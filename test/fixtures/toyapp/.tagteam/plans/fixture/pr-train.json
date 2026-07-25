@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "base": null,
+  "prs": [
+    {
+      "id": "safe-lookup",
+      "title": "feat: make account lookup safe",
+      "scope": "Add query coverage, bound parameters, and database failure handling.",
+      "taskIds": ["query-tests", "safe-query"],
+      "dependsOn": [],
+      "userVisible": "no",
+      "userVisibleReason": "The successful response stays the same; this hardens internal lookup and errors.",
+      "sizeEstimate": "Small backend change."
+    },
+    {
+      "id": "account-status",
+      "title": "feat: show accurate account status",
+      "scope": "Expose account status and update the user-facing documentation.",
+      "taskIds": ["status-response"],
+      "dependsOn": ["safe-lookup"],
+      "userVisible": "yes",
+      "userVisibleReason": "People receive a different status message and updated usage guidance.",
+      "sizeEstimate": "Small user-visible change."
+    }
+  ]
+}

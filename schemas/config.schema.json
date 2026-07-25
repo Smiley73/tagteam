@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "planning", "prTrain", "ui", "codegraph", "maxReviewLoops",
+    "reviewTiers", "reviewers", "specialistPrepass", "complexity",
+    "implementation", "review", "verify", "worktree", "diffExclude",
+    "transport", "limits"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "planning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claude", "codex", "reviewRounds"],
+      "properties": {
+        "claude": { "$ref": "#/$defs/planningClaude" },
+        "codex": { "$ref": "#/$defs/planningCodex" },
+        "reviewRounds": { "type": "integer", "minimum": 1, "maximum": 6 }
+      }
+    },
+    "prTrain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "base", "mode", "prSize", "branchPrefix", "mergeStrategy", "pauseOn", "ci"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "base": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9._/-]+$" },
+        "mode": { "type": "string", "enum": ["github-pr", "local-branch"] },
+        "prSize": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["guidance", "enforce"],
+          "properties": {
+            "guidance": { "type": "string" },
+            "enforce": { "const": false }
+          }
+        },
+        "branchPrefix": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._/-]+$" },
+        "mergeStrategy": { "const": "squash" },
+        "pauseOn": {
+          "type": "array",
+          "contains": { "const": "ui" },
+          "items": { "type": "string", "enum": ["ui", "every-merge"] },
+          "uniqueItems": true
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["blockOnFailure", "waitTimeoutSec"],
+          "properties": {
+            "blockOnFailure": { "const": true },
+            "waitTimeoutSec": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateOnUserVisible"],
+      "properties": { "gateOnUserVisible": { "const": true } }
+    },
+    "codegraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "maxReviewLoops": { "type": "integer", "minimum": 1, "maximum": 12 },
+    "reviewTiers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/enginePair" }
+    },
+    "reviewers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/reviewer" }
+    },
+    "specialistPrepass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "claude"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "claude": { "$ref": "#/$defs/claudeRuntime" }
+      }
+    },
+    "complexity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["simple", "medium", "complex"],
+      "properties": {
+        "simple": { "$ref": "#/$defs/enginePair" },
+        "medium": { "$ref": "#/$defs/enginePair" },
+        "complex": { "$ref": "#/$defs/enginePair" }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "routes", "maxParallel"],
+      "properties": {
+        "engine": { "type": "string", "enum": ["claude", "codex"] },
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["match", "engine"],
+            "properties": {
+              "match": { "type": "string", "minLength": 1 },
+              "engine": { "type": "string", "enum": ["claude", "codex"] },
+              "tier": { "type": "string", "enum": ["simple", "medium", "complex"] }
+            }
+          }
+        },
+        "maxParallel": { "type": "integer", "minimum": 1, "maximum": 16 }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["firstReviewer"],
+      "properties": { "firstReviewer": { "type": "string", "enum": ["claude", "codex"] } }
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runAfter", "commands"],
+      "properties": {
+        "runAfter": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["implement", "fix"] },
+          "uniqueItems": true
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["when", "command", "timeoutSec"],
+            "properties": {
+              "when": { "$ref": "#/$defs/when" },
+              "command": { "type": "string", "minLength": 1 },
+              "timeoutSec": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setupCommands", "copyUntracked", "setupTimeoutSec"],
+      "properties": {
+        "setupCommands": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "copyUntracked": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "setupTimeoutSec": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "diffExclude": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "const": "exec" } }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentCallsPerPr", "maxConcurrentCodex"],
+      "properties": {
+        "agentCallsPerPr": { "type": "integer", "minimum": 1 },
+        "maxConcurrentCodex": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "claudeRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "effort"],
+      "properties": {
+        "model": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
+      }
+    },
+    "codexRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "effort"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] }
+      }
+    },
+    "planningClaude": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "effort"],
+      "properties": {
+        "model": { "type": "string", "enum": ["opus", "fable"] },
+        "effort": { "type": "string", "enum": ["medium", "high", "xhigh", "max"] }
+      }
+    },
+    "planningCodex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "effort"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "enum": ["medium", "high", "xhigh"] }
+      }
+    },
+    "enginePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claude", "codex"],
+      "properties": {
+        "claude": { "$ref": "#/$defs/claudeRuntime" },
+        "codex": { "$ref": "#/$defs/codexRuntime" }
+      }
+    },
+    "when": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "globs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "keywords": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "anyOf": [
+        { "required": ["globs"] },
+        { "required": ["keywords"] }
+      ]
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "tier": { "type": "string", "minLength": 1 },
+        "gate": { "type": "string", "enum": ["blocking", "major", "minor", "nit"] },
+        "focus": { "type": "string", "minLength": 1 },
+        "when": { "$ref": "#/$defs/when" },
+        "claude": { "$ref": "#/$defs/claudeRuntime" },
+        "codex": { "$ref": "#/$defs/codexRuntime" }
+      }
+    }
+  }
+}

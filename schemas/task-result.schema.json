@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["taskId", "status", "summary", "filesChanged", "criteria"],
+  "properties": {
+    "taskId": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "enum": ["completed", "failed", "blocked"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "filesChanged": { "type": "array", "items": { "type": "string" } },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "met", "evidence"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1 },
+          "met": { "type": "boolean" },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "testsRun": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

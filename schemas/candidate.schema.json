@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "baseOid", "candidateOid", "diffPath", "reviewDiffPath", "changedPaths",
+    "addedLines", "excluded", "diffBytes", "fileCount", "treeClean"
+  ],
+  "properties": {
+    "baseOid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "candidateOid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "diffPath": { "type": "string", "minLength": 1 },
+    "reviewDiffPath": { "type": "string", "minLength": 1 },
+    "changedPaths": { "type": "array", "items": { "type": "string" } },
+    "addedLines": { "type": "string" },
+    "excluded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "oldBlob", "newBlob", "diffstat"],
+        "properties": {
+          "path": { "type": "string" },
+          "oldBlob": { "type": ["string", "null"] },
+          "newBlob": { "type": ["string", "null"] },
+          "diffstat": { "type": "string" }
+        }
+      }
+    },
+    "diffBytes": { "type": "integer", "minimum": 0 },
+    "fileCount": { "type": "integer", "minimum": 0 },
+    "treeClean": { "type": "string" },
+    "createdAt": { "type": "string" }
+  }
+}
