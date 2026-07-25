@@ -69,6 +69,22 @@ export const messages = {
       DETAILS(context)
     ].join("\n");
   },
+  relayLost(context) {
+    return [
+      "A finished check could not be handed back to the run, even after re-reading it.",
+      "The work itself is safe: its result is saved and will be reused instead of paid for again.",
+      "Run the same command again with --resume to continue from the saved work.",
+      DETAILS(context)
+    ].join("\n");
+  },
+  planInterrupted(context) {
+    return [
+      "Planning stopped before the plan was ready to approve.",
+      "The drafting and checking done so far is saved and nothing has been approved.",
+      "Run the same plan command again with --resume to continue from the saved work.",
+      DETAILS(context)
+    ].join("\n");
+  },
   fixFailed(context) {
     return [
       "An automated repair stopped before it could produce a complete, recorded candidate.",

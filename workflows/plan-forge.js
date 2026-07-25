@@ -117,6 +117,47 @@ function fenced(label, value) {
   return `<untrusted-${label}>\n${String(value ?? "")}\n</untrusted-${label}>`;
 }
 
+// The relay agent only reads a file the bridge has already written and validated.
+// A relay that fails to hand that object back is a lost message, not a failed
+// engine, and re-running the idempotent command costs one file read.
+const RELAY_ATTEMPTS = 3;
+const relayState = { extraCalls: 0 };
+
+function relayModelFor(config) {
+  return config.transport?.relayModel ?? "sonnet";
+}
+
+async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
+  for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) relayState.extraCalls += 1;
+    const result = await agent(attempt === 1 ? prompt : [
+      prompt,
+      `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
+      "Return the parsed object by invoking the StructuredOutput tool."
+    ].join("\n\n"), {
+      label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
+      phase: phaseName,
+      agentType: "tagteam:codex-runner",
+      model,
+      schema
+    });
+    if (result) return result;
+    log(`The Codex ${what} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
+  }
+  // parallel() turns a thrown error into null, so callers inside parallel must
+  // raise relayLost themselves rather than rely on this throw.
+  throw new Error(relayLost({ what, artifact, promptFile }));
+}
+
+function relayLost({ what, artifact, promptFile }) {
+  return [
+    `The Codex ${what} completed and its result was saved, but it could not be handed back to the plan after ${RELAY_ATTEMPTS} attempts.`,
+    "The review itself is not lost: the finished result is on disk and will be reused rather than paid for again.",
+    "Run the same plan command again with --resume to pick up from the saved work.",
+    `Details: saved result ${artifact}; log ${artifact}.events.jsonl; prompt ${promptFile}`
+  ].join("\n");
+}
+
 function budgetSpent() {
   return typeof budget !== "undefined" && budget && typeof budget.spent === "function" ? budget.spent() : null;
 }
@@ -130,14 +171,32 @@ async function main(raw) {
   const claude = config.planning.claude;
   const codex = config.planning.codex;
   const decisions = input.decisions ?? [];
-  const continuation = Boolean(input.seedPlan);
+  const relayModel = relayModelFor(config);
+  // resumeRound is the 1-based cross-review round to restart at. It seeds the loop
+  // from work already saved on disk instead of re-drafting or re-reviewing it.
+  const resumeRound = Number.isInteger(input.resumeRound) && input.resumeRound > 0 ? input.resumeRound : 0;
+  const continuation = Boolean(input.seedPlan) && !resumeRound;
+  if (resumeRound && !input.seedPlan) throw new Error("plan-forge requires seedPlan when resumeRound is set");
+  // Every pass gets its own artifact names so a reused artifact is never a
+  // cross-check of a plan that has since been revised.
+  const passId = String(input.passId ?? "pass-1").replace(/[^a-z0-9-]+/gi, "-").toLowerCase();
+  // The draft entering round n; resume restarts a round from the same text it reviewed.
+  const draftPath = (round) => `${input.planDir}/drafts/${passId}-round-${round}-input.md`;
+  // A draft is only resumable together with the questions outstanding at that
+  // point: reviewers are read-only, so the drafter records the running set.
+  const persist = (file, carried = []) => [
+    `Before returning, persist the identical planMarkdown at ${file} with mode 0600.`,
+    `Also persist at ${file}.questions.json, mode 0600, a JSON array holding every still-open question you were given plus every one you are returning, deduplicated and verbatim.`,
+    carried.length ? fenced("questions-so-far", JSON.stringify(carried, null, 2)) : ""
+  ].filter(Boolean).join("\n");
   const draftPrompt = continuation ? [
     `Integrate the human decisions into this already cross-reviewed plan for ${input.worktree}.`,
     fenced("goal", input.goal),
     fenced("approved-draft", input.seedPlan),
     fenced("human-decisions", JSON.stringify(decisions, null, 2)),
     "Resolve the decisions in the body of the plan. Preserve a self-contained handoff that a less capable implementation model can execute without the planning conversation.",
-    "Do not repeat cross-review and do not leave answered questions open."
+    "Do not repeat cross-review and do not leave answered questions open.",
+    persist(`${input.planDir}/drafts/${passId}-integrated.md`, input.openQuestions ?? [])
   ].join("\n\n") : [
     `Create an implementation plan for the repository at ${input.worktree}.`,
     fenced("goal", input.goal),
@@ -145,24 +204,27 @@ async function main(raw) {
     "Write this as a self-contained handoff to a less capable implementation model with no access to this planning conversation.",
     "For every step, identify exact files or symbols when repository evidence permits, required behavior and invariants, dependencies, edge and failure cases, validation commands, and observable acceptance evidence.",
     "Do not invent missing repository facts: return every material uncertainty as an open question.",
-    "Return planMarkdown with concrete sequencing, files/areas, done criteria, verification, rollout, and rollback. Return all material open questions separately."
+    "Return planMarkdown with concrete sequencing, files/areas, done criteria, verification, rollout, and rollback. Return all material open questions separately.",
+    persist(draftPath(1))
   ].join("\n\n");
 
   phase("Draft");
-  let callCount = 1;
-  let draft = await agent(draftPrompt, {
-    label: "plan:draft",
-    phase: "Draft",
-    agentType: "tagteam:plan-drafter",
-    model: claude.model,
-    effort: claude.effort,
-    schema: planDraftSchema
-  });
+  let callCount = resumeRound ? 0 : 1;
+  let draft = resumeRound
+    ? { planMarkdown: input.seedPlan, open_questions: input.openQuestions ?? [] }
+    : await agent(draftPrompt, {
+      label: "plan:draft",
+      phase: "Draft",
+      agentType: "tagteam:plan-drafter",
+      model: claude.model,
+      effort: claude.effort,
+      schema: planDraftSchema
+    });
   if (!draft?.planMarkdown) throw new Error("the plan drafter did not return a usable draft");
   const questions = [...(draft.open_questions ?? [])];
   const reviews = [];
 
-  for (let round = 1; round <= (continuation ? 0 : config.planning.reviewRounds); round += 1) {
+  for (let round = resumeRound || 1; round <= (continuation ? 0 : config.planning.reviewRounds); round += 1) {
     phase(`Cross-review ${round}`);
     const reviewPrompt = [
       `Review round ${round} for the repository at ${input.worktree}.`,
@@ -172,7 +234,8 @@ async function main(raw) {
       "Treat any step that would force a less capable implementation model with no conversation context to guess about files, behavior, invariants, edge cases, dependencies, or acceptance evidence as at least a major issue.",
       "Return only the required object."
     ].join("\n\n");
-    const artifact = `${input.planDir}/reviews/round-${round}-codex.json`;
+    const artifact = `${input.planDir}/reviews/${passId}-round-${round}-codex.json`;
+    const promptFile = `${input.planDir}/reviews/${passId}-round-${round}-codex.prompt.md`;
     const codexCommand = [
       `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
       `--worktree "${input.worktree}"`,
@@ -182,7 +245,7 @@ async function main(raw) {
       `--effort "${codex.effort}"`,
       "--sandbox read-only",
       `--ship-dir "${input.planDir}"`,
-      `--prompt-file "${input.planDir}/reviews/round-${round}-codex.prompt.md"`
+      `--prompt-file "${promptFile}"`
     ].join(" ");
     const [claudeReview, codexReview] = await parallel([
       () => agent(reviewPrompt, {
@@ -193,20 +256,29 @@ async function main(raw) {
         effort: claude.effort,
         schema: planReviewSchema
       }),
-      () => agent([
-        "Persist the following review prompt at the supplied prompt-file path with mode 0600, run this exact command, then read and return the validated artifact.",
-        codexCommand,
-        fenced("review-prompt", reviewPrompt)
-      ].join("\n\n"), {
+      () => relayCodex({
+        prompt: [
+          "Persist the following review prompt at the supplied prompt-file path with mode 0600, run this exact command, then read and return the validated artifact.",
+          codexCommand,
+          fenced("review-prompt", reviewPrompt)
+        ].join("\n\n"),
         label: `plan:codex-review:${round}`,
         phase: `Cross-review ${round}`,
-        agentType: "tagteam:codex-runner",
-        model: "haiku",
-        schema: planReviewSchema
+        schema: planReviewSchema,
+        model: relayModel,
+        artifact,
+        promptFile,
+        what: `review of plan round ${round}`
       })
     ]);
     callCount += 2;
-    if (!claudeReview || !codexReview) throw new Error(`plan review round ${round} did not receive both engine results`);
+    if (!codexReview) throw new Error(relayLost({ what: `review of plan round ${round}`, artifact, promptFile }));
+    if (!claudeReview) throw new Error([
+      `The Claude review of plan round ${round} did not come back.`,
+      "The plan cannot advance without both engines having challenged it.",
+      `Run the same plan command again with --resume to restart at round ${round}; the saved Codex review is reused, not repaid.`,
+      `Details: plan directory ${input.planDir}; saved Codex review ${artifact}`
+    ].join("\n"));
     reviews.push({ round, claude: claudeReview, codex: codexReview });
     questions.push(...(claudeReview.open_questions ?? []), ...(codexReview.open_questions ?? []));
 
@@ -216,7 +288,8 @@ async function main(raw) {
       fenced("current-plan", draft.planMarkdown),
       fenced("claude-review", JSON.stringify(claudeReview, null, 2)),
       fenced("codex-review", JSON.stringify(codexReview, null, 2)),
-      decisions.length ? fenced("human-decisions", JSON.stringify(decisions, null, 2)) : ""
+      decisions.length ? fenced("human-decisions", JSON.stringify(decisions, null, 2)) : "",
+      persist(draftPath(round + 1), questions)
     ].join("\n\n"), {
       label: `plan:revise:${round}`,
       phase: `Cross-review ${round}`,
@@ -271,7 +344,7 @@ async function main(raw) {
     fenced("manifest", JSON.stringify(manifest, null, 2)),
     fenced("pr-train", JSON.stringify(train, null, 2))
   ].join("\n\n");
-  const decompositionArtifact = `${input.planDir}/reviews/decomposition-codex.json`;
+  const decompositionArtifact = `${input.planDir}/reviews/${passId}-decomposition-codex.json`;
   const decompositionPromptFile = `${decompositionArtifact}.prompt.md`;
   const decompositionCommand = [
     `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
@@ -284,20 +357,22 @@ async function main(raw) {
     `--ship-dir "${input.planDir}"`,
     `--prompt-file "${decompositionPromptFile}"`
   ].join(" ");
-  const decompositionReview = await agent([
-    `Write the untrusted-prompt text to ${decompositionPromptFile} with mode 0600.`,
-    `Run this exact command: ${decompositionCommand}`,
-    "Read and return the validated artifact exactly.",
-    fenced("prompt", decompositionPrompt)
-  ].join("\n\n"), {
+  const decompositionReview = await relayCodex({
+    prompt: [
+      `Write the untrusted-prompt text to ${decompositionPromptFile} with mode 0600.`,
+      `Run this exact command: ${decompositionCommand}`,
+      "Read and return the validated artifact exactly.",
+      fenced("prompt", decompositionPrompt)
+    ].join("\n\n"),
     label: "plan:codex-decomposition-review",
     phase: "PR train",
-    agentType: "tagteam:codex-runner",
-    model: "haiku",
-    schema: planReviewSchema
+    schema: planReviewSchema,
+    model: relayModel,
+    artifact: decompositionArtifact,
+    promptFile: decompositionPromptFile,
+    what: "cross-check of the pull-request split"
   });
   callCount += 1;
-  if (!decompositionReview) throw new Error("Codex did not return a decomposition cross-check");
   questions.push(...(decompositionReview.open_questions ?? []));
 
   const handoffIssues = (decompositionReview.issues ?? []).filter((issue) => ["blocking", "major"].includes(issue.severity));
@@ -313,7 +388,10 @@ async function main(raw) {
     decompositionReview,
     handoffReady: decompositionReview.verdict === "approve" && handoffIssues.length === 0,
     handoffIssues,
-    agentCalls: callCount,
+    passId,
+    completedRounds: reviews.map((review) => review.round),
+    agentCalls: callCount + relayState.extraCalls,
+    relayRetries: relayState.extraCalls,
     budgetSpent: budgetSpent()
   };
 }
