@@ -12,6 +12,7 @@ Use this reference for `/tagteam:init`, `/tagteam:plan`, `/tagteam:ship`, and `/
 ```text
 /tagteam:init
 /tagteam:plan <goal>
+/tagteam:plan --resume <slug>
 /tagteam:ship .tagteam/plans/<slug>
 /tagteam:ship .tagteam/plans/<slug> --resume
 /tagteam:ship .tagteam/plans/<slug> --reviewers security,functionality
@@ -42,6 +43,7 @@ A complete editable example lives at `${CLAUDE_PLUGIN_ROOT}/examples/config.json
 | `worktree.copyUntracked` | array | Exact ignored repo-relative paths only; no globs, traversal, or symlinks. |
 | `diffExclude` | array | Removes content from reviewer prompts only; selection still sees every path. |
 | `transport.mode` | string | Must be `exec`. |
+| `transport.relayModel` | string | Model for the Codex relay agent. Defaults to `sonnet`; the relay reads one saved file, and a model that reliably returns a structured result is worth far more than the tokens saved. |
 | `limits.agentCallsPerPr` | integer | Persisted per-PR speed bump checked before starting a review round. |
 | `limits.maxConcurrentCodex` | integer | Maximum concurrent Codex subprocesses across one ship. |
 
@@ -154,7 +156,21 @@ Never amend, interactively rebase, bare-force push, hard-reset committed work, m
 - `prs/<id>/ci/<candidateOid>.json`: every CI observation;
 - `report.md`: deterministic final summary.
 
+## What a project commits
+
+`/tagteam:init` owns the repository `.gitignore` through `scripts/ensure-gitignore.mjs`, which rewrites one managed block and leaves every other line alone. Working state is ignored: `.tagteam/ships/`, `.tagteam/worktrees/`, `.tagteam/locks/`, `.tagteam/transport.json`, `.tagteam/plans/*/drafts/`, `.tagteam/plans/*/reviews/`, and the `.codex-slots/` and `.quota/` bookkeeping directories. The reviewed record is committable: `.tagteam/config.json` and each approved plan's `plan.md`, `manifest.json`, `pr-train.json`, `decisions.json`, and `approved.json`.
+
+The script is idempotent and verifies the result with `git check-ignore`, so `/tagteam:init --reconfigure` repairs a drifted block. A pattern listed but not ignored means another rule re-includes it; that is reported and never silently accepted.
+
 Resume parses artifacts and reconciles Git/GitHub before mutation. It never trusts conversation memory. A malformed review artifact means not converged.
+
+Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point, `drafts/<passId>-integrated.md`, `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
+
+## Codex artifacts are the result
+
+`codex-run.mjs` is the source of truth for a Codex step. A validated artifact on disk *is* the completed work, so the bridge reuses it and does not re-invoke Codex; only `--no-reuse` overrides that.
+
+Reuse is bound to the request, not the path. Each artifact carries a `.request.json` sidecar fingerprinting the prompt, schema, model, effort, sandbox, and worktree that produced it, and reuse requires an exact match. So a retry of the same call is free, while a second implementation attempt at a higher tier, a cross-check of a regenerated plan, or a review of a new candidate always runs — none of them can inherit an earlier answer. An artifact with no sidecar is never trusted. The relay agent that carries the artifact back to a workflow is plumbing, and losing its reply is a lost message rather than a failed engine: workflows re-run the same idempotent command up to three times, at the cost of a file read each. A completed review, fix, or implementation is never discarded and never paid for twice. Relay re-reads count against `limits.agentCallsPerPr` like any other call.
 
 ## Plain-English messages
 
@@ -171,10 +187,13 @@ Avoid internal terms in the first three parts. Options state outcomes: “Merge 
 
 - `transport.mode: mcp`: unsupported because Codex MCP cannot enforce an output schema; use `exec`.
 - Codex returns success but no artifact: the step failed; inspect the `.events.jsonl` and prompt beside the expected artifact.
+- A Codex step's result never came back: the artifact beside the prompt is the real result; resume, and the bridge reuses it instead of re-running Codex.
+- Planning stopped mid-round: `/tagteam:plan --resume <slug>` restarts at the saved round; nothing is approved until you approve it.
 - Review parser error: do not hand-edit old rounds; inspect the first malformed header/finding ID and resume after repairing only the artifact grammar.
 - All CI checks skipped: this is `not-run`, not failure and not pass; local verification carries the gate.
 - Verification hangs: increase only that command’s `timeoutSec` after confirming the command is expected to run.
 - Worktree copy rejected: make the destination ignored, remove symlinks/traversal, and list the exact path.
+- Ships or plan drafts showing up in `git status`: run `/tagteam:init --reconfigure`; if a pattern is reported as still not ignored, remove the rule elsewhere in `.gitignore` that re-includes it.
 - Stale merge lock: `/tagteam:status` identifies the owner. Takeover requires explicit human approval after confirming the PID is dead.
 - Base moved: release the merge lock, rebase, then re-run every gate on the new candidate.
 - Unprotected base: enable pull-request protection or merge the ready PR by hand.

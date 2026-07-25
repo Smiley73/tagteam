@@ -310,6 +310,17 @@ function tally(ledger) {
   return result;
 }
 
+// The relay agent only reads an artifact the bridge has already written and
+// validated. Losing its reply is a lost message, not a failed engine: the
+// command is idempotent, so re-running it re-reads the file instead of paying
+// for the review, fix, or implementation a second time.
+const RELAY_ATTEMPTS = 3;
+const relayState = { extraCalls: 0 };
+
+function relayModelFor(config) {
+  return config.transport?.relayModel ?? "sonnet";
+}
+
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
   const promptFile = `${artifact}.prompt.md`;
   const command = [
@@ -325,18 +336,29 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     `--prompt-file "${promptFile}"`,
     reviewDiffPath ? `--review-diff-path "${reviewDiffPath}"` : ""
   ].join(" ");
-  return agent([
+  const basePrompt = [
     `Write the exact text in the untrusted-prompt fence to ${promptFile} with mode 0600.`,
     `Run this exact command: ${command}`,
     "Read the validated artifact and return its parsed JSON object exactly.",
     fence("prompt", prompt)
-  ].join("\n\n"), {
-    label,
-    phase: kind,
-    agentType: "tagteam:codex-runner",
-    model: "haiku",
-    schema
-  });
+  ].join("\n\n");
+  for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) relayState.extraCalls += 1;
+    const result = await agent(attempt === 1 ? basePrompt : [
+      basePrompt,
+      `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
+      "Return the parsed object by invoking the StructuredOutput tool."
+    ].join("\n\n"), {
+      label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
+      phase: kind,
+      agentType: "tagteam:codex-runner",
+      model: relayModelFor(input.config),
+      schema
+    });
+    if (result) return result;
+    log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
+  }
+  return null;
 }
 
 async function implementTask(input, task, tierName, engine, attempt) {
@@ -490,19 +512,22 @@ async function main(raw) {
   const config = input.config;
   const roundOffset = Number(input.roundOffset ?? 0);
   let callCount = Number(input.agentCalls ?? 0);
+  // Relay re-reads are cheap but still calls, so they eat into the per-PR limit
+  // rather than silently expanding it.
+  const callBudget = () => config.limits.agentCallsPerPr - relayState.extraCalls;
   const taskResults = [...(input.taskResults ?? [])];
   const failedTasks = new Set();
 
   if (!input.existingCandidateOid) {
     const implementationCapacity = input.tasks.length * 2 + 4;
-    if (callCount + implementationCapacity > config.limits.agentCallsPerPr) {
+    if (callCount + implementationCapacity > callBudget()) {
       return {
         status: "agent-budget-gate",
         tasks: taskResults,
         rounds: [],
         tallies: {},
         gateFailures: [`This PR needs capacity for up to ${implementationCapacity} implementation and candidate calls before review, exceeding its ${config.limits.agentCallsPerPr}-call limit.`],
-        agentCalls: callCount
+        agentCalls: callCount + relayState.extraCalls
       };
     }
     phase("Implement");
@@ -534,18 +559,18 @@ async function main(raw) {
       }
     }
     if (failedTasks.size > 0) {
-      return { status: "implementation-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: [`Tasks failed: ${[...failedTasks].join(", ")}`], agentCalls: callCount };
+      return { status: "implementation-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: [`Tasks failed: ${[...failedTasks].join(", ")}`], agentCalls: callCount + relayState.extraCalls };
     }
   }
 
   phase("Candidate");
   let candidateOid = input.existingCandidateOid ?? null;
   if (candidateOid && (input.repairFindings ?? []).length > 0) {
-    if (callCount + 2 > config.limits.agentCallsPerPr) {
+    if (callCount + 2 > callBudget()) {
       return {
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["The PR call limit has no room for the requested repair and new candidate."],
-        candidateOid, agentCalls: callCount
+        candidateOid, agentCalls: callCount + relayState.extraCalls
       };
     }
     const repairEngine = input.repairEngine === "codex" ? "codex" : "claude";
@@ -567,7 +592,7 @@ async function main(raw) {
         });
     callCount += 1;
     if (!repairReport || input.repairFindings.some((finding) => !(repairReport.results ?? []).some((result) => result.id === finding.id && result.status === "fixed"))) {
-      return { status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount };
+      return { status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls };
     }
     candidateOid = await commitCandidate(input, roundOffset + 1, "external gate repair");
     callCount += 1;
@@ -575,11 +600,11 @@ async function main(raw) {
     candidateOid = await commitCandidate(input, 0, input.pr.title);
     callCount += 1;
   }
-  if (callCount + 3 > config.limits.agentCallsPerPr) {
+  if (callCount + 3 > callBudget()) {
     return {
       status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
       gateFailures: ["The PR call limit has no room to snapshot, verify, and classify the current candidate."],
-      candidateOid, agentCalls: callCount
+      candidateOid, agentCalls: callCount + relayState.extraCalls
     };
   }
   const initialRound = roundOffset === 0 ? 0 : roundOffset + 1;
@@ -588,11 +613,11 @@ async function main(raw) {
   let verification = await runVerify(input, snapshotValue, initialRound);
   callCount += 1;
   if (verification.status === "failed") {
-    if (callCount + 5 > config.limits.agentCallsPerPr) {
+    if (callCount + 5 > callBudget()) {
       return {
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["Local verification failed, but the PR call limit has no room for its one repair, new candidate, and classification."],
-        candidateOid, verify: verification, agentCalls: callCount
+        candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls
       };
     }
     const repair = await agent([
@@ -608,7 +633,7 @@ async function main(raw) {
     });
     callCount += 1;
     if (!repair?.results?.some((item) => item.id === "TT-VERIFY" && item.status === "fixed")) {
-      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount };
+      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls };
     }
     candidateOid = await commitCandidate(input, initialRound, "repair local verification");
     callCount += 1;
@@ -617,7 +642,7 @@ async function main(raw) {
     verification = await runVerify(input, snapshotValue, initialRound);
     callCount += 1;
     if (verification.status === "failed") {
-      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount };
+      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls };
     }
   }
 
@@ -632,11 +657,11 @@ async function main(raw) {
   const specialistItems = [];
 
   if (config.specialistPrepass.enabled && roundOffset === 0) {
-    if (callCount + 6 > config.limits.agentCallsPerPr) {
+    if (callCount + 6 > callBudget()) {
       return {
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["The PR call limit has no room for the six specialist pre-pass checks."],
-        candidateOid, ui, verify: verification, selected: initialSelectedInfo, agentCalls: callCount
+        candidateOid, ui, verify: verification, selected: initialSelectedInfo, agentCalls: callCount + relayState.extraCalls
       };
     }
     phase("Specialist pre-pass");
@@ -675,11 +700,11 @@ async function main(raw) {
     };
     const assignments = reviewAssignments(selectedInfo.selected, round, lastFixEngine, config.review.firstReviewer);
     const estimatedCalls = assignments.length + 1 + (loopRound < config.maxReviewLoops ? 10 : 0);
-    if (callCount + estimatedCalls > config.limits.agentCallsPerPr) {
+    if (callCount + estimatedCalls > callBudget()) {
       return {
         status: "agent-budget-gate", tasks: taskResults, rounds, tallies: tally(ledger),
         gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit before round ${round}.`],
-        candidateOid, ui, verify: verification, selected: selectedInfo, agentCalls: callCount
+        candidateOid, ui, verify: verification, selected: selectedInfo, agentCalls: callCount + relayState.extraCalls
       };
     }
     phase(`Review ${round}`);
@@ -982,7 +1007,8 @@ async function main(raw) {
     planUserVisibleReason: input.pr.userVisibleReason,
     verify: verification,
     selected: selectedInfo,
-    agentCalls: callCount,
+    agentCalls: callCount + relayState.extraCalls,
+    relayRetries: relayState.extraCalls,
     budgetSpent: budgetSpent()
   };
 }

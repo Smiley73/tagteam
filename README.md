@@ -56,8 +56,8 @@ Planning batches unresolved decisions and requires explicit approval. Shipping w
 
 | Command | Options |
 |---|---|
-| `/tagteam:init` | `--reconfigure` revisits an existing project configuration. |
-| `/tagteam:plan <goal>` | Per-run overrides: `--model opus\|fable`, `--effort medium\|high\|xhigh\|max`, and `--codex-effort medium\|high\|xhigh`. |
+| `/tagteam:init` | `--reconfigure` revisits an existing project configuration and repairs the managed `.gitignore` block. |
+| `/tagteam:plan <goal>` | `--resume <slug>` continues an interrupted plan from its saved drafts and reviews. Per-run overrides: `--model opus\|fable`, `--effort medium\|high\|xhigh\|max`, and `--codex-effort medium\|high\|xhigh`. |
 | `/tagteam:ship [plan-dir\|plan-file]` | `--resume`, `--dry-run`, and `--reviewers all\|dimension,dimension`; named built-in or custom reviewers are force-enabled for that run. |
 | `/tagteam:status` | Lists plans, active/completed ships, and pending approvals. |
 

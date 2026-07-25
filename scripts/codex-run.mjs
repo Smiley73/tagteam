@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -25,6 +26,7 @@ function parseArgs(argv) {
     if (!key.startsWith("--")) throw new Error(`unexpected argument: ${key}`);
     const name = key.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (name === "dryRun") options.dryRun = true;
+    else if (name === "noReuse") options.noReuse = true;
     else options[name] = argv[++index];
   }
   options.timeoutSec = Number(options.timeoutSec);
@@ -140,6 +142,21 @@ async function runChild({ options, prompt, outputPath, eventsPath }) {
   return { argv, stderr, timedOut, exitCode };
 }
 
+// Identifies the work an artifact is the answer to. Reuse requires this to
+// match, so a retry of the same call re-reads the file while genuinely
+// different work — a higher implementation tier, a regenerated plan, a new
+// candidate diff — always runs Codex instead of inheriting a stale answer.
+function requestFingerprint({ options, prompt, schema }) {
+  return createHash("sha256").update(JSON.stringify({
+    prompt,
+    schema,
+    model: options.model,
+    effort: options.effort,
+    sandbox: options.sandbox,
+    worktree: path.resolve(options.worktree)
+  })).digest("hex");
+}
+
 function validateArtifact(schema, outputPath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(outputPath, "utf8"));
@@ -154,6 +171,30 @@ export async function runCodex(options, prompt) {
   const schema = JSON.parse(fs.readFileSync(options.schema, "utf8"));
   const artifact = path.resolve(options.artifact);
   const eventsPath = `${artifact}.events.jsonl`;
+
+  const fingerprint = requestFingerprint({ options, prompt, schema });
+  const requestPath = `${artifact}.request.json`;
+
+  // Idempotence: a completed artifact is the record of the work that produced
+  // it. Re-running the same call must never re-invoke Codex, so a lost relay
+  // result or a resumed run costs one file read and can never rewrite an
+  // earlier review. An artifact whose recorded request differs is a different
+  // question and is answered afresh.
+  if (!options.noReuse) {
+    const existing = validateArtifact(schema, artifact);
+    if (existing.ok) {
+      let recorded = null;
+      try { recorded = JSON.parse(fs.readFileSync(requestPath, "utf8")).fingerprint; } catch {}
+      if (recorded === fingerprint) {
+        process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
+        return { result: existing.value, reused: true };
+      }
+      process.stderr.write(recorded
+        ? `The artifact at ${artifact} answers a different request; running Codex again.\n`
+        : `The artifact at ${artifact} has no recorded request; running Codex again.\n`);
+    }
+  }
+
   fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
   const release = await acquireSlot(options.shipDir ? path.resolve(options.shipDir) : null, options.maxConcurrent);
   const quotaStatePath = path.join(options.shipDir ?? path.dirname(artifact), ".quota", `${options.model}-${options.effort}.json`);
@@ -173,9 +214,17 @@ export async function runCodex(options, prompt) {
       const validation = !result.timedOut ? validateArtifact(schema, attemptPath) : { ok: false, errors: ["Codex timed out"] };
       if (validation.ok) {
         fs.chmodSync(attemptPath, 0o600);
+        // The sidecar is removed first and rewritten after: a crash in between
+        // leaves an artifact that will not be reused, never one that is reused
+        // for the wrong request.
+        try { fs.unlinkSync(requestPath); } catch {}
         fs.renameSync(attemptPath, artifact);
+        fs.writeFileSync(requestPath, JSON.stringify({
+          fingerprint, model: options.model, effort: options.effort, sandbox: options.sandbox,
+          completedAt: new Date().toISOString()
+        }, null, 2) + "\n", { mode: 0o600 });
         try { fs.unlinkSync(quotaStatePath); } catch {}
-        return validation.value;
+        return { result: validation.value, reused: false };
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
@@ -227,8 +276,8 @@ async function main() {
       const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }
-    const result = await runCodex(options, prompt);
-    process.stdout.write(JSON.stringify({ ok: true, artifact: path.resolve(options.artifact), result }) + "\n");
+    const { result, reused } = await runCodex(options, prompt);
+    process.stdout.write(JSON.stringify({ ok: true, reused, artifact: path.resolve(options.artifact), result }) + "\n");
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

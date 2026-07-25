@@ -1,6 +1,6 @@
 ---
 description: Forge and approve a cross-engine implementation plan and PR train
-argument-hint: '<goal> [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
+argument-hint: '<goal> [--resume <slug>] [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
 allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:codex-runner), Bash(node *), Bash(git *)
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagt
 
 Raw arguments: `$ARGUMENTS`
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Require a non-empty goal and a valid `.tagteam/config.json`. Parse the three optional planning overrides and reject low planning effort. Use the overrides only for this invocation; show the resulting Claude and Codex model/effort before starting.
+Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` first; with it the goal comes from the saved plan directory. Otherwise require a non-empty goal and a valid `.tagteam/config.json`. Parse the three optional planning overrides and reject low planning effort. Use the overrides only for this invocation; show the resulting Claude and Codex model/effort before starting.
 Reject repository and artifact paths containing control characters or shell metacharacters before forming Bash commands.
 
 Derive a short lowercase plan slug with only `[a-z0-9-]`, create `.tagteam/plans/<slug>/drafts` and `reviews`, and pass absolute paths to the workflow. Planning may write draft/review artifacts there, but no approved `plan.md`, `manifest.json`, or `pr-train.json` exists until explicit approval.
@@ -23,16 +23,35 @@ Workflow({
     worktree: <repo>,
     pluginRoot: <absolute plugin root>,
     planDir: <absolute plan dir>,
+    passId: <"pass-1", then "pass-2", ... one per forge invocation>,
     config: <merged config with run overrides>
   }
 })
 ```
 
+Give every forge invocation its own `passId` so a reused Codex artifact can never be a check of a plan that has since been revised. Reuse a `passId` only when resuming that same pass.
+
+## Resume
+
+`--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
+
+1. If `approved.json` exists, there is nothing to resume; point at `/tagteam:ship .tagteam/plans/<slug>` and stop.
+2. Read `goal.json` for the original goal and run overrides. Write it at the start of every non-resume invocation next to the drafts.
+3. Take the highest `pass-<n>` present. Within it, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point.
+4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
+5. If only `drafts/<passId>-integrated.md` exists, resume the continuation instead: pass `seedPlan`, its `.questions.json`, and the answers from `drafts/<passId>-decisions.json` as `decisions`, with no `resumeRound`.
+6. Continue with the normal question, cross-check, and approval flow below.
+
+If the workflow fails, do not show the raw error. Render `messages.mjs relayLost` when its message names a saved Codex result, and `messages.mjs planInterrupted` otherwise, with `--artifact` set to the saved artifact or the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
+
 If the workflow returns open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
 Persist the returned draft and each structured engine review under the plan directory (`drafts/` and `reviews/`) before asking; use mode 0600 and never rewrite an earlier review.
 
+As soon as a chunk is answered, append those `{question, answer}` rows to `drafts/<passId>-decisions.json` at mode 0600. Answers are the one thing here a human cannot cheaply reproduce, and approval may be a long way off; the approved `decisions.json` is written only at approval, from this file.
+
 Then invoke `tagteam:plan-forge` once more with the same arguments plus:
 
+- `passId`: the next pass (`pass-2`, then `pass-3` for each handoff repair);
 - `seedPlan`: the first result's `planMarkdown`;
 - `decisions`: `{question, answer}` rows.
 
@@ -54,7 +73,7 @@ Only explicit approval may write:
 - `.tagteam/plans/<slug>/plan.md`
 - `.tagteam/plans/<slug>/manifest.json`
 - `.tagteam/plans/<slug>/pr-train.json`
-- `.tagteam/plans/<slug>/decisions.json`
+- `.tagteam/plans/<slug>/decisions.json` (the accumulated `drafts/<passId>-decisions.json` rows, unchanged)
 - `.tagteam/plans/<slug>/approved.json` containing version, UTC time, config fingerprint, and the three artifact hashes.
 
 Validate both JSON artifacts with their schemas after writing. Validate the PR train with `validate-json.mjs --manifest <manifest.json>` so every task appears exactly once and cross-PR task dependencies are represented. If validation fails, remove only `approved.json`, explain the exact validation error, and stop. Never start shipping automatically; end with `/tagteam:ship .tagteam/plans/<slug>`.

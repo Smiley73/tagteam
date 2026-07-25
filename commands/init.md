@@ -23,7 +23,14 @@ Run these read-only checks and retain their exact output:
 6. Report whether Codex's config contains a trust entry for this repository; never edit the user's global Codex config.
 7. Check for `.codegraph/`. If absent, ask once: “Should tagteam build a CodeGraph index for this project?” Explain that yes gives both engines caller/data-flow context and runs `codegraph init`; no is supported but loses that context. Store the answer as `codegraph.enabled`. On yes, run `codegraph init` in the repository and validate `.codegraph/` now exists.
 8. In GitHub PR mode, query `gh api repos/<owner>/<repo>/branches/<base>/protection`. Never change repository settings. Record whether protection prevents unsynchronized direct pushes and print the exact repository-specific `gh api --method PUT ...` guidance if it is absent. State plainly that an unprotected base can still be shipped to a ready PR, but tagteam will not merge it automatically.
-9. Invoke `Workflow({name:"tagteam:runtime-probe",args:{}})`. Record whether Workflow budget reporting exists (reporting only, never a gate) and whether this harness accepts `effort` on Haiku. If Haiku effort is rejected, do not allow a Haiku runtime in any config slot that dispatches an effort value; offer Sonnet instead. Save the capability result in gitignored `.tagteam/transport.json`.
+9. Report whether Git already ignores tagteam's working state, without writing anything:
+
+   ```bash
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-gitignore.mjs" "<repo>" --check
+   ```
+
+   Say plainly whether the repository would otherwise commit ships, worktrees, locks, and plan drafts. Setup fixes this at write time; do not fix it here.
+10. Invoke `Workflow({name:"tagteam:runtime-probe",args:{}})`. Record whether Workflow budget reporting exists (reporting only, never a gate) and whether this harness accepts `effort` on Haiku. If Haiku effort is rejected, do not allow a Haiku runtime in any config slot that dispatches an effort value; offer Sonnet instead. Save the capability result in gitignored `.tagteam/transport.json`.
 
 ## Interview
 
@@ -33,7 +40,7 @@ If `.tagteam/config.json` exists and `--reconfigure` was not supplied, validate 
 node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-json.mjs" --repo "<repo>" "${CLAUDE_PLUGIN_ROOT}/schemas/config.schema.json" "<repo>/.tagteam/config.json"
 ```
 
-Show the current choices and ask whether to keep or edit them. Otherwise ask all setup questions in batches of at most four. Do not silently choose these values:
+Show the current choices and ask whether to keep or edit them. Keeping every choice still re-runs the `.gitignore` step below, so `--reconfigure` is the supported way to repair it in an already-configured repository. Otherwise ask all setup questions in batches of at most four. Do not silently choose these values:
 
 - planning Claude model: `opus` or `fable`;
 - planning Claude effort: `medium`, `high`, `xhigh`, or `max` (never offer low);
@@ -57,9 +64,15 @@ On confirmation:
 
 1. Create `<repo>/.tagteam/` if needed.
 2. Write `<repo>/.tagteam/config.json` as strict JSON version 1, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
-3. Ensure the repository `.gitignore` contains these exact entries once:
-   `.tagteam/ships/`, `.tagteam/worktrees/`, `.tagteam/locks/`, `.tagteam/transport.json`.
-   Approved `.tagteam/plans/` and `.tagteam/config.json` stay committable.
+3. Configure the repository `.gitignore`. Never hand-edit it; run:
+
+   ```bash
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-gitignore.mjs" "<repo>"
+   ```
+
+   This rewrites one managed block covering ships, worktrees, locks, `transport.json`, plan drafts and reviews, and Codex slot/quota bookkeeping, leaving every other line untouched. Approved plans (`plan.md`, `manifest.json`, `pr-train.json`, `decisions.json`, `approved.json`) and `.tagteam/config.json` stay committable on purpose. It is idempotent, so `--reconfigure` repairs a drifted or hand-edited block.
+
+   The command reports `ok`, whether the file was created or changed, and any hand-written duplicates it folded into the block. A non-empty `notIgnored` means a rule elsewhere in the file — usually a later negation — still re-includes tagteam's working state; report exactly which patterns, name that as the one thing to fix by hand, and do not report setup as complete.
 4. Validate the file with `validate-json.mjs --repo`.
 5. Print what is ready, what still needs human action, and the next command `/tagteam:plan <goal>`.
 
