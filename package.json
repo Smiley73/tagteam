@@ -1,0 +1,13 @@
+{
+  "name": "tagteam-plugin",
+  "version": "0.1.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check-workflow-syntax.mjs workflows/runtime-probe.js workflows/plan-forge.js workflows/ship-pr.js && node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "issues", "open_questions", "suggestions"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["approve", "revise"] },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "detail"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["blocking", "major", "minor"] },
+          "title": { "type": "string", "minLength": 1 },
+          "detail": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "suggestions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

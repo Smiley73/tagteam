@@ -1,0 +1,238 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import { validateJson } from "./validate-json.mjs";
+import {
+  classifyProviderError,
+  nextBackoff,
+  parseResetTime,
+  readOrCreateQuotaState
+} from "./quota-backoff.mjs";
+
+function parseArgs(argv) {
+  const options = {
+    sandbox: "read-only",
+    timeoutSec: 900,
+    maxConcurrent: 3,
+    codexBin: process.env.TAGTEAM_CODEX_BIN || "codex"
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const key = argv[index];
+    if (!key.startsWith("--")) throw new Error(`unexpected argument: ${key}`);
+    const name = key.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+    if (name === "dryRun") options.dryRun = true;
+    else options[name] = argv[++index];
+  }
+  options.timeoutSec = Number(options.timeoutSec);
+  options.maxConcurrent = Number(options.maxConcurrent);
+  for (const required of ["worktree", "schema", "artifact", "model", "effort"]) {
+    if (!options[required]) throw new Error(`--${required} is required`);
+  }
+  if (!["read-only", "workspace-write"].includes(options.sandbox)) throw new Error("--sandbox must be read-only or workspace-write");
+  if (!Number.isFinite(options.timeoutSec) || options.timeoutSec <= 0) throw new Error("--timeout-sec must be positive");
+  if (!Number.isInteger(options.maxConcurrent) || options.maxConcurrent <= 0) throw new Error("--max-concurrent must be a positive integer");
+  return options;
+}
+
+function stubFor(rule, root) {
+  if (rule.$ref) {
+    const target = rule.$ref.slice(2).split("/").reduce((node, key) => node[key], root);
+    return stubFor(target, root);
+  }
+  if (Object.hasOwn(rule, "const")) return rule.const;
+  if (rule.enum) return rule.enum[0];
+  const type = Array.isArray(rule.type) ? rule.type.find((entry) => entry !== "null") : rule.type;
+  if (type === "object" || rule.properties) {
+    return Object.fromEntries((rule.required ?? []).map((key) => [key, stubFor(rule.properties[key], root)]));
+  }
+  if (type === "array") return [];
+  if (type === "integer" || type === "number") return Math.max(rule.minimum ?? 0, 1);
+  if (type === "boolean") return false;
+  if (type === "null") return null;
+  return "dry-run";
+}
+
+async function acquireSlot(shipDir, maximum) {
+  if (!shipDir) return () => {};
+  const slotRoot = path.join(shipDir, ".codex-slots");
+  fs.mkdirSync(slotRoot, { recursive: true, mode: 0o700 });
+  while (true) {
+    for (let slot = 0; slot < maximum; slot += 1) {
+      const slotPath = path.join(slotRoot, `slot-${slot}`);
+      try {
+        fs.mkdirSync(slotPath, { mode: 0o700 });
+        fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { mode: 0o600 });
+        return () => fs.rmSync(slotPath, { recursive: true, force: true });
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        try {
+          const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
+          process.kill(owner.pid, 0);
+        } catch (ownerError) {
+          if (ownerError.code === "ESRCH" || ownerError.code === "ENOENT" || ownerError instanceof SyntaxError) {
+            fs.rmSync(slotPath, { recursive: true, force: true });
+          }
+        }
+      }
+    }
+    await delay(250);
+  }
+}
+
+function killProcessGroup(child, signal) {
+  if (!child.pid) return;
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {
+    try { child.kill(signal); } catch { /* already gone */ }
+  }
+}
+
+async function runChild({ options, prompt, outputPath, eventsPath }) {
+  const argv = [
+    "exec", "--json", "--ephemeral",
+    "--cd", path.resolve(options.worktree),
+    "--sandbox", options.sandbox,
+    "-m", options.model,
+    "-c", `model_reasoning_effort="${options.effort}"`,
+    "-c", 'approval_policy="never"',
+    "--output-schema", path.resolve(options.schema),
+    "-o", outputPath,
+    "-"
+  ];
+  if (options.dryRun || process.env.TAGTEAM_DRY_RUN === "1") return { argv, dryRun: true, stderr: "", timedOut: false, exitCode: 0 };
+
+  fs.mkdirSync(path.dirname(eventsPath), { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(eventsPath, 0o600); } catch {}
+  const events = fs.createWriteStream(eventsPath, { flags: "a", mode: 0o600 });
+  const child = spawn(options.codexBin, argv, {
+    cwd: path.resolve(options.worktree),
+    shell: false,
+    detached: process.platform !== "win32",
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  let stderr = "";
+  child.stdout.pipe(events, { end: false });
+  child.stderr.on("data", (chunk) => {
+    stderr = (stderr + chunk.toString()).slice(-65_536);
+  });
+  child.stdin.on("error", () => {});
+  child.stdin.end(prompt);
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killProcessGroup(child, "SIGTERM");
+    setTimeout(() => killProcessGroup(child, "SIGKILL"), 2_000).unref();
+  }, options.timeoutSec * 1000);
+  const exitCode = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  }).finally(() => {
+    clearTimeout(timer);
+    events.end();
+  });
+  return { argv, stderr, timedOut, exitCode };
+}
+
+function validateArtifact(schema, outputPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    const errors = validateJson(schema, parsed);
+    return errors.length === 0 ? { ok: true, value: parsed } : { ok: false, errors };
+  } catch (error) {
+    return { ok: false, errors: [error.message] };
+  }
+}
+
+export async function runCodex(options, prompt) {
+  const schema = JSON.parse(fs.readFileSync(options.schema, "utf8"));
+  const artifact = path.resolve(options.artifact);
+  const eventsPath = `${artifact}.events.jsonl`;
+  fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
+  const release = await acquireSlot(options.shipDir ? path.resolve(options.shipDir) : null, options.maxConcurrent);
+  const quotaStatePath = path.join(options.shipDir ?? path.dirname(artifact), ".quota", `${options.model}-${options.effort}.json`);
+  try {
+    let amendedPrompt = prompt;
+    let invalidAttempts = 0;
+    while (invalidAttempts < 2) {
+      const attemptPath = `${artifact}.attempt-${invalidAttempts + 1}-${process.pid}.tmp`;
+      try { fs.unlinkSync(attemptPath); } catch {}
+      fs.writeFileSync(attemptPath, "", { mode: 0o600 });
+      const result = await runChild({ options, prompt: amendedPrompt, outputPath: attemptPath, eventsPath });
+      if (result.dryRun) {
+        const stub = stubFor(schema, schema);
+        fs.writeFileSync(attemptPath, JSON.stringify(stub, null, 2) + "\n", { mode: 0o600 });
+        process.stdout.write(JSON.stringify({ dryRun: true, argv: result.argv }) + "\n");
+      }
+      const validation = !result.timedOut ? validateArtifact(schema, attemptPath) : { ok: false, errors: ["Codex timed out"] };
+      if (validation.ok) {
+        fs.chmodSync(attemptPath, 0o600);
+        fs.renameSync(attemptPath, artifact);
+        try { fs.unlinkSync(quotaStatePath); } catch {}
+        return validation.value;
+      }
+
+      try { fs.unlinkSync(attemptPath); } catch {}
+      const classification = classifyProviderError(result.stderr, "codex");
+      if (classification.kind === "model-unavailable") {
+        throw new Error(`Codex model ${options.model} at ${options.effort} effort is unavailable: ${result.stderr.slice(-1000)}`);
+      }
+      if (classification.kind === "quota") {
+        const state = readOrCreateQuotaState(quotaStatePath);
+        let targetAt = parseResetTime(result.stderr);
+        while (true) {
+          const next = nextBackoff({ firstDetectedAt: state.firstDetectedAt, targetAt });
+          if (next.action === "abort") {
+            try { fs.unlinkSync(quotaStatePath); } catch {}
+            throw new Error(`Codex quota did not clear within four hours for ${options.model}/${options.effort}`);
+          }
+          if (next.action === "retry") break;
+          process.stderr.write(`Codex usage limit reached; retrying at ${new Date(targetAt).toISOString()} (ceiling ${new Date(next.ceilingAt).toISOString()}).\n`);
+          await delay(next.milliseconds);
+        }
+        continue;
+      }
+      invalidAttempts += 1;
+      if (invalidAttempts < 2) {
+        amendedPrompt = `${prompt}\n\nYour previous response did not produce JSON matching the required schema. Return only a complete schema-valid response.`;
+      } else {
+        throw new Error(`Codex did not produce a valid artifact after two attempts: ${validation.errors.join("; ")}${result.stderr ? `; ${result.stderr.slice(-1000)}` : ""}`);
+      }
+    }
+    throw new Error("unreachable");
+  } finally {
+    release();
+  }
+}
+
+async function main() {
+  try {
+    const options = parseArgs(process.argv.slice(2));
+    let prompt = options.promptFile
+      ? fs.readFileSync(path.resolve(options.promptFile), "utf8")
+      : await new Promise((resolve, reject) => {
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", (chunk) => { input += chunk; });
+        process.stdin.on("end", () => resolve(input));
+        process.stdin.on("error", reject);
+      });
+    if (options.reviewDiffPath) {
+      const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
+      prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
+    }
+    const result = await runCodex(options, prompt);
+    process.stdout.write(JSON.stringify({ ok: true, artifact: path.resolve(options.artifact), result }) + "\n");
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

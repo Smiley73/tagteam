@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "tagteam-local",
+  "owner": {
+    "name": "tagteam contributors"
+  },
+  "metadata": {
+    "description": "Local development marketplace for the tagteam plugin."
+  },
+  "plugins": [
+    {
+      "name": "tagteam",
+      "description": "Cross-engine plan, implement, review, and merge workflows for Claude Code and Codex.",
+      "version": "0.1.3",
+      "author": {
+        "name": "tagteam contributors"
+      },
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

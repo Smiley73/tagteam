@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "goal": "Make account lookup safe, reliable, and user-visible.",
+  "tasks": [
+    {
+      "id": "query-tests",
+      "title": "Add account query tests",
+      "complexity": "simple",
+      "files": ["test/query.test.js"],
+      "dependsOn": [],
+      "doneCriteria": ["Tests cover ordinary and adversarial names."]
+    },
+    {
+      "id": "safe-query",
+      "title": "Parameterize lookup and handle database errors",
+      "complexity": "medium",
+      "files": ["src/query.js", "src/app.js"],
+      "dependsOn": ["query-tests"],
+      "doneCriteria": ["Lookup uses bound parameters.", "Database failures return a bounded error response."]
+    },
+    {
+      "id": "status-response",
+      "title": "Expose and document account status",
+      "complexity": "complex",
+      "files": ["src/app.js", "README.md"],
+      "dependsOn": ["safe-query"],
+      "doneCriteria": ["People receive an accurate status message.", "README matches the endpoint."]
+    }
+  ]
+}

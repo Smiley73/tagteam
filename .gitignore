@@ -1,0 +1,10 @@
+.DS_Store
+node_modules/
+.plan/
+
+# tagteam run state — config and approved plans are committable, the rest is not
+.tagteam/ships/
+.tagteam/worktrees/
+.tagteam/locks/
+.tagteam/transport.json
+coverage/

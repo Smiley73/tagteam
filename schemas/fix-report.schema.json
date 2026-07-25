@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "results"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1 },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "explanation"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["fixed", "wont-fix", "failed"] },
+          "explanation": { "type": "string", "minLength": 1 },
+          "files": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}
