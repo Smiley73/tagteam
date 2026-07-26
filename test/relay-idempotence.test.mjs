@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { normalizeRunPolicy, validateRunPolicy } from "../scripts/lib/run-policy.mjs";
 import { gitWorktreeState } from "../scripts/lib/worktree-state.mjs";
 import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
@@ -47,6 +47,32 @@ function runBridge(temp, artifact, fake, extra = [], prompt = "review this", wor
     "--min-prompt-bytes", "1",
     ...extra
   ], { input: prompt, encoding: "utf8" });
+}
+
+function runBridgeAsync(temp, artifact, fake, extra = [], prompt = "review this", worktree = root) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [
+      path.join(root, "scripts/codex-run.mjs"),
+      "--worktree", worktree,
+      "--schema", path.join(root, "schemas/findings.schema.json"),
+      "--artifact", artifact,
+      "--model", "gpt-test",
+      "--effort", "high",
+      "--sandbox", "read-only",
+      "--ship-dir", temp,
+      "--codex-bin", fake,
+      "--min-prompt-bytes", "1",
+      ...extra
+    ]);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(prompt);
+  });
 }
 
 test("the bridge reuses a validated artifact instead of re-invoking Codex", () => {
@@ -94,6 +120,71 @@ test("legacy request sidecars gain one stable receipt without rerunning Codex", 
   const repeated = runBridge(temp, artifact, fake);
   assert.equal(JSON.parse(repeated.stdout.trim()).executionId, migratedResult.executionId);
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
+});
+
+test("concurrent identical bridges serialize reuse and retain one receipt", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-artifact-lock-"));
+  const fake = path.join(temp, "fake-codex.mjs");
+  const counter = path.join(temp, "count.txt");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(counter)}, "x");
+await new Promise((resolve) => setTimeout(resolve, 250));
+fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(CLEAN_FINDINGS)}));
+`);
+  fs.chmodSync(fake, 0o700);
+  const artifact = path.join(temp, "findings.json");
+  const results = await Promise.all([
+    runBridgeAsync(temp, artifact, fake),
+    runBridgeAsync(temp, artifact, fake)
+  ]);
+  for (const result of results) assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+  const envelopes = results.map((result) => JSON.parse(result.stdout.trim()));
+  assert.deepEqual(envelopes.map((item) => item.reused).sort(), [false, true]);
+  assert.equal(envelopes[0].executionId, envelopes[1].executionId);
+  const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
+  assert.equal(receipts.invocations.length, 1);
+});
+
+test("workspace-writing bridges serialize different artifacts in one worktree", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-writer-lock-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  const fake = path.join(temp, "fake-codex.mjs");
+  const overlap = path.join(temp, "overlap.txt");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+let active;
+try {
+  active = fs.openSync("active-writer.lock", "wx");
+} catch {
+  fs.writeFileSync(${JSON.stringify(overlap)}, "overlap");
+}
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (active !== undefined) {
+  fs.closeSync(active);
+  fs.unlinkSync("active-writer.lock");
+}
+fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(CLEAN_FINDINGS)}));
+`);
+  fs.chmodSync(fake, 0o700);
+  const results = await Promise.all([
+    runBridgeAsync(temp, path.join(temp, "one.json"), fake, ["--sandbox", "workspace-write"], "one", worktree),
+    runBridgeAsync(temp, path.join(temp, "two.json"), fake, ["--sandbox", "workspace-write"], "two", worktree)
+  ]);
+  for (const result of results) assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(overlap), false);
 });
 
 test("the bridge re-runs Codex for an invalid artifact and when reuse is refused", () => {

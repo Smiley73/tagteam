@@ -74,26 +74,112 @@ async function acquireSlot(shipDir, maximum) {
   if (!shipDir) return () => {};
   const slotRoot = path.join(shipDir, ".codex-slots");
   fs.mkdirSync(slotRoot, { recursive: true, mode: 0o700 });
+  const token = randomUUID();
   while (true) {
     for (let slot = 0; slot < maximum; slot += 1) {
       const slotPath = path.join(slotRoot, `slot-${slot}`);
       try {
         fs.mkdirSync(slotPath, { mode: 0o700 });
-        fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { mode: 0o600 });
-        return () => fs.rmSync(slotPath, { recursive: true, force: true });
+        fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({
+          pid: process.pid, token, at: new Date().toISOString()
+        }), { mode: 0o600 });
+        return () => {
+          try {
+            const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
+            if (owner.token === token) fs.rmSync(slotPath, { recursive: true, force: true });
+          } catch {}
+        };
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
+        let reclaim = false;
         try {
           const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
-          process.kill(owner.pid, 0);
-        } catch (ownerError) {
-          if (ownerError.code === "ESRCH" || ownerError.code === "ENOENT" || ownerError instanceof SyntaxError) {
-            fs.rmSync(slotPath, { recursive: true, force: true });
+          try { process.kill(owner.pid, 0); } catch (ownerError) {
+            if (ownerError.code === "ESRCH") reclaim = true;
           }
+        } catch {
+          try {
+            reclaim = Date.now() - fs.statSync(slotPath).mtimeMs > 30_000;
+          } catch {}
+        }
+        if (reclaim) {
+          try { fs.rmSync(slotPath, { recursive: true, force: true }); } catch {}
         }
       }
     }
     await delay(250);
+  }
+}
+
+async function acquireNamedLock(root, name) {
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const lockPath = path.join(root, name);
+  const token = randomUUID();
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath, { mode: 0o700 });
+      fs.writeFileSync(
+        path.join(lockPath, "owner.json"),
+        JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }),
+        { mode: 0o600 }
+      );
+      return () => {
+        try {
+          const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+          if (owner.token === token) fs.rmSync(lockPath, { recursive: true, force: true });
+        } catch {}
+      };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      let reclaim = false;
+      try {
+        const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+        try { process.kill(owner.pid, 0); } catch (ownerError) {
+          if (ownerError.code === "ESRCH") reclaim = true;
+        }
+      } catch {
+        // mkdir is atomic but owner.json is a second operation. Give a live
+        // process time to finish publishing its ownership before reclaiming.
+        try {
+          reclaim = Date.now() - fs.statSync(lockPath).mtimeMs > 30_000;
+        } catch {}
+      }
+      if (reclaim) {
+        try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch {}
+      } else {
+        await delay(100);
+      }
+    }
+  }
+}
+
+async function acquireExecutionLocks(options) {
+  const artifact = path.resolve(options.artifact);
+  const worktree = path.resolve(options.worktree);
+  const digest = (value) => createHash("sha256").update(value).digest("hex");
+  const gitMarker = path.join(worktree, ".git");
+  const gitDirectory = fs.statSync(gitMarker).isDirectory()
+    ? gitMarker
+    : path.resolve(worktree, fs.readFileSync(gitMarker, "utf8").trim().replace(/^gitdir:\s*/, ""));
+  const locks = [
+    {
+      root: path.join(path.dirname(artifact), ".codex-artifact-locks"),
+      name: digest(artifact)
+    },
+    ...(options.sandbox === "workspace-write" ? [{
+      root: path.join(gitDirectory, "tagteam-codex-writer-locks"),
+      name: digest(worktree)
+    }] : [])
+  ].sort((left, right) => `${left.root}/${left.name}`.localeCompare(`${right.root}/${right.name}`));
+  const releases = [];
+  try {
+    for (const lock of locks) releases.push(await acquireNamedLock(lock.root, lock.name));
+    return () => {
+      for (const release of releases.reverse()) release();
+    };
+  } catch (error) {
+    for (const release of releases.reverse()) release();
+    throw error;
   }
 }
 
@@ -395,6 +481,7 @@ function writeRelayCheckpoint(options, executionId, before) {
 }
 
 async function main() {
+  let releaseExecutionLocks = () => {};
   try {
     const options = parseArgs(process.argv.slice(2));
     let prompt = options.promptFile
@@ -410,6 +497,7 @@ async function main() {
       const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }
+    releaseExecutionLocks = await acquireExecutionLocks(options);
     const before = gitWorktreeState(options.worktree);
     const { result, reused, executionId } = await runCodex(options, prompt);
     const checkpointPath = `${path.resolve(options.artifact)}.relay-checkpoint.json`;
@@ -427,6 +515,8 @@ async function main() {
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
+  } finally {
+    releaseExecutionLocks();
   }
 }
 
