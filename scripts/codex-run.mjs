@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -222,10 +222,10 @@ export async function runCodex(options, prompt) {
     const existing = validateArtifact(schema, artifact);
     if (existing.ok) {
       let recorded = null;
-      try { recorded = JSON.parse(fs.readFileSync(requestPath, "utf8")).fingerprint; } catch {}
-      if (recorded === fingerprint) {
+      try { recorded = JSON.parse(fs.readFileSync(requestPath, "utf8")); } catch {}
+      if (recorded?.fingerprint === fingerprint) {
         process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
-        return { result: existing.value, reused: true };
+        return { result: existing.value, reused: true, executionId: recorded.executionId ?? null };
       }
       process.stderr.write(recorded
         ? `The artifact at ${artifact} answers a different request; running Codex again.\n`
@@ -257,12 +257,14 @@ export async function runCodex(options, prompt) {
         // for the wrong request.
         try { fs.unlinkSync(requestPath); } catch {}
         fs.renameSync(attemptPath, artifact);
+        const executionId = randomUUID();
         fs.writeFileSync(requestPath, JSON.stringify({
           fingerprint, model: options.model, effort: options.effort, sandbox: options.sandbox,
+          executionId,
           completedAt: new Date().toISOString()
         }, null, 2) + "\n", { mode: 0o600 });
         try { fs.unlinkSync(quotaStatePath); } catch {}
-        return { result: validation.value, reused: false };
+        return { result: validation.value, reused: false, executionId };
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
@@ -323,8 +325,8 @@ async function main() {
       const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }
-    const { result, reused } = await runCodex(options, prompt);
-    process.stdout.write(JSON.stringify({ ok: true, reused, artifact: path.resolve(options.artifact), result }) + "\n");
+    const { result, reused, executionId } = await runCodex(options, prompt);
+    process.stdout.write(JSON.stringify({ ok: true, reused, executionId, artifact: path.resolve(options.artifact), result }) + "\n");
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

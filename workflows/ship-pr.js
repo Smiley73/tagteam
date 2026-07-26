@@ -356,6 +356,7 @@ function tally(ledger) {
 const RELAY_ATTEMPTS = 3;
 const relayState = { extraCalls: 0 };
 const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
+const codexReceiptState = new Set();
 
 async function claudeReasoningCall(prompt, options) {
   usageState.claudeReasoningCalls += 1;
@@ -375,9 +376,10 @@ function relayEnvelopeSchema(resultSchema) {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["reused", "result"],
+    required: ["reused", "executionId", "result"],
     properties: {
       reused: { type: "boolean" },
+      executionId: { type: ["string", "null"] },
       result: resultSchema
     }
   };
@@ -416,11 +418,11 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
-      "From the bridge stdout, return only reused and result. Do not infer or alter either field."
+      "From the bridge stdout, return only reused, executionId, and result. Do not infer or alter any field."
     ].join("\n\n") : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "From the bridge stdout, return only reused and result. Do not infer or alter either field."
+      "From the bridge stdout, return only reused, executionId, and result. Do not infer or alter any field."
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: kind,
@@ -431,8 +433,13 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     if (response) {
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
-        : { reused: false, result: response };
-      if (!envelope.reused) usageState.codexCalls += 1;
+        : { reused: false, executionId: null, result: response };
+      if (envelope.executionId && !codexReceiptState.has(envelope.executionId)) {
+        codexReceiptState.add(envelope.executionId);
+        usageState.codexCalls += 1;
+      } else if (!envelope.reused && !envelope.executionId) {
+        usageState.codexCalls += 1;
+      }
       return envelope.result;
     }
     log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
@@ -597,6 +604,8 @@ async function main(raw) {
     codexCalls: Number(priorUsage.codexCalls ?? 0)
   });
   const priorRelayRetries = Number(priorUsage.relayRetries ?? 0);
+  codexReceiptState.clear();
+  for (const receipt of input.usageReceipts ?? []) codexReceiptState.add(receipt);
   const runPolicy = await workflowRunPolicy(input, config);
   // All relay dispatch reads the validated, disk-authoritative policy rather
   // than a transport setting that may have changed since the run began.
@@ -612,6 +621,7 @@ async function main(raw) {
     assurance: runPolicy.assurance,
     policyFingerprint: runPolicy.policyFingerprint,
     usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
+    usageReceipts: [...codexReceiptState],
     ...result
   });
   const taskResults = [...(input.taskResults ?? [])];

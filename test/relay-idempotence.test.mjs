@@ -54,13 +54,16 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
 
   const first = runBridge(temp, artifact, fake);
   assert.equal(first.status, 0, first.stderr);
-  assert.equal(JSON.parse(first.stdout.trim()).reused, false);
+  const firstResult = JSON.parse(first.stdout.trim());
+  assert.equal(firstResult.reused, false);
+  assert.match(firstResult.executionId, /^[0-9a-f-]{36}$/);
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
 
   const second = runBridge(temp, artifact, fake);
   assert.equal(second.status, 0, second.stderr);
   const parsed = JSON.parse(second.stdout.trim());
   assert.equal(parsed.reused, true);
+  assert.equal(parsed.executionId, firstResult.executionId);
   assert.deepEqual(parsed.result, CLEAN_FINDINGS);
   // Codex was not spawned a second time, so a retry costs nothing and cannot
   // overwrite the earlier review.
@@ -325,7 +328,8 @@ test("planning continuation carries cumulative provider usage", async () => {
   const first = await harness("workflows/plan-forge.js", PLAN_ARGS, planResponder([]));
   const second = await harness("workflows/plan-forge.js", {
     ...PLAN_ARGS,
-    usage: first.result.usage
+    usage: first.result.usage,
+    usageReceipts: first.result.usageReceipts
   }, planResponder([]));
   assert.deepEqual(second.result.usage, {
     claudeReasoningCalls: first.result.usage.claudeReasoningCalls * 2,
@@ -435,6 +439,7 @@ test("shipping resume adds current invocation usage to persisted usage", async (
   const second = await harness("workflows/ship-pr.js", {
     ...SHIP_ARGS,
     usage: first.result.usage,
+    usageReceipts: first.result.usageReceipts,
     roundOffset: 1
   }, responder);
   assert.deepEqual(second.result.usage, {
@@ -492,7 +497,11 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
 });
 
 test("validated Codex artifact reuse is not counted as a new Codex call", async () => {
-  const { result } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, _prompt, options) => {
+  const { result } = await harness("workflows/ship-pr.js", {
+    ...SHIP_ARGS,
+    usage: { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 1, relayRetries: 0 },
+    usageReceipts: ["exec-old"]
+  }, (label, _prompt, options) => {
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
@@ -506,11 +515,13 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
     if (label.startsWith("scribe:")) {
       return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
     }
-    if (options.agentType === "tagteam:codex-runner") return { reused: true, result: CLEAN_FINDINGS };
+    if (options.agentType === "tagteam:codex-runner") {
+      return { reused: true, executionId: "exec-old", result: CLEAN_FINDINGS };
+    }
     return CLEAN_FINDINGS;
   });
   assert.equal(result.status, "clean");
-  assert.equal(result.usage.codexCalls, 0);
+  assert.equal(result.usage.codexCalls, 1);
 });
 
 test("a lost Codex review relay result does not fail the PR round", async () => {
@@ -532,6 +543,9 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
     if (/^review:1:codex:/.test(label) && !droppedCodexReview) {
       droppedCodexReview = true;
       return null;
+    }
+    if (/^review:1:codex:.*:relay-retry-1$/.test(label)) {
+      return { reused: true, executionId: "exec-lost-relay", result: CLEAN_FINDINGS };
     }
     return CLEAN_FINDINGS;
   });
