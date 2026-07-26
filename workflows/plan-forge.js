@@ -177,6 +177,26 @@ function canonicalPolicy(value) {
   return JSON.stringify(value);
 }
 
+async function sha256(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `sha256:${digest}`;
+}
+
+async function codexRequestIdentity({ promptHash, schemaPath, model, effort, sandbox, worktree }) {
+  return sha256(JSON.stringify({
+    version: 1,
+    promptHash,
+    schemaPath,
+    model,
+    effort,
+    sandbox,
+    dryRun: false,
+    worktree
+  }));
+}
+
 async function workflowRunPolicy(input, config) {
   const policy = input.runPolicy ?? {
     version: 1,
@@ -196,10 +216,7 @@ async function workflowRunPolicy(input, config) {
     plumbingModel: policy.plumbingModel,
     assurance: policy.assurance
   };
-  const bytes = new TextEncoder().encode(canonicalPolicy(fields));
-  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
-    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  const policyFingerprint = `sha256:${digest}`;
+  const policyFingerprint = await sha256(canonicalPolicy(fields));
   if (policy.policyFingerprint && policy.policyFingerprint !== policyFingerprint) throw new Error("run policy fingerprint does not match its fields");
   // PR 1 threads and binds policy identity without pretending an unfinished
   // dispatch path is available. PR 2 replaces this guard with provider routing.
@@ -246,6 +263,7 @@ const promptBuildSchema = {
   properties: {
     ok: { type: "boolean" },
     promptPath: { type: "string" },
+    promptHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     bytes: { type: "integer" },
     error: { type: "string" }
   }
@@ -365,7 +383,7 @@ function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = 
 // reply arrives, disk reconciliation decides whether Codex actually dispatched;
 // the workflow cannot truthfully infer that from a missing relay response.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0, fatal: [], receiptFiles: [], unconfirmedReceiptFiles: [] };
+const relayState = { extraCalls: 0, fatal: [], receiptFiles: [], unconfirmedDispatches: [] };
 const usageState = {
   claudeReasoningCalls: 0,
   haikuPlumbingCalls: 0,
@@ -411,7 +429,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
   const prompt = [
     `Run this exact command: ${command}`,
     "It assembles a request file from text this plan already saved. Do not write, edit, summarise, or retype any of that text yourself.",
-    "Return ok=true with the promptPath and bytes the command reported. If it exits non-zero, return ok=false with its exact stderr as error."
+    "Return ok=true with the promptPath, promptHash, and bytes the command reported. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
@@ -422,7 +440,10 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
       model,
       schema: promptBuildSchema
     });
-    if (result?.ok) return result;
+    if (result?.ok && /^sha256:[0-9a-f]{64}$/.test(result.promptHash ?? "")) return result;
+    if (result?.ok) {
+      throw new Error(promptNotBuilt({ what, promptFile, detail: "the prompt builder omitted its SHA-256 identity" }));
+    }
     if (result && !result.ok) {
       // The command itself refused: a section is missing, empty, or is not the
       // text this run produced. Re-running cannot change that.
@@ -527,12 +548,19 @@ function promptNotBuilt({ what, promptFile, detail }) {
   ].join("\n");
 }
 
-async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
-  const receiptFile = `${artifact}.usage-receipts.json`;
-  if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
-  if (!relayState.unconfirmedReceiptFiles.includes(receiptFile)) {
-    relayState.unconfirmedReceiptFiles.push(receiptFile);
+async function relayCodex({
+  prompt, label, phase: phaseName, schema, model, artifact, promptFile, what,
+  requestIdentity, sandbox = "read-only"
+}) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(requestIdentity ?? "")) {
+    throw new Error(`Codex ${what} has no request-bound dispatch identity`);
   }
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  const checkpoint = `${artifact}.relay-checkpoint.json`;
+  if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
+  relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+    .filter((item) => item.receiptFile !== receiptFile);
+  relayState.unconfirmedDispatches.push({ receiptFile, checkpoint, requestIdentity, sandbox });
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await planAgent(attempt === 1 ? [
@@ -550,8 +578,8 @@ async function relayCodex({ prompt, label, phase: phaseName, schema, model, arti
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
-      relayState.unconfirmedReceiptFiles = relayState.unconfirmedReceiptFiles
-        .filter((file) => file !== receiptFile);
+      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+        .filter((item) => item.receiptFile !== receiptFile);
       // The compatibility branch is for legacy workflow harnesses; production
       // agents are schema-bound to the envelope above.
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
@@ -589,7 +617,7 @@ async function main(raw) {
   relayState.extraCalls = 0;
   relayState.fatal = [];
   relayState.receiptFiles = [];
-  relayState.unconfirmedReceiptFiles = [];
+  relayState.unconfirmedDispatches = [];
   const priorAgentCalls = persistedCount(input.agentCalls, "persisted planning agentCalls");
   planState.dispatchedCalls = priorAgentCalls;
   planState.runPolicy = null;
@@ -809,13 +837,21 @@ async function main(raw) {
     ].join(" ");
     // Both engines judge the same bytes, and those bytes are assembled from the
     // saved draft rather than retyped, so neither can review a shortened plan.
-    await buildPrompt({
+    const builtReviewPrompt = await buildPrompt({
       command: prepareCommand,
       label: `plan:review-request:${round}`,
       phase: `Cross-review ${round}`,
       model: relayModel,
       what: `review of plan round ${round}`,
       promptFile
+    });
+    const reviewRequestIdentity = await codexRequestIdentity({
+      promptHash: builtReviewPrompt.promptHash,
+      schemaPath: `${input.pluginRoot}/schemas/plan-review.schema.json`,
+      model: codex.model,
+      effort: codex.effort,
+      sandbox: "read-only",
+      worktree: input.worktree
     });
     callCount += 1;
     const [claudeReview, codexReview, uiReview] = await parallel([
@@ -844,7 +880,8 @@ async function main(raw) {
         model: relayModel,
         artifact,
         promptFile,
-        what: `review of plan round ${round}`
+        what: `review of plan round ${round}`,
+        requestIdentity: reviewRequestIdentity
       }),
       // Gated on the repository having an interface at all, never on how much
       // the human wants to be asked: this lens removes bad surfaces without
@@ -1049,13 +1086,21 @@ async function main(raw) {
     "--require-fence pr-train",
     `--min-prompt-bytes ${decompositionMinBytes}`
   ].join(" ");
-  await buildPrompt({
+  const builtDecompositionPrompt = await buildPrompt({
     command: decompositionPrepare,
     label: "plan:decomposition-request",
     phase: "PR train",
     model: relayModel,
     what: "cross-check of the pull-request split",
     promptFile: decompositionPromptFile
+  });
+  const decompositionRequestIdentity = await codexRequestIdentity({
+    promptHash: builtDecompositionPrompt.promptHash,
+    schemaPath: `${input.pluginRoot}/schemas/plan-review.schema.json`,
+    model: codex.model,
+    effort: codex.effort,
+    sandbox: "read-only",
+    worktree: input.worktree
   });
   callCount += 1;
   const decompositionReview = await relayCodex({
@@ -1070,7 +1115,8 @@ async function main(raw) {
     model: relayModel,
     artifact: decompositionArtifact,
     promptFile: decompositionPromptFile,
-    what: "cross-check of the pull-request split"
+    what: "cross-check of the pull-request split",
+    requestIdentity: decompositionRequestIdentity
   });
   callCount += 1;
   questions.push(...(decompositionReview.open_questions ?? []));
@@ -1117,7 +1163,7 @@ async function main(raw) {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
-    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
+    unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
@@ -1146,7 +1192,7 @@ try {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
-    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
+    unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),

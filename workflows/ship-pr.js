@@ -163,6 +163,26 @@ function canonicalPolicy(value) {
   return JSON.stringify(value);
 }
 
+async function sha256(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `sha256:${digest}`;
+}
+
+async function codexRequestIdentity({ prompt, schemaPath, model, effort, sandbox, worktree }) {
+  return sha256(JSON.stringify({
+    version: 1,
+    promptHash: await sha256(prompt),
+    schemaPath,
+    model,
+    effort,
+    sandbox,
+    dryRun: false,
+    worktree
+  }));
+}
+
 async function workflowRunPolicy(input, config) {
   const policy = input.runPolicy ?? {
     version: 1,
@@ -182,10 +202,7 @@ async function workflowRunPolicy(input, config) {
     plumbingModel: policy.plumbingModel,
     assurance: policy.assurance
   };
-  const bytes = new TextEncoder().encode(canonicalPolicy(fields));
-  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
-    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  const policyFingerprint = `sha256:${digest}`;
+  const policyFingerprint = await sha256(canonicalPolicy(fields));
   if (policy.policyFingerprint && policy.policyFingerprint !== policyFingerprint) throw new Error("run policy fingerprint does not match its fields");
   // PR 1 binds the policy to every shipping artifact but leaves dispatch
   // unchanged. PR 3 replaces this guard with provider-aware shipping routes.
@@ -376,7 +393,7 @@ const relayState = {
   extraCalls: 0,
   fatal: [],
   receiptFiles: [],
-  unconfirmedReceiptFiles: [],
+  unconfirmedDispatches: [],
   dispatchedCalls: 0,
   maximumCalls: Infinity,
   capacityExceeded: false
@@ -440,6 +457,15 @@ function relayEnvelopeSchema(resultSchema) {
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
   const promptFile = `${artifact}.prompt.md`;
+  const schemaPath = `${input.pluginRoot}/schemas/${schemaFile}`;
+  const requestIdentity = await codexRequestIdentity({
+    prompt,
+    schemaPath,
+    model: runtime.model,
+    effort: runtime.effort,
+    sandbox,
+    worktree: input.worktree
+  });
   // Declared from the prompt the workflow actually built, so a relay that
   // shortened or paraphrased it fails before Codex is invoked rather than
   // buying a confident answer to a question that was never fully asked.
@@ -448,7 +474,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
   const command = [
     `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
     `--worktree "${input.worktree}"`,
-    `--schema "${input.pluginRoot}/schemas/${schemaFile}"`,
+    `--schema "${schemaPath}"`,
     `--artifact "${artifact}"`,
     `--model "${runtime.model}"`,
     `--effort "${runtime.effort}"`,
@@ -473,9 +499,14 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     }
     const receiptFile = `${artifact}.usage-receipts.json`;
     if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
-    if (!relayState.unconfirmedReceiptFiles.includes(receiptFile)) {
-      relayState.unconfirmedReceiptFiles.push(receiptFile);
-    }
+    relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+      .filter((item) => item.receiptFile !== receiptFile);
+    relayState.unconfirmedDispatches.push({
+      receiptFile,
+      checkpoint: `${artifact}.relay-checkpoint.json`,
+      requestIdentity,
+      sandbox
+    });
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
@@ -492,8 +523,8 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
-      relayState.unconfirmedReceiptFiles = relayState.unconfirmedReceiptFiles
-        .filter((file) => file !== receiptFile);
+      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+        .filter((item) => item.receiptFile !== receiptFile);
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
         : { reused: false, executionId: null, result: response };
@@ -660,7 +691,7 @@ async function main(raw) {
   relayState.extraCalls = 0;
   relayState.fatal = [];
   relayState.receiptFiles = [];
-  relayState.unconfirmedReceiptFiles = [];
+  relayState.unconfirmedDispatches = [];
   shipState.runPolicy = null;
   shipState.legacyUsageIncomplete = false;
   shipState.taskResults = [];
@@ -718,7 +749,7 @@ async function main(raw) {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
-    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
+    unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
@@ -1377,7 +1408,7 @@ try {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
-    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
+    unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),

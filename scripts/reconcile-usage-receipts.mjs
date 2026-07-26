@@ -25,11 +25,26 @@ export function reconcileUsageReceipts(result) {
     throw new Error(`Codex usage count ${codexCalls} does not match ${receipts.size} authoritative receipts`);
   }
   const receiptFiles = new Set(result.usageReceiptFiles ?? []);
-  const unconfirmedReceiptFiles = new Set(result.unconfirmedUsageReceiptFiles ?? []);
-  for (const receiptFile of unconfirmedReceiptFiles) {
-    if (!receiptFiles.has(receiptFile)) {
-      throw new Error(`unconfirmed Codex receipt is not registered for reconciliation: ${receiptFile}`);
+  const checkpointFiles = new Set(result.relayCheckpoints ?? []);
+  const unconfirmedByReceipt = new Map();
+  const unconfirmedByCheckpoint = new Map();
+  for (const dispatch of result.unconfirmedCodexDispatches ?? []) {
+    if (!dispatch || typeof dispatch !== "object"
+      || typeof dispatch.receiptFile !== "string"
+      || typeof dispatch.checkpoint !== "string"
+      || !/^sha256:[0-9a-f]{64}$/.test(dispatch.requestIdentity ?? "")
+      || !["read-only", "workspace-write"].includes(dispatch.sandbox)) {
+      throw new Error("invalid unconfirmed Codex dispatch record");
     }
+    if (!receiptFiles.has(dispatch.receiptFile) || !checkpointFiles.has(dispatch.checkpoint)) {
+      throw new Error(`unconfirmed Codex dispatch is not registered for reconciliation: ${dispatch.receiptFile}`);
+    }
+    if (unconfirmedByReceipt.has(dispatch.receiptFile)
+      || unconfirmedByCheckpoint.has(dispatch.checkpoint)) {
+      throw new Error(`duplicate unconfirmed Codex dispatch record: ${dispatch.receiptFile}`);
+    }
+    unconfirmedByReceipt.set(dispatch.receiptFile, dispatch);
+    unconfirmedByCheckpoint.set(dispatch.checkpoint, dispatch);
   }
   const workspaceCheckpointStates = [];
   let added = 0;
@@ -38,7 +53,7 @@ export function reconcileUsageReceipts(result) {
       throw new Error(`invalid Codex usage receipt journal path: ${receiptFile}`);
     }
     if (!fs.existsSync(receiptFile)) {
-      if (unconfirmedReceiptFiles.has(receiptFile)) {
+      if (unconfirmedByReceipt.has(receiptFile)) {
         // No relay response means the workflow cannot know whether the runner
         // ever reached the bridge. Preserve every known counter, but do not
         // claim the Codex total is exact when no dispatch evidence exists.
@@ -52,6 +67,15 @@ export function reconcileUsageReceipts(result) {
       || receiptFile !== `${journal.artifact}.usage-receipts.json`
       || !Array.isArray(journal.invocations)) {
       throw new Error(`invalid Codex usage receipt journal: ${receiptFile}`);
+    }
+    const expectedDispatch = unconfirmedByReceipt.get(receiptFile);
+    if (expectedDispatch
+      && !journal.invocations.some((entry) =>
+        entry.requestIdentity === expectedDispatch.requestIdentity)) {
+      // This can be a perfectly valid journal for an earlier request at the
+      // same artifact path. Count its durable historical invocations, but do
+      // not mistake them for evidence that the current relay reached Codex.
+      incomplete = true;
     }
     for (const invocation of journal.invocations) {
       if (typeof invocation.executionId !== "string" || invocation.executionId.length === 0
@@ -75,7 +99,7 @@ export function reconcileUsageReceipts(result) {
       }
     }
   }
-  for (const checkpointFile of result.relayCheckpoints ?? []) {
+  for (const checkpointFile of checkpointFiles) {
     if (!fs.existsSync(checkpointFile) && (result.usageReceiptFiles ?? []).length > 0) {
       // A failed/invalid Codex invocation has a durable per-invocation journal
       // but no completed-artifact checkpoint. Usage can still be made exact;
@@ -98,8 +122,19 @@ export function reconcileUsageReceipts(result) {
       || checkpoint.executionId.length === 0
       || checkpoint.executionId !== request.executionId
       || checkpoint.requestFingerprint !== request.fingerprint
+      || (checkpoint.requestIdentity !== undefined
+        && checkpoint.requestIdentity !== request.requestIdentity)
       || checkpoint.completedAt !== request.completedAt) {
       throw new Error(`relay checkpoint has no matching execution receipt: ${checkpointFile}`);
+    }
+    const expectedDispatch = unconfirmedByCheckpoint.get(checkpointFile);
+    if (expectedDispatch && (checkpoint.requestIdentity !== expectedDispatch.requestIdentity
+      || checkpoint.sandbox !== expectedDispatch.sandbox)) {
+      incomplete = true;
+      if (expectedDispatch.sandbox === "workspace-write") {
+        workspaceCheckpointStates.push("unknown");
+      }
+      continue;
     }
     if (!receipts.has(checkpoint.executionId)) {
       receipts.add(checkpoint.executionId);

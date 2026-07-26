@@ -89,6 +89,23 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   assert.equal(firstResult.reused, false);
   assert.match(firstResult.executionId, /^[0-9a-f-]{36}$/);
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
+  const request = JSON.parse(fs.readFileSync(`${artifact}.request.json`, "utf8"));
+  const journal = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
+  const checkpoint = JSON.parse(fs.readFileSync(`${artifact}.relay-checkpoint.json`, "utf8"));
+  const promptHash = `sha256:${createHash("sha256").update("review this").digest("hex")}`;
+  const expectedIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
+    version: 1,
+    promptHash,
+    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    model: "gpt-test",
+    effort: "high",
+    sandbox: "read-only",
+    dryRun: false,
+    worktree: root
+  })).digest("hex")}`;
+  assert.equal(request.requestIdentity, expectedIdentity);
+  assert.equal(journal.invocations[0].requestIdentity, request.requestIdentity);
+  assert.equal(checkpoint.requestIdentity, request.requestIdentity);
 
   const second = runBridge(temp, artifact, fake);
   assert.equal(second.status, 0, second.stderr);
@@ -721,6 +738,7 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
 test("reconciliation preserves counters when relay dispatch is unconfirmed but rejects missing confirmed evidence", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-unconfirmed-dispatch-"));
   const receiptFile = path.join(temp, "missing.json.usage-receipts.json");
+  const checkpoint = path.join(temp, "missing.json.relay-checkpoint.json");
   const interrupted = {
     status: "relay-interrupted",
     agentCalls: 7,
@@ -733,13 +751,19 @@ test("reconciliation preserves counters when relay dispatch is unconfirmed but r
     },
     usageReceipts: [],
     usageReceiptFiles: [receiptFile],
+    relayCheckpoints: [checkpoint],
     usageAccounting: "pending-checkpoint-reconciliation"
   };
 
   assert.throws(() => reconcileUsageReceipts(interrupted), /missing Codex usage receipt journal/);
   const reconciled = reconcileUsageReceipts({
     ...interrupted,
-    unconfirmedUsageReceiptFiles: [receiptFile]
+    unconfirmedCodexDispatches: [{
+      receiptFile,
+      checkpoint,
+      requestIdentity: `sha256:${"a".repeat(64)}`,
+      sandbox: "read-only"
+    }]
   });
   assert.equal(reconciled.usageAccounting, "legacy-incomplete");
   assert.equal(reconciled.agentCalls, 7);
@@ -812,14 +836,91 @@ test("receipt reconciliation classifies workspace interruption from its checkpoi
   assert.equal(reconcileUsageReceipts(interrupted).status, "relay-interrupted-workspace-unknown");
 });
 
+test("stale evidence at a reused artifact path cannot recover a different unconfirmed request", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-stale-dispatch-"));
+  const artifact = path.join(temp, "result.json");
+  const requestPath = `${artifact}.request.json`;
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  const checkpointFile = `${artifact}.relay-checkpoint.json`;
+  const schema = path.join(root, "schemas/findings.schema.json");
+  const oldIdentity = `sha256:${"a".repeat(64)}`;
+  const newIdentity = `sha256:${"b".repeat(64)}`;
+  const request = {
+    executionId: "exec-old-request",
+    fingerprint: "old-fingerprint",
+    requestIdentity: oldIdentity,
+    completedAt: "2026-07-26T12:00:00.000Z"
+  };
+  const before = {
+    headOid: "c".repeat(40),
+    statusBytes: 0,
+    statusHash: "clean-status",
+    contentHash: "clean-content",
+    automaticRecoverySafe: true
+  };
+  const after = {
+    ...before,
+    statusBytes: 12,
+    statusHash: "dirty-status",
+    contentHash: "dirty-content"
+  };
+  fs.writeFileSync(artifact, JSON.stringify(CLEAN_FINDINGS));
+  fs.writeFileSync(requestPath, JSON.stringify(request));
+  fs.writeFileSync(receiptFile, JSON.stringify({
+    version: 1,
+    artifact,
+    invocations: [{
+      executionId: request.executionId,
+      requestFingerprint: request.fingerprint,
+      requestIdentity: oldIdentity,
+      recordedAt: request.completedAt
+    }]
+  }));
+  fs.writeFileSync(checkpointFile, JSON.stringify({
+    version: 2,
+    artifact,
+    requestPath,
+    schema,
+    artifactHash: fileHash(artifact),
+    requestHash: fileHash(requestPath),
+    schemaHash: fileHash(schema),
+    sandbox: "workspace-write",
+    executionId: request.executionId,
+    requestFingerprint: request.fingerprint,
+    requestIdentity: oldIdentity,
+    completedAt: request.completedAt,
+    statusBefore: before,
+    statusAfter: after
+  }));
+
+  const reconciled = reconcileUsageReceipts({
+    status: "relay-interrupted-workspace-unknown",
+    usage: { codexCalls: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [receiptFile],
+    relayCheckpoints: [checkpointFile],
+    unconfirmedCodexDispatches: [{
+      receiptFile,
+      checkpoint: checkpointFile,
+      requestIdentity: newIdentity,
+      sandbox: "workspace-write"
+    }],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  });
+  assert.equal(reconciled.usageAccounting, "legacy-incomplete");
+  assert.equal(reconciled.usage.codexCalls, 1);
+  assert.deepEqual(reconciled.usageReceipts, [request.executionId]);
+  assert.equal(reconciled.status, "relay-interrupted-workspace-unknown");
+});
+
 function loadWorkflow(file) {
   const source = fs.readFileSync(path.join(root, file), "utf8").replace(/\bexport\s+const\s+meta\b/, "const meta");
   return new AsyncFunction("args", "agent", "parallel", "phase", "log", "budget", source);
 }
 
 // Runs a workflow with a stub agent. `respond` maps a call label to its result;
-// returning null models a relay that completed on disk but never handed its
-// object back.
+// returning null models an unconfirmed relay: it may have completed on disk or
+// may have failed before it ever invoked the bridge.
 function harness(file, args, respond) {
   const labels = [];
   const calls = [];
@@ -893,7 +994,12 @@ function planResponder(dropOnce) {
     }
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
-      return { ok: true, promptPath: "/plans/slug/reviews/prompt.md", bytes: 4096 };
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
     }
     if (label.startsWith("plan:draft") || label.startsWith("plan:revise")) {
       return { planMarkdown: "# Plan", open_questions: [] };
@@ -951,9 +1057,12 @@ test("a plan relay that never returns preserves interruption accounting", async 
   assert.deepEqual(result.relayCheckpoints, [
     "/plans/slug/reviews/pass-1-round-1-codex.json.relay-checkpoint.json"
   ]);
-  assert.deepEqual(result.unconfirmedUsageReceiptFiles, [
+  assert.equal(result.unconfirmedCodexDispatches.length, 1);
+  assert.equal(
+    result.unconfirmedCodexDispatches[0].receiptFile,
     "/plans/slug/reviews/pass-1-round-1-codex.json.usage-receipts.json"
-  ]);
+  );
+  assert.match(result.unconfirmedCodexDispatches[0].requestIdentity, /^sha256:[0-9a-f]{64}$/);
   assert.equal(lines.length, 4);
   assert.match(lines[0], /could not be handed back/);
   assert.match(lines[1], /whether Codex started/);

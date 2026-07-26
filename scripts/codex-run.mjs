@@ -426,6 +426,21 @@ function requestFingerprint({ options, prompt, schema }) {
   })).digest("hex");
 }
 
+function requestIdentity({ options, prompt }) {
+  const promptHash = `sha256:${createHash("sha256").update(prompt).digest("hex")}`;
+  const fields = {
+    version: 1,
+    promptHash,
+    schemaPath: options.schema,
+    model: options.model,
+    effort: options.effort,
+    sandbox: options.sandbox,
+    dryRun: Boolean(options.dryRun),
+    worktree: options.worktree
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(fields)).digest("hex")}`;
+}
+
 function legacyExecutionId(artifact, fingerprint) {
   const hex = createHash("sha256").update(`tagteam-legacy-codex\0${artifact}\0${fingerprint}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -452,13 +467,24 @@ function appendInvocationReceipt(artifact, fingerprint, executionId, fields = {}
     }
     journal = existing;
   }
-  if (!journal.invocations.some((entry) => entry.executionId === executionId)) {
+  const existingIndex = journal.invocations.findIndex((entry) => entry.executionId === executionId);
+  if (existingIndex < 0) {
     journal.invocations.push({
       executionId,
       requestFingerprint: fingerprint,
       recordedAt: new Date().toISOString(),
       ...fields
     });
+    writeJsonAtomic(file, journal);
+  } else if (fields.requestIdentity
+    && journal.invocations[existingIndex].requestIdentity !== fields.requestIdentity) {
+    if (journal.invocations[existingIndex].requestFingerprint !== fingerprint) {
+      throw new Error(`Codex invocation receipt identity conflicts at ${file}`);
+    }
+    journal.invocations[existingIndex] = {
+      ...journal.invocations[existingIndex],
+      requestIdentity: fields.requestIdentity
+    };
     writeJsonAtomic(file, journal);
   }
   return file;
@@ -517,6 +543,7 @@ export async function runCodex(options, prompt) {
   const eventsPath = `${artifact}.events.jsonl`;
 
   const fingerprint = requestFingerprint({ options, prompt, schema });
+  const identity = requestIdentity({ options, prompt });
   const requestPath = `${artifact}.request.json`;
 
   // Idempotence: a completed artifact is the record of the work that produced
@@ -561,7 +588,10 @@ export async function runCodex(options, prompt) {
           writeJsonAtomic(requestPath, recorded);
         }
         if (safeReuse) {
-          appendInvocationReceipt(artifact, fingerprint, recorded.executionId, { legacy: true });
+          appendInvocationReceipt(artifact, fingerprint, recorded.executionId, {
+            legacy: true,
+            requestIdentity: identity
+          });
           process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
           return { result: existing.value, reused: true, executionId: recorded.executionId };
         }
@@ -600,7 +630,10 @@ export async function runCodex(options, prompt) {
           slotLock.protect(childPid);
           options.executionLocks?.protect(childPid);
           if (!options.dryRun) {
-            appendInvocationReceipt(artifact, fingerprint, executionId, { attempt: invalidAttempts + 1 });
+            appendInvocationReceipt(artifact, fingerprint, executionId, {
+              attempt: invalidAttempts + 1,
+              requestIdentity: identity
+            });
           }
         }
       });
@@ -619,6 +652,7 @@ export async function runCodex(options, prompt) {
         fs.renameSync(attemptPath, artifact);
         fs.writeFileSync(requestPath, JSON.stringify({
           fingerprint, model: options.model, effort: options.effort, sandbox: options.sandbox,
+          requestIdentity: identity,
           executionId: options.dryRun ? null : executionId,
           dryRun: Boolean(options.dryRun),
           completedAt: new Date().toISOString()
@@ -685,6 +719,7 @@ function writeRelayCheckpoint(options, executionId, before) {
     sandbox: options.sandbox,
     executionId,
     requestFingerprint: request.fingerprint,
+    requestIdentity: request.requestIdentity,
     headOid: before.headOid,
     statusBefore: before,
     statusAfter: gitWorktreeState(options.worktree),

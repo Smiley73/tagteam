@@ -141,7 +141,12 @@ async function forge({
       if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
       const parsed = JSON.parse(result.stdout.trim());
       composed.push({ label, command, ...parsed });
-      return { ok: true, promptPath: parsed.promptPath, bytes: parsed.bytes };
+      return {
+        ok: true,
+        promptPath: parsed.promptPath,
+        promptHash: parsed.promptHash,
+        bytes: parsed.bytes
+      };
     }
     return APPROVE;
   };

@@ -31,7 +31,8 @@ export function validateCompletionCheckpoint(checkpointFile, artifactArg, expect
   }
   const request = readJson(checkpoint.requestPath);
   if (!checkpoint.executionId || request.executionId !== checkpoint.executionId
-    || request.fingerprint !== checkpoint.requestFingerprint) {
+    || request.fingerprint !== checkpoint.requestFingerprint
+    || checkpoint.requestIdentity !== request.requestIdentity) {
     throw new Error("relay checkpoint does not match the saved request receipt");
   }
   const schema = readJson(checkpoint.schema);
