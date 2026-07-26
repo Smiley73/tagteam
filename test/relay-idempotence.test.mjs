@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { validateRunPolicy } from "../scripts/lib/run-policy.mjs";
+import { normalizeRunPolicy, validateRunPolicy } from "../scripts/lib/run-policy.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -130,8 +130,10 @@ function loadWorkflow(file) {
 // object back.
 function harness(file, args, respond) {
   const labels = [];
+  const calls = [];
   const agent = async (prompt, options) => {
     labels.push(options.label);
+    calls.push({ label: options.label, model: options.model, agentType: options.agentType });
     return respond(options.label, prompt, options);
   };
   const parallel = async (thunks) => {
@@ -141,7 +143,7 @@ function harness(file, args, respond) {
     }
     return results;
   };
-  return loadWorkflow(file)(args, agent, parallel, () => {}, () => {}, undefined).then((result) => ({ result, labels }));
+  return loadWorkflow(file)(args, agent, parallel, () => {}, () => {}, undefined).then((result) => ({ result, labels, calls }));
 }
 
 const PLAN_CONFIG = {
@@ -226,7 +228,7 @@ test("a lost plan-review relay result is recovered from the saved artifact", asy
   ]);
   assert.equal(result.usage.relayRetries, 1);
   assert.ok(result.usage.claudeReasoningCalls > 0);
-  assert.ok(result.usage.haikuPlumbingCalls > 0);
+  assert.equal(result.usage.haikuPlumbingCalls, 0);
   assert.ok(result.usage.codexCalls > 0);
 });
 
@@ -429,6 +431,52 @@ test("shipping resume adds current invocation usage to persisted usage", async (
   });
 });
 
+test("saved policy controls relay execution and non-Haiku relays are not labeled Haiku", async () => {
+  const policy = normalizeRunPolicy({}, { transport: { relayModel: "sonnet" } });
+  const planConfig = {
+    ...PLAN_CONFIG,
+    transport: { ...PLAN_CONFIG.transport, relayModel: "opus" }
+  };
+  const plan = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config: planConfig, runPolicy: policy },
+    planResponder([])
+  );
+  const planPlumbing = plan.calls.filter((call) =>
+    call.agentType === "tagteam:prompt-builder" || call.agentType === "tagteam:codex-runner"
+  );
+  assert.ok(planPlumbing.length > 0);
+  assert.equal(planPlumbing.every((call) => call.model === "sonnet"), true);
+  assert.equal(plan.result.usage.haikuPlumbingCalls, 0);
+
+  const shipConfig = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  shipConfig.transport.relayModel = "opus";
+  const ship = await harness("workflows/ship-pr.js", {
+    ...SHIP_ARGS,
+    config: shipConfig,
+    runPolicy: policy
+  }, (label) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    return CLEAN_FINDINGS;
+  });
+  const shipRelays = ship.calls.filter((call) => call.agentType === "tagteam:codex-runner");
+  assert.ok(shipRelays.length > 0);
+  assert.equal(shipRelays.every((call) => call.model === "sonnet"), true);
+  assert.equal(ship.result.usage.haikuPlumbingCalls, 4);
+});
+
 test("a lost Codex review relay result does not fail the PR round", async () => {
   let droppedCodexReview = false;
   const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label) => {
@@ -460,7 +508,7 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.equal(result.policyFingerprint, result.runPolicy.policyFingerprint);
   assert.deepEqual(result.usage, {
     claudeReasoningCalls: 3,
-    haikuPlumbingCalls: 8,
+    haikuPlumbingCalls: 4,
     codexCalls: 3,
     relayRetries: 1
   });

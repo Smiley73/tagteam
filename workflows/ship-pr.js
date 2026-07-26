@@ -362,13 +362,13 @@ async function claudeReasoningCall(prompt, options) {
   return agent(prompt, options);
 }
 
-async function haikuPlumbingCall(prompt, options) {
-  usageState.haikuPlumbingCalls += 1;
+async function plumbingCall(prompt, options) {
+  if (options.model === "haiku") usageState.haikuPlumbingCalls += 1;
   return agent(prompt, options);
 }
 
-function relayModelFor(config) {
-  return config.transport?.relayModel ?? "sonnet";
+function relayModelFor(policy, config) {
+  return policy?.plumbingModel ?? config.transport?.relayModel ?? "sonnet";
 }
 
 // TEST_SENTINEL_WORKFLOW_CORE_END
@@ -403,7 +403,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
-    const result = await haikuPlumbingCall(attempt === 1 ? basePrompt : [
+    const result = await plumbingCall(attempt === 1 ? basePrompt : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
       "Return the parsed object by invoking the StructuredOutput tool."
@@ -411,7 +411,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: kind,
       agentType: "tagteam:codex-runner",
-      model: relayModelFor(input.config),
+      model: relayModelFor(input.runPolicy, input.config),
       schema
     });
     if (result) return result;
@@ -462,7 +462,7 @@ async function commitCandidate(input, round, summary) {
     `Run exactly: git -C "${input.worktree}" rev-parse HEAD`,
     `Return ok=true, that full OID as candidateOid, and message=${JSON.stringify(message)}.`
   ].join("\n");
-  const result = await haikuPlumbingCall(prompt, {
+  const result = await plumbingCall(prompt, {
     label: `candidate:commit:${round}`,
     phase: "Candidate",
     agentType: "tagteam:committer",
@@ -485,7 +485,7 @@ async function snapshot(input, round, candidateOid) {
     `--exclude-json "${input.diffExcludePath}"`
   ].join(" ");
   const codegraph = input.config.codegraph.enabled ? `Then run exactly: codegraph sync "${input.worktree}"` : "CodeGraph is disabled; do not run it.";
-  const result = await haikuPlumbingCall([
+  const result = await plumbingCall([
     `Run exactly: ${command}`,
     codegraph,
     `Read ${outDir}/candidate.json.`,
@@ -513,7 +513,7 @@ async function runVerify(input, snapshotValue, round) {
     `--out-dir "${input.shipDir}/prs/${input.pr.id}/verify/${round}"`,
     `--out "${resultPath}"`
   ].join(" ");
-  const result = await haikuPlumbingCall([
+  const result = await plumbingCall([
     `Run exactly: ${command}`,
     `Read ${resultPath} and return status, commands, and resultPath=${JSON.stringify(resultPath)}.`
   ].join("\n"), {
@@ -528,7 +528,7 @@ async function runVerify(input, snapshotValue, round) {
 }
 
 async function classifyUi(input, snapshotValue, round) {
-  const result = await haikuPlumbingCall([
+  const result = await plumbingCall([
     "Independently answer whether a person using the product or developer tool would notice this actual candidate change.",
     fence("changed-paths", snapshotValue.changedPaths),
     `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
@@ -578,6 +578,9 @@ async function main(raw) {
   });
   const priorRelayRetries = Number(priorUsage.relayRetries ?? 0);
   const runPolicy = await workflowRunPolicy(input, config);
+  // All relay dispatch reads the validated, disk-authoritative policy rather
+  // than a transport setting that may have changed since the run began.
+  input.runPolicy = runPolicy;
   const roundOffset = Number(input.roundOffset ?? 0);
   let callCount = Number(input.agentCalls ?? 0);
   // Relay re-reads are cheap but still calls, so they eat into the per-PR limit
@@ -895,7 +898,7 @@ async function main(raw) {
     };
     const roundJsonPath = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/round.json`;
     const reviewPath = `${input.shipDir}/prs/${input.pr.id}/review.md`;
-    const scribe = await haikuPlumbingCall([
+    const scribe = await plumbingCall([
       `Persist this round JSON at ${roundJsonPath} with mode 0600.`,
       `Also persist each non-null reviewerResults entry at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/<engine>-<dimension>.findings.json and ledgerSnapshot at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/ledger.snapshot.json, all mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/render-review-round.mjs" "${reviewPath}" "${roundJsonPath}"`,
@@ -981,7 +984,7 @@ async function main(raw) {
       candidateBefore: candidateOid,
       report: fixReport
     };
-    const fixScribe = await haikuPlumbingCall([
+    const fixScribe = await plumbingCall([
       `Persist this fix event at ${fixEventPath} with mode 0600.`,
       `Persist the event's report object at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/fixes.json with mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/append-review-event.mjs" "${input.shipDir}/prs/${input.pr.id}/review.md" "${fixEventPath}"`,

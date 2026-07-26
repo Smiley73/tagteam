@@ -349,8 +349,8 @@ const RELAY_ATTEMPTS = 3;
 const relayState = { extraCalls: 0 };
 const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
 
-function relayModelFor(config) {
-  return config.transport?.relayModel ?? "sonnet";
+function relayModelFor(policy, config) {
+  return policy?.plumbingModel ?? config.transport?.relayModel ?? "sonnet";
 }
 
 // Builds one request file out of text that is already on disk. The agent runs a
@@ -363,7 +363,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
     "Return ok=true with the promptPath and bytes the command reported. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
-    usageState.haikuPlumbingCalls += 1;
+    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await agent(prompt, {
       label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
@@ -397,7 +397,7 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
     "Return ok=true with the payloads array the command printed, unchanged. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
-    usageState.haikuPlumbingCalls += 1;
+    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await agent(prompt, {
       label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
@@ -481,7 +481,7 @@ function promptNotBuilt({ what, promptFile, detail }) {
 async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
   usageState.codexCalls += 1;
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
-    usageState.haikuPlumbingCalls += 1;
+    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await agent(attempt === 1 ? prompt : [
       prompt,
@@ -533,7 +533,7 @@ async function main(raw) {
   const claude = config.planning.claude;
   const codex = config.planning.codex;
   const decisions = input.decisions ?? [];
-  const relayModel = relayModelFor(config);
+  const relayModel = relayModelFor(runPolicy, config);
   // Settings written before these questions existed leave hasUserInterface
   // undefined. The lens is free to the user, so it runs; confirmation is not,
   // so it stays off until the answers exist. Ship makes the same choice.
