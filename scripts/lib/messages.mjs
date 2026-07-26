@@ -93,6 +93,14 @@ export const messages = {
       DETAILS(context)
     ].join("\n");
   },
+  // Ship continues on settings that predate the interface questions, so this
+  // is a single sentence said once, not the four-line stop that plan renders.
+  configStaleShip(context) {
+    return [
+      "This project has no answer on file for how much say you want over the look and feel of user-facing changes, so this change will not stop to ask; the pull request still waits for you when the change is noticeable.",
+      DETAILS(context)
+    ].join("\n");
+  },
   fixFailed(context) {
     return [
       "An automated repair stopped before it could produce a complete, recorded candidate.",

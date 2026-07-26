@@ -308,26 +308,36 @@ export function loadAndValidate(schemaPath, documentPath, options = {}) {
   return { schema, document, errors };
 }
 
+const USAGE = "usage: validate-json.mjs [--repo <path>] [--manifest <manifest.json>] <schema.json> <document.json>\n";
+
+// Returns undefined when the flag is absent and null when it is present with
+// no value, so a truncated command line reaches the usage error instead of
+// resolving `undefined` into a raw stack trace.
+function takeFlag(argv, flag) {
+  const index = argv.indexOf(flag);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  if (value === undefined) return null;
+  argv.splice(index, 2);
+  return value;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
-  const repoIndex = argv.indexOf("--repo");
-  let repo;
-  if (repoIndex >= 0) {
-    repo = path.resolve(argv[repoIndex + 1]);
-    argv.splice(repoIndex, 2);
-  }
-  const manifestIndex = argv.indexOf("--manifest");
-  let manifest;
-  if (manifestIndex >= 0) {
-    manifest = JSON.parse(fs.readFileSync(path.resolve(argv[manifestIndex + 1]), "utf8"));
-    argv.splice(manifestIndex, 2);
-  }
-  if (argv.length !== 2) {
-    process.stderr.write("usage: validate-json.mjs [--repo <path>] [--manifest <manifest.json>] <schema.json> <document.json>\n");
+  const repoValue = takeFlag(argv, "--repo");
+  const manifestValue = takeFlag(argv, "--manifest");
+  if (repoValue === null || manifestValue === null || argv.length !== 2) {
+    process.stderr.write(USAGE);
     process.exitCode = 2;
     return;
   }
   try {
+    const repo = repoValue === undefined ? undefined : path.resolve(repoValue);
+    // Read inside the try so an unreadable manifest reports the same way an
+    // unreadable schema or document does, rather than as an unhandled throw.
+    const manifest = manifestValue === undefined
+      ? undefined
+      : JSON.parse(fs.readFileSync(path.resolve(manifestValue), "utf8"));
     const result = loadAndValidate(path.resolve(argv[0]), path.resolve(argv[1]), { repo, manifest });
     if (result.errors.length > 0) {
       process.stderr.write(result.errors.map((error) => `- ${error}`).join("\n") + "\n");
