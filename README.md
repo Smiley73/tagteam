@@ -40,7 +40,7 @@ Open Claude Code in the repository you want to ship:
 
 The interview checks Git, GitHub CLI, Codex schema output, branch protection, local verification, worktree setup, ignored-file copying, review exclusions, models, and reviewer selection. You can enable built-in review dimensions or add custom reviewers with a project-specific focus and optional file/keyword conditions. It writes `.tagteam/config.json`.
 
-Normal source changes do not require another init: every plan and ship inspects the current repository and candidate. Run `/tagteam:init --reconfigure` when build/test commands, worktree setup, copied files, review policy, models, concurrency, or branch strategy changes. Tagteam validates configuration but does not rewrite stale project-specific commands automatically.
+Normal source changes do not require another init: every plan and ship inspects the current repository and candidate. Run `/tagteam:init --reconfigure` when build/test commands, worktree setup, copied files, review policy, models, concurrency, or branch strategy changes. Run `/tagteam:init --upgrade` when the settings themselves predate the plugin: it asks only the questions a newer version added and keeps every existing choice. Tagteam validates configuration but does not rewrite stale project-specific commands automatically.
 
 ## Run
 
