@@ -354,7 +354,7 @@ function tally(ledger) {
 // command is idempotent, so re-running it re-reads the file instead of paying
 // for the review, fix, or implementation a second time.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0 };
+const relayState = { extraCalls: 0, fatal: [] };
 const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
 const codexReceiptState = new Set();
 
@@ -383,6 +383,15 @@ function relayEnvelopeSchema(resultSchema) {
       result: resultSchema
     }
   };
+}
+
+function throwRelayFailures() {
+  if (relayState.fatal.length === 0) return;
+  throw new Error([
+    "Codex completed work, but its saved result could not be handed back after all relay attempts.",
+    "Stop this invocation so resume can reuse the exact saved request and import its execution receipt.",
+    `Saved artifacts: ${relayState.fatal.join(", ")}`
+  ].join("\n"));
 }
 
 // TEST_SENTINEL_WORKFLOW_CORE_END
@@ -444,7 +453,8 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     }
     log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
   }
-  return null;
+  relayState.fatal.push(artifact);
+  throw new Error(`Codex result relay failed for ${artifact}; resume to reuse the saved artifact`);
 }
 
 async function implementTask(input, task, tierName, engine, attempt) {
@@ -597,6 +607,7 @@ async function main(raw) {
   }
   const config = input.config;
   relayState.extraCalls = 0;
+  relayState.fatal = [];
   const priorUsage = input.usage ?? {};
   Object.assign(usageState, {
     claudeReasoningCalls: Number(priorUsage.claudeReasoningCalls ?? 0),
@@ -658,6 +669,7 @@ async function main(raw) {
           }
           return { task, result };
         }));
+        throwRelayFailures();
         for (const item of results) {
           const result = item?.result;
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
@@ -858,6 +870,7 @@ async function main(raw) {
       }
       return { ...assignment, result };
     }));
+    throwRelayFailures();
     callCount += assignments.length;
 
     lastRoundFailures = reviewResults.filter((item) => !item?.result).map((item) => `${item?.engine ?? "unknown"}:${item?.dimension ?? "unknown"}`);

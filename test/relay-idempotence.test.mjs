@@ -524,6 +524,84 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
   assert.equal(result.usage.codexCalls, 1);
 });
 
+test("total review relay loss stops, then resume imports the saved execution receipt", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  for (const setting of Object.values(config.reviewers)) setting.enabled = false;
+  config.reviewers.functionality.enabled = true;
+  const args = { ...SHIP_ARGS, config };
+  const respond = (resume) => (label, _prompt, options) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: args.baseOid, candidateOid: args.existingCandidateOid,
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") {
+      return resume ? { reused: true, executionId: "exec-review-lost", result: CLEAN_FINDINGS } : null;
+    }
+    return CLEAN_FINDINGS;
+  };
+  await assert.rejects(
+    harness("workflows/ship-pr.js", args, respond(false)),
+    /resume can reuse the exact saved request/
+  );
+  const resumed = await harness("workflows/ship-pr.js", args, respond(true));
+  assert.equal(resumed.result.status, "clean");
+  assert.equal(resumed.result.usage.codexCalls, 1);
+  assert.deepEqual(resumed.result.usageReceipts, ["exec-review-lost"]);
+});
+
+test("total implementation relay loss stops before retrying changed work", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.implementation.engine = "codex";
+  for (const setting of Object.values(config.reviewers)) setting.enabled = false;
+  config.reviewers.functionality.enabled = true;
+  const args = {
+    ...SHIP_ARGS,
+    config,
+    existingCandidateOid: undefined,
+    tasks: [{ id: "T1", title: "t", description: "d", complexity: "simple", files: ["a.js"], dependsOn: [], doneCriteria: ["works"] }]
+  };
+  await assert.rejects(
+    harness("workflows/ship-pr.js", args, (label) => label.startsWith("implement:") ? null : CLEAN_FINDINGS),
+    /resume can reuse the exact saved request/
+  );
+  const resumed = await harness("workflows/ship-pr.js", args, (label, _prompt, options) => {
+    if (label.startsWith("implement:")) {
+      return {
+        reused: true,
+        executionId: "exec-implementation-lost",
+        result: { taskId: "T1", status: "completed", summary: "done", filesChanged: ["a.js"], criteria: [{ criterion: "works", met: true, evidence: "ran" }] }
+      };
+    }
+    if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: args.baseOid, candidateOid: "d".repeat(40),
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") return CLEAN_FINDINGS;
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(resumed.result.status, "clean");
+  assert.equal(resumed.result.usageReceipts.includes("exec-implementation-lost"), true);
+});
+
 test("a lost Codex review relay result does not fail the PR round", async () => {
   let droppedCodexReview = false;
   const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label) => {
