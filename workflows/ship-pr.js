@@ -144,6 +144,17 @@ function persistedCount(value, name) {
   return count;
 }
 
+function persistedModelCounts(value) {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("persisted plumbing usage must be an object");
+  }
+  return Object.fromEntries(Object.entries(value).map(([model, count]) => [
+    model,
+    persistedCount(count, `persisted plumbing usage for ${model}`)
+  ]));
+}
+
 function canonicalPolicy(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
   if (value && typeof value === "object") {
@@ -370,7 +381,12 @@ const relayState = {
   maximumCalls: Infinity,
   capacityExceeded: false
 };
-const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
+const usageState = {
+  claudeReasoningCalls: 0,
+  haikuPlumbingCalls: 0,
+  plumbingCallsByModel: {},
+  codexCalls: 0
+};
 const codexReceiptState = new Set();
 const shipState = { runPolicy: null, priorRelayRetries: 0, legacyUsageIncomplete: false };
 
@@ -390,7 +406,9 @@ async function plumbingCall(prompt, options) {
     return null;
   }
   relayState.dispatchedCalls += 1;
-  if (options.model === "haiku") usageState.haikuPlumbingCalls += 1;
+  const model = String(options.model ?? "unknown");
+  usageState.plumbingCallsByModel[model] = (usageState.plumbingCallsByModel[model] ?? 0) + 1;
+  if (model === "haiku") usageState.haikuPlumbingCalls += 1;
   return agent(prompt, options);
 }
 
@@ -637,14 +655,23 @@ async function main(raw) {
   relayState.maximumCalls = maximumCalls;
   relayState.capacityExceeded = false;
   const priorUsage = input.usage ?? {};
+  const priorHaikuCalls = persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage");
+  const priorPlumbingCalls = Object.hasOwn(priorUsage, "plumbingCallsByModel")
+    ? persistedModelCounts(priorUsage.plumbingCallsByModel)
+    : (priorHaikuCalls > 0 ? { haiku: priorHaikuCalls } : {});
+  if (Object.hasOwn(priorUsage, "plumbingCallsByModel")
+    && (priorPlumbingCalls.haiku ?? 0) !== priorHaikuCalls) {
+    throw new Error("persisted Haiku usage must match plumbingCallsByModel.haiku");
+  }
   Object.assign(usageState, {
     claudeReasoningCalls: persistedCount(priorUsage.claudeReasoningCalls, "persisted Claude usage"),
-    haikuPlumbingCalls: persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage"),
+    haikuPlumbingCalls: priorHaikuCalls,
+    plumbingCallsByModel: priorPlumbingCalls,
     codexCalls: persistedCount(priorUsage.codexCalls, "persisted Codex usage")
   });
   const priorRelayRetries = persistedCount(priorUsage.relayRetries, "persisted relay retries");
   shipState.priorRelayRetries = priorRelayRetries;
-  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "codexCalls", "relayRetries"]
+  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "plumbingCallsByModel", "codexCalls", "relayRetries"]
     .every((key) => Object.hasOwn(priorUsage, key));
   const legacyUsageIncomplete = input.usageAccounting === "legacy-incomplete"
     || (initialAgentCalls > 0 && !hasUsageSnapshot);
@@ -666,7 +693,11 @@ async function main(raw) {
     reasoningProvider: runPolicy.reasoningProvider,
     assurance: runPolicy.assurance,
     policyFingerprint: runPolicy.policyFingerprint,
-    usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
+    usage: {
+      ...usageState,
+      plumbingCallsByModel: { ...usageState.plumbingCallsByModel },
+      relayRetries: priorRelayRetries + relayState.extraCalls
+    },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
     usageAccounting: relayState.receiptFiles.length > 0
@@ -677,9 +708,9 @@ async function main(raw) {
     agentCalls: relayState.dispatchedCalls
   });
   const relayInterruption = ({ candidateOid = null, rounds = [], ledger = [], ...extra } = {}) => {
-    const dirty = relayState.fatal.some((item) => item.sandbox === "workspace-write");
+    const workspaceStateUnknown = relayState.fatal.some((item) => item.sandbox === "workspace-write");
     return finish({
-      status: dirty ? "relay-interrupted-dirty-worktree" : "relay-interrupted",
+      status: workspaceStateUnknown ? "relay-interrupted-workspace-unknown" : "relay-interrupted",
       usageAccounting: "pending-checkpoint-reconciliation",
       tasks: taskResults,
       rounds,
@@ -691,7 +722,30 @@ async function main(raw) {
       ...extra
     });
   };
-  const taskResults = [...(input.taskResults ?? [])];
+  const taskResults = [];
+  for (const result of input.taskResults ?? []) {
+    const priorIndex = taskResults.findIndex((entry) => entry?.taskId === result?.taskId);
+    if (priorIndex >= 0) taskResults.splice(priorIndex, 1);
+    taskResults.push(result);
+  }
+  const taskById = new Map(input.tasks.map((task) => [task.id, task]));
+  const completedResult = (result) => {
+    const task = taskById.get(result?.taskId);
+    if (!task || result.status !== "completed" || !Array.isArray(result.criteria)) return false;
+    return (task.doneCriteria ?? []).every((criterion) =>
+      result.criteria.some((entry) => entry?.criterion === criterion && entry.met === true));
+  };
+  const completedTaskIds = new Set(taskResults
+    .filter(completedResult)
+    .map((result) => result.taskId));
+  const recordTaskResult = (result) => {
+    const priorIndex = taskResults.findIndex((entry) => entry?.taskId === result.taskId);
+    if (priorIndex >= 0) taskResults.splice(priorIndex, 1);
+    taskResults.push(result);
+    if (completedResult(result)) {
+      completedTaskIds.add(result.taskId);
+    }
+  };
   const failedTasks = new Set();
   const capacityGate = ({ candidateOid = input.existingCandidateOid ?? null, rounds = [], ledger = [], ...extra } = {}) => finish({
     status: "agent-budget-gate",
@@ -705,7 +759,8 @@ async function main(raw) {
   });
 
   if (!input.existingCandidateOid) {
-    const implementationCapacity = input.tasks.length * 2 + 4;
+    const unfinishedTaskCount = input.tasks.filter((task) => !completedTaskIds.has(task.id)).length;
+    const implementationCapacity = unfinishedTaskCount * 2 + 4;
     if (callCount + implementationCapacity > callBudget()) {
       return finish({
         status: "agent-budget-gate",
@@ -718,10 +773,11 @@ async function main(raw) {
     }
     phase("Implement");
     for (const wave of topoWaves(input.tasks)) {
-      const runnable = wave.filter((task) => !(task.dependsOn ?? []).some((dependency) => failedTasks.has(dependency)));
-      for (const task of wave.filter((item) => !runnable.includes(item))) {
+      const unfinishedWave = wave.filter((task) => !completedTaskIds.has(task.id));
+      const runnable = unfinishedWave.filter((task) => !(task.dependsOn ?? []).some((dependency) => failedTasks.has(dependency)));
+      for (const task of unfinishedWave.filter((item) => !runnable.includes(item))) {
         failedTasks.add(task.id);
-        taskResults.push({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
+        recordTaskResult({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
       }
       const implementationParallel = runnable.some((task) => implementationRoute(config, task).engine === "codex")
         ? 1
@@ -746,7 +802,7 @@ async function main(raw) {
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
             failedTasks.add(item.task.id);
           }
-          taskResults.push(result ?? { taskId: item.task.id, status: "failed", summary: "The implementation agent did not return a valid result.", filesChanged: [], criteria: [] });
+          recordTaskResult(result ?? { taskId: item.task.id, status: "failed", summary: "The implementation agent did not return a valid result.", filesChanged: [], criteria: [] });
         }
       }
     }
@@ -1288,6 +1344,7 @@ try {
     relayRetries: relayState.extraCalls,
     usage: {
       ...usageState,
+      plumbingCallsByModel: { ...usageState.plumbingCallsByModel },
       relayRetries: shipState.priorRelayRetries + relayState.extraCalls
     },
     usageReceipts: [...codexReceiptState],

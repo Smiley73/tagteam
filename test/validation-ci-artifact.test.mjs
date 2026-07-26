@@ -404,6 +404,7 @@ test("the final report discloses provider assurance and split usage", () => {
       usage: {
         claudeReasoningCalls: 0,
         haikuPlumbingCalls: 8,
+        plumbingCallsByModel: { haiku: 8, sonnet: 3 },
         codexCalls: 6,
         relayRetries: 1
       }
@@ -413,6 +414,7 @@ test("the final report discloses provider assurance and split usage", () => {
   assert.match(report, /Substantive provider: codex/);
   assert.match(report, /Review assurance: single-provider/);
   assert.match(report, /Usage: Claude reasoning 0; Haiku plumbing 8; Codex 6; relay retries 1/);
+  assert.match(report, /Plumbing by model: haiku 8; sonnet 3/);
   assert.match(report, /Usage accounting: legacy-incomplete/);
 });
 

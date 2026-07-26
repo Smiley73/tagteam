@@ -158,6 +158,17 @@ function persistedCount(value, name) {
   return count;
 }
 
+function persistedModelCounts(value) {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("persisted plumbing usage must be an object");
+  }
+  return Object.fromEntries(Object.entries(value).map(([model, count]) => [
+    model,
+    persistedCount(count, `persisted plumbing usage for ${model}`)
+  ]));
+}
+
 function canonicalPolicy(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
   if (value && typeof value === "object") {
@@ -355,13 +366,22 @@ function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = 
 // engine, and re-running the idempotent command costs one file read.
 const RELAY_ATTEMPTS = 3;
 const relayState = { extraCalls: 0, fatal: [], receiptFiles: [] };
-const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
+const usageState = {
+  claudeReasoningCalls: 0,
+  haikuPlumbingCalls: 0,
+  plumbingCallsByModel: {},
+  codexCalls: 0
+};
 const codexReceiptState = new Set();
 const planState = { dispatchedCalls: 0, runPolicy: null, priorRelayRetries: 0, legacyUsageIncomplete: false };
 
 async function planAgent(prompt, options) {
   planState.dispatchedCalls += 1;
-  if (!["tagteam:prompt-builder", "tagteam:codex-runner"].includes(options.agentType)) {
+  if (["tagteam:prompt-builder", "tagteam:codex-runner"].includes(options.agentType)) {
+    const model = String(options.model ?? "unknown");
+    usageState.plumbingCallsByModel[model] = (usageState.plumbingCallsByModel[model] ?? 0) + 1;
+    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
+  } else {
     usageState.claudeReasoningCalls += 1;
   }
   return agent(prompt, options);
@@ -394,7 +414,6 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
     "Return ok=true with the promptPath and bytes the command reported. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
-    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await planAgent(prompt, {
       label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
@@ -428,7 +447,6 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
     "Return ok=true with the payloads array the command printed, unchanged. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
-    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await planAgent(prompt, {
       label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
@@ -513,7 +531,6 @@ async function relayCodex({ prompt, label, phase: phaseName, schema, model, arti
   const receiptFile = `${artifact}.usage-receipts.json`;
   if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
-    if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await planAgent(attempt === 1 ? [
       prompt,
@@ -571,13 +588,22 @@ async function main(raw) {
   planState.dispatchedCalls = priorAgentCalls;
   planState.runPolicy = null;
   const priorUsage = input.usage ?? {};
-  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "codexCalls", "relayRetries"]
+  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "plumbingCallsByModel", "codexCalls", "relayRetries"]
     .every((key) => Object.hasOwn(priorUsage, key));
   planState.legacyUsageIncomplete = input.usageAccounting === "legacy-incomplete"
     || (priorAgentCalls > 0 && !hasUsageSnapshot);
+  const priorHaikuCalls = persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage");
+  const priorPlumbingCalls = Object.hasOwn(priorUsage, "plumbingCallsByModel")
+    ? persistedModelCounts(priorUsage.plumbingCallsByModel)
+    : (priorHaikuCalls > 0 ? { haiku: priorHaikuCalls } : {});
+  if (Object.hasOwn(priorUsage, "plumbingCallsByModel")
+    && (priorPlumbingCalls.haiku ?? 0) !== priorHaikuCalls) {
+    throw new Error("persisted Haiku usage must match plumbingCallsByModel.haiku");
+  }
   Object.assign(usageState, {
     claudeReasoningCalls: persistedCount(priorUsage.claudeReasoningCalls, "persisted Claude usage"),
-    haikuPlumbingCalls: persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage"),
+    haikuPlumbingCalls: priorHaikuCalls,
+    plumbingCallsByModel: priorPlumbingCalls,
     codexCalls: persistedCount(priorUsage.codexCalls, "persisted Codex usage")
   });
   const priorRelayRetries = persistedCount(priorUsage.relayRetries, "persisted relay retries");
@@ -1078,7 +1104,11 @@ async function main(raw) {
     completedRounds: reviews.map((review) => review.round),
     agentCalls: planState.dispatchedCalls,
     relayRetries: relayState.extraCalls,
-    usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
+    usage: {
+      ...usageState,
+      plumbingCallsByModel: { ...usageState.plumbingCallsByModel },
+      relayRetries: priorRelayRetries + relayState.extraCalls
+    },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
     usageAccounting: relayState.receiptFiles.length > 0
@@ -1104,6 +1134,7 @@ try {
     relayRetries: relayState.extraCalls,
     usage: {
       ...usageState,
+      plumbingCallsByModel: { ...usageState.plumbingCallsByModel },
       relayRetries: planState.priorRelayRetries + relayState.extraCalls
     },
     usageReceipts: [...codexReceiptState],

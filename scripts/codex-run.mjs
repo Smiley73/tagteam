@@ -70,6 +70,26 @@ function stubFor(rule, root) {
   return "dry-run";
 }
 
+function staleLockIdentity(lockPath, owner) {
+  if (owner?.token) return `token:${owner.token}`;
+  const stat = fs.statSync(lockPath);
+  return `stat:${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.mtimeMs}`;
+}
+
+function quarantineStaleLock(lockPath, identity) {
+  const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 20);
+  try {
+    // The destination is stable for the ownership generation we inspected.
+    // If another contender already moved that generation, EEXIST prevents us
+    // from renaming (and later deleting) the replacement owner's lock.
+    fs.renameSync(lockPath, `${lockPath}.stale-${suffix}`);
+    return true;
+  } catch (error) {
+    if (["EEXIST", "ENOTEMPTY", "ENOENT"].includes(error.code)) return false;
+    throw error;
+  }
+}
+
 async function acquireSlot(shipDir, maximum) {
   if (!shipDir) return () => {};
   const slotRoot = path.join(shipDir, ".codex-slots");
@@ -91,20 +111,20 @@ async function acquireSlot(shipDir, maximum) {
         };
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
-        let reclaim = false;
+        let reclaimIdentity = null;
         try {
           const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
           try { process.kill(owner.pid, 0); } catch (ownerError) {
-            if (ownerError.code === "ESRCH") reclaim = true;
+            if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(slotPath, owner);
           }
         } catch {
           try {
-            reclaim = Date.now() - fs.statSync(slotPath).mtimeMs > 30_000;
+            if (Date.now() - fs.statSync(slotPath).mtimeMs > 30_000) {
+              reclaimIdentity = staleLockIdentity(slotPath);
+            }
           } catch {}
         }
-        if (reclaim) {
-          try { fs.rmSync(slotPath, { recursive: true, force: true }); } catch {}
-        }
+        if (reclaimIdentity) quarantineStaleLock(slotPath, reclaimIdentity);
       }
     }
     await delay(250);
@@ -131,21 +151,23 @@ async function acquireNamedLock(root, name) {
       };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      let reclaim = false;
+      let reclaimIdentity = null;
       try {
         const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
         try { process.kill(owner.pid, 0); } catch (ownerError) {
-          if (ownerError.code === "ESRCH") reclaim = true;
+          if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(lockPath, owner);
         }
       } catch {
         // mkdir is atomic but owner.json is a second operation. Give a live
         // process time to finish publishing its ownership before reclaiming.
         try {
-          reclaim = Date.now() - fs.statSync(lockPath).mtimeMs > 30_000;
+          if (Date.now() - fs.statSync(lockPath).mtimeMs > 30_000) {
+            reclaimIdentity = staleLockIdentity(lockPath);
+          }
         } catch {}
       }
-      if (reclaim) {
-        try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch {}
+      if (reclaimIdentity) {
+        quarantineStaleLock(lockPath, reclaimIdentity);
       } else {
         await delay(100);
       }

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { normalizeRunPolicy, validateRunPolicy } from "../scripts/lib/run-policy.mjs";
 import { gitWorktreeState } from "../scripts/lib/worktree-state.mjs";
 import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
@@ -122,7 +123,7 @@ test("legacy request sidecars gain one stable receipt without rerunning Codex", 
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
 });
 
-test("concurrent identical bridges serialize reuse and retain one receipt", async () => {
+test("concurrent identical bridges safely reclaim one stale lock and retain one receipt", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-artifact-lock-"));
   const fake = path.join(temp, "fake-codex.mjs");
   const counter = path.join(temp, "count.txt");
@@ -135,6 +136,14 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
 `);
   fs.chmodSync(fake, 0o700);
   const artifact = path.join(temp, "findings.json");
+  const lockName = createHash("sha256").update(path.resolve(artifact)).digest("hex");
+  const staleLock = path.join(temp, ".codex-artifact-locks", lockName);
+  fs.mkdirSync(staleLock, { recursive: true });
+  fs.writeFileSync(path.join(staleLock, "owner.json"), JSON.stringify({
+    pid: 2_147_483_647,
+    token: "stale-generation",
+    at: "2026-01-01T00:00:00.000Z"
+  }));
   const results = await Promise.all([
     runBridgeAsync(temp, artifact, fake),
     runBridgeAsync(temp, artifact, fake)
@@ -146,6 +155,7 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   assert.equal(envelopes[0].executionId, envelopes[1].executionId);
   const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
   assert.equal(receipts.invocations.length, 1);
+  assert.equal(fs.existsSync(`${staleLock}.stale-${createHash("sha256").update("token:stale-generation").digest("hex").slice(0, 20)}`), true);
 });
 
 test("workspace-writing bridges serialize different artifacts in one worktree", async () => {
@@ -185,6 +195,44 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   ]);
   for (const result of results) assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(overlap), false);
+});
+
+test("concurrent bridges safely reclaim one stale global slot", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-slot-lock-"));
+  const slotPath = path.join(temp, ".codex-slots", "slot-0");
+  fs.mkdirSync(slotPath, { recursive: true });
+  fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({
+    pid: 2_147_483_647,
+    token: "stale-slot-generation",
+    at: "2026-01-01T00:00:00.000Z"
+  }));
+  const fake = path.join(temp, "fake-codex.mjs");
+  const overlap = path.join(temp, "overlap.txt");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+let active;
+try {
+  active = fs.openSync(${JSON.stringify(path.join(temp, "active-slot.lock"))}, "wx");
+} catch {
+  fs.writeFileSync(${JSON.stringify(overlap)}, "overlap");
+}
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (active !== undefined) {
+  fs.closeSync(active);
+  fs.unlinkSync(${JSON.stringify(path.join(temp, "active-slot.lock"))});
+}
+fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(CLEAN_FINDINGS)}));
+`);
+  fs.chmodSync(fake, 0o700);
+  const results = await Promise.all([
+    runBridgeAsync(temp, path.join(temp, "one.json"), fake, ["--max-concurrent", "1"]),
+    runBridgeAsync(temp, path.join(temp, "two.json"), fake, ["--max-concurrent", "1"])
+  ]);
+  for (const result of results) assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(overlap), false);
+  const quarantine = `${slotPath}.stale-${createHash("sha256").update("token:stale-slot-generation").digest("hex").slice(0, 20)}`;
+  assert.equal(fs.existsSync(quarantine), true);
 });
 
 test("the bridge re-runs Codex for an invalid artifact and when reuse is refused", () => {
@@ -365,6 +413,64 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
     legacyUsageIncomplete: true
   });
   assert.equal(legacy.usageAccounting, "legacy-incomplete");
+});
+
+test("receipt reconciliation classifies workspace interruption from its checkpoint", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-reconcile-workspace-"));
+  const artifact = path.join(temp, "result.json");
+  const checkpointFile = `${artifact}.relay-checkpoint.json`;
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  const request = {
+    executionId: "exec-workspace",
+    fingerprint: "fingerprint",
+    completedAt: "2026-07-26T12:00:00.000Z"
+  };
+  const cleanState = {
+    headOid: "a".repeat(40),
+    statusBytes: 0,
+    statusHash: "status",
+    contentHash: "content",
+    automaticRecoverySafe: true
+  };
+  fs.writeFileSync(artifact, JSON.stringify(CLEAN_FINDINGS));
+  fs.writeFileSync(`${artifact}.request.json`, JSON.stringify(request));
+  fs.writeFileSync(receiptFile, JSON.stringify({
+    version: 1,
+    artifact,
+    invocations: [{ executionId: request.executionId, requestFingerprint: request.fingerprint, recordedAt: request.completedAt }]
+  }));
+  const checkpoint = {
+    version: 1,
+    artifact,
+    sandbox: "workspace-write",
+    executionId: request.executionId,
+    requestFingerprint: request.fingerprint,
+    completedAt: request.completedAt,
+    statusBefore: cleanState,
+    statusAfter: { ...cleanState }
+  };
+  fs.writeFileSync(checkpointFile, JSON.stringify(checkpoint));
+  const interrupted = {
+    status: "relay-interrupted-workspace-unknown",
+    usage: { codexCalls: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [receiptFile],
+    relayCheckpoints: [checkpointFile],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  };
+  assert.equal(reconcileUsageReceipts(interrupted).status, "relay-interrupted");
+
+  fs.writeFileSync(checkpointFile, JSON.stringify({
+    ...checkpoint,
+    statusAfter: { ...cleanState, statusBytes: 12, statusHash: "changed", contentHash: "changed" }
+  }));
+  assert.equal(reconcileUsageReceipts(interrupted).status, "relay-interrupted-dirty-worktree");
+
+  fs.writeFileSync(checkpointFile, JSON.stringify({
+    ...checkpoint,
+    statusBefore: { ...cleanState, automaticRecoverySafe: false }
+  }));
+  assert.equal(reconcileUsageReceipts(interrupted).status, "relay-interrupted-workspace-unknown");
 });
 
 function loadWorkflow(file) {
@@ -586,6 +692,8 @@ test("planning continuation carries cumulative provider usage", async () => {
   assert.deepEqual(second.result.usage, {
     claudeReasoningCalls: first.result.usage.claudeReasoningCalls * 2,
     haikuPlumbingCalls: first.result.usage.haikuPlumbingCalls * 2,
+    plumbingCallsByModel: Object.fromEntries(Object.entries(first.result.usage.plumbingCallsByModel)
+      .map(([model, count]) => [model, count * 2])),
     codexCalls: first.result.usage.codexCalls * 2,
     relayRetries: first.result.usage.relayRetries * 2
   });
@@ -600,6 +708,7 @@ test("shipping preserves accounting when a post-dispatch helper throws", async (
   assert.deepEqual(result.usage, {
     claudeReasoningCalls: 0,
     haikuPlumbingCalls: 1,
+    plumbingCallsByModel: { haiku: 1 },
     codexCalls: 0,
     relayRetries: 0
   });
@@ -619,6 +728,19 @@ test("invalid persisted call counts fail before shipping dispatch", async () => 
     harness("workflows/plan-forge.js", { ...PLAN_ARGS, agentCalls: -1 }, planResponder([])),
     /nonnegative safe integer/
   );
+  await assert.rejects(
+    harness("workflows/ship-pr.js", {
+      ...SHIP_ARGS,
+      usage: {
+        claudeReasoningCalls: 0,
+        haikuPlumbingCalls: 1,
+        plumbingCallsByModel: { haiku: 2 },
+        codexCalls: 0,
+        relayRetries: 0
+      }
+    }, () => CLEAN_FINDINGS),
+    /must match plumbingCallsByModel/
+  );
 });
 
 test("legacy calls without a provider-usage snapshot stay explicitly incomplete", async () => {
@@ -635,6 +757,26 @@ test("legacy calls without a provider-usage snapshot stay explicitly incomplete"
   assert.equal(calls.length, 0);
   assert.equal(result.usageAccounting, "legacy-incomplete");
   assert.equal(result.legacyUsageIncomplete, true);
+});
+
+test("legacy Haiku counts migrate into the model-keyed cumulative snapshot", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.limits.agentCallsPerPr = 1;
+  const { result } = await harness("workflows/ship-pr.js", {
+    ...SHIP_ARGS,
+    config,
+    agentCalls: 1,
+    usage: {
+      claudeReasoningCalls: 2,
+      haikuPlumbingCalls: 3,
+      codexCalls: 1,
+      relayRetries: 0
+    },
+    usageAccounting: "legacy-incomplete"
+  }, () => CLEAN_FINDINGS);
+  assert.equal(result.status, "agent-budget-gate");
+  assert.deepEqual(result.usage.plumbingCallsByModel, { haiku: 3 });
+  assert.equal(result.usageAccounting, "legacy-incomplete");
 });
 
 test("every early exit reports the relay retries it spent", async () => {
@@ -744,6 +886,8 @@ test("shipping resume adds current invocation usage to persisted usage", async (
   assert.deepEqual(second.result.usage, {
     claudeReasoningCalls: first.result.usage.claudeReasoningCalls * 2,
     haikuPlumbingCalls: first.result.usage.haikuPlumbingCalls * 2,
+    plumbingCallsByModel: Object.fromEntries(Object.entries(first.result.usage.plumbingCallsByModel)
+      .map(([model, count]) => [model, count * 2])),
     codexCalls: first.result.usage.codexCalls * 2,
     relayRetries: 0
   });
@@ -766,6 +910,7 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
   assert.ok(planPlumbing.length > 0);
   assert.equal(planPlumbing.every((call) => call.model === "sonnet"), true);
   assert.equal(plan.result.usage.haikuPlumbingCalls, 0);
+  assert.equal(plan.result.usage.plumbingCallsByModel.sonnet, planPlumbing.length);
 
   const shipConfig = JSON.parse(JSON.stringify(SHIP_CONFIG));
   shipConfig.transport.relayModel = "opus";
@@ -793,12 +938,19 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
   assert.ok(shipRelays.length > 0);
   assert.equal(shipRelays.every((call) => call.model === "sonnet"), true);
   assert.equal(ship.result.usage.haikuPlumbingCalls, 4);
+  assert.equal(ship.result.usage.plumbingCallsByModel.sonnet, shipRelays.length);
 });
 
 test("validated Codex artifact reuse is not counted as a new Codex call", async () => {
   const { result } = await harness("workflows/ship-pr.js", {
     ...SHIP_ARGS,
-    usage: { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 1, relayRetries: 0 },
+    usage: {
+      claudeReasoningCalls: 0,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: {},
+      codexCalls: 1,
+      relayRetries: 0
+    },
     usageReceipts: ["exec-old"]
   }, (label, _prompt, options) => {
     if (label.startsWith("candidate:snapshot")) {
@@ -864,7 +1016,7 @@ test("total review relay loss keeps Codex usage pending disk reconciliation", as
   assert.equal(resumed.result.usageAccounting, "pending-checkpoint-reconciliation");
 });
 
-test("total implementation relay loss returns a dirty checkpoint before retrying changed work", async () => {
+test("total implementation relay loss remains workspace-unknown until checkpoint reconciliation", async () => {
   const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
   config.implementation.engine = "codex";
   for (const setting of Object.values(config.reviewers)) setting.enabled = false;
@@ -880,7 +1032,7 @@ test("total implementation relay loss returns a dirty checkpoint before retrying
     args,
     (label) => label.startsWith("implement:") ? null : CLEAN_FINDINGS
   );
-  assert.equal(interrupted.result.status, "relay-interrupted-dirty-worktree");
+  assert.equal(interrupted.result.status, "relay-interrupted-workspace-unknown");
   assert.equal(interrupted.result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.deepEqual(interrupted.result.relayCheckpoints, [
     "/ships/s1/prs/PR-1/tasks/T1/result.json.relay-checkpoint.json"
@@ -919,6 +1071,76 @@ test("total implementation relay loss returns a dirty checkpoint before retrying
   assert.equal(resumed.result.status, "clean");
   assert.equal(resumed.result.usageReceipts.includes("exec-implementation-lost"), false);
   assert.equal(resumed.result.usageAccounting, "pending-checkpoint-reconciliation");
+});
+
+test("implementation resume reuses completed dependency waves", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.implementation.engine = "claude";
+  config.implementation.routes = [{ match: "Codex second", engine: "codex" }];
+  for (const setting of Object.values(config.reviewers)) setting.enabled = false;
+  config.reviewers.functionality.enabled = true;
+  const tasks = [
+    {
+      id: "T1", title: "Claude first", description: "d", complexity: "simple",
+      files: ["one.js"], dependsOn: [], doneCriteria: ["first works"]
+    },
+    {
+      id: "T2", title: "Codex second", description: "d", complexity: "simple",
+      files: ["two.js"], dependsOn: ["T1"], doneCriteria: ["second works"]
+    }
+  ];
+  const args = { ...SHIP_ARGS, config, existingCandidateOid: undefined, tasks };
+  const interrupted = await harness("workflows/ship-pr.js", args, (label) => {
+    if (label.startsWith("implement:T1:")) {
+      return {
+        taskId: "T1", status: "completed", summary: "first done", filesChanged: ["one.js"],
+        criteria: [{ criterion: "first works", met: true, evidence: "ran" }]
+      };
+    }
+    if (label.startsWith("implement:T2:")) return null;
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(interrupted.result.status, "relay-interrupted-workspace-unknown");
+  assert.deepEqual(interrupted.result.tasks.map((task) => task.taskId), ["T1"]);
+
+  const resumed = await harness("workflows/ship-pr.js", {
+    ...args,
+    taskResults: interrupted.result.tasks,
+    usage: interrupted.result.usage,
+    usageReceipts: interrupted.result.usageReceipts,
+    agentCalls: interrupted.result.agentCalls
+  }, (label, _prompt, options) => {
+    if (label.startsWith("implement:T1:")) throw new Error("completed task T1 was dispatched again");
+    if (label.startsWith("implement:T2:")) {
+      return {
+        reused: true,
+        executionId: "exec-second",
+        result: {
+          taskId: "T2", status: "completed", summary: "second done", filesChanged: ["two.js"],
+          criteria: [{ criterion: "second works", met: true, evidence: "ran" }]
+        }
+      };
+    }
+    if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: tasks" };
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: args.baseOid, candidateOid: "d".repeat(40),
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["one.js", "two.js"], addedLines: "+ok", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 2
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") return CLEAN_FINDINGS;
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(resumed.labels.some((label) => label.startsWith("implement:T1:")), false);
+  assert.equal(resumed.result.status, "clean");
+  assert.deepEqual(resumed.result.tasks.map((task) => task.taskId).sort(), ["T1", "T2"]);
 });
 
 test("Codex implementation tasks do not share a parallel writable batch", async () => {
@@ -1093,6 +1315,7 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.deepEqual(result.usage, {
     claudeReasoningCalls: 3,
     haikuPlumbingCalls: 4,
+    plumbingCallsByModel: { haiku: 4, sonnet: 4 },
     codexCalls: 0,
     relayRetries: 1
   });

@@ -10,6 +10,7 @@ function readJson(file) {
 export function reconcileUsageReceipts(result) {
   if (!result || typeof result !== "object") throw new Error("workflow result is required");
   const receipts = new Set(result.usageReceipts ?? []);
+  const workspaceCheckpointStates = [];
   let added = 0;
   for (const receiptFile of result.usageReceiptFiles ?? []) {
     if (typeof receiptFile !== "string" || !receiptFile.endsWith(".usage-receipts.json")) {
@@ -48,6 +49,7 @@ export function reconcileUsageReceipts(result) {
       // A failed/invalid Codex invocation has a durable per-invocation journal
       // but no completed-artifact checkpoint. Usage can still be made exact;
       // the missing checkpoint remains a separate resume/recovery hard stop.
+      workspaceCheckpointStates.push("unknown");
       continue;
     }
     const checkpoint = readJson(checkpointFile);
@@ -66,9 +68,34 @@ export function reconcileUsageReceipts(result) {
       receipts.add(checkpoint.executionId);
       added += 1;
     }
+    if (checkpoint.sandbox === "workspace-write") {
+      const before = checkpoint.statusBefore ?? {};
+      const after = checkpoint.statusAfter ?? {};
+      const complete = [before, after].every((state) =>
+        typeof state.headOid === "string"
+        && Number.isSafeInteger(state.statusBytes)
+        && typeof state.statusHash === "string"
+        && typeof state.contentHash === "string");
+      if (!complete) {
+        workspaceCheckpointStates.push("unknown");
+      } else {
+        const changed = ["headOid", "statusBytes", "statusHash", "contentHash"]
+          .some((key) => before[key] !== after[key]);
+        workspaceCheckpointStates.push(changed
+          ? "dirty"
+          : (before.automaticRecoverySafe === true && after.automaticRecoverySafe === true ? "clean" : "unknown"));
+      }
+    }
+  }
+  let status = result.status;
+  if (status === "relay-interrupted-workspace-unknown") {
+    if (workspaceCheckpointStates.includes("dirty")) status = "relay-interrupted-dirty-worktree";
+    else if (workspaceCheckpointStates.length > 0
+      && workspaceCheckpointStates.every((state) => state === "clean")) status = "relay-interrupted";
   }
   return {
     ...result,
+    status,
     usage: {
       ...(result.usage ?? {}),
       codexCalls: Number(result.usage?.codexCalls ?? 0) + added
