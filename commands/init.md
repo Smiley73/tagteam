@@ -1,6 +1,6 @@
 ---
 description: Configure tagteam for this repository and verify its local prerequisites
-argument-hint: '[--reconfigure]'
+argument-hint: '[--reconfigure] [--upgrade]'
 allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:runtime-probe), Agent(tagteam:runtime-probe), Bash(node *), Bash(git *), Bash(gh *), Bash(codex *), Bash(codegraph *)
 ---
 
@@ -9,7 +9,10 @@ allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagt
 Raw arguments: `$ARGUMENTS`
 
 Configure the repository containing the current working directory. Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. Every user-facing sentence must follow its plain-English message rules.
-If the repository path contains control characters or shell metacharacters, stop and ask the user to move the checkout to a conventional path before any Bash command is formed.
+
+If the repository path contains control characters or shell metacharacters, stop and ask the user to move the checkout to a conventional path before any Bash command is formed. This applies to every invocation, including `--upgrade`, and comes before any other work.
+
+Then dispatch on the arguments. With `--upgrade`, run `git rev-parse --show-toplevel` to locate the repository, apply that same path check to what it returns, and go straight to **Upgrade**: skip the preflight and the interview entirely. Upgrading an already-configured repository must never build an index, probe Codex, query GitHub, rewrite `.gitignore`, or touch `.tagteam/transport.json`. Everything between here and that section belongs to a full `/tagteam:init` or `--reconfigure` run.
 
 ## Preflight
 
@@ -40,6 +43,8 @@ If `.tagteam/config.json` exists and `--reconfigure` was not supplied, validate 
 node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-json.mjs" --repo "<repo>" "${CLAUDE_PLUGIN_ROOT}/schemas/config.schema.json" "<repo>/.tagteam/config.json"
 ```
 
+Exit 3 is not failure: the file is valid but was written by an earlier plugin, and its output names the unanswered keys. Treat it as an upgrade, not a repair. Exit 1 is a real error; show it and stop.
+
 Show the current choices and ask whether to keep or edit them. Keeping every choice still re-runs the `.gitignore` step below, so `--reconfigure` is the supported way to repair it in an already-configured repository. Otherwise ask all setup questions in batches of at most four. Do not silently choose these values:
 
 - planning Claude model: `opus` or `fable`;
@@ -53,17 +58,39 @@ Show the current choices and ask whether to keep or edit them. Keeping every cho
 - review-diff exclusions;
 - implementation engine/routes and simple/medium/complex runtime mappings.
 - maximum concurrent Codex subprocesses (suggest 3 independently of implementation concurrency).
+- the three interface questions below.
+
+### Interface questions
+
+Ask these three together, in plain product language, never in schema terms:
+
+1. `ui.hasUserInterface` — does this repository ship anything a person looks at or interacts with? A library, a service with no console, or a build tool is a no. A no silences the other two: write `conventionPaths` as `[]` and `confirmDecisions` as `off`, and do not ask them. This one question removes every interface interruption from repositories that could never need one, so ask it first.
+2. `ui.conventionPaths` — where the existing look and feel is defined: design system, shared component directory, or a conventions document. Require repository-relative non-traversing paths that exist; a path that points at nothing weakens every check that reads it. An empty list is honest and allowed, and it means new surfaces are judged without precedent.
+3. `ui.confirmDecisions` — how much taste tagteam confirms with the user before a plan is approved. Offer outcomes, not flags: `new-surfaces` (recommended: confirm anything new a person would see — a dialog, a page, a navigation entry, a required input — plus any change the repository has no existing pattern for), `all-surfaces` (also confirm changes that do follow an existing pattern), `off` (decide alone and rely on the pull-request gate). Describe `new-surfaces` exactly as written: a change with no precedent is confirmed whatever kind of surface it touches. Say plainly that `off` does not disable the user-visible merge gate, which is not optional.
+
+`ui.gateOnUserVisible` is never asked. It is a safety rule, not a preference.
 
 Offer the reference configuration from `SKILL.md` as editable suggestions. For each `copyUntracked` entry, require a repository-relative non-symlink path that exists and is ignored at its destination. A missing source stops setup; a non-ignored destination is rejected as a secret-safety risk.
 
-User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects recursively and replace arrays wholesale. Project answers override user defaults.
+User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects recursively and replace arrays wholesale. Project answers override user defaults. Offer to save `ui.confirmDecisions` there as well: it is a trait of the person, and saving it once pre-answers the question in every later repository. It is a seed, not a substitute — validation reads the project file alone, so the answer is always written there too. Never write repository facts to user defaults.
+
+## Upgrade
+
+`--upgrade` answers only what a newer plugin added, for a repository that is already configured. It is the supported response to exit 3 and must not re-run the whole interview.
+
+1. Validate the existing file. Exit 1 means it is broken, not stale: report the errors and point at `--reconfigure`. Exit 0 means nothing to upgrade; say so and stop.
+2. Read the unanswered keys from the validator's own output. Never infer the list from this document, so that a plugin newer than this text still upgrades correctly.
+3. Ask only those questions, using the wording above, seeded from `~/.tagteam/config.json` when it answers one.
+4. State before writing that `.tagteam/config.json` is a committed file, so the new answers become a tracked change the rest of the team inherits. Get explicit confirmation.
+5. Write the merged object with `version` set to 2, preserving every existing choice byte for byte, then validate with `validate-json.mjs --repo` and require exit 0.
+6. Do not touch `.gitignore`, do not re-run the preflight probes, and do not re-run the runtime probe. `--reconfigure` owns those.
 
 ## Write and verify
 
 On confirmation:
 
 1. Create `<repo>/.tagteam/` if needed.
-2. Write `<repo>/.tagteam/config.json` as strict JSON version 1, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
+2. Write `<repo>/.tagteam/config.json` as strict JSON version 2, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
 3. Configure the repository `.gitignore`. Never hand-edit it; run:
 
    ```bash

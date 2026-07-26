@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "planning": {
     "claude": { "model": "opus", "effort": "xhigh" },
     "codex": { "model": "gpt-5.6-sol", "effort": "high" },
@@ -15,7 +15,12 @@
     "pauseOn": ["ui"],
     "ci": { "blockOnFailure": true, "waitTimeoutSec": 1800 }
   },
-  "ui": { "gateOnUserVisible": true },
+  "ui": {
+    "gateOnUserVisible": true,
+    "hasUserInterface": true,
+    "conventionPaths": ["docs/ui-conventions.md"],
+    "confirmDecisions": "new-surfaces"
+  },
   "codegraph": { "enabled": true },
   "maxReviewLoops": 3,
   "reviewTiers": {

@@ -79,6 +79,34 @@ test("copyUntracked validation rejects a destination Git would track", () => {
   assert.match(semanticErrors("config.schema.json", config, { repo }).join("\n"), /not ignored/);
 });
 
+test("copyUntracked validation runs the same symlink check the copy itself runs", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-copy-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-copy-outside-"));
+  spawnSync("git", ["init", "-q", repo]);
+  fs.writeFileSync(path.join(repo, ".gitignore"), "linked/\nmissing.env\n");
+  fs.writeFileSync(path.join(outside, "creds.env"), "secret\n", { mode: 0o600 });
+  fs.symlinkSync(outside, path.join(repo, "linked"));
+  const config = { worktree: { copyUntracked: ["linked/creds.env"] }, reviewers: {}, reviewTiers: {} };
+
+  // A link on an inner component leaves the repository while the leaf is an
+  // ordinary file, so checking only the last component missed this entirely.
+  assert.match(
+    semanticErrors("config.schema.json", config, { repo }).join("\n"),
+    /worktree\.copyUntracked contains a symlink/
+  );
+
+  // A source that is not there stops setup, so validation says so rather than
+  // passing and failing later.
+  config.worktree.copyUntracked = ["missing.env"];
+  assert.match(
+    semanticErrors("config.schema.json", config, { repo }).join("\n"),
+    /worktree\.copyUntracked does not exist/
+  );
+
+  fs.rmSync(repo, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
 test("config accepts focused custom reviewers and rejects underspecified ones", () => {
   const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas/config.schema.json"), "utf8"));
   const config = JSON.parse(fs.readFileSync(path.join(root, "examples/config.json"), "utf8"));

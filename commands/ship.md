@@ -14,7 +14,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` completely before acting. F
 
 1. Parse `--resume`, `--dry-run`, and `--reviewers`. A named reviewer is force-enabled even if disabled/conditional; `all` forces every dimension.
    Reject repository/worktree/artifact paths containing control characters or shell metacharacters before forming any Bash command; say that the checkout must be moved to a conventional path. Never try to escape through an ambiguous path.
-2. Require a valid `.tagteam/config.json`. Reject any transport other than `exec`.
+2. Require a valid `.tagteam/config.json`. Reject any transport other than `exec`. Exit 3 does not stop a ship: settings written by an earlier plugin are missing answers, not wrong, and a train already in flight must never be wedged by a plugin upgrade. Treat the unanswered interface keys as `hasUserInterface: true`, `conventionPaths: []`, and `confirmDecisions: off`, say once in one sentence that interface confirmation is off until `/tagteam:init --upgrade` runs, and continue. The user-visible merge gate is unaffected.
 3. An approved plan directory must contain a valid approval marker whose hashes still match. A bare plan file is parsed and decomposed with the plan agents, then its question batch and approval gate run before shipping.
 4. Require the primary checkout to be clean at ship start. Re-check `codex --version`, `gh auth status` in GitHub mode, origin, and base protection. Snapshot the resolved base name and starting OID. Never infer that protection still exists from init.
 5. Resolve `prTrain.base` once: null means the GitHub default branch, or the current branch in local mode. Create ship ID `<slug>-<UTC timestamp>`.

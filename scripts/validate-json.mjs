@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { assertSafeRelativePath } from "./lib/matcher.mjs";
+import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
 
 function typeMatches(value, expected) {
   if (expected === "null") return value === null;
@@ -94,6 +94,31 @@ export function validateJson(schema, value) {
   return errors;
 }
 
+// The configuration version the current plugin writes. A configuration written
+// by an older plugin stays valid: it is missing answers, not wrong. Only the
+// keys listed here were added after version 1, so they are optional in the
+// schema and required only once a configuration claims to be current.
+export const CONFIG_VERSION = 2;
+
+const VERSION_2_KEYS = ["ui.hasUserInterface", "ui.conventionPaths", "ui.confirmDecisions"];
+
+const missingKeys = (value, keys) => keys.filter((key) => {
+  const [group, name] = key.split(".");
+  return !Object.hasOwn(value?.[group] ?? {}, name);
+});
+
+// Staleness is not an error, so it never joins the error list: a repository
+// mid-train must not be wedged by a plugin upgrade. Callers decide what to do
+// with it, and they decide differently.
+export function configStaleness(value) {
+  const version = value?.version;
+  return {
+    stale: version !== CONFIG_VERSION,
+    version,
+    missing: version === CONFIG_VERSION ? [] : missingKeys(value, VERSION_2_KEYS)
+  };
+}
+
 function graphErrors(items, itemLabel, dependencyKey) {
   const errors = [];
   const byId = new Map();
@@ -169,6 +194,59 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
       "resiliency", "conventions", "documentation", "performance", "accessibility",
       "concurrency", "error-handling", "cost"
     ]);
+    // A configuration that claims to be current must actually carry the answers
+    // this version asks for; one that predates them is stale, reported
+    // separately, and repaired by an upgrade rather than rejected here.
+    if (value.version === CONFIG_VERSION) {
+      for (const key of missingKeys(value, VERSION_2_KEYS)) {
+        errors.push(`${key}: is required at configuration version ${CONFIG_VERSION}`);
+      }
+    }
+    if (value.ui?.hasUserInterface === false) {
+      if (value.ui.confirmDecisions !== undefined && value.ui.confirmDecisions !== "off") {
+        errors.push("ui.confirmDecisions must be off in a repository with no user-facing interface");
+      }
+      if ((value.ui.conventionPaths ?? []).length > 0) {
+        errors.push("ui.conventionPaths must be empty in a repository with no user-facing interface");
+      }
+    }
+    for (const conventionPath of value.ui?.conventionPaths ?? []) {
+      let safePath;
+      try {
+        safePath = assertSafeRelativePath(conventionPath);
+      } catch (error) {
+        errors.push(`ui.conventionPaths: ${error.message}`);
+        continue;
+      }
+      // These names are rendered into planning prompts as ordinary prose, so a
+      // control character in one could add lines of its own. C0 and DEL are not
+      // the whole set: NEL, the C1 block, and U+2028/U+2029 break a line too.
+      if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(conventionPath)) {
+        errors.push(`ui.conventionPaths may not contain control characters: ${JSON.stringify(conventionPath)}`);
+        continue;
+      }
+      if (!repo) continue;
+      const target = path.resolve(repo, safePath);
+      // A convention path that points at nothing silently weakens every
+      // precedent check that reads it, so treat it as configuration error.
+      if (!fs.existsSync(target)) {
+        errors.push(`ui.conventionPaths names a path that does not exist: ${conventionPath}`);
+        continue;
+      }
+      // Lexical safety is not enough and neither is a symlink check on the last
+      // component: any ancestor can be a link out of the checkout. Resolve both
+      // ends and require containment. A committed config makes an escape
+      // everyone's problem, not the author's alone.
+      try {
+        const realRepo = fs.realpathSync(repo);
+        const realTarget = fs.realpathSync(target);
+        if (realTarget !== realRepo && !realTarget.startsWith(realRepo + path.sep)) {
+          errors.push(`ui.conventionPaths resolves outside the repository: ${conventionPath}`);
+        }
+      } catch (error) {
+        errors.push(`could not inspect ui.conventionPaths path ${conventionPath}: ${error.message}`);
+      }
+    }
     for (const [label, ref] of [
       ["prTrain.base", value.prTrain?.base],
       ["prTrain.branchPrefix", value.prTrain?.branchPrefix]
@@ -186,14 +264,14 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
         continue;
       }
       if (!repo) continue;
-      const source = path.resolve(repo, safePath);
+      // The same check the copy itself runs, so a configuration cannot validate
+      // here and then be refused at worktree setup. It rejects a link on any
+      // component, not just the last one, and a source that is not there at all.
       try {
-        if (fs.existsSync(source) && fs.lstatSync(source).isSymbolicLink()) {
-          errors.push(`worktree.copyUntracked may not contain a symlink: ${configuredPath}`);
-          continue;
-        }
+        assertNoSymlinkedSegment(repo, safePath, "worktree.copyUntracked");
       } catch (error) {
-        errors.push(`could not inspect worktree.copyUntracked path ${configuredPath}: ${error.message}`);
+        errors.push(error.message);
+        continue;
       }
       const ignored = spawnSync("git", ["-C", repo, "check-ignore", "--no-index", "--quiet", "--", safePath], {
         stdio: "ignore",
@@ -255,6 +333,18 @@ async function main() {
       process.stderr.write(result.errors.map((error) => `- ${error}`).join("\n") + "\n");
       process.exitCode = 1;
       return;
+    }
+    // Exit 3 is "valid, but written by an older plugin": distinct from invalid
+    // (1) and from a usage error (2), so a caller can tell a configuration that
+    // needs answers from one that is broken.
+    if (path.basename(argv[0]) === "config.schema.json") {
+      const staleness = configStaleness(result.document);
+      if (staleness.stale) {
+        const missing = staleness.missing.length > 0 ? staleness.missing.join(", ") : "none";
+        process.stdout.write(`stale: configuration version ${staleness.version} predates ${CONFIG_VERSION}; unanswered: ${missing}\n`);
+        process.exitCode = 3;
+        return;
+      }
     }
     process.stdout.write("valid\n");
   } catch (error) {

@@ -56,12 +56,14 @@ Planning batches unresolved decisions and requires explicit approval. Shipping w
 
 | Command | Options |
 |---|---|
-| `/tagteam:init` | `--reconfigure` revisits an existing project configuration and repairs the managed `.gitignore` block. |
+| `/tagteam:init` | `--reconfigure` revisits an existing project configuration and repairs the managed `.gitignore` block. `--upgrade` asks only the questions a newer plugin added, keeping every existing choice. |
 | `/tagteam:plan <goal>` | `--resume <slug>` continues an interrupted plan from its saved drafts and reviews. Per-run overrides: `--model opus\|fable`, `--effort medium\|high\|xhigh\|max`, and `--codex-effort medium\|high\|xhigh`. |
 | `/tagteam:ship [plan-dir\|plan-file]` | `--resume`, `--dry-run`, and `--reviewers all\|dimension,dimension`; named built-in or custom reviewers are force-enabled for that run. |
 | `/tagteam:status` | Lists plans, active/completed ships, and pending approvals. |
 
-Init configures GitHub PR or local-branch mode, planning/review/implementation runtimes, review loops and dimensions, verification and worktree commands, copied ignored paths, diff exclusions, PR policy, and agent/Codex concurrency limits. Optional user defaults live at `~/.tagteam/config.json`; project settings override them.
+Init configures GitHub PR or local-branch mode, planning/review/implementation runtimes, review loops and dimensions, verification and worktree commands, copied ignored paths, diff exclusions, PR policy, agent/Codex concurrency limits, and how much say you want over user-facing design decisions. Optional user defaults live at `~/.tagteam/config.json`; project settings override them.
+
+Configuration carries a version. Settings written by an older plugin stay valid rather than breaking: shipping continues, planning asks you to run `/tagteam:init --upgrade`, which asks only the new questions.
 
 ### Internal workflows
 
