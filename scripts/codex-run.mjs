@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateJson } from "./validate-json.mjs";
@@ -16,9 +16,31 @@ import {
 } from "./quota-backoff.mjs";
 import { gitWorktreeState } from "./lib/worktree-state.mjs";
 
-const LOCK_LEASE_MS = 120_000;
 const LOCK_HEARTBEAT_MS = 10_000;
-const LOCK_WAIT_TIMEOUT_MS = 30 * 60_000;
+const lockWaitOverride = Number(process.env.TAGTEAM_LOCK_WAIT_TIMEOUT_MS);
+const LOCK_WAIT_TIMEOUT_MS = Number.isFinite(lockWaitOverride) && lockWaitOverride > 0
+  ? lockWaitOverride
+  : 30 * 60_000;
+
+function processIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      if (fields[19]) return `linux-start-ticks:${fields[19]}`;
+    } catch {}
+  }
+  if (process.platform !== "win32") {
+    try {
+      const started = String(execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" })).trim();
+      if (started) return `ps-start:${started}`;
+    } catch {}
+  }
+  return null;
+}
+
+const PROCESS_IDENTITY = processIdentity(process.pid);
 
 function parseArgs(argv) {
   const options = {
@@ -38,6 +60,7 @@ function parseArgs(argv) {
   }
   options.timeoutSec = Number(options.timeoutSec);
   options.maxConcurrent = Number(options.maxConcurrent);
+  options.dryRun = Boolean(options.dryRun || process.env.TAGTEAM_DRY_RUN === "1");
   if (options.minPromptBytes !== undefined) options.minPromptBytes = Number(options.minPromptBytes);
   for (const required of ["worktree", "schema", "artifact", "model", "effort"]) {
     if (!options[required]) throw new Error(`--${required} is required`);
@@ -104,7 +127,8 @@ function publishLock(lockPath, token) {
       pid: process.pid,
       token,
       at: new Date().toISOString(),
-      heartbeatAt: new Date().toISOString()
+      heartbeatAt: new Date().toISOString(),
+      processIdentity: PROCESS_IDENTITY
     }),
     { mode: 0o600 }
   );
@@ -119,9 +143,20 @@ function publishLock(lockPath, token) {
   }
 }
 
-function lockExpired(owner) {
-  const heartbeat = Date.parse(owner?.heartbeatAt ?? owner?.at ?? "");
-  return !Number.isFinite(heartbeat) || Date.now() - heartbeat > LOCK_LEASE_MS;
+function staleOwnerIdentity(lockPath, owner) {
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    return error.code === "ESRCH" ? staleLockIdentity(lockPath, owner) : null;
+  }
+  const currentIdentity = processIdentity(owner.pid);
+  if (owner.processIdentity && currentIdentity && owner.processIdentity !== currentIdentity) {
+    return staleLockIdentity(lockPath, owner);
+  }
+  // A live matching process is never evicted merely because its heartbeat is
+  // late: a suspended bridge can resume, and the lock token cannot fence its
+  // already-running Codex child from filesystem writes.
+  return null;
 }
 
 function holdLock(lockPath, token) {
@@ -163,13 +198,7 @@ async function acquireSlot(shipDir, maximum) {
         let reclaimIdentity = null;
         try {
           const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
-          if (lockExpired(owner)) {
-            reclaimIdentity = staleLockIdentity(slotPath, owner);
-          } else {
-            try { process.kill(owner.pid, 0); } catch (ownerError) {
-              if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(slotPath, owner);
-            }
-          }
+          reclaimIdentity = staleOwnerIdentity(slotPath, owner);
         } catch {
           try {
             if (Date.now() - fs.statSync(slotPath).mtimeMs > 30_000) {
@@ -197,13 +226,7 @@ async function acquireNamedLock(root, name) {
       let reclaimIdentity = null;
       try {
         const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
-        if (lockExpired(owner)) {
-          reclaimIdentity = staleLockIdentity(lockPath, owner);
-        } else {
-          try { process.kill(owner.pid, 0); } catch (ownerError) {
-            if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(lockPath, owner);
-          }
-        }
+        reclaimIdentity = staleOwnerIdentity(lockPath, owner);
       } catch {
         // Older plugin versions exposed the directory before owner.json. Give
         // such a legacy ownerless lock a grace period before reclaiming it.
@@ -275,7 +298,7 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     "-o", outputPath,
     "-"
   ];
-  if (options.dryRun || process.env.TAGTEAM_DRY_RUN === "1") return { argv, dryRun: true, stderr: "", timedOut: false, exitCode: 0 };
+  if (options.dryRun) return { argv, dryRun: true, stderr: "", timedOut: false, exitCode: 0 };
 
   fs.mkdirSync(path.dirname(eventsPath), { recursive: true, mode: 0o700 });
   try { fs.chmodSync(eventsPath, 0o600); } catch {}

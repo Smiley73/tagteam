@@ -9,6 +9,13 @@ function git(worktree, args, options = {}) {
   return execFileSync("git", ["-C", worktree, ...args], { maxBuffer: MAX_GIT_OUTPUT, ...options });
 }
 
+function framed(hash, value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  hash.update(String(bytes.length));
+  hash.update(":");
+  hash.update(bytes);
+}
+
 export function gitWorktreeState(worktreeArg) {
   const worktree = path.resolve(worktreeArg);
   const headOid = String(git(worktree, ["rev-parse", "HEAD"], { encoding: "utf8" })).trim();
@@ -27,20 +34,26 @@ export function gitWorktreeState(worktreeArg) {
   const untracked = String(git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }))
     .split("\0").filter(Boolean).sort();
   const content = createHash("sha256");
-  content.update("tracked-diff\0");
-  content.update(trackedDiff);
-  content.update("\0untracked\0");
+  framed(content, "tracked-diff");
+  framed(content, trackedDiff);
   for (const relative of untracked) {
     const file = path.join(worktree, relative);
     const stat = fs.lstatSync(file);
-    content.update(relative);
-    content.update("\0");
-    content.update(String(stat.mode));
-    content.update("\0");
-    if (stat.isSymbolicLink()) content.update(fs.readlinkSync(file));
-    else if (stat.isFile()) content.update(fs.readFileSync(file));
-    else content.update(`special:${stat.size}`);
-    content.update("\0");
+    const entry = createHash("sha256");
+    framed(entry, relative);
+    framed(entry, stat.mode);
+    if (stat.isSymbolicLink()) {
+      framed(entry, "symlink");
+      framed(entry, fs.readlinkSync(file));
+    } else if (stat.isFile()) {
+      framed(entry, "file");
+      framed(entry, fs.readFileSync(file));
+    } else {
+      framed(entry, "special");
+      framed(entry, stat.size);
+    }
+    framed(content, "untracked-entry");
+    framed(content, entry.digest());
   }
   return {
     headOid,

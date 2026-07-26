@@ -50,7 +50,7 @@ function runBridge(temp, artifact, fake, extra = [], prompt = "review this", wor
   ], { input: prompt, encoding: "utf8" });
 }
 
-function runBridgeAsync(temp, artifact, fake, extra = [], prompt = "review this", worktree = root) {
+function runBridgeAsync(temp, artifact, fake, extra = [], prompt = "review this", worktree = root, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [
       path.join(root, "scripts/codex-run.mjs"),
@@ -64,7 +64,7 @@ function runBridgeAsync(temp, artifact, fake, extra = [], prompt = "review this"
       "--codex-bin", fake,
       "--min-prompt-bytes", "1",
       ...extra
-    ]);
+    ], { env: { ...process.env, ...env } });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -148,10 +148,11 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   const staleLock = path.join(temp, ".codex-artifact-locks", lockName);
   fs.mkdirSync(staleLock, { recursive: true });
   fs.writeFileSync(path.join(staleLock, "owner.json"), JSON.stringify({
-    pid: process.pid,
+    pid: 2_147_483_647,
     token: "stale-generation",
     at: "2026-01-01T00:00:00.000Z",
-    heartbeatAt: "2026-01-01T00:00:00.000Z"
+    heartbeatAt: "2026-01-01T00:00:00.000Z",
+    processIdentity: "dead-process"
   }));
   const results = await Promise.all([
     runBridgeAsync(temp, artifact, fake),
@@ -165,6 +166,35 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
   assert.equal(receipts.invocations.length, 1);
   assert.equal(fs.existsSync(`${staleLock}.stale-${createHash("sha256").update("token:stale-generation").digest("hex").slice(0, 20)}`), true);
+});
+
+test("an expired heartbeat never evicts a still-live lock owner", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-live-lock-"));
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter);
+  const artifact = path.join(temp, "findings.json");
+  const lockName = createHash("sha256").update(path.resolve(artifact)).digest("hex");
+  const lockPath = path.join(temp, ".codex-artifact-locks", lockName);
+  fs.mkdirSync(lockPath, { recursive: true });
+  fs.writeFileSync(path.join(lockPath, "owner.json"), JSON.stringify({
+    pid: process.pid,
+    token: "live-owner",
+    at: "2026-01-01T00:00:00.000Z",
+    heartbeatAt: "2026-01-01T00:00:00.000Z"
+  }));
+  const result = await runBridgeAsync(
+    temp,
+    artifact,
+    fake,
+    [],
+    "review this",
+    root,
+    { TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "300" }
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /timed out waiting.*lock/);
+  assert.equal(fs.existsSync(counter), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8")).token, "live-owner");
 });
 
 test("public lock generations are visible only after owner publication", async () => {
@@ -239,10 +269,11 @@ test("concurrent bridges safely reclaim one stale global slot", async () => {
   const slotPath = path.join(temp, ".codex-slots", "slot-0");
   fs.mkdirSync(slotPath, { recursive: true });
   fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({
-    pid: process.pid,
+    pid: 2_147_483_647,
     token: "stale-slot-generation",
     at: "2026-01-01T00:00:00.000Z",
-    heartbeatAt: "2026-01-01T00:00:00.000Z"
+    heartbeatAt: "2026-01-01T00:00:00.000Z",
+    processIdentity: "dead-process"
   }));
   const fake = path.join(temp, "fake-codex.mjs");
   const overlap = path.join(temp, "overlap.txt");
@@ -451,6 +482,56 @@ test("worktree state marks submodule contents as unsafe for automatic recovery",
   const state = gitWorktreeState(worktree);
   assert.equal(state.automaticRecoverySafe, false);
   assert.deepEqual(state.unboundState.submodulePaths, ["vendor/sub"]);
+});
+
+test("worktree content hashing length-prefixes untracked entries", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-framing-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+
+  const a = path.join(worktree, "a");
+  const b = path.join(worktree, "b");
+  fs.writeFileSync(a, "X");
+  fs.writeFileSync(b, "temporary");
+  const mode = fs.lstatSync(b).mode;
+  const oldHash = () => {
+    const hash = createHash("sha256");
+    hash.update("tracked-diff\0");
+    hash.update(spawnSync("git", ["-C", worktree, "diff", "--binary", "HEAD", "--"]).stdout);
+    hash.update("\0untracked\0");
+    for (const relative of ["a", "b"]) {
+      const file = path.join(worktree, relative);
+      hash.update(relative);
+      hash.update("\0");
+      hash.update(String(fs.lstatSync(file).mode));
+      hash.update("\0");
+      hash.update(fs.readFileSync(file));
+      hash.update("\0");
+    }
+    return hash.digest("hex");
+  };
+  const boundary = Buffer.from(`\0b\0${mode}\0`);
+  fs.writeFileSync(a, "X");
+  fs.writeFileSync(b, Buffer.concat([Buffer.from("Y"), boundary, Buffer.from("Z")]));
+  const legacyFirst = oldHash();
+  const first = gitWorktreeState(worktree);
+
+  fs.writeFileSync(a, Buffer.concat([Buffer.from("X"), boundary, Buffer.from("Y")]));
+  fs.writeFileSync(b, "Z");
+  const legacySecond = oldHash();
+  const second = gitWorktreeState(worktree);
+
+  assert.equal(legacyFirst, legacySecond);
+  assert.equal(first.statusHash, second.statusHash);
+  assert.notEqual(first.contentHash, second.contentHash);
 });
 
 test("interrupted usage reconciliation imports matching receipts exactly once", () => {
