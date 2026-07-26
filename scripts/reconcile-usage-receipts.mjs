@@ -19,16 +19,33 @@ export function reconcileUsageReceipts(result) {
   if (!Number.isSafeInteger(codexCalls) || codexCalls < 0) {
     throw new Error("persisted Codex usage must be a nonnegative safe integer");
   }
-  const legacyIncomplete = result.legacyUsageIncomplete === true
+  let incomplete = result.legacyUsageIncomplete === true
     || result.usageAccounting === "legacy-incomplete";
-  if (!legacyIncomplete && codexCalls !== receipts.size) {
+  if (!incomplete && codexCalls !== receipts.size) {
     throw new Error(`Codex usage count ${codexCalls} does not match ${receipts.size} authoritative receipts`);
+  }
+  const receiptFiles = new Set(result.usageReceiptFiles ?? []);
+  const unconfirmedReceiptFiles = new Set(result.unconfirmedUsageReceiptFiles ?? []);
+  for (const receiptFile of unconfirmedReceiptFiles) {
+    if (!receiptFiles.has(receiptFile)) {
+      throw new Error(`unconfirmed Codex receipt is not registered for reconciliation: ${receiptFile}`);
+    }
   }
   const workspaceCheckpointStates = [];
   let added = 0;
-  for (const receiptFile of result.usageReceiptFiles ?? []) {
+  for (const receiptFile of receiptFiles) {
     if (typeof receiptFile !== "string" || !receiptFile.endsWith(".usage-receipts.json")) {
       throw new Error(`invalid Codex usage receipt journal path: ${receiptFile}`);
+    }
+    if (!fs.existsSync(receiptFile)) {
+      if (unconfirmedReceiptFiles.has(receiptFile)) {
+        // No relay response means the workflow cannot know whether the runner
+        // ever reached the bridge. Preserve every known counter, but do not
+        // claim the Codex total is exact when no dispatch evidence exists.
+        incomplete = true;
+        continue;
+      }
+      throw new Error(`missing Codex usage receipt journal: ${receiptFile}`);
     }
     const journal = readJson(receiptFile);
     if (journal.version !== 1
@@ -118,10 +135,10 @@ export function reconcileUsageReceipts(result) {
     status,
     usage: {
       ...(result.usage ?? {}),
-      codexCalls: legacyIncomplete ? codexCalls + added : receipts.size
+      codexCalls: incomplete ? codexCalls + added : receipts.size
     },
     usageReceipts: [...receipts],
-    usageAccounting: legacyIncomplete ? "legacy-incomplete" : "complete"
+    usageAccounting: incomplete ? "legacy-incomplete" : "complete"
   };
 }
 

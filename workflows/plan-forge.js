@@ -361,11 +361,11 @@ function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = 
   ].join(" ");
 }
 
-// The relay agent only reads a file the bridge has already written and validated.
-// A relay that fails to hand that object back is a lost message, not a failed
-// engine, and re-running the idempotent command costs one file read.
+// A relay is instructed to run the bridge and return its validated file. If no
+// reply arrives, disk reconciliation decides whether Codex actually dispatched;
+// the workflow cannot truthfully infer that from a missing relay response.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0, fatal: [], receiptFiles: [] };
+const relayState = { extraCalls: 0, fatal: [], receiptFiles: [], unconfirmedReceiptFiles: [] };
 const usageState = {
   claudeReasoningCalls: 0,
   haikuPlumbingCalls: 0,
@@ -530,6 +530,9 @@ function promptNotBuilt({ what, promptFile, detail }) {
 async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
   const receiptFile = `${artifact}.usage-receipts.json`;
   if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
+  if (!relayState.unconfirmedReceiptFiles.includes(receiptFile)) {
+    relayState.unconfirmedReceiptFiles.push(receiptFile);
+  }
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await planAgent(attempt === 1 ? [
@@ -547,6 +550,8 @@ async function relayCodex({ prompt, label, phase: phaseName, schema, model, arti
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
+      relayState.unconfirmedReceiptFiles = relayState.unconfirmedReceiptFiles
+        .filter((file) => file !== receiptFile);
       // The compatibility branch is for legacy workflow harnesses; production
       // agents are schema-bound to the envelope above.
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
@@ -564,10 +569,10 @@ async function relayCodex({ prompt, label, phase: phaseName, schema, model, arti
 
 function relayLost({ what, artifact, promptFile }) {
   return [
-    `The Codex ${what} completed and its result was saved, but it could not be handed back to the plan after ${RELAY_ATTEMPTS} attempts.`,
-    "The review itself is not lost: the finished result is on disk and will be reused rather than paid for again.",
-    "Run the same plan command again with --resume to pick up from the saved work.",
-    `Details: saved result ${artifact}; log ${artifact}.events.jsonl; prompt ${promptFile}`
+    `The Codex ${what} could not be handed back to the plan after ${RELAY_ATTEMPTS} attempts.`,
+    "Disk reconciliation will determine whether Codex started and saved a reusable result or the relay failed before bridge dispatch.",
+    "Run the same plan command again with --resume; saved work is reused when present and uncertain usage remains explicitly incomplete.",
+    `Details: expected result ${artifact}; log ${artifact}.events.jsonl; prompt ${promptFile}`
   ].join("\n");
 }
 
@@ -584,6 +589,7 @@ async function main(raw) {
   relayState.extraCalls = 0;
   relayState.fatal = [];
   relayState.receiptFiles = [];
+  relayState.unconfirmedReceiptFiles = [];
   const priorAgentCalls = persistedCount(input.agentCalls, "persisted planning agentCalls");
   planState.dispatchedCalls = priorAgentCalls;
   planState.runPolicy = null;
@@ -1111,6 +1117,7 @@ async function main(raw) {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
+    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
@@ -1139,6 +1146,7 @@ try {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
+    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),

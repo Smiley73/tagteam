@@ -718,6 +718,34 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
   }), /does not match 1 authoritative receipts/);
 });
 
+test("reconciliation preserves counters when relay dispatch is unconfirmed but rejects missing confirmed evidence", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-unconfirmed-dispatch-"));
+  const receiptFile = path.join(temp, "missing.json.usage-receipts.json");
+  const interrupted = {
+    status: "relay-interrupted",
+    agentCalls: 7,
+    usage: {
+      claudeReasoningCalls: 2,
+      haikuPlumbingCalls: 5,
+      plumbingCallsByModel: { haiku: 5 },
+      codexCalls: 0,
+      relayRetries: 2
+    },
+    usageReceipts: [],
+    usageReceiptFiles: [receiptFile],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  };
+
+  assert.throws(() => reconcileUsageReceipts(interrupted), /missing Codex usage receipt journal/);
+  const reconciled = reconcileUsageReceipts({
+    ...interrupted,
+    unconfirmedUsageReceiptFiles: [receiptFile]
+  });
+  assert.equal(reconciled.usageAccounting, "legacy-incomplete");
+  assert.equal(reconciled.agentCalls, 7);
+  assert.deepEqual(reconciled.usage, interrupted.usage);
+});
+
 test("receipt reconciliation classifies workspace interruption from its checkpoint", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-reconcile-workspace-"));
   const artifact = path.join(temp, "result.json");
@@ -923,10 +951,36 @@ test("a plan relay that never returns preserves interruption accounting", async 
   assert.deepEqual(result.relayCheckpoints, [
     "/plans/slug/reviews/pass-1-round-1-codex.json.relay-checkpoint.json"
   ]);
+  assert.deepEqual(result.unconfirmedUsageReceiptFiles, [
+    "/plans/slug/reviews/pass-1-round-1-codex.json.usage-receipts.json"
+  ]);
   assert.equal(lines.length, 4);
-  assert.match(lines[0], /completed and its result was saved/);
+  assert.match(lines[0], /could not be handed back/);
+  assert.match(lines[1], /whether Codex started/);
   assert.match(lines[2], /--resume/);
-  assert.match(lines[3], /^Details: saved result \/plans\/slug\/reviews\/pass-1-round-1-codex\.json;/);
+  assert.match(lines[3], /^Details: expected result \/plans\/slug\/reviews\/pass-1-round-1-codex\.json;/);
+
+  const persisted = reconcileUsageReceipts(result);
+  assert.equal(persisted.usageAccounting, "legacy-incomplete");
+  assert.equal(persisted.agentCalls, result.agentCalls);
+  assert.deepEqual(persisted.usage, result.usage);
+
+  const { result: resumedRaw } = await harness("workflows/plan-forge.js", {
+    ...PLAN_ARGS,
+    seedPlan: "# Plan",
+    resumeRound: 1,
+    agentCalls: persisted.agentCalls,
+    usage: persisted.usage,
+    usageReceipts: persisted.usageReceipts,
+    usageAccounting: persisted.usageAccounting
+  }, (label, prompt) => (
+    label.startsWith("plan:codex-review") ? null : planResponder([])(label, prompt)
+  ));
+  const resumed = reconcileUsageReceipts(resumedRaw);
+  assert.equal(resumed.usageAccounting, "legacy-incomplete");
+  assert.ok(resumed.agentCalls > persisted.agentCalls);
+  assert.ok(resumed.usage.claudeReasoningCalls > persisted.usage.claudeReasoningCalls);
+  assert.ok(resumed.usage.relayRetries > persisted.usage.relayRetries);
 });
 
 test("a lost request-build reply is rebuilt rather than failing the pass", async () => {
@@ -1357,13 +1411,19 @@ test("total review relay loss keeps Codex usage pending disk reconciliation", as
   assert.equal(interrupted.result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.equal(interrupted.result.usage.relayRetries, 2);
   assert.ok(interrupted.result.agentCalls > 0);
+  const persisted = reconcileUsageReceipts(interrupted.result);
+  assert.equal(persisted.usageAccounting, "legacy-incomplete");
+  assert.equal(persisted.agentCalls, interrupted.result.agentCalls);
+  assert.deepEqual(persisted.usage, interrupted.result.usage);
   const resumed = await harness("workflows/ship-pr.js", {
     ...args,
-    usage: interrupted.result.usage,
-    usageReceipts: interrupted.result.usageReceipts,
-    agentCalls: interrupted.result.agentCalls
+    usage: persisted.usage,
+    usageReceipts: persisted.usageReceipts,
+    usageAccounting: persisted.usageAccounting,
+    agentCalls: persisted.agentCalls
   }, respond(true));
   assert.equal(resumed.result.status, "clean");
+  assert.ok(resumed.result.agentCalls > persisted.agentCalls);
   assert.equal(resumed.result.usage.codexCalls, 0);
   assert.deepEqual(resumed.result.usageReceipts, []);
   assert.equal(resumed.result.usageAccounting, "pending-checkpoint-reconciliation");
@@ -1391,11 +1451,15 @@ test("total implementation relay loss remains workspace-unknown until checkpoint
     "/ships/s1/prs/PR-1/tasks/T1/result.json.relay-checkpoint.json"
   ]);
   assert.ok(interrupted.result.agentCalls > 0);
+  const persisted = reconcileUsageReceipts(interrupted.result);
+  assert.equal(persisted.usageAccounting, "legacy-incomplete");
+  assert.equal(persisted.status, "relay-interrupted-workspace-unknown");
   const resumed = await harness("workflows/ship-pr.js", {
     ...args,
-    usage: interrupted.result.usage,
-    usageReceipts: interrupted.result.usageReceipts,
-    agentCalls: interrupted.result.agentCalls
+    usage: persisted.usage,
+    usageReceipts: persisted.usageReceipts,
+    usageAccounting: persisted.usageAccounting,
+    agentCalls: persisted.agentCalls
   }, (label, _prompt, options) => {
     if (label.startsWith("implement:")) {
       return {

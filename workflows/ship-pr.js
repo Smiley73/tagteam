@@ -368,15 +368,15 @@ function tally(ledger) {
   return result;
 }
 
-// The relay agent only reads an artifact the bridge has already written and
-// validated. Losing its reply is a lost message, not a failed engine: the
-// command is idempotent, so re-running it re-reads the file instead of paying
-// for the review, fix, or implementation a second time.
+// A relay is instructed to run the bridge and return its validated artifact.
+// When no reply arrives, disk reconciliation—not the workflow—decides whether
+// Codex actually dispatched and whether any saved result is reusable.
 const RELAY_ATTEMPTS = 3;
 const relayState = {
   extraCalls: 0,
   fatal: [],
   receiptFiles: [],
+  unconfirmedReceiptFiles: [],
   dispatchedCalls: 0,
   maximumCalls: Infinity,
   capacityExceeded: false
@@ -473,6 +473,9 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     }
     const receiptFile = `${artifact}.usage-receipts.json`;
     if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
+    if (!relayState.unconfirmedReceiptFiles.includes(receiptFile)) {
+      relayState.unconfirmedReceiptFiles.push(receiptFile);
+    }
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
@@ -489,6 +492,8 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
+      relayState.unconfirmedReceiptFiles = relayState.unconfirmedReceiptFiles
+        .filter((file) => file !== receiptFile);
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
         : { reused: false, executionId: null, result: response };
@@ -655,6 +660,7 @@ async function main(raw) {
   relayState.extraCalls = 0;
   relayState.fatal = [];
   relayState.receiptFiles = [];
+  relayState.unconfirmedReceiptFiles = [];
   shipState.runPolicy = null;
   shipState.legacyUsageIncomplete = false;
   shipState.taskResults = [];
@@ -712,6 +718,7 @@ async function main(raw) {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
+    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
@@ -728,7 +735,7 @@ async function main(raw) {
       rounds,
       tallies: tally(ledger),
       ledger,
-      gateFailures: ["Codex completed saved work, but every relay handoff failed. Resume to reuse the exact request."],
+      gateFailures: ["Every Codex relay handoff failed. Reconcile disk evidence, then resume to reuse saved work when present."],
       candidateOid,
       relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
       ...extra
@@ -1370,6 +1377,7 @@ try {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
+    unconfirmedUsageReceiptFiles: [...relayState.unconfirmedReceiptFiles],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
