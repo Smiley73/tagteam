@@ -87,9 +87,16 @@ function persistPathFrom(prompt, pattern) {
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
 
 // Drives plan-forge with stub agents that behave like well-behaved models: they
-// persist what they produce, and they run the workflow's compose command for
-// real. `corrupt` lets one test model a drafter that saved a shortened copy.
-async function forge({ planDir, corrupt = (_label, planMarkdown) => planMarkdown }) {
+// persist what they produce, and they run the workflow's plumbing commands for
+// real. `corrupt` lets one test model a drafter that saved a shortened copy;
+// `after` lets one model a file changed behind the run's back once a step is done.
+async function forge({
+  planDir,
+  reviewRounds = 1,
+  corrupt = (_label, planMarkdown) => planMarkdown,
+  corruptManifest = (manifest) => manifest,
+  after = () => {}
+}) {
   fs.mkdirSync(path.join(planDir, "drafts"), { recursive: true });
   fs.mkdirSync(path.join(planDir, "reviews"), { recursive: true });
   fs.writeFileSync(path.join(planDir, "goal.json"), JSON.stringify({ goal: "harden the outbound relay" }, null, 2));
@@ -99,8 +106,10 @@ async function forge({ planDir, corrupt = (_label, planMarkdown) => planMarkdown
   const train = bigTrain();
   const composed = [];
 
+  const verified = [];
   const agent = async (prompt, options) => {
     const label = options.label;
+    after(label, { planDir });
     if (label === "plan:draft" || label.startsWith("plan:revise")) {
       const file = persistPathFrom(prompt, /persist the identical planMarkdown at (\S+) with mode 0600/);
       const planMarkdown = label === "plan:draft" ? plans.draft : plans.revised;
@@ -109,7 +118,7 @@ async function forge({ planDir, corrupt = (_label, planMarkdown) => planMarkdown
       return { planMarkdown, open_questions: [] };
     }
     if (label === "plan:manifest") {
-      fs.writeFileSync(persistPathFrom(prompt, /persist the identical manifest as JSON at (\S+) with mode 0600/), JSON.stringify(manifest), { mode: 0o600 });
+      fs.writeFileSync(persistPathFrom(prompt, /persist the identical manifest as JSON at (\S+) with mode 0600/), JSON.stringify(corruptManifest(manifest)), { mode: 0o600 });
       return manifest;
     }
     if (label === "plan:decompose") {
@@ -117,11 +126,21 @@ async function forge({ planDir, corrupt = (_label, planMarkdown) => planMarkdown
       fs.writeFileSync(persistPathFrom(prompt, /persist the identical PR train as JSON at (\S+) with mode 0600/), JSON.stringify(train, null, 4), { mode: 0o600 });
       return train;
     }
-    if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
+    // Both plumbing steps run their real command against the real files, so what
+    // the workflow learns here is what is actually on disk.
+    if (label.startsWith("plan:verify-")) {
       const result = runCommand(commandFrom(prompt));
       if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
       const parsed = JSON.parse(result.stdout.trim());
-      composed.push({ label, ...parsed });
+      verified.push({ label, ...parsed });
+      return parsed;
+    }
+    if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
+      const command = commandFrom(prompt);
+      const result = runCommand(command);
+      if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
+      const parsed = JSON.parse(result.stdout.trim());
+      composed.push({ label, command, ...parsed });
       return { ok: true, promptPath: parsed.promptPath, bytes: parsed.bytes };
     }
     return APPROVE;
@@ -139,12 +158,12 @@ async function forge({ planDir, corrupt = (_label, planMarkdown) => planMarkdown
     pluginRoot: root,
     planDir,
     config: {
-      planning: { claude: { model: "opus", effort: "high" }, codex: { model: "gpt-test", effort: "high" }, reviewRounds: 1 },
+      planning: { claude: { model: "opus", effort: "high" }, codex: { model: "gpt-test", effort: "high" }, reviewRounds },
       prTrain: { prSize: { guidance: "small" } },
       transport: { mode: "exec" }
     }
   }, agent, parallel, () => {}, () => {}, undefined);
-  return { result, composed, plans, manifest, train };
+  return { result, composed, verified, plans, manifest, train };
 }
 
 test("a 130 KB plan reaches the cross-check whole, as the exact string the workflow specified", async () => {
@@ -196,7 +215,7 @@ test("a completed pass leaves a resumable integrated draft that matches the retu
   assert.deepEqual(JSON.parse(fs.readFileSync(result.prTrainPath, "utf8")), result.prTrain);
 });
 
-test("a draft saved short stops the pass before Codex is asked anything", async () => {
+test("a draft saved short stops the pass at the write, before any review is spent", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-short-draft-"));
   await assert.rejects(
     forge({
@@ -210,14 +229,163 @@ test("a draft saved short stops the pass before Codex is asked anything", async 
     (error) => {
       const lines = error.message.split("\n");
       assert.equal(lines.length, 4);
-      assert.match(lines[0], /could not be assembled, so nothing was sent and nothing was paid for/);
+      assert.match(lines[0], /The plan draft was not saved as the text this run produced/);
       assert.match(lines[2], /--resume/);
-      assert.match(lines[3], /^Details: request .*pass-1-round-1-codex\.prompt\.md; reported problem /);
-      assert.match(lines[3], /draft-plan section .* is not the text this run produced/);
+      assert.match(lines[3], /^Details: saved file .*pass-1-round-1-input\.md; reported problem /);
+      assert.match(lines[3], /the file holds 59 characters \(59:[0-9a-f]{8}\) where this run produced \d{6} /);
       return true;
     }
   );
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-round-1-codex.prompt.md")), false);
+});
+
+test("a revision saved short stops that round instead of the next one", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-short-revision-"));
+  await assert.rejects(
+    forge({
+      planDir,
+      corrupt: (label, planMarkdown) => (label === "plan:revise:1"
+        ? planMarkdown.slice(0, Math.floor(planMarkdown.length / 2))
+        : planMarkdown)
+    }),
+    (error) => {
+      assert.match(error.message.split("\n")[0], /The plan revised in round 1 was not saved as the text this run produced/);
+      assert.match(error.message, /pass-1-integrated\.md/);
+      return true;
+    }
+  );
+  // Nothing downstream of the bad write ran: the manifest was never parsed and no
+  // cross-check request exists.
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-manifest.json")), false);
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-decomposition-codex.json.prompt.md")), false);
+});
+
+test("a saved plan that drifts by a character is what the run records, not the reply", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-drift-"));
+  // One character of a model's own copy of its own text: the drift that used to
+  // strand a pass at the next round with an unexplained checksum mismatch.
+  const drifted = (planMarkdown) => planMarkdown.replace("# Implementation plan (revised)", "# Implementation plan (Revised)");
+  const { result, composed, plans } = await forge({
+    planDir,
+    corrupt: (label, planMarkdown) => (label === "plan:revise:1" ? drifted(planMarkdown) : planMarkdown)
+  });
+
+  // The pass finishes rather than stalling, and the cross-check judged the file.
+  assert.equal(result.status, "needs-questions-or-approval");
+  const decomposition = composed.find((item) => item.label === "plan:decomposition-request");
+  const prompt = fs.readFileSync(decomposition.promptPath, "utf8");
+  assert.equal(prompt.includes(fenced("plan", normalizeText(drifted(plans.revised)))), true);
+  assert.equal(prompt.includes(normalizeText(plans.revised)), false);
+});
+
+test("round two reviews the round-one revision even when its file drifted", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-round-two-"));
+  // The field failure exactly: the round-one revision saved a copy four
+  // characters shorter than the one it returned, and the pass died at the start of
+  // round two with a checksum no resume could re-observe.
+  const drifted = (planMarkdown) => planMarkdown.replace("one row per finding.\n", "one row.\n");
+  const { result, composed, plans } = await forge({
+    planDir,
+    reviewRounds: 2,
+    corrupt: (label, planMarkdown) => (label === "plan:revise:1" ? drifted(planMarkdown) : planMarkdown)
+  });
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.deepEqual(result.completedRounds, [1, 2]);
+
+  // Round two was assembled and judged, from the bytes actually saved for it.
+  const round2 = composed.find((item) => item.label === "plan:review-request:2");
+  assert.notEqual(round2, undefined, composed.map((item) => item.label).join(", "));
+  const prompt = fs.readFileSync(round2.promptPath, "utf8");
+  const saved = fs.readFileSync(path.join(planDir, "drafts/pass-1-round-2-input.md"), "utf8");
+  assert.equal(prompt.includes(fenced("draft-plan", normalizeText(saved))), true);
+  assert.equal(normalizeText(saved).length < normalizeText(plans.revised).length, true);
+});
+
+test("a draft edited after it was verified still stops the pass before Codex", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-late-edit-"));
+  await assert.rejects(
+    forge({
+      planDir,
+      // Verification has already recorded this file's checksum; a hand edit
+      // afterwards must be caught by the request that fences it.
+      after: (label) => {
+        if (label !== "plan:manifest") return;
+        const integrated = path.join(planDir, "drafts/pass-1-integrated.md");
+        fs.writeFileSync(integrated, `${fs.readFileSync(integrated, "utf8")}\n## Step 501 — added by hand\n`);
+      }
+    }),
+    (error) => {
+      const lines = error.message.split("\n");
+      assert.match(lines[0], /could not be assembled, so nothing was sent and nothing was paid for/);
+      assert.match(lines[3], /plan section at .*pass-1-integrated\.md is not the text this run produced/);
+      return true;
+    }
+  );
+});
+
+test("a manifest saved with a task dropped stops the pass exactly, with no tolerance", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-short-manifest-"));
+  await assert.rejects(
+    forge({
+      planDir,
+      corruptManifest: (manifest) => ({ ...manifest, tasks: manifest.tasks.slice(0, -1) })
+    }),
+    (error) => {
+      assert.match(error.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
+      assert.match(error.message, /pass-1-manifest\.json/);
+      return true;
+    }
+  );
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-decomposition-codex.json.prompt.md")), false);
+});
+
+test("a manifest saved the same length but not the same content still stops the pass", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-swapped-manifest-"));
+  await assert.rejects(
+    // Nothing about the size changed, so only the checksum can tell: the
+    // tolerance the plan text gets must not reach the handoff artifacts.
+    forge({
+      planDir,
+      corruptManifest: (manifest) => ({
+        ...manifest,
+        tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, title: "Task 6" } : task))
+      })
+    }),
+    (error) => {
+      assert.match(error.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
+      assert.match(error.message, /the file holds (\d+) characters .* where this run produced \1 /);
+      return true;
+    }
+  );
+});
+
+test("every checksum a request checks was read back off the file it names", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recorded-"));
+  const { verified, composed } = await forge({ planDir });
+
+  // Each of the four fenced payloads was read back after it was written.
+  const read = new Map();
+  for (const step of verified) {
+    for (const payload of step.payloads) {
+      assert.equal(payload.matches, true, `${payload.name} did not match at ${step.label}`);
+      read.set(payload.token, payload.file);
+    }
+  }
+  assert.deepEqual([...read.values()].map((file) => path.basename(file)).sort(), [
+    "pass-1-integrated.md",
+    "pass-1-manifest.json",
+    "pass-1-pr-train.json",
+    "pass-1-round-1-input.md"
+  ]);
+
+  // And every token a request checks is one of those reads, so no request is
+  // checking a value a model merely claimed it had written.
+  for (const request of composed) {
+    const tokens = [...request.command.matchAll(/--expect "[A-Z_]+=(\d+:[0-9a-f]{8})"/g)].map(([, token]) => token);
+    assert.equal(tokens.length > 0, true, `no --expect in ${request.label}`);
+    for (const token of tokens) assert.equal(read.has(token), true, `${request.label} checks an unread token ${token}`);
+  }
 });
 
 test("a missing resume record stops the pass even when the plan itself is whole", () => {
@@ -252,6 +420,62 @@ test("a missing resume record stops the pass even when the plan itself is whole"
   const empty = compose();
   assert.equal(empty.status, 1);
   assert.match(empty.stderr, /The plan section at .*pass-1-integrated\.md is empty/);
+});
+
+test("reading a payload back reports a mismatch instead of hiding it or refusing", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-verify-payload-"));
+  const plan = path.join(temp, "plan.md");
+  const train = path.join(temp, "train.json");
+  fs.writeFileSync(plan, `${bigPlan("whole")}\n\n`);
+  fs.writeFileSync(train, JSON.stringify(bigTrain(), null, 4));
+  fs.writeFileSync(`${plan}.questions.json`, "[]");
+
+  const verify = (extra = []) => spawnSync(process.execPath, [
+    path.join(root, "scripts/verify-payload.mjs"),
+    "--payload", `DRAFT_PLAN=${plan}`,
+    "--payload-json", `PR_TRAIN=${train}`,
+    "--require-json", `${plan}.questions.json`,
+    ...extra
+  ], { encoding: "utf8" });
+
+  const first = verify();
+  assert.equal(first.status, 0, first.stderr);
+  const { payloads } = JSON.parse(first.stdout.trim());
+  const [savedPlan, savedTrain] = payloads;
+  // Trailing blank lines are formatting, and so is JSON indentation: neither
+  // changes what the file holds.
+  assert.equal(savedPlan.chars, normalizeText(bigPlan("whole")).length);
+  assert.equal(savedTrain.token, JSON.parse(spawnSync(process.execPath, [
+    path.join(root, "scripts/verify-payload.mjs"),
+    "--payload-json", `PR_TRAIN=${train}`
+  ], { encoding: "utf8" }).stdout.trim()).payloads[0].token);
+
+  // An expectation that holds is reported as met, and one that does not is
+  // reported as data rather than as a refusal: the file is what later steps read,
+  // so what to do about a mismatch is the caller's decision.
+  assert.equal(JSON.parse(verify(["--expect", `DRAFT_PLAN=${savedPlan.token}`]).stdout.trim()).payloads[0].matches, true);
+  const drifted = verify(["--expect", "DRAFT_PLAN=1:00000000"]);
+  assert.equal(drifted.status, 0, drifted.stderr);
+  const reported = JSON.parse(drifted.stdout.trim()).payloads[0];
+  assert.equal(reported.matches, false);
+  assert.equal(reported.expected, "1:00000000");
+  assert.equal(reported.token, savedPlan.token);
+
+  // A file that cannot serve as a payload at all, or a resume record that cannot,
+  // is a refusal.
+  assert.match(verify(["--expect", "NOPE=1:00000000"]).stderr, /--expect names NOPE, but no --payload/);
+  fs.writeFileSync(train, "{truncated");
+  assert.match(verify().stderr, /The pr-train section at .*train\.json is not readable JSON/);
+  fs.rmSync(train);
+  assert.match(verify().stderr, /The pr-train section is missing: nothing was saved at .*train\.json/);
+  fs.writeFileSync(plan, "\n\n\n");
+  assert.match(verify().stderr, /The draft-plan section at .*plan\.md is empty/);
+  // The resume record is checked on the same terms, and only once the payloads
+  // themselves are readable.
+  fs.writeFileSync(plan, bigPlan("whole"));
+  fs.writeFileSync(train, JSON.stringify(bigTrain()));
+  fs.rmSync(`${plan}.questions.json`);
+  assert.match(verify().stderr, /questions\.json that lets this plan resume was never written/);
 });
 
 test("the bridge refuses a stubbed prompt before it starts Codex", () => {

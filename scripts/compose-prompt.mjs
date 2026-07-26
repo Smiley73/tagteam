@@ -45,8 +45,27 @@ export function expectToken(text) {
   return `${text.length}:${fnv1a(text)}`;
 }
 
-function fenceLabel(name) {
+export function fenceLabel(name) {
   return name.toLocaleLowerCase().replaceAll("_", "-");
+}
+
+// A pass may not report success while the record it resumes from is missing,
+// empty, or unreadable. Shared with verify-payload.mjs so the same record is
+// judged by the same words wherever it is checked.
+export function assertResumeRecord(file) {
+  const resolved = path.resolve(file);
+  let raw;
+  try {
+    raw = fs.readFileSync(resolved, "utf8");
+  } catch {
+    throw new Error(`The record at ${resolved} that lets this plan resume was never written.`);
+  }
+  if (raw.trim() === "") throw new Error(`The record at ${resolved} that lets this plan resume is empty.`);
+  try {
+    JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`The record at ${resolved} that lets this plan resume is not readable JSON (${error.message}).`);
+  }
 }
 
 function splitPair(flag, raw) {
@@ -165,21 +184,7 @@ export function composePrompt(options) {
     throw new Error(`The composed request is ${bytes} bytes, below the ${options.minBytes} bytes it must contain. Nothing was sent to Codex.`);
   }
 
-  for (const file of options.requireJson) {
-    const resolved = path.resolve(file);
-    let raw;
-    try {
-      raw = fs.readFileSync(resolved, "utf8");
-    } catch {
-      throw new Error(`The record at ${resolved} that lets this plan resume was never written.`);
-    }
-    if (raw.trim() === "") throw new Error(`The record at ${resolved} that lets this plan resume is empty.`);
-    try {
-      JSON.parse(raw);
-    } catch (error) {
-      throw new Error(`The record at ${resolved} that lets this plan resume is not readable JSON (${error.message}).`);
-    }
-  }
+  for (const file of options.requireJson) assertResumeRecord(file);
 
   const out = path.resolve(options.out);
   fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
