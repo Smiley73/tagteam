@@ -243,20 +243,37 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
     requestFingerprint: request.fingerprint,
     completedAt: request.completedAt
   }));
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  fs.writeFileSync(receiptFile, JSON.stringify({
+    version: 1,
+    artifact,
+    invocations: [
+      { executionId: "exec-invalid-schema", requestFingerprint: "fingerprint", recordedAt: request.completedAt },
+      { executionId: "exec-new", requestFingerprint: "fingerprint", recordedAt: request.completedAt }
+    ]
+  }));
   const interrupted = {
+    status: "relay-interrupted",
     usage: { codexCalls: 3, relayRetries: 2 },
     usageReceipts: ["exec-old"],
+    usageReceiptFiles: [receiptFile],
     relayCheckpoints: [checkpointFile],
     usageAccounting: "pending-checkpoint-reconciliation"
   };
 
   const reconciled = reconcileUsageReceipts(interrupted);
-  assert.equal(reconciled.usage.codexCalls, 4);
-  assert.deepEqual(reconciled.usageReceipts, ["exec-old", "exec-new"]);
+  assert.equal(reconciled.usage.codexCalls, 5);
+  assert.deepEqual(reconciled.usageReceipts, ["exec-old", "exec-invalid-schema", "exec-new"]);
   assert.equal(reconciled.usageAccounting, "complete");
   const repeated = reconcileUsageReceipts(reconciled);
-  assert.equal(repeated.usage.codexCalls, 4);
+  assert.equal(repeated.usage.codexCalls, 5);
   assert.deepEqual(repeated.usageReceipts, reconciled.usageReceipts);
+  const legacy = reconcileUsageReceipts({
+    ...reconciled,
+    usageAccounting: "pending-checkpoint-reconciliation",
+    legacyUsageIncomplete: true
+  });
+  assert.equal(legacy.usageAccounting, "legacy-incomplete");
 });
 
 function loadWorkflow(file) {
@@ -270,19 +287,22 @@ function loadWorkflow(file) {
 function harness(file, args, respond) {
   const labels = [];
   const calls = [];
+  const parallelWidths = [];
   const agent = async (prompt, options) => {
     labels.push(options.label);
     calls.push({ label: options.label, model: options.model, agentType: options.agentType });
     return respond(options.label, prompt, options);
   };
   const parallel = async (thunks) => {
+    parallelWidths.push(thunks.length);
     const results = [];
     for (const thunk of thunks) {
       try { results.push(await thunk()); } catch { results.push(null); }
     }
     return results;
   };
-  return loadWorkflow(file)(args, agent, parallel, () => {}, () => {}, undefined).then((result) => ({ result, labels, calls }));
+  return loadWorkflow(file)(args, agent, parallel, () => {}, () => {}, undefined)
+    .then((result) => ({ result, labels, calls, parallelWidths }));
 }
 
 const PLAN_CONFIG = {
@@ -368,7 +388,8 @@ test("a lost plan-review relay result is recovered from the saved artifact", asy
   assert.equal(result.usage.relayRetries, 1);
   assert.ok(result.usage.claudeReasoningCalls > 0);
   assert.equal(result.usage.haikuPlumbingCalls, 0);
-  assert.ok(result.usage.codexCalls > 0);
+  assert.equal(result.usage.codexCalls, 0);
+  assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
 });
 
 test("a lost decomposition cross-check relay result is recovered from the saved artifact", async () => {
@@ -466,15 +487,63 @@ test("planning continuation carries cumulative provider usage", async () => {
   const first = await harness("workflows/plan-forge.js", PLAN_ARGS, planResponder([]));
   const second = await harness("workflows/plan-forge.js", {
     ...PLAN_ARGS,
+    agentCalls: first.result.agentCalls,
     usage: first.result.usage,
     usageReceipts: first.result.usageReceipts
   }, planResponder([]));
+  assert.equal(second.result.agentCalls, first.result.agentCalls * 2);
   assert.deepEqual(second.result.usage, {
     claudeReasoningCalls: first.result.usage.claudeReasoningCalls * 2,
     haikuPlumbingCalls: first.result.usage.haikuPlumbingCalls * 2,
     codexCalls: first.result.usage.codexCalls * 2,
     relayRetries: first.result.usage.relayRetries * 2
   });
+});
+
+test("shipping preserves accounting when a post-dispatch helper throws", async () => {
+  const { result, calls } = await harness("workflows/ship-pr.js", SHIP_ARGS, () => null);
+  assert.equal(result.status, "ship-interrupted");
+  assert.match(result.message, /candidate snapshot 0/);
+  assert.equal(result.agentCalls, 1);
+  assert.equal(result.agentCalls, calls.length);
+  assert.deepEqual(result.usage, {
+    claudeReasoningCalls: 0,
+    haikuPlumbingCalls: 1,
+    codexCalls: 0,
+    relayRetries: 0
+  });
+  assert.equal(result.usageAccounting, "complete");
+});
+
+test("invalid persisted call counts fail before shipping dispatch", async () => {
+  await assert.rejects(
+    harness("workflows/ship-pr.js", { ...SHIP_ARGS, agentCalls: -1 }, () => CLEAN_FINDINGS),
+    /nonnegative safe integer/
+  );
+  await assert.rejects(
+    harness("workflows/ship-pr.js", { ...SHIP_ARGS, agentCalls: "not-a-number" }, () => CLEAN_FINDINGS),
+    /nonnegative safe integer/
+  );
+  await assert.rejects(
+    harness("workflows/plan-forge.js", { ...PLAN_ARGS, agentCalls: -1 }, planResponder([])),
+    /nonnegative safe integer/
+  );
+});
+
+test("legacy calls without a provider-usage snapshot stay explicitly incomplete", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.limits.agentCallsPerPr = 1;
+  const { result, calls } = await harness("workflows/ship-pr.js", {
+    ...SHIP_ARGS,
+    config,
+    agentCalls: 1,
+    usage: undefined,
+    usageAccounting: undefined
+  }, () => CLEAN_FINDINGS);
+  assert.equal(result.status, "agent-budget-gate");
+  assert.equal(calls.length, 0);
+  assert.equal(result.usageAccounting, "legacy-incomplete");
+  assert.equal(result.legacyUsageIncomplete, true);
 });
 
 test("every early exit reports the relay retries it spent", async () => {
@@ -517,7 +586,8 @@ test("every early exit reports the relay retries it spent", async () => {
   assert.equal(result.reasoningProvider, "both");
   assert.equal(result.assurance, "cross-provider");
   assert.deepEqual(validateRunPolicy(result.runPolicy), result.runPolicy);
-  assert.equal(result.usage.codexCalls, 1);
+  assert.equal(result.usage.codexCalls, 0);
+  assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.equal(result.usage.relayRetries, 1);
   assert.equal(result.usage.claudeReasoningCalls, 1);
   assert.ok(result.usage.haikuPlumbingCalls > 0);
@@ -662,7 +732,7 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
   assert.equal(result.usage.codexCalls, 1);
 });
 
-test("total review relay loss returns accounting, then resume imports the saved execution receipt", async () => {
+test("total review relay loss keeps Codex usage pending disk reconciliation", async () => {
   const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
   for (const setting of Object.values(config.reviewers)) setting.enabled = false;
   config.reviewers.functionality.enabled = true;
@@ -698,8 +768,9 @@ test("total review relay loss returns accounting, then resume imports the saved 
     agentCalls: interrupted.result.agentCalls
   }, respond(true));
   assert.equal(resumed.result.status, "clean");
-  assert.equal(resumed.result.usage.codexCalls, 1);
-  assert.deepEqual(resumed.result.usageReceipts, ["exec-review-lost"]);
+  assert.equal(resumed.result.usage.codexCalls, 0);
+  assert.deepEqual(resumed.result.usageReceipts, []);
+  assert.equal(resumed.result.usageAccounting, "pending-checkpoint-reconciliation");
 });
 
 test("total implementation relay loss returns a dirty checkpoint before retrying changed work", async () => {
@@ -755,7 +826,49 @@ test("total implementation relay loss returns a dirty checkpoint before retrying
     return CLEAN_FINDINGS;
   });
   assert.equal(resumed.result.status, "clean");
-  assert.equal(resumed.result.usageReceipts.includes("exec-implementation-lost"), true);
+  assert.equal(resumed.result.usageReceipts.includes("exec-implementation-lost"), false);
+  assert.equal(resumed.result.usageAccounting, "pending-checkpoint-reconciliation");
+});
+
+test("Codex implementation tasks do not share a parallel writable batch", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.implementation.engine = "codex";
+  const args = {
+    ...SHIP_ARGS,
+    config,
+    existingCandidateOid: undefined,
+    tasks: ["T1", "T2"].map((id) => ({
+      id, title: id, description: "d", complexity: "simple",
+      files: [`${id}.js`], dependsOn: [], doneCriteria: ["works"]
+    }))
+  };
+  const { result, parallelWidths } = await harness("workflows/ship-pr.js", args, (label, _prompt, options) => {
+    if (label.startsWith("implement:")) {
+      const taskId = label.split(":")[1];
+      return {
+        taskId, status: "completed", summary: "done", filesChanged: [`${taskId}.js`],
+        criteria: [{ criterion: "works", met: true, evidence: "ran" }]
+      };
+    }
+    if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: args.baseOid, candidateOid: "d".repeat(40),
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["T1.js", "T2.js"], addedLines: "+ok", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 2
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") return CLEAN_FINDINGS;
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(result.status, "clean");
+  assert.deepEqual(parallelWidths.slice(0, 2), [1, 1]);
 });
 
 test("relay retries stop at the hard per-PR dispatch ceiling", async () => {
@@ -851,7 +964,7 @@ test("a recovered relay cannot make later verification repair exceed the call ce
   assert.equal(result.agentCalls, config.limits.agentCallsPerPr);
   assert.equal(calls.length, config.limits.agentCallsPerPr);
   assert.equal(result.usage.relayRetries, 1);
-  assert.equal(result.usageAccounting, "complete");
+  assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
 });
 
 test("a lost Codex review relay result does not fail the PR round", async () => {
@@ -889,9 +1002,11 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.deepEqual(result.usage, {
     claudeReasoningCalls: 3,
     haikuPlumbingCalls: 4,
-    codexCalls: 3,
+    codexCalls: 0,
     relayRetries: 1
   });
+  assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
+  assert.equal(result.usageReceipts.includes("exec-lost-relay"), false);
   assert.equal(result.rounds[0].policyFingerprint, result.policyFingerprint);
   assert.equal(result.rounds[0].assurance, "cross-provider");
   assert.equal(result.rounds[0].reviewerFailures.length, 0);

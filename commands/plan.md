@@ -30,15 +30,17 @@ Workflow({
     passId: <"pass-1", then "pass-2", ... one per forge invocation>,
     config: <merged config with run overrides>,
     runPolicy: <validated run policy>,
+    agentCalls: <latest persisted cumulative planning call count, or 0 for a new plan>,
     usage: <latest persisted usage, or zeroes for a new plan>,
-    usageReceipts: <latest persisted Codex execution receipts, or []>
+    usageReceipts: <latest persisted Codex execution receipts, or []>,
+    usageAccounting: <complete|legacy-incomplete from the latest snapshot>
   }
 })
 ```
 
 Give every forge invocation its own `passId` so a reused Codex artifact can never be a check of a plan that has since been revised. Reuse a `passId` only when resuming that same pass.
 
-Write the raw workflow return to a mode-0600 temporary result file. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output. A missing, mismatched, or unreadable receipt is a hard stop; never persist pending accounting as authoritative state. Atomically persist every reconciled response's `usage` and `usageReceipts` before branching on its status. When the status is `plan-interrupted`, render `messages.mjs relayLost` when its message names a saved Codex result and `messages.mjs planInterrupted` otherwise, then show its message as supporting detail and stop. Resume passes the reconciled counters back unchanged.
+Write the raw workflow return to a mode-0600 temporary result file. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output. A missing, mismatched, or unreadable receipt is a hard stop; never persist pending accounting as authoritative state. Atomically persist every reconciled response's cumulative accounting snapshot before branching on its status. When the status is `plan-interrupted`, render `messages.mjs relayLost` when its message names a saved Codex result and `messages.mjs planInterrupted` otherwise, then show its message as supporting detail and stop. Resume passes the reconciled counters back unchanged.
 
 ## Resume
 
@@ -46,8 +48,8 @@ Write the raw workflow return to a mode-0600 temporary result file. If it says `
 
 1. If `approved.json` exists, there is nothing to resume; point at `/tagteam:ship .tagteam/plans/<slug>` and stop.
 2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts. Determine the highest `pass-<n>` from the saved draft/review artifacts before resolving policy or usage. Restore `reviews/<passId>-run-policy.json` with `run-policy.mjs restore`; an omitted provider flag reuses it, and a missing file is migrated once to the validated legacy `both` policy.
-3. For that selected pass, read the newest valid `reviews/pass-<n>-usage.json` at or before it, searching backward by pass number. A missing current-pass snapshot means the interrupted invocation did not get far enough to save its response; inherit the prior snapshot instead of resetting earlier counters. Only a plan with no usage snapshot in any pass starts from zeroes and an empty receipt list. Within the selected pass, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point, and its `.ui-decisions.json` sidecar, if present, for the interface decisions declared so far. A plan interrupted before that second sidecar existed simply has none; that costs a re-declaration, never the plan.
-4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), `uiDecisions` (the interface sidecar's array, or `[]` when that file is absent or unreadable), persisted `usage`, and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
+3. For that selected pass, read the newest valid `reviews/pass-<n>-usage.json` at or before it, searching backward by pass number. A missing current-pass snapshot means the interrupted invocation did not get far enough to save its response; inherit the prior snapshot instead of resetting earlier counters. Only a brand-new plan with no model artifacts starts from zeroes, zero calls, an empty receipt list, and `usageAccounting: complete`. A pre-feature plan with model artifacts but no usage snapshot uses `usageAccounting: legacy-incomplete`; import durable Codex receipt journals as they are encountered, but never describe unknowable historical Claude/Haiku usage as zero or exact. Within the selected pass, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point, and its `.ui-decisions.json` sidecar, if present, for the interface decisions declared so far. A plan interrupted before that second sidecar existed simply has none; that costs a re-declaration, never the plan.
+4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), `uiDecisions` (the interface sidecar's array, or `[]` when that file is absent or unreadable), persisted `agentCalls`, `usage`, `usageReceipts`, `usageAccounting`, and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
 5. `drafts/<passId>-integrated.md` is the finished plan of its pass: the last cross-review revision writes it, and so does a continuation. If it is the newest draft in the pass, resume from it with `seedPlan`, its `.questions.json`, and its `.ui-decisions.json` when that file exists and parses — an absent, empty, or malformed one means no interface decisions are recoverable, which costs a re-declaration and is never a reason to stop; pass `[]` — and either `decisions` from `drafts/<passId>-decisions.json` when that file exists (a continuation), or `resumeRound: <reviewRounds + 1>` when it does not (cross-review finished; only the manifest, train, and cross-check remain).
 6. Continue with the normal question, cross-check, and approval flow below.
 
@@ -74,7 +76,7 @@ Record every outcome in `drafts/<passId>-decisions.json` as an ordinary `{questi
 
 Never invent an option the workflow did not return, and never ask about a decision the policy filtered out.
 Persist each structured engine review under `reviews/` before asking; use mode 0600 and never rewrite an earlier review. The plan, manifest, and train are already saved: the workflow returns `planPath`, `questionsPath`, `manifestPath`, and `prTrainPath`, and those files are the exact bytes the cross-check judged. Copy from them rather than retyping the returned values, and read `planPath` instead of holding the plan in the conversation.
-After every reconciled workflow response, including `plan-interrupted`, atomically persist `{ "usage": <result.usage>, "usageReceipts": <result.usageReceipts> }` at `reviews/<passId>-usage.json` with mode 0600 before branching on status, asking questions, or approval. Every resume and continuation passes both values from the newest persisted snapshot into the next invocation, so counters are cumulative across the full planning run and a reused Codex artifact is not counted twice.
+After every reconciled workflow response, including `plan-interrupted`, atomically persist `{ "agentCalls": <result.agentCalls>, "usage": <result.usage>, "usageReceipts": <result.usageReceipts>, "usageAccounting": <result.usageAccounting> }` at `reviews/<passId>-usage.json` with mode 0600 before branching on status, asking questions, or approval. Every resume and continuation passes all four values from the newest persisted snapshot into the next invocation, so counters are cumulative across the full planning run and a reused Codex artifact is not counted twice.
 
 As soon as a chunk is answered, append those `{question, answer}` rows to `drafts/<passId>-decisions.json` at mode 0600. Answers are the one thing here a human cannot cheaply reproduce, and approval may be a long way off; the approved `decisions.json` is written only at approval, from this file.
 
@@ -84,7 +86,7 @@ Then invoke `tagteam:plan-forge` once more with the same arguments plus:
 - `seedPlan`: the contents of the first result's `planPath`;
 - `decisions`: `{question, answer}` rows;
 - `uiDecisions`: the array at the first result's `uiDecisionsPath`, so decisions the policy never surfaced survive the pass. A null path means this repository has no interface; a path naming a file that is absent or unreadable means none were declared. Pass `[]` in both cases and continue.
-- `usage` and `usageReceipts`: the exact cumulative values from the newest usage snapshot at or before the prior pass.
+- `agentCalls`, `usage`, `usageReceipts`, and `usageAccounting`: the cumulative values from the newest usage snapshot at or before the prior pass.
 
 This continuation performs one integration pass and regenerates the manifest and train; it must not repeat the cross-review rounds.
 Persist its integrated draft and decomposition cross-check as new artifacts, leaving the first invocation byte-frozen.

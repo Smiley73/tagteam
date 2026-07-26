@@ -41,6 +41,8 @@ test("Codex dry-run prints hardened argv and writes a schema-valid atomic artifa
   assert.equal(argv.includes("--dangerously-bypass-approvals-and-sandbox"), false);
   const parsed = JSON.parse(fs.readFileSync(artifact, "utf8"));
   assert.deepEqual(parsed.findings, []);
+  assert.equal(lines.at(-1).executionId, null);
+  assert.equal(fs.existsSync(`${artifact}.usage-receipts.json`), false);
 });
 
 test("Codex bridge rejects truncated artifacts, retries once, and leaves no final artifact", () => {
@@ -72,7 +74,51 @@ fs.writeFileSync(output, "{truncated");
   assert.equal(result.status, 1);
   assert.equal(fs.readFileSync(counter, "utf8"), "xx");
   assert.equal(fs.existsSync(artifact), false);
+  const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
+  assert.equal(receipts.invocations.length, 2);
+  assert.equal(new Set(receipts.invocations.map((entry) => entry.executionId)).size, 2);
   assert.match(result.stderr, /valid artifact after two attempts/);
+});
+
+test("a valid second schema attempt retains receipts for both Codex invocations", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-codex-retry-valid-"));
+  const fake = path.join(temp, "fake-codex.mjs");
+  const counter = path.join(temp, "count.txt");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+const output = args[args.indexOf("-o") + 1];
+let count = 0;
+try { count = fs.readFileSync(${JSON.stringify(counter)}, "utf8").length; } catch {}
+fs.appendFileSync(${JSON.stringify(counter)}, "x");
+fs.writeFileSync(output, count === 0 ? "{truncated" : JSON.stringify({
+  verdict: "clean",
+  summary: "Clean.",
+  dimension_sweep: "Checked.",
+  load_bearing_claim: "Checked.",
+  findings: []
+}));
+`);
+  fs.chmodSync(fake, 0o700);
+  const artifact = path.join(temp, "findings.json");
+  const result = spawnSync(process.execPath, [
+    path.join(root, "scripts/codex-run.mjs"),
+    "--worktree", root,
+    "--schema", path.join(root, "schemas/findings.schema.json"),
+    "--artifact", artifact,
+    "--model", "gpt-test",
+    "--effort", "high",
+    "--sandbox", "read-only",
+    "--ship-dir", temp,
+    "--codex-bin", fake,
+    "--min-prompt-bytes", "1"
+  ], { input: "review this", encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const bridge = JSON.parse(result.stdout.trim());
+  const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
+  assert.equal(receipts.invocations.length, 2);
+  assert.equal(bridge.executionId, receipts.invocations[1].executionId);
+  assert.equal(JSON.parse(fs.readFileSync(`${artifact}.request.json`, "utf8")).executionId, bridge.executionId);
 });
 
 test("Codex bridge appends the exact review diff without a model retyping it", () => {

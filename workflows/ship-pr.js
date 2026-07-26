@@ -136,6 +136,14 @@ function parseInput(input) {
   return input && typeof input === "object" ? input : {};
 }
 
+function persistedCount(value, name) {
+  const count = Number(value ?? 0);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`${name} must be a nonnegative safe integer`);
+  }
+  return count;
+}
+
 function canonicalPolicy(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
   if (value && typeof value === "object") {
@@ -354,9 +362,17 @@ function tally(ledger) {
 // command is idempotent, so re-running it re-reads the file instead of paying
 // for the review, fix, or implementation a second time.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0, fatal: [], dispatchedCalls: 0, maximumCalls: Infinity, capacityExceeded: false };
+const relayState = {
+  extraCalls: 0,
+  fatal: [],
+  receiptFiles: [],
+  dispatchedCalls: 0,
+  maximumCalls: Infinity,
+  capacityExceeded: false
+};
 const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
 const codexReceiptState = new Set();
+const shipState = { runPolicy: null, priorRelayRetries: 0, legacyUsageIncomplete: false };
 
 async function claudeReasoningCall(prompt, options) {
   if (relayState.dispatchedCalls >= relayState.maximumCalls) {
@@ -389,7 +405,7 @@ function relayEnvelopeSchema(resultSchema) {
     required: ["reused", "executionId", "result"],
     properties: {
       reused: { type: "boolean" },
-      executionId: { type: ["string", "null"] },
+      executionId: { type: "string", minLength: 1 },
       result: resultSchema
     }
   };
@@ -429,6 +445,8 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       relayState.capacityExceeded = true;
       break;
     }
+    const receiptFile = `${artifact}.usage-receipts.json`;
+    if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
@@ -448,12 +466,6 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
         : { reused: false, executionId: null, result: response };
-      if (envelope.executionId && !codexReceiptState.has(envelope.executionId)) {
-        codexReceiptState.add(envelope.executionId);
-        usageState.codexCalls += 1;
-      } else if (!envelope.reused && !envelope.executionId) {
-        usageState.codexCalls += 1;
-      }
       return envelope.result;
     }
     if (relayState.capacityExceeded) break;
@@ -616,24 +628,36 @@ async function main(raw) {
   const config = input.config;
   relayState.extraCalls = 0;
   relayState.fatal = [];
-  relayState.dispatchedCalls = Number(input.agentCalls ?? 0);
-  relayState.maximumCalls = config.limits.agentCallsPerPr;
+  relayState.receiptFiles = [];
+  shipState.runPolicy = null;
+  shipState.legacyUsageIncomplete = false;
+  const initialAgentCalls = persistedCount(input.agentCalls, "persisted shipping agentCalls");
+  const maximumCalls = persistedCount(config.limits.agentCallsPerPr, "agentCallsPerPr");
+  relayState.dispatchedCalls = initialAgentCalls;
+  relayState.maximumCalls = maximumCalls;
   relayState.capacityExceeded = false;
   const priorUsage = input.usage ?? {};
   Object.assign(usageState, {
-    claudeReasoningCalls: Number(priorUsage.claudeReasoningCalls ?? 0),
-    haikuPlumbingCalls: Number(priorUsage.haikuPlumbingCalls ?? 0),
-    codexCalls: Number(priorUsage.codexCalls ?? 0)
+    claudeReasoningCalls: persistedCount(priorUsage.claudeReasoningCalls, "persisted Claude usage"),
+    haikuPlumbingCalls: persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage"),
+    codexCalls: persistedCount(priorUsage.codexCalls, "persisted Codex usage")
   });
-  const priorRelayRetries = Number(priorUsage.relayRetries ?? 0);
+  const priorRelayRetries = persistedCount(priorUsage.relayRetries, "persisted relay retries");
+  shipState.priorRelayRetries = priorRelayRetries;
+  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "codexCalls", "relayRetries"]
+    .every((key) => Object.hasOwn(priorUsage, key));
+  const legacyUsageIncomplete = input.usageAccounting === "legacy-incomplete"
+    || (initialAgentCalls > 0 && !hasUsageSnapshot);
+  shipState.legacyUsageIncomplete = legacyUsageIncomplete;
   codexReceiptState.clear();
   for (const receipt of input.usageReceipts ?? []) codexReceiptState.add(receipt);
   const runPolicy = await workflowRunPolicy(input, config);
+  shipState.runPolicy = runPolicy;
   // All relay dispatch reads the validated, disk-authoritative policy rather
   // than a transport setting that may have changed since the run began.
   input.runPolicy = runPolicy;
   const roundOffset = Number(input.roundOffset ?? 0);
-  let callCount = Number(input.agentCalls ?? 0);
+  let callCount = initialAgentCalls;
   // Relay re-reads are cheap but still calls, so they eat into the per-PR limit
   // rather than silently expanding it.
   const callBudget = () => config.limits.agentCallsPerPr - relayState.extraCalls;
@@ -644,7 +668,11 @@ async function main(raw) {
     policyFingerprint: runPolicy.policyFingerprint,
     usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
     usageReceipts: [...codexReceiptState],
-    usageAccounting: "complete",
+    usageReceiptFiles: [...relayState.receiptFiles],
+    usageAccounting: relayState.receiptFiles.length > 0
+      ? "pending-checkpoint-reconciliation"
+      : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
+    legacyUsageIncomplete,
     ...result,
     agentCalls: relayState.dispatchedCalls
   });
@@ -695,8 +723,11 @@ async function main(raw) {
         failedTasks.add(task.id);
         taskResults.push({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
       }
-      for (let offset = 0; offset < runnable.length; offset += config.implementation.maxParallel) {
-        const batch = runnable.slice(offset, offset + config.implementation.maxParallel);
+      const implementationParallel = runnable.some((task) => implementationRoute(config, task).engine === "codex")
+        ? 1
+        : config.implementation.maxParallel;
+      for (let offset = 0; offset < runnable.length; offset += implementationParallel) {
+        const batch = runnable.slice(offset, offset + implementationParallel);
         const results = await parallel(batch.map((task) => async () => {
           const route = implementationRoute(config, task);
           let result = await implementTask(input, task, route.tier, route.engine, 1);
@@ -1242,4 +1273,30 @@ async function main(raw) {
   });
 }
 
-return await main(args);
+try {
+  return await main(args);
+} catch (error) {
+  if (!shipState.runPolicy) throw error;
+  return {
+    runPolicy: shipState.runPolicy,
+    reasoningProvider: shipState.runPolicy.reasoningProvider,
+    assurance: shipState.runPolicy.assurance,
+    policyFingerprint: shipState.runPolicy.policyFingerprint,
+    status: "ship-interrupted",
+    message: error instanceof Error ? error.message : String(error),
+    agentCalls: relayState.dispatchedCalls,
+    relayRetries: relayState.extraCalls,
+    usage: {
+      ...usageState,
+      relayRetries: shipState.priorRelayRetries + relayState.extraCalls
+    },
+    usageReceipts: [...codexReceiptState],
+    usageReceiptFiles: [...relayState.receiptFiles],
+    usageAccounting: relayState.receiptFiles.length > 0
+      ? "pending-checkpoint-reconciliation"
+      : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
+    legacyUsageIncomplete: shipState.legacyUsageIncomplete,
+    relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
+    budgetSpent: budgetSpent()
+  };
+}

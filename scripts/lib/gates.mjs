@@ -64,6 +64,11 @@ export function gateIsCurrent(pr, gate) {
 
 export function checkCallCapacity(pr, maximum, callsNeeded) {
   const used = Number(pr.agentCalls ?? 0);
+  if (!Number.isSafeInteger(used) || used < 0
+    || !Number.isSafeInteger(maximum) || maximum < 0
+    || !Number.isSafeInteger(callsNeeded) || callsNeeded < 0) {
+    throw new Error("call capacity requires nonnegative safe integers");
+  }
   return {
     allowed: used + callsNeeded <= maximum,
     used,

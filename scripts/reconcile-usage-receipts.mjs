@@ -11,7 +11,45 @@ export function reconcileUsageReceipts(result) {
   if (!result || typeof result !== "object") throw new Error("workflow result is required");
   const receipts = new Set(result.usageReceipts ?? []);
   let added = 0;
+  for (const receiptFile of result.usageReceiptFiles ?? []) {
+    if (typeof receiptFile !== "string" || !receiptFile.endsWith(".usage-receipts.json")) {
+      throw new Error(`invalid Codex usage receipt journal path: ${receiptFile}`);
+    }
+    const journal = readJson(receiptFile);
+    if (journal.version !== 1
+      || receiptFile !== `${journal.artifact}.usage-receipts.json`
+      || !Array.isArray(journal.invocations)) {
+      throw new Error(`invalid Codex usage receipt journal: ${receiptFile}`);
+    }
+    for (const invocation of journal.invocations) {
+      if (typeof invocation.executionId !== "string" || invocation.executionId.length === 0
+        || typeof invocation.requestFingerprint !== "string" || invocation.requestFingerprint.length === 0) {
+        throw new Error(`invalid Codex invocation receipt: ${receiptFile}`);
+      }
+      if (!receipts.has(invocation.executionId)) {
+        receipts.add(invocation.executionId);
+        added += 1;
+      }
+    }
+    const interruption = /interrupted/.test(String(result.status ?? ""));
+    if (!interruption) {
+      const request = readJson(`${journal.artifact}.request.json`);
+      if (!fs.existsSync(journal.artifact)
+        || typeof request.executionId !== "string"
+        || !journal.invocations.some((entry) =>
+          entry.executionId === request.executionId
+          && entry.requestFingerprint === request.fingerprint)) {
+        throw new Error(`Codex result has no matching completed invocation receipt: ${receiptFile}`);
+      }
+    }
+  }
   for (const checkpointFile of result.relayCheckpoints ?? []) {
+    if (!fs.existsSync(checkpointFile) && (result.usageReceiptFiles ?? []).length > 0) {
+      // A failed/invalid Codex invocation has a durable per-invocation journal
+      // but no completed-artifact checkpoint. Usage can still be made exact;
+      // the missing checkpoint remains a separate resume/recovery hard stop.
+      continue;
+    }
     const checkpoint = readJson(checkpointFile);
     if (checkpointFile !== `${checkpoint.artifact}.relay-checkpoint.json`) {
       throw new Error(`relay checkpoint path does not match its artifact: ${checkpointFile}`);
@@ -36,7 +74,7 @@ export function reconcileUsageReceipts(result) {
       codexCalls: Number(result.usage?.codexCalls ?? 0) + added
     },
     usageReceipts: [...receipts],
-    usageAccounting: "complete"
+    usageAccounting: result.legacyUsageIncomplete ? "legacy-incomplete" : "complete"
   };
 }
 

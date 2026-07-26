@@ -42,6 +42,7 @@ export function renderReport(shipDir) {
     lines.push(`- Agent calls: ${pr.agentCalls ?? 0}`);
     const usage = pr.usage ?? {};
     lines.push(`- Usage: Claude reasoning ${usage.claudeReasoningCalls ?? 0}; Haiku plumbing ${usage.haikuPlumbingCalls ?? 0}; Codex ${usage.codexCalls ?? 0}; relay retries ${usage.relayRetries ?? 0}`);
+    lines.push(`- Usage accounting: ${pr.usageAccounting ?? "legacy-incomplete"}`);
     if (pr.budgetSpent !== null && pr.budgetSpent !== undefined) lines.push(`- Workflow budget spent: ${JSON.stringify(pr.budgetSpent)}`);
     lines.push(`- Local verification: ${pr.gates?.verify?.status ?? "not-run"}`);
     lines.push(`- CI: ${pr.gates?.ci?.status ?? "not-run"}${pr.gates?.ci?.reason ? ` — ${pr.gates.ci.reason}` : ""}`);

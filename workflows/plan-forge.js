@@ -150,6 +150,14 @@ function parseInput(input) {
   return input && typeof input === "object" ? input : {};
 }
 
+function persistedCount(value, name) {
+  const count = Number(value ?? 0);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`${name} must be a nonnegative safe integer`);
+  }
+  return count;
+}
+
 function canonicalPolicy(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
   if (value && typeof value === "object") {
@@ -346,10 +354,10 @@ function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = 
 // A relay that fails to hand that object back is a lost message, not a failed
 // engine, and re-running the idempotent command costs one file read.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0, fatal: [] };
+const relayState = { extraCalls: 0, fatal: [], receiptFiles: [] };
 const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
 const codexReceiptState = new Set();
-const planState = { dispatchedCalls: 0, runPolicy: null, priorRelayRetries: 0 };
+const planState = { dispatchedCalls: 0, runPolicy: null, priorRelayRetries: 0, legacyUsageIncomplete: false };
 
 async function planAgent(prompt, options) {
   planState.dispatchedCalls += 1;
@@ -370,7 +378,7 @@ function relayEnvelopeSchema(resultSchema) {
     required: ["reused", "executionId", "result"],
     properties: {
       reused: { type: "boolean" },
-      executionId: { type: ["string", "null"] },
+      executionId: { type: "string", minLength: 1 },
       result: resultSchema
     }
   };
@@ -502,6 +510,8 @@ function promptNotBuilt({ what, promptFile, detail }) {
 }
 
 async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
@@ -525,13 +535,6 @@ async function relayCodex({ prompt, label, phase: phaseName, schema, model, arti
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
         : { reused: false, executionId: null, result: response };
-      if (envelope.executionId && !codexReceiptState.has(envelope.executionId)) {
-        codexReceiptState.add(envelope.executionId);
-        usageState.codexCalls += 1;
-      } else if (!envelope.reused && !envelope.executionId) {
-        // Legacy bridge responses predate receipts but still prove an execution.
-        usageState.codexCalls += 1;
-      }
       return envelope.result;
     }
     log(`The Codex ${what} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
@@ -563,15 +566,21 @@ async function main(raw) {
   const config = input.config;
   relayState.extraCalls = 0;
   relayState.fatal = [];
-  planState.dispatchedCalls = 0;
+  relayState.receiptFiles = [];
+  const priorAgentCalls = persistedCount(input.agentCalls, "persisted planning agentCalls");
+  planState.dispatchedCalls = priorAgentCalls;
   planState.runPolicy = null;
   const priorUsage = input.usage ?? {};
+  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "codexCalls", "relayRetries"]
+    .every((key) => Object.hasOwn(priorUsage, key));
+  planState.legacyUsageIncomplete = input.usageAccounting === "legacy-incomplete"
+    || (priorAgentCalls > 0 && !hasUsageSnapshot);
   Object.assign(usageState, {
-    claudeReasoningCalls: Number(priorUsage.claudeReasoningCalls ?? 0),
-    haikuPlumbingCalls: Number(priorUsage.haikuPlumbingCalls ?? 0),
-    codexCalls: Number(priorUsage.codexCalls ?? 0)
+    claudeReasoningCalls: persistedCount(priorUsage.claudeReasoningCalls, "persisted Claude usage"),
+    haikuPlumbingCalls: persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage"),
+    codexCalls: persistedCount(priorUsage.codexCalls, "persisted Codex usage")
   });
-  const priorRelayRetries = Number(priorUsage.relayRetries ?? 0);
+  const priorRelayRetries = persistedCount(priorUsage.relayRetries, "persisted relay retries");
   planState.priorRelayRetries = priorRelayRetries;
   codexReceiptState.clear();
   for (const receipt of input.usageReceipts ?? []) codexReceiptState.add(receipt);
@@ -1071,7 +1080,11 @@ async function main(raw) {
     relayRetries: relayState.extraCalls,
     usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
     usageReceipts: [...codexReceiptState],
-    usageAccounting: "complete",
+    usageReceiptFiles: [...relayState.receiptFiles],
+    usageAccounting: relayState.receiptFiles.length > 0
+      ? "pending-checkpoint-reconciliation"
+      : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
+    legacyUsageIncomplete: planState.legacyUsageIncomplete,
     budgetSpent: budgetSpent()
   };
 }
@@ -1094,7 +1107,11 @@ try {
       relayRetries: planState.priorRelayRetries + relayState.extraCalls
     },
     usageReceipts: [...codexReceiptState],
-    usageAccounting: relayState.fatal.length > 0 ? "pending-checkpoint-reconciliation" : "complete",
+    usageReceiptFiles: [...relayState.receiptFiles],
+    usageAccounting: relayState.receiptFiles.length > 0
+      ? "pending-checkpoint-reconciliation"
+      : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
+    legacyUsageIncomplete: planState.legacyUsageIncomplete,
     relayCheckpoints: [...relayState.fatal],
     budgetSpent: budgetSpent()
   };

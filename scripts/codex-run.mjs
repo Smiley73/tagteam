@@ -165,6 +165,7 @@ function requestFingerprint({ options, prompt, schema }) {
     model: options.model,
     effort: options.effort,
     sandbox: options.sandbox,
+    dryRun: Boolean(options.dryRun),
     worktree: path.resolve(options.worktree)
   })).digest("hex");
 }
@@ -179,6 +180,32 @@ function writeJsonAtomic(file, value) {
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temporary, file);
   fs.chmodSync(file, 0o600);
+}
+
+function usageReceiptFile(artifact) {
+  return `${artifact}.usage-receipts.json`;
+}
+
+function appendInvocationReceipt(artifact, fingerprint, executionId, fields = {}) {
+  const file = usageReceiptFile(artifact);
+  let journal = { version: 1, artifact, invocations: [] };
+  if (fs.existsSync(file)) {
+    const existing = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (existing.version !== 1 || existing.artifact !== artifact || !Array.isArray(existing.invocations)) {
+      throw new Error(`invalid Codex usage receipt journal at ${file}`);
+    }
+    journal = existing;
+  }
+  if (!journal.invocations.some((entry) => entry.executionId === executionId)) {
+    journal.invocations.push({
+      executionId,
+      requestFingerprint: fingerprint,
+      recordedAt: new Date().toISOString(),
+      ...fields
+    });
+    writeJsonAtomic(file, journal);
+  }
+  return file;
 }
 
 // A model that was asked to transcribe a large prompt can truncate it,
@@ -237,6 +264,10 @@ export async function runCodex(options, prompt) {
       let recorded = null;
       try { recorded = JSON.parse(fs.readFileSync(requestPath, "utf8")); } catch {}
       if (recorded?.fingerprint === fingerprint) {
+        if (options.dryRun) {
+          process.stderr.write(`Reusing the existing dry-run artifact at ${artifact}; Codex was not invoked.\n`);
+          return { result: existing.value, reused: true, executionId: null };
+        }
         if (!recorded.executionId) {
           // Pre-receipt sidecars still describe one historical execution. Give
           // that execution a deterministic identity so every resume imports it
@@ -248,6 +279,7 @@ export async function runCodex(options, prompt) {
           };
           writeJsonAtomic(requestPath, recorded);
         }
+        appendInvocationReceipt(artifact, fingerprint, recorded.executionId, { legacy: true });
         process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
         return { result: existing.value, reused: true, executionId: recorded.executionId };
       }
@@ -267,6 +299,10 @@ export async function runCodex(options, prompt) {
       const attemptPath = `${artifact}.attempt-${invalidAttempts + 1}-${process.pid}.tmp`;
       try { fs.unlinkSync(attemptPath); } catch {}
       fs.writeFileSync(attemptPath, "", { mode: 0o600 });
+      const executionId = randomUUID();
+      if (!options.dryRun) {
+        appendInvocationReceipt(artifact, fingerprint, executionId, { attempt: invalidAttempts + 1 });
+      }
       const result = await runChild({ options, prompt: amendedPrompt, outputPath: attemptPath, eventsPath });
       if (result.dryRun) {
         const stub = stubFor(schema, schema);
@@ -281,14 +317,14 @@ export async function runCodex(options, prompt) {
         // for the wrong request.
         try { fs.unlinkSync(requestPath); } catch {}
         fs.renameSync(attemptPath, artifact);
-        const executionId = randomUUID();
         fs.writeFileSync(requestPath, JSON.stringify({
           fingerprint, model: options.model, effort: options.effort, sandbox: options.sandbox,
-          executionId,
+          executionId: options.dryRun ? null : executionId,
+          dryRun: Boolean(options.dryRun),
           completedAt: new Date().toISOString()
         }, null, 2) + "\n", { mode: 0o600 });
         try { fs.unlinkSync(quotaStatePath); } catch {}
-        return { result: validation.value, reused: false, executionId };
+        return { result: validation.value, reused: false, executionId: options.dryRun ? null : executionId };
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
@@ -380,7 +416,14 @@ async function main() {
     if (executionId && (!reused || !fs.existsSync(checkpointPath))) {
       writeRelayCheckpoint(options, executionId, before);
     }
-    process.stdout.write(JSON.stringify({ ok: true, reused, executionId, artifact: path.resolve(options.artifact), result }) + "\n");
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      reused,
+      executionId,
+      usageReceiptFile: usageReceiptFile(path.resolve(options.artifact)),
+      artifact: path.resolve(options.artifact),
+      result
+    }) + "\n");
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

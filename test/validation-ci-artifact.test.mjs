@@ -341,6 +341,9 @@ test("gate evaluation requires evidence, UI approval, and protected-base approva
   pr = recordGate(pr, "review", pr.candidateOid, { status: "failed", gateFailures: ["one failed reviewer"] });
   assert.equal(evaluateGates(pr, config, { baseProtected: true }).ready, true);
   assert.equal(checkCallCapacity({ agentCalls: 59 }, 60, 2).allowed, false);
+  assert.throws(() => checkCallCapacity({ agentCalls: -1 }, 60, 1), /nonnegative safe integers/);
+  assert.throws(() => checkCallCapacity({ agentCalls: "not-a-number" }, 60, 1), /nonnegative safe integers/);
+  assert.throws(() => checkCallCapacity({ agentCalls: 1 }, 60, -1), /nonnegative safe integers/);
 });
 
 test("single-provider gates bind candidate and policy and always require approval", () => {
@@ -397,6 +400,7 @@ test("the final report discloses provider assurance and split usage", () => {
       state: "awaiting-approval",
       assurance: "single-provider",
       policyFingerprint: "sha256:test",
+      usageAccounting: "legacy-incomplete",
       usage: {
         claudeReasoningCalls: 0,
         haikuPlumbingCalls: 8,
@@ -409,6 +413,7 @@ test("the final report discloses provider assurance and split usage", () => {
   assert.match(report, /Substantive provider: codex/);
   assert.match(report, /Review assurance: single-provider/);
   assert.match(report, /Usage: Claude reasoning 0; Haiku plumbing 8; Codex 6; relay retries 1/);
+  assert.match(report, /Usage accounting: legacy-incomplete/);
 });
 
 test("merge lock serializes ships, supports a lease heartbeat, and validates ownership", () => {
