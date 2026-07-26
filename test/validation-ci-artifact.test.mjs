@@ -272,6 +272,20 @@ test("single-provider gate message discloses reduced assurance", () => {
   assert.match(rendered, /commit abc1234/);
 });
 
+test("message catalog and the ship command's permitted recurring keys stay synchronized", () => {
+  assert.deepEqual(Object.keys(messages).sort(), [
+    "agentBudget", "ciFailed", "configStale", "configStaleShip", "fixFailed",
+    "mergeFailed", "noEvidence", "planInterrupted", "relayLost", "reviewFailed",
+    "singleProvider", "unprotectedBase", "userVisible", "verificationFailed"
+  ]);
+  const shipSource = fs.readFileSync(path.join(root, "commands/ship.md"), "utf8");
+  const permitted = shipSource.match(/messages\.mjs" "<([^"]+)>"/)?.[1].split("|").sort();
+  assert.deepEqual(permitted, [
+    "agentBudget", "ciFailed", "fixFailed", "mergeFailed", "noEvidence",
+    "reviewFailed", "singleProvider", "unprotectedBase", "userVisible", "verificationFailed"
+  ]);
+});
+
 test("plain-English gate message CLI emits the catalog output", () => {
   const result = spawnSync(process.execPath, [
     path.join(root, "scripts/lib/messages.mjs"),
@@ -341,7 +355,7 @@ test("single-provider gates bind candidate and policy and always require approva
     ["verify", { status: "passed" }],
     ["ui", { verdict: "no" }],
     ["ci", { status: "passed" }]
-  ]) pr = recordGate(pr, gate, pr.candidateOid, value);
+  ]) pr = recordGate(pr, gate, pr.candidateOid, value, policy.policyFingerprint);
   const config = { prTrain: { mode: "github-pr", pauseOn: ["ui"] } };
   const pending = evaluateGates(pr, config, { baseProtected: true, runPolicy: policy });
   assert.deepEqual(pending.approvals, ["single-provider"]);
@@ -352,7 +366,11 @@ test("single-provider gates bind candidate and policy and always require approva
     () => recordGate(pr, "human", pr.candidateOid, { approved: true }, `sha256:${"0".repeat(64)}`),
     /stale run policy/
   );
-  pr = recordGate(pr, "human", pr.candidateOid, { approved: true });
+  assert.throws(
+    () => recordGate(pr, "human", pr.candidateOid, { approved: true }),
+    /without the current run policy fingerprint/
+  );
+  pr = recordGate(pr, "human", pr.candidateOid, { approved: true }, policy.policyFingerprint);
   assert.equal(evaluateGates(pr, config, { baseProtected: true, runPolicy: policy }).ready, true);
   const tampered = { ...policy, reasoningProvider: "claude" };
   const mismatch = evaluateGates(pr, config, { baseProtected: true, runPolicy: tampered });

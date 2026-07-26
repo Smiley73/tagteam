@@ -60,7 +60,7 @@ git -C "<worktree>" checkout --detach "<baseOid>"
 git -C "<worktree>" switch -c "<branchPrefix><ship-id>/<pr.id>"
 ```
 
-Invoke `Workflow({name:"tagteam:ship-pr", args:{...}})` with the effective config, validated `runPolicy`, config path, PR, its manifest tasks, PR base OID, ship/plugin/worktree/primary paths, diff-exclude JSON path, forced reviewers, and persisted call count. Persist its result. The workflow owns implementation, candidate commits, snapshots, CodeGraph sync, UI classification, dimension selection, alternating review/fix, artifact parsing, and local verification.
+Invoke `Workflow({name:"tagteam:ship-pr", args:{...}})` with the effective config, validated `runPolicy`, config path, PR, its manifest tasks, PR base OID, ship/plugin/worktree/primary paths, diff-exclude JSON path, forced reviewers, persisted call count, and persisted `usage`. Persist its result. The workflow owns implementation, candidate commits, snapshots, CodeGraph sync, UI classification, dimension selection, alternating review/fix, artifact parsing, and local verification.
 
 For revalidation of an already committed candidate, also pass `existingCandidateOid`, prior `taskResults`, and `roundOffset` from the parsed append-only artifact; this skips implementation and appends new global round numbers. For a CI or human-requested repair, additionally pass structured `repairFindings` and `repairEngine`; the workflow fixes, commits a new candidate, then runs every gate. Never re-run implementation merely to revalidate a rebase or gate repair.
 

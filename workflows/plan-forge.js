@@ -165,6 +165,7 @@ async function workflowRunPolicy(input, config) {
     plumbingModel: config.transport?.relayModel ?? "sonnet",
     assurance: "cross-provider"
   };
+  if (input.runPolicy && !input.runPolicy.policyFingerprint) throw new Error("explicit run policy fingerprint is required");
   if (policy.version !== 1) throw new Error("run policy version must be 1");
   if (!["both", "claude", "codex"].includes(policy.reasoningProvider)) throw new Error("invalid run policy provider");
   const expectedAssurance = policy.reasoningProvider === "both" ? "cross-provider" : "single-provider";
@@ -521,7 +522,13 @@ async function main(raw) {
   }
   const config = input.config;
   relayState.extraCalls = 0;
-  Object.assign(usageState, { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 });
+  const priorUsage = input.usage ?? {};
+  Object.assign(usageState, {
+    claudeReasoningCalls: Number(priorUsage.claudeReasoningCalls ?? 0),
+    haikuPlumbingCalls: Number(priorUsage.haikuPlumbingCalls ?? 0),
+    codexCalls: Number(priorUsage.codexCalls ?? 0)
+  });
+  const priorRelayRetries = Number(priorUsage.relayRetries ?? 0);
   const runPolicy = await workflowRunPolicy(input, config);
   const claude = config.planning.claude;
   const codex = config.planning.codex;
@@ -1020,7 +1027,7 @@ async function main(raw) {
     completedRounds: reviews.map((review) => review.round),
     agentCalls: callCount + relayState.extraCalls,
     relayRetries: relayState.extraCalls,
-    usage: { ...usageState, relayRetries: relayState.extraCalls },
+    usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
     budgetSpent: budgetSpent()
   };
 }

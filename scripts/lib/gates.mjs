@@ -38,9 +38,12 @@ export function bindNewCandidate(pr, candidateOid, baseOid, policy = null) {
   };
 }
 
-export function recordGate(pr, gate, candidateOid, value, policyFingerprint = pr.policyFingerprint ?? null) {
+export function recordGate(pr, gate, candidateOid, value, policyFingerprint = undefined) {
   if (!["review", "verify", "ui", "ci", "human"].includes(gate)) throw new Error(`unknown gate: ${gate}`);
   if (pr.candidateOid !== candidateOid) throw new Error(`cannot record ${gate} for stale candidate ${candidateOid}`);
+  if (pr.policyFingerprint && !policyFingerprint) {
+    throw new Error(`cannot record ${gate} without the current run policy fingerprint`);
+  }
   if (pr.policyFingerprint && policyFingerprint !== pr.policyFingerprint) {
     throw new Error(`cannot record ${gate} for stale run policy ${policyFingerprint ?? "(missing)"}`);
   }

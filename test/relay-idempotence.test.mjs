@@ -381,6 +381,54 @@ test("shipping rejects a run policy whose fingerprint does not match its fields"
   );
 });
 
+test("workflows reject an explicit run policy with its fingerprint removed", async () => {
+  const runPolicy = {
+    version: 1,
+    reasoningProvider: "both",
+    plumbingModel: "sonnet",
+    assurance: "cross-provider"
+  };
+  await assert.rejects(
+    harness("workflows/ship-pr.js", { ...SHIP_ARGS, runPolicy }),
+    /explicit run policy fingerprint is required/
+  );
+  await assert.rejects(
+    harness("workflows/plan-forge.js", { ...PLAN_ARGS, runPolicy }, planResponder([])),
+    /explicit run policy fingerprint is required/
+  );
+});
+
+test("shipping resume adds current invocation usage to persisted usage", async () => {
+  const responder = (label) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    return CLEAN_FINDINGS;
+  };
+  const first = await harness("workflows/ship-pr.js", SHIP_ARGS, responder);
+  const second = await harness("workflows/ship-pr.js", {
+    ...SHIP_ARGS,
+    usage: first.result.usage,
+    roundOffset: 1
+  }, responder);
+  assert.deepEqual(second.result.usage, {
+    claudeReasoningCalls: first.result.usage.claudeReasoningCalls * 2,
+    haikuPlumbingCalls: first.result.usage.haikuPlumbingCalls * 2,
+    codexCalls: first.result.usage.codexCalls * 2,
+    relayRetries: 0
+  });
+});
+
 test("a lost Codex review relay result does not fail the PR round", async () => {
   let droppedCodexReview = false;
   const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label) => {
