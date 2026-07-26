@@ -44,6 +44,15 @@ async function forge({ ui, draftDecisions = [], reviewDecisions = [], seedDecisi
     }
     if (label === "plan:manifest") return MANIFEST;
     if (label === "plan:decompose") return TRAIN;
+    // A file that holds exactly what the step returned: the checksum reported back
+    // is the one the workflow asked the read to expect.
+    if (label.startsWith("plan:verify-")) {
+      return {
+        ok: true,
+        payloads: [...prompt.matchAll(/--expect "([A-Z_]+)=(\d+):([0-9a-f]{8})"/g)]
+          .map(([, name, chars, hash]) => ({ name, token: `${chars}:${hash}`, chars: Number(chars) }))
+      };
+    }
     if (label.endsWith("-request") || label.includes("request:")) return { ok: true, promptPath: "/tmp/p.md", bytes: 10 };
     return APPROVE;
   };

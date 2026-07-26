@@ -177,13 +177,23 @@ const TRAIN = {
   }]
 };
 
+// Models a payload file that holds exactly what the step returned: the checksum
+// the command reports back is the one the workflow asked it to expect.
+function verifyResponse(prompt) {
+  const payloads = [...prompt.matchAll(/--expect "([A-Z_]+)=(\d+):([0-9a-f]{8})"/g)]
+    .map(([, name, chars, hash]) => ({ name, token: `${chars}:${hash}`, chars: Number(chars) }));
+  assert.notEqual(payloads.length, 0, `no --expect token in verify prompt: ${prompt.slice(0, 300)}`);
+  return { ok: true, payloads };
+}
+
 function planResponder(dropOnce) {
   const dropped = new Set();
-  return (label) => {
+  return (label, prompt = "") => {
     if (dropOnce.some((prefix) => label === prefix) && !dropped.has(label)) {
       dropped.add(label);
       return null;
     }
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
       return { ok: true, promptPath: "/plans/slug/reviews/prompt.md", bytes: 4096 };
     }
@@ -222,8 +232,8 @@ test("a lost decomposition cross-check relay result is recovered from the saved 
 
 test("a relay that never returns fails with a plain-English message naming the saved result", async () => {
   await assert.rejects(
-    harness("workflows/plan-forge.js", PLAN_ARGS, (label) => (
-      label.startsWith("plan:codex-review") ? null : planResponder([])(label)
+    harness("workflows/plan-forge.js", PLAN_ARGS, (label, prompt) => (
+      label.startsWith("plan:codex-review") ? null : planResponder([])(label, prompt)
     )),
     (error) => {
       const lines = error.message.split("\n");
@@ -289,7 +299,7 @@ test("resume carries saved open questions and keeps persisting them", async () =
     { ...PLAN_ARGS, seedPlan: "# Saved draft", resumeRound: 1, openQuestions: ["Which database should the cache front?"] },
     (label, prompt) => {
       if (prompt.includes(".questions.json")) persisted.push(label);
-      return planResponder([])(label);
+      return planResponder([])(label, prompt);
     }
   );
   // A question raised before the interruption is still owed by the human.

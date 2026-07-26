@@ -194,6 +194,37 @@ const promptBuildSchema = {
   }
 };
 
+// What verify-payload.mjs reports about the files a step was told to write. The
+// checksum travels back to the workflow so the run can record what is actually on
+// disk rather than what the step said it wrote.
+const payloadVerifySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok"],
+  properties: {
+    ok: { type: "boolean" },
+    payloads: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "chars", "token"],
+        properties: {
+          name: { type: "string" },
+          label: { type: "string" },
+          file: { type: "string" },
+          json: { type: "boolean" },
+          chars: { type: "integer" },
+          token: { type: "string" },
+          expected: { type: ["string", "null"] },
+          matches: { type: "boolean" }
+        }
+      }
+    },
+    error: { type: "string" }
+  }
+};
+
 // Everything fenced here is model-derived: plan text, review objects, and the
 // interface sketches a person will be shown. JSON encoding does not escape angle
 // brackets, so a closing marker inside a payload would end the fence early and
@@ -264,6 +295,15 @@ function composeCommand({ pluginRoot, template, out, vars = {}, fences = [], exp
   ].filter(Boolean).join(" ");
 }
 
+function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = [] }) {
+  return [
+    `node "${pluginRoot}/scripts/verify-payload.mjs"`,
+    ...payloads.map((payload) => `${payload.json ? "--payload-json" : "--payload"} "${payload.name}=${payload.file}"`),
+    ...Object.entries(expects).filter(([, token]) => token).map(([name, token]) => `--expect "${name}=${token}"`),
+    ...requireJson.map((file) => `--require-json "${file}"`)
+  ].join(" ");
+}
+
 // The relay agent only reads a file the bridge has already written and validated.
 // A relay that fails to hand that object back is a lost message, not a failed
 // engine, and re-running the idempotent command costs one file read.
@@ -306,6 +346,86 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
     "Run the same plan command again with --resume; every finished check is reused rather than repaid.",
     `Details: request ${promptFile}`
   ].join("\n"));
+}
+
+// Reports what the files a step was just told to write actually hold. The command
+// only reads, so a lost reply costs one re-read and nothing else.
+async function verifySaved({ command, label, phase: phaseName, model, what, file }) {
+  const prompt = [
+    `Run this exact command: ${command}`,
+    "It reads files this plan already saved and reports a checksum for each. Do not write, edit, summarise, or retype any of that text yourself.",
+    "Return ok=true with the payloads array the command printed, unchanged. If it exits non-zero, return ok=false with its exact stderr as error."
+  ].join("\n\n");
+  for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) relayState.extraCalls += 1;
+    const result = await agent(prompt, {
+      label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
+      phase: phaseName,
+      agentType: "tagteam:prompt-builder",
+      model,
+      schema: payloadVerifySchema
+    });
+    if (result?.ok && Array.isArray(result.payloads) && result.payloads.length) return result.payloads;
+    if (result && !result.ok) {
+      // The file is missing, empty, unreadable, or the record that lets the pass
+      // resume is not beside it. Re-running cannot change that.
+      throw new Error(payloadNotSaved({ what, file, detail: result.error }));
+    }
+    log(`The saved ${what} was checked, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Reading it again is free.`);
+  }
+  throw new Error([
+    `The saved ${what} was checked, but that could not be confirmed after ${RELAY_ATTEMPTS} attempts.`,
+    "Nothing was sent to the second opinion and nothing was paid for.",
+    "Run the same plan command again with --resume; every finished check is reused rather than repaid.",
+    `Details: saved file ${file}`
+  ].join("\n"));
+}
+
+// How far a model's own copy of its own text may sit from the value it handed
+// back. Persisting a plan and returning it are two acts, and a model doing both
+// slips by a few characters: a reflowed line, trailing punctuation, a rewritten
+// last clause. That is noise between two copies of one document, and the saved
+// copy is the one every later step reads, so the file wins and the run records its
+// checksum. Past this band it is not a slip — a dropped section, a paraphrase, or
+// a pointer back to the conversation — which is the failure this check exists for,
+// and the pass stops at the write rather than one round later. The floor keeps a
+// short plan from being held to a handful of characters; the fraction keeps a long
+// one from being allowed to lose a whole section.
+const SAVED_DRIFT_FLOOR = 64;
+const SAVED_DRIFT_FRACTION = 0.005;
+
+// Decides which checksum this run records for a file it asked a step to write.
+// `drift` is false where a faithful copy has nothing left to differ by — canonical
+// JSON already absorbs key order and indentation — so there any mismatch stops the
+// pass. The relay's own `matches` flag is ignored: the workflow compares the
+// checksum itself, and whatever it records is re-checked against the same file by
+// compose-prompt.mjs before anything is sent.
+function adoptSavedToken({ payload, expected, expectedChars, drift = false, what, file }) {
+  if (payload?.token === expected) return expected;
+  const chars = payload?.chars ?? 0;
+  const distance = Math.abs(chars - expectedChars);
+  const slack = Math.max(SAVED_DRIFT_FLOOR, Math.floor(expectedChars * SAVED_DRIFT_FRACTION));
+  if (!payload?.token || !drift || distance > slack) {
+    throw new Error(payloadNotSaved({
+      what,
+      file,
+      detail: `the file holds ${chars} characters (${payload?.token ?? "unreadable"}) where this run produced ${expectedChars} (${expected})`
+    }));
+  }
+  log([
+    `The saved ${what} differs from the copy this run holds by ${distance} character${distance === 1 ? "" : "s"}, within the ${slack} characters a model's own copy of its own text may drift.`,
+    `That file is what every later step reads, so its checksum is what this run records: ${payload.token} at ${file}.`
+  ].join(" "));
+  return payload.token;
+}
+
+function payloadNotSaved({ what, file, detail }) {
+  return [
+    `The ${what} was not saved as the text this run produced, so the pass stopped before anything was sent and nothing was paid for.`,
+    "Every later step reads that file rather than the reply it arrived with, so a second opinion would have judged a copy the plan never wrote.",
+    "Run the same plan command again with --resume; every finished check is reused rather than repaid.",
+    `Details: saved file ${file}${detail ? `; reported problem ${String(detail).split("\n")[0]}` : ""}`
+  ].join("\n");
 }
 
 function promptNotBuilt({ what, promptFile, detail }) {
@@ -456,10 +576,60 @@ async function main(raw) {
       schema: planDraftSchema
     });
   if (!draft?.planMarkdown) throw new Error("the plan drafter did not return a usable draft");
-  // A draft this run produced must still match the file it was told to write.
-  // A seeded draft came from that file in the first place, so the file is the
-  // truth and there is nothing to compare it against.
-  let planExpect = resumeRound ? null : expectText(draft.planMarkdown);
+
+  // Reads the plan file a step was just told to write and records the checksum of
+  // what is actually there. Doing this beside the write is what makes a
+  // divergence between the reply and the file an immediate, named failure instead
+  // of an unexplained checksum mismatch in the middle of the next round, after
+  // that round's reviews have been paid for. It also means the token this run
+  // carries describes the bytes both engines will really read.
+  const recordPlanFile = async ({ file, text, label, phaseName, what }) => {
+    const expected = expectText(text);
+    const payloads = await verifySaved({
+      command: verifyCommand({
+        pluginRoot: input.pluginRoot,
+        payloads: [{ name: "DRAFT_PLAN", file }],
+        expects: { DRAFT_PLAN: expected },
+        // Required on the same terms wherever this plan is read, so a draft saved
+        // without its resume record stops the pass here rather than at the next
+        // request it is fenced into.
+        requireJson: [`${file}.questions.json`]
+      }),
+      label,
+      phase: phaseName,
+      model: relayModel,
+      what,
+      file
+    });
+    callCount += 1;
+    return adoptSavedToken({
+      payload: payloads.find((payload) => payload?.name === "DRAFT_PLAN") ?? null,
+      expected,
+      expectedChars: normalizeText(text).length,
+      drift: true,
+      what,
+      file
+    });
+  };
+
+  // Where the plan this run starts from is saved: a fresh pass drafts it for round
+  // one, a continuation writes the pass's finished plan straight to the integrated
+  // path, and a resumed pass was seeded from the file its round already reviewed.
+  // A seeded plan used to travel with no checksum at all, because the file it came
+  // from was taken on trust; reading the file back gives that round a real check
+  // for the price of one file read.
+  const seedFile = continuation
+    ? integratedPath
+    : resumeRound
+      ? (resumeRound <= lastRound ? draftPath(resumeRound) : integratedPath)
+      : draftPath(1);
+  let planExpect = await recordPlanFile({
+    file: seedFile,
+    text: draft.planMarkdown,
+    label: resumeRound ? `plan:verify-seed:${resumeRound}` : "plan:verify-draft",
+    phaseName: "Draft",
+    what: resumeRound ? `plan seeded for round ${resumeRound}` : "plan draft"
+  });
   const questions = [...(draft.open_questions ?? [])];
   const uiDecisions = [...(input.uiDecisions ?? []), ...(draft.ui_decisions ?? [])];
   const reviews = [];
@@ -572,6 +742,9 @@ async function main(raw) {
     questions.push(...(claudeReview.open_questions ?? []), ...(codexReview.open_questions ?? []));
     uiDecisions.push(...(uiReview?.ui_decisions ?? []));
 
+    // The last revision of a pass is that pass's finished plan, so it lands on the
+    // one file the manifest, the train, and the cross-check all read.
+    const revisedFile = round < lastRound ? draftPath(round + 1) : integratedPath;
     draft = await agent([
       "Revise the plan by resolving every supported critique. Preserve valid details and do not add a review transcript.",
       fenced("goal", input.goal),
@@ -581,9 +754,7 @@ async function main(raw) {
       uiReview ? fenced("interface-review", JSON.stringify(uiReview, null, 2)) : "",
       decisions.length ? fenced("human-decisions", JSON.stringify(decisions, null, 2)) : "",
       uiBrief,
-      // The last revision of a pass is that pass's finished plan, so it lands on
-      // the one file the manifest, the train, and the cross-check all read.
-      persist(round < lastRound ? draftPath(round + 1) : integratedPath, questions, dedupeDecisions(uiDecisions))
+      persist(revisedFile, questions, dedupeDecisions(uiDecisions))
     ].join("\n\n"), {
       label: `plan:revise:${round}`,
       phase: `Cross-review ${round}`,
@@ -594,7 +765,13 @@ async function main(raw) {
     });
     callCount += 1;
     if (!draft?.planMarkdown) throw new Error(`plan revision ${round} failed`);
-    planExpect = expectText(draft.planMarkdown);
+    planExpect = await recordPlanFile({
+      file: revisedFile,
+      text: draft.planMarkdown,
+      label: `plan:verify-revision:${round}`,
+      phaseName: `Cross-review ${round}`,
+      what: `plan revised in round ${round}`
+    });
     questions.push(...(draft.open_questions ?? []));
     uiDecisions.push(...(draft.ui_decisions ?? []));
   }
@@ -635,6 +812,44 @@ async function main(raw) {
   callCount += 1;
   if (!train?.prs?.length) throw new Error("the PR decomposer returned no pull requests");
 
+  // Both handoff artifacts are read back in one command, so the pass learns what
+  // was really saved before it assembles a cross-check around it. Canonical JSON
+  // already absorbs key order and indentation, which leaves a faithful copy
+  // nothing to differ by: unlike the plan text, these must match exactly, and a
+  // dropped task or pull request stops the pass here.
+  const handoffExpects = { MANIFEST: expectJson(manifest), PR_TRAIN: expectJson(train) };
+  const savedHandoff = await verifySaved({
+    command: verifyCommand({
+      pluginRoot: input.pluginRoot,
+      payloads: [
+        { name: "MANIFEST", file: manifestPath, json: true },
+        { name: "PR_TRAIN", file: trainPath, json: true }
+      ],
+      expects: handoffExpects
+    }),
+    label: "plan:verify-handoff",
+    phase: "PR train",
+    model: relayModel,
+    what: "manifest and pull-request train",
+    file: `${manifestPath} and ${trainPath}`
+  });
+  callCount += 1;
+  const savedPayload = (name) => savedHandoff.find((payload) => payload?.name === name) ?? null;
+  const manifestExpect = adoptSavedToken({
+    payload: savedPayload("MANIFEST"),
+    expected: handoffExpects.MANIFEST,
+    expectedChars: canonicalJson(manifest).length,
+    what: "manifest",
+    file: manifestPath
+  });
+  const trainExpect = adoptSavedToken({
+    payload: savedPayload("PR_TRAIN"),
+    expected: handoffExpects.PR_TRAIN,
+    expectedChars: canonicalJson(train).length,
+    what: "pull-request train",
+    file: trainPath
+  });
+
   const decompositionArtifact = `${input.planDir}/reviews/${passId}-decomposition-codex.json`;
   const decompositionPromptFile = `${decompositionArtifact}.prompt.md`;
   // The three sections together ran to hundreds of kilobytes in real plans. They
@@ -655,10 +870,12 @@ async function main(raw) {
       { name: "MANIFEST", file: manifestPath, json: true },
       { name: "PR_TRAIN", file: trainPath, json: true }
     ],
+    // Every token here was read back off the file it names, so this is a check
+    // that nothing has changed since, not a restatement of what a step claimed.
     expects: {
       PLAN: planExpect,
-      MANIFEST: expectJson(manifest),
-      PR_TRAIN: expectJson(train)
+      MANIFEST: manifestExpect,
+      PR_TRAIN: trainExpect
     },
     // The pass may not report success while the record it resumes from is
     // missing, empty, or unreadable.
