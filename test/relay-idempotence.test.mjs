@@ -99,6 +99,12 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   // Codex was not spawned a second time, so a retry costs nothing and cannot
   // overwrite the earlier review.
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
+
+  fs.writeFileSync(artifact, JSON.stringify({ ...CLEAN_FINDINGS, summary: "tampered" }));
+  const repaired = runBridge(temp, artifact, fake);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  assert.equal(JSON.parse(repaired.stdout.trim()).reused, false);
+  assert.equal(fs.readFileSync(counter, "utf8"), "xx");
 });
 
 test("a Codex executable that never spawns does not create a usage receipt", () => {
@@ -109,7 +115,7 @@ test("a Codex executable that never spawns does not create a usage receipt", () 
   assert.equal(fs.existsSync(`${artifact}.usage-receipts.json`), false);
 });
 
-test("legacy request sidecars gain one stable receipt without rerunning Codex", () => {
+test("legacy request sidecars are re-executed once when completion binding is unavailable", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-legacy-receipt-"));
   const counter = path.join(temp, "count.txt");
   const fake = fakeCodex(temp, counter);
@@ -124,12 +130,14 @@ test("legacy request sidecars gain one stable receipt without rerunning Codex", 
   const migrated = runBridge(temp, artifact, fake);
   assert.equal(migrated.status, 0, migrated.stderr);
   const migratedResult = JSON.parse(migrated.stdout.trim());
-  assert.equal(migratedResult.reused, true);
+  assert.equal(migratedResult.reused, false);
   assert.match(migratedResult.executionId, /^[0-9a-f-]{36}$/);
   assert.equal(JSON.parse(fs.readFileSync(requestFile, "utf8")).executionId, migratedResult.executionId);
   const repeated = runBridge(temp, artifact, fake);
-  assert.equal(JSON.parse(repeated.stdout.trim()).executionId, migratedResult.executionId);
-  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+  const repeatedResult = JSON.parse(repeated.stdout.trim());
+  assert.equal(repeatedResult.reused, true);
+  assert.equal(repeatedResult.executionId, migratedResult.executionId);
+  assert.equal(fs.readFileSync(counter, "utf8"), "xx");
 });
 
 test("concurrent identical bridges safely reclaim one stale lock and retain one receipt", async () => {
@@ -263,6 +271,85 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   ]);
   for (const result of results) assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(overlap), false);
+});
+
+test("an orphaned Codex child keeps the worktree writer lock", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-orphan-writer-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  const counter = path.join(temp, "count.txt");
+  const fake = path.join(temp, "fake-codex.mjs");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(counter)}, "x");
+await new Promise((resolve) => setTimeout(resolve, 1200));
+fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(CLEAN_FINDINGS)}));
+`);
+  fs.chmodSync(fake, 0o700);
+  const firstArtifact = path.join(temp, "one.json");
+  const first = spawn(process.execPath, [
+    path.join(root, "scripts/codex-run.mjs"),
+    "--worktree", worktree,
+    "--schema", path.join(root, "schemas/findings.schema.json"),
+    "--artifact", firstArtifact,
+    "--model", "gpt-test",
+    "--effort", "high",
+    "--sandbox", "workspace-write",
+    "--ship-dir", temp,
+    "--codex-bin", fake,
+    "--min-prompt-bytes", "1"
+  ], { stdio: ["pipe", "ignore", "ignore"] });
+  first.stdin.end("one");
+  const writerLock = path.join(
+    worktree,
+    ".git",
+    "tagteam-codex-writer-locks",
+    createHash("sha256").update(path.resolve(worktree)).digest("hex")
+  );
+  let owner = null;
+  for (let attempt = 0; attempt < 100 && !(owner?.protectedProcesses?.length); attempt += 1) {
+    try { owner = JSON.parse(fs.readFileSync(path.join(writerLock, "owner.json"), "utf8")); } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(owner?.protectedProcesses?.length, 1);
+  first.kill("SIGKILL");
+  await new Promise((resolve) => first.once("close", resolve));
+
+  const secondArtifact = path.join(temp, "two.json");
+  const blocked = await runBridgeAsync(
+    temp,
+    secondArtifact,
+    fake,
+    ["--sandbox", "workspace-write"],
+    "two",
+    worktree,
+    { TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "350" }
+  );
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /timed out waiting.*lock/);
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+
+  await new Promise((resolve) => setTimeout(resolve, 1300));
+  const recovered = await runBridgeAsync(
+    temp,
+    secondArtifact,
+    fake,
+    ["--sandbox", "workspace-write"],
+    "two",
+    worktree,
+    { TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "3000" }
+  );
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(fs.readFileSync(counter, "utf8"), "xx");
 });
 
 test("concurrent bridges safely reclaim one stale global slot", async () => {
@@ -471,7 +558,7 @@ test("automatic dirty recovery refuses ignored bytes it cannot bind", () => {
     `${artifact}.relay-checkpoint.json`, worktree, artifact
   ], { encoding: "utf8" });
   assert.equal(rejected.status, 1);
-  assert.match(rejected.stderr, /cannot bind ignored files or submodule contents/);
+  assert.match(rejected.stderr, /cannot bind ignored files, hidden tracked files, or submodule contents/);
 });
 
 test("worktree state marks submodule contents as unsafe for automatic recovery", () => {
@@ -492,6 +579,30 @@ test("worktree state marks submodule contents as unsafe for automatic recovery",
   const state = gitWorktreeState(worktree);
   assert.equal(state.automaticRecoverySafe, false);
   assert.deepEqual(state.unboundState.submodulePaths, ["vendor/sub"]);
+});
+
+test("worktree state refuses tracked files hidden by index flags", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-hidden-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "assumed.txt"), "original\n");
+  fs.writeFileSync(path.join(worktree, "skipped.txt"), "original\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "."]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "update-index", "--assume-unchanged", "assumed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "update-index", "--skip-worktree", "skipped.txt"]).status, 0);
+  fs.writeFileSync(path.join(worktree, "assumed.txt"), "hidden change\n");
+  fs.writeFileSync(path.join(worktree, "skipped.txt"), "hidden change\n");
+
+  const state = gitWorktreeState(worktree);
+  assert.equal(state.statusBytes, 0);
+  assert.equal(state.automaticRecoverySafe, false);
+  assert.deepEqual(state.unboundState.hiddenTrackedPaths, ["assumed.txt", "skipped.txt"]);
 });
 
 test("worktree content hashing length-prefixes untracked entries", () => {
@@ -581,7 +692,7 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
   }));
   const interrupted = {
     status: "relay-interrupted",
-    usage: { codexCalls: 3, relayRetries: 2 },
+    usage: { codexCalls: 1, relayRetries: 2 },
     usageReceipts: ["exec-old"],
     usageReceiptFiles: [receiptFile],
     relayCheckpoints: [checkpointFile],
@@ -589,11 +700,11 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
   };
 
   const reconciled = reconcileUsageReceipts(interrupted);
-  assert.equal(reconciled.usage.codexCalls, 5);
+  assert.equal(reconciled.usage.codexCalls, 3);
   assert.deepEqual(reconciled.usageReceipts, ["exec-old", "exec-invalid-schema", "exec-new"]);
   assert.equal(reconciled.usageAccounting, "complete");
   const repeated = reconcileUsageReceipts(reconciled);
-  assert.equal(repeated.usage.codexCalls, 5);
+  assert.equal(repeated.usage.codexCalls, 3);
   assert.deepEqual(repeated.usageReceipts, reconciled.usageReceipts);
   const legacy = reconcileUsageReceipts({
     ...reconciled,
@@ -601,6 +712,10 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
     legacyUsageIncomplete: true
   });
   assert.equal(legacy.usageAccounting, "legacy-incomplete");
+  assert.throws(() => reconcileUsageReceipts({
+    ...interrupted,
+    usage: { codexCalls: 0, relayRetries: 2 }
+  }), /does not match 1 authoritative receipts/);
 });
 
 test("receipt reconciliation classifies workspace interruption from its checkpoint", () => {

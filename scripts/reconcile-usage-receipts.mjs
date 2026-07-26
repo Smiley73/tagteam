@@ -15,6 +15,15 @@ function fileHash(file) {
 export function reconcileUsageReceipts(result) {
   if (!result || typeof result !== "object") throw new Error("workflow result is required");
   const receipts = new Set(result.usageReceipts ?? []);
+  const codexCalls = Number(result.usage?.codexCalls ?? 0);
+  if (!Number.isSafeInteger(codexCalls) || codexCalls < 0) {
+    throw new Error("persisted Codex usage must be a nonnegative safe integer");
+  }
+  const legacyIncomplete = result.legacyUsageIncomplete === true
+    || result.usageAccounting === "legacy-incomplete";
+  if (!legacyIncomplete && codexCalls !== receipts.size) {
+    throw new Error(`Codex usage count ${codexCalls} does not match ${receipts.size} authoritative receipts`);
+  }
   const workspaceCheckpointStates = [];
   let added = 0;
   for (const receiptFile of result.usageReceiptFiles ?? []) {
@@ -109,10 +118,10 @@ export function reconcileUsageReceipts(result) {
     status,
     usage: {
       ...(result.usage ?? {}),
-      codexCalls: Number(result.usage?.codexCalls ?? 0) + added
+      codexCalls: legacyIncomplete ? codexCalls + added : receipts.size
     },
     usageReceipts: [...receipts],
-    usageAccounting: result.legacyUsageIncomplete ? "legacy-incomplete" : "complete"
+    usageAccounting: legacyIncomplete ? "legacy-incomplete" : "complete"
   };
 }
 

@@ -31,6 +31,11 @@ export function gitWorktreeState(worktreeArg) {
     .filter((entry) => entry.startsWith("160000 "))
     .map((entry) => entry.slice(entry.indexOf("\t") + 1))
     .sort();
+  const hiddenTracked = String(git(worktree, ["ls-files", "-v", "-z"], { encoding: "utf8" }))
+    .split("\0").filter(Boolean)
+    .filter((entry) => entry.startsWith("S ") || /^[a-z] /.test(entry))
+    .map((entry) => entry.slice(2))
+    .sort();
   const untracked = String(git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }))
     .split("\0").filter(Boolean).sort();
   const content = createHash("sha256");
@@ -60,10 +65,11 @@ export function gitWorktreeState(worktreeArg) {
     statusBytes: status.length,
     statusHash: createHash("sha256").update(status).digest("hex"),
     contentHash: content.digest("hex"),
-    automaticRecoverySafe: ignored.length === 0 && gitlinks.length === 0,
+    automaticRecoverySafe: ignored.length === 0 && gitlinks.length === 0 && hiddenTracked.length === 0,
     unboundState: {
       ignoredPaths: ignored,
-      submodulePaths: gitlinks
+      submodulePaths: gitlinks,
+      hiddenTrackedPaths: hiddenTracked
     }
   };
 }

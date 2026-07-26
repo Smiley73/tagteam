@@ -7,7 +7,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateJson } from "./validate-json.mjs";
-import { validateRelayCheckpoint } from "./validate-relay-checkpoint.mjs";
+import { validateCompletionCheckpoint, validateRelayCheckpoint } from "./validate-relay-checkpoint.mjs";
 import {
   classifyProviderError,
   nextBackoff,
@@ -101,7 +101,7 @@ function stubFor(rule, root) {
 function staleLockIdentity(lockPath, owner) {
   if (owner?.token) return `token:${owner.token}`;
   const stat = fs.statSync(lockPath);
-  return `stat:${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.mtimeMs}`;
+  return `stat:${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
 }
 
 function quarantineStaleLock(lockPath, identity) {
@@ -128,8 +128,14 @@ function quarantineStaleLock(lockPath, identity) {
     // published while that directory still occupies lockPath, and every new
     // publisher observes reclaimingPath before retrying. Re-read after taking
     // both claims so a stale observation can never quarantine a successor.
-    const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
-    if (staleLockIdentity(lockPath, owner) !== identity) return false;
+    let currentIdentity;
+    try {
+      const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+      currentIdentity = staleLockIdentity(lockPath, owner);
+    } catch {
+      currentIdentity = staleLockIdentity(lockPath);
+    }
+    if (currentIdentity !== identity) return false;
     fs.renameSync(lockPath, `${lockPath}.stale-${suffix}`);
     moved = true;
     return true;
@@ -157,7 +163,8 @@ function publishLock(lockPath, token) {
       token,
       at: new Date().toISOString(),
       heartbeatAt: new Date().toISOString(),
-      processIdentity: PROCESS_IDENTITY
+      processIdentity: PROCESS_IDENTITY,
+      protectedProcesses: []
     }),
     { mode: 0o600 }
   );
@@ -172,48 +179,64 @@ function publishLock(lockPath, token) {
   }
 }
 
+/*
+ * A stale bridge can leave a detached Codex child behind. Ownership therefore
+ * covers both the bridge generation and every child it started; a contender
+ * may reclaim only after all recorded process identities are gone.
+ */
 function staleOwnerIdentity(lockPath, owner) {
-  try {
-    process.kill(owner.pid, 0);
-  } catch (error) {
-    return error.code === "ESRCH" ? staleLockIdentity(lockPath, owner) : null;
-  }
-  const currentIdentity = processIdentity(owner.pid);
-  if (owner.processIdentity && currentIdentity && owner.processIdentity !== currentIdentity) {
-    return staleLockIdentity(lockPath, owner);
-  }
-  // A live matching process is never evicted merely because its heartbeat is
-  // late: a suspended bridge can resume, and the lock token cannot fence its
-  // already-running Codex child from filesystem writes.
-  return null;
+  const processIsAlive = ({ pid, processIdentity: expectedIdentity }) => {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
+    const currentIdentity = processIdentity(pid);
+    return !(expectedIdentity && currentIdentity && expectedIdentity !== currentIdentity);
+  };
+  if (processIsAlive(owner)) return null;
+  if ((owner.protectedProcesses ?? []).some(processIsAlive)) return null;
+  return staleLockIdentity(lockPath, owner);
 }
 
 function holdLock(lockPath, token) {
+  const updateOwner = (transform) => {
+    const ownerPath = path.join(lockPath, "owner.json");
+    const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+    if (owner.token !== token) throw new Error(`lock ownership changed at ${lockPath}`);
+    writeJsonAtomic(ownerPath, transform(owner));
+  };
   const heartbeat = setInterval(() => {
     try {
-      const ownerPath = path.join(lockPath, "owner.json");
-      const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
-      if (owner.token !== token) {
-        clearInterval(heartbeat);
-        return;
-      }
-      writeJsonAtomic(ownerPath, { ...owner, heartbeatAt: new Date().toISOString() });
+      updateOwner((owner) => ({ ...owner, heartbeatAt: new Date().toISOString() }));
     } catch {
       clearInterval(heartbeat);
     }
   }, LOCK_HEARTBEAT_MS);
   heartbeat.unref();
-  return () => {
-    clearInterval(heartbeat);
-    try {
-      const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
-      if (owner.token === token) fs.rmSync(lockPath, { recursive: true, force: true });
-    } catch {}
+  return {
+    protect(pid) {
+      const child = { pid, processIdentity: processIdentity(pid) };
+      updateOwner((owner) => ({
+        ...owner,
+        protectedProcesses: [
+          ...(owner.protectedProcesses ?? []).filter((entry) => entry.pid !== pid),
+          child
+        ]
+      }));
+    },
+    release() {
+      clearInterval(heartbeat);
+      try {
+        const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+        if (owner.token === token) fs.rmSync(lockPath, { recursive: true, force: true });
+      } catch {}
+    }
   };
 }
 
 async function acquireSlot(shipDir, maximum) {
-  if (!shipDir) return () => {};
+  if (!shipDir) return { protect() {}, release() {} };
   const slotRoot = path.join(shipDir, ".codex-slots");
   fs.mkdirSync(slotRoot, { recursive: true, mode: 0o700 });
   const token = randomUUID();
@@ -293,14 +316,19 @@ async function acquireExecutionLocks(options) {
       name: digest(worktree)
     }] : [])
   ].sort((left, right) => `${left.root}/${left.name}`.localeCompare(`${right.root}/${right.name}`));
-  const releases = [];
+  const handles = [];
   try {
-    for (const lock of locks) releases.push(await acquireNamedLock(lock.root, lock.name));
-    return () => {
-      for (const release of releases.reverse()) release();
+    for (const lock of locks) handles.push(await acquireNamedLock(lock.root, lock.name));
+    return {
+      protect(pid) {
+        for (const handle of handles) handle.protect(pid);
+      },
+      release() {
+        for (const handle of handles.reverse()) handle.release();
+      }
     };
   } catch (error) {
-    for (const release of releases.reverse()) release();
+    for (const handle of handles.reverse()) handle.release();
     throw error;
   }
 }
@@ -361,7 +389,7 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
       child.once("spawn", spawned);
       child.once("error", failed);
     });
-    onSpawn();
+    onSpawn(child.pid);
     child.stdin.end(prompt);
   } catch (error) {
     killProcessGroup(child, "SIGTERM");
@@ -506,15 +534,22 @@ export async function runCodex(options, prompt) {
           process.stderr.write(`Reusing the existing dry-run artifact at ${artifact}; Codex was not invoked.\n`);
           return { result: existing.value, reused: true, executionId: null };
         }
-        if (options.sandbox === "workspace-write") {
-          const checkpointPath = `${artifact}.relay-checkpoint.json`;
-          try {
+        const checkpointPath = `${artifact}.relay-checkpoint.json`;
+        let safeReuse = true;
+        try {
+          if (options.sandbox === "workspace-write") {
             validateRelayCheckpoint(checkpointPath, options.worktree, artifact, { requireChange: false });
-          } catch (error) {
+          } else {
+            validateCompletionCheckpoint(checkpointPath, artifact, "read-only");
+          }
+        } catch (error) {
+          if (options.sandbox === "workspace-write") {
             throw new Error(`Writable Codex result cannot be reused safely: ${error.message}`);
           }
+          safeReuse = false;
+          process.stderr.write(`Read-only Codex result cannot be reused safely (${error.message}); running Codex again.\n`);
         }
-        if (!recorded.executionId) {
+        if (safeReuse && !recorded.executionId) {
           // Pre-receipt sidecars still describe one historical execution. Give
           // that execution a deterministic identity so every resume imports it
           // once instead of claiming exact accounting while silently omitting it.
@@ -525,13 +560,17 @@ export async function runCodex(options, prompt) {
           };
           writeJsonAtomic(requestPath, recorded);
         }
-        appendInvocationReceipt(artifact, fingerprint, recorded.executionId, { legacy: true });
-        process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
-        return { result: existing.value, reused: true, executionId: recorded.executionId };
+        if (safeReuse) {
+          appendInvocationReceipt(artifact, fingerprint, recorded.executionId, { legacy: true });
+          process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
+          return { result: existing.value, reused: true, executionId: recorded.executionId };
+        }
       }
-      process.stderr.write(recorded
-        ? `The artifact at ${artifact} answers a different request; running Codex again.\n`
-        : `The artifact at ${artifact} has no recorded request; running Codex again.\n`);
+      if (recorded?.fingerprint !== fingerprint) {
+        process.stderr.write(recorded
+          ? `The artifact at ${artifact} answers a different request; running Codex again.\n`
+          : `The artifact at ${artifact} has no recorded request; running Codex again.\n`);
+      }
     }
   }
   if (options.sandbox === "workspace-write" && hasInvocationReceipt(artifact, fingerprint)) {
@@ -542,7 +581,7 @@ export async function runCodex(options, prompt) {
   }
 
   fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
-  const release = await acquireSlot(options.shipDir ? path.resolve(options.shipDir) : null, options.maxConcurrent);
+  const slotLock = await acquireSlot(options.shipDir ? path.resolve(options.shipDir) : null, options.maxConcurrent);
   const quotaStatePath = path.join(options.shipDir ?? path.dirname(artifact), ".quota", `${options.model}-${options.effort}.json`);
   try {
     let amendedPrompt = prompt;
@@ -557,7 +596,9 @@ export async function runCodex(options, prompt) {
         prompt: amendedPrompt,
         outputPath: attemptPath,
         eventsPath,
-        onSpawn: () => {
+        onSpawn: (childPid) => {
+          slotLock.protect(childPid);
+          options.executionLocks?.protect(childPid);
           if (!options.dryRun) {
             appendInvocationReceipt(artifact, fingerprint, executionId, { attempt: invalidAttempts + 1 });
           }
@@ -615,7 +656,7 @@ export async function runCodex(options, prompt) {
     }
     throw new Error("unreachable");
   } finally {
-    release();
+    slotLock.release();
   }
 }
 
@@ -657,7 +698,7 @@ function writeRelayCheckpoint(options, executionId, before) {
 }
 
 async function main() {
-  let releaseExecutionLocks = () => {};
+  let executionLocks = { protect() {}, release() {} };
   try {
     const options = parseArgs(process.argv.slice(2));
     let prompt = options.promptFile
@@ -673,7 +714,8 @@ async function main() {
       const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }
-    releaseExecutionLocks = await acquireExecutionLocks(options);
+    executionLocks = await acquireExecutionLocks(options);
+    options.executionLocks = executionLocks;
     const before = gitWorktreeState(options.worktree);
     const { result, reused, executionId } = await runCodex(options, prompt);
     if (executionId && !reused) {
@@ -695,7 +737,7 @@ async function main() {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
   } finally {
-    releaseExecutionLocks();
+    executionLocks.release();
   }
 }
 

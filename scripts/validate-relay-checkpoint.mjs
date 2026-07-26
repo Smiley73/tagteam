@@ -14,28 +14,43 @@ function fileHash(file) {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
-export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg, { requireChange = true } = {}) {
+export function validateCompletionCheckpoint(checkpointFile, artifactArg, expectedSandbox) {
   const checkpoint = readJson(checkpointFile);
-  const worktree = path.resolve(worktreeArg);
   const artifact = path.resolve(artifactArg);
   if (checkpoint.version !== 2) throw new Error("unsupported relay checkpoint version");
-  if (checkpoint.worktree !== worktree || checkpoint.artifact !== artifact) {
-    throw new Error("relay checkpoint paths do not match this resume");
+  if (checkpoint.artifact !== artifact) {
+    throw new Error("relay checkpoint artifact path does not match this resume");
   }
-  if (checkpoint.sandbox !== "workspace-write") throw new Error("relay checkpoint is not for workspace-writing work");
+  if (expectedSandbox && checkpoint.sandbox !== expectedSandbox) {
+    throw new Error(`relay checkpoint is not for ${expectedSandbox} work`);
+  }
   if (checkpoint.artifactHash !== fileHash(artifact)
     || checkpoint.requestHash !== fileHash(checkpoint.requestPath)
     || checkpoint.schemaHash !== fileHash(checkpoint.schema)) {
     throw new Error("relay checkpoint artifact, request, or schema bytes changed after completion");
   }
-  if (checkpoint.statusBefore?.automaticRecoverySafe !== true
-    || checkpoint.statusAfter?.automaticRecoverySafe !== true) {
-    throw new Error("relay checkpoint cannot bind ignored files or submodule contents; human reconciliation is required");
-  }
   const request = readJson(checkpoint.requestPath);
   if (!checkpoint.executionId || request.executionId !== checkpoint.executionId
     || request.fingerprint !== checkpoint.requestFingerprint) {
     throw new Error("relay checkpoint does not match the saved request receipt");
+  }
+  const schema = readJson(checkpoint.schema);
+  const artifactValue = readJson(artifact);
+  const errors = validateJson(schema, artifactValue);
+  if (errors.length > 0) throw new Error(`relay artifact is invalid: ${errors.join("; ")}`);
+  return checkpoint;
+}
+
+export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg, { requireChange = true } = {}) {
+  const checkpoint = validateCompletionCheckpoint(checkpointFile, artifactArg, "workspace-write");
+  const worktree = path.resolve(worktreeArg);
+  const artifact = path.resolve(artifactArg);
+  if (checkpoint.worktree !== worktree) {
+    throw new Error("relay checkpoint worktree path does not match this resume");
+  }
+  if (checkpoint.statusBefore?.automaticRecoverySafe !== true
+    || checkpoint.statusAfter?.automaticRecoverySafe !== true) {
+    throw new Error("relay checkpoint cannot bind ignored files, hidden tracked files, or submodule contents; human reconciliation is required");
   }
   const state = gitWorktreeState(worktree);
   if (state.headOid !== checkpoint.headOid
@@ -52,10 +67,6 @@ export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg
       throw new Error("relay checkpoint does not record a workspace change");
     }
   }
-  const schema = readJson(checkpoint.schema);
-  const artifactValue = readJson(artifact);
-  const errors = validateJson(schema, artifactValue);
-  if (errors.length > 0) throw new Error(`relay artifact is invalid: ${errors.join("; ")}`);
   return { ok: true, checkpoint: path.resolve(checkpointFile), artifact, executionId: checkpoint.executionId, headOid: state.headOid };
 }
 
