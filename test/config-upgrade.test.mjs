@@ -142,3 +142,55 @@ test("the stale-settings message names the upgrade command and keeps internal te
     assert.doesNotMatch(line, /schema|config\.json|ui\.|exit 3/i);
   }
 });
+
+test("a flag given without a value is a usage error, not a crash", () => {
+  for (const argv of [["--repo"], ["--manifest"], ["--repo", root]]) {
+    const result = spawnSync(process.execPath, [
+      path.join(root, "scripts/validate-json.mjs"),
+      ...argv
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 2, `${argv.join(" ")}: ${result.stderr}`);
+    assert.match(result.stderr, /^usage: validate-json\.mjs /);
+    // A raw stack means the argument reached path.resolve as undefined.
+    assert.doesNotMatch(result.stderr, /ERR_INVALID_ARG_TYPE|at Object\.resolve/);
+  }
+});
+
+test("an unreadable manifest reports like any other unreadable input", () => {
+  const result = runValidator(example(), ["--manifest", path.join(root, "does-not-exist.json")]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^validation failed: /);
+  assert.doesNotMatch(result.stderr, /ENOENT: no such file[\s\S]*at /);
+});
+
+test("the ship-side stale notice is one sentence and keeps internal terms out of it", () => {
+  const rendered = messages.configStaleShip({
+    command: "/tagteam:init --upgrade",
+    artifact: "/repo/.tagteam/config.json"
+  });
+  const lines = rendered.split("\n");
+  // Ship continues, so it says this in one sentence; plan's four-line stop does not apply.
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /command \/tagteam:init --upgrade/);
+  assert.match(lines[1], /artifact \/repo\/\.tagteam\/config\.json/);
+  assert.doesNotMatch(lines[0], /schema|config\.json|ui\.|exit 3/i);
+  // The merge gate survives the missing answers, and the sentence has to say so.
+  assert.match(lines[0], /pull request still waits for you/);
+});
+
+test("ship and the skill state the same defaults for unanswered interface keys", () => {
+  const ship = fs.readFileSync(path.join(root, "commands/ship.md"), "utf8");
+  const skill = fs.readFileSync(path.join(root, "skills/tagteam/SKILL.md"), "utf8");
+  // Asymmetric on purpose: review coverage stays on, confirmation prompts do not
+  // start appearing for people who never asked for them.
+  const defaults = [
+    /`hasUserInterface: true`/,
+    /`conventionPaths: \[\]`/,
+    /`confirmDecisions: off`/,
+    /messages\.mjs configStaleShip|`messages\.mjs configStaleShip`/
+  ];
+  for (const pattern of defaults) {
+    assert.match(ship, pattern, `commands/ship.md must state ${pattern}`);
+    assert.match(skill, pattern, `skills/tagteam/SKILL.md must state ${pattern}`);
+  }
+});
