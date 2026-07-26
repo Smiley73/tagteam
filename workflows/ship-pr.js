@@ -371,9 +371,20 @@ function relayModelFor(policy, config) {
   return policy?.plumbingModel ?? config.transport?.relayModel ?? "sonnet";
 }
 
+function relayEnvelopeSchema(resultSchema) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["reused", "result"],
+    properties: {
+      reused: { type: "boolean" },
+      result: resultSchema
+    }
+  };
+}
+
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
-  usageState.codexCalls += 1;
   const promptFile = `${artifact}.prompt.md`;
   // Declared from the prompt the workflow actually built, so a relay that
   // shortened or paraphrased it fails before Codex is invoked rather than
@@ -398,23 +409,32 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
   const basePrompt = [
     `Write the exact text in the untrusted-prompt fence to ${promptFile} with mode 0600.`,
     `Run this exact command: ${command}`,
-    "Read the validated artifact and return its parsed JSON object exactly.",
+    "Use the bridge's JSON stdout; do not re-read or retype the artifact.",
     fence("prompt", prompt)
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
-    const result = await plumbingCall(attempt === 1 ? basePrompt : [
+    const response = await plumbingCall(attempt === 1 ? [
+      basePrompt,
+      "From the bridge stdout, return only reused and result. Do not infer or alter either field."
+    ].join("\n\n") : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "Return the parsed object by invoking the StructuredOutput tool."
+      "From the bridge stdout, return only reused and result. Do not infer or alter either field."
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: kind,
       agentType: "tagteam:codex-runner",
       model: relayModelFor(input.runPolicy, input.config),
-      schema
+      schema: relayEnvelopeSchema(schema)
     });
-    if (result) return result;
+    if (response) {
+      const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
+        ? response
+        : { reused: false, result: response };
+      if (!envelope.reused) usageState.codexCalls += 1;
+      return envelope.result;
+    }
     log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
   }
   return null;

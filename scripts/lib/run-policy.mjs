@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const RUN_POLICY_VERSION = 1;
@@ -93,6 +94,17 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
+export function restoreRunPolicy(file, config = {}) {
+  if (fs.existsSync(file)) return { policy: validateRunPolicy(readJson(file)), migratedLegacy: false };
+  const policy = normalizeRunPolicy({ provider: "both" }, config);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, file);
+  fs.chmodSync(file, 0o600);
+  return { policy, migratedLegacy: true };
+}
+
 async function main() {
   const [action, value, configPath] = process.argv.slice(2);
   if (action === "normalize") {
@@ -100,8 +112,11 @@ async function main() {
     process.stdout.write(`${JSON.stringify(normalizeRunPolicy({ provider: value ?? "both" }, config), null, 2)}\n`);
   } else if (action === "validate") {
     process.stdout.write(`${JSON.stringify(validateRunPolicy(readJson(value)), null, 2)}\n`);
+  } else if (action === "restore") {
+    const config = configPath ? readJson(configPath) : {};
+    process.stdout.write(`${JSON.stringify(restoreRunPolicy(value, config), null, 2)}\n`);
   } else {
-    process.stderr.write("usage: run-policy.mjs <normalize <both|claude|codex> [config.json]|validate <policy.json>>\n");
+    process.stderr.write("usage: run-policy.mjs <normalize <both|claude|codex> [config.json]|validate <policy.json>|restore <policy.json> [config.json]>\n");
     process.exitCode = 2;
   }
 }

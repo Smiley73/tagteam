@@ -353,6 +353,18 @@ function relayModelFor(policy, config) {
   return policy?.plumbingModel ?? config.transport?.relayModel ?? "sonnet";
 }
 
+function relayEnvelopeSchema(resultSchema) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["reused", "result"],
+    properties: {
+      reused: { type: "boolean" },
+      result: resultSchema
+    }
+  };
+}
+
 // Builds one request file out of text that is already on disk. The agent runs a
 // command and reports a byte count; the payload never passes through it. The
 // command is idempotent, so a lost reply costs one re-run and nothing else.
@@ -479,22 +491,32 @@ function promptNotBuilt({ what, promptFile, detail }) {
 }
 
 async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
-  usageState.codexCalls += 1;
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (model === "haiku") usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
-    const result = await agent(attempt === 1 ? prompt : [
+    const response = await agent(attempt === 1 ? [
+      prompt,
+      "From the bridge stdout, return only reused and result. Do not infer or alter either field."
+    ].join("\n\n") : [
       prompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "Return the parsed object by invoking the StructuredOutput tool."
+      "From the bridge stdout, return only reused and result. Do not infer or alter either field."
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: phaseName,
       agentType: "tagteam:codex-runner",
       model,
-      schema
+      schema: relayEnvelopeSchema(schema)
     });
-    if (result) return result;
+    if (response) {
+      // The compatibility branch is for legacy workflow harnesses; production
+      // agents are schema-bound to the envelope above.
+      const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
+        ? response
+        : { reused: false, result: response };
+      if (!envelope.reused) usageState.codexCalls += 1;
+      return envelope.result;
+    }
     log(`The Codex ${what} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
   }
   // parallel() turns a thrown error into null, so callers inside parallel must
@@ -747,7 +769,7 @@ async function main(raw) {
       }),
       () => relayCodex({
         prompt: [
-          "The review request has already been written to disk. Run this exact command, then read and return the validated artifact.",
+          "The review request has already been written to disk. Run this exact command and use its JSON stdout.",
           codexCommand,
           "Do not write, edit, or re-create the prompt file."
         ].join("\n\n"),
@@ -977,7 +999,7 @@ async function main(raw) {
   callCount += 1;
   const decompositionReview = await relayCodex({
     prompt: [
-      "The cross-check request has already been written to disk. Run this exact command, then read and return the validated artifact.",
+      "The cross-check request has already been written to disk. Run this exact command and use its JSON stdout.",
       decompositionCommand,
       "Do not write, edit, or re-create the prompt file."
     ].join("\n\n"),

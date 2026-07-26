@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   assuranceFor,
   normalizeRunPolicy,
   plumbingModelFor,
   providerAllowed,
   reasoningProviders,
+  restoreRunPolicy,
   samePolicy,
   validateRunPolicy
 } from "../scripts/lib/run-policy.mjs";
@@ -47,4 +51,17 @@ test("run policy validation rejects field tampering under a retained fingerprint
     assert.throws(() => validateRunPolicy(changed));
     assert.equal(samePolicy(policy, changed), false);
   }
+});
+
+test("legacy resume restores a validated both policy once at mode 0600", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-policy-"));
+  const file = path.join(directory, "reviews", "pass-1-run-policy.json");
+  const first = restoreRunPolicy(file, { transport: { relayModel: "opus" } });
+  assert.equal(first.migratedLegacy, true);
+  assert.equal(first.policy.reasoningProvider, "both");
+  assert.equal(first.policy.plumbingModel, "opus");
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  const second = restoreRunPolicy(file, { transport: { relayModel: "sonnet" } });
+  assert.equal(second.migratedLegacy, false);
+  assert.deepEqual(second.policy, first.policy);
 });

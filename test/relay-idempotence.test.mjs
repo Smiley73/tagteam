@@ -321,6 +321,20 @@ test("resume carries saved open questions and keeps persisting them", async () =
   assert.equal(persisted.includes("plan:revise:1"), true);
 });
 
+test("planning continuation carries cumulative provider usage", async () => {
+  const first = await harness("workflows/plan-forge.js", PLAN_ARGS, planResponder([]));
+  const second = await harness("workflows/plan-forge.js", {
+    ...PLAN_ARGS,
+    usage: first.result.usage
+  }, planResponder([]));
+  assert.deepEqual(second.result.usage, {
+    claudeReasoningCalls: first.result.usage.claudeReasoningCalls * 2,
+    haikuPlumbingCalls: first.result.usage.haikuPlumbingCalls * 2,
+    codexCalls: first.result.usage.codexCalls * 2,
+    relayRetries: first.result.usage.relayRetries * 2
+  });
+});
+
 test("every early exit reports the relay retries it spent", async () => {
   let droppedImplement = false;
   const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
@@ -475,6 +489,28 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
   assert.ok(shipRelays.length > 0);
   assert.equal(shipRelays.every((call) => call.model === "sonnet"), true);
   assert.equal(ship.result.usage.haikuPlumbingCalls, 4);
+});
+
+test("validated Codex artifact reuse is not counted as a new Codex call", async () => {
+  const { result } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, _prompt, options) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") return { reused: true, result: CLEAN_FINDINGS };
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(result.status, "clean");
+  assert.equal(result.usage.codexCalls, 0);
 });
 
 test("a lost Codex review relay result does not fail the PR round", async () => {
