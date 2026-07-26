@@ -323,6 +323,11 @@ function relayModelFor(config) {
 
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
   const promptFile = `${artifact}.prompt.md`;
+  // Declared from the prompt the workflow actually built, so a relay that
+  // shortened or paraphrased it fails before Codex is invoked rather than
+  // buying a confident answer to a question that was never fully asked.
+  const requiredFences = [...new Set([...prompt.matchAll(/<untrusted-([a-z0-9-]+)>/g)].map((match) => match[1]))];
+  if (reviewDiffPath) requiredFences.push("review-diff");
   const command = [
     `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
     `--worktree "${input.worktree}"`,
@@ -334,6 +339,8 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     `--ship-dir "${input.shipDir}"`,
     `--max-concurrent "${input.config.limits.maxConcurrentCodex}"`,
     `--prompt-file "${promptFile}"`,
+    ...requiredFences.map((label) => `--require-fence ${label}`),
+    `--min-prompt-bytes ${Math.floor(prompt.length * 0.8)}`,
     reviewDiffPath ? `--review-diff-path "${reviewDiffPath}"` : ""
   ].join(" ");
   const basePrompt = [

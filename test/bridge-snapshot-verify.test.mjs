@@ -28,6 +28,7 @@ test("Codex dry-run prints hardened argv and writes a schema-valid atomic artifa
     "--effort", "high",
     "--sandbox", "read-only",
     "--ship-dir", temp,
+    "--min-prompt-bytes", "1",
     "--dry-run"
   ], { input: "review this", encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
@@ -65,6 +66,7 @@ fs.writeFileSync(output, "{truncated");
     "--sandbox", "read-only",
     "--ship-dir", temp,
     "--codex-bin", fake,
+    "--min-prompt-bytes", "1",
     "--timeout-sec", "2"
   ], { input: "review this", encoding: "utf8" });
   assert.equal(result.status, 1);
@@ -112,6 +114,7 @@ process.stdin.on("end", () => {
     "--ship-dir", temp,
     "--codex-bin", fake,
     "--prompt-file", promptFile,
+    "--require-fence", "review-diff",
     "--review-diff-path", reviewDiffPath
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);

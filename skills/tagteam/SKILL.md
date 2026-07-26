@@ -164,13 +164,25 @@ The script is idempotent and verifies the result with `git check-ignore`, so `/t
 
 Resume parses artifacts and reconciles Git/GitHub before mutation. It never trusts conversation memory. A malformed review artifact means not converged.
 
-Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point, `drafts/<passId>-integrated.md`, `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
+Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point, `drafts/<passId>-integrated.md` (that pass's finished plan, written by its last cross-review revision or by a continuation, with the same sidecar), `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass manifest, PR train, prompts, and Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
+
+A pass cannot report success while that record is missing: the request that ends the pass is assembled from `drafts/<passId>-integrated.md` and refuses to build unless the draft is present, non-empty, and the text this run produced, and its `.questions.json` sidecar parses.
 
 ## Codex artifacts are the result
 
 `codex-run.mjs` is the source of truth for a Codex step. A validated artifact on disk *is* the completed work, so the bridge reuses it and does not re-invoke Codex; only `--no-reuse` overrides that.
 
 Reuse is bound to the request, not the path. Each artifact carries a `.request.json` sidecar fingerprinting the prompt, schema, model, effort, sandbox, and worktree that produced it, and reuse requires an exact match. So a retry of the same call is free, while a second implementation attempt at a higher tier, a cross-check of a regenerated plan, or a review of a new candidate always runs — none of them can inherit an earlier answer. An artifact with no sidecar is never trusted. The relay agent that carries the artifact back to a workflow is plumbing, and losing its reply is a lost message rather than a failed engine: workflows re-run the same idempotent command up to three times, at the cost of a file read each. A completed review, fix, or implementation is never discarded and never paid for twice. Relay re-reads count against `limits.agentCallsPerPr` like any other call.
+
+## Requests are built from files, not retyped
+
+Nothing large ever passes through a model to reach disk. A workflow script cannot write files, so each large payload — a plan draft, a manifest, a PR train, a candidate diff — is saved once by whichever agent produced it, and every later step refers to it by path.
+
+`compose-prompt.mjs` assembles a request from a plugin-owned template in `prompts/` plus those files. The workflow states, for each section, the exact length and checksum the file must hold; the composer checks that before writing anything and refuses on a missing, empty, or altered section. Formatting is not content: text is compared with trailing whitespace normalized, and JSON by its canonical form, so indentation and key order may differ while the content may not.
+
+`codex-run.mjs` then requires the caller to declare what a finished prompt contains — `--require-fence <label>` for each expected section, `--min-prompt-bytes <n>`, or both — and exits non-zero before Codex is invoked when the prompt file is absent, empty, short, or missing a declared section. A stub never reaches a paid engine, and a review is never bought for inputs the reviewer could not see.
+
+Changing how a prompt is built changes its bytes, which changes the request fingerprint, which correctly makes artifacts produced from an earlier prompt shape ineligible for reuse.
 
 ## Plain-English messages
 
@@ -189,6 +201,8 @@ Avoid internal terms in the first three parts. Options state outcomes: “Merge 
 - Codex returns success but no artifact: the step failed; inspect the `.events.jsonl` and prompt beside the expected artifact.
 - A Codex step's result never came back: the artifact beside the prompt is the real result; resume, and the bridge reuses it instead of re-running Codex.
 - Planning stopped mid-round: `/tagteam:plan --resume <slug>` restarts at the saved round; nothing is approved until you approve it.
+- A request could not be assembled: a draft, manifest, or train was not saved whole. Nothing was sent and nothing was paid for. The message names the file; resume, and the step is drafted again rather than reviewed short.
+- Codex was not started because a section is missing: the prompt file beside the artifact is incomplete. Delete it and resume; it is rebuilt from the saved plan, never retyped.
 - Review parser error: do not hand-edit old rounds; inspect the first malformed header/finding ID and resume after repairing only the artifact grammar.
 - All CI checks skipped: this is `not-run`, not failure and not pass; local verification carries the gate.
 - Verification hangs: increase only that command’s `timeoutSec` after confirming the command is expected to run.

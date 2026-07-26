@@ -27,12 +27,23 @@ function parseArgs(argv) {
     const name = key.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (name === "dryRun") options.dryRun = true;
     else if (name === "noReuse") options.noReuse = true;
+    else if (name === "requireFence") (options.requireFence ??= []).push(argv[++index]);
     else options[name] = argv[++index];
   }
   options.timeoutSec = Number(options.timeoutSec);
   options.maxConcurrent = Number(options.maxConcurrent);
+  if (options.minPromptBytes !== undefined) options.minPromptBytes = Number(options.minPromptBytes);
   for (const required of ["worktree", "schema", "artifact", "model", "effort"]) {
     if (!options[required]) throw new Error(`--${required} is required`);
+  }
+  // The caller must say what a complete prompt looks like. Without that there is
+  // nothing to check a stub against, and a stub reaching a paid engine buys a
+  // confident answer to a question it was never asked.
+  if (!(options.requireFence?.length) && options.minPromptBytes === undefined) {
+    throw new Error("--require-fence <label> (repeatable) or --min-prompt-bytes <n> is required so a truncated prompt cannot reach Codex");
+  }
+  if (options.minPromptBytes !== undefined && (!Number.isFinite(options.minPromptBytes) || options.minPromptBytes < 0)) {
+    throw new Error("--min-prompt-bytes must be a non-negative number");
   }
   if (!["read-only", "workspace-write"].includes(options.sandbox)) throw new Error("--sandbox must be read-only or workspace-write");
   if (!Number.isFinite(options.timeoutSec) || options.timeoutSec <= 0) throw new Error("--timeout-sec must be positive");
@@ -157,6 +168,27 @@ function requestFingerprint({ options, prompt, schema }) {
   })).digest("hex");
 }
 
+// A model that was asked to transcribe a large prompt can truncate it,
+// paraphrase it, or replace it with a pointer, and the result still looks like a
+// prompt. The caller declares what the finished prompt must contain and this
+// runs before anything is sent, so an incomplete request fails here instead of
+// buying a confident review of inputs the reviewer never saw.
+export function assertPromptIntegrity({ prompt, promptPath, requireFence = [], minPromptBytes }) {
+  const where = promptPath ? `prompt file ${path.resolve(promptPath)}` : "prompt supplied on standard input";
+  const bytes = Buffer.byteLength(String(prompt ?? ""), "utf8");
+  if (bytes === 0) {
+    throw new Error(`The ${where} is empty, so Codex was not started. Rebuild the request and run this command again.`);
+  }
+  for (const label of requireFence) {
+    if (!prompt.includes(`<untrusted-${label}>`) || !prompt.includes(`</untrusted-${label}>`)) {
+      throw new Error(`The ${where} is missing its ${label} section, so Codex was not started. Rebuild the request and run this command again.`);
+    }
+  }
+  if (minPromptBytes !== undefined && bytes < minPromptBytes) {
+    throw new Error(`The ${where} holds ${bytes} bytes but this request needs at least ${minPromptBytes}, so Codex was not started. Rebuild the request and run this command again.`);
+  }
+}
+
 function validateArtifact(schema, outputPath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(outputPath, "utf8"));
@@ -168,6 +200,12 @@ function validateArtifact(schema, outputPath) {
 }
 
 export async function runCodex(options, prompt) {
+  assertPromptIntegrity({
+    prompt,
+    promptPath: options.promptFile,
+    requireFence: options.requireFence ?? [],
+    minPromptBytes: options.minPromptBytes
+  });
   const schema = JSON.parse(fs.readFileSync(options.schema, "utf8"));
   const artifact = path.resolve(options.artifact);
   const eventsPath = `${artifact}.events.jsonl`;
@@ -260,11 +298,20 @@ export async function runCodex(options, prompt) {
   }
 }
 
+function readPromptFile(promptFile) {
+  const resolved = path.resolve(promptFile);
+  try {
+    return fs.readFileSync(resolved, "utf8");
+  } catch {
+    throw new Error(`The prompt file ${resolved} does not exist, so Codex was not started. Rebuild the request and run this command again.`);
+  }
+}
+
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
     let prompt = options.promptFile
-      ? fs.readFileSync(path.resolve(options.promptFile), "utf8")
+      ? readPromptFile(options.promptFile)
       : await new Promise((resolve, reject) => {
         let input = "";
         process.stdin.setEncoding("utf8");
