@@ -324,7 +324,7 @@ function writeRelayCheckpoint(options, executionId, before) {
     executionId,
     requestFingerprint: request.fingerprint,
     headOid: before.headOid,
-    statusBeforeHash: before.statusHash,
+    statusBefore: before,
     statusAfter: gitWorktreeState(options.worktree),
     completedAt: request.completedAt
   };

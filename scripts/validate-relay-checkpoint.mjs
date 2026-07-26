@@ -32,7 +32,8 @@ export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg
     throw new Error("worktree changed after the relay checkpoint");
   }
   if (state.statusBytes === 0) throw new Error("relay checkpoint does not describe a dirty worktree");
-  if (checkpoint.statusBeforeHash === checkpoint.statusAfter.statusHash) {
+  if (checkpoint.statusBefore?.statusHash === checkpoint.statusAfter.statusHash
+    && checkpoint.statusBefore?.contentHash === checkpoint.statusAfter.contentHash) {
     throw new Error("relay checkpoint does not record a workspace change");
   }
   const schema = readJson(checkpoint.schema);

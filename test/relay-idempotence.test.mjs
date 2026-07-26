@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { normalizeRunPolicy, validateRunPolicy } from "../scripts/lib/run-policy.mjs";
+import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -139,6 +140,9 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   const counter = path.join(temp, "count.txt");
   const fake = fakeCodex(temp, counter, { editWorktree: true });
   const artifact = path.join(temp, "findings.json");
+  // The porcelain entry is identical before and after the bridge runs; only
+  // the untracked file bytes prove that Codex actually changed the worktree.
+  fs.writeFileSync(path.join(worktree, "bridge-edit.txt"), "original\n");
   const result = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
   assert.equal(result.status, 0, result.stderr);
   const checkpoint = `${artifact}.relay-checkpoint.json`;
@@ -150,6 +154,38 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   const drifted = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
   assert.equal(drifted.status, 1);
   assert.match(drifted.stderr, /changed after the relay checkpoint/);
+});
+
+test("interrupted usage reconciliation imports matching receipts exactly once", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-receipts-"));
+  const artifact = path.join(temp, "result.json");
+  const checkpointFile = `${artifact}.relay-checkpoint.json`;
+  const request = {
+    executionId: "exec-new",
+    fingerprint: "fingerprint",
+    completedAt: "2026-07-26T12:00:00.000Z"
+  };
+  fs.writeFileSync(`${artifact}.request.json`, JSON.stringify(request));
+  fs.writeFileSync(checkpointFile, JSON.stringify({
+    artifact,
+    executionId: request.executionId,
+    requestFingerprint: request.fingerprint,
+    completedAt: request.completedAt
+  }));
+  const interrupted = {
+    usage: { codexCalls: 3, relayRetries: 2 },
+    usageReceipts: ["exec-old"],
+    relayCheckpoints: [checkpointFile],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  };
+
+  const reconciled = reconcileUsageReceipts(interrupted);
+  assert.equal(reconciled.usage.codexCalls, 4);
+  assert.deepEqual(reconciled.usageReceipts, ["exec-old", "exec-new"]);
+  assert.equal(reconciled.usageAccounting, "complete");
+  const repeated = reconcileUsageReceipts(reconciled);
+  assert.equal(repeated.usage.codexCalls, 4);
+  assert.deepEqual(repeated.usageReceipts, reconciled.usageReceipts);
 });
 
 function loadWorkflow(file) {
@@ -579,6 +615,7 @@ test("total review relay loss returns accounting, then resume imports the saved 
   };
   const interrupted = await harness("workflows/ship-pr.js", args, respond(false));
   assert.equal(interrupted.result.status, "relay-interrupted");
+  assert.equal(interrupted.result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.equal(interrupted.result.usage.relayRetries, 2);
   assert.ok(interrupted.result.agentCalls > 0);
   const resumed = await harness("workflows/ship-pr.js", {
@@ -609,6 +646,7 @@ test("total implementation relay loss returns a dirty checkpoint before retrying
     (label) => label.startsWith("implement:") ? null : CLEAN_FINDINGS
   );
   assert.equal(interrupted.result.status, "relay-interrupted-dirty-worktree");
+  assert.equal(interrupted.result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.deepEqual(interrupted.result.relayCheckpoints, [
     "/ships/s1/prs/PR-1/tasks/T1/result.json.relay-checkpoint.json"
   ]);
@@ -645,6 +683,34 @@ test("total implementation relay loss returns a dirty checkpoint before retrying
   });
   assert.equal(resumed.result.status, "clean");
   assert.equal(resumed.result.usageReceipts.includes("exec-implementation-lost"), true);
+});
+
+test("relay retries stop at the hard per-PR dispatch ceiling", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.maxReviewLoops = 1;
+  config.limits.agentCallsPerPr = 6;
+  config.review.firstReviewer = "codex";
+  for (const setting of Object.values(config.reviewers)) setting.enabled = false;
+  config.reviewers.functionality.enabled = true;
+  const { result, calls } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config }, (label) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("review:")) return null;
+    return CLEAN_FINDINGS;
+  });
+
+  assert.equal(result.status, "relay-interrupted");
+  assert.equal(result.agentCalls, config.limits.agentCallsPerPr);
+  assert.equal(calls.length, config.limits.agentCallsPerPr);
+  assert.equal(result.usage.relayRetries, 1);
 });
 
 test("a lost Codex review relay result does not fail the PR round", async () => {

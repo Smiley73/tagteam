@@ -354,16 +354,26 @@ function tally(ledger) {
 // command is idempotent, so re-running it re-reads the file instead of paying
 // for the review, fix, or implementation a second time.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0, fatal: [] };
+const relayState = { extraCalls: 0, fatal: [], dispatchedCalls: 0, maximumCalls: Infinity, capacityExceeded: false };
 const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
 const codexReceiptState = new Set();
 
 async function claudeReasoningCall(prompt, options) {
+  if (relayState.dispatchedCalls >= relayState.maximumCalls) {
+    relayState.capacityExceeded = true;
+    return null;
+  }
+  relayState.dispatchedCalls += 1;
   usageState.claudeReasoningCalls += 1;
   return agent(prompt, options);
 }
 
 async function plumbingCall(prompt, options) {
+  if (relayState.dispatchedCalls >= relayState.maximumCalls) {
+    relayState.capacityExceeded = true;
+    return null;
+  }
+  relayState.dispatchedCalls += 1;
   if (options.model === "haiku") usageState.haikuPlumbingCalls += 1;
   return agent(prompt, options);
 }
@@ -415,6 +425,10 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     fence("prompt", prompt)
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (relayState.dispatchedCalls >= relayState.maximumCalls) {
+      relayState.capacityExceeded = true;
+      break;
+    }
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
@@ -442,6 +456,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       }
       return envelope.result;
     }
+    if (relayState.capacityExceeded) break;
     log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
   }
   relayState.fatal.push({ artifact, sandbox, checkpoint: `${artifact}.relay-checkpoint.json` });
@@ -599,6 +614,9 @@ async function main(raw) {
   const config = input.config;
   relayState.extraCalls = 0;
   relayState.fatal = [];
+  relayState.dispatchedCalls = Number(input.agentCalls ?? 0);
+  relayState.maximumCalls = config.limits.agentCallsPerPr;
+  relayState.capacityExceeded = false;
   const priorUsage = input.usage ?? {};
   Object.assign(usageState, {
     claudeReasoningCalls: Number(priorUsage.claudeReasoningCalls ?? 0),
@@ -624,12 +642,15 @@ async function main(raw) {
     policyFingerprint: runPolicy.policyFingerprint,
     usage: { ...usageState, relayRetries: priorRelayRetries + relayState.extraCalls },
     usageReceipts: [...codexReceiptState],
-    ...result
+    usageAccounting: "complete",
+    ...result,
+    agentCalls: relayState.dispatchedCalls
   });
   const relayInterruption = ({ candidateOid = null, rounds = [], ledger = [], ...extra } = {}) => {
     const dirty = relayState.fatal.some((item) => item.sandbox === "workspace-write");
     return finish({
       status: dirty ? "relay-interrupted-dirty-worktree" : "relay-interrupted",
+      usageAccounting: "pending-checkpoint-reconciliation",
       tasks: taskResults,
       rounds,
       tallies: tally(ledger),
@@ -637,7 +658,6 @@ async function main(raw) {
       gateFailures: ["Codex completed saved work, but every relay handoff failed. Resume to reuse the exact request."],
       candidateOid,
       relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
-      agentCalls: callCount + relayState.extraCalls,
       ...extra
     });
   };
