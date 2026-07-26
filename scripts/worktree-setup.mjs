@@ -4,16 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { assertSafeRelativePath } from "./lib/matcher.mjs";
-
-function ensureNoSymlink(root, relative) {
-  let current = root;
-  for (const segment of relative.split("/")) {
-    current = path.join(current, segment);
-    if (!fs.existsSync(current)) throw new Error(`configured copy source does not exist: ${relative}`);
-    if (fs.lstatSync(current).isSymbolicLink()) throw new Error(`configured copy path contains a symlink: ${relative}`);
-  }
-}
+import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
 
 function copyPreservingMode(source, destination) {
   const stat = fs.lstatSync(source);
@@ -62,7 +53,7 @@ export async function setupWorktree({ primary, worktree, config }) {
   const started = Date.now();
   for (const configured of config.worktree.copyUntracked) {
     const relative = assertSafeRelativePath(configured);
-    ensureNoSymlink(primary, relative);
+    assertNoSymlinkedSegment(primary, relative, "configured copy source");
     const ignored = spawnSync("git", ["-C", worktree, "check-ignore", "--no-index", "--quiet", "--", relative], {
       stdio: "ignore",
       shell: false

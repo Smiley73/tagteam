@@ -85,6 +85,14 @@ export const messages = {
       DETAILS(context)
     ].join("\n");
   },
+  configStale(context) {
+    return [
+      "This project's tagteam settings were written by an earlier version of tagteam.",
+      "Tagteam now asks how much say you want over the look and feel of user-facing changes, and this project has no answer on file.",
+      "Run the upgrade command to answer only the new questions; every existing choice is kept.",
+      DETAILS(context)
+    ].join("\n");
+  },
   fixFailed(context) {
     return [
       "An automated repair stopped before it could produce a complete, recorded candidate.",

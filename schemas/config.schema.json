@@ -9,7 +9,7 @@
     "transport", "limits"
   ],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "enum": [1, 2] },
     "planning": {
       "type": "object",
       "additionalProperties": false,
@@ -60,7 +60,16 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["gateOnUserVisible"],
-      "properties": { "gateOnUserVisible": { "const": true } }
+      "properties": {
+        "gateOnUserVisible": { "const": true },
+        "hasUserInterface": { "type": "boolean" },
+        "conventionPaths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "confirmDecisions": { "enum": ["all-surfaces", "new-surfaces", "off"] }
+      }
     },
     "codegraph": {
       "type": "object",

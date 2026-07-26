@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 const REGEX_META = /[\\^$+?.()|[\]{}]/g;
@@ -134,4 +135,18 @@ export function assertSafeRelativePath(value) {
   if (normalized.split("/").includes("..")) throw new Error(`path may not traverse outside the repository: ${value}`);
   if (normalized === ".") throw new Error("path must name a file or directory below the repository root");
   return normalized;
+}
+
+// Lexical safety says nothing about what is on disk. Every component has to be
+// checked, not just the last one: `linked/dir/file` leaves the repository while
+// `file` itself is an ordinary file. Both the copy that runs and the validation
+// that predicts it call this, so a configuration cannot pass one and fail the
+// other.
+export function assertNoSymlinkedSegment(root, relative, label = "path") {
+  let current = root;
+  for (const segment of relative.split("/")) {
+    current = path.join(current, segment);
+    if (!fs.existsSync(current)) throw new Error(`${label} does not exist: ${relative}`);
+    if (fs.lstatSync(current).isSymbolicLink()) throw new Error(`${label} contains a symlink: ${relative}`);
+  }
 }

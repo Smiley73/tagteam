@@ -31,6 +31,9 @@ A complete editable example lives at `${CLAUDE_PLUGIN_ROOT}/examples/config.json
 | `prTrain.prSize` | object | Advisory prose only; `enforce` must be false. |
 | `prTrain.pauseOn` | array | Must contain `ui`; may add `every-merge`. |
 | `ui.gateOnUserVisible` | true | Schema-locked safety rule. |
+| `ui.hasUserInterface` | boolean | Whether this repository ships anything a person looks at. False silences every interface question; it is a fact about the repository, so init asks it. |
+| `ui.conventionPaths` | array | Repo-relative paths to the design system, component directory, or conventions doc a new surface must follow. Each must exist. |
+| `ui.confirmDecisions` | enum | `all-surfaces`, `new-surfaces`, or `off`. How much interface taste tagteam confirms before approval. Belongs in user defaults as easily as project config. |
 | `codegraph.enabled` | boolean | Init and every ship worktree manage the index. |
 | `maxReviewLoops` | integer | Bounded review/fix cycles. |
 | `reviewTiers` | object | Per-engine runtime pairs. A dimension may override one engine inline. |
@@ -40,20 +43,37 @@ A complete editable example lives at `${CLAUDE_PLUGIN_ROOT}/examples/config.json
 | `implementation` | object | Default engine, regex routes, and concurrency. |
 | `verify.commands` | array | Every matching command runs, in order, with its own timeout. |
 | `worktree.setupCommands` | array | Runs after copying ignored paths and before CodeGraph init. |
-| `worktree.copyUntracked` | array | Exact ignored repo-relative paths only; no globs, traversal, or symlinks. |
+| `worktree.copyUntracked` | array | Exact ignored repo-relative paths only; no globs, traversal, or symlinks on any component. Validation runs the same check the copy runs, so a source that is missing or reached through a link is reported at setup rather than mid-ship. |
 | `diffExclude` | array | Removes content from reviewer prompts only; selection still sees every path. |
 | `transport.mode` | string | Must be `exec`. |
 | `transport.relayModel` | string | Model for the Codex relay agent. Defaults to `sonnet`; the relay reads one saved file, and a model that reliably returns a structured result is worth far more than the tokens saved. |
 | `limits.agentCallsPerPr` | integer | Persisted per-PR speed bump checked before starting a review round. |
 | `limits.maxConcurrentCodex` | integer | Maximum concurrent Codex subprocesses across one ship. |
 
-User defaults at `~/.tagteam/config.json` are recursively merged into project config. Objects merge; arrays replace. Project values win. Per-dimension values win over tiers. Run flags win over both.
+User defaults at `~/.tagteam/config.json` are recursively merged into project config. Objects merge; arrays replace. Project values win. Per-dimension values win over tiers. Run flags win over both. `ui.confirmDecisions` is the one interface key worth setting there: how chatty tagteam is about taste is a trait of the person, while `ui.hasUserInterface` and `ui.conventionPaths` are facts about the repository. User defaults only seed the interview; validation reads the project file on its own, so every answer still lands there.
+
+Configuration carries a `version`. The plugin writes version 2; version 1 predates the interface questions and stays valid, so an upgraded plugin never wedges a configured repository. `validate-json.mjs` reports that separately from failure: exit 0 is current, exit 3 is valid but written by an earlier plugin and names the unanswered keys, exit 1 is invalid. Ship proceeds on exit 3 with interface confirmation off and says so once; plan stops and asks for `/tagteam:init --upgrade`, which asks only the new questions and keeps every existing choice. Because `.tagteam/config.json` is committed, an upgrade is a tracked change the whole team inherits: say so before writing it.
 
 Reviewer glob grammar is `*`, `**`, `?`, and `{a,b}` only. Paths are POSIX-normalized and repo-relative. Keywords match added lines only, case-insensitively, as substrings. A matcher error runs the reviewer and records the error.
 
 Five dimensions always run by default: functionality, security, code quality, error handling, and test coverage. Concurrency/data integrity, reliability, resiliency, performance, cost, conventions, documentation, and accessibility are conditional. A positive or unknown ship-time user-visible judgment always forces accessibility.
 
 Only open/recurring blocking and major findings drive fixes and block convergence. Minor and nit findings are offered as an optional cleanup PR after the train. A dimension’s `gate` can impose a stricter final pause.
+
+## Interface decisions
+
+A model that adds a pointless input or puts a dialog in the wrong place is not uncertain, it is confident, so nothing it is unsure about ever reaches a human through open questions. Planning therefore has a second channel: the drafter *declares* interface choices instead of asking about them.
+
+A declaration names what was decided, the surface kind, the chosen option, at least one alternative that was genuinely weighed, a short sketch of each so a person compares pictures rather than paragraphs, and the exact repository path establishing the precedent it follows — or null when nothing there votes for it. New dialogs, pages, navigation entries, required inputs, and changes to the step count of an existing flow are declared; copy, spacing, icons, and internal component structure are not.
+
+Two mechanisms then act on that channel, and they are gated differently on purpose:
+
+- `tagteam:plan-interaction-reviewer` runs in every cross-review round whenever `ui.hasUserInterface` is not false, including for settings that predate these questions. It asks whether each surface needs to exist, whether it is in the right place, whether every new input earns itself, and whether it follows precedent — and returns decisions the plan made without declaring. It never asks the human anything, never blocks a pass, and a round that loses it stands on its two engine reviews. Because it costs the user nothing, it is not a preference.
+- Confirmation is a preference, so `ui.confirmDecisions` gates it. `new-surfaces` surfaces new surfaces plus anything with no precedent; `all-surfaces` surfaces everything declared; `off` surfaces nothing. An unanswered policy behaves as `off`: an upgrade must never start interrupting people who did not ask to be interrupted.
+
+The command asks in two steps and never one question per decision: one multi-select scan per three decisions, defaulting to keeping them all, then a single-select drill-down carrying each option's sketch as its preview only for the ones the user picked. Outcomes are recorded as ordinary decision rows, including the ones kept unchanged, so no later pass asks twice.
+
+None of this replaces the user-visible merge gate, which is not optional.
 
 ## Worktree and secret safety
 
@@ -164,9 +184,9 @@ The script is idempotent and verifies the result with `git check-ignore`, so `/t
 
 Resume parses artifacts and reconciles Git/GitHub before mutation. It never trusts conversation memory. A malformed review artifact means not converged.
 
-Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point, `drafts/<passId>-integrated.md` (that pass's finished plan, written by its last cross-review revision or by a continuation, with the same sidecar), `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass manifest, PR train, prompts, and Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
+Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point and a `.ui-decisions.json` sidecar carrying the interface choices declared so far, `drafts/<passId>-integrated.md` (that pass's finished plan, written by its last cross-review revision or by a continuation, with the same sidecars), `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass manifest, PR train, prompts, and Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
 
-A pass cannot report success while that record is missing: the request that ends the pass is assembled from `drafts/<passId>-integrated.md` and refuses to build unless the draft is present, non-empty, and the text this run produced, and its `.questions.json` sidecar parses.
+A pass cannot report success while that record is missing: the request that ends the pass is assembled from `drafts/<passId>-integrated.md` and refuses to build unless the draft is present, non-empty, and the text this run produced, and its `.questions.json` sidecar parses. The `.ui-decisions.json` sidecar is deliberately not part of that hard record: a pass interrupted before it existed must still resume, and losing it costs a re-declaration rather than a plan.
 
 ## Codex artifacts are the result
 
@@ -208,6 +228,7 @@ Avoid internal terms in the first three parts. Options state outcomes: “Merge 
 - Verification hangs: increase only that command’s `timeoutSec` after confirming the command is expected to run.
 - Worktree copy rejected: make the destination ignored, remove symlinks/traversal, and list the exact path.
 - Ships or plan drafts showing up in `git status`: run `/tagteam:init --reconfigure`; if a pattern is reported as still not ignored, remove the rule elsewhere in `.gitignore` that re-includes it.
+- Settings written by an earlier plugin: `/tagteam:init --upgrade` asks only the new questions and keeps every existing choice. Shipping continues meanwhile with interface confirmation off; planning waits.
 - Stale merge lock: `/tagteam:status` identifies the owner. Takeover requires explicit human approval after confirming the PID is dead.
 - Base moved: release the merge lock, rebase, then re-run every gate on the new candidate.
 - Unprotected base: enable pull-request protection or merge the ready PR by hand.
