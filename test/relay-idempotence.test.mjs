@@ -319,6 +319,43 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   assert.match(drifted.stderr, /changed after the relay checkpoint/);
 });
 
+test("reused writable work without its original checkpoint stays workspace-unknown", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-crash-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter, { editWorktree: true });
+  const artifact = path.join(temp, "findings.json");
+  const checkpoint = `${artifact}.relay-checkpoint.json`;
+  const first = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(first.status, 0, first.stderr);
+  fs.unlinkSync(checkpoint);
+
+  const reused = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(JSON.parse(reused.stdout.trim()).reused, true);
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+  assert.equal(fs.existsSync(checkpoint), false);
+
+  const reconciled = reconcileUsageReceipts({
+    status: "relay-interrupted-workspace-unknown",
+    usage: { codexCalls: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [`${artifact}.usage-receipts.json`],
+    relayCheckpoints: [checkpoint],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  });
+  assert.equal(reconciled.status, "relay-interrupted-workspace-unknown");
+});
+
 test("automatic dirty recovery refuses ignored bytes it cannot bind", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-ignored-"));
   const worktree = path.join(temp, "repo");

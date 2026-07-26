@@ -522,8 +522,11 @@ async function main() {
     releaseExecutionLocks = await acquireExecutionLocks(options);
     const before = gitWorktreeState(options.worktree);
     const { result, reused, executionId } = await runCodex(options, prompt);
-    const checkpointPath = `${path.resolve(options.artifact)}.relay-checkpoint.json`;
-    if (executionId && (!reused || !fs.existsSync(checkpointPath))) {
+    if (executionId && !reused) {
+      // A reused result without its original checkpoint may have survived a
+      // crash after changing the worktree but before recording the before
+      // state. The current state cannot reconstruct that history, so leave the
+      // checkpoint absent and let reconciliation keep recovery unknown.
       writeRelayCheckpoint(options, executionId, before);
     }
     process.stdout.write(JSON.stringify({
