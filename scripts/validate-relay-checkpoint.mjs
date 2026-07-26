@@ -9,7 +9,7 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg) {
+export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg, { requireChange = true } = {}) {
   const checkpoint = readJson(checkpointFile);
   const worktree = path.resolve(worktreeArg);
   const artifact = path.resolve(artifactArg);
@@ -35,10 +35,12 @@ export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg
     || state.contentHash !== checkpoint.statusAfter?.contentHash) {
     throw new Error("worktree changed after the relay checkpoint");
   }
-  if (state.statusBytes === 0) throw new Error("relay checkpoint does not describe a dirty worktree");
-  if (checkpoint.statusBefore?.statusHash === checkpoint.statusAfter.statusHash
-    && checkpoint.statusBefore?.contentHash === checkpoint.statusAfter.contentHash) {
-    throw new Error("relay checkpoint does not record a workspace change");
+  if (requireChange) {
+    if (state.statusBytes === 0) throw new Error("relay checkpoint does not describe a dirty worktree");
+    if (checkpoint.statusBefore?.statusHash === checkpoint.statusAfter.statusHash
+      && checkpoint.statusBefore?.contentHash === checkpoint.statusAfter.contentHash) {
+      throw new Error("relay checkpoint does not record a workspace change");
+    }
   }
   const schema = readJson(checkpoint.schema);
   const artifactValue = readJson(artifact);

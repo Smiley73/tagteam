@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateJson } from "./validate-json.mjs";
+import { validateRelayCheckpoint } from "./validate-relay-checkpoint.mjs";
 import {
   classifyProviderError,
   nextBackoff,
@@ -90,6 +91,25 @@ function quarantineStaleLock(lockPath, identity) {
   }
 }
 
+function publishLock(lockPath, token) {
+  const pendingPath = `${lockPath}.pending-${token}`;
+  fs.mkdirSync(pendingPath, { mode: 0o700 });
+  fs.writeFileSync(
+    path.join(pendingPath, "owner.json"),
+    JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }),
+    { mode: 0o600 }
+  );
+  try {
+    // Only a fully initialized generation becomes visible at lockPath.
+    fs.renameSync(pendingPath, lockPath);
+    return true;
+  } catch (error) {
+    try { fs.rmSync(pendingPath, { recursive: true, force: true }); } catch {}
+    if (["EEXIST", "ENOTEMPTY"].includes(error.code)) return false;
+    throw error;
+  }
+}
+
 async function acquireSlot(shipDir, maximum) {
   if (!shipDir) return () => {};
   const slotRoot = path.join(shipDir, ".codex-slots");
@@ -98,19 +118,14 @@ async function acquireSlot(shipDir, maximum) {
   while (true) {
     for (let slot = 0; slot < maximum; slot += 1) {
       const slotPath = path.join(slotRoot, `slot-${slot}`);
-      try {
-        fs.mkdirSync(slotPath, { mode: 0o700 });
-        fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({
-          pid: process.pid, token, at: new Date().toISOString()
-        }), { mode: 0o600 });
+      if (publishLock(slotPath, token)) {
         return () => {
           try {
             const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
             if (owner.token === token) fs.rmSync(slotPath, { recursive: true, force: true });
           } catch {}
         };
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
+      } else {
         let reclaimIdentity = null;
         try {
           const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
@@ -136,21 +151,14 @@ async function acquireNamedLock(root, name) {
   const lockPath = path.join(root, name);
   const token = randomUUID();
   while (true) {
-    try {
-      fs.mkdirSync(lockPath, { mode: 0o700 });
-      fs.writeFileSync(
-        path.join(lockPath, "owner.json"),
-        JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }),
-        { mode: 0o600 }
-      );
+    if (publishLock(lockPath, token)) {
       return () => {
         try {
           const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
           if (owner.token === token) fs.rmSync(lockPath, { recursive: true, force: true });
         } catch {}
       };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+    } else {
       let reclaimIdentity = null;
       try {
         const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
@@ -158,8 +166,8 @@ async function acquireNamedLock(root, name) {
           if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(lockPath, owner);
         }
       } catch {
-        // mkdir is atomic but owner.json is a second operation. Give a live
-        // process time to finish publishing its ownership before reclaiming.
+        // Older plugin versions exposed the directory before owner.json. Give
+        // such a legacy ownerless lock a grace period before reclaiming it.
         try {
           if (Date.now() - fs.statSync(lockPath).mtimeMs > 30_000) {
             reclaimIdentity = staleLockIdentity(lockPath);
@@ -375,6 +383,14 @@ export async function runCodex(options, prompt) {
         if (options.dryRun) {
           process.stderr.write(`Reusing the existing dry-run artifact at ${artifact}; Codex was not invoked.\n`);
           return { result: existing.value, reused: true, executionId: null };
+        }
+        if (options.sandbox === "workspace-write") {
+          const checkpointPath = `${artifact}.relay-checkpoint.json`;
+          try {
+            validateRelayCheckpoint(checkpointPath, options.worktree, artifact, { requireChange: false });
+          } catch (error) {
+            throw new Error(`Writable Codex result cannot be reused safely: ${error.message}`);
+          }
         }
         if (!recorded.executionId) {
           // Pre-receipt sidecars still describe one historical execution. Give

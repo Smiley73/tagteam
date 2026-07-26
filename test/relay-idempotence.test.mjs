@@ -158,6 +158,34 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   assert.equal(fs.existsSync(`${staleLock}.stale-${createHash("sha256").update("token:stale-generation").digest("hex").slice(0, 20)}`), true);
 });
 
+test("public lock generations are visible only after owner publication", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-lock-publication-"));
+  const fake = path.join(temp, "fake-codex.mjs");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+await new Promise((resolve) => setTimeout(resolve, 400));
+fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(CLEAN_FINDINGS)}));
+`);
+  fs.chmodSync(fake, 0o700);
+  const artifact = path.join(temp, "findings.json");
+  const artifactLock = path.join(
+    temp,
+    ".codex-artifact-locks",
+    createHash("sha256").update(path.resolve(artifact)).digest("hex")
+  );
+  const slotLock = path.join(temp, ".codex-slots", "slot-0");
+  const bridge = runBridgeAsync(temp, artifact, fake, ["--max-concurrent", "1"]);
+  for (let attempt = 0; attempt < 100
+    && !(fs.existsSync(artifactLock) && fs.existsSync(slotLock)); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(fs.existsSync(path.join(artifactLock, "owner.json")), true);
+  assert.equal(fs.existsSync(path.join(slotLock, "owner.json")), true);
+  const result = await bridge;
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("workspace-writing bridges serialize different artifacts in one worktree", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-writer-lock-"));
   const worktree = path.join(temp, "repo");
@@ -313,7 +341,13 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   const valid = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
   assert.equal(valid.status, 0, valid.stderr);
   assert.equal(JSON.parse(valid.stdout).executionId, JSON.parse(result.stdout.trim()).executionId);
+  const reused = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(JSON.parse(reused.stdout.trim()).reused, true);
   fs.writeFileSync(path.join(worktree, "bridge-edit.txt"), "changed again\n");
+  const unsafeReuse = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(unsafeReuse.status, 1);
+  assert.match(unsafeReuse.stderr, /cannot be reused safely.*changed after the relay checkpoint/);
   const drifted = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
   assert.equal(drifted.status, 1);
   assert.match(drifted.stderr, /changed after the relay checkpoint/);
@@ -340,8 +374,8 @@ test("reused writable work without its original checkpoint stays workspace-unkno
   fs.unlinkSync(checkpoint);
 
   const reused = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
-  assert.equal(reused.status, 0, reused.stderr);
-  assert.equal(JSON.parse(reused.stdout.trim()).reused, true);
+  assert.equal(reused.status, 1);
+  assert.match(reused.stderr, /cannot be reused safely/);
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
   assert.equal(fs.existsSync(checkpoint), false);
 
