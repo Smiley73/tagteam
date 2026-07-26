@@ -100,6 +100,14 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
 });
 
+test("a Codex executable that never spawns does not create a usage receipt", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spawn-failure-"));
+  const artifact = path.join(temp, "findings.json");
+  const result = runBridge(temp, artifact, path.join(temp, "missing-codex"));
+  assert.equal(result.status, 1);
+  assert.equal(fs.existsSync(`${artifact}.usage-receipts.json`), false);
+});
+
 test("legacy request sidecars gain one stable receipt without rerunning Codex", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-legacy-receipt-"));
   const counter = path.join(temp, "count.txt");
@@ -140,9 +148,10 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   const staleLock = path.join(temp, ".codex-artifact-locks", lockName);
   fs.mkdirSync(staleLock, { recursive: true });
   fs.writeFileSync(path.join(staleLock, "owner.json"), JSON.stringify({
-    pid: 2_147_483_647,
+    pid: process.pid,
     token: "stale-generation",
-    at: "2026-01-01T00:00:00.000Z"
+    at: "2026-01-01T00:00:00.000Z",
+    heartbeatAt: "2026-01-01T00:00:00.000Z"
   }));
   const results = await Promise.all([
     runBridgeAsync(temp, artifact, fake),
@@ -230,9 +239,10 @@ test("concurrent bridges safely reclaim one stale global slot", async () => {
   const slotPath = path.join(temp, ".codex-slots", "slot-0");
   fs.mkdirSync(slotPath, { recursive: true });
   fs.writeFileSync(path.join(slotPath, "owner.json"), JSON.stringify({
-    pid: 2_147_483_647,
+    pid: process.pid,
     token: "stale-slot-generation",
-    at: "2026-01-01T00:00:00.000Z"
+    at: "2026-01-01T00:00:00.000Z",
+    heartbeatAt: "2026-01-01T00:00:00.000Z"
   }));
   const fake = path.join(temp, "fake-codex.mjs");
   const overlap = path.join(temp, "overlap.txt");
@@ -378,6 +388,12 @@ test("reused writable work without its original checkpoint stays workspace-unkno
   assert.match(reused.stderr, /cannot be reused safely/);
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
   assert.equal(fs.existsSync(checkpoint), false);
+
+  fs.writeFileSync(artifact, "{crashed-before-completion-metadata");
+  const unsafeReplay = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(unsafeReplay.status, 1);
+  assert.match(unsafeReplay.stderr, /prior writable Codex dispatch exists/);
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
 
   const reconciled = reconcileUsageReceipts({
     status: "relay-interrupted-workspace-unknown",
@@ -784,6 +800,48 @@ test("shipping preserves accounting when a post-dispatch helper throws", async (
     relayRetries: 0
   });
   assert.equal(result.usageAccounting, "complete");
+  assert.equal(result.candidateOid, SHIP_ARGS.existingCandidateOid);
+  assert.deepEqual(result.tasks, []);
+  assert.deepEqual(result.rounds, []);
+  assert.deepEqual(result.ledger, []);
+});
+
+test("generic shipping interruption preserves completed tasks and candidate state", async () => {
+  const args = {
+    ...SHIP_ARGS,
+    existingCandidateOid: undefined,
+    tasks: [{
+      id: "T1",
+      title: "task",
+      description: "implement it",
+      complexity: "simple",
+      files: ["a.js"],
+      dependsOn: [],
+      doneCriteria: ["works"]
+    }]
+  };
+  const candidateOid = "d".repeat(40);
+  const { result } = await harness("workflows/ship-pr.js", args, (label) => {
+    if (label.startsWith("implement:T1:")) {
+      return {
+        taskId: "T1",
+        status: "completed",
+        summary: "done",
+        filesChanged: ["a.js"],
+        criteria: [{ criterion: "works", met: true, evidence: "ran" }]
+      };
+    }
+    if (label.startsWith("candidate:commit")) {
+      return { ok: true, candidateOid, message: "feat: task" };
+    }
+    if (label.startsWith("candidate:snapshot")) return null;
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(result.status, "ship-interrupted");
+  assert.equal(result.candidateOid, candidateOid);
+  assert.deepEqual(result.tasks.map((task) => task.taskId), ["T1"]);
+  assert.deepEqual(result.rounds, []);
+  assert.deepEqual(result.ledger, []);
 });
 
 test("invalid persisted call counts fail before shipping dispatch", async () => {

@@ -388,7 +388,15 @@ const usageState = {
   codexCalls: 0
 };
 const codexReceiptState = new Set();
-const shipState = { runPolicy: null, priorRelayRetries: 0, legacyUsageIncomplete: false };
+const shipState = {
+  runPolicy: null,
+  priorRelayRetries: 0,
+  legacyUsageIncomplete: false,
+  taskResults: [],
+  candidateOid: null,
+  rounds: [],
+  ledger: []
+};
 
 async function claudeReasoningCall(prompt, options) {
   if (relayState.dispatchedCalls >= relayState.maximumCalls) {
@@ -649,6 +657,10 @@ async function main(raw) {
   relayState.receiptFiles = [];
   shipState.runPolicy = null;
   shipState.legacyUsageIncomplete = false;
+  shipState.taskResults = [];
+  shipState.candidateOid = null;
+  shipState.rounds = [];
+  shipState.ledger = [];
   const initialAgentCalls = persistedCount(input.agentCalls, "persisted shipping agentCalls");
   const maximumCalls = persistedCount(config.limits.agentCallsPerPr, "agentCallsPerPr");
   relayState.dispatchedCalls = initialAgentCalls;
@@ -728,6 +740,7 @@ async function main(raw) {
     if (priorIndex >= 0) taskResults.splice(priorIndex, 1);
     taskResults.push(result);
   }
+  shipState.taskResults = taskResults;
   const taskById = new Map(input.tasks.map((task) => [task.id, task]));
   const completedResult = (result) => {
     const task = taskById.get(result?.taskId);
@@ -813,6 +826,7 @@ async function main(raw) {
 
   phase("Candidate");
   let candidateOid = input.existingCandidateOid ?? null;
+  shipState.candidateOid = candidateOid;
   if (candidateOid && (input.repairFindings ?? []).length > 0) {
     if (callCount + 2 > callBudget()) {
       return finish({
@@ -848,11 +862,13 @@ async function main(raw) {
     callCount += 1;
     if (relayState.capacityExceeded) return capacityGate({ candidateOid });
     candidateOid = repairedCandidateOid;
+    shipState.candidateOid = candidateOid;
   } else if (!candidateOid) {
     const initialCandidateOid = await commitCandidate(input, 0, input.pr.title);
     callCount += 1;
     if (relayState.capacityExceeded) return capacityGate();
     candidateOid = initialCandidateOid;
+    shipState.candidateOid = candidateOid;
   }
   if (callCount + 3 > callBudget()) {
     return finish({
@@ -896,6 +912,7 @@ async function main(raw) {
     callCount += 1;
     if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     candidateOid = verificationCandidateOid;
+    shipState.candidateOid = candidateOid;
     snapshotValue = await snapshot(input, initialRound, candidateOid);
     callCount += 1;
     if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
@@ -916,6 +933,8 @@ async function main(raw) {
   const ledger = [];
   const advisory = [];
   const rounds = [];
+  shipState.ledger = ledger;
+  shipState.rounds = rounds;
   const specialistItems = [];
 
   if (config.specialistPrepass.enabled && roundOffset === 0) {
@@ -1214,6 +1233,7 @@ async function main(raw) {
       return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
     }
     candidateOid = fixedCandidateOid;
+    shipState.candidateOid = candidateOid;
     snapshotValue = await snapshot(input, round, candidateOid);
     callCount += 1;
     if (relayState.capacityExceeded) {
@@ -1268,6 +1288,7 @@ async function main(raw) {
         return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
       }
       candidateOid = repairCandidateOid;
+      shipState.candidateOid = candidateOid;
       snapshotValue = await snapshot(input, `${round}-repair`, candidateOid);
       callCount += 1;
       if (relayState.capacityExceeded) {
@@ -1354,6 +1375,11 @@ try {
       : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
     legacyUsageIncomplete: shipState.legacyUsageIncomplete,
     relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
+    tasks: [...shipState.taskResults],
+    candidateOid: shipState.candidateOid,
+    rounds: [...shipState.rounds],
+    ledger: [...shipState.ledger],
+    tallies: tally(shipState.ledger),
     budgetSpent: budgetSpent()
   };
 }

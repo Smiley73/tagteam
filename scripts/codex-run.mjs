@@ -16,6 +16,10 @@ import {
 } from "./quota-backoff.mjs";
 import { gitWorktreeState } from "./lib/worktree-state.mjs";
 
+const LOCK_LEASE_MS = 120_000;
+const LOCK_HEARTBEAT_MS = 10_000;
+const LOCK_WAIT_TIMEOUT_MS = 30 * 60_000;
+
 function parseArgs(argv) {
   const options = {
     sandbox: "read-only",
@@ -96,7 +100,12 @@ function publishLock(lockPath, token) {
   fs.mkdirSync(pendingPath, { mode: 0o700 });
   fs.writeFileSync(
     path.join(pendingPath, "owner.json"),
-    JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }),
+    JSON.stringify({
+      pid: process.pid,
+      token,
+      at: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString()
+    }),
     { mode: 0o600 }
   );
   try {
@@ -110,27 +119,56 @@ function publishLock(lockPath, token) {
   }
 }
 
+function lockExpired(owner) {
+  const heartbeat = Date.parse(owner?.heartbeatAt ?? owner?.at ?? "");
+  return !Number.isFinite(heartbeat) || Date.now() - heartbeat > LOCK_LEASE_MS;
+}
+
+function holdLock(lockPath, token) {
+  const heartbeat = setInterval(() => {
+    try {
+      const ownerPath = path.join(lockPath, "owner.json");
+      const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+      if (owner.token !== token) {
+        clearInterval(heartbeat);
+        return;
+      }
+      writeJsonAtomic(ownerPath, { ...owner, heartbeatAt: new Date().toISOString() });
+    } catch {
+      clearInterval(heartbeat);
+    }
+  }, LOCK_HEARTBEAT_MS);
+  heartbeat.unref();
+  return () => {
+    clearInterval(heartbeat);
+    try {
+      const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+      if (owner.token === token) fs.rmSync(lockPath, { recursive: true, force: true });
+    } catch {}
+  };
+}
+
 async function acquireSlot(shipDir, maximum) {
   if (!shipDir) return () => {};
   const slotRoot = path.join(shipDir, ".codex-slots");
   fs.mkdirSync(slotRoot, { recursive: true, mode: 0o700 });
   const token = randomUUID();
+  const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS;
   while (true) {
     for (let slot = 0; slot < maximum; slot += 1) {
       const slotPath = path.join(slotRoot, `slot-${slot}`);
       if (publishLock(slotPath, token)) {
-        return () => {
-          try {
-            const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
-            if (owner.token === token) fs.rmSync(slotPath, { recursive: true, force: true });
-          } catch {}
-        };
+        return holdLock(slotPath, token);
       } else {
         let reclaimIdentity = null;
         try {
           const owner = JSON.parse(fs.readFileSync(path.join(slotPath, "owner.json"), "utf8"));
-          try { process.kill(owner.pid, 0); } catch (ownerError) {
-            if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(slotPath, owner);
+          if (lockExpired(owner)) {
+            reclaimIdentity = staleLockIdentity(slotPath, owner);
+          } else {
+            try { process.kill(owner.pid, 0); } catch (ownerError) {
+              if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(slotPath, owner);
+            }
           }
         } catch {
           try {
@@ -142,6 +180,7 @@ async function acquireSlot(shipDir, maximum) {
         if (reclaimIdentity) quarantineStaleLock(slotPath, reclaimIdentity);
       }
     }
+    if (Date.now() >= deadline) throw new Error(`timed out waiting ${LOCK_WAIT_TIMEOUT_MS / 1000}s for a Codex execution slot`);
     await delay(250);
   }
 }
@@ -150,20 +189,20 @@ async function acquireNamedLock(root, name) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   const lockPath = path.join(root, name);
   const token = randomUUID();
+  const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS;
   while (true) {
     if (publishLock(lockPath, token)) {
-      return () => {
-        try {
-          const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
-          if (owner.token === token) fs.rmSync(lockPath, { recursive: true, force: true });
-        } catch {}
-      };
+      return holdLock(lockPath, token);
     } else {
       let reclaimIdentity = null;
       try {
         const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
-        try { process.kill(owner.pid, 0); } catch (ownerError) {
-          if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(lockPath, owner);
+        if (lockExpired(owner)) {
+          reclaimIdentity = staleLockIdentity(lockPath, owner);
+        } else {
+          try { process.kill(owner.pid, 0); } catch (ownerError) {
+            if (ownerError.code === "ESRCH") reclaimIdentity = staleLockIdentity(lockPath, owner);
+          }
         }
       } catch {
         // Older plugin versions exposed the directory before owner.json. Give
@@ -177,6 +216,7 @@ async function acquireNamedLock(root, name) {
       if (reclaimIdentity) {
         quarantineStaleLock(lockPath, reclaimIdentity);
       } else {
+        if (Date.now() >= deadline) throw new Error(`timed out waiting ${LOCK_WAIT_TIMEOUT_MS / 1000}s for lock ${name}`);
         await delay(100);
       }
     }
@@ -223,7 +263,7 @@ function killProcessGroup(child, signal) {
   }
 }
 
-async function runChild({ options, prompt, outputPath, eventsPath }) {
+async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () => {} }) {
   const argv = [
     "exec", "--json", "--ephemeral",
     "--cd", path.resolve(options.worktree),
@@ -252,7 +292,30 @@ async function runChild({ options, prompt, outputPath, eventsPath }) {
     stderr = (stderr + chunk.toString()).slice(-65_536);
   });
   child.stdin.on("error", () => {});
-  child.stdin.end(prompt);
+  const closePromise = new Promise((resolve) => child.once("close", resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      const spawned = () => {
+        child.off("error", failed);
+        child.on("error", (error) => {
+          stderr = (stderr + error.message).slice(-65_536);
+        });
+        resolve();
+      };
+      const failed = (error) => {
+        child.off("spawn", spawned);
+        reject(error);
+      };
+      child.once("spawn", spawned);
+      child.once("error", failed);
+    });
+    onSpawn();
+    child.stdin.end(prompt);
+  } catch (error) {
+    killProcessGroup(child, "SIGTERM");
+    events.end();
+    throw error;
+  }
 
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -260,10 +323,7 @@ async function runChild({ options, prompt, outputPath, eventsPath }) {
     killProcessGroup(child, "SIGTERM");
     setTimeout(() => killProcessGroup(child, "SIGKILL"), 2_000).unref();
   }, options.timeoutSec * 1000);
-  const exitCode = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  }).finally(() => {
+  const exitCode = await closePromise.finally(() => {
     clearTimeout(timer);
     events.end();
   });
@@ -322,6 +382,16 @@ function appendInvocationReceipt(artifact, fingerprint, executionId, fields = {}
     writeJsonAtomic(file, journal);
   }
   return file;
+}
+
+function hasInvocationReceipt(artifact, fingerprint) {
+  const file = usageReceiptFile(artifact);
+  if (!fs.existsSync(file)) return false;
+  const journal = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (journal.version !== 1 || journal.artifact !== artifact || !Array.isArray(journal.invocations)) {
+    throw new Error(`invalid Codex usage receipt journal at ${file}`);
+  }
+  return journal.invocations.some((entry) => entry.requestFingerprint === fingerprint);
 }
 
 // A model that was asked to transcribe a large prompt can truncate it,
@@ -412,6 +482,12 @@ export async function runCodex(options, prompt) {
         : `The artifact at ${artifact} has no recorded request; running Codex again.\n`);
     }
   }
+  if (options.sandbox === "workspace-write" && hasInvocationReceipt(artifact, fingerprint)) {
+    throw new Error(
+      "A prior writable Codex dispatch exists without a checkpoint-bound reusable result; "
+      + "the worktree may already contain changes, so automatic replay is unsafe."
+    );
+  }
 
   fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
   const release = await acquireSlot(options.shipDir ? path.resolve(options.shipDir) : null, options.maxConcurrent);
@@ -424,10 +500,17 @@ export async function runCodex(options, prompt) {
       try { fs.unlinkSync(attemptPath); } catch {}
       fs.writeFileSync(attemptPath, "", { mode: 0o600 });
       const executionId = randomUUID();
-      if (!options.dryRun) {
-        appendInvocationReceipt(artifact, fingerprint, executionId, { attempt: invalidAttempts + 1 });
-      }
-      const result = await runChild({ options, prompt: amendedPrompt, outputPath: attemptPath, eventsPath });
+      const result = await runChild({
+        options,
+        prompt: amendedPrompt,
+        outputPath: attemptPath,
+        eventsPath,
+        onSpawn: () => {
+          if (!options.dryRun) {
+            appendInvocationReceipt(artifact, fingerprint, executionId, { attempt: invalidAttempts + 1 });
+          }
+        }
+      });
       if (result.dryRun) {
         const stub = stubFor(schema, schema);
         fs.writeFileSync(attemptPath, JSON.stringify(stub, null, 2) + "\n", { mode: 0o600 });
