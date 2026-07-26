@@ -40,6 +40,8 @@ export function renderReport(shipDir) {
     lines.push(`- Review input: ${pr.fileCount ?? 0} changed files, ${pr.diffBytes ?? 0} full-diff bytes`);
     lines.push(`- Review rounds: ${review?.highestRound ?? 0}${review && !review.ok ? " (artifact did not parse; not converged)" : ""}`);
     lines.push(`- Agent calls: ${pr.agentCalls ?? 0}`);
+    const usage = pr.usage ?? {};
+    lines.push(`- Usage: Claude reasoning ${usage.claudeReasoningCalls ?? 0}; Haiku plumbing ${usage.haikuPlumbingCalls ?? 0}; Codex ${usage.codexCalls ?? 0}; relay retries ${usage.relayRetries ?? 0}`);
     if (pr.budgetSpent !== null && pr.budgetSpent !== undefined) lines.push(`- Workflow budget spent: ${JSON.stringify(pr.budgetSpent)}`);
     lines.push(`- Local verification: ${pr.gates?.verify?.status ?? "not-run"}`);
     lines.push(`- CI: ${pr.gates?.ci?.status ?? "not-run"}${pr.gates?.ci?.reason ? ` — ${pr.gates.ci.reason}` : ""}`);

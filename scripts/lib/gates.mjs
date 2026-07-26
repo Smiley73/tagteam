@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
+import { validateRunPolicy } from "./run-policy.mjs";
 
 const TRANSITIONS = {
   pending: new Set(["implementing", "failed"]),
@@ -18,14 +19,16 @@ export function transitionPr(pr, next) {
 
 export function bindNewCandidate(pr, candidateOid, baseOid, policy = null) {
   if (!candidateOid || !baseOid) throw new Error("candidate and base OIDs are required");
-  const policyFingerprint = policy?.policyFingerprint ?? pr.policyFingerprint ?? null;
-  const assurance = policy?.assurance ?? pr.assurance ?? null;
+  const normalizedPolicy = policy ? validateRunPolicy(policy) : pr.runPolicy ? validateRunPolicy(pr.runPolicy) : null;
+  const policyFingerprint = normalizedPolicy?.policyFingerprint ?? pr.policyFingerprint ?? null;
+  const assurance = normalizedPolicy?.assurance ?? pr.assurance ?? null;
   return {
     ...pr,
     candidateOid,
     baseOid,
     ...(policyFingerprint ? { policyFingerprint } : {}),
     ...(assurance ? { assurance } : {}),
+    ...(normalizedPolicy ? { runPolicy: normalizedPolicy } : {}),
     candidateHistory: [...(pr.candidateHistory ?? []), {
       candidateOid, baseOid, at: new Date().toISOString(),
       ...(policyFingerprint ? { policyFingerprint } : {}),
@@ -77,10 +80,17 @@ export function evaluateGates(pr, config, { baseProtected = false, runPolicy = n
   const ui = current("ui");
   const ci = current("ci");
   const human = current("human");
-  const policyMismatch = Boolean(runPolicy) && (
+  let normalizedPolicy = null;
+  let policyInvalid = false;
+  try {
+    normalizedPolicy = runPolicy ? validateRunPolicy(runPolicy) : pr.runPolicy ? validateRunPolicy(pr.runPolicy) : null;
+  } catch {
+    policyInvalid = true;
+  }
+  const policyMismatch = policyInvalid || Boolean(normalizedPolicy) && (
     !pr.policyFingerprint
-    || pr.policyFingerprint !== runPolicy.policyFingerprint
-    || pr.assurance !== runPolicy.assurance
+    || pr.policyFingerprint !== normalizedPolicy.policyFingerprint
+    || pr.assurance !== normalizedPolicy.assurance
   );
 
   if (policyMismatch) {

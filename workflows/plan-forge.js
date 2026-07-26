@@ -150,6 +150,43 @@ function parseInput(input) {
   return input && typeof input === "object" ? input : {};
 }
 
+function canonicalPolicy(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalPolicy(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function workflowRunPolicy(input, config) {
+  const policy = input.runPolicy ?? {
+    version: 1,
+    reasoningProvider: "both",
+    plumbingModel: config.transport?.relayModel ?? "sonnet",
+    assurance: "cross-provider"
+  };
+  if (policy.version !== 1) throw new Error("run policy version must be 1");
+  if (!["both", "claude", "codex"].includes(policy.reasoningProvider)) throw new Error("invalid run policy provider");
+  const expectedAssurance = policy.reasoningProvider === "both" ? "cross-provider" : "single-provider";
+  if (policy.assurance !== expectedAssurance || !policy.plumbingModel) throw new Error("incomplete run policy");
+  if (policy.reasoningProvider !== "both" && policy.plumbingModel !== "haiku") throw new Error("single-provider runs require Haiku plumbing");
+  const fields = {
+    version: policy.version,
+    reasoningProvider: policy.reasoningProvider,
+    plumbingModel: policy.plumbingModel,
+    assurance: policy.assurance
+  };
+  const bytes = new TextEncoder().encode(canonicalPolicy(fields));
+  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const policyFingerprint = `sha256:${digest}`;
+  if (policy.policyFingerprint && policy.policyFingerprint !== policyFingerprint) throw new Error("run policy fingerprint does not match its fields");
+  // PR 1 threads and binds policy identity without pretending an unfinished
+  // dispatch path is available. PR 2 replaces this guard with provider routing.
+  if (policy.reasoningProvider !== "both") throw new Error("single-provider planning dispatch is not available in this build");
+  return { ...fields, policyFingerprint };
+}
+
 function dedupeQuestions(questions) {
   const seen = new Set();
   return questions.filter((question) => {
@@ -309,6 +346,7 @@ function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = 
 // engine, and re-running the idempotent command costs one file read.
 const RELAY_ATTEMPTS = 3;
 const relayState = { extraCalls: 0 };
+const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
 
 function relayModelFor(config) {
   return config.transport?.relayModel ?? "sonnet";
@@ -324,6 +362,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
     "Return ok=true with the promptPath and bytes the command reported. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await agent(prompt, {
       label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
@@ -357,6 +396,7 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
     "Return ok=true with the payloads array the command printed, unchanged. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await agent(prompt, {
       label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
@@ -438,7 +478,9 @@ function promptNotBuilt({ what, promptFile, detail }) {
 }
 
 async function relayCodex({ prompt, label, phase: phaseName, schema, model, artifact, promptFile, what }) {
+  usageState.codexCalls += 1;
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    usageState.haikuPlumbingCalls += 1;
     if (attempt > 1) relayState.extraCalls += 1;
     const result = await agent(attempt === 1 ? prompt : [
       prompt,
@@ -478,6 +520,9 @@ async function main(raw) {
     if (!input[key]) throw new Error(`plan-forge requires ${key}`);
   }
   const config = input.config;
+  relayState.extraCalls = 0;
+  Object.assign(usageState, { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 });
+  const runPolicy = await workflowRunPolicy(input, config);
   const claude = config.planning.claude;
   const codex = config.planning.codex;
   const decisions = input.decisions ?? [];
@@ -575,6 +620,7 @@ async function main(raw) {
       effort: claude.effort,
       schema: planDraftSchema
     });
+  if (!resumeRound) usageState.claudeReasoningCalls += 1;
   if (!draft?.planMarkdown) throw new Error("the plan drafter did not return a usable draft");
 
   // Reads the plan file a step was just told to write and records the checksum of
@@ -727,6 +773,7 @@ async function main(raw) {
       })] : [])
     ]);
     callCount += uiEnabled ? 3 : 2;
+    usageState.claudeReasoningCalls += uiEnabled ? 2 : 1;
     if (!codexReview) throw new Error(relayLost({ what: `review of plan round ${round}`, artifact, promptFile }));
     if (!claudeReview) throw new Error([
       `The Claude review of plan round ${round} did not come back.`,
@@ -738,7 +785,19 @@ async function main(raw) {
     // reviews, and stopping the plan over a missing suggestion would cost far
     // more than the suggestion is worth.
     if (uiEnabled && !uiReview) log(`The interface check for round ${round} did not come back. The round stands on its two reviews.`);
-    reviews.push({ round, claude: claudeReview, codex: codexReview, interaction: uiReview ?? null });
+    reviews.push({
+      round,
+      reviewers: [
+        { provider: "claude", role: "plan-review", result: claudeReview },
+        { provider: "codex", role: "plan-review", result: codexReview },
+        ...(uiReview ? [{ provider: "claude", role: "interaction-review", result: uiReview }] : [])
+      ],
+      // Retained during the artifact migration so older command/resume readers
+      // continue to work until PR 2 switches them to `reviewers`.
+      claude: claudeReview,
+      codex: codexReview,
+      interaction: uiReview ?? null
+    });
     questions.push(...(claudeReview.open_questions ?? []), ...(codexReview.open_questions ?? []));
     uiDecisions.push(...(uiReview?.ui_decisions ?? []));
 
@@ -764,6 +823,7 @@ async function main(raw) {
       schema: planDraftSchema
     });
     callCount += 1;
+    usageState.claudeReasoningCalls += 1;
     if (!draft?.planMarkdown) throw new Error(`plan revision ${round} failed`);
     planExpect = await recordPlanFile({
       file: revisedFile,
@@ -792,6 +852,7 @@ async function main(raw) {
     schema: manifestSchema
   });
   callCount += 1;
+  usageState.claudeReasoningCalls += 1;
   if (!manifest?.tasks?.length) throw new Error("the plan parser returned no tasks");
 
   phase("PR train");
@@ -810,6 +871,7 @@ async function main(raw) {
     schema: trainSchema
   });
   callCount += 1;
+  usageState.claudeReasoningCalls += 1;
   if (!train?.prs?.length) throw new Error("the PR decomposer returned no pull requests");
 
   // Both handoff artifacts are read back in one command, so the pass learns what
@@ -925,6 +987,10 @@ async function main(raw) {
 
   const handoffIssues = (decompositionReview.issues ?? []).filter((issue) => ["blocking", "major"].includes(issue.severity));
   return {
+    runPolicy,
+    reasoningProvider: runPolicy.reasoningProvider,
+    assurance: runPolicy.assurance,
+    policyFingerprint: runPolicy.policyFingerprint,
     status: decompositionReview.verdict === "approve" && handoffIssues.length === 0
       ? "needs-questions-or-approval"
       : "needs-handoff-revision",
@@ -954,6 +1020,7 @@ async function main(raw) {
     completedRounds: reviews.map((review) => review.round),
     agentCalls: callCount + relayState.extraCalls,
     relayRetries: relayState.extraCalls,
+    usage: { ...usageState, relayRetries: relayState.extraCalls },
     budgetSpent: budgetSpent()
   };
 }

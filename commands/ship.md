@@ -1,6 +1,6 @@
 ---
 description: Implement, review, verify, publish, and merge an approved plan as an isolated PR train
-argument-hint: '[plan-dir|plan-file] [--resume] [--dry-run] [--reviewers all|dim,dim]'
+argument-hint: '[plan-dir|plan-file] [--resume] [--dry-run] [--provider both|claude|codex] [--reviewers all|dim,dim]'
 allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:ship-pr), Agent(tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-drafter, tagteam:fixer, tagteam:ui-classifier), Bash(node *), Bash(git *), Bash(gh *), Bash(codex *), Bash(codegraph *)
 ---
 
@@ -12,13 +12,13 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` completely before acting. F
 
 ## Resolve and preflight
 
-1. Parse `--resume`, `--dry-run`, and `--reviewers`. A named reviewer is force-enabled even if disabled/conditional; `all` forces every dimension.
+1. Parse `--resume`, `--dry-run`, `--provider`, and `--reviewers`. Reject a missing value or provider outside `both|claude|codex`; a named reviewer is force-enabled even if disabled/conditional; `all` forces every dimension.
    Reject repository/worktree/artifact paths containing control characters or shell metacharacters before forming any Bash command; say that the checkout must be moved to a conventional path. Never try to escape through an ambiguous path.
 2. Require a valid `.tagteam/config.json`. Reject any transport other than `exec`. Exit 3 does not stop a ship: settings written by an earlier plugin are missing answers, not wrong, and a train already in flight must never be wedged by a plugin upgrade. Treat the unanswered interface keys as `hasUserInterface: true`, `conventionPaths: []`, and `confirmDecisions: off`; say so once by rendering `messages.mjs configStaleShip` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, never in your own words, and continue. The user-visible merge gate is unaffected.
 3. An approved plan directory must contain a valid approval marker whose hashes still match. A bare plan file is parsed and decomposed with the plan agents, then its question batch and approval gate run before shipping.
-4. Require the primary checkout to be clean at ship start. Re-check `codex --version`, `gh auth status` in GitHub mode, origin, and base protection. Snapshot the resolved base name and starting OID. Never infer that protection still exists from init.
+4. Require the primary checkout to be clean at ship start. Normalize the effective provider with `node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/run-policy.mjs" normalize "<provider>" "<repo>/.tagteam/config.json"` before model work. Re-check `codex --version` only for `both` or `codex`; re-check `gh auth status` in GitHub mode, origin, and base protection. Snapshot the resolved base name and starting OID. Never infer that protection still exists from init.
 5. Resolve `prTrain.base` once: null means the GitHub default branch, or the current branch in local mode. Create ship ID `<slug>-<UTC timestamp>`.
-6. Copy plan artifacts and the effective config into `.tagteam/ships/<ship-id>/` with mode 0600. Initialize `pr-train-state.json`; persist after every transition and count every model call.
+6. Copy plan artifacts and the effective config into `.tagteam/ships/<ship-id>/` with mode 0600. Persist the validated policy as `run-policy.json` at mode 0600 and carry its assurance and fingerprint on every PR state record. On resume without an explicit provider, validate and reuse that file; an explicit change records a policy-change event, invalidates every candidate-bound gate, and revalidates the candidate. Initialize `pr-train-state.json`; persist after every transition and count every model call.
 7. If not resuming, use exactly:
 
 ```bash
@@ -60,13 +60,13 @@ git -C "<worktree>" checkout --detach "<baseOid>"
 git -C "<worktree>" switch -c "<branchPrefix><ship-id>/<pr.id>"
 ```
 
-Invoke `Workflow({name:"tagteam:ship-pr", args:{...}})` with the effective config, config path, PR, its manifest tasks, PR base OID, ship/plugin/worktree/primary paths, diff-exclude JSON path, forced reviewers, and persisted call count. Persist its result. The workflow owns implementation, candidate commits, snapshots, CodeGraph sync, UI classification, dimension selection, alternating review/fix, artifact parsing, and local verification.
+Invoke `Workflow({name:"tagteam:ship-pr", args:{...}})` with the effective config, validated `runPolicy`, config path, PR, its manifest tasks, PR base OID, ship/plugin/worktree/primary paths, diff-exclude JSON path, forced reviewers, and persisted call count. Persist its result. The workflow owns implementation, candidate commits, snapshots, CodeGraph sync, UI classification, dimension selection, alternating review/fix, artifact parsing, and local verification.
 
 For revalidation of an already committed candidate, also pass `existingCandidateOid`, prior `taskResults`, and `roundOffset` from the parsed append-only artifact; this skips implementation and appends new global round numbers. For a CI or human-requested repair, additionally pass structured `repairFindings` and `repairEngine`; the workflow fixes, commits a new candidate, then runs every gate. Never re-run implementation merely to revalidate a rebase or gate repair.
 
 Any new candidate OID invalidates every prior review, verification, UI, CI, and human-approval record. Never copy a gate record across OIDs.
 
-Use the CLI in `${CLAUDE_PLUGIN_ROOT}/scripts/lib/gates.mjs` for state transitions, candidate invalidation, call-capacity checks, and final gate evaluation (`transition`, `bind`, `record`, `capacity`, `evaluate`). Persist its returned JSON. Do not reproduce that math in prose or model judgment.
+Use the CLI in `${CLAUDE_PLUGIN_ROOT}/scripts/lib/gates.mjs` for state transitions, candidate invalidation, call-capacity checks, and final gate evaluation (`transition`, `bind`, `record`, `capacity`, `evaluate`). Pass `run-policy.json` to `bind` and `evaluate`, and its fingerprint to `record`; persist the returned JSON. Do not reproduce that math in prose or model judgment.
 
 ## Publish and CI
 

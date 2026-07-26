@@ -23,7 +23,7 @@ function loadWorkflowCore() {
   assert.notEqual(end, -1);
   const context = { module: { exports: {} }, log() {} };
   vm.runInNewContext(`${source.slice(start, end)}
-module.exports = { globRegex, matchesWhen, selectDimensions, stableId, mergeLedger, actionable, applyFixes };`, context);
+module.exports = { globRegex, matchesWhen, selectDimensions, stableId, mergeLedger, actionable, applyFixes, tally };`, context);
   return context.module.exports;
 }
 
@@ -82,13 +82,20 @@ test("shared ledger stays equivalent to the workflow production rules", () => {
     JSON.parse(JSON.stringify(actionableFindings(sharedLedger))),
     JSON.parse(JSON.stringify(workflow.actionable(workflowLedger)))
   );
-  assert.deepEqual(tallies(sharedLedger), {
-    total: workflowLedger.length,
-    bySeverity: { major: 1, minor: 1 },
-    byDimension: { Security: 1, "code-quality": 1 },
-    byEngine: { codex: 2 },
-    byStatus: { recurring: 1, "needs-human": 1 }
-  });
+  assert.deepEqual(tallies(sharedLedger), JSON.parse(JSON.stringify(workflow.tally(workflowLedger))));
+
+  const escalated = [{ ...findings[0], severity: "blocking", line_start: 12, line_end: 14 }];
+  workflow.mergeLedger(workflowLedger, escalated, "codex", 3);
+  sharedLedger = mergeFindings(sharedLedger, escalated, { engine: "codex", round: 3 });
+  const failed = { results: [{ id: sharedLedger[0].id, status: "failed", explanation: "Repair failed." }] };
+  workflow.applyFixes(workflowLedger, failed);
+  sharedLedger = applyFixReport(sharedLedger, failed);
+  assert.deepEqual(JSON.parse(JSON.stringify(sharedLedger)), JSON.parse(JSON.stringify(workflowLedger)));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(actionableFindings(sharedLedger))),
+    JSON.parse(JSON.stringify(workflow.actionable(workflowLedger)))
+  );
+  assert.deepEqual(tallies(sharedLedger), JSON.parse(JSON.stringify(workflow.tally(workflowLedger))));
 });
 
 test("matcher errors fail open and keywords inspect only the supplied added corpus", () => {

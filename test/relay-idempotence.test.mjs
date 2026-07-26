@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { validateRunPolicy } from "../scripts/lib/run-policy.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -217,6 +218,16 @@ test("a lost plan-review relay result is recovered from the saved artifact", asy
   assert.equal(labels.includes("plan:codex-review:1:relay-retry-1"), true);
   assert.equal(result.reviews.length, 1);
   assert.deepEqual(result.reviews[0].codex, APPROVE);
+  assert.deepEqual(validateRunPolicy(result.runPolicy), result.runPolicy);
+  assert.deepEqual(result.reviews[0].reviewers.map(({ provider, role }) => ({ provider, role })), [
+    { provider: "claude", role: "plan-review" },
+    { provider: "codex", role: "plan-review" },
+    { provider: "claude", role: "interaction-review" }
+  ]);
+  assert.equal(result.usage.relayRetries, 1);
+  assert.ok(result.usage.claudeReasoningCalls > 0);
+  assert.ok(result.usage.haikuPlumbingCalls > 0);
+  assert.ok(result.usage.codexCalls > 0);
 });
 
 test("a lost decomposition cross-check relay result is recovered from the saved artifact", async () => {
@@ -345,6 +356,29 @@ test("every early exit reports the relay retries it spent", async () => {
   // The retry is a real model call; an early exit that hid it would let the
   // next resume overrun the configured limit.
   assert.equal(result.agentCalls, 9);
+  assert.equal(result.reasoningProvider, "both");
+  assert.equal(result.assurance, "cross-provider");
+  assert.deepEqual(validateRunPolicy(result.runPolicy), result.runPolicy);
+  assert.equal(result.usage.codexCalls, 1);
+  assert.equal(result.usage.relayRetries, 1);
+  assert.equal(result.usage.claudeReasoningCalls, 1);
+  assert.ok(result.usage.haikuPlumbingCalls > 0);
+});
+
+test("shipping rejects a run policy whose fingerprint does not match its fields", async () => {
+  await assert.rejects(
+    harness("workflows/ship-pr.js", {
+      ...SHIP_ARGS,
+      runPolicy: {
+        version: 1,
+        reasoningProvider: "both",
+        plumbingModel: "sonnet",
+        assurance: "cross-provider",
+        policyFingerprint: `sha256:${"0".repeat(64)}`
+      }
+    }),
+    /fingerprint does not match/
+  );
 });
 
 test("a lost Codex review relay result does not fail the PR round", async () => {
@@ -375,5 +409,14 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   // The round converges on the recovered result instead of recording a failed reviewer.
   assert.equal(result.status, "clean");
   assert.equal(result.relayRetries, 1);
+  assert.equal(result.policyFingerprint, result.runPolicy.policyFingerprint);
+  assert.deepEqual(result.usage, {
+    claudeReasoningCalls: 3,
+    haikuPlumbingCalls: 8,
+    codexCalls: 3,
+    relayRetries: 1
+  });
+  assert.equal(result.rounds[0].policyFingerprint, result.policyFingerprint);
+  assert.equal(result.rounds[0].assurance, "cross-provider");
   assert.equal(result.rounds[0].reviewerFailures.length, 0);
 });

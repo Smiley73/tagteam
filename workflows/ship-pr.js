@@ -136,6 +136,43 @@ function parseInput(input) {
   return input && typeof input === "object" ? input : {};
 }
 
+function canonicalPolicy(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalPolicy(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function workflowRunPolicy(input, config) {
+  const policy = input.runPolicy ?? {
+    version: 1,
+    reasoningProvider: "both",
+    plumbingModel: config.transport?.relayModel ?? "sonnet",
+    assurance: "cross-provider"
+  };
+  if (policy.version !== 1) throw new Error("run policy version must be 1");
+  if (!["both", "claude", "codex"].includes(policy.reasoningProvider)) throw new Error("invalid run policy provider");
+  const expectedAssurance = policy.reasoningProvider === "both" ? "cross-provider" : "single-provider";
+  if (policy.assurance !== expectedAssurance || !policy.plumbingModel) throw new Error("incomplete run policy");
+  if (policy.reasoningProvider !== "both" && policy.plumbingModel !== "haiku") throw new Error("single-provider runs require Haiku plumbing");
+  const fields = {
+    version: policy.version,
+    reasoningProvider: policy.reasoningProvider,
+    plumbingModel: policy.plumbingModel,
+    assurance: policy.assurance
+  };
+  const bytes = new TextEncoder().encode(canonicalPolicy(fields));
+  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const policyFingerprint = `sha256:${digest}`;
+  if (policy.policyFingerprint && policy.policyFingerprint !== policyFingerprint) throw new Error("run policy fingerprint does not match its fields");
+  // PR 1 binds the policy to every shipping artifact but leaves dispatch
+  // unchanged. PR 3 replaces this guard with provider-aware shipping routes.
+  if (policy.reasoningProvider !== "both") throw new Error("single-provider shipping dispatch is not available in this build");
+  return { ...fields, policyFingerprint };
+}
+
 function fence(label, value) {
   return `<untrusted-${label}>\n${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n</untrusted-${label}>`;
 }
@@ -317,6 +354,17 @@ function tally(ledger) {
 // for the review, fix, or implementation a second time.
 const RELAY_ATTEMPTS = 3;
 const relayState = { extraCalls: 0 };
+const usageState = { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 };
+
+async function claudeReasoningCall(prompt, options) {
+  usageState.claudeReasoningCalls += 1;
+  return agent(prompt, options);
+}
+
+async function haikuPlumbingCall(prompt, options) {
+  usageState.haikuPlumbingCalls += 1;
+  return agent(prompt, options);
+}
 
 function relayModelFor(config) {
   return config.transport?.relayModel ?? "sonnet";
@@ -324,6 +372,7 @@ function relayModelFor(config) {
 
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
+  usageState.codexCalls += 1;
   const promptFile = `${artifact}.prompt.md`;
   // Declared from the prompt the workflow actually built, so a relay that
   // shortened or paraphrased it fails before Codex is invoked rather than
@@ -353,7 +402,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
-    const result = await agent(attempt === 1 ? basePrompt : [
+    const result = await haikuPlumbingCall(attempt === 1 ? basePrompt : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
       "Return the parsed object by invoking the StructuredOutput tool."
@@ -391,7 +440,7 @@ async function implementTask(input, task, tierName, engine, attempt) {
       sandbox: "workspace-write"
     });
   }
-  return agent(prompt, {
+  return claudeReasoningCall(prompt, {
     label: `implement:${task.id}:${attempt}`,
     phase: "Implement",
     agentType: "tagteam:implementer",
@@ -412,7 +461,7 @@ async function commitCandidate(input, round, summary) {
     `Run exactly: git -C "${input.worktree}" rev-parse HEAD`,
     `Return ok=true, that full OID as candidateOid, and message=${JSON.stringify(message)}.`
   ].join("\n");
-  const result = await agent(prompt, {
+  const result = await haikuPlumbingCall(prompt, {
     label: `candidate:commit:${round}`,
     phase: "Candidate",
     agentType: "tagteam:committer",
@@ -435,7 +484,7 @@ async function snapshot(input, round, candidateOid) {
     `--exclude-json "${input.diffExcludePath}"`
   ].join(" ");
   const codegraph = input.config.codegraph.enabled ? `Then run exactly: codegraph sync "${input.worktree}"` : "CodeGraph is disabled; do not run it.";
-  const result = await agent([
+  const result = await haikuPlumbingCall([
     `Run exactly: ${command}`,
     codegraph,
     `Read ${outDir}/candidate.json.`,
@@ -463,7 +512,7 @@ async function runVerify(input, snapshotValue, round) {
     `--out-dir "${input.shipDir}/prs/${input.pr.id}/verify/${round}"`,
     `--out "${resultPath}"`
   ].join(" ");
-  const result = await agent([
+  const result = await haikuPlumbingCall([
     `Run exactly: ${command}`,
     `Read ${resultPath} and return status, commands, and resultPath=${JSON.stringify(resultPath)}.`
   ].join("\n"), {
@@ -478,7 +527,7 @@ async function runVerify(input, snapshotValue, round) {
 }
 
 async function classifyUi(input, snapshotValue, round) {
-  const result = await agent([
+  const result = await haikuPlumbingCall([
     "Independently answer whether a person using the product or developer tool would notice this actual candidate change.",
     fence("changed-paths", snapshotValue.changedPaths),
     `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
@@ -519,25 +568,36 @@ async function main(raw) {
     if (!input[key]) throw new Error(`ship-pr requires ${key}`);
   }
   const config = input.config;
+  relayState.extraCalls = 0;
+  Object.assign(usageState, { claudeReasoningCalls: 0, haikuPlumbingCalls: 0, codexCalls: 0 });
+  const runPolicy = await workflowRunPolicy(input, config);
   const roundOffset = Number(input.roundOffset ?? 0);
   let callCount = Number(input.agentCalls ?? 0);
   // Relay re-reads are cheap but still calls, so they eat into the per-PR limit
   // rather than silently expanding it.
   const callBudget = () => config.limits.agentCallsPerPr - relayState.extraCalls;
+  const finish = (result) => ({
+    runPolicy,
+    reasoningProvider: runPolicy.reasoningProvider,
+    assurance: runPolicy.assurance,
+    policyFingerprint: runPolicy.policyFingerprint,
+    usage: { ...usageState, relayRetries: relayState.extraCalls },
+    ...result
+  });
   const taskResults = [...(input.taskResults ?? [])];
   const failedTasks = new Set();
 
   if (!input.existingCandidateOid) {
     const implementationCapacity = input.tasks.length * 2 + 4;
     if (callCount + implementationCapacity > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate",
         tasks: taskResults,
         rounds: [],
         tallies: {},
         gateFailures: [`This PR needs capacity for up to ${implementationCapacity} implementation and candidate calls before review, exceeding its ${config.limits.agentCallsPerPr}-call limit.`],
         agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     phase("Implement");
     for (const wave of topoWaves(input.tasks)) {
@@ -568,7 +628,7 @@ async function main(raw) {
       }
     }
     if (failedTasks.size > 0) {
-      return { status: "implementation-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: [`Tasks failed: ${[...failedTasks].join(", ")}`], agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "implementation-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: [`Tasks failed: ${[...failedTasks].join(", ")}`], agentCalls: callCount + relayState.extraCalls });
     }
   }
 
@@ -576,11 +636,11 @@ async function main(raw) {
   let candidateOid = input.existingCandidateOid ?? null;
   if (candidateOid && (input.repairFindings ?? []).length > 0) {
     if (callCount + 2 > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["The PR call limit has no room for the requested repair and new candidate."],
         candidateOid, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     const repairEngine = input.repairEngine === "codex" ? "codex" : "claude";
     const repairRuntime = config.complexity.complex[repairEngine];
@@ -595,13 +655,13 @@ async function main(raw) {
           artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${roundOffset + 1}/external-fixes.json`,
           prompt: repairPrompt, runtime: repairRuntime, sandbox: "workspace-write"
         })
-      : await agent(repairPrompt, {
+      : await claudeReasoningCall(repairPrompt, {
           label: "repair:external:claude", phase: "Fix", agentType: "tagteam:fixer",
           model: repairRuntime.model, effort: repairRuntime.effort, schema: fixReportSchema
         });
     callCount += 1;
     if (!repairReport || input.repairFindings.some((finding) => !(repairReport.results ?? []).some((result) => result.id === finding.id && result.status === "fixed"))) {
-      return { status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls });
     }
     candidateOid = await commitCandidate(input, roundOffset + 1, "external gate repair");
     callCount += 1;
@@ -610,11 +670,11 @@ async function main(raw) {
     callCount += 1;
   }
   if (callCount + 3 > callBudget()) {
-    return {
+    return finish({
       status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
       gateFailures: ["The PR call limit has no room to snapshot, verify, and classify the current candidate."],
       candidateOid, agentCalls: callCount + relayState.extraCalls
-    };
+    });
   }
   const initialRound = roundOffset === 0 ? 0 : roundOffset + 1;
   let snapshotValue = await snapshot(input, initialRound, candidateOid);
@@ -623,13 +683,13 @@ async function main(raw) {
   callCount += 1;
   if (verification.status === "failed") {
     if (callCount + 5 > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["Local verification failed, but the PR call limit has no room for its one repair, new candidate, and classification."],
         candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
-    const repair = await agent([
+    const repair = await claudeReasoningCall([
       `Repair only the verification failure recorded at ${verification.resultPath} inside ${input.worktree}.`,
       "Do not commit or perform unrelated changes. Return one result for TT-VERIFY."
     ].join("\n"), {
@@ -642,7 +702,7 @@ async function main(raw) {
     });
     callCount += 1;
     if (!repair?.results?.some((item) => item.id === "TT-VERIFY" && item.status === "fixed")) {
-      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
     }
     candidateOid = await commitCandidate(input, initialRound, "repair local verification");
     callCount += 1;
@@ -651,7 +711,7 @@ async function main(raw) {
     verification = await runVerify(input, snapshotValue, initialRound);
     callCount += 1;
     if (verification.status === "failed") {
-      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
     }
   }
 
@@ -667,15 +727,15 @@ async function main(raw) {
 
   if (config.specialistPrepass.enabled && roundOffset === 0) {
     if (callCount + 6 > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["The PR call limit has no room for the six specialist pre-pass checks."],
         candidateOid, ui, verify: verification, selected: initialSelectedInfo, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     phase("Specialist pre-pass");
     const focuses = ["architecture", "security", "reliability", "testing", "code-quality", "documentation"];
-    const specialists = await parallel(focuses.map((focus) => () => agent([
+    const specialists = await parallel(focuses.map((focus) => () => claudeReasoningCall([
       `Apply the ${focus} lens to candidate ${candidateOid} in ${input.worktree}.`,
       fence("changed-paths", snapshotValue.changedPaths),
       `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
@@ -710,11 +770,11 @@ async function main(raw) {
     const assignments = reviewAssignments(selectedInfo.selected, round, lastFixEngine, config.review.firstReviewer);
     const estimatedCalls = assignments.length + 1 + (loopRound < config.maxReviewLoops ? 10 : 0);
     if (callCount + estimatedCalls > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds, tallies: tally(ledger),
         gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit before round ${round}.`],
         candidateOid, ui, verify: verification, selected: selectedInfo, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     phase(`Review ${round}`);
     const reviewResults = await parallel(assignments.map((assignment) => async () => {
@@ -744,7 +804,7 @@ async function main(raw) {
           reviewDiffPath: snapshotValue.reviewDiffPath
         });
       } else {
-        result = await agent([
+        result = await claudeReasoningCall([
           ...promptParts,
           `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
         ].join("\n\n"), {
@@ -820,11 +880,15 @@ async function main(raw) {
       ledgerSnapshot: ledger,
       reviewerFailures: lastRoundFailures,
       fixEngine: null,
+      runPolicy,
+      reasoningProvider: runPolicy.reasoningProvider,
+      assurance: runPolicy.assurance,
+      policyFingerprint: runPolicy.policyFingerprint,
       verification
     };
     const roundJsonPath = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/round.json`;
     const reviewPath = `${input.shipDir}/prs/${input.pr.id}/review.md`;
-    const scribe = await agent([
+    const scribe = await haikuPlumbingCall([
       `Persist this round JSON at ${roundJsonPath} with mode 0600.`,
       `Also persist each non-null reviewerResults entry at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/<engine>-<dimension>.findings.json and ledgerSnapshot at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/ledger.snapshot.json, all mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/render-review-round.mjs" "${reviewPath}" "${roundJsonPath}"`,
@@ -883,7 +947,7 @@ async function main(raw) {
         sandbox: "workspace-write"
       });
     } else {
-      fixReport = await agent(fixPrompt, {
+      fixReport = await claudeReasoningCall(fixPrompt, {
         label: `fix:${round}:claude`,
         phase: `Fix ${round}`,
         agentType: "tagteam:fixer",
@@ -910,7 +974,7 @@ async function main(raw) {
       candidateBefore: candidateOid,
       report: fixReport
     };
-    const fixScribe = await agent([
+    const fixScribe = await haikuPlumbingCall([
       `Persist this fix event at ${fixEventPath} with mode 0600.`,
       `Persist the event's report object at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/fixes.json with mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/append-review-event.mjs" "${input.shipDir}/prs/${input.pr.id}/review.md" "${fixEventPath}"`,
@@ -954,7 +1018,7 @@ async function main(raw) {
             runtime,
             sandbox: "workspace-write"
           })
-        : await agent(repairPrompt, {
+        : await claudeReasoningCall(repairPrompt, {
             label: `verify:repair:${round}:claude`,
             phase: `Verify repair ${round}`,
             agentType: "tagteam:fixer",
@@ -996,7 +1060,7 @@ async function main(raw) {
       gateFailures.push(`${dimension} still has findings at or above its configured gate`);
     }
   }
-  return {
+  return finish({
     status: gateFailures.length > 0 && status === "clean" ? "failed-gates" : status,
     tasks: taskResults,
     rounds,
@@ -1019,7 +1083,7 @@ async function main(raw) {
     agentCalls: callCount + relayState.extraCalls,
     relayRetries: relayState.extraCalls,
     budgetSpent: budgetSpent()
-  };
+  });
 }
 
 return await main(args);

@@ -17,6 +17,8 @@ import { parseReviewArtifact } from "../scripts/parse-review-artifact.mjs";
 import { appendRound } from "../scripts/render-review-round.mjs";
 import { appendEvent } from "../scripts/append-review-event.mjs";
 import { classifyProviderError, nextBackoff } from "../scripts/quota-backoff.mjs";
+import { normalizeRunPolicy } from "../scripts/lib/run-policy.mjs";
+import { renderReport } from "../scripts/render-report.mjs";
 import { semanticErrors, validateJson } from "../scripts/validate-json.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -328,13 +330,7 @@ test("gate evaluation requires evidence, UI approval, and protected-base approva
 });
 
 test("single-provider gates bind candidate and policy and always require approval", () => {
-  const policy = {
-    version: 1,
-    reasoningProvider: "codex",
-    plumbingModel: "haiku",
-    assurance: "single-provider",
-    policyFingerprint: `sha256:${"f".repeat(64)}`
-  };
+  const policy = normalizeRunPolicy({ provider: "codex" });
   let pr = {
     state: "verifying", gates: {}, candidateHistory: [],
     planUserVisible: "no", changedPaths: ["src/api.ts"]
@@ -358,10 +354,36 @@ test("single-provider gates bind candidate and policy and always require approva
   );
   pr = recordGate(pr, "human", pr.candidateOid, { approved: true });
   assert.equal(evaluateGates(pr, config, { baseProtected: true, runPolicy: policy }).ready, true);
-  const tampered = { ...policy, policyFingerprint: `sha256:${"0".repeat(64)}` };
+  const tampered = { ...policy, reasoningProvider: "claude" };
   const mismatch = evaluateGates(pr, config, { baseProtected: true, runPolicy: tampered });
   assert.equal(mismatch.ready, false);
   assert.equal(mismatch.blockers.includes("policy-identity"), true);
+});
+
+test("the final report discloses provider assurance and split usage", () => {
+  const shipDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-report-"));
+  fs.writeFileSync(path.join(shipDir, "ship-meta.json"), JSON.stringify({
+    shipId: "s1",
+    runPolicy: normalizeRunPolicy({ provider: "codex" })
+  }));
+  fs.writeFileSync(path.join(shipDir, "pr-train-state.json"), JSON.stringify({
+    prs: [{
+      id: "PR-1",
+      state: "awaiting-approval",
+      assurance: "single-provider",
+      policyFingerprint: "sha256:test",
+      usage: {
+        claudeReasoningCalls: 0,
+        haikuPlumbingCalls: 8,
+        codexCalls: 6,
+        relayRetries: 1
+      }
+    }]
+  }));
+  const report = renderReport(shipDir);
+  assert.match(report, /Substantive provider: codex/);
+  assert.match(report, /Review assurance: single-provider/);
+  assert.match(report, /Usage: Claude reasoning 0; Haiku plumbing 8; Codex 6; relay retries 1/);
 });
 
 test("merge lock serializes ships, supports a lease heartbeat, and validates ownership", () => {

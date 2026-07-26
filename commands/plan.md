@@ -1,6 +1,6 @@
 ---
 description: Forge and approve a cross-engine implementation plan and PR train
-argument-hint: '<goal> [--resume <slug>] [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
+argument-hint: '<goal> [--resume <slug>] [--provider both|claude|codex] [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
 allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:plan-interaction-reviewer, tagteam:prompt-builder, tagteam:codex-runner), Bash(node *), Bash(git *)
 ---
 
@@ -8,7 +8,9 @@ allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagt
 
 Raw arguments: `$ARGUMENTS`
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` first; with it the goal comes from the saved plan directory. Otherwise require a non-empty goal and a valid `.tagteam/config.json`. Validate it with `validate-json.mjs --repo`; exit 3 means the settings predate this plugin's interface questions, and planning is exactly where those answers matter. Render `messages.mjs configStale` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, and stop without drafting. Never guess the missing answers. Parse the three optional planning overrides and reject low planning effort. Use the overrides only for this invocation; show the resulting Claude and Codex model/effort before starting.
+Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` first; with it the goal comes from the saved plan directory. Otherwise require a non-empty goal and a valid `.tagteam/config.json`. Validate it with `validate-json.mjs --repo`; exit 3 means the settings predate this plugin's interface questions, and planning is exactly where those answers matter. Render `messages.mjs configStale` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, and stop without drafting. Never guess the missing answers. Parse `--provider` and the three optional planning overrides; reject missing values, unknown providers, and low planning effort. `--provider` defaults to `both`. Use model overrides only for this invocation.
+
+Normalize the provider before model work with `node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/run-policy.mjs" normalize "<provider>" "<repo>/.tagteam/config.json"`. Persist its exact JSON at `reviews/<passId>-run-policy.json` with mode 0600 and pass it as `runPolicy`. On resume without an explicit flag, validate and reuse the latest pass policy with `run-policy.mjs validate`; never derive it from conversation memory. An explicit change starts a new pass under the provider-switch protocol. Show substantive provider, plumbing model, assurance, and resulting Claude/Codex model effort before starting.
 Reject repository and artifact paths containing control characters or shell metacharacters before forming Bash commands.
 
 Derive a short lowercase plan slug with only `[a-z0-9-]`, create `.tagteam/plans/<slug>/drafts` and `reviews`, and pass absolute paths to the workflow. Planning may write draft/review artifacts there, but no approved `plan.md`, `manifest.json`, or `pr-train.json` exists until explicit approval.
@@ -26,7 +28,8 @@ Workflow({
     pluginRoot: <absolute plugin root>,
     planDir: <absolute plan dir>,
     passId: <"pass-1", then "pass-2", ... one per forge invocation>,
-    config: <merged config with run overrides>
+    config: <merged config with run overrides>,
+    runPolicy: <validated run policy>
   }
 })
 ```
@@ -38,7 +41,7 @@ Give every forge invocation its own `passId` so a reused Codex artifact can neve
 `--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
 
 1. If `approved.json` exists, there is nothing to resume; point at `/tagteam:ship .tagteam/plans/<slug>` and stop.
-2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts.
+2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts. Read and validate `reviews/<passId>-run-policy.json`; an omitted provider flag reuses it.
 3. Take the highest `pass-<n>` present. Within it, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point, and its `.ui-decisions.json` sidecar, if present, for the interface decisions declared so far. A plan interrupted before that second sidecar existed simply has none; that costs a re-declaration, never the plan.
 4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), `uiDecisions` (the interface sidecar's array, or `[]` when that file is absent or unreadable), and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
 5. `drafts/<passId>-integrated.md` is the finished plan of its pass: the last cross-review revision writes it, and so does a continuation. If it is the newest draft in the pass, resume from it with `seedPlan`, its `.questions.json`, and its `.ui-decisions.json` when that file exists and parses — an absent, empty, or malformed one means no interface decisions are recoverable, which costs a re-declaration and is never a reason to stop; pass `[]` — and either `decisions` from `drafts/<passId>-decisions.json` when that file exists (a continuation), or `resumeRound: <reviewRounds + 1>` when it does not (cross-review finished; only the manifest, train, and cross-check remain).
@@ -96,6 +99,6 @@ Only explicit approval may write:
 - `.tagteam/plans/<slug>/manifest.json`
 - `.tagteam/plans/<slug>/pr-train.json`
 - `.tagteam/plans/<slug>/decisions.json` (every pass's `drafts/*-decisions.json` rows in pass order, unchanged)
-- `.tagteam/plans/<slug>/approved.json` containing version, UTC time, config fingerprint, and the three artifact hashes.
+- `.tagteam/plans/<slug>/approved.json` containing version, UTC time, config fingerprint, the validated run policy and policy fingerprint, and the three artifact hashes.
 
 Validate both JSON artifacts with their schemas after writing. Validate the PR train with `validate-json.mjs --manifest <manifest.json>` so every task appears exactly once and cross-PR task dependencies are represented. If validation fails, remove only `approved.json`, explain the exact validation error, and stop. Never start shipping automatically; end with `/tagteam:ship .tagteam/plans/<slug>`.
