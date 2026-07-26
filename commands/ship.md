@@ -96,7 +96,7 @@ Wait for the user when any of these is true: workflow gate failures; local verif
 Render recurring gate and failure text only through the tested catalog:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/messages.mjs" "<reviewFailed|userVisible|noEvidence|unprotectedBase|mergeFailed|verificationFailed|ciFailed|agentBudget|fixFailed>" --ship-id "<ship-id>" --pr "<pr>" --branch "<branch>" --sha "<short-sha>" --command "<recovery-command>" --artifact "<artifact>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/messages.mjs" "<reviewFailed|userVisible|singleProvider|noEvidence|unprotectedBase|mergeFailed|verificationFailed|ciFailed|agentBudget|fixFailed>" --ship-id "<ship-id>" --pr "<pr>" --branch "<branch>" --sha "<short-sha>" --command "<recovery-command>" --artifact "<artifact>"
 ```
 
 For `userVisible`, also pass `--plan-answer "<yes|no>" --ship-answer "<yes|no|unknown>"`. Use the emitted text unchanged with `node "${CLAUDE_PLUGIN_ROOT}/scripts/notify.mjs" "Tagteam needs your review" "<emitted text>"`, persist `awaiting-approval`, then ask one question:

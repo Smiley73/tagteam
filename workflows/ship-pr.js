@@ -175,6 +175,7 @@ function nextTier(tier) {
   return tier === "simple" ? "medium" : "complex";
 }
 
+// TEST_SENTINEL_WORKFLOW_CORE_START
 function expandBraces(pattern) {
   const open = pattern.indexOf("{");
   if (open < 0) return [pattern];
@@ -321,6 +322,7 @@ function relayModelFor(config) {
   return config.transport?.relayModel ?? "sonnet";
 }
 
+// TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
   const promptFile = `${artifact}.prompt.md`;
   // Declared from the prompt the workflow actually built, so a relay that

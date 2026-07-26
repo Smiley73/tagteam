@@ -260,6 +260,16 @@ test("plain-English gate messages preserve recovery identifiers", () => {
   ].join("\n"));
 });
 
+test("single-provider gate message discloses reduced assurance", () => {
+  const rendered = messages.singleProvider({
+    shipId: "ship-1", pr: 42, branch: "tagteam/ship-1/p1",
+    sha: "abc1234", command: "/tagteam:ship --resume", artifact: "/tmp/review.md"
+  });
+  assert.match(rendered, /one substantive provider/);
+  assert.match(rendered, /not independent cross-provider confirmation/);
+  assert.match(rendered, /commit abc1234/);
+});
+
 test("plain-English gate message CLI emits the catalog output", () => {
   const result = spawnSync(process.execPath, [
     path.join(root, "scripts/lib/messages.mjs"),
@@ -315,6 +325,43 @@ test("gate evaluation requires evidence, UI approval, and protected-base approva
   pr = recordGate(pr, "review", pr.candidateOid, { status: "failed", gateFailures: ["one failed reviewer"] });
   assert.equal(evaluateGates(pr, config, { baseProtected: true }).ready, true);
   assert.equal(checkCallCapacity({ agentCalls: 59 }, 60, 2).allowed, false);
+});
+
+test("single-provider gates bind candidate and policy and always require approval", () => {
+  const policy = {
+    version: 1,
+    reasoningProvider: "codex",
+    plumbingModel: "haiku",
+    assurance: "single-provider",
+    policyFingerprint: `sha256:${"f".repeat(64)}`
+  };
+  let pr = {
+    state: "verifying", gates: {}, candidateHistory: [],
+    planUserVisible: "no", changedPaths: ["src/api.ts"]
+  };
+  pr = bindNewCandidate(pr, "a".repeat(40), "b".repeat(40), policy);
+  for (const [gate, value] of [
+    ["review", { status: "clean", gateFailures: [] }],
+    ["verify", { status: "passed" }],
+    ["ui", { verdict: "no" }],
+    ["ci", { status: "passed" }]
+  ]) pr = recordGate(pr, gate, pr.candidateOid, value);
+  const config = { prTrain: { mode: "github-pr", pauseOn: ["ui"] } };
+  const pending = evaluateGates(pr, config, { baseProtected: true, runPolicy: policy });
+  assert.deepEqual(pending.approvals, ["single-provider"]);
+  assert.equal(pending.ready, false);
+  assert.equal(pending.needsHuman, true);
+
+  assert.throws(
+    () => recordGate(pr, "human", pr.candidateOid, { approved: true }, `sha256:${"0".repeat(64)}`),
+    /stale run policy/
+  );
+  pr = recordGate(pr, "human", pr.candidateOid, { approved: true });
+  assert.equal(evaluateGates(pr, config, { baseProtected: true, runPolicy: policy }).ready, true);
+  const tampered = { ...policy, policyFingerprint: `sha256:${"0".repeat(64)}` };
+  const mismatch = evaluateGates(pr, config, { baseProtected: true, runPolicy: tampered });
+  assert.equal(mismatch.ready, false);
+  assert.equal(mismatch.blockers.includes("policy-identity"), true);
 });
 
 test("merge lock serializes ships, supports a lease heartbeat, and validates ownership", () => {

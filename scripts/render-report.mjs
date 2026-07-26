@@ -17,6 +17,9 @@ export function renderReport(shipDir) {
     `- Plan: ${meta.planSlug ?? "unknown"}`,
     `- Base: ${meta.base ?? "unknown"} at ${meta.baseOid ?? "unknown"}`,
     `- Transport: ${meta.transport ?? "exec"}`,
+    `- Substantive provider: ${meta.runPolicy?.reasoningProvider ?? meta.reasoningProvider ?? "both"}`,
+    `- Review assurance: ${meta.runPolicy?.assurance ?? meta.assurance ?? "cross-provider"}`,
+    `- Policy fingerprint: ${meta.runPolicy?.policyFingerprint ?? meta.policyFingerprint ?? "legacy"}`,
     `- Started: ${meta.startedAt ?? "unknown"}`,
     "",
     "## Pull requests",
@@ -32,6 +35,8 @@ export function renderReport(shipDir) {
     lines.push(`- Branch: ${pr.branch ?? "not created"}`);
     lines.push(`- Pull request: ${pr.number ?? "not published"}`);
     lines.push(`- Reviewed commit: ${pr.candidateOid ?? "none"}`);
+    lines.push(`- Review assurance: ${pr.assurance ?? "cross-provider"}`);
+    lines.push(`- Policy fingerprint: ${pr.policyFingerprint ?? "legacy"}`);
     lines.push(`- Review input: ${pr.fileCount ?? 0} changed files, ${pr.diffBytes ?? 0} full-diff bytes`);
     lines.push(`- Review rounds: ${review?.highestRound ?? 0}${review && !review.ok ? " (artifact did not parse; not converged)" : ""}`);
     lines.push(`- Agent calls: ${pr.agentCalls ?? 0}`);

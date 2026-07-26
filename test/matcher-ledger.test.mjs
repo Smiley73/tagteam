@@ -7,11 +7,18 @@ import {
   recursiveMerge,
   resolveReviewerRuntime
 } from "../scripts/lib/matcher.mjs";
+import {
+  actionableFindings,
+  applyFixReport,
+  findingId,
+  mergeFindings,
+  tallies
+} from "../scripts/lib/ledger.mjs";
 
 function loadWorkflowCore() {
   const source = fs.readFileSync(path.resolve(import.meta.dirname, "../workflows/ship-pr.js"), "utf8");
-  const start = source.indexOf("function expandBraces");
-  const end = source.indexOf("async function codexCall");
+  const start = source.indexOf("// TEST_SENTINEL_WORKFLOW_CORE_START");
+  const end = source.indexOf("// TEST_SENTINEL_WORKFLOW_CORE_END");
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const context = { module: { exports: {} }, log() {} };
@@ -27,6 +34,61 @@ test("restricted globs support star, globstar, question, and braces", () => {
   assert.equal(workflow.globRegex("src/?pp.js").test("src/app.js"), true);
   assert.equal(workflow.globRegex("src/*.js").test("src/nested/app.js"), false);
   assert.throws(() => workflow.globRegex("src/[ab].js"), /unsupported/);
+});
+
+test("shared ledger stays equivalent to the workflow production rules", () => {
+  const findings = [{
+    title: "Café authorization check",
+    body: "A caller can read another account.",
+    file: "src/Account.ts",
+    line_start: 10,
+    line_end: 12,
+    severity: "major",
+    dimension: "Security",
+    confidence: 0.9,
+    recommendation: "Check ownership."
+  }, {
+    title: "Retry name",
+    body: "The name is vague.",
+    file: "src/retry.ts",
+    line_start: 2,
+    line_end: 2,
+    severity: "minor",
+    dimension: "code-quality",
+    confidence: 0.7,
+    recommendation: "Rename it."
+  }];
+  const workflowLedger = [];
+  workflow.mergeLedger(workflowLedger, findings, "codex", 1);
+  let sharedLedger = mergeFindings([], findings, { engine: "codex", round: 1 });
+  assert.deepEqual(JSON.parse(JSON.stringify(sharedLedger)), JSON.parse(JSON.stringify(workflowLedger)));
+  assert.equal(findingId(findings[0]), workflow.stableId(findings[0]));
+
+  const report = {
+    results: [
+      { id: sharedLedger[0].id, status: "fixed", explanation: "Added ownership check." },
+      { id: sharedLedger[1].id, status: "wont-fix", explanation: "Needs a naming decision." }
+    ]
+  };
+  workflow.applyFixes(workflowLedger, report);
+  sharedLedger = applyFixReport(sharedLedger, report);
+  assert.deepEqual(JSON.parse(JSON.stringify(sharedLedger)), JSON.parse(JSON.stringify(workflowLedger)));
+
+  const recurring = [{ ...findings[0], line_start: 11, line_end: 13 }];
+  workflow.mergeLedger(workflowLedger, recurring, "claude", 2);
+  sharedLedger = mergeFindings(sharedLedger, recurring, { engine: "claude", round: 2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(sharedLedger)), JSON.parse(JSON.stringify(workflowLedger)));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(actionableFindings(sharedLedger))),
+    JSON.parse(JSON.stringify(workflow.actionable(workflowLedger)))
+  );
+  assert.deepEqual(tallies(sharedLedger), {
+    total: workflowLedger.length,
+    bySeverity: { major: 1, minor: 1 },
+    byDimension: { Security: 1, "code-quality": 1 },
+    byEngine: { codex: 2 },
+    byStatus: { recurring: 1, "needs-human": 1 }
+  });
 });
 
 test("matcher errors fail open and keywords inspect only the supplied added corpus", () => {
