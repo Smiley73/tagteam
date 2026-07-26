@@ -1,23 +1,12 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
+import { gitWorktreeState } from "./lib/worktree-state.mjs";
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-function gitState(worktree) {
-  const headOid = execFileSync("git", ["-C", worktree, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const status = execFileSync("git", ["-C", worktree, "status", "--porcelain=v1", "-z"], { encoding: "utf8" });
-  return {
-    headOid,
-    statusBytes: Buffer.byteLength(status),
-    statusHash: createHash("sha256").update(status).digest("hex")
-  };
 }
 
 export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg) {
@@ -34,11 +23,12 @@ export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg
     || request.fingerprint !== checkpoint.requestFingerprint) {
     throw new Error("relay checkpoint does not match the saved request receipt");
   }
-  const state = gitState(worktree);
+  const state = gitWorktreeState(worktree);
   if (state.headOid !== checkpoint.headOid
     || state.headOid !== checkpoint.statusAfter?.headOid
     || state.statusHash !== checkpoint.statusAfter?.statusHash
-    || state.statusBytes !== checkpoint.statusAfter?.statusBytes) {
+    || state.statusBytes !== checkpoint.statusAfter?.statusBytes
+    || state.contentHash !== checkpoint.statusAfter?.contentHash) {
     throw new Error("worktree changed after the relay checkpoint");
   }
   if (state.statusBytes === 0) throw new Error("relay checkpoint does not describe a dirty worktree");

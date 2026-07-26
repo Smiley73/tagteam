@@ -146,7 +146,7 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   const valid = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
   assert.equal(valid.status, 0, valid.stderr);
   assert.equal(JSON.parse(valid.stdout).executionId, JSON.parse(result.stdout.trim()).executionId);
-  fs.writeFileSync(path.join(worktree, "later.txt"), "drift\n");
+  fs.writeFileSync(path.join(worktree, "bridge-edit.txt"), "changed again\n");
   const drifted = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
   assert.equal(drifted.status, 1);
   assert.match(drifted.stderr, /changed after the relay checkpoint/);

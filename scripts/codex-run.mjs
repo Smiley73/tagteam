@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateJson } from "./validate-json.mjs";
@@ -13,6 +13,7 @@ import {
   parseResetTime,
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
+import { gitWorktreeState } from "./lib/worktree-state.mjs";
 
 function parseArgs(argv) {
   const options = {
@@ -309,16 +310,6 @@ function readPromptFile(promptFile) {
   }
 }
 
-function gitSnapshot(worktree) {
-  const headOid = execFileSync("git", ["-C", worktree, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const status = execFileSync("git", ["-C", worktree, "status", "--porcelain=v1", "-z"], { encoding: "utf8" });
-  return {
-    headOid,
-    statusBytes: Buffer.byteLength(status),
-    statusHash: createHash("sha256").update(status).digest("hex")
-  };
-}
-
 function writeRelayCheckpoint(options, executionId, before) {
   const artifact = path.resolve(options.artifact);
   const requestPath = `${artifact}.request.json`;
@@ -334,7 +325,7 @@ function writeRelayCheckpoint(options, executionId, before) {
     requestFingerprint: request.fingerprint,
     headOid: before.headOid,
     statusBeforeHash: before.statusHash,
-    statusAfter: gitSnapshot(options.worktree),
+    statusAfter: gitWorktreeState(options.worktree),
     completedAt: request.completedAt
   };
   const checkpointPath = `${artifact}.relay-checkpoint.json`;
@@ -360,7 +351,7 @@ async function main() {
       const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }
-    const before = gitSnapshot(options.worktree);
+    const before = gitWorktreeState(options.worktree);
     const { result, reused, executionId } = await runCodex(options, prompt);
     if (!reused && executionId) writeRelayCheckpoint(options, executionId, before);
     process.stdout.write(JSON.stringify({ ok: true, reused, executionId, artifact: path.resolve(options.artifact), result }) + "\n");
