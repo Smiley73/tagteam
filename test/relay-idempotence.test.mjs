@@ -11,6 +11,7 @@ import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs"
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const fileHash = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
 const CLEAN_FINDINGS = {
   verdict: "clean",
@@ -385,6 +386,15 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   const reused = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
   assert.equal(reused.status, 0, reused.stderr);
   assert.equal(JSON.parse(reused.stdout.trim()).reused, true);
+  const originalArtifact = fs.readFileSync(artifact);
+  fs.writeFileSync(artifact, JSON.stringify({ ...CLEAN_FINDINGS, summary: "Tampered but schema-valid." }));
+  const tamperedArtifact = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
+  assert.equal(tamperedArtifact.status, 1);
+  assert.match(tamperedArtifact.stderr, /artifact, request, or schema bytes changed/);
+  const unsafeArtifactReuse = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(unsafeArtifactReuse.status, 1);
+  assert.match(unsafeArtifactReuse.stderr, /cannot be reused safely/);
+  fs.writeFileSync(artifact, originalArtifact);
   fs.writeFileSync(path.join(worktree, "bridge-edit.txt"), "changed again\n");
   const unsafeReuse = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
   assert.equal(unsafeReuse.status, 1);
@@ -538,14 +548,24 @@ test("interrupted usage reconciliation imports matching receipts exactly once", 
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-receipts-"));
   const artifact = path.join(temp, "result.json");
   const checkpointFile = `${artifact}.relay-checkpoint.json`;
+  const requestPath = `${artifact}.request.json`;
+  const schema = path.join(temp, "schema.json");
   const request = {
     executionId: "exec-new",
     fingerprint: "fingerprint",
     completedAt: "2026-07-26T12:00:00.000Z"
   };
-  fs.writeFileSync(`${artifact}.request.json`, JSON.stringify(request));
+  fs.writeFileSync(artifact, "{}");
+  fs.writeFileSync(schema, "{}");
+  fs.writeFileSync(requestPath, JSON.stringify(request));
   fs.writeFileSync(checkpointFile, JSON.stringify({
+    version: 2,
     artifact,
+    requestPath,
+    schema,
+    artifactHash: fileHash(artifact),
+    requestHash: fileHash(requestPath),
+    schemaHash: fileHash(schema),
     executionId: request.executionId,
     requestFingerprint: request.fingerprint,
     completedAt: request.completedAt
@@ -588,6 +608,8 @@ test("receipt reconciliation classifies workspace interruption from its checkpoi
   const artifact = path.join(temp, "result.json");
   const checkpointFile = `${artifact}.relay-checkpoint.json`;
   const receiptFile = `${artifact}.usage-receipts.json`;
+  const requestPath = `${artifact}.request.json`;
+  const schema = path.join(root, "schemas/findings.schema.json");
   const request = {
     executionId: "exec-workspace",
     fingerprint: "fingerprint",
@@ -601,15 +623,20 @@ test("receipt reconciliation classifies workspace interruption from its checkpoi
     automaticRecoverySafe: true
   };
   fs.writeFileSync(artifact, JSON.stringify(CLEAN_FINDINGS));
-  fs.writeFileSync(`${artifact}.request.json`, JSON.stringify(request));
+  fs.writeFileSync(requestPath, JSON.stringify(request));
   fs.writeFileSync(receiptFile, JSON.stringify({
     version: 1,
     artifact,
     invocations: [{ executionId: request.executionId, requestFingerprint: request.fingerprint, recordedAt: request.completedAt }]
   }));
   const checkpoint = {
-    version: 1,
+    version: 2,
     artifact,
+    requestPath,
+    schema,
+    artifactHash: fileHash(artifact),
+    requestHash: fileHash(requestPath),
+    schemaHash: fileHash(schema),
     sandbox: "workspace-write",
     executionId: request.executionId,
     requestFingerprint: request.fingerprint,
@@ -636,7 +663,8 @@ test("receipt reconciliation classifies workspace interruption from its checkpoi
 
   fs.writeFileSync(checkpointFile, JSON.stringify({
     ...checkpoint,
-    statusBefore: { ...cleanState, automaticRecoverySafe: false }
+    statusBefore: { ...cleanState, automaticRecoverySafe: false },
+    statusAfter: { ...cleanState, statusBytes: 12, statusHash: "changed", contentHash: "changed" }
   }));
   assert.equal(reconcileUsageReceipts(interrupted).status, "relay-interrupted-workspace-unknown");
 });

@@ -2,9 +2,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function fileHash(file) {
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
 export function reconcileUsageReceipts(result) {
@@ -53,8 +58,14 @@ export function reconcileUsageReceipts(result) {
       continue;
     }
     const checkpoint = readJson(checkpointFile);
-    if (checkpointFile !== `${checkpoint.artifact}.relay-checkpoint.json`) {
+    if (checkpoint.version !== 2
+      || checkpointFile !== `${checkpoint.artifact}.relay-checkpoint.json`) {
       throw new Error(`relay checkpoint path does not match its artifact: ${checkpointFile}`);
+    }
+    if (checkpoint.artifactHash !== fileHash(checkpoint.artifact)
+      || checkpoint.requestHash !== fileHash(checkpoint.requestPath)
+      || checkpoint.schemaHash !== fileHash(checkpoint.schema)) {
+      throw new Error(`relay checkpoint bytes do not match their completion hashes: ${checkpointFile}`);
     }
     const request = readJson(`${checkpoint.artifact}.request.json`);
     if (typeof checkpoint.executionId !== "string"
@@ -76,14 +87,14 @@ export function reconcileUsageReceipts(result) {
         && Number.isSafeInteger(state.statusBytes)
         && typeof state.statusHash === "string"
         && typeof state.contentHash === "string");
-      if (!complete) {
+      if (!complete
+        || before.automaticRecoverySafe !== true
+        || after.automaticRecoverySafe !== true) {
         workspaceCheckpointStates.push("unknown");
       } else {
         const changed = ["headOid", "statusBytes", "statusHash", "contentHash"]
           .some((key) => before[key] !== after[key]);
-        workspaceCheckpointStates.push(changed
-          ? "dirty"
-          : (before.automaticRecoverySafe === true && after.automaticRecoverySafe === true ? "clean" : "unknown"));
+        workspaceCheckpointStates.push(changed ? "dirty" : "clean");
       }
     }
   }

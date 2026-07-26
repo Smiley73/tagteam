@@ -106,19 +106,48 @@ function staleLockIdentity(lockPath, owner) {
 
 function quarantineStaleLock(lockPath, identity) {
   const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 20);
+  const claimPath = path.join(lockPath, `.reclaim-${suffix}`);
+  const reclaimingPath = `${lockPath}.reclaiming`;
   try {
-    // The destination is stable for the ownership generation we inspected.
-    // If another contender already moved that generation, EEXIST prevents us
-    // from renaming (and later deleting) the replacement owner's lock.
+    fs.writeFileSync(claimPath, suffix, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (["EEXIST", "ENOENT"].includes(error.code)) return false;
+    throw error;
+  }
+  let ownsReclaiming = false;
+  let moved = false;
+  try {
+    try {
+      fs.mkdirSync(reclaimingPath, { mode: 0o700 });
+      ownsReclaiming = true;
+    } catch (error) {
+      if (error.code === "EEXIST") return false;
+      throw error;
+    }
+    // The claim lives inside the inspected generation. A successor cannot be
+    // published while that directory still occupies lockPath, and every new
+    // publisher observes reclaimingPath before retrying. Re-read after taking
+    // both claims so a stale observation can never quarantine a successor.
+    const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+    if (staleLockIdentity(lockPath, owner) !== identity) return false;
     fs.renameSync(lockPath, `${lockPath}.stale-${suffix}`);
+    moved = true;
     return true;
   } catch (error) {
     if (["EEXIST", "ENOTEMPTY", "ENOENT"].includes(error.code)) return false;
     throw error;
+  } finally {
+    if (!moved) {
+      try { fs.unlinkSync(claimPath); } catch {}
+    }
+    if (ownsReclaiming) {
+      try { fs.rmSync(reclaimingPath, { recursive: true, force: true }); } catch {}
+    }
   }
 }
 
 function publishLock(lockPath, token) {
+  if (fs.existsSync(`${lockPath}.reclaiming`)) return false;
   const pendingPath = `${lockPath}.pending-${token}`;
   fs.mkdirSync(pendingPath, { mode: 0o700 });
   fs.writeFileSync(
@@ -604,10 +633,13 @@ function writeRelayCheckpoint(options, executionId, before) {
   const requestPath = `${artifact}.request.json`;
   const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
   const checkpoint = {
-    version: 1,
+    version: 2,
     artifact,
     requestPath,
     schema: path.resolve(options.schema),
+    artifactHash: createHash("sha256").update(fs.readFileSync(artifact)).digest("hex"),
+    requestHash: createHash("sha256").update(fs.readFileSync(requestPath)).digest("hex"),
+    schemaHash: createHash("sha256").update(fs.readFileSync(path.resolve(options.schema))).digest("hex"),
     worktree: path.resolve(options.worktree),
     sandbox: options.sandbox,
     executionId,

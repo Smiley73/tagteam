@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { validateJson } from "./validate-json.mjs";
 import { gitWorktreeState } from "./lib/worktree-state.mjs";
 
@@ -9,15 +10,24 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
+function fileHash(file) {
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
 export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg, { requireChange = true } = {}) {
   const checkpoint = readJson(checkpointFile);
   const worktree = path.resolve(worktreeArg);
   const artifact = path.resolve(artifactArg);
-  if (checkpoint.version !== 1) throw new Error("unsupported relay checkpoint version");
+  if (checkpoint.version !== 2) throw new Error("unsupported relay checkpoint version");
   if (checkpoint.worktree !== worktree || checkpoint.artifact !== artifact) {
     throw new Error("relay checkpoint paths do not match this resume");
   }
   if (checkpoint.sandbox !== "workspace-write") throw new Error("relay checkpoint is not for workspace-writing work");
+  if (checkpoint.artifactHash !== fileHash(artifact)
+    || checkpoint.requestHash !== fileHash(checkpoint.requestPath)
+    || checkpoint.schemaHash !== fileHash(checkpoint.schema)) {
+    throw new Error("relay checkpoint artifact, request, or schema bytes changed after completion");
+  }
   if (checkpoint.statusBefore?.automaticRecoverySafe !== true
     || checkpoint.statusAfter?.automaticRecoverySafe !== true) {
     throw new Error("relay checkpoint cannot bind ignored files or submodule contents; human reconciliation is required");
