@@ -4,9 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { snapshotCandidate } from "../scripts/snapshot-candidate.mjs";
 import { verify } from "../scripts/verify-run.mjs";
 import { setupWorktree } from "../scripts/worktree-setup.mjs";
+import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 
@@ -170,6 +172,20 @@ process.stdin.on("end", () => {
     "--review-diff-path", reviewDiffPath
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
+  const bridge = JSON.parse(result.stdout.trim());
+  const reviewDiff = fs.readFileSync(reviewDiffPath, "utf8");
+  const requestIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
+    version: 1,
+    promptHash: `sha256:${createHash("sha256").update("Review the candidate.").digest("hex")}`,
+    reviewDiffHash: `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`,
+    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    model: "gpt-test",
+    effort: "high",
+    sandbox: "read-only",
+    dryRun: false,
+    worktree: root
+  })).digest("hex")}`;
+  assert.equal(bridge.requestIdentity, requestIdentity);
   assert.equal(fs.readFileSync(captured, "utf8"), [
     "Review the candidate.",
     "",
@@ -178,6 +194,22 @@ process.stdin.on("end", () => {
     "</untrusted-review-diff>",
     ""
   ].join("\n"));
+  const reconciled = reconcileUsageReceipts({
+    status: "relay-interrupted",
+    usage: { codexCalls: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [`${artifact}.usage-receipts.json`],
+    relayCheckpoints: [`${artifact}.relay-checkpoint.json`],
+    unconfirmedCodexDispatches: [{
+      receiptFile: `${artifact}.usage-receipts.json`,
+      checkpoint: `${artifact}.relay-checkpoint.json`,
+      requestIdentity,
+      sandbox: "read-only"
+    }],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  });
+  assert.equal(reconciled.usageAccounting, "complete");
+  assert.equal(reconciled.usage.codexCalls, 1);
 });
 
 test("candidate snapshot binds a non-empty committed diff and preserves excluded-file evidence", () => {
@@ -213,6 +245,10 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
   assert.deepEqual(result.changedPaths.sort(), ["app.js", "package-lock.json"]);
   assert.equal(result.excluded.length, 1);
   assert.match(fs.readFileSync(result.reviewDiffPath, "utf8"), /old [0-9a-f]+ \| new [0-9a-f]+/);
+  assert.equal(
+    result.reviewDiffHash,
+    `sha256:${createHash("sha256").update(fs.readFileSync(result.reviewDiffPath)).digest("hex")}`
+  );
   assert.match(result.addedLines, /value = 2/);
 });
 

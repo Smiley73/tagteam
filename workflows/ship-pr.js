@@ -77,10 +77,12 @@ const commitSchema = {
 };
 const snapshotSchema = {
   type: "object", additionalProperties: false,
-  required: ["baseOid", "candidateOid", "candidatePath", "reviewDiffPath", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
+  required: ["baseOid", "candidateOid", "candidatePath", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
   properties: {
     baseOid: { type: "string" }, candidateOid: { type: "string" }, candidatePath: { type: "string" },
-    reviewDiffPath: { type: "string" }, changedPaths: { type: "array", items: { type: "string" } },
+    reviewDiffPath: { type: "string" },
+    reviewDiffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    changedPaths: { type: "array", items: { type: "string" } },
     addedLines: { type: "string" }, excluded: { type: "array" }, treeClean: { type: "string" },
     diffBytes: { type: "integer" }, fileCount: { type: "integer" }
   }
@@ -170,10 +172,13 @@ async function sha256(value) {
   return `sha256:${digest}`;
 }
 
-async function codexRequestIdentity({ prompt, schemaPath, model, effort, sandbox, worktree }) {
+async function codexRequestIdentity({
+  prompt, reviewDiffHash = null, schemaPath, model, effort, sandbox, worktree
+}) {
   return sha256(JSON.stringify({
     version: 1,
     promptHash: await sha256(prompt),
+    reviewDiffHash,
     schemaPath,
     model,
     effort,
@@ -445,27 +450,35 @@ function relayEnvelopeSchema(resultSchema) {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["reused", "executionId", "result"],
+    required: ["reused", "executionId", "requestIdentity", "result"],
     properties: {
       reused: { type: "boolean" },
       executionId: { type: "string", minLength: 1 },
+      requestIdentity: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
       result: resultSchema
     }
   };
 }
 
 // TEST_SENTINEL_WORKFLOW_CORE_END
-async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
-  const promptFile = `${artifact}.prompt.md`;
+async function codexCall(input, {
+  label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox,
+  reviewDiffPath, reviewDiffHash = null
+}) {
   const schemaPath = `${input.pluginRoot}/schemas/${schemaFile}`;
   const requestIdentity = await codexRequestIdentity({
     prompt,
+    reviewDiffHash,
     schemaPath,
     model: runtime.model,
     effort: runtime.effort,
     sandbox,
     worktree: input.worktree
   });
+  if (reviewDiffPath && !/^sha256:[0-9a-f]{64}$/.test(reviewDiffHash ?? "")) {
+    throw new Error(`Codex ${label} has no immutable review-diff identity`);
+  }
+  const promptFile = `${artifact}.${requestIdentity.slice("sha256:".length)}.prompt.md`;
   // Declared from the prompt the workflow actually built, so a relay that
   // shortened or paraphrased it fails before Codex is invoked rather than
   // buying a confident answer to a question that was never fully asked.
@@ -482,6 +495,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     `--ship-dir "${input.shipDir}"`,
     `--max-concurrent "${input.config.limits.maxConcurrentCodex}"`,
     `--prompt-file "${promptFile}"`,
+    `--expected-request-identity "${requestIdentity}"`,
     ...requiredFences.map((label) => `--require-fence ${label}`),
     `--min-prompt-bytes ${Math.floor(prompt.length * 0.8)}`,
     reviewDiffPath ? `--review-diff-path "${reviewDiffPath}"` : ""
@@ -510,11 +524,11 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
-      "From the bridge stdout, return only reused, executionId, and result. Do not infer or alter any field."
+      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
     ].join("\n\n") : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "From the bridge stdout, return only reused, executionId, and result. Do not infer or alter any field."
+      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: kind,
@@ -523,11 +537,15 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
-      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
-        .filter((item) => item.receiptFile !== receiptFile);
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
-        : { reused: false, executionId: null, result: response };
+        : { reused: false, executionId: null, requestIdentity, result: response };
+      if (envelope.requestIdentity !== requestIdentity) {
+        log(`The Codex step ${label} returned a result for a different request identity; retrying the immutable request.`);
+        continue;
+      }
+      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+        .filter((item) => item.receiptFile !== receiptFile);
       return envelope.result;
     }
     if (relayState.capacityExceeded) break;
@@ -592,7 +610,7 @@ async function commitCandidate(input, round, summary) {
 }
 
 async function snapshot(input, round, candidateOid) {
-  const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}`;
+  const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}-${candidateOid}`;
   const command = [
     `node "${input.pluginRoot}/scripts/snapshot-candidate.mjs"`,
     `--worktree "${input.worktree}"`,
@@ -1054,7 +1072,8 @@ async function main(raw) {
           prompt: promptParts.join("\n\n"),
           runtime,
           sandbox: "read-only",
-          reviewDiffPath: snapshotValue.reviewDiffPath
+          reviewDiffPath: snapshotValue.reviewDiffPath,
+          reviewDiffHash: snapshotValue.reviewDiffHash
         });
       } else {
         result = await claudeReasoningCall([

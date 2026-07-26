@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { globToRegExp, normalizeRepoPath } from "./lib/matcher.mjs";
 
 function git(cwd, args, { allowFailure = false, encoding = "utf8" } = {}) {
@@ -65,11 +66,13 @@ export function snapshotCandidate(options) {
   const reviewDiffPath = path.join(outDir, "review.diff");
   fs.writeFileSync(diffPath, fullDiff, { mode: 0o600 });
   fs.writeFileSync(reviewDiffPath, reviewDiff, { mode: 0o600 });
+  const reviewDiffHash = `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`;
   const candidate = {
     baseOid,
     candidateOid,
     diffPath,
     reviewDiffPath,
+    reviewDiffHash,
     changedPaths,
     addedLines,
     excluded,

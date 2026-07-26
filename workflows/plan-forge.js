@@ -188,6 +188,7 @@ async function codexRequestIdentity({ promptHash, schemaPath, model, effort, san
   return sha256(JSON.stringify({
     version: 1,
     promptHash,
+    reviewDiffHash: null,
     schemaPath,
     model,
     effort,
@@ -413,10 +414,11 @@ function relayEnvelopeSchema(resultSchema) {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["reused", "executionId", "result"],
+    required: ["reused", "executionId", "requestIdentity", "result"],
     properties: {
       reused: { type: "boolean" },
       executionId: { type: "string", minLength: 1 },
+      requestIdentity: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
       result: resultSchema
     }
   };
@@ -565,11 +567,11 @@ async function relayCodex({
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await planAgent(attempt === 1 ? [
       prompt,
-      "From the bridge stdout, return only reused, executionId, and result. Do not infer or alter any field."
+      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
     ].join("\n\n") : [
       prompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "From the bridge stdout, return only reused, executionId, and result. Do not infer or alter any field."
+      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: phaseName,
@@ -578,13 +580,17 @@ async function relayCodex({
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
-      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
-        .filter((item) => item.receiptFile !== receiptFile);
       // The compatibility branch is for legacy workflow harnesses; production
       // agents are schema-bound to the envelope above.
       const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
         ? response
-        : { reused: false, executionId: null, result: response };
+        : { reused: false, executionId: null, requestIdentity, result: response };
+      if (envelope.requestIdentity !== requestIdentity) {
+        log(`The Codex ${what} returned a result for a different request identity; retrying the immutable request.`);
+        continue;
+      }
+      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+        .filter((item) => item.receiptFile !== receiptFile);
       return envelope.result;
     }
     log(`The Codex ${what} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
@@ -805,8 +811,14 @@ async function main(raw) {
   for (let round = resumeRound || 1; round <= lastRound; round += 1) {
     phase(`Cross-review ${round}`);
     const planFile = draftPath(round);
-    const artifact = `${input.planDir}/reviews/${passId}-round-${round}-codex.json`;
-    const promptFile = `${input.planDir}/reviews/${passId}-round-${round}-codex.prompt.md`;
+    const requestSeed = (await sha256(JSON.stringify({
+      goal: input.goal,
+      worktree: input.worktree,
+      round,
+      draft: draft.planMarkdown
+    }))).slice("sha256:".length);
+    const artifact = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-codex.json`;
+    const promptFile = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-codex.prompt.md`;
     const minBytes = Math.floor(normalizeText(draft.planMarkdown).length * 0.8);
     const prepareCommand = composeCommand({
       pluginRoot: input.pluginRoot,
@@ -1039,7 +1051,14 @@ async function main(raw) {
     file: trainPath
   });
 
-  const decompositionArtifact = `${input.planDir}/reviews/${passId}-decomposition-codex.json`;
+  const decompositionSeed = (await sha256(JSON.stringify({
+    goal: input.goal,
+    worktree: input.worktree,
+    plan: draft.planMarkdown,
+    manifest,
+    train
+  }))).slice("sha256:".length);
+  const decompositionArtifact = `${input.planDir}/reviews/${passId}-${decompositionSeed}-decomposition-codex.json`;
   const decompositionPromptFile = `${decompositionArtifact}.prompt.md`;
   // The three sections together ran to hundreds of kilobytes in real plans. They
   // are read from the files that produced them and checked against what this run

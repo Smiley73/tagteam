@@ -20,6 +20,13 @@ const CLEAN_FINDINGS = {
   load_bearing_claim: "Checked one caller.",
   findings: []
 };
+const TEST_REVIEW_DIFF_HASH = `sha256:${"d".repeat(64)}`;
+
+function requestIdentityFromRelayPrompt(prompt) {
+  const match = String(prompt).match(/\.([0-9a-f]{64})\.prompt\.md/);
+  assert.ok(match, `relay prompt has no request-specific prompt path: ${String(prompt).slice(0, 300)}`);
+  return `sha256:${match[1]}`;
+}
 
 function fakeCodex(temp, counter, { editWorktree = false } = {}) {
   const fake = path.join(temp, "fake-codex.mjs");
@@ -96,6 +103,7 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   const expectedIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
     version: 1,
     promptHash,
+    reviewDiffHash: null,
     schemaPath: path.join(root, "schemas/findings.schema.json"),
     model: "gpt-test",
     effort: "high",
@@ -129,6 +137,46 @@ test("a Codex executable that never spawns does not create a usage receipt", () 
   const artifact = path.join(temp, "findings.json");
   const result = runBridge(temp, artifact, path.join(temp, "missing-codex"));
   assert.equal(result.status, 1);
+  assert.equal(fs.existsSync(`${artifact}.usage-receipts.json`), false);
+});
+
+test("shipping-style immutable request identities reject changed prompt bytes before Codex spawns", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-immutable-request-"));
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter);
+  const expectedPrompt = "expected prompt";
+  const promptHash = `sha256:${createHash("sha256").update(expectedPrompt).digest("hex")}`;
+  const requestIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
+    version: 1,
+    promptHash,
+    reviewDiffHash: null,
+    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    model: "gpt-test",
+    effort: "high",
+    sandbox: "read-only",
+    dryRun: false,
+    worktree: root
+  })).digest("hex")}`;
+  const promptFile = path.join(temp, `artifact.${requestIdentity.slice("sha256:".length)}.prompt.md`);
+  fs.writeFileSync(promptFile, "changed prompt");
+  const artifact = path.join(temp, "findings.json");
+  const result = spawnSync(process.execPath, [
+    path.join(root, "scripts/codex-run.mjs"),
+    "--worktree", root,
+    "--schema", path.join(root, "schemas/findings.schema.json"),
+    "--artifact", artifact,
+    "--model", "gpt-test",
+    "--effort", "high",
+    "--sandbox", "read-only",
+    "--ship-dir", temp,
+    "--codex-bin", fake,
+    "--prompt-file", promptFile,
+    "--expected-request-identity", requestIdentity,
+    "--min-prompt-bytes", "1"
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /do not match the immutable request identity/);
+  assert.equal(fs.existsSync(counter), false);
   assert.equal(fs.existsSync(`${artifact}.usage-receipts.json`), false);
 });
 
@@ -192,6 +240,77 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
   assert.equal(receipts.invocations.length, 1);
   assert.equal(fs.existsSync(`${staleLock}.stale-${createHash("sha256").update("token:stale-generation").digest("hex").slice(0, 20)}`), true);
+});
+
+test("concurrent different requests keep immutable prompt and review-diff identities", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-different-requests-"));
+  const artifact = path.join(temp, "shared-findings.json");
+  const counter = path.join(temp, "count.txt");
+  const fake = path.join(temp, "fake-codex.mjs");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", async () => {
+  fs.appendFileSync(${JSON.stringify(counter)}, "x");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify({
+    verdict: "clean",
+    summary: input.includes("REQUEST-A") ? "request-a" : "request-b",
+    dimension_sweep: "checked",
+    load_bearing_claim: "checked",
+    findings: []
+  }));
+});
+`);
+  fs.chmodSync(fake, 0o700);
+  const promptA = path.join(temp, "prompt-a.md");
+  const promptB = path.join(temp, "prompt-b.md");
+  const diffA = path.join(temp, "diff-a.patch");
+  const diffB = path.join(temp, "diff-b.patch");
+  fs.writeFileSync(promptA, "REQUEST-A");
+  fs.writeFileSync(promptB, "REQUEST-B");
+  fs.writeFileSync(diffA, "+candidate-a\n");
+  fs.writeFileSync(diffB, "+candidate-b\n");
+
+  const launch = (promptFile, reviewDiffPath) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [
+      path.join(root, "scripts/codex-run.mjs"),
+      "--worktree", root,
+      "--schema", path.join(root, "schemas/findings.schema.json"),
+      "--artifact", artifact,
+      "--model", "gpt-test",
+      "--effort", "high",
+      "--sandbox", "read-only",
+      "--ship-dir", temp,
+      "--codex-bin", fake,
+      "--prompt-file", promptFile,
+      "--review-diff-path", reviewDiffPath,
+      "--require-fence", "review-diff"
+    ]);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+
+  const [first, second] = await Promise.all([
+    launch(promptA, diffA),
+    launch(promptB, diffB)
+  ]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  const firstResult = JSON.parse(first.stdout.trim());
+  const secondResult = JSON.parse(second.stdout.trim());
+  assert.equal(firstResult.result.summary, "request-a");
+  assert.equal(secondResult.result.summary, "request-b");
+  assert.notEqual(firstResult.requestIdentity, secondResult.requestIdentity);
+  assert.equal(fs.readFileSync(counter, "utf8"), "xx");
 });
 
 test("an expired heartbeat never evicts a still-live lock owner", async () => {
@@ -1054,20 +1173,22 @@ test("a plan relay that never returns preserves interruption accounting", async 
   assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.equal(result.usage.relayRetries, 2);
   assert.equal(result.agentCalls, 8);
-  assert.deepEqual(result.relayCheckpoints, [
-    "/plans/slug/reviews/pass-1-round-1-codex.json.relay-checkpoint.json"
-  ]);
+  assert.equal(result.relayCheckpoints.length, 1);
+  assert.match(
+    result.relayCheckpoints[0],
+    /^\/plans\/slug\/reviews\/pass-1-round-1-[0-9a-f]{64}-codex\.json\.relay-checkpoint\.json$/
+  );
   assert.equal(result.unconfirmedCodexDispatches.length, 1);
-  assert.equal(
+  assert.match(
     result.unconfirmedCodexDispatches[0].receiptFile,
-    "/plans/slug/reviews/pass-1-round-1-codex.json.usage-receipts.json"
+    /^\/plans\/slug\/reviews\/pass-1-round-1-[0-9a-f]{64}-codex\.json\.usage-receipts\.json$/
   );
   assert.match(result.unconfirmedCodexDispatches[0].requestIdentity, /^sha256:[0-9a-f]{64}$/);
   assert.equal(lines.length, 4);
   assert.match(lines[0], /could not be handed back/);
   assert.match(lines[1], /whether Codex started/);
   assert.match(lines[2], /--resume/);
-  assert.match(lines[3], /^Details: expected result \/plans\/slug\/reviews\/pass-1-round-1-codex\.json;/);
+  assert.match(lines[3], /^Details: expected result \/plans\/slug\/reviews\/pass-1-round-1-[0-9a-f]{64}-codex\.json;/);
 
   const persisted = reconcileUsageReceipts(result);
   assert.equal(persisted.usageAccounting, "legacy-incomplete");
@@ -1316,7 +1437,7 @@ test("every early exit reports the relay retries it spent", async () => {
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1380,7 +1501,7 @@ test("shipping resume adds current invocation usage to persisted usage", async (
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1438,7 +1559,7 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1472,7 +1593,7 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1483,7 +1604,12 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
       return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
     }
     if (options.agentType === "tagteam:codex-runner") {
-      return { reused: true, executionId: "exec-old", result: CLEAN_FINDINGS };
+      return {
+        reused: true,
+        executionId: "exec-old",
+        requestIdentity: requestIdentityFromRelayPrompt(_prompt),
+        result: CLEAN_FINDINGS
+      };
     }
     return CLEAN_FINDINGS;
   });
@@ -1500,7 +1626,7 @@ test("total review relay loss keeps Codex usage pending disk reconciliation", as
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: args.baseOid, candidateOid: args.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1511,7 +1637,12 @@ test("total review relay loss keeps Codex usage pending disk reconciliation", as
       return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
     }
     if (options.agentType === "tagteam:codex-runner") {
-      return resume ? { reused: true, executionId: "exec-review-lost", result: CLEAN_FINDINGS } : null;
+      return resume ? {
+        reused: true,
+        executionId: "exec-review-lost",
+        requestIdentity: requestIdentityFromRelayPrompt(_prompt),
+        result: CLEAN_FINDINGS
+      } : null;
     }
     return CLEAN_FINDINGS;
   };
@@ -1574,6 +1705,7 @@ test("total implementation relay loss remains workspace-unknown until checkpoint
       return {
         reused: true,
         executionId: "exec-implementation-lost",
+        requestIdentity: requestIdentityFromRelayPrompt(_prompt),
         result: { taskId: "T1", status: "completed", summary: "done", filesChanged: ["a.js"], criteria: [{ criterion: "works", met: true, evidence: "ran" }] }
       };
     }
@@ -1581,7 +1713,7 @@ test("total implementation relay loss remains workspace-unknown until checkpoint
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: args.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1641,6 +1773,7 @@ test("implementation resume reuses completed dependency waves", async () => {
       return {
         reused: true,
         executionId: "exec-second",
+        requestIdentity: requestIdentityFromRelayPrompt(_prompt),
         result: {
           taskId: "T2", status: "completed", summary: "second done", filesChanged: ["two.js"],
           criteria: [{ criterion: "second works", met: true, evidence: "ran" }]
@@ -1651,7 +1784,7 @@ test("implementation resume reuses completed dependency waves", async () => {
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: args.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["one.js", "two.js"], addedLines: "+ok", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 2
       };
@@ -1693,7 +1826,7 @@ test("Codex implementation tasks do not share a parallel writable batch", async 
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: args.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["T1.js", "T2.js"], addedLines: "+ok", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 2
       };
@@ -1721,7 +1854,7 @@ test("relay retries stop at the hard per-PR dispatch ceiling", async () => {
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1766,7 +1899,7 @@ test("a recovered relay cannot make later verification repair exceed the call ce
       const candidateOid = label === "candidate:snapshot:0" ? SHIP_ARGS.existingCandidateOid : (commitCount === 1 ? "d" : "e").repeat(40);
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1781,7 +1914,12 @@ test("a recovered relay cannot make later verification repair exceed the call ce
       return null;
     }
     if (label.includes("relay-retry-1")) {
-      return { reused: true, executionId: "exec-recovered-review", result: CLEAN_FINDINGS };
+      return {
+        reused: true,
+        executionId: "exec-recovered-review",
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: CLEAN_FINDINGS
+      };
     }
     if (label === "fix:1:codex") {
       const id = prompt.match(/Return exactly one accounting row per ID: ([^.\n]+)/)?.[1];
@@ -1808,11 +1946,11 @@ test("a recovered relay cannot make later verification repair exceed the call ce
 
 test("a lost Codex review relay result does not fail the PR round", async () => {
   let droppedCodexReview = false;
-  const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label) => {
+  const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, prompt) => {
     if (label.startsWith("candidate:snapshot")) {
       return {
         baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
         changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
         treeClean: "", diffBytes: 20, fileCount: 1
       };
@@ -1827,7 +1965,12 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
       return null;
     }
     if (/^review:1:codex:.*:relay-retry-1$/.test(label)) {
-      return { reused: true, executionId: "exec-lost-relay", result: CLEAN_FINDINGS };
+      return {
+        reused: true,
+        executionId: "exec-lost-relay",
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: CLEAN_FINDINGS
+      };
     }
     return CLEAN_FINDINGS;
   });
@@ -1850,4 +1993,55 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.equal(result.rounds[0].policyFingerprint, result.policyFingerprint);
   assert.equal(result.rounds[0].assurance, "cross-provider");
   assert.equal(result.rounds[0].reviewerFailures.length, 0);
+});
+
+test("a confirmed relay result with another request identity is rejected and retried", async () => {
+  let returnedMismatch = false;
+  const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, prompt, options) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        baseOid: SHIP_ARGS.baseOid,
+        candidateOid: SHIP_ARGS.existingCandidateOid,
+        candidatePath: "/ships/s1/candidate.diff",
+        reviewDiffPath: "/ships/s1/review.diff",
+        reviewDiffHash: TEST_REVIEW_DIFF_HASH,
+        changedPaths: ["src/a.js"],
+        addedLines: "+const a = 1;",
+        excluded: [],
+        treeClean: "",
+        diffBytes: 20,
+        fileCount: 1
+      };
+    }
+    if (label.startsWith("verify:")) {
+      return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    }
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") {
+      if (!returnedMismatch) {
+        returnedMismatch = true;
+        return {
+          reused: true,
+          executionId: "exec-other-request",
+          requestIdentity: `sha256:${"0".repeat(64)}`,
+          result: CLEAN_FINDINGS
+        };
+      }
+      return {
+        reused: true,
+        executionId: "exec-matching-request",
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: CLEAN_FINDINGS
+      };
+    }
+    return CLEAN_FINDINGS;
+  });
+
+  assert.equal(returnedMismatch, true);
+  assert.equal(result.status, "clean");
+  assert.equal(labels.some((label) => label.includes("relay-retry-1")), true);
+  assert.equal(result.usage.relayRetries, 1);
 });

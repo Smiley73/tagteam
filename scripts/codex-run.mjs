@@ -426,11 +426,14 @@ function requestFingerprint({ options, prompt, schema }) {
   })).digest("hex");
 }
 
-function requestIdentity({ options, prompt }) {
+function requestIdentity({ options, prompt, reviewDiff = null }) {
   const promptHash = `sha256:${createHash("sha256").update(prompt).digest("hex")}`;
   const fields = {
     version: 1,
     promptHash,
+    reviewDiffHash: reviewDiff === null
+      ? null
+      : `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`,
     schemaPath: options.schema,
     model: options.model,
     effort: options.effort,
@@ -543,7 +546,7 @@ export async function runCodex(options, prompt) {
   const eventsPath = `${artifact}.events.jsonl`;
 
   const fingerprint = requestFingerprint({ options, prompt, schema });
-  const identity = requestIdentity({ options, prompt });
+  const identity = options.requestIdentity ?? requestIdentity({ options, prompt });
   const requestPath = `${artifact}.request.json`;
 
   // Idempotence: a completed artifact is the record of the work that produced
@@ -559,7 +562,7 @@ export async function runCodex(options, prompt) {
       if (recorded?.fingerprint === fingerprint) {
         if (options.dryRun) {
           process.stderr.write(`Reusing the existing dry-run artifact at ${artifact}; Codex was not invoked.\n`);
-          return { result: existing.value, reused: true, executionId: null };
+          return { result: existing.value, reused: true, executionId: null, requestIdentity: identity };
         }
         const checkpointPath = `${artifact}.relay-checkpoint.json`;
         let safeReuse = true;
@@ -593,7 +596,12 @@ export async function runCodex(options, prompt) {
             requestIdentity: identity
           });
           process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
-          return { result: existing.value, reused: true, executionId: recorded.executionId };
+          return {
+            result: existing.value,
+            reused: true,
+            executionId: recorded.executionId,
+            requestIdentity: identity
+          };
         }
       }
       if (recorded?.fingerprint !== fingerprint) {
@@ -658,7 +666,12 @@ export async function runCodex(options, prompt) {
           completedAt: new Date().toISOString()
         }, null, 2) + "\n", { mode: 0o600 });
         try { fs.unlinkSync(quotaStatePath); } catch {}
-        return { result: validation.value, reused: false, executionId: options.dryRun ? null : executionId };
+        return {
+          result: validation.value,
+          reused: false,
+          executionId: options.dryRun ? null : executionId,
+          requestIdentity: identity
+        };
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
@@ -745,14 +758,27 @@ async function main() {
         process.stdin.on("end", () => resolve(input));
         process.stdin.on("error", reject);
       });
+    let reviewDiff = null;
     if (options.reviewDiffPath) {
-      const reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
+      reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
+    }
+    options.requestIdentity = requestIdentity({ options, prompt, reviewDiff });
+    if (options.expectedRequestIdentity) {
+      const expected = options.expectedRequestIdentity;
+      const promptName = path.basename(path.resolve(options.promptFile ?? ""));
+      if (options.requestIdentity !== expected
+        || !/^sha256:[0-9a-f]{64}$/.test(expected)
+        || !promptName.includes(expected.slice("sha256:".length))) {
+        throw new Error("Codex request bytes do not match the immutable request identity");
+      }
+    }
+    if (reviewDiff !== null) {
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }
     executionLocks = await acquireExecutionLocks(options);
     options.executionLocks = executionLocks;
     const before = gitWorktreeState(options.worktree);
-    const { result, reused, executionId } = await runCodex(options, prompt);
+    const { result, reused, executionId, requestIdentity: completedRequestIdentity } = await runCodex(options, prompt);
     if (executionId && !reused) {
       // A reused result without its original checkpoint may have survived a
       // crash after changing the worktree but before recording the before
@@ -764,6 +790,7 @@ async function main() {
       ok: true,
       reused,
       executionId,
+      requestIdentity: completedRequestIdentity,
       usageReceiptFile: usageReceiptFile(path.resolve(options.artifact)),
       artifact: path.resolve(options.artifact),
       result
