@@ -169,6 +169,18 @@ function requestFingerprint({ options, prompt, schema }) {
   })).digest("hex");
 }
 
+function legacyExecutionId(artifact, fingerprint) {
+  const hex = createHash("sha256").update(`tagteam-legacy-codex\0${artifact}\0${fingerprint}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function writeJsonAtomic(file, value) {
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, file);
+  fs.chmodSync(file, 0o600);
+}
+
 // A model that was asked to transcribe a large prompt can truncate it,
 // paraphrase it, or replace it with a pointer, and the result still looks like a
 // prompt. The caller declares what the finished prompt must contain and this
@@ -225,8 +237,19 @@ export async function runCodex(options, prompt) {
       let recorded = null;
       try { recorded = JSON.parse(fs.readFileSync(requestPath, "utf8")); } catch {}
       if (recorded?.fingerprint === fingerprint) {
+        if (!recorded.executionId) {
+          // Pre-receipt sidecars still describe one historical execution. Give
+          // that execution a deterministic identity so every resume imports it
+          // once instead of claiming exact accounting while silently omitting it.
+          recorded = {
+            ...recorded,
+            executionId: legacyExecutionId(artifact, fingerprint),
+            legacyReceiptRecoveredAt: new Date().toISOString()
+          };
+          writeJsonAtomic(requestPath, recorded);
+        }
         process.stderr.write(`Reusing the existing validated artifact at ${artifact}; Codex was not re-invoked.\n`);
-        return { result: existing.value, reused: true, executionId: recorded.executionId ?? null };
+        return { result: existing.value, reused: true, executionId: recorded.executionId };
       }
       process.stderr.write(recorded
         ? `The artifact at ${artifact} answers a different request; running Codex again.\n`
@@ -353,7 +376,10 @@ async function main() {
     }
     const before = gitWorktreeState(options.worktree);
     const { result, reused, executionId } = await runCodex(options, prompt);
-    if (!reused && executionId) writeRelayCheckpoint(options, executionId, before);
+    const checkpointPath = `${path.resolve(options.artifact)}.relay-checkpoint.json`;
+    if (executionId && (!reused || !fs.existsSync(checkpointPath))) {
+      writeRelayCheckpoint(options, executionId, before);
+    }
     process.stdout.write(JSON.stringify({ ok: true, reused, executionId, artifact: path.resolve(options.artifact), result }) + "\n");
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

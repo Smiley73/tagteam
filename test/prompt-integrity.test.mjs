@@ -217,43 +217,36 @@ test("a completed pass leaves a resumable integrated draft that matches the retu
 
 test("a draft saved short stops the pass at the write, before any review is spent", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-short-draft-"));
-  await assert.rejects(
-    forge({
-      planDir,
-      // The failure seen in the field: the file says "see the plan as provided
-      // in this session's context" instead of holding the plan.
-      corrupt: (label, planMarkdown) => (label === "plan:draft"
-        ? "See the plan content as provided in this session's context.\n"
-        : planMarkdown)
-    }),
-    (error) => {
-      const lines = error.message.split("\n");
-      assert.equal(lines.length, 4);
-      assert.match(lines[0], /The plan draft was not saved as the text this run produced/);
-      assert.match(lines[2], /--resume/);
-      assert.match(lines[3], /^Details: saved file .*pass-1-round-1-input\.md; reported problem /);
-      assert.match(lines[3], /the file holds 59 characters \(59:[0-9a-f]{8}\) where this run produced \d{6} /);
-      return true;
-    }
-  );
+  const { result } = await forge({
+    planDir,
+    // The failure seen in the field: the file says "see the plan as provided
+    // in this session's context" instead of holding the plan.
+    corrupt: (label, planMarkdown) => (label === "plan:draft"
+      ? "See the plan content as provided in this session's context.\n"
+      : planMarkdown)
+  });
+  const lines = result.message.split("\n");
+  assert.equal(result.status, "plan-interrupted");
+  assert.equal(result.usageAccounting, "complete");
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /The plan draft was not saved as the text this run produced/);
+  assert.match(lines[2], /--resume/);
+  assert.match(lines[3], /^Details: saved file .*pass-1-round-1-input\.md; reported problem /);
+  assert.match(lines[3], /the file holds 59 characters \(59:[0-9a-f]{8}\) where this run produced \d{6} /);
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-round-1-codex.prompt.md")), false);
 });
 
 test("a revision saved short stops that round instead of the next one", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-short-revision-"));
-  await assert.rejects(
-    forge({
-      planDir,
-      corrupt: (label, planMarkdown) => (label === "plan:revise:1"
-        ? planMarkdown.slice(0, Math.floor(planMarkdown.length / 2))
-        : planMarkdown)
-    }),
-    (error) => {
-      assert.match(error.message.split("\n")[0], /The plan revised in round 1 was not saved as the text this run produced/);
-      assert.match(error.message, /pass-1-integrated\.md/);
-      return true;
-    }
-  );
+  const { result } = await forge({
+    planDir,
+    corrupt: (label, planMarkdown) => (label === "plan:revise:1"
+      ? planMarkdown.slice(0, Math.floor(planMarkdown.length / 2))
+      : planMarkdown)
+  });
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message.split("\n")[0], /The plan revised in round 1 was not saved as the text this run produced/);
+  assert.match(result.message, /pass-1-integrated\.md/);
   // Nothing downstream of the bad write ran: the manifest was never parsed and no
   // cross-check request exists.
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-manifest.json")), false);
@@ -304,60 +297,48 @@ test("round two reviews the round-one revision even when its file drifted", asyn
 
 test("a draft edited after it was verified still stops the pass before Codex", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-late-edit-"));
-  await assert.rejects(
-    forge({
-      planDir,
-      // Verification has already recorded this file's checksum; a hand edit
-      // afterwards must be caught by the request that fences it.
-      after: (label) => {
-        if (label !== "plan:manifest") return;
-        const integrated = path.join(planDir, "drafts/pass-1-integrated.md");
-        fs.writeFileSync(integrated, `${fs.readFileSync(integrated, "utf8")}\n## Step 501 — added by hand\n`);
-      }
-    }),
-    (error) => {
-      const lines = error.message.split("\n");
-      assert.match(lines[0], /could not be assembled, so nothing was sent and nothing was paid for/);
-      assert.match(lines[3], /plan section at .*pass-1-integrated\.md is not the text this run produced/);
-      return true;
+  const { result } = await forge({
+    planDir,
+    // Verification has already recorded this file's checksum; a hand edit
+    // afterwards must be caught by the request that fences it.
+    after: (label) => {
+      if (label !== "plan:manifest") return;
+      const integrated = path.join(planDir, "drafts/pass-1-integrated.md");
+      fs.writeFileSync(integrated, `${fs.readFileSync(integrated, "utf8")}\n## Step 501 — added by hand\n`);
     }
-  );
+  });
+  const lines = result.message.split("\n");
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(lines[0], /could not be assembled, so nothing was sent and nothing was paid for/);
+  assert.match(lines[3], /plan section at .*pass-1-integrated\.md is not the text this run produced/);
 });
 
 test("a manifest saved with a task dropped stops the pass exactly, with no tolerance", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-short-manifest-"));
-  await assert.rejects(
-    forge({
-      planDir,
-      corruptManifest: (manifest) => ({ ...manifest, tasks: manifest.tasks.slice(0, -1) })
-    }),
-    (error) => {
-      assert.match(error.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
-      assert.match(error.message, /pass-1-manifest\.json/);
-      return true;
-    }
-  );
+  const { result } = await forge({
+    planDir,
+    corruptManifest: (manifest) => ({ ...manifest, tasks: manifest.tasks.slice(0, -1) })
+  });
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
+  assert.match(result.message, /pass-1-manifest\.json/);
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-decomposition-codex.json.prompt.md")), false);
 });
 
 test("a manifest saved the same length but not the same content still stops the pass", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-swapped-manifest-"));
-  await assert.rejects(
-    // Nothing about the size changed, so only the checksum can tell: the
-    // tolerance the plan text gets must not reach the handoff artifacts.
-    forge({
-      planDir,
-      corruptManifest: (manifest) => ({
-        ...manifest,
-        tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, title: "Task 6" } : task))
-      })
-    }),
-    (error) => {
-      assert.match(error.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
-      assert.match(error.message, /the file holds (\d+) characters .* where this run produced \1 /);
-      return true;
-    }
-  );
+  // Nothing about the size changed, so only the checksum can tell: the
+  // tolerance the plan text gets must not reach the handoff artifacts.
+  const { result } = await forge({
+    planDir,
+    corruptManifest: (manifest) => ({
+      ...manifest,
+      tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, title: "Task 6" } : task))
+    })
+  });
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
+  assert.match(result.message, /the file holds (\d+) characters .* where this run produced \1 /);
 });
 
 test("every checksum a request checks was read back off the file it names", async () => {

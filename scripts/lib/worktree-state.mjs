@@ -14,6 +14,16 @@ export function gitWorktreeState(worktreeArg) {
   const headOid = String(git(worktree, ["rev-parse", "HEAD"], { encoding: "utf8" })).trim();
   const status = git(worktree, ["status", "--porcelain=v1", "-z"]);
   const trackedDiff = git(worktree, ["diff", "--binary", "HEAD", "--"]);
+  // Git intentionally omits ignored bytes and does not expose the contents of
+  // dirty submodules in the superproject diff. A relay checkpoint must never
+  // imply that those writable bytes were bound when they were not.
+  const ignored = String(git(worktree, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "-z"], { encoding: "utf8" }))
+    .split("\0").filter(Boolean).sort();
+  const gitlinks = String(git(worktree, ["ls-files", "--stage", "-z"], { encoding: "utf8" }))
+    .split("\0").filter(Boolean)
+    .filter((entry) => entry.startsWith("160000 "))
+    .map((entry) => entry.slice(entry.indexOf("\t") + 1))
+    .sort();
   const untracked = String(git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }))
     .split("\0").filter(Boolean).sort();
   const content = createHash("sha256");
@@ -36,6 +46,11 @@ export function gitWorktreeState(worktreeArg) {
     headOid,
     statusBytes: status.length,
     statusHash: createHash("sha256").update(status).digest("hex"),
-    contentHash: content.digest("hex")
+    contentHash: content.digest("hex"),
+    automaticRecoverySafe: ignored.length === 0 && gitlinks.length === 0,
+    unboundState: {
+      ignoredPaths: ignored,
+      submodulePaths: gitlinks
+    }
   };
 }

@@ -38,6 +38,8 @@ Workflow({
 
 Give every forge invocation its own `passId` so a reused Codex artifact can never be a check of a plan that has since been revised. Reuse a `passId` only when resuming that same pass.
 
+Write the raw workflow return to a mode-0600 temporary result file. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output. A missing, mismatched, or unreadable receipt is a hard stop; never persist pending accounting as authoritative state. Atomically persist every reconciled response's `usage` and `usageReceipts` before branching on its status. When the status is `plan-interrupted`, render `messages.mjs relayLost` when its message names a saved Codex result and `messages.mjs planInterrupted` otherwise, then show its message as supporting detail and stop. Resume passes the reconciled counters back unchanged.
+
 ## Resume
 
 `--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
@@ -53,7 +55,7 @@ A resumed pass seeds itself from these files, so pass them through byte for byte
 
 `--resume` starts a fresh forge invocation, which is what makes it a recovery: every artifact is read off disk again. Resuming the workflow run itself instead replays each finished step's recorded result, so a plumbing failure would repeat with identical numbers however often the underlying file is repaired. If that is what you are seeing, run this command.
 
-If the workflow fails, do not show the raw error. Render `messages.mjs relayLost` when its message names a saved Codex result, and `messages.mjs planInterrupted` otherwise, with `--artifact` set to the saved artifact or the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
+If the workflow fails before it can return an accounting envelope, do not show the raw error. Render `messages.mjs planInterrupted` with `--artifact` set to the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
 
 If the workflow returns open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
 
@@ -72,7 +74,7 @@ Record every outcome in `drafts/<passId>-decisions.json` as an ordinary `{questi
 
 Never invent an option the workflow did not return, and never ask about a decision the policy filtered out.
 Persist each structured engine review under `reviews/` before asking; use mode 0600 and never rewrite an earlier review. The plan, manifest, and train are already saved: the workflow returns `planPath`, `questionsPath`, `manifestPath`, and `prTrainPath`, and those files are the exact bytes the cross-check judged. Copy from them rather than retyping the returned values, and read `planPath` instead of holding the plan in the conversation.
-After every successful workflow response, atomically persist `{ "usage": <result.usage>, "usageReceipts": <result.usageReceipts> }` at `reviews/<passId>-usage.json` with mode 0600 before asking questions or approval. Every resume and continuation passes both values from the newest persisted snapshot into the next invocation, so counters are cumulative across the full planning run and a reused Codex artifact is not counted twice.
+After every reconciled workflow response, including `plan-interrupted`, atomically persist `{ "usage": <result.usage>, "usageReceipts": <result.usageReceipts> }` at `reviews/<passId>-usage.json` with mode 0600 before branching on status, asking questions, or approval. Every resume and continuation passes both values from the newest persisted snapshot into the next invocation, so counters are cumulative across the full planning run and a reused Codex artifact is not counted twice.
 
 As soon as a chunk is answered, append those `{question, answer}` rows to `drafts/<passId>-decisions.json` at mode 0600. Answers are the one thing here a human cannot cheaply reproduce, and approval may be a long way off; the approved `decisions.json` is written only at approval, from this file.
 

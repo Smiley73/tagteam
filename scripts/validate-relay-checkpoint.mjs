@@ -18,6 +18,10 @@ export function validateRelayCheckpoint(checkpointFile, worktreeArg, artifactArg
     throw new Error("relay checkpoint paths do not match this resume");
   }
   if (checkpoint.sandbox !== "workspace-write") throw new Error("relay checkpoint is not for workspace-writing work");
+  if (checkpoint.statusBefore?.automaticRecoverySafe !== true
+    || checkpoint.statusAfter?.automaticRecoverySafe !== true) {
+    throw new Error("relay checkpoint cannot bind ignored files or submodule contents; human reconciliation is required");
+  }
   const request = readJson(checkpoint.requestPath);
   if (!checkpoint.executionId || request.executionId !== checkpoint.executionId
     || request.fingerprint !== checkpoint.requestFingerprint) {

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { normalizeRunPolicy, validateRunPolicy } from "../scripts/lib/run-policy.mjs";
+import { gitWorktreeState } from "../scripts/lib/worktree-state.mjs";
 import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -69,6 +70,29 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   assert.deepEqual(parsed.result, CLEAN_FINDINGS);
   // Codex was not spawned a second time, so a retry costs nothing and cannot
   // overwrite the earlier review.
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+});
+
+test("legacy request sidecars gain one stable receipt without rerunning Codex", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-legacy-receipt-"));
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter);
+  const artifact = path.join(temp, "findings.json");
+  const first = runBridge(temp, artifact, fake);
+  assert.equal(first.status, 0, first.stderr);
+  const requestFile = `${artifact}.request.json`;
+  const legacy = JSON.parse(fs.readFileSync(requestFile, "utf8"));
+  delete legacy.executionId;
+  fs.writeFileSync(requestFile, JSON.stringify(legacy));
+
+  const migrated = runBridge(temp, artifact, fake);
+  assert.equal(migrated.status, 0, migrated.stderr);
+  const migratedResult = JSON.parse(migrated.stdout.trim());
+  assert.equal(migratedResult.reused, true);
+  assert.match(migratedResult.executionId, /^[0-9a-f-]{36}$/);
+  assert.equal(JSON.parse(fs.readFileSync(requestFile, "utf8")).executionId, migratedResult.executionId);
+  const repeated = runBridge(temp, artifact, fake);
+  assert.equal(JSON.parse(repeated.stdout.trim()).executionId, migratedResult.executionId);
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
 });
 
@@ -154,6 +178,53 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   const drifted = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
   assert.equal(drifted.status, 1);
   assert.match(drifted.stderr, /changed after the relay checkpoint/);
+});
+
+test("automatic dirty recovery refuses ignored bytes it cannot bind", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-ignored-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, ".gitignore"), "ignored.txt\n");
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", ".gitignore", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  fs.writeFileSync(path.join(worktree, "ignored.txt"), "unbound\n");
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter, { editWorktree: true });
+  const artifact = path.join(temp, "findings.json");
+  const result = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(result.status, 0, result.stderr);
+  const rejected = spawnSync(process.execPath, [
+    path.join(root, "scripts/validate-relay-checkpoint.mjs"),
+    `${artifact}.relay-checkpoint.json`, worktree, artifact
+  ], { encoding: "utf8" });
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /cannot bind ignored files or submodule contents/);
+});
+
+test("worktree state marks submodule contents as unsafe for automatic recovery", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-submodule-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  const oid = spawnSync("git", ["-C", worktree, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  assert.equal(spawnSync("git", ["-C", worktree, "update-index", "--add", "--cacheinfo", `160000,${oid},vendor/sub`]).status, 0);
+
+  const state = gitWorktreeState(worktree);
+  assert.equal(state.automaticRecoverySafe, false);
+  assert.deepEqual(state.unboundState.submodulePaths, ["vendor/sub"]);
 });
 
 test("interrupted usage reconciliation imports matching receipts exactly once", () => {
@@ -311,20 +382,22 @@ test("a lost decomposition cross-check relay result is recovered from the saved 
   assert.equal(labels.includes("plan:codex-decomposition-review:relay-retry-1"), true);
 });
 
-test("a relay that never returns fails with a plain-English message naming the saved result", async () => {
-  await assert.rejects(
-    harness("workflows/plan-forge.js", PLAN_ARGS, (label, prompt) => (
-      label.startsWith("plan:codex-review") ? null : planResponder([])(label, prompt)
-    )),
-    (error) => {
-      const lines = error.message.split("\n");
-      assert.equal(lines.length, 4);
-      assert.match(lines[0], /completed and its result was saved/);
-      assert.match(lines[2], /--resume/);
-      assert.match(lines[3], /^Details: saved result \/plans\/slug\/reviews\/pass-1-round-1-codex\.json;/);
-      return true;
-    }
-  );
+test("a plan relay that never returns preserves interruption accounting", async () => {
+  const { result } = await harness("workflows/plan-forge.js", PLAN_ARGS, (label, prompt) => (
+    label.startsWith("plan:codex-review") ? null : planResponder([])(label, prompt)
+  ));
+  const lines = result.message.split("\n");
+  assert.equal(result.status, "plan-interrupted");
+  assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
+  assert.equal(result.usage.relayRetries, 2);
+  assert.equal(result.agentCalls, 8);
+  assert.deepEqual(result.relayCheckpoints, [
+    "/plans/slug/reviews/pass-1-round-1-codex.json.relay-checkpoint.json"
+  ]);
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /completed and its result was saved/);
+  assert.match(lines[2], /--resume/);
+  assert.match(lines[3], /^Details: saved result \/plans\/slug\/reviews\/pass-1-round-1-codex\.json;/);
 });
 
 test("a lost request-build reply is rebuilt rather than failing the pass", async () => {
@@ -711,6 +784,74 @@ test("relay retries stop at the hard per-PR dispatch ceiling", async () => {
   assert.equal(result.agentCalls, config.limits.agentCallsPerPr);
   assert.equal(calls.length, config.limits.agentCallsPerPr);
   assert.equal(result.usage.relayRetries, 1);
+});
+
+test("a recovered relay cannot make later verification repair exceed the call ceiling", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.maxReviewLoops = 2;
+  config.limits.agentCallsPerPr = 16;
+  for (const setting of Object.values(config.reviewers)) setting.enabled = false;
+  config.reviewers.functionality.enabled = true;
+  let droppedReview = false;
+  let commitCount = 0;
+  const findingResult = {
+    ...CLEAN_FINDINGS,
+    verdict: "needs-attention",
+    findings: [{
+      title: "repair this",
+      body: "The behavior is wrong.",
+      file: "src/a.js",
+      line_start: 1,
+      line_end: 1,
+      severity: "major",
+      dimension: "functionality",
+      confidence: 0.99,
+      recommendation: "Fix it."
+    }]
+  };
+  const { result, calls } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config }, (label, prompt) => {
+    if (label.startsWith("candidate:snapshot")) {
+      const candidateOid = label === "candidate:snapshot:0" ? SHIP_ARGS.existingCandidateOid : (commitCount === 1 ? "d" : "e").repeat(40);
+      return {
+        baseOid: SHIP_ARGS.baseOid, candidateOid,
+        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff",
+        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
+        treeClean: "", diffBytes: 20, fileCount: 1
+      };
+    }
+    if (label === "verify:0") return { status: "passed", resultPath: "/ships/s1/verify-0.json", commands: [] };
+    if (label === "verify:1") return { status: "failed", resultPath: "/ships/s1/verify-1.json", commands: [] };
+    if (label === "verify:1-repair") return { status: "passed", resultPath: "/ships/s1/verify-1-repair.json", commands: [] };
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("review:1:claude:")) return findingResult;
+    if (label.startsWith("review:1:codex:") && !droppedReview) {
+      droppedReview = true;
+      return null;
+    }
+    if (label.includes("relay-retry-1")) {
+      return { reused: true, executionId: "exec-recovered-review", result: CLEAN_FINDINGS };
+    }
+    if (label === "fix:1:codex") {
+      const id = prompt.match(/Return exactly one accounting row per ID: ([^.\n]+)/)?.[1];
+      return { summary: "fixed", results: [{ id, status: "fixed", explanation: "done" }] };
+    }
+    if (label === "verify:repair:1:codex") {
+      return { summary: "fixed verify", results: [{ id: "TT-VERIFY-R1", status: "fixed", explanation: "done" }] };
+    }
+    if (label.startsWith("scribe:")) return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    if (label === "candidate:commit:1") {
+      commitCount += 1;
+      return { ok: true, candidateOid: (commitCount === 1 ? "d" : "e").repeat(40), message: "fix: review round 1" };
+    }
+    return CLEAN_FINDINGS;
+  });
+
+  assert.equal(droppedReview, true);
+  assert.equal(result.status, "agent-budget-gate");
+  assert.equal(result.agentCalls, config.limits.agentCallsPerPr);
+  assert.equal(calls.length, config.limits.agentCallsPerPr);
+  assert.equal(result.usage.relayRetries, 1);
+  assert.equal(result.usageAccounting, "complete");
 });
 
 test("a lost Codex review relay result does not fail the PR round", async () => {

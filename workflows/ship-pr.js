@@ -512,6 +512,7 @@ async function commitCandidate(input, round, summary) {
     model: "haiku",
     schema: commitSchema
   });
+  if (!result && relayState.capacityExceeded) return null;
   if (!result?.ok || !result.candidateOid) throw new Error(`candidate commit ${round} failed`);
   return result.candidateOid;
 }
@@ -540,6 +541,7 @@ async function snapshot(input, round, candidateOid) {
     model: "haiku",
     schema: snapshotSchema
   });
+  if (!result && relayState.capacityExceeded) return null;
   if (!result || result.candidateOid !== candidateOid || result.baseOid !== input.baseOid || result.treeClean !== "") {
     throw new Error(`candidate snapshot ${round} did not bind to the expected commits or the primary checkout changed`);
   }
@@ -663,6 +665,16 @@ async function main(raw) {
   };
   const taskResults = [...(input.taskResults ?? [])];
   const failedTasks = new Set();
+  const capacityGate = ({ candidateOid = input.existingCandidateOid ?? null, rounds = [], ledger = [], ...extra } = {}) => finish({
+    status: "agent-budget-gate",
+    tasks: taskResults,
+    rounds,
+    tallies: tally(ledger),
+    ledger,
+    gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit.`],
+    candidateOid,
+    ...extra
+  });
 
   if (!input.existingCandidateOid) {
     const implementationCapacity = input.tasks.length * 2 + 4;
@@ -697,6 +709,7 @@ async function main(raw) {
           return { task, result };
         }));
         if (relayState.fatal.length > 0) return relayInterruption();
+        if (relayState.capacityExceeded) return capacityGate();
         for (const item of results) {
           const result = item?.result;
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
@@ -740,14 +753,19 @@ async function main(raw) {
         });
     callCount += 1;
     if (relayState.fatal.length > 0) return relayInterruption({ candidateOid });
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid });
     if (!repairReport || input.repairFindings.some((finding) => !(repairReport.results ?? []).some((result) => result.id === finding.id && result.status === "fixed"))) {
       return finish({ status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls });
     }
-    candidateOid = await commitCandidate(input, roundOffset + 1, "external gate repair");
+    const repairedCandidateOid = await commitCandidate(input, roundOffset + 1, "external gate repair");
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid });
+    candidateOid = repairedCandidateOid;
   } else if (!candidateOid) {
-    candidateOid = await commitCandidate(input, 0, input.pr.title);
+    const initialCandidateOid = await commitCandidate(input, 0, input.pr.title);
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate();
+    candidateOid = initialCandidateOid;
   }
   if (callCount + 3 > callBudget()) {
     return finish({
@@ -759,8 +777,10 @@ async function main(raw) {
   const initialRound = roundOffset === 0 ? 0 : roundOffset + 1;
   let snapshotValue = await snapshot(input, initialRound, candidateOid);
   callCount += 1;
+  if (relayState.capacityExceeded) return capacityGate({ candidateOid });
   let verification = await runVerify(input, snapshotValue, initialRound);
   callCount += 1;
+  if (relayState.capacityExceeded) return capacityGate({ candidateOid });
   if (verification.status === "failed") {
     if (callCount + 5 > callBudget()) {
       return finish({
@@ -781,15 +801,20 @@ async function main(raw) {
       schema: fixReportSchema
     });
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     if (!repair?.results?.some((item) => item.id === "TT-VERIFY" && item.status === "fixed")) {
       return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
     }
-    candidateOid = await commitCandidate(input, initialRound, "repair local verification");
+    const verificationCandidateOid = await commitCandidate(input, initialRound, "repair local verification");
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
+    candidateOid = verificationCandidateOid;
     snapshotValue = await snapshot(input, initialRound, candidateOid);
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     verification = await runVerify(input, snapshotValue, initialRound);
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     if (verification.status === "failed") {
       return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
     }
@@ -797,6 +822,7 @@ async function main(raw) {
 
   let ui = await classifyUi(input, snapshotValue, initialRound);
   callCount += 1;
+  if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
   const initialSelectedInfo = selectDimensions(config, snapshotValue, input.reviewers ?? [], ui.verdict);
   if (initialSelectedInfo.selected.length === 0) throw new Error("no review dimensions were selected");
   let selectedInfo = { selected: [], skipped: [], matcherErrors: [] };
@@ -828,6 +854,9 @@ async function main(raw) {
       schema: specialistSchema
     })));
     callCount += focuses.length;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, ui, verify: verification, selected: initialSelectedInfo });
+    }
     let sequence = 1;
     specialists.filter(Boolean).forEach((result) => {
       for (const finding of result.findings ?? []) specialistItems.push({ ...finding, id: `S${sequence++}`, focus: result.focus });
@@ -901,6 +930,9 @@ async function main(raw) {
     callCount += assignments.length;
     if (relayState.fatal.length > 0) {
       return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
     }
 
     lastRoundFailures = reviewResults.filter((item) => !item?.result).map((item) => `${item?.engine ?? "unknown"}:${item?.dimension ?? "unknown"}`);
@@ -985,6 +1017,9 @@ async function main(raw) {
       schema: scribeSchema
     });
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!scribe?.ok) lastRoundFailures.push("review-artifact-cross-check");
 
     const open = actionable(ledger);
@@ -1043,6 +1078,9 @@ async function main(raw) {
     if (relayState.fatal.length > 0) {
       return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
     }
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!fixReport || fixTargets.some((finding) => !(fixReport.results ?? []).some((result) => result.id === finding.id))) {
       rounds.at(-1).fixFailure = "fix report was missing or incomplete";
       status = "fix-failed-dirty-worktree";
@@ -1074,18 +1112,31 @@ async function main(raw) {
       schema: eventScribeSchema
     });
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!fixScribe?.ok) {
       rounds.at(-1).fixFailure = "fix event did not persist";
       status = "fix-failed-dirty-worktree";
       rounds.at(-1).worktreeDirty = true;
       break;
     }
-    candidateOid = await commitCandidate(input, round, `review round ${round}`);
+    const fixedCandidateOid = await commitCandidate(input, round, `review round ${round}`);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
+    candidateOid = fixedCandidateOid;
     snapshotValue = await snapshot(input, round, candidateOid);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     verification = await runVerify(input, snapshotValue, round);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (verification.status === "failed") {
       rounds.at(-1).verification = verification;
       const repairId = `TT-VERIFY-R${round}`;
@@ -1116,17 +1167,30 @@ async function main(raw) {
       if (relayState.fatal.length > 0) {
         return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
       }
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       if (!repairReport?.results?.some((item) => item.id === repairId && item.status === "fixed")) {
         status = "verify-repair-failed-dirty-worktree";
         rounds.at(-1).worktreeDirty = true;
         break;
       }
-      candidateOid = await commitCandidate(input, round, `repair verification after review round ${round}`);
+      const repairCandidateOid = await commitCandidate(input, round, `repair verification after review round ${round}`);
       callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
+      candidateOid = repairCandidateOid;
       snapshotValue = await snapshot(input, `${round}-repair`, candidateOid);
       callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       verification = await runVerify(input, snapshotValue, `${round}-repair`);
       callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       rounds.at(-1).verificationRepair = { report: repairReport, verification };
       if (verification.status === "failed") {
         status = "verify-failed";
@@ -1135,6 +1199,9 @@ async function main(raw) {
     }
     ui = await classifyUi(input, snapshotValue, round);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     lastFixEngine = fixEngine;
   }
 
