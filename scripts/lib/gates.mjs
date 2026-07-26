@@ -51,7 +51,7 @@ export function recordGate(pr, gate, candidateOid, value, policyFingerprint = un
     ...pr,
     gates: {
       ...pr.gates,
-      [gate]: { candidateOid, ...(policyFingerprint ? { policyFingerprint } : {}), ...value }
+      [gate]: { ...value, candidateOid, ...(policyFingerprint ? { policyFingerprint } : {}) }
     }
   };
 }

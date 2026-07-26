@@ -370,6 +370,13 @@ test("single-provider gates bind candidate and policy and always require approva
     () => recordGate(pr, "human", pr.candidateOid, { approved: true }),
     /without the current run policy fingerprint/
   );
+  const bound = recordGate(pr, "review", pr.candidateOid, {
+    status: "clean",
+    candidateOid: "c".repeat(40),
+    policyFingerprint: `sha256:${"0".repeat(64)}`
+  }, policy.policyFingerprint);
+  assert.equal(bound.gates.review.candidateOid, pr.candidateOid);
+  assert.equal(bound.gates.review.policyFingerprint, policy.policyFingerprint);
   pr = recordGate(pr, "human", pr.candidateOid, { approved: true }, policy.policyFingerprint);
   assert.equal(evaluateGates(pr, config, { baseProtected: true, runPolicy: policy }).ready, true);
   const tampered = { ...policy, reasoningProvider: "claude" };
