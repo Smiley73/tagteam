@@ -1,7 +1,7 @@
 ---
 description: Forge and approve a cross-engine implementation plan and PR train
 argument-hint: '<goal> [--resume <slug>] [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
-allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:codex-runner), Bash(node *), Bash(git *)
+allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:prompt-builder, tagteam:codex-runner), Bash(node *), Bash(git *)
 ---
 
 # Forge a plan
@@ -12,6 +12,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` fi
 Reject repository and artifact paths containing control characters or shell metacharacters before forming Bash commands.
 
 Derive a short lowercase plan slug with only `[a-z0-9-]`, create `.tagteam/plans/<slug>/drafts` and `reviews`, and pass absolute paths to the workflow. Planning may write draft/review artifacts there, but no approved `plan.md`, `manifest.json`, or `pr-train.json` exists until explicit approval.
+
+Write `goal.json` before invoking the workflow, on every invocation including resumes and continuations. The forge builds each cross-engine request from files on disk and reads the goal from that one, so a missing `goal.json` stops the pass before anything is sent.
 
 Invoke:
 
@@ -36,23 +38,25 @@ Give every forge invocation its own `passId` so a reused Codex artifact can neve
 `--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
 
 1. If `approved.json` exists, there is nothing to resume; point at `/tagteam:ship .tagteam/plans/<slug>` and stop.
-2. Read `goal.json` for the original goal and run overrides. Write it at the start of every non-resume invocation next to the drafts.
+2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts.
 3. Take the highest `pass-<n>` present. Within it, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point.
 4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
-5. If only `drafts/<passId>-integrated.md` exists, resume the continuation instead: pass `seedPlan`, its `.questions.json`, and the answers from `drafts/<passId>-decisions.json` as `decisions`, with no `resumeRound`.
+5. `drafts/<passId>-integrated.md` is the finished plan of its pass: the last cross-review revision writes it, and so does a continuation. If it is the newest draft in the pass, resume from it with `seedPlan` and its `.questions.json`, and either `decisions` from `drafts/<passId>-decisions.json` when that file exists (a continuation), or `resumeRound: <reviewRounds + 1>` when it does not (cross-review finished; only the manifest, train, and cross-check remain).
 6. Continue with the normal question, cross-check, and approval flow below.
+
+A resumed pass seeds itself from these files, so pass them through byte for byte and never from memory. The workflow checks each draft it produced against the file it was told to write, and stops the pass rather than sending a shortened plan to either engine.
 
 If the workflow fails, do not show the raw error. Render `messages.mjs relayLost` when its message names a saved Codex result, and `messages.mjs planInterrupted` otherwise, with `--artifact` set to the saved artifact or the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
 
 If the workflow returns open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
-Persist the returned draft and each structured engine review under the plan directory (`drafts/` and `reviews/`) before asking; use mode 0600 and never rewrite an earlier review.
+Persist each structured engine review under `reviews/` before asking; use mode 0600 and never rewrite an earlier review. The plan, manifest, and train are already saved: the workflow returns `planPath`, `questionsPath`, `manifestPath`, and `prTrainPath`, and those files are the exact bytes the cross-check judged. Copy from them rather than retyping the returned values, and read `planPath` instead of holding the plan in the conversation.
 
 As soon as a chunk is answered, append those `{question, answer}` rows to `drafts/<passId>-decisions.json` at mode 0600. Answers are the one thing here a human cannot cheaply reproduce, and approval may be a long way off; the approved `decisions.json` is written only at approval, from this file.
 
 Then invoke `tagteam:plan-forge` once more with the same arguments plus:
 
 - `passId`: the next pass (`pass-2`, then `pass-3` for each handoff repair);
-- `seedPlan`: the first result's `planMarkdown`;
+- `seedPlan`: the contents of the first result's `planPath`;
 - `decisions`: `{question, answer}` rows.
 
 This continuation performs one integration pass and regenerates the manifest and train; it must not repeat the cross-review rounds.

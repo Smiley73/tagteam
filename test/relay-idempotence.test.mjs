@@ -39,6 +39,8 @@ function runBridge(temp, artifact, fake, extra = [], prompt = "review this") {
     "--sandbox", "read-only",
     "--ship-dir", temp,
     "--codex-bin", fake,
+    // Every caller must declare what a complete prompt looks like.
+    "--min-prompt-bytes", "1",
     ...extra
   ], { input: prompt, encoding: "utf8" });
 }
@@ -182,6 +184,9 @@ function planResponder(dropOnce) {
       dropped.add(label);
       return null;
     }
+    if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
+      return { ok: true, promptPath: "/plans/slug/reviews/prompt.md", bytes: 4096 };
+    }
     if (label.startsWith("plan:draft") || label.startsWith("plan:revise")) {
       return { planMarkdown: "# Plan", open_questions: [] };
     }
@@ -229,6 +234,19 @@ test("a relay that never returns fails with a plain-English message naming the s
       return true;
     }
   );
+});
+
+test("a lost request-build reply is rebuilt rather than failing the pass", async () => {
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    planResponder(["plan:decomposition-request"])
+  );
+  // Rebuilding the request rewrites the same file from the same saved sources,
+  // so a lost reply costs one command and nothing else.
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(labels.includes("plan:decomposition-request:retry-1"), true);
+  assert.equal(result.relayRetries, 1);
 });
 
 test("plan resume restarts a saved round without re-drafting or re-reviewing it", async () => {
