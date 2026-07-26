@@ -17,22 +17,23 @@ const CLEAN_FINDINGS = {
   findings: []
 };
 
-function fakeCodex(temp, counter) {
+function fakeCodex(temp, counter, { editWorktree = false } = {}) {
   const fake = path.join(temp, "fake-codex.mjs");
   fs.writeFileSync(fake, `#!/usr/bin/env node
 import fs from "node:fs";
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(counter)}, "x");
+${editWorktree ? 'fs.writeFileSync("bridge-edit.txt", "changed\\n");' : ""}
 fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(CLEAN_FINDINGS)}));
 `);
   fs.chmodSync(fake, 0o700);
   return fake;
 }
 
-function runBridge(temp, artifact, fake, extra = [], prompt = "review this") {
+function runBridge(temp, artifact, fake, extra = [], prompt = "review this", worktree = root) {
   return spawnSync(process.execPath, [
     path.join(root, "scripts/codex-run.mjs"),
-    "--worktree", root,
+    "--worktree", worktree,
     "--schema", path.join(root, "schemas/findings.schema.json"),
     "--artifact", artifact,
     "--model", "gpt-test",
@@ -121,6 +122,34 @@ test("an artifact with no recorded request is answered afresh rather than truste
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
   assert.equal(fs.existsSync(`${artifact}.request.json`), true);
   assert.equal(fs.statSync(`${artifact}.request.json`).mode & 0o777, 0o600);
+});
+
+test("workspace-writing bridge checkpoints bind the exact dirty worktree state", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter, { editWorktree: true });
+  const artifact = path.join(temp, "findings.json");
+  const result = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "review this", worktree);
+  assert.equal(result.status, 0, result.stderr);
+  const checkpoint = `${artifact}.relay-checkpoint.json`;
+  const validator = path.join(root, "scripts/validate-relay-checkpoint.mjs");
+  const valid = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(JSON.parse(valid.stdout).executionId, JSON.parse(result.stdout.trim()).executionId);
+  fs.writeFileSync(path.join(worktree, "later.txt"), "drift\n");
+  const drifted = spawnSync(process.execPath, [validator, checkpoint, worktree, artifact], { encoding: "utf8" });
+  assert.equal(drifted.status, 1);
+  assert.match(drifted.stderr, /changed after the relay checkpoint/);
 });
 
 function loadWorkflow(file) {
@@ -524,7 +553,7 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
   assert.equal(result.usage.codexCalls, 1);
 });
 
-test("total review relay loss stops, then resume imports the saved execution receipt", async () => {
+test("total review relay loss returns accounting, then resume imports the saved execution receipt", async () => {
   const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
   for (const setting of Object.values(config.reviewers)) setting.enabled = false;
   config.reviewers.functionality.enabled = true;
@@ -548,17 +577,22 @@ test("total review relay loss stops, then resume imports the saved execution rec
     }
     return CLEAN_FINDINGS;
   };
-  await assert.rejects(
-    harness("workflows/ship-pr.js", args, respond(false)),
-    /resume can reuse the exact saved request/
-  );
-  const resumed = await harness("workflows/ship-pr.js", args, respond(true));
+  const interrupted = await harness("workflows/ship-pr.js", args, respond(false));
+  assert.equal(interrupted.result.status, "relay-interrupted");
+  assert.equal(interrupted.result.usage.relayRetries, 2);
+  assert.ok(interrupted.result.agentCalls > 0);
+  const resumed = await harness("workflows/ship-pr.js", {
+    ...args,
+    usage: interrupted.result.usage,
+    usageReceipts: interrupted.result.usageReceipts,
+    agentCalls: interrupted.result.agentCalls
+  }, respond(true));
   assert.equal(resumed.result.status, "clean");
   assert.equal(resumed.result.usage.codexCalls, 1);
   assert.deepEqual(resumed.result.usageReceipts, ["exec-review-lost"]);
 });
 
-test("total implementation relay loss stops before retrying changed work", async () => {
+test("total implementation relay loss returns a dirty checkpoint before retrying changed work", async () => {
   const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
   config.implementation.engine = "codex";
   for (const setting of Object.values(config.reviewers)) setting.enabled = false;
@@ -569,11 +603,22 @@ test("total implementation relay loss stops before retrying changed work", async
     existingCandidateOid: undefined,
     tasks: [{ id: "T1", title: "t", description: "d", complexity: "simple", files: ["a.js"], dependsOn: [], doneCriteria: ["works"] }]
   };
-  await assert.rejects(
-    harness("workflows/ship-pr.js", args, (label) => label.startsWith("implement:") ? null : CLEAN_FINDINGS),
-    /resume can reuse the exact saved request/
+  const interrupted = await harness(
+    "workflows/ship-pr.js",
+    args,
+    (label) => label.startsWith("implement:") ? null : CLEAN_FINDINGS
   );
-  const resumed = await harness("workflows/ship-pr.js", args, (label, _prompt, options) => {
+  assert.equal(interrupted.result.status, "relay-interrupted-dirty-worktree");
+  assert.deepEqual(interrupted.result.relayCheckpoints, [
+    "/ships/s1/prs/PR-1/tasks/T1/result.json.relay-checkpoint.json"
+  ]);
+  assert.ok(interrupted.result.agentCalls > 0);
+  const resumed = await harness("workflows/ship-pr.js", {
+    ...args,
+    usage: interrupted.result.usage,
+    usageReceipts: interrupted.result.usageReceipts,
+    agentCalls: interrupted.result.agentCalls
+  }, (label, _prompt, options) => {
     if (label.startsWith("implement:")) {
       return {
         reused: true,

@@ -36,7 +36,9 @@ For `--dry-run`, validate manifests, dependency order, reviewer selection inputs
 
 Before any mutation, rebuild review state from each `review.md` with `parse-review-artifact.mjs` and reconcile Git/GitHub facts: worktree existence, branch/head OID, origin head, PR state/head, merged commit, base OID, candidate-bound gates, and merge lock owner. Artifact/Git disagreement stops with one recovery action. Never trust conversation memory or merely replay the last step. An `awaiting-approval` state remains waiting until the user answers.
 
-Also run `git -C "<worktree>" status --porcelain` for every retained worktree. A workflow status ending in `dirty-worktree`, or any uncommitted edit that is not already reconciled to a recorded candidate, is a hard stop: render the `fixFailed` catalog message, show the bounded diff to the human, and do not check out another candidate or begin the next PR. Resume only after the human explicitly reconciles those edits with the recorded candidate.
+Also run `git -C "<worktree>" status --porcelain` for every retained worktree. A workflow status ending in `dirty-worktree`, or any uncommitted edit that is not already reconciled to a recorded candidate, is a hard stop except for the narrow `relay-interrupted-dirty-worktree` checkpoint below: render the `fixFailed` catalog message, show the bounded diff to the human, and do not check out another candidate or begin the next PR. Resume only after the human explicitly reconciles those edits with the recorded candidate.
+
+`relay-interrupted-dirty-worktree` is expected only when workspace-writing Codex work finished but all relay handoffs were lost. This automatic recovery is deliberately limited to exactly one workspace-writing checkpoint; multiple concurrent lost writers require the ordinary human reconciliation stop. Validate that checkpoint with `node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-relay-checkpoint.mjs" "<checkpoint>" "<worktree>" "<artifact>"`. Continue only when the validator binds the current HEAD and complete changed porcelain-status hash to the saved schema-valid artifact and request execution receipt. Do not clean, stage, or alter the worktree; re-invoke the identical workflow task/round so `codex-run.mjs` reuses that artifact, imports its receipt, and then performs the normal candidate commit. Any missing/invalid checkpoint or any byte of later worktree drift remains the ordinary hard stop.
 
 If a clean worktree was removed on a prior stop, recreate it only after reconciliation:
 
@@ -61,6 +63,8 @@ git -C "<worktree>" switch -c "<branchPrefix><ship-id>/<pr.id>"
 ```
 
 Invoke `Workflow({name:"tagteam:ship-pr", args:{...}})` with the effective config, validated `runPolicy`, config path, PR, its manifest tasks, PR base OID, ship/plugin/worktree/primary paths, diff-exclude JSON path, forced reviewers, persisted call count, persisted `usage`, and persisted `usageReceipts`. Persist its result, including both usage fields. The workflow owns implementation, candidate commits, snapshots, CodeGraph sync, UI classification, dimension selection, alternating review/fix, artifact parsing, and local verification.
+
+Persist every returned workflow result before branching on its status, including `relay-interrupted` and `relay-interrupted-dirty-worktree`. Their returned `agentCalls`, `usage`, relay retries, and checkpoint paths are authoritative interruption accounting and must be passed back on resume; never reconstruct or reset them from conversation memory.
 
 For revalidation of an already committed candidate, also pass `existingCandidateOid`, prior `taskResults`, and `roundOffset` from the parsed append-only artifact; this skips implementation and appends new global round numbers. For a CI or human-requested repair, additionally pass structured `repairFindings` and `repairEngine`; the workflow fixes, commits a new candidate, then runs every gate. Never re-run implementation merely to revalidate a rebase or gate repair.
 

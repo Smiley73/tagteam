@@ -385,15 +385,6 @@ function relayEnvelopeSchema(resultSchema) {
   };
 }
 
-function throwRelayFailures() {
-  if (relayState.fatal.length === 0) return;
-  throw new Error([
-    "Codex completed work, but its saved result could not be handed back after all relay attempts.",
-    "Stop this invocation so resume can reuse the exact saved request and import its execution receipt.",
-    `Saved artifacts: ${relayState.fatal.join(", ")}`
-  ].join("\n"));
-}
-
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
   const promptFile = `${artifact}.prompt.md`;
@@ -453,8 +444,8 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     }
     log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
   }
-  relayState.fatal.push(artifact);
-  throw new Error(`Codex result relay failed for ${artifact}; resume to reuse the saved artifact`);
+  relayState.fatal.push({ artifact, sandbox, checkpoint: `${artifact}.relay-checkpoint.json` });
+  return null;
 }
 
 async function implementTask(input, task, tierName, engine, attempt) {
@@ -635,6 +626,21 @@ async function main(raw) {
     usageReceipts: [...codexReceiptState],
     ...result
   });
+  const relayInterruption = ({ candidateOid = null, rounds = [], ledger = [], ...extra } = {}) => {
+    const dirty = relayState.fatal.some((item) => item.sandbox === "workspace-write");
+    return finish({
+      status: dirty ? "relay-interrupted-dirty-worktree" : "relay-interrupted",
+      tasks: taskResults,
+      rounds,
+      tallies: tally(ledger),
+      ledger,
+      gateFailures: ["Codex completed saved work, but every relay handoff failed. Resume to reuse the exact request."],
+      candidateOid,
+      relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
+      agentCalls: callCount + relayState.extraCalls,
+      ...extra
+    });
+  };
   const taskResults = [...(input.taskResults ?? [])];
   const failedTasks = new Set();
 
@@ -663,13 +669,14 @@ async function main(raw) {
           const route = implementationRoute(config, task);
           let result = await implementTask(input, task, route.tier, route.engine, 1);
           callCount += 1;
+          if (relayState.fatal.length > 0) return { task, result };
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
             result = await implementTask(input, task, nextTier(route.tier), route.engine, 2);
             callCount += 1;
           }
           return { task, result };
         }));
-        throwRelayFailures();
+        if (relayState.fatal.length > 0) return relayInterruption();
         for (const item of results) {
           const result = item?.result;
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
@@ -712,6 +719,7 @@ async function main(raw) {
           model: repairRuntime.model, effort: repairRuntime.effort, schema: fixReportSchema
         });
     callCount += 1;
+    if (relayState.fatal.length > 0) return relayInterruption({ candidateOid });
     if (!repairReport || input.repairFindings.some((finding) => !(repairReport.results ?? []).some((result) => result.id === finding.id && result.status === "fixed"))) {
       return finish({ status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls });
     }
@@ -870,8 +878,10 @@ async function main(raw) {
       }
       return { ...assignment, result };
     }));
-    throwRelayFailures();
     callCount += assignments.length;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
 
     lastRoundFailures = reviewResults.filter((item) => !item?.result).map((item) => `${item?.engine ?? "unknown"}:${item?.dimension ?? "unknown"}`);
     const roundFindings = [];
@@ -1010,6 +1020,9 @@ async function main(raw) {
       });
     }
     callCount += 1;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!fixReport || fixTargets.some((finding) => !(fixReport.results ?? []).some((result) => result.id === finding.id))) {
       rounds.at(-1).fixFailure = "fix report was missing or incomplete";
       status = "fix-failed-dirty-worktree";
@@ -1080,6 +1093,9 @@ async function main(raw) {
             schema: fixReportSchema
           });
       callCount += 1;
+      if (relayState.fatal.length > 0) {
+        return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       if (!repairReport?.results?.some((item) => item.id === repairId && item.status === "fixed")) {
         status = "verify-repair-failed-dirty-worktree";
         rounds.at(-1).worktreeDirty = true;
