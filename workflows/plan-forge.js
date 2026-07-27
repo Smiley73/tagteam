@@ -759,6 +759,7 @@ async function main(raw) {
   const manifestPath = `${input.planDir}/reviews/${passId}-manifest.json`;
   const trainPath = `${input.planDir}/reviews/${passId}-pr-train.json`;
   const goalPath = input.goalFile ?? `${input.planDir}/goal.json`;
+  const configPath = input.configPath ?? `${input.worktree}/.tagteam/config.json`;
   const useClaude = runPolicy.reasoningProvider !== "codex";
   const useCodex = runPolicy.reasoningProvider !== "claude";
 
@@ -929,6 +930,7 @@ async function main(raw) {
     const fences = continuation
       ? [
         { name: "GOAL", file: goalPath, json: true },
+        { name: "PROJECT_CONFIG", file: configPath, json: true },
         { name: "SEED_PLAN", file: input.seedPlanPath },
         { name: "HUMAN_DECISIONS", file: input.decisionsFile, json: true },
         { name: "CARRIED_QUESTIONS", file: `${input.seedPlanPath}.questions.json`, json: true },
@@ -938,7 +940,10 @@ async function main(raw) {
           json: true
         }] : [])
       ]
-      : [{ name: "GOAL", file: goalPath, json: true }];
+      : [
+        { name: "GOAL", file: goalPath, json: true },
+        { name: "PROJECT_CONFIG", file: configPath, json: true }
+      ];
     const expects = continuation
       ? {
         SEED_PLAN: expectText(input.seedPlan),
@@ -1159,6 +1164,7 @@ async function main(raw) {
         vars: { WORKTREE: input.worktree },
         fences: [
           { name: "GOAL", file: goalPath, json: true },
+          { name: "PROJECT_CONFIG", file: configPath, json: true },
           { name: "PLAN", file: planFile },
           { name: "DECLARED_INTERFACE_DECISIONS", file: `${planFile}.ui-decisions.json`, json: true }
         ],
@@ -1246,6 +1252,7 @@ async function main(raw) {
       const revisionPromptFile = `${revisionArtifact}.prompt.md`;
       const revisionFences = [
         { name: "GOAL", file: goalPath, json: true },
+        { name: "PROJECT_CONFIG", file: configPath, json: true },
         { name: "CURRENT_PLAN", file: planFile },
         { name: "PLAN_REVIEW", file: artifact, json: true },
         { name: "CARRIED_QUESTIONS", file: `${planFile}.questions.json`, json: true },
@@ -1370,6 +1377,7 @@ async function main(raw) {
       template: "plan-decompose-codex.md",
       vars: { WORKTREE: input.worktree },
       fences: [
+        { name: "PROJECT_CONFIG", file: configPath, json: true },
         { name: "PLAN", file: integratedPath },
         { name: "MANIFEST", file: manifestPath, json: true }
       ],

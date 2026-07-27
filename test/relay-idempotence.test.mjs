@@ -1343,7 +1343,9 @@ test("Claude-only planning dispatches no Codex work", async () => {
 test("Codex-only planning leaves Haiku on plumbing and routes every substantive step to Codex", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const prompts = new Map();
   const responder = (label, prompt) => {
+    prompts.set(label, prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
       return {
@@ -1385,6 +1387,14 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
     { provider: "codex", role: "plan-review" },
     { provider: "codex", role: "interaction-review" }
   ]);
+  for (const label of [
+    "plan:codex-draft:request",
+    "plan:codex-interaction-review:1:request",
+    "plan:codex-revise:1:request",
+    "plan:codex-decompose:request"
+  ]) {
+    assert.match(prompts.get(label), /--fence-json "PROJECT_CONFIG=\/repo\/\.tagteam\/config\.json"/);
+  }
 });
 
 test("Codex-only planning keeps the interface lens advisory when its relay is unavailable", async () => {

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { composePrompt } from "../scripts/compose-prompt.mjs";
 import { materializePlanArtifact } from "../scripts/materialize-plan-artifact.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -106,4 +107,84 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /Reject `--provider` on resume if it differs/);
   assert.match(command, /In `codex` mode Claude\/Haiku performs orchestration only/);
   assert.match(command, /In `claude` mode no Codex request is dispatched/);
+});
+
+test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {
+  const draft = fs.readFileSync(path.join(root, "prompts", "plan-draft-codex.md"), "utf8");
+  const interaction = fs.readFileSync(path.join(root, "prompts", "plan-interaction-review-codex.md"), "utf8");
+  const decompose = fs.readFileSync(path.join(root, "prompts", "plan-decompose-codex.md"), "utf8");
+  assert.match(draft, /ui\.hasUserInterface/);
+  assert.match(draft, /ui\.conventionPaths/);
+  assert.match(interaction, /ui\.hasUserInterface/);
+  assert.match(interaction, /ui\.conventionPaths/);
+  assert.match(decompose, /prTrain\.prSize\.guidance/);
+});
+
+test("composed Codex requests carry concrete UI and PR-size settings from disk", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-config-"));
+  const configPath = path.join(directory, "config.json");
+  const goalPath = path.join(directory, "goal.json");
+  const planPath = path.join(directory, "plan.md");
+  const manifestPath = path.join(directory, "manifest.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    ui: {
+      hasUserInterface: true,
+      conventionPaths: ["docs/ui-conventions.md"],
+      confirmDecisions: "off"
+    },
+    prTrain: { prSize: { guidance: "under 200 changed lines", enforce: false } }
+  }));
+  fs.writeFileSync(goalPath, JSON.stringify({ goal: "g" }));
+  fs.writeFileSync(planPath, "# Plan\n");
+  fs.writeFileSync(manifestPath, JSON.stringify({ version: 1, goal: "g", tasks: [] }));
+
+  const draftOut = path.join(directory, "draft.prompt.md");
+  composePrompt({
+    template: path.join(root, "prompts", "plan-draft-codex.md"),
+    out: draftOut,
+    vars: [{ name: "WORKTREE", text: "/repo" }],
+    fences: [
+      { name: "GOAL", file: goalPath, json: true },
+      { name: "PROJECT_CONFIG", file: configPath, json: true }
+    ],
+    expects: new Map(),
+    requireJson: []
+  });
+  const draftPrompt = fs.readFileSync(draftOut, "utf8");
+  assert.match(draftPrompt, /"hasUserInterface": true/);
+  assert.match(draftPrompt, /"conventionPaths": \[/);
+  assert.match(draftPrompt, /docs\/ui-conventions\.md/);
+
+  fs.writeFileSync(configPath, JSON.stringify({
+    ui: { hasUserInterface: false, conventionPaths: [], confirmDecisions: "off" },
+    prTrain: { prSize: { guidance: "under 200 changed lines", enforce: false } }
+  }));
+  const noUiOut = path.join(directory, "draft-no-ui.prompt.md");
+  composePrompt({
+    template: path.join(root, "prompts", "plan-draft-codex.md"),
+    out: noUiOut,
+    vars: [{ name: "WORKTREE", text: "/repo" }],
+    fences: [
+      { name: "GOAL", file: goalPath, json: true },
+      { name: "PROJECT_CONFIG", file: configPath, json: true }
+    ],
+    expects: new Map(),
+    requireJson: []
+  });
+  assert.match(fs.readFileSync(noUiOut, "utf8"), /"hasUserInterface": false/);
+
+  const decomposeOut = path.join(directory, "decompose.prompt.md");
+  composePrompt({
+    template: path.join(root, "prompts", "plan-decompose-codex.md"),
+    out: decomposeOut,
+    vars: [{ name: "WORKTREE", text: "/repo" }],
+    fences: [
+      { name: "PROJECT_CONFIG", file: configPath, json: true },
+      { name: "PLAN", file: planPath, json: false },
+      { name: "MANIFEST", file: manifestPath, json: true }
+    ],
+    expects: new Map(),
+    requireJson: []
+  });
+  assert.match(fs.readFileSync(decomposeOut, "utf8"), /under 200 changed lines/);
 });

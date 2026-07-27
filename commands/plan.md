@@ -27,6 +27,7 @@ Workflow({
     worktree: <repo>,
     pluginRoot: <absolute plugin root>,
     planDir: <absolute plan dir>,
+    configPath: <absolute validated repo/.tagteam/config.json>,
     passId: <"pass-1", then "pass-2", ... one per forge invocation>,
     config: <merged config with run overrides>,
     runPolicy: <validated run policy>,
