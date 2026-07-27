@@ -657,6 +657,59 @@ test("workspace-writing bridge checkpoints bind the exact dirty worktree state",
   assert.match(drifted.stderr, /changed after the relay checkpoint/);
 });
 
+test("distinct writable implementation attempts reconcile against distinct checkpoints", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-attempt-checkpoints-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter, { editWorktree: true });
+  const artifacts = [
+    path.join(temp, "tasks", "T1", "result.json"),
+    path.join(temp, "tasks", "T1", "result-attempt-2.json")
+  ];
+  fs.mkdirSync(path.dirname(artifacts[0]), { recursive: true });
+  const completed = artifacts.map((artifact, index) => {
+    const result = runBridge(
+      temp,
+      artifact,
+      fake,
+      ["--sandbox", "workspace-write"],
+      `implement task T1 attempt ${index + 1}`,
+      worktree
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim());
+  });
+
+  const reconciled = reconcileUsageReceipts({
+    status: "clean",
+    usage: { codexCalls: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: artifacts.map((artifact) => `${artifact}.usage-receipts.json`),
+    relayCheckpoints: artifacts.map((artifact) => `${artifact}.relay-checkpoint.json`),
+    confirmedCodexDispatches: artifacts.map((artifact, index) => ({
+      receiptFile: `${artifact}.usage-receipts.json`,
+      checkpoint: `${artifact}.relay-checkpoint.json`,
+      executionId: completed[index].executionId,
+      requestIdentity: completed[index].requestIdentity,
+      sandbox: "workspace-write"
+    })),
+    usageAccounting: "pending-checkpoint-reconciliation"
+  });
+  assert.equal(reconciled.usageAccounting, "complete");
+  assert.equal(reconciled.usage.codexCalls, 2);
+  assert.deepEqual(new Set(reconciled.usageReceipts), new Set(completed.map((item) => item.executionId)));
+});
+
 test("reused writable work without its original checkpoint stays workspace-unknown", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-crash-"));
   const worktree = path.join(temp, "repo");
@@ -1929,6 +1982,79 @@ test("implementation resume reuses completed dependency waves", async () => {
   assert.equal(resumed.labels.some((label) => label.startsWith("implement:T1:")), false);
   assert.equal(resumed.result.status, "clean");
   assert.deepEqual(resumed.result.tasks.map((task) => task.taskId).sort(), ["T1", "T2"]);
+});
+
+test("Codex implementation retries use attempt-specific recovery artifacts", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.implementation.engine = "codex";
+  const args = {
+    ...SHIP_ARGS,
+    config,
+    existingCandidateOid: undefined,
+    tasks: [{
+      id: "T1",
+      title: "retry task",
+      description: "d",
+      complexity: "simple",
+      files: ["a.js"],
+      dependsOn: [],
+      doneCriteria: ["works"]
+    }]
+  };
+  const seenImplementationPrompts = [];
+  const { result } = await harness("workflows/ship-pr.js", args, (label, prompt, options) => {
+    if (label.startsWith("implement:T1:")) {
+      seenImplementationPrompts.push(prompt);
+      const attempt = Number(label.split(":")[2]);
+      return {
+        reused: false,
+        executionId: `exec-implementation-${attempt}`,
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: {
+          taskId: "T1",
+          status: "completed",
+          summary: `attempt ${attempt}`,
+          filesChanged: ["a.js"],
+          criteria: [{ criterion: "works", met: attempt === 2, evidence: "ran" }]
+        }
+      };
+    }
+    if (label.startsWith("candidate:commit")) {
+      return { ok: true, candidateOid: "d".repeat(40), message: "feat: retry task" };
+    }
+    if (label.startsWith("candidate:snapshot")) {
+      return snapshotFixture(label, "d".repeat(40), args.baseOid);
+    }
+    if (label.startsWith("verify:")) {
+      return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    }
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") {
+      return {
+        reused: false,
+        executionId: `exec-${label.replaceAll(":", "-")}`,
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: CLEAN_FINDINGS
+      };
+    }
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(result.status, "clean");
+  assert.equal(seenImplementationPrompts.length, 2);
+  assert.match(seenImplementationPrompts[0], /\/tasks\/T1\/result\.json/);
+  assert.match(seenImplementationPrompts[1], /\/tasks\/T1\/result-attempt-2\.json/);
+  const implementationDispatches = result.confirmedCodexDispatches
+    .filter((dispatch) => dispatch.receiptFile.includes("/tasks/T1/"));
+  assert.deepEqual(
+    implementationDispatches.map((dispatch) => dispatch.checkpoint),
+    [
+      "/ships/s1/prs/PR-1/tasks/T1/result.json.relay-checkpoint.json",
+      "/ships/s1/prs/PR-1/tasks/T1/result-attempt-2.json.relay-checkpoint.json"
+    ]
+  );
 });
 
 test("Codex implementation tasks do not share a parallel writable batch", async () => {

@@ -572,7 +572,10 @@ async function codexCall(input, {
 
 async function implementTask(input, task, tierName, engine, attempt) {
   const runtime = input.config.complexity[tierName][engine];
-  const resultPath = `${input.shipDir}/prs/${input.pr.id}/tasks/${task.id}/result.json`;
+  // Preserve attempt 1's historical path for in-flight ships, while ensuring
+  // every retry has its own immutable receipt journal and checkpoint.
+  const resultPath = `${input.shipDir}/prs/${input.pr.id}/tasks/${task.id}/`
+    + (attempt === 1 ? "result.json" : `result-attempt-${attempt}.json`);
   const prompt = [
     `Implement task ${task.id} inside ${input.worktree}. This is attempt ${attempt}.`,
     `Before returning, persist the identical task-result JSON at ${resultPath} with mode 0600.`,
