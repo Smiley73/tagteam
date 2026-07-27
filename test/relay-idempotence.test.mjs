@@ -1287,6 +1287,17 @@ function verifyResponse(prompt) {
   return { ok: true, payloads };
 }
 
+function planToken(text) {
+  let hash = 2166136261;
+  const normalized = String(text).replace(/\r\n/g, "\n")
+    .split("\n").map((line) => line.replace(/[ \t]+$/, "")).join("\n").replace(/\n+$/, "");
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${normalized.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 function planResponder(dropOnce) {
   const dropped = new Set();
   return (label, prompt = "") => {
@@ -1311,6 +1322,106 @@ function planResponder(dropOnce) {
     return APPROVE;
   };
 }
+
+test("Claude-only planning dispatches no Codex work", async () => {
+  const policy = normalizeRunPolicy({ provider: "claude" });
+  const { result, calls } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, runPolicy: policy },
+    planResponder([])
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.reasoningProvider, "claude");
+  assert.equal(result.assurance, "single-provider");
+  assert.equal(calls.some((call) => call.agentType === "tagteam:codex-runner"), false);
+  assert.equal(calls.some((call) => call.label.includes("codex")), false);
+  assert.ok(result.usage.claudeReasoningCalls > 0);
+  assert.ok(result.usage.haikuPlumbingCalls > 0);
+});
+
+test("Codex-only planning leaves Haiku on plumbing and routes every substantive step to Codex", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft") || label.startsWith("plan:codex-revise")) return draft;
+    if (label.startsWith("plan:codex-interaction-review")) return { issues: [], ui_decisions: [] };
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+  const { result, calls } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.reasoningProvider, "codex");
+  assert.equal(result.assurance, "single-provider");
+  assert.equal(result.usage.claudeReasoningCalls, 0);
+  assert.ok(result.usage.haikuPlumbingCalls > 0);
+  assert.equal(
+    calls.every((call) => ["tagteam:prompt-builder", "tagteam:codex-runner"].includes(call.agentType)),
+    true
+  );
+  assert.deepEqual(result.reviews[0].reviewers.map(({ provider, role }) => ({ provider, role })), [
+    { provider: "codex", role: "plan-review" },
+    { provider: "codex", role: "interaction-review" }
+  ]);
+});
+
+test("Codex-only planning keeps the interface lens advisory when its relay is unavailable", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-interaction-review")) return null;
+    if (label.startsWith("plan:codex-draft") || label.startsWith("plan:codex-revise")) return draft;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.deepEqual(result.reviews[0].reviewers.map(({ role }) => role), ["plan-review"]);
+});
 
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
   const { result, labels } = await harness(

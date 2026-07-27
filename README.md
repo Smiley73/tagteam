@@ -52,12 +52,20 @@ Normal source changes do not require another init: every plan and ship inspects 
 
 Planning batches unresolved decisions and requires explicit approval. Shipping works in a dedicated Git worktree, commits every reviewed candidate, runs Claude and Codex review, verifies locally, publishes a PR, and pauses for user-visible changes or other defined gates.
 
+If one substantive provider is temporarily unavailable, planning can keep Claude Code on lightweight Haiku orchestration while routing the planning work to the available provider:
+
+```text
+/tagteam:plan Add account recovery with auditable security events --provider codex
+```
+
+`--provider both` remains the default and provides independent cross-provider review. `--provider claude` and `--provider codex` use single-provider assurance, persist that choice for resume, and never silently switch providers mid-run.
+
 ### Command reference
 
 | Command | Options |
 |---|---|
 | `/tagteam:init` | `--reconfigure` revisits an existing project configuration and repairs the managed `.gitignore` block. `--upgrade` asks only the questions a newer plugin added, keeping every existing choice. |
-| `/tagteam:plan <goal>` | `--resume <slug>` continues an interrupted plan from its saved drafts and reviews. Per-run overrides: `--model opus\|fable`, `--effort medium\|high\|xhigh\|max`, and `--codex-effort medium\|high\|xhigh`. |
+| `/tagteam:plan <goal>` | `--resume <slug>` continues an interrupted plan from its saved drafts and reviews. Per-run overrides: `--provider both\|claude\|codex`, `--model opus\|fable`, `--effort medium\|high\|xhigh\|max`, and `--codex-effort medium\|high\|xhigh`. |
 | `/tagteam:ship [plan-dir\|plan-file]` | `--resume`, `--dry-run`, and `--reviewers all\|dimension,dimension`; named built-in or custom reviewers are force-enabled for that run. |
 | `/tagteam:status` | Lists plans, active/completed ships, and pending approvals. |
 
