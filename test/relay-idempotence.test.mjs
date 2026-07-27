@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { normalizeRunPolicy, validateRunPolicy } from "../scripts/lib/run-policy.mjs";
 import { gitWorktreeState } from "../scripts/lib/worktree-state.mjs";
 import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
+import { beginShipInvocation, completeShipInvocation } from "../scripts/ship-invocation.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -1839,6 +1840,21 @@ test("Claude-only shipping dispatches no Codex work", async () => {
     SHIP_CONFIG.reviewTiers.standard.claude.model);
   assert.equal(result.rounds.every((round) =>
     round.reviewers.every((reviewer) => reviewer.engine === "claude")), true);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-real-ship-result-"));
+  const descriptor = path.join(directory, "workflow-invocation.json");
+  const resultFile = path.join(directory, "workflow-result.json");
+  beginShipInvocation({
+    file: descriptor,
+    policyFingerprint: result.policyFingerprint,
+    prId: SHIP_ARGS.pr.id,
+    agentCallsBefore: 0,
+    maximumCalls: SHIP_CONFIG.limits.agentCallsPerPr,
+    invocationId: SHIP_ARGS.invocationId
+  });
+  fs.writeFileSync(resultFile, JSON.stringify(result));
+  const completed = completeShipInvocation({ file: descriptor, resultFile });
+  assert.equal(completed.agentCallsAfter, result.agentCalls);
 });
 
 test("shipping requires a durable invocation identity before any model dispatch", async () => {

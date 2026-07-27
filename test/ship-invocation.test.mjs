@@ -24,8 +24,31 @@ function writeResult(file, overrides = {}) {
   fs.writeFileSync(file, JSON.stringify({
     invocationId,
     policyFingerprint,
+    runPolicy: {
+      version: 1,
+      reasoningProvider: "both",
+      plumbingModel: "sonnet",
+      assurance: "cross-provider",
+      policyFingerprint
+    },
+    reasoningProvider: "both",
+    assurance: "cross-provider",
+    status: "clean",
     agentCalls: 7,
+    usage: {
+      claudeReasoningCalls: 2,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 5 },
+      codexCalls: 0,
+      relayRetries: 0
+    },
+    usageReceipts: [],
+    usageReceiptFiles: [],
     usageAccounting: "complete",
+    tasks: [],
+    taskAttempts: {},
+    rounds: [],
+    tallies: {},
     ...overrides
   }));
 }
@@ -110,6 +133,74 @@ test("completion rejects unrelated, pending, or out-of-budget workflow results",
     }));
     assert.equal(JSON.parse(fs.readFileSync(files.descriptor)).status, "active");
   }
+});
+
+test("completion rejects results that omit or contradict cumulative dispatch evidence", () => {
+  for (const overrides of [
+    { usage: undefined },
+    {
+      usage: {
+        claudeReasoningCalls: 1,
+        haikuPlumbingCalls: 0,
+        plumbingCallsByModel: { sonnet: 5 },
+        codexCalls: 0,
+        relayRetries: 0
+      }
+    },
+    {
+      usage: {
+        claudeReasoningCalls: 2,
+        haikuPlumbingCalls: 0,
+        plumbingCallsByModel: { sonnet: 5 },
+        codexCalls: 1,
+        relayRetries: 0
+      }
+    },
+    { tasks: undefined }
+  ]) {
+    const files = fixture();
+    beginShipInvocation({
+      file: files.descriptor,
+      policyFingerprint,
+      prId: "PR-1",
+      agentCallsBefore: 3,
+      maximumCalls: 12,
+      invocationId
+    });
+    writeResult(files.result, overrides);
+    assert.throws(() => completeShipInvocation({
+      file: files.descriptor,
+      resultFile: files.result
+    }));
+    assert.equal(JSON.parse(fs.readFileSync(files.descriptor)).status, "active");
+  }
+});
+
+test("legacy-incomplete results retain unknown historical calls without claiming they are exact", () => {
+  const files = fixture();
+  beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 3,
+    maximumCalls: 12,
+    invocationId
+  });
+  writeResult(files.result, {
+    agentCalls: 7,
+    usageAccounting: "legacy-incomplete",
+    usage: {
+      claudeReasoningCalls: 1,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 2 },
+      codexCalls: 0,
+      relayRetries: 0
+    }
+  });
+
+  const completed = completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+  assert.equal(completed.agentCallsAfter, 7);
+  assert.equal(completed.usageAccounting, "legacy-incomplete");
 });
 
 test("completed invocation evidence cannot be changed before the next dispatch", () => {

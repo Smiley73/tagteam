@@ -22,6 +22,27 @@ function count(value, description) {
   return parsed;
 }
 
+function object(value, description) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${description} must be an object`);
+  }
+  return value;
+}
+
+function stringArray(value, description) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${description} must be an array of strings`);
+  }
+  return value;
+}
+
+function modelCounts(value) {
+  return Object.fromEntries(Object.entries(object(value, "ship workflow plumbing usage")).map(([model, value]) => {
+    if (!model) throw new Error("ship workflow plumbing model name is required");
+    return [model, count(value, `ship workflow plumbing usage for ${model}`)];
+  }));
+}
+
 function fingerprint(value) {
   if (!/^sha256:[0-9a-f]{64}$/.test(String(value ?? ""))) {
     throw new Error("policy fingerprint must be a SHA-256 identity");
@@ -104,6 +125,41 @@ function resultFor(descriptor, resultFile) {
   if (!["complete", "legacy-incomplete"].includes(value.usageAccounting)) {
     throw new Error("ship workflow result must have reconciled usage accounting");
   }
+  const runPolicy = object(value.runPolicy, "ship workflow result run policy");
+  if (runPolicy.policyFingerprint !== descriptor.policyFingerprint
+    || value.reasoningProvider !== runPolicy.reasoningProvider
+    || value.assurance !== runPolicy.assurance) {
+    throw new Error("ship workflow result provider fields do not match its run policy");
+  }
+  if (typeof value.status !== "string" || !value.status) {
+    throw new Error("ship workflow result status is required");
+  }
+  const usage = object(value.usage, "ship workflow cumulative usage");
+  const claudeReasoningCalls = count(usage.claudeReasoningCalls, "ship workflow Claude usage");
+  const haikuPlumbingCalls = count(usage.haikuPlumbingCalls, "ship workflow Haiku usage");
+  const plumbingCallsByModel = modelCounts(usage.plumbingCallsByModel);
+  const codexCalls = count(usage.codexCalls, "ship workflow Codex usage");
+  count(usage.relayRetries, "ship workflow relay retries");
+  if ((plumbingCallsByModel.haiku ?? 0) !== haikuPlumbingCalls) {
+    throw new Error("ship workflow Haiku usage must match plumbingCallsByModel.haiku");
+  }
+  const knownAgentCalls = claudeReasoningCalls
+    + Object.values(plumbingCallsByModel).reduce((sum, item) => sum + item, 0);
+  if (knownAgentCalls > agentCalls
+    || (value.usageAccounting === "complete" && knownAgentCalls !== agentCalls)) {
+    throw new Error("ship workflow cumulative usage does not conserve its agent call count");
+  }
+  const usageReceipts = stringArray(value.usageReceipts, "ship workflow usage receipts");
+  stringArray(value.usageReceiptFiles, "ship workflow usage receipt files");
+  if (value.usageAccounting === "complete"
+    && codexCalls !== new Set(usageReceipts).size) {
+    throw new Error("ship workflow complete Codex usage does not match its receipts");
+  }
+  if (!Array.isArray(value.tasks) || !Array.isArray(value.rounds)) {
+    throw new Error("ship workflow result must retain task and round state");
+  }
+  object(value.taskAttempts, "ship workflow task attempts");
+  object(value.tallies, "ship workflow review tallies");
   return { ...result, agentCalls, usageAccounting: value.usageAccounting };
 }
 
