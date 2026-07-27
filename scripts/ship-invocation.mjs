@@ -4,8 +4,32 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { validateRunPolicy } from "./lib/run-policy.mjs";
 
 const VERSION = 1;
+const RESULT_STATUSES = new Set([
+  "agent-budget-gate",
+  "clean",
+  "external-repair-failed",
+  "failed-gates",
+  "fix-failed-dirty-worktree",
+  "implementation-failed",
+  "implementation-verify-failed",
+  "max-loops-reached",
+  "relay-interrupted",
+  "relay-interrupted-dirty-worktree",
+  "ship-interrupted",
+  "verify-failed",
+  "verify-repair-failed-dirty-worktree"
+]);
+const FINAL_REVIEW_STATUSES = new Set([
+  "clean",
+  "failed-gates",
+  "fix-failed-dirty-worktree",
+  "max-loops-reached",
+  "verify-failed",
+  "verify-repair-failed-dirty-worktree"
+]);
 
 function readJson(file, description) {
   const resolved = path.resolve(file);
@@ -41,6 +65,58 @@ function modelCounts(value) {
     if (!model) throw new Error("ship workflow plumbing model name is required");
     return [model, count(value, `ship workflow plumbing usage for ${model}`)];
   }));
+}
+
+function oid(value, description) {
+  if (!/^[0-9a-f]{40}$/.test(String(value ?? ""))) {
+    throw new Error(`${description} must be a full lowercase Git object ID`);
+  }
+  return value;
+}
+
+function validateResultState(value) {
+  if (!RESULT_STATUSES.has(value.status)) {
+    throw new Error(`ship workflow result status is not authoritative: ${value.status}`);
+  }
+  if (!Array.isArray(value.tasks) || !Array.isArray(value.rounds)) {
+    throw new Error("ship workflow result must retain task and round state");
+  }
+  object(value.taskAttempts, "ship workflow task attempts");
+  object(value.tallies, "ship workflow review tallies");
+  if (value.status === "ship-interrupted") {
+    if (typeof value.message !== "string" || !value.message) {
+      throw new Error("interrupted ship workflow result must retain its message");
+    }
+    return;
+  }
+  stringArray(value.gateFailures, "ship workflow gate failures");
+  if (["relay-interrupted", "relay-interrupted-dirty-worktree"].includes(value.status)) {
+    const checkpoints = stringArray(value.relayCheckpoints, "ship workflow relay checkpoints");
+    if (checkpoints.length === 0) {
+      throw new Error("relay interruption must retain at least one checkpoint");
+    }
+    return;
+  }
+  if (value.status === "external-repair-failed") {
+    oid(value.candidateOid, "external repair candidate");
+    return;
+  }
+  if (value.status === "implementation-verify-failed") {
+    oid(value.candidateOid, "implementation verification candidate");
+    object(value.verify, "implementation verification result");
+    return;
+  }
+  if (FINAL_REVIEW_STATUSES.has(value.status)) {
+    oid(value.baseOid, "reviewed candidate base");
+    oid(value.candidateOid, "reviewed candidate");
+    stringArray(value.changedPaths, "reviewed candidate paths");
+    if (value.rounds.length === 0 || !Array.isArray(value.ledger)) {
+      throw new Error("reviewed candidate must retain review rounds and ledger state");
+    }
+    object(value.verify, "reviewed candidate verification");
+    object(value.selected, "reviewed candidate reviewer selection");
+    object(value.ui, "reviewed candidate UI classification");
+  }
 }
 
 function fingerprint(value) {
@@ -125,15 +201,13 @@ function resultFor(descriptor, resultFile) {
   if (!["complete", "legacy-incomplete"].includes(value.usageAccounting)) {
     throw new Error("ship workflow result must have reconciled usage accounting");
   }
-  const runPolicy = object(value.runPolicy, "ship workflow result run policy");
+  const runPolicy = validateRunPolicy(object(value.runPolicy, "ship workflow result run policy"));
   if (runPolicy.policyFingerprint !== descriptor.policyFingerprint
     || value.reasoningProvider !== runPolicy.reasoningProvider
     || value.assurance !== runPolicy.assurance) {
     throw new Error("ship workflow result provider fields do not match its run policy");
   }
-  if (typeof value.status !== "string" || !value.status) {
-    throw new Error("ship workflow result status is required");
-  }
+  validateResultState(value);
   const usage = object(value.usage, "ship workflow cumulative usage");
   const claudeReasoningCalls = count(usage.claudeReasoningCalls, "ship workflow Claude usage");
   const haikuPlumbingCalls = count(usage.haikuPlumbingCalls, "ship workflow Haiku usage");
@@ -142,6 +216,10 @@ function resultFor(descriptor, resultFile) {
   count(usage.relayRetries, "ship workflow relay retries");
   if ((plumbingCallsByModel.haiku ?? 0) !== haikuPlumbingCalls) {
     throw new Error("ship workflow Haiku usage must match plumbingCallsByModel.haiku");
+  }
+  const allowedPlumbingModels = new Set(["haiku", runPolicy.plumbingModel]);
+  if (Object.keys(plumbingCallsByModel).some((model) => !allowedPlumbingModels.has(model))) {
+    throw new Error("ship workflow usage contains a plumbing model outside the run policy");
   }
   const knownAgentCalls = claudeReasoningCalls
     + Object.values(plumbingCallsByModel).reduce((sum, item) => sum + item, 0);
@@ -155,11 +233,6 @@ function resultFor(descriptor, resultFile) {
     && codexCalls !== new Set(usageReceipts).size) {
     throw new Error("ship workflow complete Codex usage does not match its receipts");
   }
-  if (!Array.isArray(value.tasks) || !Array.isArray(value.rounds)) {
-    throw new Error("ship workflow result must retain task and round state");
-  }
-  object(value.taskAttempts, "ship workflow task attempts");
-  object(value.tallies, "ship workflow review tallies");
   return { ...result, agentCalls, usageAccounting: value.usageAccounting };
 }
 

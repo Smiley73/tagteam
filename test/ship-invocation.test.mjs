@@ -8,8 +8,10 @@ import {
   completeShipInvocation,
   recoverShipInvocation
 } from "../scripts/ship-invocation.mjs";
+import { normalizeRunPolicy } from "../scripts/lib/run-policy.mjs";
 
-const policyFingerprint = `sha256:${"a".repeat(64)}`;
+const runPolicy = normalizeRunPolicy({ provider: "both" });
+const policyFingerprint = runPolicy.policyFingerprint;
 const invocationId = "11111111-1111-4111-8111-111111111111";
 
 function fixture() {
@@ -24,16 +26,13 @@ function writeResult(file, overrides = {}) {
   fs.writeFileSync(file, JSON.stringify({
     invocationId,
     policyFingerprint,
-    runPolicy: {
-      version: 1,
-      reasoningProvider: "both",
-      plumbingModel: "sonnet",
-      assurance: "cross-provider",
-      policyFingerprint
-    },
+    runPolicy,
     reasoningProvider: "both",
     assurance: "cross-provider",
     status: "clean",
+    baseOid: "b".repeat(40),
+    candidateOid: "c".repeat(40),
+    changedPaths: ["src/a.js"],
     agentCalls: 7,
     usage: {
       claudeReasoningCalls: 2,
@@ -47,8 +46,13 @@ function writeResult(file, overrides = {}) {
     usageAccounting: "complete",
     tasks: [],
     taskAttempts: {},
-    rounds: [],
+    rounds: [{ round: 1 }],
+    ledger: [],
     tallies: {},
+    gateFailures: [],
+    verify: { status: "passed" },
+    selected: { selected: ["functionality"] },
+    ui: { verdict: "no" },
     ...overrides
   }));
 }
@@ -173,6 +177,40 @@ test("completion rejects results that omit or contradict cumulative dispatch evi
       resultFile: files.result
     }));
     assert.equal(JSON.parse(fs.readFileSync(files.descriptor)).status, "active");
+  }
+});
+
+test("completion authenticates the policy and enforces status-specific recovery state", () => {
+  for (const overrides of [
+    { runPolicy: { ...runPolicy, version: 999 } },
+    { status: "not-a-workflow-status" },
+    { candidateOid: undefined },
+    { rounds: [] },
+    { verify: undefined },
+    {
+      usage: {
+        claudeReasoningCalls: 4,
+        haikuPlumbingCalls: 0,
+        plumbingCallsByModel: { attacker: 3 },
+        codexCalls: 0,
+        relayRetries: 0
+      }
+    }
+  ]) {
+    const files = fixture();
+    beginShipInvocation({
+      file: files.descriptor,
+      policyFingerprint,
+      prId: "PR-1",
+      agentCallsBefore: 3,
+      maximumCalls: 12,
+      invocationId
+    });
+    writeResult(files.result, overrides);
+    assert.throws(() => completeShipInvocation({
+      file: files.descriptor,
+      resultFile: files.result
+    }));
   }
 });
 
