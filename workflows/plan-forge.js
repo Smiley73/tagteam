@@ -923,8 +923,8 @@ async function main(raw) {
       schema: planDraftSchema
     });
   } else {
-    if (continuation && (!input.seedPlanPath || !input.decisionsFile)) {
-      throw new Error("Codex plan continuation requires seedPlanPath and decisionsFile");
+    if (continuation && (!input.seedPlanPath || !input.decisionsFile || !input.questionsFile)) {
+      throw new Error("Codex plan continuation requires seedPlanPath, decisionsFile, and questionsFile");
     }
     if (!continuation && decisions.length) {
       throw new Error("a fresh Codex plan with human decisions requires a saved continuation");
@@ -938,7 +938,7 @@ async function main(raw) {
         { name: "PROJECT_CONFIG", file: configPath, json: true },
         { name: "SEED_PLAN", file: input.seedPlanPath },
         { name: "HUMAN_DECISIONS", file: input.decisionsFile, json: true },
-        { name: "CARRIED_QUESTIONS", file: `${input.seedPlanPath}.questions.json`, json: true },
+        { name: "CARRIED_QUESTIONS", file: input.questionsFile, json: true },
         ...(uiEnabled ? [{
           name: "CARRIED_INTERFACE_DECISIONS",
           file: input.uiDecisionsFile,

@@ -129,8 +129,13 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /source-passId/);
   assert.match(command, /never derive this path from the next pass ID/);
   assert.match(command, /<passId>-invocation\.json/);
+  assert.match(command, /exact source `questionsFile`/);
+  assert.match(command, /regardless of whether its provider is `both`, `claude`, or `codex`/);
   assert.match(command, /no draft or integrated plan/);
   assert.match(command, /invoke without `seedPlan` or `resumeRound`/);
+  assert.match(command, /first result's `questionsPath`/);
+  assert.match(command, /never replace missing or malformed outstanding-question state with `\[\]`/);
+  assert.match(command, /derive only `<seedPlanPath>\.questions\.json`/);
 });
 
 test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {

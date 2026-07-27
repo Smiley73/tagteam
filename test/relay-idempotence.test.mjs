@@ -1555,6 +1555,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
     decisions: [{ question: "Use staged rollout?", answer: "Yes" }],
     decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
     openQuestions: ["Which rollout?"],
+    questionsFile: "/plans/slug/drafts/pass-1-integrated.md.questions.json",
     uiDecisions: [uiDecision],
     uiDecisionsFile: "/plans/slug/drafts/pass-1-integrated.md.ui-decisions.json"
   }, responder);
@@ -1569,7 +1570,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
 
 test("Codex no-draft recovery re-enters the same initial or continuation invocation", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
-  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const draft = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
   const responder = (dropDraft) => (label, prompt) => {
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
@@ -1610,7 +1611,8 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
     seedPlanPath: "/plans/slug/drafts/pass-1-integrated.md",
     decisions: [{ question: "Ship?", answer: "Yes" }],
     decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
-    openQuestions: [],
+    openQuestions: ["Which rollout?"],
+    questionsFile: "/plans/slug/drafts/pass-1-integrated.md.questions.json",
     uiDecisions: [],
     uiDecisionsFile: "/plans/slug/reviews/pass-2-recovered-ui-decisions.json"
   };
@@ -1780,6 +1782,202 @@ function snapshotFixture(
     ...candidate
   };
 }
+
+function cleanShipResponder(label) {
+  if (label.startsWith("candidate:snapshot")) return snapshotFixture(label);
+  if (label.startsWith("verify:")) {
+    return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+  }
+  if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+  if (label.startsWith("scribe:")) {
+    return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+  }
+  return CLEAN_FINDINGS;
+}
+
+test("Claude-only shipping dispatches no Codex work", async () => {
+  const policy = normalizeRunPolicy({ provider: "claude" });
+  const { result, calls } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: policy },
+    cleanShipResponder
+  );
+
+  assert.equal(result.status, "clean");
+  assert.equal(result.reasoningProvider, "claude");
+  assert.equal(result.assurance, "single-provider");
+  assert.equal(result.usage.codexCalls, 0);
+  assert.equal(calls.some((call) => call.agentType === "tagteam:codex-runner"), false);
+  assert.equal(result.rounds.every((round) =>
+    round.reviewers.every((reviewer) => reviewer.engine === "claude")), true);
+});
+
+test("Codex-only shipping uses Haiku only for plumbing", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const { result, calls, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: policy },
+    cleanShipResponder
+  );
+
+  assert.equal(result.status, "clean");
+  assert.equal(result.reasoningProvider, "codex");
+  assert.equal(result.assurance, "single-provider");
+  assert.equal(result.usage.claudeReasoningCalls, 0);
+  assert.equal(labels.some((label) => label.startsWith("review:1:codex:")), true);
+  assert.equal(calls.filter((call) => call.agentType !== "tagteam:codex-runner")
+    .every((call) => call.model === "haiku"), true);
+  assert.equal(calls.filter((call) => call.agentType === "tagteam:codex-runner")
+    .every((call) => call.model === "haiku"), true);
+  assert.equal(result.rounds.every((round) =>
+    round.reviewers.every((reviewer) => reviewer.engine === "codex")), true);
+});
+
+test("single-provider policy overrides configured implementation routing", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.implementation.engine = "claude";
+  config.implementation.routes = [{ match: "route me", engine: "claude", tier: "simple" }];
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const task = {
+    id: "T1",
+    title: "route me",
+    description: "implement it",
+    complexity: "simple",
+    files: ["src/a.js"],
+    dependsOn: [],
+    doneCriteria: ["works"]
+  };
+  const { result, calls } = await harness("workflows/ship-pr.js", {
+    ...SHIP_ARGS,
+    config,
+    runPolicy: policy,
+    existingCandidateOid: undefined,
+    pr: { ...SHIP_ARGS.pr, taskIds: ["T1"] },
+    tasks: [task]
+  }, (label) => {
+    if (label.startsWith("implement:T1:")) {
+      return {
+        taskId: "T1",
+        status: "completed",
+        summary: "done",
+        filesChanged: ["src/a.js"],
+        criteria: [{ criterion: "works", met: true, evidence: "implemented" }]
+      };
+    }
+    if (label === "candidate:commit:0") {
+      return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
+    }
+    if (label.startsWith("candidate:snapshot")) return snapshotFixture(label, "d".repeat(40));
+    return cleanShipResponder(label);
+  });
+
+  assert.equal(result.status, "clean");
+  assert.equal(result.usage.claudeReasoningCalls, 0);
+  const implementationCalls = calls.filter((call) => call.label.startsWith("implement:T1:"));
+  assert.equal(implementationCalls.length, 1);
+  assert.equal(implementationCalls[0].agentType, "tagteam:codex-runner");
+});
+
+test("Codex-only specialist pre-pass routes all six lenses through Codex", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.specialistPrepass.enabled = true;
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const { result, calls } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config, runPolicy: policy },
+    (label) => {
+      if (label.startsWith("specialist:")) {
+        return { focus: label.split(":")[1], status: "none", findings: [] };
+      }
+      return cleanShipResponder(label);
+    }
+  );
+
+  assert.equal(result.status, "clean");
+  const specialists = calls.filter((call) => call.label.startsWith("specialist:"));
+  assert.equal(specialists.length, 6);
+  assert.equal(specialists.every((call) => call.agentType === "tagteam:codex-runner"), true);
+  assert.equal(result.usage.claudeReasoningCalls, 0);
+});
+
+test("Codex-only shipping routes implementation verification repair through Codex", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  let verifyCalls = 0;
+  let repaired = false;
+  const { result, calls } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: policy },
+    (label) => {
+      if (label.startsWith("candidate:snapshot")) {
+        return snapshotFixture(label, repaired ? "d".repeat(40) : SHIP_ARGS.existingCandidateOid);
+      }
+      if (label === "verify:0") {
+        verifyCalls += 1;
+        return verifyCalls === 1
+          ? { status: "failed", resultPath: "/ships/s1/verify-0.json", commands: [] }
+          : { status: "passed", resultPath: "/ships/s1/verify-0.json", commands: [] };
+      }
+      if (label === "verify:repair:implement:codex") {
+        return { summary: "fixed", results: [{ id: "TT-VERIFY", status: "fixed", explanation: "done" }] };
+      }
+      if (label === "candidate:commit:0") {
+        repaired = true;
+        return { ok: true, candidateOid: "d".repeat(40), message: "fix: review round 0" };
+      }
+      return cleanShipResponder(label);
+    }
+  );
+
+  assert.equal(result.status, "clean");
+  const repair = calls.find((call) => call.label === "verify:repair:implement:codex");
+  assert.equal(repair?.agentType, "tagteam:codex-runner");
+  assert.equal(result.usage.claudeReasoningCalls, 0);
+});
+
+test("Claude-only review fixes and fresh post-fix coverage stay on Claude", async () => {
+  const policy = normalizeRunPolicy({ provider: "claude" });
+  let fixed = false;
+  const finding = {
+    ...CLEAN_FINDINGS,
+    verdict: "needs-attention",
+    findings: [{
+      title: "repair this",
+      body: "The behavior is wrong.",
+      file: "src/a.js",
+      line_start: 1,
+      line_end: 1,
+      severity: "major",
+      dimension: "functionality",
+      confidence: 0.99,
+      recommendation: "Fix it."
+    }]
+  };
+  const { result, calls } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: policy },
+    (label, prompt) => {
+      if (label.startsWith("candidate:snapshot")) {
+        return snapshotFixture(label, fixed ? "d".repeat(40) : SHIP_ARGS.existingCandidateOid);
+      }
+      if (label === "review:1:claude:functionality") return finding;
+      if (label === "fix:1:claude") {
+        const id = prompt.match(/Return exactly one accounting row per ID: ([^.\n]+)/)?.[1];
+        return { summary: "fixed", results: [{ id, status: "fixed", explanation: "done" }] };
+      }
+      if (label === "candidate:commit:1") {
+        fixed = true;
+        return { ok: true, candidateOid: "d".repeat(40), message: "fix: review round 1" };
+      }
+      return cleanShipResponder(label);
+    }
+  );
+
+  assert.equal(result.status, "clean");
+  assert.equal(calls.some((call) => call.agentType === "tagteam:codex-runner"), false);
+  assert.equal(calls.find((call) => call.label === "fix:1:claude")?.agentType, "tagteam:fixer");
+  assert.equal(result.rounds.at(-1).independentCoverage, true);
+  assert.equal(result.rounds.at(-1).reviewers.every((reviewer) => reviewer.engine === "claude"), true);
+});
 
 test("resume carries saved open questions and keeps persisting them", async () => {
   const persisted = [];

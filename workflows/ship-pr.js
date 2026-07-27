@@ -213,9 +213,6 @@ async function workflowRunPolicy(input, config) {
   };
   const policyFingerprint = await sha256(canonicalPolicy(fields));
   if (policy.policyFingerprint && policy.policyFingerprint !== policyFingerprint) throw new Error("run policy fingerprint does not match its fields");
-  // PR 1 binds the policy to every shipping artifact but leaves dispatch
-  // unchanged. PR 3 replaces this guard with provider-aware shipping routes.
-  if (policy.reasoningProvider !== "both") throw new Error("single-provider shipping dispatch is not available in this build");
   return { ...fields, policyFingerprint };
 }
 
@@ -241,17 +238,21 @@ function topoWaves(tasks) {
   return waves;
 }
 
-function implementationRoute(config, task) {
+function selectedEngine(runPolicy, configuredEngine) {
+  return runPolicy.reasoningProvider === "both" ? configuredEngine : runPolicy.reasoningProvider;
+}
+
+function implementationRoute(config, task, runPolicy) {
   for (const route of config.implementation.routes ?? []) {
     try {
       if (new RegExp(route.match, "i").test(task.title)) {
-        return { engine: route.engine, tier: route.tier ?? task.complexity };
+        return { engine: selectedEngine(runPolicy, route.engine), tier: route.tier ?? task.complexity };
       }
     } catch {
       log(`implementation route ${JSON.stringify(route.match)} is invalid; using the default route`);
     }
   }
-  return { engine: config.implementation.engine, tier: task.complexity };
+  return { engine: selectedEngine(runPolicy, config.implementation.engine), tier: task.complexity };
 }
 
 function nextTier(tier) {
@@ -426,6 +427,9 @@ const shipState = {
 };
 
 async function claudeReasoningCall(prompt, options) {
+  if (shipState.runPolicy?.reasoningProvider === "codex") {
+    throw new Error(`Claude reasoning dispatch ${options.label} is forbidden by the codex-only run policy`);
+  }
   if (relayState.dispatchedCalls >= relayState.maximumCalls) {
     relayState.capacityExceeded = true;
     return null;
@@ -470,6 +474,9 @@ async function codexCall(input, {
   label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox,
   reviewDiffPath, reviewDiffHash = null
 }) {
+  if (shipState.runPolicy?.reasoningProvider === "claude") {
+    throw new Error(`Codex dispatch ${label} is forbidden by the claude-only run policy`);
+  }
   const schemaPath = `${input.pluginRoot}/schemas/${schemaFile}`;
   const requestIdentity = await codexRequestIdentity({
     prompt,
@@ -730,7 +737,10 @@ async function classifyUi(input, snapshotValue, round) {
   return result ?? { verdict: "unknown", reason: "The ship-time classifier did not return a usable answer." };
 }
 
-function reviewAssignments(selected, round, lastFixEngine, firstReviewer) {
+function reviewAssignments(selected, round, lastFixEngine, firstReviewer, runPolicy) {
+  if (runPolicy.reasoningProvider !== "both") {
+    return selected.map((dimension) => ({ engine: runPolicy.reasoningProvider, dimension }));
+  }
   if (selected.length === 1) return [
     { engine: "claude", dimension: selected[0] },
     { engine: "codex", dimension: selected[0] }
@@ -919,13 +929,13 @@ async function main(raw) {
         failedTasks.add(task.id);
         recordTaskResult({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
       }
-      const implementationParallel = runnable.some((task) => implementationRoute(config, task).engine === "codex")
+      const implementationParallel = runnable.some((task) => implementationRoute(config, task, runPolicy).engine === "codex")
         ? 1
         : config.implementation.maxParallel;
       for (let offset = 0; offset < runnable.length; offset += implementationParallel) {
         const batch = runnable.slice(offset, offset + implementationParallel);
         const results = await parallel(batch.map((task) => async () => {
-          const route = implementationRoute(config, task);
+          const route = implementationRoute(config, task, runPolicy);
           const resumeAttempt = taskAttempts[task.id] ?? 1;
           taskAttempts[task.id] = resumeAttempt;
           let result = await implementTask(
@@ -972,7 +982,7 @@ async function main(raw) {
         candidateOid, agentCalls: callCount + relayState.extraCalls
       });
     }
-    const repairEngine = input.repairEngine === "codex" ? "codex" : "claude";
+    const repairEngine = selectedEngine(runPolicy, input.repairEngine === "codex" ? "codex" : "claude");
     const repairRuntime = config.complexity.complex[repairEngine];
     const repairPrompt = [
       `Repair only these external-gate findings in ${input.worktree}.`,
@@ -1029,18 +1039,35 @@ async function main(raw) {
         candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls
       });
     }
-    const repair = await claudeReasoningCall([
+    const repairEngine = selectedEngine(runPolicy, "claude");
+    const repairRuntime = config.complexity.complex[repairEngine];
+    const repairPrompt = [
       `Repair only the verification failure recorded at ${verification.resultPath} inside ${input.worktree}.`,
       "Do not commit or perform unrelated changes. Return one result for TT-VERIFY."
-    ].join("\n"), {
-      label: "verify:repair:implement",
-      phase: "Verify",
-      agentType: "tagteam:fixer",
-      model: config.complexity.complex.claude.model,
-      effort: config.complexity.complex.claude.effort,
-      schema: fixReportSchema
-    });
+    ].join("\n");
+    const repair = repairEngine === "codex"
+      ? await codexCall(input, {
+          label: "verify:repair:implement:codex",
+          kind: "Verify repair",
+          schema: fixReportSchema,
+          schemaFile: "fix-report.schema.json",
+          artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${initialRound}/implementation-verify-repair.json`,
+          prompt: repairPrompt,
+          runtime: repairRuntime,
+          sandbox: "workspace-write"
+        })
+      : await claudeReasoningCall(repairPrompt, {
+          label: "verify:repair:implement:claude",
+          phase: "Verify",
+          agentType: "tagteam:fixer",
+          model: repairRuntime.model,
+          effort: repairRuntime.effort,
+          schema: fixReportSchema
+        });
     callCount += 1;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, verify: verification });
+    }
     if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     if (!repair?.results?.some((item) => item.id === "TT-VERIFY" && item.status === "fixed")) {
       return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
@@ -1084,19 +1111,42 @@ async function main(raw) {
     }
     phase("Specialist pre-pass");
     const focuses = ["architecture", "security", "reliability", "testing", "code-quality", "documentation"];
-    const specialists = await parallel(focuses.map((focus) => () => claudeReasoningCall([
+    const specialistEngine = selectedEngine(runPolicy, "claude");
+    const specialistRuntime = specialistEngine === "claude"
+      ? config.specialistPrepass.claude
+      : config.reviewTiers.standard.codex;
+    const specialists = await parallel(focuses.map((focus) => async () => {
+      const specialistPrompt = [
       `Apply the ${focus} lens to candidate ${candidateOid} in ${input.worktree}.`,
       fence("changed-paths", snapshotValue.changedPaths),
       `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
-    ].join("\n\n"), {
-      label: `specialist:${focus}`,
-      phase: "Specialist pre-pass",
-      agentType: "tagteam:specialist",
-      model: config.specialistPrepass.claude.model,
-      effort: config.specialistPrepass.claude.effort,
-      schema: specialistSchema
-    })));
+      ].join("\n\n");
+      return specialistEngine === "codex"
+        ? codexCall(input, {
+            label: `specialist:${focus}:codex`,
+            kind: "Specialist pre-pass",
+            schema: specialistSchema,
+            schemaFile: "specialist.schema.json",
+            artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/0/codex-specialist-${focus}.json`,
+            prompt: specialistPrompt,
+            runtime: specialistRuntime,
+            sandbox: "read-only",
+            reviewDiffPath: snapshotValue.reviewDiffPath,
+            reviewDiffHash: snapshotValue.reviewDiffHash
+          })
+        : claudeReasoningCall(specialistPrompt, {
+            label: `specialist:${focus}:claude`,
+            phase: "Specialist pre-pass",
+            agentType: "tagteam:specialist",
+            model: specialistRuntime.model,
+            effort: specialistRuntime.effort,
+            schema: specialistSchema
+          });
+    }));
     callCount += focuses.length;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, ui, verify: verification, selected: initialSelectedInfo });
+    }
     if (relayState.capacityExceeded) {
       return capacityGate({ candidateOid, ui, verify: verification, selected: initialSelectedInfo });
     }
@@ -1119,7 +1169,7 @@ async function main(raw) {
       skipped: recalculated.skipped.filter((item) => !selected.includes(item.dimension)),
       matcherErrors: [...selectedInfo.matcherErrors, ...recalculated.matcherErrors]
     };
-    const assignments = reviewAssignments(selectedInfo.selected, round, lastFixEngine, config.review.firstReviewer);
+    const assignments = reviewAssignments(selectedInfo.selected, round, lastFixEngine, config.review.firstReviewer, runPolicy);
     const estimatedCalls = assignments.length + 1 + (loopRound < config.maxReviewLoops ? 10 : 0);
     if (callCount + estimatedCalls > callBudget()) {
       return finish({
@@ -1267,7 +1317,11 @@ async function main(raw) {
     if (!scribe?.ok) lastRoundFailures.push("review-artifact-cross-check");
 
     const open = actionable(ledger);
-    const independentEngine = lastFixEngine ? (lastFixEngine === "claude" ? "codex" : "claude") : null;
+    const independentEngine = lastFixEngine
+      ? (runPolicy.reasoningProvider === "both"
+          ? (lastFixEngine === "claude" ? "codex" : "claude")
+          : runPolicy.reasoningProvider)
+      : null;
     const independentCoverage = !independentEngine || selectedInfo.selected.every((dimension) =>
       reviewResults.some((item) => item?.engine === independentEngine && item?.dimension === dimension && item?.result)
     );
@@ -1289,7 +1343,7 @@ async function main(raw) {
     }
 
     phase(`Fix ${round}`);
-    const fixEngine = round % 2 === 1 ? "codex" : "claude";
+    const fixEngine = selectedEngine(runPolicy, round % 2 === 1 ? "codex" : "claude");
     const runtime = config.complexity.complex[fixEngine];
     const fixPrompt = [
       `Fix only these must-fix findings in ${input.worktree}.`,
