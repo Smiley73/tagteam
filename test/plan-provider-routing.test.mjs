@@ -128,6 +128,9 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /atomically write `\[\]`/);
   assert.match(command, /source-passId/);
   assert.match(command, /never derive this path from the next pass ID/);
+  assert.match(command, /<passId>-invocation\.json/);
+  assert.match(command, /no draft or integrated plan/);
+  assert.match(command, /invoke without `seedPlan` or `resumeRound`/);
 });
 
 test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {

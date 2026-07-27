@@ -614,7 +614,7 @@ function promptNotBuilt({ what, promptFile, detail }) {
 
 async function relayCodex({
   prompt, label, phase: phaseName, schema, model, artifact, promptFile, what,
-  requestIdentity, sandbox = "read-only"
+  requestIdentity, sandbox = "read-only", optional = false
 }) {
   if (!/^sha256:[0-9a-f]{64}$/.test(requestIdentity ?? "")) {
     throw new Error(`Codex ${what} has no request-bound dispatch identity`);
@@ -624,7 +624,7 @@ async function relayCodex({
   if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
   relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
     .filter((item) => item.receiptFile !== receiptFile);
-  relayState.unconfirmedDispatches.push({ receiptFile, checkpoint, requestIdentity, sandbox });
+  relayState.unconfirmedDispatches.push({ receiptFile, checkpoint, requestIdentity, sandbox, optional });
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await planAgent(attempt === 1 ? [
@@ -660,6 +660,7 @@ async function relayCodex({
           checkpoint,
           requestIdentity,
           sandbox,
+          optional,
           executionId: envelope.executionId
         });
       }
@@ -768,7 +769,7 @@ async function main(raw) {
 
   const codexReasoning = async ({
     template, vars = {}, fences, expects = {}, requireJson = [], schemaFile,
-    schema, artifact, promptFile, label, phaseName, what, minBytes
+    schema, artifact, promptFile, label, phaseName, what, minBytes, optional = false
   }) => {
     const prepareCommand = composeCommand({
       pluginRoot: input.pluginRoot,
@@ -825,7 +826,8 @@ async function main(raw) {
       artifact,
       promptFile,
       what,
-      requestIdentity
+      requestIdentity,
+      optional
     });
     return { result, requestIdentity };
   };
@@ -1185,7 +1187,8 @@ async function main(raw) {
         promptFile: uiPromptFile,
         label: `plan:codex-interaction-review:${round}`,
         phaseName: `Cross-review ${round}`,
-        what: `interface review of plan round ${round}`
+        what: `interface review of plan round ${round}`,
+        optional: true
       })).result);
     }
     const taskResults = await parallel(tasks);
@@ -1584,7 +1587,8 @@ async function main(raw) {
     usageReceiptFiles: [...relayState.receiptFiles],
     relayCheckpoints: [...new Set([
       ...relayState.fatal,
-      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint),
+      ...relayState.unconfirmedDispatches.map((item) => item.checkpoint)
     ])],
     unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
     confirmedCodexDispatches: [...relayState.confirmedDispatches],
@@ -1624,7 +1628,8 @@ try {
     legacyUsageIncomplete: planState.legacyUsageIncomplete,
     relayCheckpoints: [...new Set([
       ...relayState.fatal,
-      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint),
+      ...relayState.unconfirmedDispatches.map((item) => item.checkpoint)
     ])],
     budgetSpent: budgetSpent()
   };

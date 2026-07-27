@@ -1056,6 +1056,43 @@ test("reconciliation preserves counters when relay dispatch is unconfirmed but r
   assert.deepEqual(reconciled.usage, interrupted.usage);
 });
 
+test("an optional read-only Codex failure counts durable usage without requiring a result artifact", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-optional-dispatch-"));
+  const artifact = path.join(temp, "interaction.json");
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  const checkpoint = `${artifact}.relay-checkpoint.json`;
+  const requestIdentity = `sha256:${"c".repeat(64)}`;
+  fs.writeFileSync(receiptFile, JSON.stringify({
+    version: 1,
+    artifact,
+    invocations: [{
+      executionId: "optional-ui-exec",
+      requestFingerprint: "optional-ui-fingerprint",
+      requestIdentity,
+      recordedAt: "2026-07-27T00:00:00.000Z"
+    }]
+  }));
+  const result = reconcileUsageReceipts({
+    status: "needs-questions-or-approval",
+    usage: { codexCalls: 0, relayRetries: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [receiptFile],
+    relayCheckpoints: [checkpoint],
+    unconfirmedCodexDispatches: [{
+      receiptFile,
+      checkpoint,
+      requestIdentity,
+      sandbox: "read-only",
+      optional: true
+    }],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  });
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.usage.codexCalls, 1);
+  assert.deepEqual(result.usageReceipts, ["optional-ui-exec"]);
+  assert.equal(result.usageAccounting, "complete");
+});
+
 test("receipt reconciliation classifies workspace interruption from its checkpoint", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-reconcile-workspace-"));
   const artifact = path.join(temp, "result.json");
@@ -1528,6 +1565,59 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
   assert.match(request, /CARRIED_INTERFACE_DECISIONS=/);
   assert.match(request, /--expect "CARRIED_QUESTIONS=/);
   assert.match(request, /--expect "CARRIED_INTERFACE_DECISIONS=/);
+});
+
+test("Codex no-draft recovery re-enters the same initial or continuation invocation", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (dropDraft) => (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft")) return dropDraft ? null : draft;
+    if (label.startsWith("plan:codex-interaction-review")) return { issues: [], ui_decisions: [] };
+    if (label.startsWith("plan:codex-revise")) return draft;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+
+  const initialArgs = { ...PLAN_ARGS, runPolicy: policy };
+  const initialLost = await harness("workflows/plan-forge.js", initialArgs, responder(true));
+  assert.equal(initialLost.result.status, "plan-interrupted");
+  assert.equal(initialLost.labels.some((label) => label.startsWith("plan:materialize-draft")), false);
+  const initialRecovered = await harness("workflows/plan-forge.js", initialArgs, responder(false));
+  assert.equal(initialRecovered.result.status, "needs-questions-or-approval");
+
+  const continuationArgs = {
+    ...PLAN_ARGS,
+    runPolicy: policy,
+    passId: "pass-2",
+    seedPlan: "# Plan",
+    seedPlanPath: "/plans/slug/drafts/pass-1-integrated.md",
+    decisions: [{ question: "Ship?", answer: "Yes" }],
+    decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
+    openQuestions: [],
+    uiDecisions: [],
+    uiDecisionsFile: "/plans/slug/reviews/pass-2-recovered-ui-decisions.json"
+  };
+  const continuationLost = await harness("workflows/plan-forge.js", continuationArgs, responder(true));
+  assert.equal(continuationLost.result.status, "plan-interrupted");
+  const continuationRecovered = await harness("workflows/plan-forge.js", continuationArgs, responder(false));
+  assert.equal(continuationRecovered.result.status, "needs-questions-or-approval");
 });
 
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
