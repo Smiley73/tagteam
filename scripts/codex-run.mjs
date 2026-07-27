@@ -146,17 +146,9 @@ function reclaimingMarkerIsActive(markerPath) {
 
 function quarantineStaleLock(lockPath, identity) {
   const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 20);
-  const claimPath = path.join(lockPath, `.reclaim-${suffix}`);
   const reclaimingToken = randomUUID();
   const reclaimingPath = `${lockPath}.reclaiming-${reclaimingToken}`;
-  try {
-    fs.writeFileSync(claimPath, suffix, { flag: "wx", mode: 0o600 });
-  } catch (error) {
-    if (["EEXIST", "ENOENT"].includes(error.code)) return false;
-    throw error;
-  }
   let ownsReclaiming = false;
-  let moved = false;
   try {
     try {
       fs.mkdirSync(reclaimingPath, { mode: 0o700 });
@@ -173,10 +165,11 @@ function quarantineStaleLock(lockPath, identity) {
       if (error.code === "EEXIST") return false;
       throw error;
     }
-    // The claim lives inside the inspected generation. A successor cannot be
-    // published while that directory still occupies lockPath, and every new
-    // publisher observes reclaimingPath before retrying. Re-read after taking
-    // both claims so a stale observation can never quarantine a successor.
+    // Every reclaimer publishes a generation-unique live marker. Publishers
+    // refuse to create a successor while any such marker is live, so concurrent
+    // reclaimers can safely race on the rename without a fixed inner claim that
+    // could itself be orphaned by a crash. Re-read the stale generation after
+    // publishing our marker so a stale observation cannot move a successor.
     let currentIdentity;
     try {
       const owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
@@ -186,15 +179,11 @@ function quarantineStaleLock(lockPath, identity) {
     }
     if (currentIdentity !== identity) return false;
     fs.renameSync(lockPath, `${lockPath}.stale-${suffix}`);
-    moved = true;
     return true;
   } catch (error) {
     if (["EEXIST", "ENOTEMPTY", "ENOENT"].includes(error.code)) return false;
     throw error;
   } finally {
-    if (!moved) {
-      try { fs.unlinkSync(claimPath); } catch {}
-    }
     if (ownsReclaiming) {
       try { fs.rmSync(reclaimingPath, { recursive: true, force: true }); } catch {}
     }
