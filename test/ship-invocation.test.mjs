@@ -241,6 +241,71 @@ test("legacy-incomplete results retain unknown historical calls without claiming
   assert.equal(completed.usageAccounting, "legacy-incomplete");
 });
 
+test("legacy history keeps its old unknown gap but accounts for every new call", () => {
+  const files = fixture();
+  beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 3,
+    maximumCalls: 12,
+    invocationId
+  });
+  writeResult(files.result, {
+    agentCalls: 7,
+    usageAccounting: "legacy-incomplete",
+    usage: {
+      claudeReasoningCalls: 1,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 2 },
+      codexCalls: 0,
+      relayRetries: 0
+    }
+  });
+  completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+
+  const nextInvocationId = "22222222-2222-4222-8222-222222222222";
+  beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 7,
+    maximumCalls: 12,
+    invocationId: nextInvocationId
+  });
+  writeResult(files.result, {
+    invocationId: nextInvocationId,
+    agentCalls: 8,
+    usageAccounting: "legacy-incomplete",
+    usage: {
+      claudeReasoningCalls: 1,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 2 },
+      codexCalls: 0,
+      relayRetries: 0
+    }
+  });
+  assert.throws(
+    () => completeShipInvocation({ file: files.descriptor, resultFile: files.result }),
+    /usage delta does not match/
+  );
+
+  writeResult(files.result, {
+    invocationId: nextInvocationId,
+    agentCalls: 8,
+    usageAccounting: "legacy-incomplete",
+    usage: {
+      claudeReasoningCalls: 2,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 2 },
+      codexCalls: 0,
+      relayRetries: 0
+    }
+  });
+  const completed = completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+  assert.equal(completed.agentCallsAfter, 8);
+});
+
 test("completed invocation evidence cannot be changed before the next dispatch", () => {
   const files = fixture();
   beginShipInvocation({
@@ -405,6 +470,58 @@ test("the begin transition serializes concurrent callers before descriptor publi
   assert.equal(winner.invocationId, invocationId);
   assert.equal(JSON.parse(fs.readFileSync(files.descriptor)).invocationId, invocationId);
   assert.equal(fs.existsSync(`${files.descriptor}.begin`), false);
+});
+
+test("completion shares the transition claim and cannot overwrite a successor invocation", () => {
+  const files = fixture();
+  beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 3,
+    maximumCalls: 12,
+    invocationId
+  });
+  writeResult(files.result);
+  let competingCompleteError;
+  let competingBeginError;
+  const completed = completeShipInvocation({
+    file: files.descriptor,
+    resultFile: files.result,
+    beforePublish() {
+      try {
+        completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+      } catch (error) {
+        competingCompleteError = error;
+      }
+      try {
+        beginShipInvocation({
+          file: files.descriptor,
+          policyFingerprint,
+          prId: "PR-1",
+          agentCallsBefore: 7,
+          maximumCalls: 12,
+          invocationId: "22222222-2222-4222-8222-222222222222"
+        });
+      } catch (error) {
+        competingBeginError = error;
+      }
+    }
+  });
+  assert.equal(completed.invocationId, invocationId);
+  assert.match(competingCompleteError?.message ?? "", /begin is already active/);
+  assert.match(competingBeginError?.message ?? "", /begin is already active/);
+
+  const successor = beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 7,
+    maximumCalls: 12,
+    invocationId: "22222222-2222-4222-8222-222222222222"
+  });
+  assert.equal(successor.status, "active");
+  assert.equal(JSON.parse(fs.readFileSync(files.descriptor)).invocationId, successor.invocationId);
 });
 
 test("a begin claim left by a process crash is durable fail-closed evidence", () => {

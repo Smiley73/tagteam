@@ -272,12 +272,10 @@ function resultFor(descriptor, resultFile) {
     if (baseline.usageAccounting === "legacy-incomplete" && value.usageAccounting === "complete") {
       throw new Error("ship workflow cannot make legacy-incomplete accounting exact");
     }
-    if (baseline.usageAccounting === "complete" && value.usageAccounting === "complete") {
-      const baselineKnownCalls = baselineUsage.claudeReasoningCalls
-        + Object.values(baselinePlumbing).reduce((sum, item) => sum + item, 0);
-      if (knownAgentCalls - baselineKnownCalls !== agentCalls - baseline.agentCalls) {
-        throw new Error("ship workflow usage delta does not match its agent call delta");
-      }
+    const baselineKnownCalls = baselineUsage.claudeReasoningCalls
+      + Object.values(baselinePlumbing).reduce((sum, item) => sum + item, 0);
+    if (knownAgentCalls - baselineKnownCalls !== agentCalls - baseline.agentCalls) {
+      throw new Error("ship workflow usage delta does not match its agent call delta");
     }
   }
   return { ...result, agentCalls, usageAccounting: value.usageAccounting };
@@ -380,14 +378,24 @@ export function beginShipInvocation({
   return descriptor;
 }
 
-export function completeShipInvocation({ file, resultFile }) {
-  const descriptorFile = readJson(file, "ship invocation");
-  const descriptor = validateDescriptor(descriptorFile.value);
-  if (descriptor.status === "complete") return verifyCompletedDescriptor(descriptor, resultFile);
-  const result = resultFor(descriptor, resultFile);
-  const completed = completedDescriptor(descriptor, result);
-  writeAtomic(descriptorFile.resolved, completed);
-  return completed;
+export function completeShipInvocation({ file, resultFile, beforePublish }) {
+  const observedFile = readJson(file, "ship invocation");
+  const observed = validateDescriptor(observedFile.value);
+  const claim = acquireBeginClaim(observedFile.resolved, observed);
+  try {
+    // Re-read after acquiring the shared transition claim. Another completion
+    // may have won between the optimistic read above and claim acquisition.
+    const descriptorFile = readJson(observedFile.resolved, "ship invocation");
+    const descriptor = validateDescriptor(descriptorFile.value);
+    if (descriptor.status === "complete") return verifyCompletedDescriptor(descriptor, resultFile);
+    const result = resultFor(descriptor, resultFile);
+    const completed = completedDescriptor(descriptor, result);
+    if (typeof beforePublish === "function") beforePublish();
+    writeAtomic(descriptorFile.resolved, completed);
+    return completed;
+  } finally {
+    fs.unlinkSync(claim);
+  }
 }
 
 export function recoverShipInvocation({ file, resultFile }) {
