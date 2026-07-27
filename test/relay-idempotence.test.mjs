@@ -785,6 +785,44 @@ test("a legacy writable artifact without request-bound evidence is never replaye
   assert.equal(fs.readFileSync(counter, "utf8"), "x");
 });
 
+test("a different request cannot reuse an artifact path after any writable dispatch", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-writable-request-change-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter, { editWorktree: true });
+  const artifact = path.join(temp, "result.json");
+  const first = runBridge(
+    temp,
+    artifact,
+    fake,
+    ["--sandbox", "workspace-write"],
+    "writable request A",
+    worktree
+  );
+  assert.equal(first.status, 0, first.stderr);
+  const changed = runBridge(
+    temp,
+    artifact,
+    fake,
+    ["--sandbox", "workspace-write"],
+    "writable request B",
+    worktree
+  );
+  assert.equal(changed.status, 1);
+  assert.match(changed.stderr, /prior writable Codex dispatch exists/);
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+});
+
 test("automatic dirty recovery refuses ignored bytes it cannot bind", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-ignored-"));
   const worktree = path.join(temp, "repo");

@@ -486,14 +486,14 @@ function appendInvocationReceipt(artifact, fingerprint, executionId, fields = {}
   return file;
 }
 
-function hasInvocationReceipt(artifact, fingerprint) {
+function hasAnyInvocationReceipt(artifact) {
   const file = usageReceiptFile(artifact);
   if (!fs.existsSync(file)) return false;
   const journal = JSON.parse(fs.readFileSync(file, "utf8"));
   if (journal.version !== 1 || journal.artifact !== artifact || !Array.isArray(journal.invocations)) {
     throw new Error(`invalid Codex usage receipt journal at ${file}`);
   }
-  return journal.invocations.some((entry) => entry.requestFingerprint === fingerprint);
+  return journal.invocations.length > 0;
 }
 
 // A model that was asked to transcribe a large prompt can truncate it,
@@ -612,7 +612,7 @@ export async function runCodex(options, prompt) {
       }
     }
   }
-  if (options.sandbox === "workspace-write" && hasInvocationReceipt(artifact, fingerprint)) {
+  if (options.sandbox === "workspace-write" && hasAnyInvocationReceipt(artifact)) {
     throw new Error(
       "A prior writable Codex dispatch exists without a checkpoint-bound reusable result; "
       + "the worktree may already contain changes, so automatic replay is unsafe."
