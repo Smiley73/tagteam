@@ -104,10 +104,51 @@ function staleLockIdentity(lockPath, owner) {
   return `stat:${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
 }
 
+function reclaimingMarkers(lockPath) {
+  const directory = path.dirname(lockPath);
+  const prefix = `${path.basename(lockPath)}.reclaiming`;
+  try {
+    return fs.readdirSync(directory)
+      .filter((entry) =>
+        (entry === prefix || entry.startsWith(`${prefix}-`))
+        && !entry.includes(".stale-"))
+      .map((entry) => path.join(directory, entry));
+  } catch {
+    return [];
+  }
+}
+
+function reclaimingMarkerIsActive(markerPath) {
+  let staleIdentity = null;
+  try {
+    const owner = JSON.parse(fs.readFileSync(path.join(markerPath, "owner.json"), "utf8"));
+    staleIdentity = staleOwnerIdentity(markerPath, owner);
+  } catch {
+    try {
+      if (Date.now() - fs.statSync(markerPath).mtimeMs > 30_000) {
+        staleIdentity = staleLockIdentity(markerPath);
+      }
+    } catch {
+      return false;
+    }
+  }
+  if (!staleIdentity) return true;
+  const suffix = createHash("sha256").update(staleIdentity).digest("hex").slice(0, 20);
+  try {
+    // Reclaim markers are generation-unique. Quarantining this exact path
+    // cannot remove a newer reclaimer, unlike a fixed shared sentinel.
+    fs.renameSync(markerPath, `${markerPath}.stale-${suffix}`);
+  } catch (error) {
+    if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
+  }
+  return false;
+}
+
 function quarantineStaleLock(lockPath, identity) {
   const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 20);
   const claimPath = path.join(lockPath, `.reclaim-${suffix}`);
-  const reclaimingPath = `${lockPath}.reclaiming`;
+  const reclaimingToken = randomUUID();
+  const reclaimingPath = `${lockPath}.reclaiming-${reclaimingToken}`;
   try {
     fs.writeFileSync(claimPath, suffix, { flag: "wx", mode: 0o600 });
   } catch (error) {
@@ -119,6 +160,14 @@ function quarantineStaleLock(lockPath, identity) {
   try {
     try {
       fs.mkdirSync(reclaimingPath, { mode: 0o700 });
+      fs.writeFileSync(path.join(reclaimingPath, "owner.json"), JSON.stringify({
+        pid: process.pid,
+        token: reclaimingToken,
+        at: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        processIdentity: PROCESS_IDENTITY,
+        protectedProcesses: []
+      }), { mode: 0o600 });
       ownsReclaiming = true;
     } catch (error) {
       if (error.code === "EEXIST") return false;
@@ -153,7 +202,7 @@ function quarantineStaleLock(lockPath, identity) {
 }
 
 function publishLock(lockPath, token) {
-  if (fs.existsSync(`${lockPath}.reclaiming`)) return false;
+  if (reclaimingMarkers(lockPath).some(reclaimingMarkerIsActive)) return false;
   const pendingPath = `${lockPath}.pending-${token}`;
   fs.mkdirSync(pendingPath, { mode: 0o700 });
   fs.writeFileSync(

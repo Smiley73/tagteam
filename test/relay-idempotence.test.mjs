@@ -258,6 +258,16 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
     heartbeatAt: "2026-01-01T00:00:00.000Z",
     processIdentity: "dead-process"
   }));
+  const orphanReclaiming = `${staleLock}.reclaiming-crashed-generation`;
+  fs.mkdirSync(orphanReclaiming);
+  fs.writeFileSync(path.join(orphanReclaiming, "owner.json"), JSON.stringify({
+    pid: 2_147_483_647,
+    token: "crashed-reclaimer",
+    at: "2026-01-01T00:00:00.000Z",
+    heartbeatAt: "2026-01-01T00:00:00.000Z",
+    processIdentity: "dead-process",
+    protectedProcesses: []
+  }));
   const results = await Promise.all([
     runBridgeAsync(temp, artifact, fake),
     runBridgeAsync(temp, artifact, fake)
@@ -270,6 +280,10 @@ fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(${JSON.stringify(C
   const receipts = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
   assert.equal(receipts.invocations.length, 1);
   assert.equal(fs.existsSync(`${staleLock}.stale-${createHash("sha256").update("token:stale-generation").digest("hex").slice(0, 20)}`), true);
+  assert.equal(
+    fs.existsSync(`${orphanReclaiming}.stale-${createHash("sha256").update("token:crashed-reclaimer").digest("hex").slice(0, 20)}`),
+    true
+  );
 });
 
 test("concurrent different requests keep immutable prompt and review-diff identities", async () => {
