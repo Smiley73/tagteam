@@ -48,11 +48,16 @@ export function materializePlanArtifact(options) {
     throw new Error(`plan artifact request identity does not match ${options.requestIdentity}`);
   }
 
-  const plan = writeAtomic(options.plan, `${result.planMarkdown.replace(/\r\n/g, "\n").replace(/\n*$/, "")}\n`);
+  const plan = path.resolve(options.plan);
+  // The plan name is how resume discovers a draft. Publish it last so a crash
+  // can leave harmless orphan sidecars, never a discoverable plan without its
+  // required question record.
   const questions = writeAtomic(`${plan}.questions.json`, `${JSON.stringify(result.open_questions, null, 2)}\n`);
   if (options.uiDecisions !== "off") {
     writeAtomic(`${plan}.ui-decisions.json`, `${JSON.stringify(result.ui_decisions, null, 2)}\n`);
   }
+  if (typeof options.beforePlanPublish === "function") options.beforePlanPublish();
+  writeAtomic(plan, `${result.planMarkdown.replace(/\r\n/g, "\n").replace(/\n*$/, "")}\n`);
   return verifyPayloads({
     payloads: [{ name: "DRAFT_PLAN", file: plan, json: false }],
     expects: new Map(),

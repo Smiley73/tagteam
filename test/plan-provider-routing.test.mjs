@@ -101,6 +101,23 @@ test("Codex draft promotion rejects missing or tampered completion checkpoints",
   }), /bytes changed after completion/);
 });
 
+test("Codex draft promotion publishes the discoverable plan only after required sidecars", () => {
+  const { artifact, plan } = fixture();
+  assert.throws(() => materializePlanArtifact({
+    artifact,
+    schema: path.join(root, "schemas", "plan-draft.schema.json"),
+    plan,
+    requestIdentity: identity,
+    uiDecisions: "on",
+    beforePlanPublish() {
+      throw new Error("simulated crash before plan publication");
+    }
+  }), /simulated crash/);
+  assert.equal(fs.existsSync(plan), false, "resume must not discover a partial promotion");
+  assert.equal(fs.existsSync(`${plan}.questions.json`), true, "the durable question sidecar may be orphaned safely");
+  assert.equal(fs.existsSync(`${plan}.ui-decisions.json`), true, "the optional UI sidecar may be orphaned safely");
+});
+
 test("plan command documents provider validation and immutable resume policy", () => {
   const command = fs.readFileSync(path.join(root, "commands", "plan.md"), "utf8");
   assert.match(command, /--provider both\|claude\|codex/);
@@ -109,6 +126,8 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /In `claude` mode no Codex request is dispatched/);
   assert.match(command, /recovered-ui-decisions\.json/);
   assert.match(command, /atomically write `\[\]`/);
+  assert.match(command, /source-passId/);
+  assert.match(command, /never derive this path from the next pass ID/);
 });
 
 test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {
@@ -120,6 +139,9 @@ test("Codex prompts consume the exact configured UI policy, conventions, and PR-
   assert.match(interaction, /ui\.hasUserInterface/);
   assert.match(interaction, /ui\.conventionPaths/);
   assert.match(decompose, /prTrain\.prSize\.guidance/);
+  const integration = fs.readFileSync(path.join(root, "prompts", "plan-integration-codex.md"), "utf8");
+  assert.match(integration, /human decision or handoff repair introduces/);
+  assert.match(integration, /do not leave a new surface implicit/);
 });
 
 test("composed Codex requests carry concrete UI and PR-size settings from disk", () => {

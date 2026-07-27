@@ -90,7 +90,7 @@ Then invoke `tagteam:plan-forge` once more with the same arguments plus:
 - `seedPlan`: the contents of the first result's `planPath`;
 - `seedPlanPath`: the absolute first result `planPath`;
 - `decisions`: `{question, answer}` rows;
-- `decisionsFile`: the absolute mode-0600 `drafts/<passId>-decisions.json` holding those exact rows;
+- `decisionsFile`: the absolute mode-0600 `drafts/<source-passId>-decisions.json` that was written while answering the source pass, before `passId` advances; never derive this path from the next pass ID;
 - `uiDecisions`: the array at the first result's `uiDecisionsPath`, so decisions the policy never surfaced survive the pass. A null path means this repository has no interface; a path naming a file that is absent or unreadable means none were declared. Pass `[]` in both cases and continue.
 - `uiDecisionsFile`: for a Codex continuation with an interface, the readable absolute `uiDecisionsPath`; if it is absent, empty, malformed, or unreadable, atomically write `[]` to a mode-0600 `reviews/<next-passId>-recovered-ui-decisions.json` and pass that path instead. Omit it when the repository has no interface.
 - `agentCalls`, `usage`, `usageReceipts`, and `usageAccounting`: the cumulative values from the newest usage snapshot at or before the prior pass.
