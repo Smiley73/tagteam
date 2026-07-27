@@ -1265,6 +1265,7 @@ function harness(file, args, respond) {
   const labels = [];
   const calls = [];
   const parallelWidths = [];
+  const logs = [];
   const agent = async (prompt, options) => {
     labels.push(options.label);
     calls.push({ label: options.label, model: options.model, agentType: options.agentType });
@@ -1278,8 +1279,8 @@ function harness(file, args, respond) {
     }
     return results;
   };
-  return loadWorkflow(file)(args, agent, parallel, () => {}, () => {}, undefined)
-    .then((result) => ({ result, labels, calls, parallelWidths }));
+  return loadWorkflow(file)(args, agent, parallel, () => {}, (message) => logs.push(message), undefined)
+    .then((result) => ({ result, labels, calls, parallelWidths, logs }));
 }
 
 const PLAN_CONFIG = {
@@ -1755,6 +1756,62 @@ test("plan resume restarts a saved round without re-drafting or re-reviewing it"
   assert.equal(labels.includes("plan:codex-review:1"), false);
   assert.equal(labels.includes("plan:codex-review:2"), true);
   assert.deepEqual(result.completedRounds, [2]);
+});
+
+test("plan resume accepts a saved path without an inline plan copy", async () => {
+  const seed = "# Saved draft";
+  const seedPath = "/plans/slug/drafts/pass-1-integrated.md";
+  const baseResponder = planResponder([]);
+  const { result, labels, logs } = await harness(
+    "workflows/plan-forge.js",
+    {
+      ...PLAN_ARGS,
+      config: {
+        ...PLAN_CONFIG,
+        planning: {
+          ...PLAN_CONFIG.planning,
+          largePlanWarningChars: 5
+        }
+      },
+      seedPlan: { path: seedPath },
+      resumeRound: 2,
+      decisions: [{ question: "This must not be used", answer: "ignored" }]
+    },
+    (label, prompt, options) => {
+      if (label === "plan:verify-seed:2") {
+        return {
+          ok: true,
+          payloads: [{ name: "DRAFT_PLAN", file: seedPath, token: planToken(seed), chars: seed.length }]
+        };
+      }
+      return baseResponder(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.planPath, seedPath);
+  assert.equal(labels.includes("plan:draft"), false);
+  assert.equal(logs.some((message) => message.includes(seedPath) && message.includes("largePlanWarningChars=5")), true);
+  assert.equal(logs.some((message) => message.includes("does not apply decisions")), true);
+});
+
+test("plan-forge names missing input and nested config keys", async () => {
+  const run = loadWorkflow("workflows/plan-forge.js");
+  const noAgent = async () => {
+    throw new Error("model work must not start");
+  };
+  const noParallel = async () => [];
+  await assert.rejects(
+    run({ ...PLAN_ARGS, config: undefined }, noAgent, noParallel, () => {}, () => {}, undefined),
+    /input key "config"/
+  );
+  await assert.rejects(
+    run({
+      ...PLAN_ARGS,
+      config: { planning: {}, prTrain: { prSize: { guidance: "small" } } }
+    }, noAgent, noParallel, () => {}, () => {}, undefined),
+    /config key "config\.planning\.claude"/
+  );
 });
 
 const SHIP_CONFIG = (() => {

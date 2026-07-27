@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { normalizeText } from "../scripts/compose-prompt.mjs";
+import { expectToken, normalizeText } from "../scripts/compose-prompt.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -106,6 +106,7 @@ test("Codex relay agent contract matches both workflow envelope schemas", () => 
 async function forge({
   planDir,
   reviewRounds = 1,
+  largePlanWarningChars,
   corrupt = (_label, planMarkdown) => planMarkdown,
   corruptManifest = (manifest) => manifest,
   after = () => {}
@@ -118,17 +119,27 @@ async function forge({
   const manifest = bigManifest();
   const train = bigTrain();
   const composed = [];
+  const prompts = new Map();
+  const logs = [];
 
   const verified = [];
   const agent = async (prompt, options) => {
     const label = options.label;
+    prompts.set(label, prompt);
     after(label, { planDir });
     if (label === "plan:draft" || label.startsWith("plan:revise")) {
-      const file = persistPathFrom(prompt, /persist the identical planMarkdown at (\S+) with mode 0600/);
+      const file = persistPathFrom(prompt, /persist the complete plan at (\S+) with mode 0600/);
       const planMarkdown = label === "plan:draft" ? plans.draft : plans.revised;
       fs.writeFileSync(file, corrupt(label, planMarkdown), { mode: 0o600 });
       fs.writeFileSync(`${file}.questions.json`, JSON.stringify([]), { mode: 0o600 });
-      return { planMarkdown, open_questions: [] };
+      const [plan_chars, plan_hash] = expectToken(normalizeText(planMarkdown)).split(":");
+      return {
+        plan_path: file,
+        plan_chars: Number(plan_chars),
+        plan_hash,
+        open_questions: [],
+        ui_decisions: []
+      };
     }
     if (label === "plan:manifest") {
       fs.writeFileSync(persistPathFrom(prompt, /persist the identical manifest as JSON at (\S+) with mode 0600/), JSON.stringify(corruptManifest(manifest)), { mode: 0o600 });
@@ -177,12 +188,17 @@ async function forge({
     pluginRoot: root,
     planDir,
     config: {
-      planning: { claude: { model: "opus", effort: "high" }, codex: { model: "gpt-test", effort: "high" }, reviewRounds },
+      planning: {
+        claude: { model: "opus", effort: "high" },
+        codex: { model: "gpt-test", effort: "high" },
+        reviewRounds,
+        ...(largePlanWarningChars ? { largePlanWarningChars } : {})
+      },
       prTrain: { prSize: { guidance: "small" } },
       transport: { mode: "exec" }
     }
-  }, agent, parallel, () => {}, () => {}, undefined);
-  return { result, composed, verified, plans, manifest, train };
+  }, agent, parallel, () => {}, (message) => logs.push(message), undefined);
+  return { result, composed, verified, plans, manifest, train, prompts, logs };
 }
 
 test("a 130 KB plan reaches the cross-check whole, as the exact string the workflow specified", async () => {
@@ -218,7 +234,30 @@ test("a 130 KB plan reaches the cross-check whole, as the exact string the workf
   assert.equal(reviewPrompt.includes("<untrusted-goal>"), true);
 });
 
-test("a completed pass leaves a resumable integrated draft that matches the returned plan", async () => {
+test("Claude plan stages pass a large draft by receipt and path, never by value", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-receipt-"));
+  const { result, plans, prompts, logs } = await forge({
+    planDir,
+    largePlanWarningChars: 100_000
+  });
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(Object.hasOwn(result, "planMarkdown"), false);
+  for (const label of ["plan:revise:1", "plan:manifest", "plan:decompose"]) {
+    const prompt = prompts.get(label);
+    assert.equal(prompt.includes(plans.draft), false, `${label} contains the draft by value`);
+    assert.equal(prompt.includes(plans.revised), false, `${label} contains the revision by value`);
+    assert.match(prompt, /Read the complete (?:current |final )?plan from /);
+  }
+  assert.match(prompts.get("plan:draft"), /Return only its receipt/);
+  assert.equal(
+    logs.some((message) => message.includes("largePlanWarningChars=100000")
+      && message.includes("pass-1-round-1-input.md")),
+    true
+  );
+});
+
+test("a completed pass leaves a resumable integrated draft matching the returned receipt", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-integrated-"));
   const { result } = await forge({ planDir });
 
@@ -227,7 +266,13 @@ test("a completed pass leaves a resumable integrated draft that matches the retu
   assert.equal(fs.existsSync(integrated), true);
   const saved = fs.readFileSync(integrated, "utf8");
   assert.equal(saved.length > 0, true);
-  assert.equal(saved, result.planMarkdown);
+  const [characters, hash] = expectToken(normalizeText(saved)).split(":");
+  assert.deepEqual(result.planReceipt, {
+    planPath: integrated,
+    characterCount: Number(characters),
+    contentHash: hash
+  });
+  assert.equal(Object.hasOwn(result, "planMarkdown"), false);
   assert.deepEqual(JSON.parse(fs.readFileSync(`${integrated}.questions.json`, "utf8")), []);
   // The manifest and train the cross-check read are the ones that were returned.
   assert.deepEqual(JSON.parse(fs.readFileSync(result.manifestPath, "utf8")), result.manifest);
