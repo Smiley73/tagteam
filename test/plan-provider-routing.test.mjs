@@ -159,6 +159,9 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /first result's `questionsPath`/);
   assert.match(command, /never replace missing or malformed outstanding-question state with `\[\]`/);
   assert.match(command, /derive only `<seedPlanPath>\.questions\.json`/);
+  assert.match(command, /restored provider is `both` or `claude`/);
+  assert.match(command, /mark the inherited snapshot `usageAccounting: legacy-incomplete`/);
+  assert.match(command, /no durable receipt can prove whether that paid call happened/);
 });
 
 test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {
