@@ -122,16 +122,9 @@ test("Codex draft promotion publishes the discoverable plan only after required 
 test("decomposition-review questions are atomically merged into the authoritative sidecar", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-final-questions-"));
   const questions = path.join(directory, "plan.md.questions.json");
-  const review = path.join(directory, "decomposition.json");
   fs.writeFileSync(questions, JSON.stringify(["Which rollout?"]));
-  fs.writeFileSync(review, JSON.stringify({
-    verdict: "approve",
-    issues: [],
-    open_questions: ["", "which   rollout?", "Who owns rollback?"],
-    suggestions: []
-  }));
 
-  const result = mergePlanQuestions(questions, review);
+  const result = mergePlanQuestions(questions, ["", "which   rollout?", "Who owns rollback?"]);
   assert.equal(result.ok, true);
   assert.deepEqual(JSON.parse(fs.readFileSync(questions, "utf8")), [
     "Which rollout?",
@@ -139,6 +132,16 @@ test("decomposition-review questions are atomically merged into the authoritativ
   ]);
   assert.equal(fs.statSync(questions).mode & 0o777, 0o600);
   assert.equal(result.payloads[0].file, questions);
+});
+
+test("Claude decomposition review stays read-only and delegates question persistence to deterministic plumbing", () => {
+  const workflow = fs.readFileSync(path.join(root, "workflows", "plan-forge.js"), "utf8");
+  const reviewer = fs.readFileSync(path.join(root, "agents", "plan-reviewer.md"), "utf8");
+  const promptBuilder = fs.readFileSync(path.join(root, "agents", "prompt-builder.md"), "utf8");
+
+  assert.doesNotMatch(workflow, /persist the identical review JSON/);
+  assert.match(reviewer, /Do not edit files/);
+  assert.match(promptBuilder, /merge-plan-questions\.mjs/);
 });
 
 test("plan command documents provider validation and immutable resume policy", () => {

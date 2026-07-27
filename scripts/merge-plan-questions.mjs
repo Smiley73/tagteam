@@ -16,19 +16,29 @@ function questionKey(value) {
   return String(value ?? "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
 }
 
-export function mergePlanQuestions(questionsFile, reviewFile) {
+function decodeQuestions(hex) {
+  if (!/^(?:[0-9a-f]{2})*$/i.test(String(hex ?? ""))) {
+    throw new Error("additional questions must be even-length hexadecimal bytes");
+  }
+  const bytes = Uint8Array.from(String(hex).match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
+  const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error("additional questions must decode to an array of strings");
+  }
+  return value;
+}
+
+export function mergePlanQuestions(questionsFile, additionalQuestions) {
   const questions = readJson(questionsFile, "question sidecar");
-  const review = readJson(reviewFile, "decomposition review");
   if (!Array.isArray(questions.value) || questions.value.some((item) => typeof item !== "string")) {
     throw new Error("question sidecar must be an array of strings");
   }
-  if (!review.value || !Array.isArray(review.value.open_questions)
-    || review.value.open_questions.some((item) => typeof item !== "string")) {
-    throw new Error("decomposition review must contain an open_questions array of strings");
+  if (!Array.isArray(additionalQuestions) || additionalQuestions.some((item) => typeof item !== "string")) {
+    throw new Error("additional questions must be an array of strings");
   }
 
   const seen = new Set();
-  const merged = [...questions.value, ...review.value.open_questions].filter((question) => {
+  const merged = [...questions.value, ...additionalQuestions].filter((question) => {
     const key = questionKey(question);
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -63,13 +73,13 @@ export function mergePlanQuestions(questionsFile, reviewFile) {
 }
 
 async function main() {
-  const [questionsFile, reviewFile] = process.argv.slice(2);
-  if (!questionsFile || !reviewFile) {
-    process.stderr.write("usage: merge-plan-questions.mjs <questions.json> <decomposition-review.json>\n");
+  const [questionsFile, additionalHex] = process.argv.slice(2);
+  if (!questionsFile || additionalHex === undefined) {
+    process.stderr.write("usage: merge-plan-questions.mjs <questions.json> <additional-questions-hex>\n");
     process.exitCode = 2;
     return;
   }
-  process.stdout.write(`${JSON.stringify(mergePlanQuestions(questionsFile, reviewFile))}\n`);
+  process.stdout.write(`${JSON.stringify(mergePlanQuestions(questionsFile, decodeQuestions(additionalHex)))}\n`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
