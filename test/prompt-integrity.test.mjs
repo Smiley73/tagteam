@@ -141,6 +141,7 @@ async function forge({
     }
     // Both plumbing steps run their real command against the real files, so what
     // the workflow learns here is what is actually on disk.
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) {
       const result = runCommand(commandFrom(prompt));
       if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
@@ -363,7 +364,8 @@ test("every checksum a request checks was read back off the file it names", asyn
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recorded-"));
   const { verified, composed } = await forge({ planDir });
 
-  // Each of the four fenced payloads was read back after it was written.
+  // Each fenced payload and the final question sidecar was read back after it
+  // was written.
   const read = new Map();
   for (const step of verified) {
     for (const payload of step.payloads) {
@@ -373,6 +375,7 @@ test("every checksum a request checks was read back off the file it names", asyn
   }
   assert.deepEqual([...read.values()].map((file) => path.basename(file)).sort(), [
     "pass-1-integrated.md",
+    "pass-1-integrated.md.questions.json",
     "pass-1-manifest.json",
     "pass-1-pr-train.json",
     "pass-1-round-1-input.md"

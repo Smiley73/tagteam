@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { composePrompt } from "../scripts/compose-prompt.mjs";
 import { materializePlanArtifact } from "../scripts/materialize-plan-artifact.mjs";
+import { mergePlanQuestions } from "../scripts/merge-plan-questions.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const identity = `sha256:${"a".repeat(64)}`;
@@ -116,6 +117,28 @@ test("Codex draft promotion publishes the discoverable plan only after required 
   assert.equal(fs.existsSync(plan), false, "resume must not discover a partial promotion");
   assert.equal(fs.existsSync(`${plan}.questions.json`), true, "the durable question sidecar may be orphaned safely");
   assert.equal(fs.existsSync(`${plan}.ui-decisions.json`), true, "the optional UI sidecar may be orphaned safely");
+});
+
+test("decomposition-review questions are atomically merged into the authoritative sidecar", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-final-questions-"));
+  const questions = path.join(directory, "plan.md.questions.json");
+  const review = path.join(directory, "decomposition.json");
+  fs.writeFileSync(questions, JSON.stringify(["Which rollout?"]));
+  fs.writeFileSync(review, JSON.stringify({
+    verdict: "approve",
+    issues: [],
+    open_questions: ["which   rollout?", "Who owns rollback?"],
+    suggestions: []
+  }));
+
+  const result = mergePlanQuestions(questions, review);
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(questions, "utf8")), [
+    "Which rollout?",
+    "Who owns rollback?"
+  ]);
+  assert.equal(fs.statSync(questions).mode & 0o777, 0o600);
+  assert.equal(result.payloads[0].file, questions);
 });
 
 test("plan command documents provider validation and immutable resume policy", () => {

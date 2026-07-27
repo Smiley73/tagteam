@@ -11,6 +11,7 @@ test("ship command validates, persists, and restores the selected provider", () 
   assert.match(command, /normalize "<provider>"/);
   assert.match(command, /supplied `--provider` that differs from it is rejected/);
   assert.match(command, /In `codex` mode Claude\/Haiku performs orchestration only/);
+  assert.match(command, /candidate UI classification/);
   assert.match(command, /In `claude` mode no Codex request is dispatched/);
   assert.match(command, /codex --version` for `both` or `codex`/);
 });

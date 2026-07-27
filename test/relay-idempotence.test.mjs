@@ -1342,6 +1342,7 @@ function planResponder(dropOnce) {
       dropped.add(label);
       return null;
     }
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
       return {
@@ -1383,6 +1384,7 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
       return {
@@ -1438,6 +1440,7 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
       return {
@@ -1475,6 +1478,7 @@ test("Codex-only revision fails closed instead of dropping a resumable question"
   const carried = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
   const dropped = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
       return {
@@ -1526,6 +1530,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
       return {
@@ -1572,6 +1577,7 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
   const responder = (dropDraft) => (label, prompt) => {
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) {
       return {
@@ -1620,6 +1626,25 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   assert.equal(continuationLost.result.status, "plan-interrupted");
   const continuationRecovered = await harness("workflows/plan-forge.js", continuationArgs, responder(false));
   assert.equal(continuationRecovered.result.status, "needs-questions-or-approval");
+});
+
+test("planning persists questions introduced by the decomposition review", async () => {
+  const baseResponder = planResponder([]);
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    (label, prompt, options) => {
+      if (label === "plan:codex-decomposition-review") {
+        return { ...APPROVE, open_questions: ["Who owns rollback?"] };
+      }
+      return baseResponder(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.openQuestions.includes("Who owns rollback?"), true);
+  assert.equal(labels.includes("plan:merge-final-questions"), true);
+  assert.equal(labels.includes("plan:verify-final-questions"), true);
+  assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
 });
 
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
@@ -1808,6 +1833,8 @@ test("Claude-only shipping dispatches no Codex work", async () => {
   assert.equal(result.assurance, "single-provider");
   assert.equal(result.usage.codexCalls, 0);
   assert.equal(calls.some((call) => call.agentType === "tagteam:codex-runner"), false);
+  assert.equal(calls.find((call) => call.label === "ui:0:claude")?.model,
+    SHIP_CONFIG.reviewTiers.standard.claude.model);
   assert.equal(result.rounds.every((round) =>
     round.reviewers.every((reviewer) => reviewer.engine === "claude")), true);
 });
@@ -1825,12 +1852,26 @@ test("Codex-only shipping uses Haiku only for plumbing", async () => {
   assert.equal(result.assurance, "single-provider");
   assert.equal(result.usage.claudeReasoningCalls, 0);
   assert.equal(labels.some((label) => label.startsWith("review:1:codex:")), true);
+  assert.equal(calls.find((call) => call.label === "ui:0:codex")?.agentType, "tagteam:codex-runner");
   assert.equal(calls.filter((call) => call.agentType !== "tagteam:codex-runner")
     .every((call) => call.model === "haiku"), true);
   assert.equal(calls.filter((call) => call.agentType === "tagteam:codex-runner")
     .every((call) => call.model === "haiku"), true);
   assert.equal(result.rounds.every((round) =>
     round.reviewers.every((reviewer) => reviewer.engine === "codex")), true);
+});
+
+test("Codex-only UI classification relay loss interrupts before review", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: policy },
+    (label) => label.startsWith("ui:0:codex") ? null : cleanShipResponder(label)
+  );
+
+  assert.equal(result.status, "relay-interrupted");
+  assert.equal(labels.includes("ui:0:codex:relay-retry-2"), true);
+  assert.equal(labels.some((label) => label.startsWith("review:")), false);
 });
 
 test("single-provider policy overrides configured implementation routing", async () => {
@@ -1977,6 +2018,50 @@ test("Claude-only review fixes and fresh post-fix coverage stay on Claude", asyn
   assert.equal(calls.find((call) => call.label === "fix:1:claude")?.agentType, "tagteam:fixer");
   assert.equal(result.rounds.at(-1).independentCoverage, true);
   assert.equal(result.rounds.at(-1).reviewers.every((reviewer) => reviewer.engine === "claude"), true);
+});
+
+test("Codex-only post-fix UI relay loss interrupts before another review round", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  let fixed = false;
+  const finding = {
+    ...CLEAN_FINDINGS,
+    verdict: "needs-attention",
+    findings: [{
+      title: "repair this",
+      body: "The behavior is wrong.",
+      file: "src/a.js",
+      line_start: 1,
+      line_end: 1,
+      severity: "major",
+      dimension: "functionality",
+      confidence: 0.99,
+      recommendation: "Fix it."
+    }]
+  };
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: policy },
+    (label, prompt) => {
+      if (label.startsWith("candidate:snapshot")) {
+        return snapshotFixture(label, fixed ? "d".repeat(40) : SHIP_ARGS.existingCandidateOid);
+      }
+      if (label === "review:1:codex:functionality") return finding;
+      if (label === "fix:1:codex") {
+        const id = prompt.match(/Return exactly one accounting row per ID: ([^.\n]+)/)?.[1];
+        return { summary: "fixed", results: [{ id, status: "fixed", explanation: "done" }] };
+      }
+      if (label === "candidate:commit:1") {
+        fixed = true;
+        return { ok: true, candidateOid: "d".repeat(40), message: "fix: review round 1" };
+      }
+      if (label.startsWith("ui:1:codex")) return null;
+      return cleanShipResponder(label);
+    }
+  );
+
+  assert.equal(result.status, "relay-interrupted");
+  assert.equal(labels.includes("ui:1:codex:relay-retry-2"), true);
+  assert.equal(labels.some((label) => label.startsWith("review:2:")), false);
 });
 
 test("resume carries saved open questions and keeps persisting them", async () => {

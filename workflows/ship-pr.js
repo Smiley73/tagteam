@@ -722,18 +722,45 @@ async function runVerify(input, snapshotValue, round) {
   return result;
 }
 
-async function classifyUi(input, snapshotValue, round) {
-  const result = await plumbingCall([
+async function classifyUi(input, snapshotValue, round, runPolicy) {
+  const prompt = [
     "Independently answer whether a person using the product or developer tool would notice this actual candidate change.",
     fence("changed-paths", snapshotValue.changedPaths),
     `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
-  ].join("\n\n"), {
-    label: `ui:${round}`,
-    phase: "Candidate",
-    agentType: "tagteam:ui-classifier",
-    model: "haiku",
-    schema: uiSchema
-  });
+  ].join("\n\n");
+  let result;
+  if (runPolicy.reasoningProvider === "codex") {
+    result = await codexCall(input, {
+      label: `ui:${round}:codex`,
+      kind: "Candidate UI classification",
+      schema: uiSchema,
+      schemaFile: "ui-verdict.schema.json",
+      artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/codex-ui-${snapshotValue.candidateOid}.json`,
+      prompt,
+      runtime: input.config.reviewTiers.standard.codex,
+      sandbox: "read-only",
+      reviewDiffPath: snapshotValue.reviewDiffPath,
+      reviewDiffHash: snapshotValue.reviewDiffHash
+    });
+  } else if (runPolicy.reasoningProvider === "claude") {
+    const runtime = input.config.reviewTiers.standard.claude;
+    result = await claudeReasoningCall(prompt, {
+      label: `ui:${round}:claude`,
+      phase: "Candidate",
+      agentType: "tagteam:ui-classifier",
+      model: runtime.model,
+      effort: runtime.effort,
+      schema: uiSchema
+    });
+  } else {
+    result = await plumbingCall(prompt, {
+      label: `ui:${round}`,
+      phase: "Candidate",
+      agentType: "tagteam:ui-classifier",
+      model: "haiku",
+      schema: uiSchema
+    });
+  }
   return result ?? { verdict: "unknown", reason: "The ship-time classifier did not return a usable answer." };
 }
 
@@ -1088,8 +1115,11 @@ async function main(raw) {
     }
   }
 
-  let ui = await classifyUi(input, snapshotValue, initialRound);
+  let ui = await classifyUi(input, snapshotValue, initialRound, runPolicy);
   callCount += 1;
+  if (relayState.fatal.length > 0) {
+    return relayInterruption({ candidateOid, verify: verification });
+  }
   if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
   const initialSelectedInfo = selectDimensions(config, snapshotValue, input.reviewers ?? [], ui.verdict);
   if (initialSelectedInfo.selected.length === 0) throw new Error("no review dimensions were selected");
@@ -1497,8 +1527,11 @@ async function main(raw) {
         break;
       }
     }
-    ui = await classifyUi(input, snapshotValue, round);
+    ui = await classifyUi(input, snapshotValue, round, runPolicy);
     callCount += 1;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (relayState.capacityExceeded) {
       return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
     }
