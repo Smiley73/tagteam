@@ -2057,6 +2057,98 @@ test("Codex implementation retries use attempt-specific recovery artifacts", asy
   );
 });
 
+test("resume re-enters a lost Codex implementation retry instead of replaying attempt 1", async () => {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.implementation.engine = "codex";
+  const args = {
+    ...SHIP_ARGS,
+    config,
+    existingCandidateOid: undefined,
+    tasks: [{
+      id: "T1",
+      title: "retry task",
+      description: "d",
+      complexity: "simple",
+      files: ["a.js"],
+      dependsOn: [],
+      doneCriteria: ["works"]
+    }]
+  };
+  const interrupted = await harness("workflows/ship-pr.js", args, (label, prompt) => {
+    if (label === "implement:T1:1") {
+      return {
+        reused: false,
+        executionId: "exec-attempt-1-incomplete",
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: {
+          taskId: "T1",
+          status: "completed",
+          summary: "incomplete",
+          filesChanged: ["a.js"],
+          criteria: [{ criterion: "works", met: false, evidence: "not yet" }]
+        }
+      };
+    }
+    if (label.startsWith("implement:T1:2")) return null;
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(interrupted.result.status, "relay-interrupted-workspace-unknown");
+  assert.deepEqual(interrupted.result.taskAttempts, { T1: 2 });
+
+  const resumed = await harness("workflows/ship-pr.js", {
+    ...args,
+    taskResults: interrupted.result.tasks,
+    taskAttempts: interrupted.result.taskAttempts,
+    agentCalls: interrupted.result.agentCalls,
+    usage: interrupted.result.usage,
+    usageReceipts: interrupted.result.usageReceipts,
+    usageAccounting: interrupted.result.usageAccounting
+  }, (label, prompt, options) => {
+    if (label.startsWith("implement:T1:1")) {
+      throw new Error("resume replayed implementation attempt 1");
+    }
+    if (label === "implement:T1:2") {
+      return {
+        reused: true,
+        executionId: "exec-attempt-2-recovered",
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: {
+          taskId: "T1",
+          status: "completed",
+          summary: "complete",
+          filesChanged: ["a.js"],
+          criteria: [{ criterion: "works", met: true, evidence: "ran" }]
+        }
+      };
+    }
+    if (label.startsWith("candidate:commit")) {
+      return { ok: true, candidateOid: "d".repeat(40), message: "feat: retry task" };
+    }
+    if (label.startsWith("candidate:snapshot")) {
+      return snapshotFixture(label, "d".repeat(40), args.baseOid);
+    }
+    if (label.startsWith("verify:")) {
+      return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    }
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    if (options.agentType === "tagteam:codex-runner") {
+      return {
+        reused: false,
+        executionId: `exec-${label.replaceAll(":", "-")}`,
+        requestIdentity: requestIdentityFromRelayPrompt(prompt),
+        result: CLEAN_FINDINGS
+      };
+    }
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(resumed.labels.some((label) => label.startsWith("implement:T1:1")), false);
+  assert.equal(resumed.result.status, "clean");
+  assert.deepEqual(resumed.result.taskAttempts, { T1: 2 });
+});
+
 test("Codex implementation tasks do not share a parallel writable batch", async () => {
   const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
   config.implementation.engine = "codex";

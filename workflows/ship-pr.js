@@ -765,6 +765,7 @@ async function main(raw) {
   shipState.runPolicy = null;
   shipState.legacyUsageIncomplete = false;
   shipState.taskResults = [];
+  shipState.taskAttempts = {};
   shipState.candidateOid = null;
   shipState.rounds = [];
   shipState.ledger = [];
@@ -802,6 +803,15 @@ async function main(raw) {
   // All relay dispatch reads the validated, disk-authoritative policy rather
   // than a transport setting that may have changed since the run began.
   input.runPolicy = runPolicy;
+  const taskIds = new Set(input.tasks.map((task) => task.id));
+  const taskAttempts = {};
+  for (const [taskId, attempt] of Object.entries(input.taskAttempts ?? {})) {
+    if (!taskIds.has(taskId) || ![1, 2].includes(attempt)) {
+      throw new Error(`invalid persisted implementation attempt for ${taskId}`);
+    }
+    taskAttempts[taskId] = attempt;
+  }
+  shipState.taskAttempts = taskAttempts;
   const roundOffset = Number(input.roundOffset ?? 0);
   let callCount = initialAgentCalls;
   // Relay re-reads are cheap but still calls, so they eat into the per-PR limit
@@ -829,6 +839,7 @@ async function main(raw) {
       ? "pending-checkpoint-reconciliation"
       : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
     legacyUsageIncomplete,
+    taskAttempts: { ...taskAttempts },
     ...result,
     agentCalls: relayState.dispatchedCalls
   });
@@ -915,10 +926,20 @@ async function main(raw) {
         const batch = runnable.slice(offset, offset + implementationParallel);
         const results = await parallel(batch.map((task) => async () => {
           const route = implementationRoute(config, task);
-          let result = await implementTask(input, task, route.tier, route.engine, 1);
+          const resumeAttempt = taskAttempts[task.id] ?? 1;
+          taskAttempts[task.id] = resumeAttempt;
+          let result = await implementTask(
+            input,
+            task,
+            resumeAttempt === 1 ? route.tier : nextTier(route.tier),
+            route.engine,
+            resumeAttempt
+          );
           callCount += 1;
           if (relayState.fatal.length > 0) return { task, result };
-          if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
+          if (resumeAttempt === 1
+            && (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met))) {
+            taskAttempts[task.id] = 2;
             result = await implementTask(input, task, nextTier(route.tier), route.engine, 2);
             callCount += 1;
           }
@@ -1493,6 +1514,7 @@ try {
       ? "pending-checkpoint-reconciliation"
       : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
     legacyUsageIncomplete: shipState.legacyUsageIncomplete,
+    taskAttempts: { ...shipState.taskAttempts },
     relayCheckpoints: [...new Set([
       ...relayState.fatal.map((item) => item.checkpoint),
       ...relayState.confirmedDispatches.map((item) => item.checkpoint)
