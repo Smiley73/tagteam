@@ -56,7 +56,15 @@ test("run policy validation rejects field tampering under a retained fingerprint
 test("legacy resume restores a validated both policy once at mode 0600", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-policy-"));
   const file = path.join(directory, "reviews", "pass-1-run-policy.json");
-  const first = restoreRunPolicy(file, { transport: { relayModel: "opus" } });
+  assert.throws(
+    () => restoreRunPolicy(file, { transport: { relayModel: "opus" } }),
+    /pass --allow-legacy/
+  );
+  const first = restoreRunPolicy(
+    file,
+    { transport: { relayModel: "opus" } },
+    { allowLegacy: true }
+  );
   assert.equal(first.migratedLegacy, true);
   assert.equal(first.policy.reasoningProvider, "both");
   assert.equal(first.policy.plumbingModel, "opus");
@@ -64,4 +72,40 @@ test("legacy resume restores a validated both policy once at mode 0600", () => {
   const second = restoreRunPolicy(file, { transport: { relayModel: "sonnet" } });
   assert.equal(second.migratedLegacy, false);
   assert.deepEqual(second.policy, first.policy);
+});
+
+test("a deleted policy cannot be recreated over policy-bound saved state", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-policy-deleted-"));
+  const file = path.join(directory, "run-policy.json");
+  const stateFile = path.join(directory, "state.json");
+  const original = normalizeRunPolicy({ provider: "codex" });
+  fs.writeFileSync(stateFile, JSON.stringify({
+    prs: [{ id: "PR-1", policyFingerprint: original.policyFingerprint }]
+  }));
+
+  assert.throws(
+    () => restoreRunPolicy(
+      file,
+      { transport: { relayModel: "opus" } },
+      { allowLegacy: true, stateFiles: [stateFile] }
+    ),
+    /policy-bound; cannot resume safely/
+  );
+  assert.equal(fs.existsSync(file), false);
+});
+
+test("an existing policy must match every saved state fingerprint", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-policy-mismatch-"));
+  const file = path.join(directory, "run-policy.json");
+  const stateFile = path.join(directory, "state.json");
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  fs.writeFileSync(file, JSON.stringify(policy));
+  fs.writeFileSync(stateFile, JSON.stringify({
+    policyFingerprint: normalizeRunPolicy({ provider: "claude" }).policyFingerprint
+  }));
+
+  assert.throws(
+    () => restoreRunPolicy(file, {}, { stateFiles: [stateFile] }),
+    /does not match/
+  );
 });

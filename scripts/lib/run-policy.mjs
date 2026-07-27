@@ -94,8 +94,44 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-export function restoreRunPolicy(file, config = {}) {
-  if (fs.existsSync(file)) return { policy: validateRunPolicy(readJson(file)), migratedLegacy: false };
+function collectPolicyFingerprints(value, fingerprints) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectPolicyFingerprints(item, fingerprints);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "policyFingerprint" && typeof item === "string") fingerprints.add(item);
+    collectPolicyFingerprints(item, fingerprints);
+  }
+}
+
+function statePolicyFingerprints(stateFiles) {
+  const fingerprints = new Set();
+  for (const stateFile of stateFiles) {
+    if (!fs.existsSync(stateFile)) throw new Error(`run policy state file does not exist: ${stateFile}`);
+    collectPolicyFingerprints(readJson(stateFile), fingerprints);
+  }
+  return fingerprints;
+}
+
+export function restoreRunPolicy(file, config = {}, { allowLegacy = false, stateFiles = [] } = {}) {
+  const savedFingerprints = statePolicyFingerprints(stateFiles);
+  if (fs.existsSync(file)) {
+    const policy = validateRunPolicy(readJson(file));
+    for (const savedFingerprint of savedFingerprints) {
+      if (savedFingerprint !== policy.policyFingerprint) {
+        throw new Error(`saved state run policy ${savedFingerprint} does not match ${policy.policyFingerprint}`);
+      }
+    }
+    return { policy, migratedLegacy: false };
+  }
+  if (savedFingerprints.size > 0) {
+    throw new Error("run policy file is missing but saved state is policy-bound; cannot resume safely");
+  }
+  if (!allowLegacy) {
+    throw new Error("run policy file is missing; pass --allow-legacy only after proving all saved state predates provider policies");
+  }
   const policy = normalizeRunPolicy({ provider: "both" }, config);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
@@ -106,7 +142,7 @@ export function restoreRunPolicy(file, config = {}) {
 }
 
 async function main() {
-  const [action, value, configPath] = process.argv.slice(2);
+  const [action, value, configPath, ...flags] = process.argv.slice(2);
   if (action === "normalize") {
     const config = configPath ? readJson(configPath) : {};
     process.stdout.write(`${JSON.stringify(normalizeRunPolicy({ provider: value ?? "both" }, config), null, 2)}\n`);
@@ -114,9 +150,21 @@ async function main() {
     process.stdout.write(`${JSON.stringify(validateRunPolicy(readJson(value)), null, 2)}\n`);
   } else if (action === "restore") {
     const config = configPath ? readJson(configPath) : {};
-    process.stdout.write(`${JSON.stringify(restoreRunPolicy(value, config), null, 2)}\n`);
+    const stateFiles = [];
+    let allowLegacy = false;
+    for (let index = 0; index < flags.length; index += 1) {
+      if (flags[index] === "--allow-legacy") {
+        allowLegacy = true;
+      } else if (flags[index] === "--state" && flags[index + 1]) {
+        stateFiles.push(flags[index + 1]);
+        index += 1;
+      } else {
+        throw new Error(`unknown restore option: ${flags[index]}`);
+      }
+    }
+    process.stdout.write(`${JSON.stringify(restoreRunPolicy(value, config, { allowLegacy, stateFiles }), null, 2)}\n`);
   } else {
-    process.stderr.write("usage: run-policy.mjs <normalize <both|claude|codex> [config.json]|validate <policy.json>|restore <policy.json> [config.json]>\n");
+    process.stderr.write("usage: run-policy.mjs <normalize <both|claude|codex> [config.json]|validate <policy.json>|restore <policy.json> [config.json] [--state <saved.json>]... [--allow-legacy]>\n");
     process.exitCode = 2;
   }
 }

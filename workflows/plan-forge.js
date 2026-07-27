@@ -384,7 +384,13 @@ function verifyCommand({ pluginRoot, payloads = [], expects = {}, requireJson = 
 // reply arrives, disk reconciliation decides whether Codex actually dispatched;
 // the workflow cannot truthfully infer that from a missing relay response.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0, fatal: [], receiptFiles: [], unconfirmedDispatches: [] };
+const relayState = {
+  extraCalls: 0,
+  fatal: [],
+  receiptFiles: [],
+  unconfirmedDispatches: [],
+  confirmedDispatches: []
+};
 const usageState = {
   claudeReasoningCalls: 0,
   haikuPlumbingCalls: 0,
@@ -582,7 +588,8 @@ async function relayCodex({
     if (response) {
       // The compatibility branch is for legacy workflow harnesses; production
       // agents are schema-bound to the envelope above.
-      const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
+      const schemaBoundEnvelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result");
+      const envelope = schemaBoundEnvelope
         ? response
         : { reused: false, executionId: null, requestIdentity, result: response };
       if (envelope.requestIdentity !== requestIdentity) {
@@ -591,6 +598,15 @@ async function relayCodex({
       }
       relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
         .filter((item) => item.receiptFile !== receiptFile);
+      if (schemaBoundEnvelope) {
+        relayState.confirmedDispatches.push({
+          receiptFile,
+          checkpoint,
+          requestIdentity,
+          sandbox,
+          executionId: envelope.executionId
+        });
+      }
       return envelope.result;
     }
     log(`The Codex ${what} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
@@ -624,6 +640,7 @@ async function main(raw) {
   relayState.fatal = [];
   relayState.receiptFiles = [];
   relayState.unconfirmedDispatches = [];
+  relayState.confirmedDispatches = [];
   const priorAgentCalls = persistedCount(input.agentCalls, "persisted planning agentCalls");
   planState.dispatchedCalls = priorAgentCalls;
   planState.runPolicy = null;
@@ -1182,7 +1199,12 @@ async function main(raw) {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
+    relayCheckpoints: [...new Set([
+      ...relayState.fatal,
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+    ])],
     unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
+    confirmedCodexDispatches: [...relayState.confirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
@@ -1212,11 +1234,15 @@ try {
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
     unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
+    confirmedCodexDispatches: [...relayState.confirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (planState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
     legacyUsageIncomplete: planState.legacyUsageIncomplete,
-    relayCheckpoints: [...relayState.fatal],
+    relayCheckpoints: [...new Set([
+      ...relayState.fatal,
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+    ])],
     budgetSpent: budgetSpent()
   };
 }

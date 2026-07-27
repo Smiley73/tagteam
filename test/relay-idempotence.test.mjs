@@ -140,6 +140,28 @@ test("a Codex executable that never spawns does not create a usage receipt", () 
   assert.equal(fs.existsSync(`${artifact}.usage-receipts.json`), false);
 });
 
+test("equivalent path spellings do not relabel and reuse an earlier execution identity", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-path-identity-"));
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter);
+  const artifact = path.join(temp, "findings.json");
+  const first = runBridge(temp, artifact, fake, [], "review this", root);
+  assert.equal(first.status, 0, first.stderr);
+  const firstIdentity = JSON.parse(first.stdout.trim()).requestIdentity;
+
+  const second = runBridge(temp, artifact, fake, [], "review this", `${root}/.`);
+  assert.equal(second.status, 0, second.stderr);
+  const secondResult = JSON.parse(second.stdout.trim());
+  assert.equal(secondResult.reused, false);
+  assert.notEqual(secondResult.requestIdentity, firstIdentity);
+  assert.equal(fs.readFileSync(counter, "utf8"), "xx");
+  const journal = JSON.parse(fs.readFileSync(`${artifact}.usage-receipts.json`, "utf8"));
+  assert.deepEqual(journal.invocations.map((entry) => entry.requestIdentity), [
+    firstIdentity,
+    secondResult.requestIdentity
+  ]);
+});
+
 test("shipping-style immutable request identities reject changed prompt bytes before Codex spawns", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-immutable-request-"));
   const counter = path.join(temp, "count.txt");
@@ -1012,6 +1034,22 @@ test("stale evidence at a reused artifact path cannot recover a different unconf
     statusAfter: after
   }));
 
+  assert.throws(() => reconcileUsageReceipts({
+    status: "clean",
+    usage: { codexCalls: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [receiptFile],
+    relayCheckpoints: [checkpointFile],
+    confirmedCodexDispatches: [{
+      receiptFile,
+      checkpoint: checkpointFile,
+      executionId: request.executionId,
+      requestIdentity: newIdentity,
+      sandbox: "workspace-write"
+    }],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  }), /confirmed Codex dispatch has no matching invocation receipt/);
+
   const reconciled = reconcileUsageReceipts({
     status: "relay-interrupted-workspace-unknown",
     usage: { codexCalls: 0 },
@@ -1259,6 +1297,26 @@ const SHIP_ARGS = {
   existingCandidateOid: "c".repeat(40)
 };
 
+function snapshotFixture(label, candidateOid = SHIP_ARGS.existingCandidateOid, baseOid = SHIP_ARGS.baseOid) {
+  const round = String(label).split(":").at(-1);
+  const outDir = `/ships/s1/prs/PR-1/rounds/${round}-${candidateOid}`;
+  return {
+    baseOid,
+    candidateOid,
+    candidatePath: `${outDir}/candidate.json`,
+    diffPath: `${outDir}/candidate.diff`,
+    diffHash: `sha256:${"c".repeat(64)}`,
+    reviewDiffPath: `${outDir}/review.diff`,
+    reviewDiffHash: TEST_REVIEW_DIFF_HASH,
+    changedPaths: ["src/a.js"],
+    addedLines: "+const a = 1;",
+    excluded: [],
+    treeClean: "",
+    diffBytes: 20,
+    fileCount: 1
+  };
+}
+
 test("resume carries saved open questions and keeps persisting them", async () => {
   const persisted = [];
   const { result } = await harness(
@@ -1435,12 +1493,7 @@ test("every early exit reports the relay retries it spent", async () => {
     }
     if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label, "d".repeat(40));
     }
     // Verification never clears, so the PR leaves through an early exit.
     if (label.startsWith("verify:repair")) return { summary: "s", results: [{ id: "TT-VERIFY", status: "fixed", explanation: "e" }] };
@@ -1499,12 +1552,7 @@ test("workflows reject an explicit run policy with its fingerprint removed", asy
 test("shipping resume adds current invocation usage to persisted usage", async () => {
   const responder = (label) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1557,12 +1605,7 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
     runPolicy: policy
   }, (label) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1591,12 +1634,7 @@ test("validated Codex artifact reuse is not counted as a new Codex call", async 
     usageReceipts: ["exec-old"]
   }, (label, _prompt, options) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1624,12 +1662,7 @@ test("total review relay loss keeps Codex usage pending disk reconciliation", as
   const args = { ...SHIP_ARGS, config };
   const respond = (resume) => (label, _prompt, options) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: args.baseOid, candidateOid: args.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label, args.existingCandidateOid, args.baseOid);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1711,12 +1744,7 @@ test("total implementation relay loss remains workspace-unknown until checkpoint
     }
     if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: args.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label, "d".repeat(40), args.baseOid);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1783,10 +1811,9 @@ test("implementation resume reuses completed dependency waves", async () => {
     if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: tasks" };
     if (label.startsWith("candidate:snapshot")) {
       return {
-        baseOid: args.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["one.js", "two.js"], addedLines: "+ok", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 2
+        ...snapshotFixture(label, "d".repeat(40), args.baseOid),
+        changedPaths: ["one.js", "two.js"],
+        fileCount: 2
       };
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
@@ -1825,10 +1852,9 @@ test("Codex implementation tasks do not share a parallel writable batch", async 
     if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
     if (label.startsWith("candidate:snapshot")) {
       return {
-        baseOid: args.baseOid, candidateOid: "d".repeat(40),
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["T1.js", "T2.js"], addedLines: "+ok", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 2
+        ...snapshotFixture(label, "d".repeat(40), args.baseOid),
+        changedPaths: ["T1.js", "T2.js"],
+        fileCount: 2
       };
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
@@ -1852,12 +1878,7 @@ test("relay retries stop at the hard per-PR dispatch ceiling", async () => {
   config.reviewers.functionality.enabled = true;
   const { result, calls } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config }, (label) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1897,12 +1918,7 @@ test("a recovered relay cannot make later verification repair exceed the call ce
   const { result, calls } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config }, (label, prompt) => {
     if (label.startsWith("candidate:snapshot")) {
       const candidateOid = label === "candidate:snapshot:0" ? SHIP_ARGS.existingCandidateOid : (commitCount === 1 ? "d" : "e").repeat(40);
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label, candidateOid);
     }
     if (label === "verify:0") return { status: "passed", resultPath: "/ships/s1/verify-0.json", commands: [] };
     if (label === "verify:1") return { status: "failed", resultPath: "/ships/s1/verify-1.json", commands: [] };
@@ -1948,12 +1964,7 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   let droppedCodexReview = false;
   const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, prompt) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid, candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff", reviewDiffPath: "/ships/s1/review.diff", reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"], addedLines: "+const a = 1;", excluded: [],
-        treeClean: "", diffBytes: 20, fileCount: 1
-      };
+      return snapshotFixture(label);
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1999,19 +2010,7 @@ test("a confirmed relay result with another request identity is rejected and ret
   let returnedMismatch = false;
   const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, prompt, options) => {
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        baseOid: SHIP_ARGS.baseOid,
-        candidateOid: SHIP_ARGS.existingCandidateOid,
-        candidatePath: "/ships/s1/candidate.diff",
-        reviewDiffPath: "/ships/s1/review.diff",
-        reviewDiffHash: TEST_REVIEW_DIFF_HASH,
-        changedPaths: ["src/a.js"],
-        addedLines: "+const a = 1;",
-        excluded: [],
-        treeClean: "",
-        diffBytes: 20,
-        fileCount: 1
-      };
+      return snapshotFixture(label);
     }
     if (label.startsWith("verify:")) {
       return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };

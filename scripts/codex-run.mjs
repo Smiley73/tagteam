@@ -481,14 +481,7 @@ function appendInvocationReceipt(artifact, fingerprint, executionId, fields = {}
     writeJsonAtomic(file, journal);
   } else if (fields.requestIdentity
     && journal.invocations[existingIndex].requestIdentity !== fields.requestIdentity) {
-    if (journal.invocations[existingIndex].requestFingerprint !== fingerprint) {
-      throw new Error(`Codex invocation receipt identity conflicts at ${file}`);
-    }
-    journal.invocations[existingIndex] = {
-      ...journal.invocations[existingIndex],
-      requestIdentity: fields.requestIdentity
-    };
-    writeJsonAtomic(file, journal);
+    throw new Error(`Codex invocation receipt identity conflicts at ${file}`);
   }
   return file;
 }
@@ -559,7 +552,7 @@ export async function runCodex(options, prompt) {
     if (existing.ok) {
       let recorded = null;
       try { recorded = JSON.parse(fs.readFileSync(requestPath, "utf8")); } catch {}
-      if (recorded?.fingerprint === fingerprint) {
+      if (recorded?.fingerprint === fingerprint && recorded.requestIdentity === identity) {
         if (options.dryRun) {
           process.stderr.write(`Reusing the existing dry-run artifact at ${artifact}; Codex was not invoked.\n`);
           return { result: existing.value, reused: true, executionId: null, requestIdentity: identity };
@@ -604,7 +597,9 @@ export async function runCodex(options, prompt) {
           };
         }
       }
-      if (recorded?.fingerprint !== fingerprint) {
+      if (recorded?.fingerprint === fingerprint && recorded.requestIdentity !== identity) {
+        process.stderr.write(`The artifact at ${artifact} has a different or legacy request identity; running Codex again.\n`);
+      } else if (recorded?.fingerprint !== fingerprint) {
         process.stderr.write(recorded
           ? `The artifact at ${artifact} answers a different request; running Codex again.\n`
           : `The artifact at ${artifact} has no recorded request; running Codex again.\n`);

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { snapshotCandidate } from "../scripts/snapshot-candidate.mjs";
+import { snapshotCandidate, validateCandidateSnapshot } from "../scripts/snapshot-candidate.mjs";
 import { verify } from "../scripts/verify-run.mjs";
 import { setupWorktree } from "../scripts/worktree-setup.mjs";
 import { reconcileUsageReceipts } from "../scripts/reconcile-usage-receipts.mjs";
@@ -200,9 +200,10 @@ process.stdin.on("end", () => {
     usageReceipts: [],
     usageReceiptFiles: [`${artifact}.usage-receipts.json`],
     relayCheckpoints: [`${artifact}.relay-checkpoint.json`],
-    unconfirmedCodexDispatches: [{
+    confirmedCodexDispatches: [{
       receiptFile: `${artifact}.usage-receipts.json`,
       checkpoint: `${artifact}.relay-checkpoint.json`,
+      executionId: bridge.executionId,
       requestIdentity,
       sandbox: "read-only"
     }],
@@ -250,6 +251,36 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
     `sha256:${createHash("sha256").update(fs.readFileSync(result.reviewDiffPath)).digest("hex")}`
   );
   assert.match(result.addedLines, /value = 2/);
+  assert.equal(
+    validateCandidateSnapshot(result.candidatePath, { baseOid: base, candidateOid: candidate }).candidateOid,
+    candidate
+  );
+  // An identical retry is safe, but neither a consumer nor a later snapshot
+  // attempt may accept different bytes under the same candidate identity.
+  assert.equal(snapshotCandidate({
+    worktree: repo,
+    primary: repo,
+    base,
+    candidate,
+    "out-dir": path.join(repo, "out"),
+    "exclude-json": exclude
+  }).candidateOid, candidate);
+  fs.appendFileSync(result.reviewDiffPath, "\npost-snapshot drift\n");
+  assert.throws(
+    () => validateCandidateSnapshot(result.candidatePath, { baseOid: base, candidateOid: candidate }),
+    /bytes do not match/
+  );
+  assert.throws(
+    () => snapshotCandidate({
+      worktree: repo,
+      primary: repo,
+      base,
+      candidate,
+      "out-dir": path.join(repo, "out"),
+      "exclude-json": exclude
+    }),
+    /immutable candidate snapshot/
+  );
 });
 
 test("verification is tri-state and path-conditioned", async () => {

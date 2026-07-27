@@ -28,6 +28,8 @@ export function reconcileUsageReceipts(result) {
   const checkpointFiles = new Set(result.relayCheckpoints ?? []);
   const unconfirmedByReceipt = new Map();
   const unconfirmedByCheckpoint = new Map();
+  const confirmedByReceipt = new Map();
+  const confirmedByCheckpoint = new Map();
   for (const dispatch of result.unconfirmedCodexDispatches ?? []) {
     if (!dispatch || typeof dispatch !== "object"
       || typeof dispatch.receiptFile !== "string"
@@ -45,6 +47,29 @@ export function reconcileUsageReceipts(result) {
     }
     unconfirmedByReceipt.set(dispatch.receiptFile, dispatch);
     unconfirmedByCheckpoint.set(dispatch.checkpoint, dispatch);
+  }
+  for (const dispatch of result.confirmedCodexDispatches ?? []) {
+    if (!dispatch || typeof dispatch !== "object"
+      || typeof dispatch.receiptFile !== "string"
+      || typeof dispatch.checkpoint !== "string"
+      || typeof dispatch.executionId !== "string"
+      || dispatch.executionId.length === 0
+      || !/^sha256:[0-9a-f]{64}$/.test(dispatch.requestIdentity ?? "")
+      || !["read-only", "workspace-write"].includes(dispatch.sandbox)) {
+      throw new Error("invalid confirmed Codex dispatch record");
+    }
+    if (!receiptFiles.has(dispatch.receiptFile) || !checkpointFiles.has(dispatch.checkpoint)) {
+      throw new Error(`confirmed Codex dispatch is not registered for reconciliation: ${dispatch.receiptFile}`);
+    }
+    if (unconfirmedByReceipt.has(dispatch.receiptFile)) {
+      throw new Error(`Codex dispatch cannot be both confirmed and unconfirmed: ${dispatch.receiptFile}`);
+    }
+    const receiptDispatches = confirmedByReceipt.get(dispatch.receiptFile) ?? [];
+    receiptDispatches.push(dispatch);
+    confirmedByReceipt.set(dispatch.receiptFile, receiptDispatches);
+    const checkpointDispatches = confirmedByCheckpoint.get(dispatch.checkpoint) ?? [];
+    checkpointDispatches.push(dispatch);
+    confirmedByCheckpoint.set(dispatch.checkpoint, checkpointDispatches);
   }
   const workspaceCheckpointStates = [];
   let added = 0;
@@ -77,6 +102,13 @@ export function reconcileUsageReceipts(result) {
       // not mistake them for evidence that the current relay reached Codex.
       incomplete = true;
     }
+    for (const confirmed of confirmedByReceipt.get(receiptFile) ?? []) {
+      if (!journal.invocations.some((entry) =>
+        entry.executionId === confirmed.executionId
+        && entry.requestIdentity === confirmed.requestIdentity)) {
+        throw new Error(`confirmed Codex dispatch has no matching invocation receipt: ${receiptFile}`);
+      }
+    }
     for (const invocation of journal.invocations) {
       if (typeof invocation.executionId !== "string" || invocation.executionId.length === 0
         || typeof invocation.requestFingerprint !== "string" || invocation.requestFingerprint.length === 0) {
@@ -101,6 +133,9 @@ export function reconcileUsageReceipts(result) {
   }
   for (const checkpointFile of checkpointFiles) {
     if (!fs.existsSync(checkpointFile) && (result.usageReceiptFiles ?? []).length > 0) {
+      if (confirmedByCheckpoint.has(checkpointFile)) {
+        throw new Error(`confirmed Codex dispatch has no completion checkpoint: ${checkpointFile}`);
+      }
       // A failed/invalid Codex invocation has a durable per-invocation journal
       // but no completed-artifact checkpoint. Usage can still be made exact;
       // the missing checkpoint remains a separate resume/recovery hard stop.
@@ -135,6 +170,13 @@ export function reconcileUsageReceipts(result) {
         workspaceCheckpointStates.push("unknown");
       }
       continue;
+    }
+    for (const confirmed of confirmedByCheckpoint.get(checkpointFile) ?? []) {
+      if (checkpoint.executionId !== confirmed.executionId
+        || checkpoint.requestIdentity !== confirmed.requestIdentity
+        || checkpoint.sandbox !== confirmed.sandbox) {
+        throw new Error(`confirmed Codex dispatch does not match its completion checkpoint: ${checkpointFile}`);
+      }
     }
     if (!receipts.has(checkpoint.executionId)) {
       receipts.add(checkpoint.executionId);

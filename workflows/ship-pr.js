@@ -77,9 +77,11 @@ const commitSchema = {
 };
 const snapshotSchema = {
   type: "object", additionalProperties: false,
-  required: ["baseOid", "candidateOid", "candidatePath", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
+  required: ["baseOid", "candidateOid", "candidatePath", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
   properties: {
     baseOid: { type: "string" }, candidateOid: { type: "string" }, candidatePath: { type: "string" },
+    diffPath: { type: "string" },
+    diffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     reviewDiffPath: { type: "string" },
     reviewDiffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     changedPaths: { type: "array", items: { type: "string" } },
@@ -399,6 +401,7 @@ const relayState = {
   fatal: [],
   receiptFiles: [],
   unconfirmedDispatches: [],
+  confirmedDispatches: [],
   dispatchedCalls: 0,
   maximumCalls: Infinity,
   capacityExceeded: false
@@ -537,7 +540,8 @@ async function codexCall(input, {
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
-      const envelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result")
+      const schemaBoundEnvelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result");
+      const envelope = schemaBoundEnvelope
         ? response
         : { reused: false, executionId: null, requestIdentity, result: response };
       if (envelope.requestIdentity !== requestIdentity) {
@@ -546,6 +550,15 @@ async function codexCall(input, {
       }
       relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
         .filter((item) => item.receiptFile !== receiptFile);
+      if (schemaBoundEnvelope) {
+        relayState.confirmedDispatches.push({
+          receiptFile,
+          checkpoint: `${artifact}.relay-checkpoint.json`,
+          requestIdentity,
+          sandbox,
+          executionId: envelope.executionId
+        });
+      }
       return envelope.result;
     }
     if (relayState.capacityExceeded) break;
@@ -610,7 +623,13 @@ async function commitCandidate(input, round, summary) {
 }
 
 async function snapshot(input, round, candidateOid) {
+  if (!/^[0-9a-f]{40}$/.test(input.baseOid) || !/^[0-9a-f]{40}$/.test(candidateOid)) {
+    throw new Error("candidate snapshot requires full lowercase Git object IDs");
+  }
   const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}-${candidateOid}`;
+  const expectedCandidatePath = `${outDir}/candidate.json`;
+  const expectedDiffPath = `${outDir}/candidate.diff`;
+  const expectedReviewDiffPath = `${outDir}/review.diff`;
   const command = [
     `node "${input.pluginRoot}/scripts/snapshot-candidate.mjs"`,
     `--worktree "${input.worktree}"`,
@@ -625,7 +644,7 @@ async function snapshot(input, round, candidateOid) {
     `Run exactly: ${command}`,
     codegraph,
     `Read ${outDir}/candidate.json.`,
-    `Return only the requested schema fields, setting candidatePath=${JSON.stringify(`${outDir}/candidate.json`)} and retaining reviewDiffPath. Do not copy review.diff through the model response.`
+    `Return only the requested schema fields, setting candidatePath=${JSON.stringify(expectedCandidatePath)}, diffPath=${JSON.stringify(expectedDiffPath)}, and reviewDiffPath=${JSON.stringify(expectedReviewDiffPath)}. Do not copy either diff through the model response.`
   ].join("\n"), {
     label: `candidate:snapshot:${round}`,
     phase: "Candidate",
@@ -634,7 +653,13 @@ async function snapshot(input, round, candidateOid) {
     schema: snapshotSchema
   });
   if (!result && relayState.capacityExceeded) return null;
-  if (!result || result.candidateOid !== candidateOid || result.baseOid !== input.baseOid || result.treeClean !== "") {
+  if (!result
+    || result.candidateOid !== candidateOid
+    || result.baseOid !== input.baseOid
+    || result.candidatePath !== expectedCandidatePath
+    || result.diffPath !== expectedDiffPath
+    || result.reviewDiffPath !== expectedReviewDiffPath
+    || result.treeClean !== "") {
     throw new Error(`candidate snapshot ${round} did not bind to the expected commits or the primary checkout changed`);
   }
   return result;
@@ -646,6 +671,8 @@ async function runVerify(input, snapshotValue, round) {
     `node "${input.pluginRoot}/scripts/verify-run.mjs"`,
     `--config "${input.configPath}"`,
     `--candidate "${snapshotValue.candidatePath}"`,
+    `--base "${input.baseOid}"`,
+    `--candidate-oid "${snapshotValue.candidateOid}"`,
     `--worktree "${input.worktree}"`,
     `--out-dir "${input.shipDir}/prs/${input.pr.id}/verify/${round}"`,
     `--out "${resultPath}"`
@@ -710,6 +737,7 @@ async function main(raw) {
   relayState.fatal = [];
   relayState.receiptFiles = [];
   relayState.unconfirmedDispatches = [];
+  relayState.confirmedDispatches = [];
   shipState.runPolicy = null;
   shipState.legacyUsageIncomplete = false;
   shipState.taskResults = [];
@@ -767,7 +795,12 @@ async function main(raw) {
     },
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
+    relayCheckpoints: [...new Set([
+      ...relayState.fatal.map((item) => item.checkpoint),
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+    ])],
     unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
+    confirmedCodexDispatches: [...relayState.confirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
@@ -786,7 +819,10 @@ async function main(raw) {
       ledger,
       gateFailures: ["Every Codex relay handoff failed. Reconcile disk evidence, then resume to reuse saved work when present."],
       candidateOid,
-      relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
+      relayCheckpoints: [...new Set([
+        ...relayState.fatal.map((item) => item.checkpoint),
+        ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+      ])],
       ...extra
     });
   };
@@ -1428,11 +1464,15 @@ try {
     usageReceipts: [...codexReceiptState],
     usageReceiptFiles: [...relayState.receiptFiles],
     unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
+    confirmedCodexDispatches: [...relayState.confirmedDispatches],
     usageAccounting: relayState.receiptFiles.length > 0
       ? "pending-checkpoint-reconciliation"
       : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
     legacyUsageIncomplete: shipState.legacyUsageIncomplete,
-    relayCheckpoints: relayState.fatal.map((item) => item.checkpoint),
+    relayCheckpoints: [...new Set([
+      ...relayState.fatal.map((item) => item.checkpoint),
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+    ])],
     tasks: [...shipState.taskResults],
     candidateOid: shipState.candidateOid,
     rounds: [...shipState.rounds],
