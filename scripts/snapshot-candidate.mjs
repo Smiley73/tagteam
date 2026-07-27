@@ -49,6 +49,18 @@ function sha256File(file) {
   return `sha256:${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}`;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function candidateMetadataHash(candidate) {
+  return `sha256:${createHash("sha256").update(canonicalJson(candidate)).digest("hex")}`;
+}
+
 export function validateCandidateSnapshot(candidatePath, {
   baseOid,
   candidateOid,
@@ -95,7 +107,12 @@ export function validateCandidateSnapshot(candidatePath, {
     || candidate.treeClean !== "") {
     throw new Error("candidate snapshot metadata is internally inconsistent");
   }
-  return { candidatePath: resolvedCandidatePath, candidateHash, ...candidate };
+  return {
+    candidatePath: resolvedCandidatePath,
+    candidateHash,
+    candidateMetadataHash: candidateMetadataHash(candidate),
+    ...candidate
+  };
 }
 
 export function snapshotCandidate(options) {

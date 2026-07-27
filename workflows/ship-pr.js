@@ -77,10 +77,11 @@ const commitSchema = {
 };
 const snapshotSchema = {
   type: "object", additionalProperties: false,
-  required: ["baseOid", "candidateOid", "candidatePath", "candidateHash", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
+  required: ["baseOid", "candidateOid", "candidatePath", "candidateHash", "candidateMetadataHash", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
   properties: {
     baseOid: { type: "string" }, candidateOid: { type: "string" }, candidatePath: { type: "string" },
     candidateHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    candidateMetadataHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     diffPath: { type: "string" },
     diffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     reviewDiffPath: { type: "string" },
@@ -677,9 +678,9 @@ async function snapshot(input, round, candidateOid) {
     fileCount: result.fileCount,
     treeClean: result.treeClean
   };
-  const returnedMetadataHash = await sha256(`${JSON.stringify(returnedMetadata, null, 2)}\n`);
-  if (result.candidateHash !== returnedMetadataHash) {
-    throw new Error(`candidate snapshot ${round} metadata does not match its immutable candidate.json hash`);
+  const returnedMetadataHash = await sha256(canonicalPolicy(returnedMetadata));
+  if (result.candidateMetadataHash !== returnedMetadataHash) {
+    throw new Error(`candidate snapshot ${round} metadata does not match its canonical candidate.json identity`);
   }
   return result;
 }

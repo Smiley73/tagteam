@@ -22,6 +22,14 @@ const CLEAN_FINDINGS = {
 };
 const TEST_REVIEW_DIFF_HASH = `sha256:${"d".repeat(64)}`;
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function requestIdentityFromRelayPrompt(prompt) {
   const match = String(prompt).match(/\.([0-9a-f]{64})\.prompt\.md/);
   assert.ok(match, `relay prompt has no request-specific prompt path: ${String(prompt).slice(0, 300)}`);
@@ -1355,6 +1363,7 @@ function snapshotFixture(
   return {
     candidatePath: `${outDir}/candidate.json`,
     candidateHash: `sha256:${createHash("sha256").update(`${JSON.stringify(candidate, null, 2)}\n`).digest("hex")}`,
+    candidateMetadataHash: `sha256:${createHash("sha256").update(canonicalJson(candidate)).digest("hex")}`,
     ...candidate
   };
 }
@@ -1425,8 +1434,45 @@ test("shipping rejects relay-transcribed snapshot metadata that does not match c
     throw new Error(`unexpected call after mismatched snapshot: ${label}`);
   });
   assert.equal(result.status, "ship-interrupted");
-  assert.match(result.message, /metadata does not match its immutable candidate\.json hash/);
+  assert.match(result.message, /metadata does not match its canonical candidate\.json identity/);
   assert.equal(labels.some((label) => label.startsWith("verify:")), false);
+});
+
+test("snapshot metadata binding ignores semantically irrelevant nested key order", async () => {
+  const originalExcluded = {
+    path: "package-lock.json",
+    oldBlob: "a".repeat(40),
+    newBlob: "b".repeat(40),
+    diffstat: "1 file changed"
+  };
+  const { result } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label) => {
+    if (label.startsWith("candidate:snapshot")) {
+      const snapshot = snapshotFixture(
+        label,
+        SHIP_ARGS.existingCandidateOid,
+        SHIP_ARGS.baseOid,
+        { excluded: [originalExcluded] }
+      );
+      return {
+        ...snapshot,
+        excluded: [{
+          diffstat: originalExcluded.diffstat,
+          newBlob: originalExcluded.newBlob,
+          oldBlob: originalExcluded.oldBlob,
+          path: originalExcluded.path
+        }]
+      };
+    }
+    if (label.startsWith("verify:")) {
+      return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
+    }
+    if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
+    if (label.startsWith("scribe:")) {
+      return { ok: true, reviewPath: "/ships/s1/review.md", roundJsonPath: "/ships/s1/round.json", findingIds: [] };
+    }
+    return CLEAN_FINDINGS;
+  });
+  assert.equal(result.status, "clean");
 });
 
 test("generic shipping interruption preserves completed tasks and candidate state", async () => {
