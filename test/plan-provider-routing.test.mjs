@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { composePrompt } from "../scripts/compose-prompt.mjs";
 import { materializePlanArtifact } from "../scripts/materialize-plan-artifact.mjs";
+import { mergePlanQuestions } from "../scripts/merge-plan-questions.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const identity = `sha256:${"a".repeat(64)}`;
@@ -118,6 +119,31 @@ test("Codex draft promotion publishes the discoverable plan only after required 
   assert.equal(fs.existsSync(`${plan}.ui-decisions.json`), true, "the optional UI sidecar may be orphaned safely");
 });
 
+test("decomposition-review questions are atomically merged into the authoritative sidecar", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-final-questions-"));
+  const questions = path.join(directory, "plan.md.questions.json");
+  fs.writeFileSync(questions, JSON.stringify(["Which rollout?"]));
+
+  const result = mergePlanQuestions(questions, ["", "which   rollout?", "Who owns rollback?"]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(questions, "utf8")), [
+    "Which rollout?",
+    "Who owns rollback?"
+  ]);
+  assert.equal(fs.statSync(questions).mode & 0o777, 0o600);
+  assert.equal(result.payloads[0].file, questions);
+});
+
+test("Claude decomposition review stays read-only and delegates question persistence to deterministic plumbing", () => {
+  const workflow = fs.readFileSync(path.join(root, "workflows", "plan-forge.js"), "utf8");
+  const reviewer = fs.readFileSync(path.join(root, "agents", "plan-reviewer.md"), "utf8");
+  const promptBuilder = fs.readFileSync(path.join(root, "agents", "prompt-builder.md"), "utf8");
+
+  assert.doesNotMatch(workflow, /persist the identical review JSON/);
+  assert.match(reviewer, /Do not edit files/);
+  assert.match(promptBuilder, /merge-plan-questions\.mjs/);
+});
+
 test("plan command documents provider validation and immutable resume policy", () => {
   const command = fs.readFileSync(path.join(root, "commands", "plan.md"), "utf8");
   assert.match(command, /--provider both\|claude\|codex/);
@@ -129,8 +155,16 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /source-passId/);
   assert.match(command, /never derive this path from the next pass ID/);
   assert.match(command, /<passId>-invocation\.json/);
+  assert.match(command, /exact source `questionsFile`/);
+  assert.match(command, /regardless of whether its provider is `both`, `claude`, or `codex`/);
   assert.match(command, /no draft or integrated plan/);
   assert.match(command, /invoke without `seedPlan` or `resumeRound`/);
+  assert.match(command, /first result's `questionsPath`/);
+  assert.match(command, /never replace missing or malformed outstanding-question state with `\[\]`/);
+  assert.match(command, /derive only `<seedPlanPath>\.questions\.json`/);
+  assert.match(command, /restored provider is `both` or `claude`/);
+  assert.match(command, /mark the inherited snapshot `usageAccounting: legacy-incomplete`/);
+  assert.match(command, /no durable receipt can prove whether that paid call happened/);
 });
 
 test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {

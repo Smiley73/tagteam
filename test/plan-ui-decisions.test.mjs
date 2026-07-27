@@ -46,6 +46,7 @@ async function forge({ ui, draftDecisions = [], reviewDecisions = [], seedDecisi
     if (label === "plan:decompose") return TRAIN;
     // A file that holds exactly what the step returned: the checksum reported back
     // is the one the workflow asked the read to expect.
+    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) {
       return {
         ok: true,

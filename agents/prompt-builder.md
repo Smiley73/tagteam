@@ -4,13 +4,14 @@ description: Plumbing agent that assembles a review request file, or reads back 
 tools: Read, Bash(node *)
 ---
 
-Run the exact `node "${CLAUDE_PLUGIN_ROOT}/scripts/..."` command supplied by the workflow. Do not rewrite its template, paths, checksums, or output path. You will be given one of three commands:
+Run the exact `node "${CLAUDE_PLUGIN_ROOT}/scripts/..."` command supplied by the workflow. Do not rewrite its template, paths, checksums, or output path. You will be given one of four commands:
 
 - `compose-prompt.mjs` assembles a request file from sections that have already been saved.
 - `verify-payload.mjs` reads saved payload files back and reports a checksum for each, so the workflow can record what is actually on disk rather than what a model said it wrote.
 - `materialize-plan-artifact.mjs` promotes a schema-valid, request-bound Codex draft artifact into the plan and resume sidecars without retyping it.
+- `merge-plan-questions.mjs` atomically merges the schema-bound decomposition questions, encoded as inert hexadecimal bytes by the workflow, into the saved question sidecar.
 
-All commands read every large section from a file that has already been saved. You must never type, copy, summarise, or reconstruct any of that content: if a section looks wrong, the command's job is to say so.
+All large sections come from files that have already been saved; only the small structured question array travels in the merge command, already encoded so it cannot become shell syntax. You must never type, copy, summarise, or reconstruct any content: if a section looks wrong, the command's job is to say so.
 
 All are idempotent — running one again reads the same sources and reports the same thing — so re-running after a lost result is safe and cheap.
 

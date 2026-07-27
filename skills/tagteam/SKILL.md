@@ -15,6 +15,7 @@ Use this reference for `/tagteam:init`, `/tagteam:plan`, `/tagteam:ship`, and `/
 /tagteam:plan --resume <slug>
 /tagteam:plan <goal> --provider both|claude|codex
 /tagteam:ship .tagteam/plans/<slug>
+/tagteam:ship .tagteam/plans/<slug> --provider both|claude|codex
 /tagteam:ship .tagteam/plans/<slug> --resume
 /tagteam:ship .tagteam/plans/<slug> --reviewers security,functionality
 /tagteam:status
@@ -70,7 +71,7 @@ A declaration names what was decided, the surface kind, the chosen option, at le
 Two mechanisms then act on that channel, and they are gated differently on purpose:
 
 - The interface lens runs in every cross-review round whenever `ui.hasUserInterface` is not false, including for settings that predate these questions. It asks whether each surface needs to exist, whether it is in the right place, whether every new input earns itself, and whether it follows precedent — and returns decisions the plan made without declaring. It runs on each plan's selected substantive provider, never asks the human anything, never blocks a pass, and a round that loses it stands on its configured substantive review. Because it costs the user nothing, it is not a preference.
-- Planning defaults to `--provider both`. `--provider claude` omits every Codex dispatch. `--provider codex` routes drafting, review, revision, manifest generation, and PR decomposition through the Codex bridge while Haiku only assembles prompts, invokes the bridge, and promotes validated artifacts. Single-provider runs disclose reduced assurance and the saved provider is immutable on resume.
+- Planning and shipping default to `--provider both`. `--provider claude` omits every Codex dispatch. For planning, `--provider codex` routes drafting, review, revision, manifest generation, and PR decomposition through the Codex bridge. For shipping it routes implementation, candidate UI classification, specialist analysis, review, verification repair, and finding repair through the bridge. Haiku only performs orchestration and deterministic repository plumbing. Single-provider runs disclose reduced assurance and the saved provider is immutable on resume.
 - Confirmation is a preference, so `ui.confirmDecisions` gates it. `new-surfaces` surfaces new surfaces plus anything with no precedent; `all-surfaces` surfaces everything declared; `off` surfaces nothing. An unanswered policy behaves as `off`: an upgrade must never start interrupting people who did not ask to be interrupted.
 
 The command asks in two steps and never one question per decision: one multi-select scan per three decisions, defaulting to keeping them all, then a single-select drill-down carrying each option's sketch as its preview only for the ones the user picked. Outcomes are recorded as ordinary decision rows, including the ones kept unchanged, so no later pass asks twice.

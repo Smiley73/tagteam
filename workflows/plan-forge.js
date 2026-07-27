@@ -383,6 +383,12 @@ function expectJson(value) {
   return `${text.length}:${fnv1a(text)}`;
 }
 
+function jsonHex(value) {
+  return [...new TextEncoder().encode(JSON.stringify(value))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function composeCommand({ pluginRoot, template, out, vars = {}, fences = [], expects = {}, requireJson = [], minBytes }) {
   return [
     `node "${pluginRoot}/scripts/compose-prompt.mjs"`,
@@ -523,6 +529,38 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
     "Run the same plan command again with --resume; every finished check is reused rather than repaid.",
     `Details: saved file ${file}`
   ].join("\n"));
+}
+
+// Runs the deterministic question-sidecar merge. The schema-bound, small
+// question array is encoded as inert hex in the command; Haiku only launches the
+// helper and relays its result. A follow-up verifySaved call binds the exact
+// final bytes.
+async function mergeFinalQuestions({ command, label, phase: phaseName, model, file }) {
+  const prompt = [
+    `Run this exact command: ${command}`,
+    "It atomically merges the saved decomposition review's open questions into the plan's question sidecar. Do not write, edit, summarise, or retype any question yourself.",
+    "Return the command's JSON stdout unchanged. If it exits non-zero, return ok=false with its exact stderr as error."
+  ].join("\n\n");
+  for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) relayState.extraCalls += 1;
+    const result = await planAgent(prompt, {
+      label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
+      phase: phaseName,
+      agentType: "tagteam:prompt-builder",
+      model,
+      schema: payloadVerifySchema
+    });
+    if (result?.ok) return;
+    if (result && !result.ok) {
+      throw new Error(payloadNotSaved({ what: "final open questions", file, detail: result.error }));
+    }
+    log(`The final question sidecar was merged, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Merging it again is idempotent.`);
+  }
+  throw new Error(payloadNotSaved({
+    what: "final open questions",
+    file,
+    detail: `merge could not be confirmed after ${RELAY_ATTEMPTS} attempts`
+  }));
 }
 
 // Promotes a validated Codex draft artifact into the exact files that make a
@@ -923,8 +961,8 @@ async function main(raw) {
       schema: planDraftSchema
     });
   } else {
-    if (continuation && (!input.seedPlanPath || !input.decisionsFile)) {
-      throw new Error("Codex plan continuation requires seedPlanPath and decisionsFile");
+    if (continuation && (!input.seedPlanPath || !input.decisionsFile || !input.questionsFile)) {
+      throw new Error("Codex plan continuation requires seedPlanPath, decisionsFile, and questionsFile");
     }
     if (!continuation && decisions.length) {
       throw new Error("a fresh Codex plan with human decisions requires a saved continuation");
@@ -938,7 +976,7 @@ async function main(raw) {
         { name: "PROJECT_CONFIG", file: configPath, json: true },
         { name: "SEED_PLAN", file: input.seedPlanPath },
         { name: "HUMAN_DECISIONS", file: input.decisionsFile, json: true },
-        { name: "CARRIED_QUESTIONS", file: `${input.seedPlanPath}.questions.json`, json: true },
+        { name: "CARRIED_QUESTIONS", file: input.questionsFile, json: true },
         ...(uiEnabled ? [{
           name: "CARRIED_INTERFACE_DECISIONS",
           file: input.uiDecisionsFile,
@@ -1543,6 +1581,39 @@ async function main(raw) {
   }
   questions.push(...(decompositionReview.open_questions ?? []));
 
+  const finalQuestions = dedupeQuestions(questions);
+  const finalQuestionsPath = `${integratedPath}.questions.json`;
+  await mergeFinalQuestions({
+    command: [
+      `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
+      `"${finalQuestionsPath}"`,
+      `"${jsonHex(decompositionReview.open_questions ?? [])}"`
+    ].join(" "),
+    label: "plan:merge-final-questions",
+    phase: "PR train",
+    model: relayModel,
+    file: finalQuestionsPath
+  });
+  const finalQuestionPayloads = await verifySaved({
+    command: verifyCommand({
+      pluginRoot: input.pluginRoot,
+      payloads: [{ name: "OPEN_QUESTIONS", file: finalQuestionsPath, json: true }],
+      expects: { OPEN_QUESTIONS: expectJson(finalQuestions) }
+    }),
+    label: "plan:verify-final-questions",
+    phase: "PR train",
+    model: relayModel,
+    what: "final open questions",
+    file: finalQuestionsPath
+  });
+  adoptSavedToken({
+    payload: finalQuestionPayloads.find((payload) => payload?.name === "OPEN_QUESTIONS") ?? null,
+    expected: expectJson(finalQuestions),
+    expectedChars: canonicalJson(finalQuestions).length,
+    what: "final open questions",
+    file: finalQuestionsPath
+  });
+
   const handoffIssues = (decompositionReview.issues ?? []).filter((issue) => ["blocking", "major"].includes(issue.severity));
   return {
     runPolicy,
@@ -1559,11 +1630,11 @@ async function main(raw) {
     // these exact files, so they are the safe source for anything that must be
     // byte-identical to what was reviewed.
     planPath: integratedPath,
-    questionsPath: `${integratedPath}.questions.json`,
+    questionsPath: finalQuestionsPath,
     uiDecisionsPath: uiEnabled ? `${integratedPath}.ui-decisions.json` : null,
     manifestPath,
     prTrainPath: trainPath,
-    openQuestions: dedupeQuestions(questions),
+    openQuestions: finalQuestions,
     // Everything the plan decided about surfaces, and the subset the configured
     // policy says is worth interrupting a person for. The full set travels so a
     // resumed pass keeps decisions the policy did not surface.
