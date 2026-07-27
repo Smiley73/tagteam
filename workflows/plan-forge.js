@@ -232,6 +232,34 @@ function dedupeQuestions(questions) {
   });
 }
 
+function questionKey(value) {
+  return String(value ?? "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
+}
+
+function requireCarriedQuestions(result, carried, resolved = []) {
+  const returned = new Set((result?.open_questions ?? []).map(questionKey));
+  const resolvedKeys = new Set((resolved ?? []).map((decision) => questionKey(decision?.question)));
+  const missing = (carried ?? []).filter((question) => {
+    const key = questionKey(question);
+    return key && !resolvedKeys.has(key) && !returned.has(key);
+  });
+  if (missing.length) {
+    throw new Error(`Codex plan result dropped ${missing.length} unresolved carried question(s)`);
+  }
+}
+
+function requireCarriedUiDecisions(result, carried) {
+  const returned = new Set((result?.ui_decisions ?? []).map((decision) =>
+    String(decision?.id ?? "").trim().toLocaleLowerCase()));
+  const missing = (carried ?? []).filter((decision) => {
+    const id = String(decision?.id ?? "").trim().toLocaleLowerCase();
+    return id && !returned.has(id);
+  });
+  if (missing.length) {
+    throw new Error(`Codex plan result dropped ${missing.length} carried interface decision(s)`);
+  }
+}
+
 // Later rounds refine the same decision under the same id, so the last version
 // wins while the order the decisions were first raised in is preserved.
 function dedupeDecisions(decisions) {
@@ -902,17 +930,27 @@ async function main(raw) {
       ? [
         { name: "GOAL", file: goalPath, json: true },
         { name: "SEED_PLAN", file: input.seedPlanPath },
-        { name: "HUMAN_DECISIONS", file: input.decisionsFile, json: true }
+        { name: "HUMAN_DECISIONS", file: input.decisionsFile, json: true },
+        { name: "CARRIED_QUESTIONS", file: `${input.seedPlanPath}.questions.json`, json: true },
+        ...(uiEnabled ? [{
+          name: "CARRIED_INTERFACE_DECISIONS",
+          file: `${input.seedPlanPath}.ui-decisions.json`,
+          json: true
+        }] : [])
       ]
       : [{ name: "GOAL", file: goalPath, json: true }];
     const expects = continuation
       ? {
         SEED_PLAN: expectText(input.seedPlan),
-        HUMAN_DECISIONS: expectJson(decisions)
+        HUMAN_DECISIONS: expectJson(decisions),
+        CARRIED_QUESTIONS: expectJson(input.openQuestions ?? []),
+        ...(uiEnabled ? { CARRIED_INTERFACE_DECISIONS: expectJson(input.uiDecisions ?? []) } : {})
       }
       : {};
     const response = await codexReasoning({
-      template: continuation ? "plan-integration-codex.md" : "plan-draft-codex.md",
+      template: continuation
+        ? (uiEnabled ? "plan-integration-codex.md" : "plan-integration-no-ui-codex.md")
+        : "plan-draft-codex.md",
       vars: { WORKTREE: input.worktree },
       fences,
       expects,
@@ -924,6 +962,10 @@ async function main(raw) {
       phaseName: "Draft",
       what: continuation ? "integration of the reviewed plan" : "plan draft"
     });
+    if (continuation) {
+      requireCarriedQuestions(response.result, input.openQuestions ?? [], decisions);
+      if (uiEnabled) requireCarriedUiDecisions(response.result, input.uiDecisions ?? []);
+    }
     draft = response.result;
     draft.savedToken = await promoteCodexPlan({
       artifact,
@@ -1199,12 +1241,19 @@ async function main(raw) {
         schema: planDraftSchema
       });
     } else {
+      const carriedDraft = draft;
       const revisionArtifact = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-revision-codex.json`;
       const revisionPromptFile = `${revisionArtifact}.prompt.md`;
       const revisionFences = [
         { name: "GOAL", file: goalPath, json: true },
         { name: "CURRENT_PLAN", file: planFile },
         { name: "PLAN_REVIEW", file: artifact, json: true },
+        { name: "CARRIED_QUESTIONS", file: `${planFile}.questions.json`, json: true },
+        ...(uiEnabled ? [{
+          name: "CARRIED_INTERFACE_DECISIONS",
+          file: `${planFile}.ui-decisions.json`,
+          json: true
+        }] : []),
         ...(uiReview ? [{ name: "INTERFACE_REVIEW", file: uiArtifact, json: true }] : [])
       ];
       const response = await codexReasoning({
@@ -1218,6 +1267,10 @@ async function main(raw) {
         expects: {
           CURRENT_PLAN: planExpect,
           PLAN_REVIEW: expectJson(codexReview),
+          CARRIED_QUESTIONS: expectJson(draft.open_questions ?? []),
+          ...(uiEnabled ? {
+            CARRIED_INTERFACE_DECISIONS: expectJson(draft.ui_decisions ?? [])
+          } : {}),
           ...(uiReview ? { INTERFACE_REVIEW: expectJson(uiReview) } : {})
         },
         requireJson: [`${planFile}.questions.json`],
@@ -1229,6 +1282,16 @@ async function main(raw) {
         phaseName: `Cross-review ${round}`,
         what: `revision of plan round ${round}`
       });
+      requireCarriedQuestions(response.result, [
+        ...(carriedDraft.open_questions ?? []),
+        ...(codexReview?.open_questions ?? [])
+      ]);
+      if (uiEnabled) {
+        requireCarriedUiDecisions(response.result, [
+          ...(carriedDraft.ui_decisions ?? []),
+          ...(uiReview?.ui_decisions ?? [])
+        ]);
+      }
       draft = response.result;
       draft.savedToken = await promoteCodexPlan({
         artifact: revisionArtifact,

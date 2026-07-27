@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
+import { validateCompletionCheckpoint } from "./validate-relay-checkpoint.mjs";
 import { verifyPayloads } from "./verify-payload.mjs";
 
 function parseArgs(argv) {
@@ -36,6 +37,7 @@ function writeAtomic(file, value) {
 
 export function materializePlanArtifact(options) {
   const artifact = path.resolve(options.artifact);
+  validateCompletionCheckpoint(`${artifact}.relay-checkpoint.json`, artifact, "read-only");
   const schema = JSON.parse(fs.readFileSync(path.resolve(options.schema), "utf8"));
   const result = JSON.parse(fs.readFileSync(artifact, "utf8"));
   const errors = validateJson(schema, result);

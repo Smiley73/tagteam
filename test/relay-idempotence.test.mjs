@@ -1423,6 +1423,102 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
   assert.deepEqual(result.reviews[0].reviewers.map(({ role }) => role), ["plan-review"]);
 });
 
+test("Codex-only revision fails closed instead of dropping a resumable question", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const carried = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
+  const dropped = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(carried.planMarkdown), chars: carried.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft")) return carried;
+    if (label.startsWith("plan:codex-revise")) return dropped;
+    return APPROVE;
+  };
+  const config = {
+    ...PLAN_CONFIG,
+    ui: { hasUserInterface: false, confirmDecisions: "off", conventionPaths: [] }
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /dropped 1 unresolved carried question/);
+});
+
+test("Codex-only continuation checksum-binds carried questions and interface decisions", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const uiDecision = {
+    id: "export-dialog",
+    decision: "where export lives",
+    surface: "new-dialog",
+    chosen: { label: "Dialog", sketch: "[ dialog ]", why: "existing flow" },
+    alternatives: [{ label: "Page", sketch: "[ page ]", why: "more space" }],
+    precedent: "src/ui/Dialog.tsx"
+  };
+  const draft = {
+    planMarkdown: "# Plan",
+    open_questions: ["Which rollout?"],
+    ui_decisions: [uiDecision]
+  };
+  const prompts = new Map();
+  const responder = (label, prompt) => {
+    prompts.set(label, prompt);
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft")) return draft;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+  const { result } = await harness("workflows/plan-forge.js", {
+    ...PLAN_ARGS,
+    runPolicy: policy,
+    passId: "pass-2",
+    seedPlan: "# Plan",
+    seedPlanPath: "/plans/slug/drafts/pass-1-integrated.md",
+    decisions: [{ question: "Use staged rollout?", answer: "Yes" }],
+    decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
+    openQuestions: ["Which rollout?"],
+    uiDecisions: [uiDecision]
+  }, responder);
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  const request = prompts.get("plan:codex-draft:request");
+  assert.match(request, /CARRIED_QUESTIONS=/);
+  assert.match(request, /CARRIED_INTERFACE_DECISIONS=/);
+  assert.match(request, /--expect "CARRIED_QUESTIONS=/);
+  assert.match(request, /--expect "CARRIED_INTERFACE_DECISIONS=/);
+});
+
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
   const { result, labels } = await harness(
     "workflows/plan-forge.js",
