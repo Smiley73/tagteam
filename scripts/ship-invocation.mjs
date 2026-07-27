@@ -123,21 +123,31 @@ export function beginShipInvocation({
   file, policyFingerprint, prId, agentCallsBefore, maximumCalls, invocationId = crypto.randomUUID()
 }) {
   const resolved = path.resolve(file);
+  const nextPolicyFingerprint = fingerprint(policyFingerprint);
+  if (typeof prId !== "string" || !prId) throw new Error("ship invocation PR ID is required");
+  const nextAgentCallsBefore = count(agentCallsBefore, "ship invocation starting call count");
+  const nextMaximumCalls = count(maximumCalls, "ship invocation maximum call count");
   if (fs.existsSync(resolved)) {
     const prior = validateDescriptor(readJson(resolved, "ship invocation").value);
     if (prior.status === "active") {
       throw new Error(`ship invocation ${prior.invocationId} is unresolved; automatic redispatch is unsafe`);
     }
     verifyCompletedDescriptor(prior);
+    if (prior.policyFingerprint !== nextPolicyFingerprint
+      || prior.prId !== prId
+      || prior.maximumCalls !== nextMaximumCalls
+      || prior.agentCallsAfter !== nextAgentCallsBefore) {
+      throw new Error("new ship invocation does not continue the completed PR accounting exactly");
+    }
   }
   const descriptor = validateDescriptor({
     version: VERSION,
     status: "active",
     invocationId,
-    policyFingerprint: fingerprint(policyFingerprint),
+    policyFingerprint: nextPolicyFingerprint,
     prId,
-    agentCallsBefore: count(agentCallsBefore, "ship invocation starting call count"),
-    maximumCalls: count(maximumCalls, "ship invocation maximum call count"),
+    agentCallsBefore: nextAgentCallsBefore,
+    maximumCalls: nextMaximumCalls,
     startedAt: new Date().toISOString()
   });
   writeAtomic(resolved, descriptor);

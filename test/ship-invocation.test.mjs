@@ -138,3 +138,43 @@ test("completed invocation evidence cannot be changed before the next dispatch",
     maximumCalls: 12
   }), /result bytes changed/);
 });
+
+test("the next invocation must continue the completed PR budget exactly", () => {
+  const files = fixture();
+  beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 3,
+    maximumCalls: 12,
+    invocationId
+  });
+  writeResult(files.result);
+  completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+
+  for (const overrides of [
+    { agentCallsBefore: 0 },
+    { maximumCalls: 13 },
+    { prId: "PR-2" },
+    { policyFingerprint: `sha256:${"b".repeat(64)}` }
+  ]) {
+    assert.throws(() => beginShipInvocation({
+      file: files.descriptor,
+      policyFingerprint,
+      prId: "PR-1",
+      agentCallsBefore: 7,
+      maximumCalls: 12,
+      ...overrides
+    }), /does not continue the completed PR accounting exactly/);
+  }
+
+  const next = beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 7,
+    maximumCalls: 12,
+    invocationId: "22222222-2222-4222-8222-222222222222"
+  });
+  assert.equal(next.agentCallsBefore, 7);
+});
