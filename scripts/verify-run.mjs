@@ -5,6 +5,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { matchWhen } from "./lib/matcher.mjs";
+import { validateCandidateSnapshot } from "./snapshot-candidate.mjs";
 
 function killGroup(child, signal) {
   try {
@@ -62,9 +63,17 @@ async function main() {
     return pairs;
   }, []));
   try {
+    if (!args.base || !args["candidate-oid"] || !args["candidate-hash"]) {
+      throw new Error("--base, --candidate-oid, and --candidate-hash are required");
+    }
+    const candidate = validateCandidateSnapshot(args.candidate, {
+      baseOid: args.base,
+      candidateOid: args["candidate-oid"],
+      candidateHash: args["candidate-hash"]
+    });
     const result = await verify({
       config: JSON.parse(fs.readFileSync(args.config, "utf8")),
-      candidate: JSON.parse(fs.readFileSync(args.candidate, "utf8")),
+      candidate,
       worktree: path.resolve(args.worktree),
       outDir: path.resolve(args["out-dir"])
     });

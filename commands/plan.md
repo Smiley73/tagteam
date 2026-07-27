@@ -8,7 +8,9 @@ allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagt
 
 Raw arguments: `$ARGUMENTS`
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` first; with it the goal comes from the saved plan directory. Otherwise require a non-empty goal and a valid `.tagteam/config.json`. Validate it with `validate-json.mjs --repo`; exit 3 means the settings predate this plugin's interface questions, and planning is exactly where those answers matter. Render `messages.mjs configStale` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, and stop without drafting. Never guess the missing answers. Parse the three optional planning overrides and reject low planning effort. Use the overrides only for this invocation; show the resulting Claude and Codex model/effort before starting.
+Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` first; with it the goal comes from the saved plan directory. Otherwise require a non-empty goal and a valid `.tagteam/config.json`. Validate it with `validate-json.mjs --repo`; exit 3 means the settings predate this plugin's interface questions, and planning is exactly where those answers matter. Render `messages.mjs configStale` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, and stop without drafting. Never guess the missing answers. Parse the three optional planning overrides; reject missing values and low planning effort. Use model overrides only for this invocation.
+
+Before model work, normalize the current dual-provider policy with `node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/run-policy.mjs" normalize "both" "<repo>/.tagteam/config.json"`. Persist its exact JSON at `reviews/<passId>-run-policy.json` with mode 0600 and pass it as `runPolicy`. On resume, run `run-policy.mjs restore` on the latest pass policy path with `--state-root "<plan-dir>"`. The restore inventories every saved JSON artifact below that root itself and validates that all embedded policy fingerprints match. A missing policy is a hard stop whenever any saved state is policy-bound. Only when the complete inventory contains recognizable pre-feature recovery state and no policy fingerprint may the pass be migrated by adding `--allow-legacy`; that atomically creates the default `both` policy at mode 0600. Never derive policy from conversation memory. Show substantive provider, plumbing model, assurance, and resulting Claude/Codex model effort before starting.
 Reject repository and artifact paths containing control characters or shell metacharacters before forming Bash commands.
 
 Derive a short lowercase plan slug with only `[a-z0-9-]`, create `.tagteam/plans/<slug>/drafts` and `reviews`, and pass absolute paths to the workflow. Planning may write draft/review artifacts there, but no approved `plan.md`, `manifest.json`, or `pr-train.json` exists until explicit approval.
@@ -26,21 +28,28 @@ Workflow({
     pluginRoot: <absolute plugin root>,
     planDir: <absolute plan dir>,
     passId: <"pass-1", then "pass-2", ... one per forge invocation>,
-    config: <merged config with run overrides>
+    config: <merged config with run overrides>,
+    runPolicy: <validated run policy>,
+    agentCalls: <latest persisted cumulative planning call count, or 0 for a new plan>,
+    usage: <latest persisted usage, or zeroes for a new plan>,
+    usageReceipts: <latest persisted Codex execution receipts, or []>,
+    usageAccounting: <complete|legacy-incomplete from the latest snapshot>
   }
 })
 ```
 
 Give every forge invocation its own `passId` so a reused Codex artifact can never be a check of a plan that has since been revised. Reuse a `passId` only when resuming that same pass.
 
+Write the raw workflow return to a mode-0600 temporary result file. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output. A missing receipt for a confirmed bridge handoff, or a mismatched or unreadable receipt, is a hard stop. When every relay reply was lost and its request-bound unconfirmed dispatch has no matching journal, reconciliation preserves all known counters as `legacy-incomplete` instead of discarding the snapshot or claiming an exact Codex total; stale evidence from another request at the same artifact path never completes or classifies the current recovery. Never persist pending accounting as authoritative state. Atomically persist every reconciled response's cumulative accounting snapshot before branching on its status. When the status is `plan-interrupted`, render `messages.mjs relayLost` when its message names a Codex result and `messages.mjs planInterrupted` otherwise, then show its message as supporting detail and stop. Resume passes the reconciled counters back unchanged.
+
 ## Resume
 
 `--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
 
 1. If `approved.json` exists, there is nothing to resume; point at `/tagteam:ship .tagteam/plans/<slug>` and stop.
-2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts.
-3. Take the highest `pass-<n>` present. Within it, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point, and its `.ui-decisions.json` sidecar, if present, for the interface decisions declared so far. A plan interrupted before that second sidecar existed simply has none; that costs a re-declaration, never the plan.
-4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), `uiDecisions` (the interface sidecar's array, or `[]` when that file is absent or unreadable), and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
+2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts. Determine the highest `pass-<n>` from the saved draft/review artifacts before resolving policy or usage. Restore `reviews/<passId>-run-policy.json` with `run-policy.mjs restore --state-root "<plan-dir>"`. If the policy is missing, stop when the script finds any policy fingerprint. Add `--allow-legacy` only when the script's complete inventory finds recognizable recovery state but no fingerprint; this performs the one-time validated `both` migration.
+3. For that selected pass, read the newest valid `reviews/pass-<n>-usage.json` at or before it, searching backward by pass number. A missing current-pass snapshot means the interrupted invocation did not get far enough to save its response; inherit the prior snapshot instead of resetting earlier counters. Only a brand-new plan with no model artifacts starts from zeroes, zero calls, an empty `plumbingCallsByModel` object, an empty receipt list, and `usageAccounting: complete`. A pre-feature plan with model artifacts but no complete usage snapshot, including the model-keyed plumbing map, uses `usageAccounting: legacy-incomplete`; import durable Codex receipt journals as they are encountered, but never describe unknowable historical Claude or plumbing-model usage as zero or exact. Within the selected pass, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point, and its `.ui-decisions.json` sidecar, if present, for the interface decisions declared so far. A plan interrupted before that second sidecar existed simply has none; that costs a re-declaration, never the plan.
+4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan` (that file's contents), `openQuestions` (that sidecar's array), `uiDecisions` (the interface sidecar's array, or `[]` when that file is absent or unreadable), persisted `agentCalls`, `usage`, `usageReceipts`, `usageAccounting`, and `resumeRound: <r>`. The workflow skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes.
 5. `drafts/<passId>-integrated.md` is the finished plan of its pass: the last cross-review revision writes it, and so does a continuation. If it is the newest draft in the pass, resume from it with `seedPlan`, its `.questions.json`, and its `.ui-decisions.json` when that file exists and parses — an absent, empty, or malformed one means no interface decisions are recoverable, which costs a re-declaration and is never a reason to stop; pass `[]` — and either `decisions` from `drafts/<passId>-decisions.json` when that file exists (a continuation), or `resumeRound: <reviewRounds + 1>` when it does not (cross-review finished; only the manifest, train, and cross-check remain).
 6. Continue with the normal question, cross-check, and approval flow below.
 
@@ -48,7 +57,7 @@ A resumed pass seeds itself from these files, so pass them through byte for byte
 
 `--resume` starts a fresh forge invocation, which is what makes it a recovery: every artifact is read off disk again. Resuming the workflow run itself instead replays each finished step's recorded result, so a plumbing failure would repeat with identical numbers however often the underlying file is repaired. If that is what you are seeing, run this command.
 
-If the workflow fails, do not show the raw error. Render `messages.mjs relayLost` when its message names a saved Codex result, and `messages.mjs planInterrupted` otherwise, with `--artifact` set to the saved artifact or the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
+If the workflow fails before it can return an accounting envelope, do not show the raw error. Render `messages.mjs planInterrupted` with `--artifact` set to the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
 
 If the workflow returns open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
 
@@ -67,6 +76,7 @@ Record every outcome in `drafts/<passId>-decisions.json` as an ordinary `{questi
 
 Never invent an option the workflow did not return, and never ask about a decision the policy filtered out.
 Persist each structured engine review under `reviews/` before asking; use mode 0600 and never rewrite an earlier review. The plan, manifest, and train are already saved: the workflow returns `planPath`, `questionsPath`, `manifestPath`, and `prTrainPath`, and those files are the exact bytes the cross-check judged. Copy from them rather than retyping the returned values, and read `planPath` instead of holding the plan in the conversation.
+After every reconciled workflow response, including `plan-interrupted`, atomically persist `{ "policyFingerprint": <result.policyFingerprint>, "agentCalls": <result.agentCalls>, "usage": <result.usage>, "usageReceipts": <result.usageReceipts>, "usageAccounting": <result.usageAccounting> }` at `reviews/<passId>-usage.json` with mode 0600 before branching on status, asking questions, or approval. The fingerprint makes deletion of a current run's policy fail closed instead of masquerading as a pre-feature resume. Every resume and continuation passes the four accounting values from the newest persisted snapshot into the next invocation, so counters are cumulative across the full planning run and a reused Codex artifact is not counted twice.
 
 As soon as a chunk is answered, append those `{question, answer}` rows to `drafts/<passId>-decisions.json` at mode 0600. Answers are the one thing here a human cannot cheaply reproduce, and approval may be a long way off; the approved `decisions.json` is written only at approval, from this file.
 
@@ -76,6 +86,7 @@ Then invoke `tagteam:plan-forge` once more with the same arguments plus:
 - `seedPlan`: the contents of the first result's `planPath`;
 - `decisions`: `{question, answer}` rows;
 - `uiDecisions`: the array at the first result's `uiDecisionsPath`, so decisions the policy never surfaced survive the pass. A null path means this repository has no interface; a path naming a file that is absent or unreadable means none were declared. Pass `[]` in both cases and continue.
+- `agentCalls`, `usage`, `usageReceipts`, and `usageAccounting`: the cumulative values from the newest usage snapshot at or before the prior pass.
 
 This continuation performs one integration pass and regenerates the manifest and train; it must not repeat the cross-review rounds.
 Persist its integrated draft and decomposition cross-check as new artifacts, leaving the first invocation byte-frozen.
@@ -96,6 +107,6 @@ Only explicit approval may write:
 - `.tagteam/plans/<slug>/manifest.json`
 - `.tagteam/plans/<slug>/pr-train.json`
 - `.tagteam/plans/<slug>/decisions.json` (every pass's `drafts/*-decisions.json` rows in pass order, unchanged)
-- `.tagteam/plans/<slug>/approved.json` containing version, UTC time, config fingerprint, and the three artifact hashes.
+- `.tagteam/plans/<slug>/approved.json` containing version, UTC time, config fingerprint, the validated run policy and policy fingerprint, and the three artifact hashes.
 
 Validate both JSON artifacts with their schemas after writing. Validate the PR train with `validate-json.mjs --manifest <manifest.json>` so every task appears exactly once and cross-PR task dependencies are represented. If validation fails, remove only `approved.json`, explain the exact validation error, and stop. Never start shipping automatically; end with `/tagteam:ship .tagteam/plans/<slug>`.

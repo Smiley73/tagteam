@@ -29,6 +29,14 @@ export const messages = {
       DETAILS(context)
     ].join("\n");
   },
+  singleProvider(context) {
+    return [
+      "This change was completed and reviewed with one substantive provider.",
+      "It has fresh review coverage, but not independent cross-provider confirmation.",
+      "Review the pull request and approve this exact candidate before it can merge.",
+      DETAILS(context)
+    ].join("\n");
+  },
   unprotectedBase(context) {
     return [
       "The destination branch does not prevent direct pushes.",

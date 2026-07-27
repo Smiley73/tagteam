@@ -77,10 +77,16 @@ const commitSchema = {
 };
 const snapshotSchema = {
   type: "object", additionalProperties: false,
-  required: ["baseOid", "candidateOid", "candidatePath", "reviewDiffPath", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
+  required: ["baseOid", "candidateOid", "candidatePath", "candidateHash", "candidateMetadataHash", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
   properties: {
     baseOid: { type: "string" }, candidateOid: { type: "string" }, candidatePath: { type: "string" },
-    reviewDiffPath: { type: "string" }, changedPaths: { type: "array", items: { type: "string" } },
+    candidateHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    candidateMetadataHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    diffPath: { type: "string" },
+    diffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    reviewDiffPath: { type: "string" },
+    reviewDiffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    changedPaths: { type: "array", items: { type: "string" } },
     addedLines: { type: "string" }, excluded: { type: "array" }, treeClean: { type: "string" },
     diffBytes: { type: "integer" }, fileCount: { type: "integer" }
   }
@@ -136,6 +142,83 @@ function parseInput(input) {
   return input && typeof input === "object" ? input : {};
 }
 
+function persistedCount(value, name) {
+  const count = Number(value ?? 0);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`${name} must be a nonnegative safe integer`);
+  }
+  return count;
+}
+
+function persistedModelCounts(value) {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("persisted plumbing usage must be an object");
+  }
+  return Object.fromEntries(Object.entries(value).map(([model, count]) => [
+    model,
+    persistedCount(count, `persisted plumbing usage for ${model}`)
+  ]));
+}
+
+function canonicalPolicy(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalPolicy).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalPolicy(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function sha256(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const digest = [...new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `sha256:${digest}`;
+}
+
+async function codexRequestIdentity({
+  prompt, reviewDiffHash = null, schemaPath, model, effort, sandbox, worktree
+}) {
+  return sha256(JSON.stringify({
+    version: 1,
+    promptHash: await sha256(prompt),
+    reviewDiffHash,
+    schemaPath,
+    model,
+    effort,
+    sandbox,
+    dryRun: false,
+    worktree
+  }));
+}
+
+async function workflowRunPolicy(input, config) {
+  const policy = input.runPolicy ?? {
+    version: 1,
+    reasoningProvider: "both",
+    plumbingModel: config.transport?.relayModel ?? "sonnet",
+    assurance: "cross-provider"
+  };
+  if (input.runPolicy && !input.runPolicy.policyFingerprint) throw new Error("explicit run policy fingerprint is required");
+  if (policy.version !== 1) throw new Error("run policy version must be 1");
+  if (!["both", "claude", "codex"].includes(policy.reasoningProvider)) throw new Error("invalid run policy provider");
+  const expectedAssurance = policy.reasoningProvider === "both" ? "cross-provider" : "single-provider";
+  if (policy.assurance !== expectedAssurance || !policy.plumbingModel) throw new Error("incomplete run policy");
+  if (policy.reasoningProvider !== "both" && policy.plumbingModel !== "haiku") throw new Error("single-provider runs require Haiku plumbing");
+  const fields = {
+    version: policy.version,
+    reasoningProvider: policy.reasoningProvider,
+    plumbingModel: policy.plumbingModel,
+    assurance: policy.assurance
+  };
+  const policyFingerprint = await sha256(canonicalPolicy(fields));
+  if (policy.policyFingerprint && policy.policyFingerprint !== policyFingerprint) throw new Error("run policy fingerprint does not match its fields");
+  // PR 1 binds the policy to every shipping artifact but leaves dispatch
+  // unchanged. PR 3 replaces this guard with provider-aware shipping routes.
+  if (policy.reasoningProvider !== "both") throw new Error("single-provider shipping dispatch is not available in this build");
+  return { ...fields, policyFingerprint };
+}
+
 function fence(label, value) {
   return `<untrusted-${label}>\n${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n</untrusted-${label}>`;
 }
@@ -175,6 +258,7 @@ function nextTier(tier) {
   return tier === "simple" ? "medium" : "complex";
 }
 
+// TEST_SENTINEL_WORKFLOW_CORE_START
 function expandBraces(pattern) {
   const open = pattern.indexOf("{");
   if (open < 0) return [pattern];
@@ -310,19 +394,96 @@ function tally(ledger) {
   return result;
 }
 
-// The relay agent only reads an artifact the bridge has already written and
-// validated. Losing its reply is a lost message, not a failed engine: the
-// command is idempotent, so re-running it re-reads the file instead of paying
-// for the review, fix, or implementation a second time.
+// A relay is instructed to run the bridge and return its validated artifact.
+// When no reply arrives, disk reconciliation—not the workflow—decides whether
+// Codex actually dispatched and whether any saved result is reusable.
 const RELAY_ATTEMPTS = 3;
-const relayState = { extraCalls: 0 };
+const relayState = {
+  extraCalls: 0,
+  fatal: [],
+  receiptFiles: [],
+  unconfirmedDispatches: [],
+  confirmedDispatches: [],
+  dispatchedCalls: 0,
+  maximumCalls: Infinity,
+  capacityExceeded: false
+};
+const usageState = {
+  claudeReasoningCalls: 0,
+  haikuPlumbingCalls: 0,
+  plumbingCallsByModel: {},
+  codexCalls: 0
+};
+const codexReceiptState = new Set();
+const shipState = {
+  runPolicy: null,
+  priorRelayRetries: 0,
+  legacyUsageIncomplete: false,
+  taskResults: [],
+  candidateOid: null,
+  rounds: [],
+  ledger: []
+};
 
-function relayModelFor(config) {
-  return config.transport?.relayModel ?? "sonnet";
+async function claudeReasoningCall(prompt, options) {
+  if (relayState.dispatchedCalls >= relayState.maximumCalls) {
+    relayState.capacityExceeded = true;
+    return null;
+  }
+  relayState.dispatchedCalls += 1;
+  usageState.claudeReasoningCalls += 1;
+  return agent(prompt, options);
 }
 
-async function codexCall(input, { label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox, reviewDiffPath }) {
-  const promptFile = `${artifact}.prompt.md`;
+async function plumbingCall(prompt, options) {
+  if (relayState.dispatchedCalls >= relayState.maximumCalls) {
+    relayState.capacityExceeded = true;
+    return null;
+  }
+  relayState.dispatchedCalls += 1;
+  const model = String(options.model ?? "unknown");
+  usageState.plumbingCallsByModel[model] = (usageState.plumbingCallsByModel[model] ?? 0) + 1;
+  if (model === "haiku") usageState.haikuPlumbingCalls += 1;
+  return agent(prompt, options);
+}
+
+function relayModelFor(policy, config) {
+  return policy?.plumbingModel ?? config.transport?.relayModel ?? "sonnet";
+}
+
+function relayEnvelopeSchema(resultSchema) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["reused", "executionId", "requestIdentity", "result"],
+    properties: {
+      reused: { type: "boolean" },
+      executionId: { type: "string", minLength: 1 },
+      requestIdentity: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+      result: resultSchema
+    }
+  };
+}
+
+// TEST_SENTINEL_WORKFLOW_CORE_END
+async function codexCall(input, {
+  label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox,
+  reviewDiffPath, reviewDiffHash = null
+}) {
+  const schemaPath = `${input.pluginRoot}/schemas/${schemaFile}`;
+  const requestIdentity = await codexRequestIdentity({
+    prompt,
+    reviewDiffHash,
+    schemaPath,
+    model: runtime.model,
+    effort: runtime.effort,
+    sandbox,
+    worktree: input.worktree
+  });
+  if (reviewDiffPath && !/^sha256:[0-9a-f]{64}$/.test(reviewDiffHash ?? "")) {
+    throw new Error(`Codex ${label} has no immutable review-diff identity`);
+  }
+  const promptFile = `${artifact}.${requestIdentity.slice("sha256:".length)}.prompt.md`;
   // Declared from the prompt the workflow actually built, so a relay that
   // shortened or paraphrased it fails before Codex is invoked rather than
   // buying a confident answer to a question that was never fully asked.
@@ -331,7 +492,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
   const command = [
     `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
     `--worktree "${input.worktree}"`,
-    `--schema "${input.pluginRoot}/schemas/${schemaFile}"`,
+    `--schema "${schemaPath}"`,
     `--artifact "${artifact}"`,
     `--model "${runtime.model}"`,
     `--effort "${runtime.effort}"`,
@@ -339,6 +500,7 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
     `--ship-dir "${input.shipDir}"`,
     `--max-concurrent "${input.config.limits.maxConcurrentCodex}"`,
     `--prompt-file "${promptFile}"`,
+    `--expected-request-identity "${requestIdentity}"`,
     ...requiredFences.map((label) => `--require-fence ${label}`),
     `--min-prompt-bytes ${Math.floor(prompt.length * 0.8)}`,
     reviewDiffPath ? `--review-diff-path "${reviewDiffPath}"` : ""
@@ -346,31 +508,74 @@ async function codexCall(input, { label, kind, schema, schemaFile, artifact, pro
   const basePrompt = [
     `Write the exact text in the untrusted-prompt fence to ${promptFile} with mode 0600.`,
     `Run this exact command: ${command}`,
-    "Read the validated artifact and return its parsed JSON object exactly.",
+    "Use the bridge's JSON stdout; do not re-read or retype the artifact.",
     fence("prompt", prompt)
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (relayState.dispatchedCalls >= relayState.maximumCalls) {
+      relayState.capacityExceeded = true;
+      break;
+    }
+    const receiptFile = `${artifact}.usage-receipts.json`;
+    if (!relayState.receiptFiles.includes(receiptFile)) relayState.receiptFiles.push(receiptFile);
+    relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+      .filter((item) => item.receiptFile !== receiptFile);
+    relayState.unconfirmedDispatches.push({
+      receiptFile,
+      checkpoint: `${artifact}.relay-checkpoint.json`,
+      requestIdentity,
+      sandbox
+    });
     if (attempt > 1) relayState.extraCalls += 1;
-    const result = await agent(attempt === 1 ? basePrompt : [
+    const response = await plumbingCall(attempt === 1 ? [
+      basePrompt,
+      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
+    ].join("\n\n") : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "Return the parsed object by invoking the StructuredOutput tool."
+      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: kind,
       agentType: "tagteam:codex-runner",
-      model: relayModelFor(input.config),
-      schema
+      model: relayModelFor(input.runPolicy, input.config),
+      schema: relayEnvelopeSchema(schema)
     });
-    if (result) return result;
+    if (response) {
+      const schemaBoundEnvelope = typeof response.reused === "boolean" && Object.hasOwn(response, "result");
+      const envelope = schemaBoundEnvelope
+        ? response
+        : { reused: false, executionId: null, requestIdentity, result: response };
+      if (envelope.requestIdentity !== requestIdentity) {
+        log(`The Codex step ${label} returned a result for a different request identity; retrying the immutable request.`);
+        continue;
+      }
+      relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
+        .filter((item) => item.receiptFile !== receiptFile);
+      if (schemaBoundEnvelope) {
+        relayState.confirmedDispatches.push({
+          receiptFile,
+          checkpoint: `${artifact}.relay-checkpoint.json`,
+          requestIdentity,
+          sandbox,
+          executionId: envelope.executionId
+        });
+      }
+      return envelope.result;
+    }
+    if (relayState.capacityExceeded) break;
     log(`The Codex step ${label} finished and was saved, but its result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Re-reading ${artifact}.`);
   }
+  relayState.fatal.push({ artifact, sandbox, checkpoint: `${artifact}.relay-checkpoint.json` });
   return null;
 }
 
 async function implementTask(input, task, tierName, engine, attempt) {
   const runtime = input.config.complexity[tierName][engine];
-  const resultPath = `${input.shipDir}/prs/${input.pr.id}/tasks/${task.id}/result.json`;
+  // Preserve attempt 1's historical path for in-flight ships, while ensuring
+  // every retry has its own immutable receipt journal and checkpoint.
+  const resultPath = `${input.shipDir}/prs/${input.pr.id}/tasks/${task.id}/`
+    + (attempt === 1 ? "result.json" : `result-attempt-${attempt}.json`);
   const prompt = [
     `Implement task ${task.id} inside ${input.worktree}. This is attempt ${attempt}.`,
     `Before returning, persist the identical task-result JSON at ${resultPath} with mode 0600.`,
@@ -389,7 +594,7 @@ async function implementTask(input, task, tierName, engine, attempt) {
       sandbox: "workspace-write"
     });
   }
-  return agent(prompt, {
+  return claudeReasoningCall(prompt, {
     label: `implement:${task.id}:${attempt}`,
     phase: "Implement",
     agentType: "tagteam:implementer",
@@ -410,19 +615,26 @@ async function commitCandidate(input, round, summary) {
     `Run exactly: git -C "${input.worktree}" rev-parse HEAD`,
     `Return ok=true, that full OID as candidateOid, and message=${JSON.stringify(message)}.`
   ].join("\n");
-  const result = await agent(prompt, {
+  const result = await plumbingCall(prompt, {
     label: `candidate:commit:${round}`,
     phase: "Candidate",
     agentType: "tagteam:committer",
     model: "haiku",
     schema: commitSchema
   });
+  if (!result && relayState.capacityExceeded) return null;
   if (!result?.ok || !result.candidateOid) throw new Error(`candidate commit ${round} failed`);
   return result.candidateOid;
 }
 
 async function snapshot(input, round, candidateOid) {
-  const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}`;
+  if (!/^[0-9a-f]{40}$/.test(input.baseOid) || !/^[0-9a-f]{40}$/.test(candidateOid)) {
+    throw new Error("candidate snapshot requires full lowercase Git object IDs");
+  }
+  const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}-${candidateOid}`;
+  const expectedCandidatePath = `${outDir}/candidate.json`;
+  const expectedDiffPath = `${outDir}/candidate.diff`;
+  const expectedReviewDiffPath = `${outDir}/review.diff`;
   const command = [
     `node "${input.pluginRoot}/scripts/snapshot-candidate.mjs"`,
     `--worktree "${input.worktree}"`,
@@ -433,11 +645,11 @@ async function snapshot(input, round, candidateOid) {
     `--exclude-json "${input.diffExcludePath}"`
   ].join(" ");
   const codegraph = input.config.codegraph.enabled ? `Then run exactly: codegraph sync "${input.worktree}"` : "CodeGraph is disabled; do not run it.";
-  const result = await agent([
+  const result = await plumbingCall([
     `Run exactly: ${command}`,
     codegraph,
     `Read ${outDir}/candidate.json.`,
-    `Return only the requested schema fields, setting candidatePath=${JSON.stringify(`${outDir}/candidate.json`)} and retaining reviewDiffPath. Do not copy review.diff through the model response.`
+    `Return only the requested schema fields, setting candidatePath=${JSON.stringify(expectedCandidatePath)}, diffPath=${JSON.stringify(expectedDiffPath)}, and reviewDiffPath=${JSON.stringify(expectedReviewDiffPath)}. Do not copy either diff through the model response.`
   ].join("\n"), {
     label: `candidate:snapshot:${round}`,
     phase: "Candidate",
@@ -445,8 +657,33 @@ async function snapshot(input, round, candidateOid) {
     model: "haiku",
     schema: snapshotSchema
   });
-  if (!result || result.candidateOid !== candidateOid || result.baseOid !== input.baseOid || result.treeClean !== "") {
+  if (!result && relayState.capacityExceeded) return null;
+  if (!result
+    || result.candidateOid !== candidateOid
+    || result.baseOid !== input.baseOid
+    || result.candidatePath !== expectedCandidatePath
+    || result.diffPath !== expectedDiffPath
+    || result.reviewDiffPath !== expectedReviewDiffPath
+    || result.treeClean !== "") {
     throw new Error(`candidate snapshot ${round} did not bind to the expected commits or the primary checkout changed`);
+  }
+  const returnedMetadata = {
+    baseOid: result.baseOid,
+    candidateOid: result.candidateOid,
+    diffPath: result.diffPath,
+    diffHash: result.diffHash,
+    reviewDiffPath: result.reviewDiffPath,
+    reviewDiffHash: result.reviewDiffHash,
+    changedPaths: result.changedPaths,
+    addedLines: result.addedLines,
+    excluded: result.excluded,
+    diffBytes: result.diffBytes,
+    fileCount: result.fileCount,
+    treeClean: result.treeClean
+  };
+  const returnedMetadataHash = await sha256(canonicalPolicy(returnedMetadata));
+  if (result.candidateMetadataHash !== returnedMetadataHash) {
+    throw new Error(`candidate snapshot ${round} metadata does not match its canonical candidate.json identity`);
   }
   return result;
 }
@@ -457,11 +694,14 @@ async function runVerify(input, snapshotValue, round) {
     `node "${input.pluginRoot}/scripts/verify-run.mjs"`,
     `--config "${input.configPath}"`,
     `--candidate "${snapshotValue.candidatePath}"`,
+    `--base "${input.baseOid}"`,
+    `--candidate-oid "${snapshotValue.candidateOid}"`,
+    `--candidate-hash "${snapshotValue.candidateHash}"`,
     `--worktree "${input.worktree}"`,
     `--out-dir "${input.shipDir}/prs/${input.pr.id}/verify/${round}"`,
     `--out "${resultPath}"`
   ].join(" ");
-  const result = await agent([
+  const result = await plumbingCall([
     `Run exactly: ${command}`,
     `Read ${resultPath} and return status, commands, and resultPath=${JSON.stringify(resultPath)}.`
   ].join("\n"), {
@@ -476,7 +716,7 @@ async function runVerify(input, snapshotValue, round) {
 }
 
 async function classifyUi(input, snapshotValue, round) {
-  const result = await agent([
+  const result = await plumbingCall([
     "Independently answer whether a person using the product or developer tool would notice this actual candidate change.",
     fence("changed-paths", snapshotValue.changedPaths),
     `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
@@ -517,68 +757,220 @@ async function main(raw) {
     if (!input[key]) throw new Error(`ship-pr requires ${key}`);
   }
   const config = input.config;
+  relayState.extraCalls = 0;
+  relayState.fatal = [];
+  relayState.receiptFiles = [];
+  relayState.unconfirmedDispatches = [];
+  relayState.confirmedDispatches = [];
+  shipState.runPolicy = null;
+  shipState.legacyUsageIncomplete = false;
+  shipState.taskResults = [];
+  shipState.taskAttempts = {};
+  shipState.candidateOid = null;
+  shipState.rounds = [];
+  shipState.ledger = [];
+  const initialAgentCalls = persistedCount(input.agentCalls, "persisted shipping agentCalls");
+  const maximumCalls = persistedCount(config.limits.agentCallsPerPr, "agentCallsPerPr");
+  relayState.dispatchedCalls = initialAgentCalls;
+  relayState.maximumCalls = maximumCalls;
+  relayState.capacityExceeded = false;
+  const priorUsage = input.usage ?? {};
+  const priorHaikuCalls = persistedCount(priorUsage.haikuPlumbingCalls, "persisted Haiku usage");
+  const priorPlumbingCalls = Object.hasOwn(priorUsage, "plumbingCallsByModel")
+    ? persistedModelCounts(priorUsage.plumbingCallsByModel)
+    : (priorHaikuCalls > 0 ? { haiku: priorHaikuCalls } : {});
+  if (Object.hasOwn(priorUsage, "plumbingCallsByModel")
+    && (priorPlumbingCalls.haiku ?? 0) !== priorHaikuCalls) {
+    throw new Error("persisted Haiku usage must match plumbingCallsByModel.haiku");
+  }
+  Object.assign(usageState, {
+    claudeReasoningCalls: persistedCount(priorUsage.claudeReasoningCalls, "persisted Claude usage"),
+    haikuPlumbingCalls: priorHaikuCalls,
+    plumbingCallsByModel: priorPlumbingCalls,
+    codexCalls: persistedCount(priorUsage.codexCalls, "persisted Codex usage")
+  });
+  const priorRelayRetries = persistedCount(priorUsage.relayRetries, "persisted relay retries");
+  shipState.priorRelayRetries = priorRelayRetries;
+  const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "plumbingCallsByModel", "codexCalls", "relayRetries"]
+    .every((key) => Object.hasOwn(priorUsage, key));
+  const legacyUsageIncomplete = input.usageAccounting === "legacy-incomplete"
+    || (initialAgentCalls > 0 && !hasUsageSnapshot);
+  shipState.legacyUsageIncomplete = legacyUsageIncomplete;
+  codexReceiptState.clear();
+  for (const receipt of input.usageReceipts ?? []) codexReceiptState.add(receipt);
+  const runPolicy = await workflowRunPolicy(input, config);
+  shipState.runPolicy = runPolicy;
+  // All relay dispatch reads the validated, disk-authoritative policy rather
+  // than a transport setting that may have changed since the run began.
+  input.runPolicy = runPolicy;
+  const taskIds = new Set(input.tasks.map((task) => task.id));
+  const taskAttempts = {};
+  for (const [taskId, attempt] of Object.entries(input.taskAttempts ?? {})) {
+    if (!taskIds.has(taskId) || ![1, 2].includes(attempt)) {
+      throw new Error(`invalid persisted implementation attempt for ${taskId}`);
+    }
+    taskAttempts[taskId] = attempt;
+  }
+  shipState.taskAttempts = taskAttempts;
   const roundOffset = Number(input.roundOffset ?? 0);
-  let callCount = Number(input.agentCalls ?? 0);
+  let callCount = initialAgentCalls;
   // Relay re-reads are cheap but still calls, so they eat into the per-PR limit
   // rather than silently expanding it.
   const callBudget = () => config.limits.agentCallsPerPr - relayState.extraCalls;
-  const taskResults = [...(input.taskResults ?? [])];
+  const finish = (result) => ({
+    runPolicy,
+    reasoningProvider: runPolicy.reasoningProvider,
+    assurance: runPolicy.assurance,
+    policyFingerprint: runPolicy.policyFingerprint,
+    usage: {
+      ...usageState,
+      plumbingCallsByModel: { ...usageState.plumbingCallsByModel },
+      relayRetries: priorRelayRetries + relayState.extraCalls
+    },
+    usageReceipts: [...codexReceiptState],
+    usageReceiptFiles: [...relayState.receiptFiles],
+    relayCheckpoints: [...new Set([
+      ...relayState.fatal.map((item) => item.checkpoint),
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+    ])],
+    unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
+    confirmedCodexDispatches: [...relayState.confirmedDispatches],
+    usageAccounting: relayState.receiptFiles.length > 0
+      ? "pending-checkpoint-reconciliation"
+      : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
+    legacyUsageIncomplete,
+    taskAttempts: { ...taskAttempts },
+    ...result,
+    agentCalls: relayState.dispatchedCalls
+  });
+  const relayInterruption = ({ candidateOid = null, rounds = [], ledger = [], ...extra } = {}) => {
+    const workspaceStateUnknown = relayState.fatal.some((item) => item.sandbox === "workspace-write");
+    return finish({
+      status: workspaceStateUnknown ? "relay-interrupted-workspace-unknown" : "relay-interrupted",
+      usageAccounting: "pending-checkpoint-reconciliation",
+      tasks: taskResults,
+      rounds,
+      tallies: tally(ledger),
+      ledger,
+      gateFailures: ["Every Codex relay handoff failed. Reconcile disk evidence, then resume to reuse saved work when present."],
+      candidateOid,
+      relayCheckpoints: [...new Set([
+        ...relayState.fatal.map((item) => item.checkpoint),
+        ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+      ])],
+      ...extra
+    });
+  };
+  const taskResults = [];
+  for (const result of input.taskResults ?? []) {
+    const priorIndex = taskResults.findIndex((entry) => entry?.taskId === result?.taskId);
+    if (priorIndex >= 0) taskResults.splice(priorIndex, 1);
+    taskResults.push(result);
+  }
+  shipState.taskResults = taskResults;
+  const taskById = new Map(input.tasks.map((task) => [task.id, task]));
+  const completedResult = (result) => {
+    const task = taskById.get(result?.taskId);
+    if (!task || result.status !== "completed" || !Array.isArray(result.criteria)) return false;
+    return (task.doneCriteria ?? []).every((criterion) =>
+      result.criteria.some((entry) => entry?.criterion === criterion && entry.met === true));
+  };
+  const completedTaskIds = new Set(taskResults
+    .filter(completedResult)
+    .map((result) => result.taskId));
+  const recordTaskResult = (result) => {
+    const priorIndex = taskResults.findIndex((entry) => entry?.taskId === result.taskId);
+    if (priorIndex >= 0) taskResults.splice(priorIndex, 1);
+    taskResults.push(result);
+    if (completedResult(result)) {
+      completedTaskIds.add(result.taskId);
+    }
+  };
   const failedTasks = new Set();
+  const capacityGate = ({ candidateOid = input.existingCandidateOid ?? null, rounds = [], ledger = [], ...extra } = {}) => finish({
+    status: "agent-budget-gate",
+    tasks: taskResults,
+    rounds,
+    tallies: tally(ledger),
+    ledger,
+    gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit.`],
+    candidateOid,
+    ...extra
+  });
 
   if (!input.existingCandidateOid) {
-    const implementationCapacity = input.tasks.length * 2 + 4;
+    const unfinishedTaskCount = input.tasks.filter((task) => !completedTaskIds.has(task.id)).length;
+    const implementationCapacity = unfinishedTaskCount * 2 + 4;
     if (callCount + implementationCapacity > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate",
         tasks: taskResults,
         rounds: [],
         tallies: {},
         gateFailures: [`This PR needs capacity for up to ${implementationCapacity} implementation and candidate calls before review, exceeding its ${config.limits.agentCallsPerPr}-call limit.`],
         agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     phase("Implement");
     for (const wave of topoWaves(input.tasks)) {
-      const runnable = wave.filter((task) => !(task.dependsOn ?? []).some((dependency) => failedTasks.has(dependency)));
-      for (const task of wave.filter((item) => !runnable.includes(item))) {
+      const unfinishedWave = wave.filter((task) => !completedTaskIds.has(task.id));
+      const runnable = unfinishedWave.filter((task) => !(task.dependsOn ?? []).some((dependency) => failedTasks.has(dependency)));
+      for (const task of unfinishedWave.filter((item) => !runnable.includes(item))) {
         failedTasks.add(task.id);
-        taskResults.push({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
+        recordTaskResult({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
       }
-      for (let offset = 0; offset < runnable.length; offset += config.implementation.maxParallel) {
-        const batch = runnable.slice(offset, offset + config.implementation.maxParallel);
+      const implementationParallel = runnable.some((task) => implementationRoute(config, task).engine === "codex")
+        ? 1
+        : config.implementation.maxParallel;
+      for (let offset = 0; offset < runnable.length; offset += implementationParallel) {
+        const batch = runnable.slice(offset, offset + implementationParallel);
         const results = await parallel(batch.map((task) => async () => {
           const route = implementationRoute(config, task);
-          let result = await implementTask(input, task, route.tier, route.engine, 1);
+          const resumeAttempt = taskAttempts[task.id] ?? 1;
+          taskAttempts[task.id] = resumeAttempt;
+          let result = await implementTask(
+            input,
+            task,
+            resumeAttempt === 1 ? route.tier : nextTier(route.tier),
+            route.engine,
+            resumeAttempt
+          );
           callCount += 1;
-          if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
+          if (relayState.fatal.length > 0) return { task, result };
+          if (resumeAttempt === 1
+            && (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met))) {
+            taskAttempts[task.id] = 2;
             result = await implementTask(input, task, nextTier(route.tier), route.engine, 2);
             callCount += 1;
           }
           return { task, result };
         }));
+        if (relayState.fatal.length > 0) return relayInterruption();
+        if (relayState.capacityExceeded) return capacityGate();
         for (const item of results) {
           const result = item?.result;
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
             failedTasks.add(item.task.id);
           }
-          taskResults.push(result ?? { taskId: item.task.id, status: "failed", summary: "The implementation agent did not return a valid result.", filesChanged: [], criteria: [] });
+          recordTaskResult(result ?? { taskId: item.task.id, status: "failed", summary: "The implementation agent did not return a valid result.", filesChanged: [], criteria: [] });
         }
       }
     }
     if (failedTasks.size > 0) {
-      return { status: "implementation-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: [`Tasks failed: ${[...failedTasks].join(", ")}`], agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "implementation-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: [`Tasks failed: ${[...failedTasks].join(", ")}`], agentCalls: callCount + relayState.extraCalls });
     }
   }
 
   phase("Candidate");
   let candidateOid = input.existingCandidateOid ?? null;
+  shipState.candidateOid = candidateOid;
   if (candidateOid && (input.repairFindings ?? []).length > 0) {
     if (callCount + 2 > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["The PR call limit has no room for the requested repair and new candidate."],
         candidateOid, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     const repairEngine = input.repairEngine === "codex" ? "codex" : "claude";
     const repairRuntime = config.complexity.complex[repairEngine];
@@ -593,41 +985,51 @@ async function main(raw) {
           artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${roundOffset + 1}/external-fixes.json`,
           prompt: repairPrompt, runtime: repairRuntime, sandbox: "workspace-write"
         })
-      : await agent(repairPrompt, {
+      : await claudeReasoningCall(repairPrompt, {
           label: "repair:external:claude", phase: "Fix", agentType: "tagteam:fixer",
           model: repairRuntime.model, effort: repairRuntime.effort, schema: fixReportSchema
         });
     callCount += 1;
+    if (relayState.fatal.length > 0) return relayInterruption({ candidateOid });
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid });
     if (!repairReport || input.repairFindings.some((finding) => !(repairReport.results ?? []).some((result) => result.id === finding.id && result.status === "fixed"))) {
-      return { status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "external-repair-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["The requested external-gate repair did not complete."], candidateOid, agentCalls: callCount + relayState.extraCalls });
     }
-    candidateOid = await commitCandidate(input, roundOffset + 1, "external gate repair");
+    const repairedCandidateOid = await commitCandidate(input, roundOffset + 1, "external gate repair");
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid });
+    candidateOid = repairedCandidateOid;
+    shipState.candidateOid = candidateOid;
   } else if (!candidateOid) {
-    candidateOid = await commitCandidate(input, 0, input.pr.title);
+    const initialCandidateOid = await commitCandidate(input, 0, input.pr.title);
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate();
+    candidateOid = initialCandidateOid;
+    shipState.candidateOid = candidateOid;
   }
   if (callCount + 3 > callBudget()) {
-    return {
+    return finish({
       status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
       gateFailures: ["The PR call limit has no room to snapshot, verify, and classify the current candidate."],
       candidateOid, agentCalls: callCount + relayState.extraCalls
-    };
+    });
   }
   const initialRound = roundOffset === 0 ? 0 : roundOffset + 1;
   let snapshotValue = await snapshot(input, initialRound, candidateOid);
   callCount += 1;
+  if (relayState.capacityExceeded) return capacityGate({ candidateOid });
   let verification = await runVerify(input, snapshotValue, initialRound);
   callCount += 1;
+  if (relayState.capacityExceeded) return capacityGate({ candidateOid });
   if (verification.status === "failed") {
     if (callCount + 5 > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["Local verification failed, but the PR call limit has no room for its one repair, new candidate, and classification."],
         candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
-    const repair = await agent([
+    const repair = await claudeReasoningCall([
       `Repair only the verification failure recorded at ${verification.resultPath} inside ${input.worktree}.`,
       "Do not commit or perform unrelated changes. Return one result for TT-VERIFY."
     ].join("\n"), {
@@ -639,41 +1041,50 @@ async function main(raw) {
       schema: fixReportSchema
     });
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     if (!repair?.results?.some((item) => item.id === "TT-VERIFY" && item.status === "fixed")) {
-      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification failed after implementation."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
     }
-    candidateOid = await commitCandidate(input, initialRound, "repair local verification");
+    const verificationCandidateOid = await commitCandidate(input, initialRound, "repair local verification");
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
+    candidateOid = verificationCandidateOid;
+    shipState.candidateOid = candidateOid;
     snapshotValue = await snapshot(input, initialRound, candidateOid);
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     verification = await runVerify(input, snapshotValue, initialRound);
     callCount += 1;
+    if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
     if (verification.status === "failed") {
-      return { status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls };
+      return finish({ status: "implementation-verify-failed", tasks: taskResults, rounds: [], tallies: {}, gateFailures: ["Local verification still fails after one repair."], candidateOid, verify: verification, agentCalls: callCount + relayState.extraCalls });
     }
   }
 
   let ui = await classifyUi(input, snapshotValue, initialRound);
   callCount += 1;
+  if (relayState.capacityExceeded) return capacityGate({ candidateOid, verify: verification });
   const initialSelectedInfo = selectDimensions(config, snapshotValue, input.reviewers ?? [], ui.verdict);
   if (initialSelectedInfo.selected.length === 0) throw new Error("no review dimensions were selected");
   let selectedInfo = { selected: [], skipped: [], matcherErrors: [] };
   const ledger = [];
   const advisory = [];
   const rounds = [];
+  shipState.ledger = ledger;
+  shipState.rounds = rounds;
   const specialistItems = [];
 
   if (config.specialistPrepass.enabled && roundOffset === 0) {
     if (callCount + 6 > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds: [], tallies: {},
         gateFailures: ["The PR call limit has no room for the six specialist pre-pass checks."],
         candidateOid, ui, verify: verification, selected: initialSelectedInfo, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     phase("Specialist pre-pass");
     const focuses = ["architecture", "security", "reliability", "testing", "code-quality", "documentation"];
-    const specialists = await parallel(focuses.map((focus) => () => agent([
+    const specialists = await parallel(focuses.map((focus) => () => claudeReasoningCall([
       `Apply the ${focus} lens to candidate ${candidateOid} in ${input.worktree}.`,
       fence("changed-paths", snapshotValue.changedPaths),
       `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
@@ -686,6 +1097,9 @@ async function main(raw) {
       schema: specialistSchema
     })));
     callCount += focuses.length;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, ui, verify: verification, selected: initialSelectedInfo });
+    }
     let sequence = 1;
     specialists.filter(Boolean).forEach((result) => {
       for (const finding of result.findings ?? []) specialistItems.push({ ...finding, id: `S${sequence++}`, focus: result.focus });
@@ -708,11 +1122,11 @@ async function main(raw) {
     const assignments = reviewAssignments(selectedInfo.selected, round, lastFixEngine, config.review.firstReviewer);
     const estimatedCalls = assignments.length + 1 + (loopRound < config.maxReviewLoops ? 10 : 0);
     if (callCount + estimatedCalls > callBudget()) {
-      return {
+      return finish({
         status: "agent-budget-gate", tasks: taskResults, rounds, tallies: tally(ledger),
         gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit before round ${round}.`],
         candidateOid, ui, verify: verification, selected: selectedInfo, agentCalls: callCount + relayState.extraCalls
-      };
+      });
     }
     phase(`Review ${round}`);
     const reviewResults = await parallel(assignments.map((assignment) => async () => {
@@ -739,10 +1153,11 @@ async function main(raw) {
           prompt: promptParts.join("\n\n"),
           runtime,
           sandbox: "read-only",
-          reviewDiffPath: snapshotValue.reviewDiffPath
+          reviewDiffPath: snapshotValue.reviewDiffPath,
+          reviewDiffHash: snapshotValue.reviewDiffHash
         });
       } else {
-        result = await agent([
+        result = await claudeReasoningCall([
           ...promptParts,
           `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
         ].join("\n\n"), {
@@ -757,6 +1172,12 @@ async function main(raw) {
       return { ...assignment, result };
     }));
     callCount += assignments.length;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
 
     lastRoundFailures = reviewResults.filter((item) => !item?.result).map((item) => `${item?.engine ?? "unknown"}:${item?.dimension ?? "unknown"}`);
     const roundFindings = [];
@@ -818,11 +1239,15 @@ async function main(raw) {
       ledgerSnapshot: ledger,
       reviewerFailures: lastRoundFailures,
       fixEngine: null,
+      runPolicy,
+      reasoningProvider: runPolicy.reasoningProvider,
+      assurance: runPolicy.assurance,
+      policyFingerprint: runPolicy.policyFingerprint,
       verification
     };
     const roundJsonPath = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/round.json`;
     const reviewPath = `${input.shipDir}/prs/${input.pr.id}/review.md`;
-    const scribe = await agent([
+    const scribe = await plumbingCall([
       `Persist this round JSON at ${roundJsonPath} with mode 0600.`,
       `Also persist each non-null reviewerResults entry at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/<engine>-<dimension>.findings.json and ledgerSnapshot at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/ledger.snapshot.json, all mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/render-review-round.mjs" "${reviewPath}" "${roundJsonPath}"`,
@@ -836,6 +1261,9 @@ async function main(raw) {
       schema: scribeSchema
     });
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!scribe?.ok) lastRoundFailures.push("review-artifact-cross-check");
 
     const open = actionable(ledger);
@@ -881,7 +1309,7 @@ async function main(raw) {
         sandbox: "workspace-write"
       });
     } else {
-      fixReport = await agent(fixPrompt, {
+      fixReport = await claudeReasoningCall(fixPrompt, {
         label: `fix:${round}:claude`,
         phase: `Fix ${round}`,
         agentType: "tagteam:fixer",
@@ -891,6 +1319,12 @@ async function main(raw) {
       });
     }
     callCount += 1;
+    if (relayState.fatal.length > 0) {
+      return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!fixReport || fixTargets.some((finding) => !(fixReport.results ?? []).some((result) => result.id === finding.id))) {
       rounds.at(-1).fixFailure = "fix report was missing or incomplete";
       status = "fix-failed-dirty-worktree";
@@ -908,7 +1342,7 @@ async function main(raw) {
       candidateBefore: candidateOid,
       report: fixReport
     };
-    const fixScribe = await agent([
+    const fixScribe = await plumbingCall([
       `Persist this fix event at ${fixEventPath} with mode 0600.`,
       `Persist the event's report object at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/fixes.json with mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/append-review-event.mjs" "${input.shipDir}/prs/${input.pr.id}/review.md" "${fixEventPath}"`,
@@ -922,18 +1356,32 @@ async function main(raw) {
       schema: eventScribeSchema
     });
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (!fixScribe?.ok) {
       rounds.at(-1).fixFailure = "fix event did not persist";
       status = "fix-failed-dirty-worktree";
       rounds.at(-1).worktreeDirty = true;
       break;
     }
-    candidateOid = await commitCandidate(input, round, `review round ${round}`);
+    const fixedCandidateOid = await commitCandidate(input, round, `review round ${round}`);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
+    candidateOid = fixedCandidateOid;
+    shipState.candidateOid = candidateOid;
     snapshotValue = await snapshot(input, round, candidateOid);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     verification = await runVerify(input, snapshotValue, round);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     if (verification.status === "failed") {
       rounds.at(-1).verification = verification;
       const repairId = `TT-VERIFY-R${round}`;
@@ -952,7 +1400,7 @@ async function main(raw) {
             runtime,
             sandbox: "workspace-write"
           })
-        : await agent(repairPrompt, {
+        : await claudeReasoningCall(repairPrompt, {
             label: `verify:repair:${round}:claude`,
             phase: `Verify repair ${round}`,
             agentType: "tagteam:fixer",
@@ -961,17 +1409,34 @@ async function main(raw) {
             schema: fixReportSchema
           });
       callCount += 1;
+      if (relayState.fatal.length > 0) {
+        return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       if (!repairReport?.results?.some((item) => item.id === repairId && item.status === "fixed")) {
         status = "verify-repair-failed-dirty-worktree";
         rounds.at(-1).worktreeDirty = true;
         break;
       }
-      candidateOid = await commitCandidate(input, round, `repair verification after review round ${round}`);
+      const repairCandidateOid = await commitCandidate(input, round, `repair verification after review round ${round}`);
       callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
+      candidateOid = repairCandidateOid;
+      shipState.candidateOid = candidateOid;
       snapshotValue = await snapshot(input, `${round}-repair`, candidateOid);
       callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       verification = await runVerify(input, snapshotValue, `${round}-repair`);
       callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
       rounds.at(-1).verificationRepair = { report: repairReport, verification };
       if (verification.status === "failed") {
         status = "verify-failed";
@@ -980,6 +1445,9 @@ async function main(raw) {
     }
     ui = await classifyUi(input, snapshotValue, round);
     callCount += 1;
+    if (relayState.capacityExceeded) {
+      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    }
     lastFixEngine = fixEngine;
   }
 
@@ -994,7 +1462,7 @@ async function main(raw) {
       gateFailures.push(`${dimension} still has findings at or above its configured gate`);
     }
   }
-  return {
+  return finish({
     status: gateFailures.length > 0 && status === "clean" ? "failed-gates" : status,
     tasks: taskResults,
     rounds,
@@ -1017,7 +1485,45 @@ async function main(raw) {
     agentCalls: callCount + relayState.extraCalls,
     relayRetries: relayState.extraCalls,
     budgetSpent: budgetSpent()
-  };
+  });
 }
 
-return await main(args);
+try {
+  return await main(args);
+} catch (error) {
+  if (!shipState.runPolicy) throw error;
+  return {
+    runPolicy: shipState.runPolicy,
+    reasoningProvider: shipState.runPolicy.reasoningProvider,
+    assurance: shipState.runPolicy.assurance,
+    policyFingerprint: shipState.runPolicy.policyFingerprint,
+    status: "ship-interrupted",
+    message: error instanceof Error ? error.message : String(error),
+    agentCalls: relayState.dispatchedCalls,
+    relayRetries: relayState.extraCalls,
+    usage: {
+      ...usageState,
+      plumbingCallsByModel: { ...usageState.plumbingCallsByModel },
+      relayRetries: shipState.priorRelayRetries + relayState.extraCalls
+    },
+    usageReceipts: [...codexReceiptState],
+    usageReceiptFiles: [...relayState.receiptFiles],
+    unconfirmedCodexDispatches: [...relayState.unconfirmedDispatches],
+    confirmedCodexDispatches: [...relayState.confirmedDispatches],
+    usageAccounting: relayState.receiptFiles.length > 0
+      ? "pending-checkpoint-reconciliation"
+      : (shipState.legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
+    legacyUsageIncomplete: shipState.legacyUsageIncomplete,
+    taskAttempts: { ...shipState.taskAttempts },
+    relayCheckpoints: [...new Set([
+      ...relayState.fatal.map((item) => item.checkpoint),
+      ...relayState.confirmedDispatches.map((item) => item.checkpoint)
+    ])],
+    tasks: [...shipState.taskResults],
+    candidateOid: shipState.candidateOid,
+    rounds: [...shipState.rounds],
+    ledger: [...shipState.ledger],
+    tallies: tally(shipState.ledger),
+    budgetSpent: budgetSpent()
+  };
+}

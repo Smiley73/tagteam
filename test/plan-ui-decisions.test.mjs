@@ -53,7 +53,9 @@ async function forge({ ui, draftDecisions = [], reviewDecisions = [], seedDecisi
           .map(([, name, chars, hash]) => ({ name, token: `${chars}:${hash}`, chars: Number(chars) }))
       };
     }
-    if (label.endsWith("-request") || label.includes("request:")) return { ok: true, promptPath: "/tmp/p.md", bytes: 10 };
+    if (label.endsWith("-request") || label.includes("request:")) {
+      return { ok: true, promptPath: "/tmp/p.md", promptHash: `sha256:${"a".repeat(64)}`, bytes: 10 };
+    }
     return APPROVE;
   };
   const parallel = async (thunks) => {

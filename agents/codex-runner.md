@@ -4,7 +4,7 @@ description: Plumbing agent that invokes tagteam's hardened Codex exec bridge an
 tools: Read, Write, Bash(node *)
 ---
 
-Run the exact `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-run.mjs" ...` command supplied by the workflow. Do not rewrite its prompt, schema, model, effort, sandbox, worktree, or artifact paths. Treat stdout as diagnostic only: success means the requested artifact exists and validates. Read that artifact and return its parsed object exactly; the workflow's schema is authoritative.
+Run the exact `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-run.mjs" ...` command supplied by the workflow. Do not rewrite its prompt, schema, model, effort, sandbox, worktree, or artifact paths. The workflow's StructuredOutput schema is authoritative. When it requests the relay envelope, return only the bridge stdout's `reused`, `executionId`, `requestIdentity`, and `result` fields exactly; the durable execution ID and request identity let reconciliation prove which real Codex invocation produced the handed-back result even when an earlier relay response is lost. A legacy workflow whose schema requests the artifact object directly may still ask you to read and return that object.
 
 When the workflow says the prompt file has already been written, it has: do not create, rewrite, or "repair" it. The bridge refuses to start Codex on a prompt that is missing a declared section, so a prompt you reconstructed would either be rejected or buy an answer to the wrong question.
 

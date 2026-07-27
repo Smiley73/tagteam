@@ -17,6 +17,9 @@ export function renderReport(shipDir) {
     `- Plan: ${meta.planSlug ?? "unknown"}`,
     `- Base: ${meta.base ?? "unknown"} at ${meta.baseOid ?? "unknown"}`,
     `- Transport: ${meta.transport ?? "exec"}`,
+    `- Substantive provider: ${meta.runPolicy?.reasoningProvider ?? meta.reasoningProvider ?? "both"}`,
+    `- Review assurance: ${meta.runPolicy?.assurance ?? meta.assurance ?? "cross-provider"}`,
+    `- Policy fingerprint: ${meta.runPolicy?.policyFingerprint ?? meta.policyFingerprint ?? "legacy"}`,
     `- Started: ${meta.startedAt ?? "unknown"}`,
     "",
     "## Pull requests",
@@ -32,9 +35,19 @@ export function renderReport(shipDir) {
     lines.push(`- Branch: ${pr.branch ?? "not created"}`);
     lines.push(`- Pull request: ${pr.number ?? "not published"}`);
     lines.push(`- Reviewed commit: ${pr.candidateOid ?? "none"}`);
+    lines.push(`- Review assurance: ${pr.assurance ?? "cross-provider"}`);
+    lines.push(`- Policy fingerprint: ${pr.policyFingerprint ?? "legacy"}`);
     lines.push(`- Review input: ${pr.fileCount ?? 0} changed files, ${pr.diffBytes ?? 0} full-diff bytes`);
     lines.push(`- Review rounds: ${review?.highestRound ?? 0}${review && !review.ok ? " (artifact did not parse; not converged)" : ""}`);
     lines.push(`- Agent calls: ${pr.agentCalls ?? 0}`);
+    const usage = pr.usage ?? {};
+    lines.push(`- Usage: Claude reasoning ${usage.claudeReasoningCalls ?? 0}; Haiku plumbing ${usage.haikuPlumbingCalls ?? 0}; Codex ${usage.codexCalls ?? 0}; relay retries ${usage.relayRetries ?? 0}`);
+    const plumbingByModel = Object.entries(usage.plumbingCallsByModel ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([model, count]) => `${model} ${count}`)
+      .join("; ");
+    lines.push(`- Plumbing by model: ${plumbingByModel || "none recorded"}`);
+    lines.push(`- Usage accounting: ${pr.usageAccounting ?? "legacy-incomplete"}`);
     if (pr.budgetSpent !== null && pr.budgetSpent !== undefined) lines.push(`- Workflow budget spent: ${JSON.stringify(pr.budgetSpent)}`);
     lines.push(`- Local verification: ${pr.gates?.verify?.status ?? "not-run"}`);
     lines.push(`- CI: ${pr.gates?.ci?.status ?? "not-run"}${pr.gates?.ci?.reason ? ` — ${pr.gates.ci.reason}` : ""}`);

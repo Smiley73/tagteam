@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 
 export function fnv1a(value) {
   let hash = 2166136261;
@@ -190,7 +191,8 @@ export function composePrompt(options) {
   fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
   fs.writeFileSync(out, composed, { mode: 0o600 });
   fs.chmodSync(out, 0o600);
-  return { ok: true, promptPath: out, bytes, chars: composed.length, sections };
+  const promptHash = `sha256:${createHash("sha256").update(composed).digest("hex")}`;
+  return { ok: true, promptPath: out, promptHash, bytes, chars: composed.length, sections };
 }
 
 async function main() {

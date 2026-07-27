@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
 import { globToRegExp, normalizeRepoPath } from "./lib/matcher.mjs";
 
 function git(cwd, args, { allowFailure = false, encoding = "utf8" } = {}) {
@@ -23,6 +24,95 @@ function parseArgs(argv) {
 function blobAt(cwd, oid, file) {
   const result = git(cwd, ["rev-parse", `${oid}:${file}`], { allowFailure: true });
   return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function writeImmutable(file, value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, bytes, { mode: 0o600 });
+  try {
+    try {
+      fs.linkSync(temporary, file);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (!fs.readFileSync(file).equals(bytes)) {
+        throw new Error(`immutable candidate snapshot already exists with different bytes: ${file}`);
+      }
+    }
+    fs.chmodSync(file, 0o600);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch {}
+  }
+}
+
+function sha256File(file) {
+  return `sha256:${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}`;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function candidateMetadataHash(candidate) {
+  return `sha256:${createHash("sha256").update(canonicalJson(candidate)).digest("hex")}`;
+}
+
+export function validateCandidateSnapshot(candidatePath, {
+  baseOid,
+  candidateOid,
+  candidateHash: expectedCandidateHash
+} = {}) {
+  const resolvedCandidatePath = path.resolve(candidatePath);
+  const candidateStat = fs.lstatSync(resolvedCandidatePath);
+  if (!candidateStat.isFile() || candidateStat.isSymbolicLink()) {
+    throw new Error(`candidate snapshot metadata is not a regular file: ${resolvedCandidatePath}`);
+  }
+  const candidateBytes = fs.readFileSync(resolvedCandidatePath);
+  const candidateHash = `sha256:${createHash("sha256").update(candidateBytes).digest("hex")}`;
+  if (expectedCandidateHash && candidateHash !== expectedCandidateHash) {
+    throw new Error("candidate snapshot metadata bytes do not match the expected hash");
+  }
+  const candidate = JSON.parse(candidateBytes.toString("utf8"));
+  const expectedDiffPath = path.join(path.dirname(resolvedCandidatePath), "candidate.diff");
+  const expectedReviewDiffPath = path.join(path.dirname(resolvedCandidatePath), "review.diff");
+  if (!/^[0-9a-f]{40}$/.test(candidate.baseOid ?? "")
+    || !/^[0-9a-f]{40}$/.test(candidate.candidateOid ?? "")
+    || (baseOid && candidate.baseOid !== baseOid)
+    || (candidateOid && candidate.candidateOid !== candidateOid)) {
+    throw new Error("candidate snapshot metadata does not match the expected commits");
+  }
+  if (candidate.diffPath !== expectedDiffPath
+    || candidate.reviewDiffPath !== expectedReviewDiffPath) {
+    throw new Error("candidate snapshot metadata points outside its immutable snapshot directory");
+  }
+  for (const artifactPath of [expectedDiffPath, expectedReviewDiffPath]) {
+    const stat = fs.lstatSync(artifactPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`candidate snapshot artifact is not a regular file: ${artifactPath}`);
+    }
+  }
+  if (candidate.diffHash !== sha256File(expectedDiffPath)
+    || candidate.reviewDiffHash !== sha256File(expectedReviewDiffPath)) {
+    throw new Error("candidate snapshot artifact bytes do not match their recorded hashes");
+  }
+  if (candidate.diffBytes !== fs.statSync(expectedDiffPath).size
+    || !Array.isArray(candidate.changedPaths)
+    || !Array.isArray(candidate.excluded)
+    || typeof candidate.addedLines !== "string"
+    || candidate.fileCount !== candidate.changedPaths.length
+    || candidate.treeClean !== "") {
+    throw new Error("candidate snapshot metadata is internally inconsistent");
+  }
+  return {
+    candidatePath: resolvedCandidatePath,
+    candidateHash,
+    candidateMetadataHash: candidateMetadataHash(candidate),
+    ...candidate
+  };
 }
 
 export function snapshotCandidate(options) {
@@ -59,34 +149,60 @@ export function snapshotCandidate(options) {
     .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
     .map((line) => line.slice(1))
     .join("\n");
+  const worktreeHead = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
+  const worktreeStatus = git(worktree, ["status", "--porcelain"]).stdout;
   const treeClean = git(primary, ["status", "--porcelain"]).stdout;
+  if (worktreeHead !== candidateOid) {
+    throw new Error(`shipping worktree HEAD ${worktreeHead} does not match candidate ${candidateOid}`);
+  }
+  if (worktreeStatus !== "") {
+    throw new Error(`shipping worktree changed after the candidate commit:\n${worktreeStatus}`);
+  }
+  if (baseOid === candidateOid || fullDiff.length === 0) throw new Error("candidate snapshot is empty; implementation was not committed");
+  if (treeClean !== "") throw new Error(`the primary checkout changed during the ship:\n${treeClean}`);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const diffPath = path.join(outDir, "candidate.diff");
   const reviewDiffPath = path.join(outDir, "review.diff");
-  fs.writeFileSync(diffPath, fullDiff, { mode: 0o600 });
-  fs.writeFileSync(reviewDiffPath, reviewDiff, { mode: 0o600 });
+  writeImmutable(diffPath, fullDiff);
+  writeImmutable(reviewDiffPath, reviewDiff);
+  const diffHash = `sha256:${createHash("sha256").update(fullDiff).digest("hex")}`;
+  const reviewDiffHash = `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`;
   const candidate = {
     baseOid,
     candidateOid,
     diffPath,
+    diffHash,
     reviewDiffPath,
+    reviewDiffHash,
     changedPaths,
     addedLines,
     excluded,
     diffBytes: Buffer.byteLength(fullDiff),
     fileCount: changedPaths.length,
-    treeClean,
-    createdAt: new Date().toISOString()
+    treeClean
   };
   const candidatePath = path.join(outDir, "candidate.json");
-  fs.writeFileSync(candidatePath, JSON.stringify(candidate, null, 2) + "\n", { mode: 0o600 });
-  if (baseOid === candidateOid || fullDiff.length === 0) throw new Error("candidate snapshot is empty; implementation was not committed");
-  if (treeClean !== "") throw new Error(`the primary checkout changed during the ship:\n${treeClean}`);
-  return { candidatePath, ...candidate };
+  writeImmutable(candidatePath, JSON.stringify(candidate, null, 2) + "\n");
+  return validateCandidateSnapshot(candidatePath, { baseOid, candidateOid });
 }
 
 async function main() {
   try {
+    if (process.argv[2] === "validate") {
+      const args = Object.fromEntries(process.argv.slice(3).reduce((pairs, value, index, all) => {
+        if (index % 2 === 0) pairs.push([value.slice(2), all[index + 1]]);
+        return pairs;
+      }, []));
+      if (!args["candidate-json"] || !args.base || !args["candidate-oid"]) {
+        throw new Error("validate requires --candidate-json, --base, and --candidate-oid");
+      }
+      process.stdout.write(`${JSON.stringify(validateCandidateSnapshot(args["candidate-json"], {
+        baseOid: args.base,
+        candidateOid: args["candidate-oid"],
+        candidateHash: args["candidate-hash"]
+      }))}\n`);
+      return;
+    }
     const result = snapshotCandidate(parseArgs(process.argv.slice(2)));
     process.stdout.write(JSON.stringify(result) + "\n");
   } catch (error) {

@@ -17,6 +17,8 @@ import { parseReviewArtifact } from "../scripts/parse-review-artifact.mjs";
 import { appendRound } from "../scripts/render-review-round.mjs";
 import { appendEvent } from "../scripts/append-review-event.mjs";
 import { classifyProviderError, nextBackoff } from "../scripts/quota-backoff.mjs";
+import { normalizeRunPolicy } from "../scripts/lib/run-policy.mjs";
+import { renderReport } from "../scripts/render-report.mjs";
 import { semanticErrors, validateJson } from "../scripts/validate-json.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -260,6 +262,30 @@ test("plain-English gate messages preserve recovery identifiers", () => {
   ].join("\n"));
 });
 
+test("single-provider gate message discloses reduced assurance", () => {
+  const rendered = messages.singleProvider({
+    shipId: "ship-1", pr: 42, branch: "tagteam/ship-1/p1",
+    sha: "abc1234", command: "/tagteam:ship --resume", artifact: "/tmp/review.md"
+  });
+  assert.match(rendered, /one substantive provider/);
+  assert.match(rendered, /not independent cross-provider confirmation/);
+  assert.match(rendered, /commit abc1234/);
+});
+
+test("message catalog and the ship command's permitted recurring keys stay synchronized", () => {
+  assert.deepEqual(Object.keys(messages).sort(), [
+    "agentBudget", "ciFailed", "configStale", "configStaleShip", "fixFailed",
+    "mergeFailed", "noEvidence", "planInterrupted", "relayLost", "reviewFailed",
+    "singleProvider", "unprotectedBase", "userVisible", "verificationFailed"
+  ]);
+  const shipSource = fs.readFileSync(path.join(root, "commands/ship.md"), "utf8");
+  const permitted = shipSource.match(/messages\.mjs" "<([^"]+)>"/)?.[1].split("|").sort();
+  assert.deepEqual(permitted, [
+    "agentBudget", "ciFailed", "fixFailed", "mergeFailed", "noEvidence",
+    "reviewFailed", "singleProvider", "unprotectedBase", "userVisible", "verificationFailed"
+  ]);
+});
+
 test("plain-English gate message CLI emits the catalog output", () => {
   const result = spawnSync(process.execPath, [
     path.join(root, "scripts/lib/messages.mjs"),
@@ -315,6 +341,81 @@ test("gate evaluation requires evidence, UI approval, and protected-base approva
   pr = recordGate(pr, "review", pr.candidateOid, { status: "failed", gateFailures: ["one failed reviewer"] });
   assert.equal(evaluateGates(pr, config, { baseProtected: true }).ready, true);
   assert.equal(checkCallCapacity({ agentCalls: 59 }, 60, 2).allowed, false);
+  assert.throws(() => checkCallCapacity({ agentCalls: -1 }, 60, 1), /nonnegative safe integers/);
+  assert.throws(() => checkCallCapacity({ agentCalls: "not-a-number" }, 60, 1), /nonnegative safe integers/);
+  assert.throws(() => checkCallCapacity({ agentCalls: 1 }, 60, -1), /nonnegative safe integers/);
+});
+
+test("single-provider gates bind candidate and policy and always require approval", () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  let pr = {
+    state: "verifying", gates: {}, candidateHistory: [],
+    planUserVisible: "no", changedPaths: ["src/api.ts"]
+  };
+  pr = bindNewCandidate(pr, "a".repeat(40), "b".repeat(40), policy);
+  for (const [gate, value] of [
+    ["review", { status: "clean", gateFailures: [] }],
+    ["verify", { status: "passed" }],
+    ["ui", { verdict: "no" }],
+    ["ci", { status: "passed" }]
+  ]) pr = recordGate(pr, gate, pr.candidateOid, value, policy.policyFingerprint);
+  const config = { prTrain: { mode: "github-pr", pauseOn: ["ui"] } };
+  const pending = evaluateGates(pr, config, { baseProtected: true, runPolicy: policy });
+  assert.deepEqual(pending.approvals, ["single-provider"]);
+  assert.equal(pending.ready, false);
+  assert.equal(pending.needsHuman, true);
+
+  assert.throws(
+    () => recordGate(pr, "human", pr.candidateOid, { approved: true }, `sha256:${"0".repeat(64)}`),
+    /stale run policy/
+  );
+  assert.throws(
+    () => recordGate(pr, "human", pr.candidateOid, { approved: true }),
+    /without the current run policy fingerprint/
+  );
+  const bound = recordGate(pr, "review", pr.candidateOid, {
+    status: "clean",
+    candidateOid: "c".repeat(40),
+    policyFingerprint: `sha256:${"0".repeat(64)}`
+  }, policy.policyFingerprint);
+  assert.equal(bound.gates.review.candidateOid, pr.candidateOid);
+  assert.equal(bound.gates.review.policyFingerprint, policy.policyFingerprint);
+  pr = recordGate(pr, "human", pr.candidateOid, { approved: true }, policy.policyFingerprint);
+  assert.equal(evaluateGates(pr, config, { baseProtected: true, runPolicy: policy }).ready, true);
+  const tampered = { ...policy, reasoningProvider: "claude" };
+  const mismatch = evaluateGates(pr, config, { baseProtected: true, runPolicy: tampered });
+  assert.equal(mismatch.ready, false);
+  assert.equal(mismatch.blockers.includes("policy-identity"), true);
+});
+
+test("the final report discloses provider assurance and split usage", () => {
+  const shipDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-report-"));
+  fs.writeFileSync(path.join(shipDir, "ship-meta.json"), JSON.stringify({
+    shipId: "s1",
+    runPolicy: normalizeRunPolicy({ provider: "codex" })
+  }));
+  fs.writeFileSync(path.join(shipDir, "pr-train-state.json"), JSON.stringify({
+    prs: [{
+      id: "PR-1",
+      state: "awaiting-approval",
+      assurance: "single-provider",
+      policyFingerprint: "sha256:test",
+      usageAccounting: "legacy-incomplete",
+      usage: {
+        claudeReasoningCalls: 0,
+        haikuPlumbingCalls: 8,
+        plumbingCallsByModel: { haiku: 8, sonnet: 3 },
+        codexCalls: 6,
+        relayRetries: 1
+      }
+    }]
+  }));
+  const report = renderReport(shipDir);
+  assert.match(report, /Substantive provider: codex/);
+  assert.match(report, /Review assurance: single-provider/);
+  assert.match(report, /Usage: Claude reasoning 0; Haiku plumbing 8; Codex 6; relay retries 1/);
+  assert.match(report, /Plumbing by model: haiku 8; sonnet 3/);
+  assert.match(report, /Usage accounting: legacy-incomplete/);
 });
 
 test("merge lock serializes ships, supports a lease heartbeat, and validates ownership", () => {
