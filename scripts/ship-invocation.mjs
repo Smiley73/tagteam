@@ -170,6 +170,25 @@ function validateDescriptor(value) {
   const agentCallsBefore = count(value.agentCallsBefore, "ship invocation starting call count");
   const maximumCalls = count(value.maximumCalls, "ship invocation maximum call count");
   if (agentCallsBefore > maximumCalls) throw new Error("ship invocation starts beyond its call limit");
+  if (value.baseline !== undefined) {
+    const baseline = object(value.baseline, "ship invocation usage baseline");
+    if (count(baseline.agentCalls, "ship invocation baseline call count") !== agentCallsBefore) {
+      throw new Error("ship invocation usage baseline does not match its starting call count");
+    }
+    if (!["complete", "legacy-incomplete"].includes(baseline.usageAccounting)) {
+      throw new Error("ship invocation usage baseline accounting is invalid");
+    }
+    const usage = object(baseline.usage, "ship invocation baseline usage");
+    count(usage.claudeReasoningCalls, "ship invocation baseline Claude usage");
+    const haiku = count(usage.haikuPlumbingCalls, "ship invocation baseline Haiku usage");
+    const plumbing = modelCounts(usage.plumbingCallsByModel);
+    count(usage.codexCalls, "ship invocation baseline Codex usage");
+    count(usage.relayRetries, "ship invocation baseline relay retries");
+    if ((plumbing.haiku ?? 0) !== haiku) {
+      throw new Error("ship invocation baseline Haiku usage is inconsistent");
+    }
+    stringArray(baseline.usageReceipts, "ship invocation baseline usage receipts");
+  }
   if (value.status === "complete") {
     if (typeof value.resultFile !== "string" || !path.isAbsolute(value.resultFile)) {
       throw new Error("completed ship invocation result file must be absolute");
@@ -233,6 +252,34 @@ function resultFor(descriptor, resultFile) {
     && codexCalls !== new Set(usageReceipts).size) {
     throw new Error("ship workflow complete Codex usage does not match its receipts");
   }
+  if (descriptor.baseline) {
+    const baseline = descriptor.baseline;
+    const baselineUsage = baseline.usage;
+    const baselinePlumbing = baselineUsage.plumbingCallsByModel;
+    const monotonic = [
+      [claudeReasoningCalls, baselineUsage.claudeReasoningCalls],
+      [haikuPlumbingCalls, baselineUsage.haikuPlumbingCalls],
+      [codexCalls, baselineUsage.codexCalls],
+      [usage.relayRetries, baselineUsage.relayRetries]
+    ].every(([current, prior]) => current >= prior)
+      && Object.entries(baselinePlumbing)
+        .every(([model, prior]) => (plumbingCallsByModel[model] ?? 0) >= prior);
+    if (!monotonic) throw new Error("ship workflow cumulative usage moved backwards");
+    const currentReceipts = new Set(usageReceipts);
+    if (baseline.usageReceipts.some((receipt) => !currentReceipts.has(receipt))) {
+      throw new Error("ship workflow cumulative receipts dropped prior evidence");
+    }
+    if (baseline.usageAccounting === "legacy-incomplete" && value.usageAccounting === "complete") {
+      throw new Error("ship workflow cannot make legacy-incomplete accounting exact");
+    }
+    if (baseline.usageAccounting === "complete" && value.usageAccounting === "complete") {
+      const baselineKnownCalls = baselineUsage.claudeReasoningCalls
+        + Object.values(baselinePlumbing).reduce((sum, item) => sum + item, 0);
+      if (knownAgentCalls - baselineKnownCalls !== agentCalls - baseline.agentCalls) {
+        throw new Error("ship workflow usage delta does not match its agent call delta");
+      }
+    }
+  }
   return { ...result, agentCalls, usageAccounting: value.usageAccounting };
 }
 
@@ -249,7 +296,7 @@ function completedDescriptor(descriptor, result) {
   };
 }
 
-function verifyCompletedDescriptor(descriptor, resultFile = descriptor.resultFile) {
+function completedResult(descriptor, resultFile = descriptor.resultFile) {
   const resolved = path.resolve(resultFile);
   if (resolved !== descriptor.resultFile) {
     throw new Error("completed ship invocation result path changed");
@@ -262,7 +309,27 @@ function verifyCompletedDescriptor(descriptor, resultFile = descriptor.resultFil
     || result.usageAccounting !== descriptor.usageAccounting) {
     throw new Error("completed ship invocation accounting changed");
   }
+  return result;
+}
+
+function verifyCompletedDescriptor(descriptor, resultFile = descriptor.resultFile) {
+  completedResult(descriptor, resultFile);
   return descriptor;
+}
+
+function baselineFrom(result) {
+  return {
+    agentCalls: result.agentCalls,
+    usageAccounting: result.usageAccounting,
+    usage: {
+      claudeReasoningCalls: result.value.usage.claudeReasoningCalls,
+      haikuPlumbingCalls: result.value.usage.haikuPlumbingCalls,
+      plumbingCallsByModel: { ...result.value.usage.plumbingCallsByModel },
+      codexCalls: result.value.usage.codexCalls,
+      relayRetries: result.value.usage.relayRetries
+    },
+    usageReceipts: [...result.value.usageReceipts]
+  };
 }
 
 export function beginShipInvocation({
@@ -279,7 +346,7 @@ export function beginShipInvocation({
   if (typeof prId !== "string" || !prId) throw new Error("ship invocation PR ID is required");
   const nextAgentCallsBefore = count(agentCallsBefore, "ship invocation starting call count");
   const nextMaximumCalls = count(maximumCalls, "ship invocation maximum call count");
-  const descriptor = validateDescriptor({
+  let descriptor = validateDescriptor({
     version: VERSION,
     status: "active",
     invocationId,
@@ -296,13 +363,14 @@ export function beginShipInvocation({
       if (prior.status === "active") {
         throw new Error(`ship invocation ${prior.invocationId} is unresolved; automatic redispatch is unsafe`);
       }
-      verifyCompletedDescriptor(prior);
+      const priorResult = completedResult(prior);
       if (prior.policyFingerprint !== nextPolicyFingerprint
         || prior.prId !== prId
         || prior.maximumCalls !== nextMaximumCalls
         || prior.agentCallsAfter !== nextAgentCallsBefore) {
         throw new Error("new ship invocation does not continue the completed PR accounting exactly");
       }
+      descriptor = validateDescriptor({ ...descriptor, baseline: baselineFrom(priorResult) });
     }
     if (typeof beforePublish === "function") beforePublish();
     writeAtomic(resolved, descriptor);

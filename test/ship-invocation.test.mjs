@@ -308,6 +308,73 @@ test("the next invocation must continue the completed PR budget exactly", () => 
   assert.equal(next.agentCallsBefore, 7);
 });
 
+test("successor invocations cannot erase cumulative provider usage or receipts", () => {
+  const files = fixture();
+  beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 3,
+    maximumCalls: 12,
+    invocationId
+  });
+  writeResult(files.result, {
+    usage: {
+      claudeReasoningCalls: 2,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 5 },
+      codexCalls: 1,
+      relayRetries: 0
+    },
+    usageReceipts: ["exec-old"]
+  });
+  completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+
+  const nextInvocationId = "22222222-2222-4222-8222-222222222222";
+  const next = beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 7,
+    maximumCalls: 12,
+    invocationId: nextInvocationId
+  });
+  assert.equal(next.baseline.usage.codexCalls, 1);
+  assert.deepEqual(next.baseline.usageReceipts, ["exec-old"]);
+
+  writeResult(files.result, {
+    invocationId: nextInvocationId,
+    agentCalls: 8,
+    usage: {
+      claudeReasoningCalls: 3,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 5 },
+      codexCalls: 0,
+      relayRetries: 0
+    },
+    usageReceipts: []
+  });
+  assert.throws(
+    () => completeShipInvocation({ file: files.descriptor, resultFile: files.result }),
+    /cumulative usage moved backwards|cumulative receipts dropped/
+  );
+
+  writeResult(files.result, {
+    invocationId: nextInvocationId,
+    agentCalls: 8,
+    usage: {
+      claudeReasoningCalls: 3,
+      haikuPlumbingCalls: 0,
+      plumbingCallsByModel: { sonnet: 5 },
+      codexCalls: 1,
+      relayRetries: 0
+    },
+    usageReceipts: ["exec-old"]
+  });
+  const completed = completeShipInvocation({ file: files.descriptor, resultFile: files.result });
+  assert.equal(completed.agentCallsAfter, 8);
+});
+
 test("the begin transition serializes concurrent callers before descriptor publication", () => {
   const files = fixture();
   let competingError;
