@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { composePrompt } from "../scripts/compose-prompt.mjs";
 import { materializePlanArtifact } from "../scripts/materialize-plan-artifact.mjs";
 import { mergePlanQuestions } from "../scripts/merge-plan-questions.mjs";
+import { planReceipt } from "../scripts/plan-receipt.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const identity = `sha256:${"a".repeat(64)}`;
@@ -62,6 +63,26 @@ test("Codex draft promotion writes the exact resumable payload without model tra
   assert.equal(fs.statSync(plan).mode & 0o777, 0o600);
   assert.equal(result.ok, true);
   assert.equal(result.payloads[0].name, "DRAFT_PLAN");
+});
+
+test("Claude draft receipts describe normalized saved content without returning it", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-receipt-"));
+  const file = path.join(directory, "plan.md");
+  fs.writeFileSync(file, "# Plan  \r\n\r\nDo the work.\n\n", { mode: 0o600 });
+
+  const receipt = planReceipt(file);
+  assert.deepEqual(receipt, {
+    plan_path: file,
+    plan_chars: 20,
+    plan_hash: "1d5cbb3a"
+  });
+  assert.equal(Object.values(receipt).includes("# Plan\n\nDo the work."), false);
+});
+
+test("Claude plan drafter can execute only the receipt helper through Bash", () => {
+  const contract = fs.readFileSync(path.join(root, "agents/plan-drafter.md"), "utf8");
+  assert.match(contract, /Bash\(node \*\/scripts\/plan-receipt\.mjs \*\)/);
+  assert.doesNotMatch(contract, /Bash\(node \*\)(?:,|$)/);
 });
 
 test("Codex draft promotion rejects an artifact from another immutable request", () => {

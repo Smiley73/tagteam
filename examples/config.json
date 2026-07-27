@@ -3,7 +3,8 @@
   "planning": {
     "claude": { "model": "opus", "effort": "xhigh" },
     "codex": { "model": "gpt-5.6-sol", "effort": "high" },
-    "reviewRounds": 2
+    "reviewRounds": 2,
+    "largePlanWarningChars": 100000
   },
   "prTrain": {
     "enabled": true,
