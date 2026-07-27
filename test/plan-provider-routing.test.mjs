@@ -107,6 +107,8 @@ test("plan command documents provider validation and immutable resume policy", (
   assert.match(command, /Reject `--provider` on resume if it differs/);
   assert.match(command, /In `codex` mode Claude\/Haiku performs orchestration only/);
   assert.match(command, /In `claude` mode no Codex request is dispatched/);
+  assert.match(command, /recovered-ui-decisions\.json/);
+  assert.match(command, /atomically write `\[\]`/);
 });
 
 test("Codex prompts consume the exact configured UI policy, conventions, and PR-size guidance", () => {

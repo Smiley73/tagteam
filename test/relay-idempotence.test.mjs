@@ -1518,7 +1518,8 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
     decisions: [{ question: "Use staged rollout?", answer: "Yes" }],
     decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
     openQuestions: ["Which rollout?"],
-    uiDecisions: [uiDecision]
+    uiDecisions: [uiDecision],
+    uiDecisionsFile: "/plans/slug/drafts/pass-1-integrated.md.ui-decisions.json"
   }, responder);
 
   assert.equal(result.status, "needs-questions-or-approval");

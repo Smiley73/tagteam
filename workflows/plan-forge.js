@@ -762,6 +762,9 @@ async function main(raw) {
   const configPath = input.configPath ?? `${input.worktree}/.tagteam/config.json`;
   const useClaude = runPolicy.reasoningProvider !== "codex";
   const useCodex = runPolicy.reasoningProvider !== "claude";
+  if (!useClaude && uiEnabled && (resumeRound || continuation) && !input.uiDecisionsFile) {
+    throw new Error("resumed Codex planning requires a normalized uiDecisionsFile");
+  }
 
   const codexReasoning = async ({
     template, vars = {}, fences, expects = {}, requireJson = [], schemaFile,
@@ -936,7 +939,7 @@ async function main(raw) {
         { name: "CARRIED_QUESTIONS", file: `${input.seedPlanPath}.questions.json`, json: true },
         ...(uiEnabled ? [{
           name: "CARRIED_INTERFACE_DECISIONS",
-          file: `${input.seedPlanPath}.ui-decisions.json`,
+          file: input.uiDecisionsFile,
           json: true
         }] : [])
       ]
@@ -1104,6 +1107,9 @@ async function main(raw) {
 
     const uiArtifact = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-interaction-codex.json`;
     const uiPromptFile = `${uiArtifact}.prompt.md`;
+    const roundUiDecisionsFile = resumeRound && round === resumeRound
+      ? input.uiDecisionsFile
+      : `${planFile}.ui-decisions.json`;
     const tasks = [];
     const taskNames = [];
     if (useClaude) {
@@ -1166,13 +1172,13 @@ async function main(raw) {
           { name: "GOAL", file: goalPath, json: true },
           { name: "PROJECT_CONFIG", file: configPath, json: true },
           { name: "PLAN", file: planFile },
-          { name: "DECLARED_INTERFACE_DECISIONS", file: `${planFile}.ui-decisions.json`, json: true }
+          { name: "DECLARED_INTERFACE_DECISIONS", file: roundUiDecisionsFile, json: true }
         ],
         expects: {
           PLAN: planExpect,
           DECLARED_INTERFACE_DECISIONS: expectJson(draft.ui_decisions ?? [])
         },
-        requireJson: [`${planFile}.ui-decisions.json`],
+        requireJson: [roundUiDecisionsFile],
         schemaFile: "ui-review.schema.json",
         schema: uiReviewSchema,
         artifact: uiArtifact,
@@ -1258,7 +1264,7 @@ async function main(raw) {
         { name: "CARRIED_QUESTIONS", file: `${planFile}.questions.json`, json: true },
         ...(uiEnabled ? [{
           name: "CARRIED_INTERFACE_DECISIONS",
-          file: `${planFile}.ui-decisions.json`,
+          file: roundUiDecisionsFile,
           json: true
         }] : []),
         ...(uiReview ? [{ name: "INTERFACE_REVIEW", file: uiArtifact, json: true }] : [])
