@@ -123,7 +123,15 @@ export function snapshotCandidate(options) {
     .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
     .map((line) => line.slice(1))
     .join("\n");
+  const worktreeHead = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
+  const worktreeStatus = git(worktree, ["status", "--porcelain"]).stdout;
   const treeClean = git(primary, ["status", "--porcelain"]).stdout;
+  if (worktreeHead !== candidateOid) {
+    throw new Error(`shipping worktree HEAD ${worktreeHead} does not match candidate ${candidateOid}`);
+  }
+  if (worktreeStatus !== "") {
+    throw new Error(`shipping worktree changed after the candidate commit:\n${worktreeStatus}`);
+  }
   if (baseOid === candidateOid || fullDiff.length === 0) throw new Error("candidate snapshot is empty; implementation was not committed");
   if (treeClean !== "") throw new Error(`the primary checkout changed during the ship:\n${treeClean}`);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });

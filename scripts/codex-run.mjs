@@ -598,6 +598,12 @@ export async function runCodex(options, prompt) {
         }
       }
       if (recorded?.fingerprint === fingerprint && recorded.requestIdentity !== identity) {
+        if (options.sandbox === "workspace-write") {
+          throw new Error(
+            "A matching legacy or differently identified writable Codex result exists without "
+            + "request-bound completion evidence; automatic replay could apply its edits twice."
+          );
+        }
         process.stderr.write(`The artifact at ${artifact} has a different or legacy request identity; running Codex again.\n`);
       } else if (recorded?.fingerprint !== fingerprint) {
         process.stderr.write(recorded

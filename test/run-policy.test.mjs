@@ -56,14 +56,29 @@ test("run policy validation rejects field tampering under a retained fingerprint
 test("legacy resume restores a validated both policy once at mode 0600", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-policy-"));
   const file = path.join(directory, "reviews", "pass-1-run-policy.json");
+  const legacyState = path.join(directory, "reviews", "pass-1-usage.json");
+  fs.mkdirSync(path.dirname(legacyState), { recursive: true });
+  fs.writeFileSync(legacyState, JSON.stringify({
+    agentCalls: 4,
+    usage: { codexCalls: 1 },
+    usageAccounting: "legacy-incomplete"
+  }));
   assert.throws(
     () => restoreRunPolicy(file, { transport: { relayModel: "opus" } }),
     /pass --allow-legacy/
   );
+  assert.throws(
+    () => restoreRunPolicy(
+      file,
+      { transport: { relayModel: "opus" } },
+      { allowLegacy: true }
+    ),
+    /complete --state-root inventory/
+  );
   const first = restoreRunPolicy(
     file,
     { transport: { relayModel: "opus" } },
-    { allowLegacy: true }
+    { allowLegacy: true, stateRoots: [directory] }
   );
   assert.equal(first.migratedLegacy, true);
   assert.equal(first.policy.reasoningProvider, "both");

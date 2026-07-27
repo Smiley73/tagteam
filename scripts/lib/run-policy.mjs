@@ -106,17 +106,53 @@ function collectPolicyFingerprints(value, fingerprints) {
   }
 }
 
-function statePolicyFingerprints(stateFiles) {
-  const fingerprints = new Set();
-  for (const stateFile of stateFiles) {
-    if (!fs.existsSync(stateFile)) throw new Error(`run policy state file does not exist: ${stateFile}`);
-    collectPolicyFingerprints(readJson(stateFile), fingerprints);
+function inventoryJsonFiles(root, files) {
+  const stat = fs.lstatSync(root);
+  if (stat.isSymbolicLink()) throw new Error(`run policy state root contains a symbolic link: ${root}`);
+  if (stat.isFile()) {
+    if (root.endsWith(".json")) files.add(path.resolve(root));
+    return;
   }
-  return fingerprints;
+  if (!stat.isDirectory()) return;
+  for (const entry of fs.readdirSync(root).sort()) {
+    inventoryJsonFiles(path.join(root, entry), files);
+  }
 }
 
-export function restoreRunPolicy(file, config = {}, { allowLegacy = false, stateFiles = [] } = {}) {
-  const savedFingerprints = statePolicyFingerprints(stateFiles);
+function hasRecoveryEvidence(value) {
+  if (Array.isArray(value)) return value.some(hasRecoveryEvidence);
+  if (!value || typeof value !== "object") return false;
+  if (Object.hasOwn(value, "agentCalls")
+    && (Object.hasOwn(value, "usage") || Object.hasOwn(value, "usageAccounting"))) {
+    return true;
+  }
+  if (Object.hasOwn(value, "prs") || Object.hasOwn(value, "taskResults")) return true;
+  return Object.values(value).some(hasRecoveryEvidence);
+}
+
+function stateInventory(stateFiles, stateRoots) {
+  const files = new Set(stateFiles.map((file) => path.resolve(file)));
+  for (const stateRoot of stateRoots) {
+    if (!fs.existsSync(stateRoot)) throw new Error(`run policy state root does not exist: ${stateRoot}`);
+    inventoryJsonFiles(path.resolve(stateRoot), files);
+  }
+  const fingerprints = new Set();
+  let recoveryEvidence = false;
+  for (const stateFile of files) {
+    if (!fs.existsSync(stateFile)) throw new Error(`run policy state file does not exist: ${stateFile}`);
+    const state = readJson(stateFile);
+    collectPolicyFingerprints(state, fingerprints);
+    recoveryEvidence ||= hasRecoveryEvidence(state);
+  }
+  return { fingerprints, recoveryEvidence };
+}
+
+export function restoreRunPolicy(file, config = {}, {
+  allowLegacy = false,
+  stateFiles = [],
+  stateRoots = []
+} = {}) {
+  const { fingerprints: savedFingerprints, recoveryEvidence } = stateInventory(stateFiles, stateRoots);
   if (fs.existsSync(file)) {
     const policy = validateRunPolicy(readJson(file));
     for (const savedFingerprint of savedFingerprints) {
@@ -131,6 +167,9 @@ export function restoreRunPolicy(file, config = {}, { allowLegacy = false, state
   }
   if (!allowLegacy) {
     throw new Error("run policy file is missing; pass --allow-legacy only after proving all saved state predates provider policies");
+  }
+  if (stateRoots.length === 0 || !recoveryEvidence) {
+    throw new Error("legacy policy migration requires a complete --state-root inventory with recognizable pre-feature recovery state");
   }
   const policy = normalizeRunPolicy({ provider: "both" }, config);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -151,6 +190,7 @@ async function main() {
   } else if (action === "restore") {
     const config = configPath ? readJson(configPath) : {};
     const stateFiles = [];
+    const stateRoots = [];
     let allowLegacy = false;
     for (let index = 0; index < flags.length; index += 1) {
       if (flags[index] === "--allow-legacy") {
@@ -158,13 +198,20 @@ async function main() {
       } else if (flags[index] === "--state" && flags[index + 1]) {
         stateFiles.push(flags[index + 1]);
         index += 1;
+      } else if (flags[index] === "--state-root" && flags[index + 1]) {
+        stateRoots.push(flags[index + 1]);
+        index += 1;
       } else {
         throw new Error(`unknown restore option: ${flags[index]}`);
       }
     }
-    process.stdout.write(`${JSON.stringify(restoreRunPolicy(value, config, { allowLegacy, stateFiles }), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(restoreRunPolicy(value, config, {
+      allowLegacy,
+      stateFiles,
+      stateRoots
+    }), null, 2)}\n`);
   } else {
-    process.stderr.write("usage: run-policy.mjs <normalize <both|claude|codex> [config.json]|validate <policy.json>|restore <policy.json> [config.json] [--state <saved.json>]... [--allow-legacy]>\n");
+    process.stderr.write("usage: run-policy.mjs <normalize <both|claude|codex> [config.json]|validate <policy.json>|restore <policy.json> [config.json] [--state-root <dir>]... [--state <saved.json>]... [--allow-legacy]>\n");
     process.exitCode = 2;
   }
 }

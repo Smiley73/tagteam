@@ -692,6 +692,38 @@ test("reused writable work without its original checkpoint stays workspace-unkno
   assert.equal(reconciled.status, "relay-interrupted-workspace-unknown");
 });
 
+test("a legacy writable artifact without request-bound evidence is never replayed", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-legacy-writable-"));
+  const worktree = path.join(temp, "repo");
+  fs.mkdirSync(worktree);
+  for (const args of [
+    ["init", "-q", worktree],
+    ["-C", worktree, "config", "user.email", "test@example.com"],
+    ["-C", worktree, "config", "user.name", "Test"]
+  ]) assert.equal(spawnSync("git", args).status, 0);
+  fs.writeFileSync(path.join(worktree, "seed.txt"), "seed\n");
+  assert.equal(spawnSync("git", ["-C", worktree, "add", "seed.txt"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "seed"]).status, 0);
+
+  const counter = path.join(temp, "count.txt");
+  const fake = fakeCodex(temp, counter, { editWorktree: true });
+  const artifact = path.join(temp, "result.json");
+  const first = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "legacy work", worktree);
+  assert.equal(first.status, 0, first.stderr);
+  const requestPath = `${artifact}.request.json`;
+  const legacyRequest = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+  delete legacyRequest.requestIdentity;
+  delete legacyRequest.executionId;
+  fs.writeFileSync(requestPath, JSON.stringify(legacyRequest));
+  fs.unlinkSync(`${artifact}.usage-receipts.json`);
+  fs.unlinkSync(`${artifact}.relay-checkpoint.json`);
+
+  const replay = runBridge(temp, artifact, fake, ["--sandbox", "workspace-write"], "legacy work", worktree);
+  assert.equal(replay.status, 1);
+  assert.match(replay.stderr, /automatic replay could apply its edits twice/);
+  assert.equal(fs.readFileSync(counter, "utf8"), "x");
+});
+
 test("automatic dirty recovery refuses ignored bytes it cannot bind", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-checkpoint-ignored-"));
   const worktree = path.join(temp, "repo");

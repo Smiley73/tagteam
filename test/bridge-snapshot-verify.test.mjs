@@ -220,6 +220,8 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
   git(repo, ["config", "user.email", "tagteam@example.invalid"]);
   fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
   fs.writeFileSync(path.join(repo, "package-lock.json"), "{}\n");
+  // Ignore the test-only snapshot outputs so the primary-tree cleanliness guard remains meaningful.
+  fs.writeFileSync(path.join(repo, ".gitignore"), "out*/\nexclude.json\n");
   git(repo, ["add", "-A"]);
   git(repo, ["commit", "-qm", "base"]);
   const base = git(repo, ["rev-parse", "HEAD"]);
@@ -230,10 +232,6 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
   const candidate = git(repo, ["rev-parse", "HEAD"]);
   const exclude = path.join(repo, "exclude.json");
   fs.writeFileSync(exclude, JSON.stringify(["**/package-lock.json"]));
-  // Ignore the test-only snapshot outputs so the primary-tree cleanliness guard remains meaningful.
-  fs.writeFileSync(path.join(repo, ".gitignore"), "out/\nexclude.json\n");
-  git(repo, ["add", ".gitignore"]);
-  git(repo, ["commit", "-qm", "test harness metadata"]);
   const result = snapshotCandidate({
     worktree: repo,
     primary: repo,
@@ -280,6 +278,34 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
       "exclude-json": exclude
     }),
     /immutable candidate snapshot/
+  );
+
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 3;\n");
+  assert.throws(
+    () => snapshotCandidate({
+      worktree: repo,
+      primary: repo,
+      base,
+      candidate,
+      "out-dir": path.join(repo, "out-dirty"),
+      "exclude-json": exclude
+    }),
+    /shipping worktree changed after the candidate commit/
+  );
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 2;\n");
+  fs.writeFileSync(path.join(repo, "later.js"), "later\n");
+  git(repo, ["add", "later.js"]);
+  git(repo, ["commit", "-qm", "later commit"]);
+  assert.throws(
+    () => snapshotCandidate({
+      worktree: repo,
+      primary: repo,
+      base,
+      candidate,
+      "out-dir": path.join(repo, "out-wrong-head"),
+      "exclude-json": exclude
+    }),
+    /does not match candidate/
   );
 });
 

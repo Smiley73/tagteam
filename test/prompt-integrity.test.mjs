@@ -86,6 +86,19 @@ function persistPathFrom(prompt, pattern) {
 
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
 
+test("Codex relay agent contract matches both workflow envelope schemas", () => {
+  const contract = fs.readFileSync(path.join(root, "agents/codex-runner.md"), "utf8");
+  assert.match(contract, /`reused`, `executionId`, `requestIdentity`, and `result`/);
+  for (const workflow of ["workflows/plan-forge.js", "workflows/ship-pr.js"]) {
+    const source = fs.readFileSync(path.join(root, workflow), "utf8");
+    assert.match(
+      source,
+      /required: \["reused", "executionId", "requestIdentity", "result"\]/,
+      `${workflow} relay schema drifted from agents/codex-runner.md`
+    );
+  }
+});
+
 // Drives plan-forge with stub agents that behave like well-behaved models: they
 // persist what they produce, and they run the workflow's plumbing commands for
 // real. `corrupt` lets one test model a drafter that saved a shortened copy;
