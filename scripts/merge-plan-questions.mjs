@@ -19,12 +19,12 @@ function questionKey(value) {
 export function mergePlanQuestions(questionsFile, reviewFile) {
   const questions = readJson(questionsFile, "question sidecar");
   const review = readJson(reviewFile, "decomposition review");
-  if (!Array.isArray(questions.value) || questions.value.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new Error("question sidecar must be an array of non-empty strings");
+  if (!Array.isArray(questions.value) || questions.value.some((item) => typeof item !== "string")) {
+    throw new Error("question sidecar must be an array of strings");
   }
   if (!review.value || !Array.isArray(review.value.open_questions)
-    || review.value.open_questions.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new Error("decomposition review must contain an open_questions array of non-empty strings");
+    || review.value.open_questions.some((item) => typeof item !== "string")) {
+    throw new Error("decomposition review must contain an open_questions array of strings");
   }
 
   const seen = new Set();

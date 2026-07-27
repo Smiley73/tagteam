@@ -127,7 +127,7 @@ test("decomposition-review questions are atomically merged into the authoritativ
   fs.writeFileSync(review, JSON.stringify({
     verdict: "approve",
     issues: [],
-    open_questions: ["which   rollout?", "Who owns rollback?"],
+    open_questions: ["", "which   rollout?", "Who owns rollback?"],
     suggestions: []
   }));
 
