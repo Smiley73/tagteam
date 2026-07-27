@@ -178,3 +178,61 @@ test("the next invocation must continue the completed PR budget exactly", () => 
   });
   assert.equal(next.agentCallsBefore, 7);
 });
+
+test("the begin transition serializes concurrent callers before descriptor publication", () => {
+  const files = fixture();
+  let competingError;
+  const winner = beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 0,
+    maximumCalls: 12,
+    invocationId,
+    beforePublish() {
+      try {
+        beginShipInvocation({
+          file: files.descriptor,
+          policyFingerprint,
+          prId: "PR-1",
+          agentCallsBefore: 0,
+          maximumCalls: 12,
+          invocationId: "22222222-2222-4222-8222-222222222222"
+        });
+      } catch (error) {
+        competingError = error;
+      }
+    }
+  });
+
+  assert.match(competingError?.message ?? "", /begin is already active/);
+  assert.equal(winner.invocationId, invocationId);
+  assert.equal(JSON.parse(fs.readFileSync(files.descriptor)).invocationId, invocationId);
+  assert.equal(fs.existsSync(`${files.descriptor}.begin`), false);
+});
+
+test("a begin claim left by a process crash is durable fail-closed evidence", () => {
+  const files = fixture();
+  fs.writeFileSync(`${files.descriptor}.begin`, JSON.stringify({
+    version: 1,
+    status: "active",
+    invocationId,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 0,
+    maximumCalls: 12,
+    startedAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const recovered = recoverShipInvocation({ file: files.descriptor, resultFile: files.result });
+  assert.equal(recovered.status, "unresolved");
+  assert.equal(recovered.conservativeAgentCalls, 12);
+  assert.equal(recovered.redispatchAllowed, false);
+  assert.throws(() => beginShipInvocation({
+    file: files.descriptor,
+    policyFingerprint,
+    prId: "PR-1",
+    agentCallsBefore: 0,
+    maximumCalls: 12
+  }), /begin is already active/);
+});

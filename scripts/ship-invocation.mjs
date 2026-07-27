@@ -43,6 +43,23 @@ function writeAtomic(file, value) {
   return resolved;
 }
 
+function beginClaimFile(file) {
+  return `${path.resolve(file)}.begin`;
+}
+
+function acquireBeginClaim(file, descriptor) {
+  const claim = beginClaimFile(file);
+  try {
+    fs.writeFileSync(claim, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error("ship invocation begin is already active or was interrupted; automatic redispatch is unsafe");
+    }
+    throw error;
+  }
+  return claim;
+}
+
 function validateDescriptor(value) {
   if (!value || value.version !== VERSION) throw new Error(`ship invocation version must be ${VERSION}`);
   if (!["active", "complete"].includes(value.status)) throw new Error("ship invocation status is invalid");
@@ -120,26 +137,19 @@ function verifyCompletedDescriptor(descriptor, resultFile = descriptor.resultFil
 }
 
 export function beginShipInvocation({
-  file, policyFingerprint, prId, agentCallsBefore, maximumCalls, invocationId = crypto.randomUUID()
+  file,
+  policyFingerprint,
+  prId,
+  agentCallsBefore,
+  maximumCalls,
+  invocationId = crypto.randomUUID(),
+  beforePublish
 }) {
   const resolved = path.resolve(file);
   const nextPolicyFingerprint = fingerprint(policyFingerprint);
   if (typeof prId !== "string" || !prId) throw new Error("ship invocation PR ID is required");
   const nextAgentCallsBefore = count(agentCallsBefore, "ship invocation starting call count");
   const nextMaximumCalls = count(maximumCalls, "ship invocation maximum call count");
-  if (fs.existsSync(resolved)) {
-    const prior = validateDescriptor(readJson(resolved, "ship invocation").value);
-    if (prior.status === "active") {
-      throw new Error(`ship invocation ${prior.invocationId} is unresolved; automatic redispatch is unsafe`);
-    }
-    verifyCompletedDescriptor(prior);
-    if (prior.policyFingerprint !== nextPolicyFingerprint
-      || prior.prId !== prId
-      || prior.maximumCalls !== nextMaximumCalls
-      || prior.agentCallsAfter !== nextAgentCallsBefore) {
-      throw new Error("new ship invocation does not continue the completed PR accounting exactly");
-    }
-  }
   const descriptor = validateDescriptor({
     version: VERSION,
     status: "active",
@@ -150,7 +160,26 @@ export function beginShipInvocation({
     maximumCalls: nextMaximumCalls,
     startedAt: new Date().toISOString()
   });
-  writeAtomic(resolved, descriptor);
+  const claim = acquireBeginClaim(resolved, descriptor);
+  try {
+    if (fs.existsSync(resolved)) {
+      const prior = validateDescriptor(readJson(resolved, "ship invocation").value);
+      if (prior.status === "active") {
+        throw new Error(`ship invocation ${prior.invocationId} is unresolved; automatic redispatch is unsafe`);
+      }
+      verifyCompletedDescriptor(prior);
+      if (prior.policyFingerprint !== nextPolicyFingerprint
+        || prior.prId !== prId
+        || prior.maximumCalls !== nextMaximumCalls
+        || prior.agentCallsAfter !== nextAgentCallsBefore) {
+        throw new Error("new ship invocation does not continue the completed PR accounting exactly");
+      }
+    }
+    if (typeof beforePublish === "function") beforePublish();
+    writeAtomic(resolved, descriptor);
+  } finally {
+    fs.unlinkSync(claim);
+  }
   return descriptor;
 }
 
@@ -165,6 +194,17 @@ export function completeShipInvocation({ file, resultFile }) {
 }
 
 export function recoverShipInvocation({ file, resultFile }) {
+  const claimFile = beginClaimFile(file);
+  if (fs.existsSync(claimFile)) {
+    const claim = validateDescriptor(readJson(claimFile, "ship invocation begin claim").value);
+    return {
+      ...claim,
+      status: "unresolved",
+      conservativeAgentCalls: claim.maximumCalls,
+      usageAccounting: "legacy-incomplete",
+      redispatchAllowed: false
+    };
+  }
   const descriptorFile = readJson(file, "ship invocation");
   const descriptor = validateDescriptor(descriptorFile.value);
   if (descriptor.status === "complete") return verifyCompletedDescriptor(descriptor, resultFile);
