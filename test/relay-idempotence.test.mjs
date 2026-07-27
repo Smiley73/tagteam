@@ -1764,6 +1764,7 @@ const SHIP_CONFIG = (() => {
   return config;
 })();
 const SHIP_ARGS = {
+  invocationId: "11111111-1111-4111-8111-111111111111",
   config: SHIP_CONFIG,
   configPath: "/repo/.tagteam/config.json",
   pr: { id: "PR-1", title: "t", taskIds: [], userVisible: "no" },
@@ -1829,6 +1830,7 @@ test("Claude-only shipping dispatches no Codex work", async () => {
   );
 
   assert.equal(result.status, "clean");
+  assert.equal(result.invocationId, SHIP_ARGS.invocationId);
   assert.equal(result.reasoningProvider, "claude");
   assert.equal(result.assurance, "single-provider");
   assert.equal(result.usage.codexCalls, 0);
@@ -1837,6 +1839,17 @@ test("Claude-only shipping dispatches no Codex work", async () => {
     SHIP_CONFIG.reviewTiers.standard.claude.model);
   assert.equal(result.rounds.every((round) =>
     round.reviewers.every((reviewer) => reviewer.engine === "claude")), true);
+});
+
+test("shipping requires a durable invocation identity before any model dispatch", async () => {
+  await assert.rejects(
+    harness("workflows/ship-pr.js", { ...SHIP_ARGS, invocationId: undefined }, cleanShipResponder),
+    /ship-pr requires invocationId/
+  );
+  await assert.rejects(
+    harness("workflows/ship-pr.js", { ...SHIP_ARGS, invocationId: "not-a-uuid" }, cleanShipResponder),
+    /ship-pr invocationId must be a UUID/
+  );
 });
 
 test("Codex-only shipping uses Haiku only for plumbing", async () => {

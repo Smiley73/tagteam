@@ -417,6 +417,7 @@ const usageState = {
 };
 const codexReceiptState = new Set();
 const shipState = {
+  invocationId: null,
   runPolicy: null,
   priorRelayRetries: 0,
   legacyUsageIncomplete: false,
@@ -790,9 +791,14 @@ function reviewAssignments(selected, round, lastFixEngine, firstReviewer, runPol
 
 async function main(raw) {
   const input = parseInput(raw);
-  for (const key of ["config", "configPath", "pr", "tasks", "baseOid", "shipDir", "pluginRoot", "worktree", "primary", "diffExcludePath"]) {
+  shipState.invocationId = null;
+  for (const key of ["config", "configPath", "pr", "tasks", "baseOid", "shipDir", "pluginRoot", "worktree", "primary", "diffExcludePath", "invocationId"]) {
     if (!input[key]) throw new Error(`ship-pr requires ${key}`);
   }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.invocationId)) {
+    throw new Error("ship-pr invocationId must be a UUID");
+  }
+  shipState.invocationId = input.invocationId;
   const config = input.config;
   relayState.extraCalls = 0;
   relayState.fatal = [];
@@ -855,6 +861,7 @@ async function main(raw) {
   // rather than silently expanding it.
   const callBudget = () => config.limits.agentCallsPerPr - relayState.extraCalls;
   const finish = (result) => ({
+    invocationId: input.invocationId,
     runPolicy,
     reasoningProvider: runPolicy.reasoningProvider,
     assurance: runPolicy.assurance,
@@ -1580,6 +1587,7 @@ try {
 } catch (error) {
   if (!shipState.runPolicy) throw error;
   return {
+    invocationId: shipState.invocationId,
     runPolicy: shipState.runPolicy,
     reasoningProvider: shipState.runPolicy.reasoningProvider,
     assurance: shipState.runPolicy.assurance,

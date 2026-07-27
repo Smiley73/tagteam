@@ -14,6 +14,11 @@ test("ship command validates, persists, and restores the selected provider", () 
   assert.match(command, /candidate UI classification/);
   assert.match(command, /In `claude` mode no Codex request is dispatched/);
   assert.match(command, /codex --version` for `both` or `codex`/);
+  assert.match(command, /ship-invocation\.mjs" begin/);
+  assert.match(command, /Pass its exact `invocationId`/);
+  assert.match(command, /status: "unresolved"/);
+  assert.match(command, /conservativeAgentCalls/);
+  assert.match(command, /Never invoke a model, delete or replace the descriptor/);
 });
 
 test("Codex-only raw-plan convenience cannot bypass provider-aware planning", () => {
