@@ -1056,6 +1056,43 @@ test("reconciliation preserves counters when relay dispatch is unconfirmed but r
   assert.deepEqual(reconciled.usage, interrupted.usage);
 });
 
+test("an optional read-only Codex failure counts durable usage without requiring a result artifact", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-optional-dispatch-"));
+  const artifact = path.join(temp, "interaction.json");
+  const receiptFile = `${artifact}.usage-receipts.json`;
+  const checkpoint = `${artifact}.relay-checkpoint.json`;
+  const requestIdentity = `sha256:${"c".repeat(64)}`;
+  fs.writeFileSync(receiptFile, JSON.stringify({
+    version: 1,
+    artifact,
+    invocations: [{
+      executionId: "optional-ui-exec",
+      requestFingerprint: "optional-ui-fingerprint",
+      requestIdentity,
+      recordedAt: "2026-07-27T00:00:00.000Z"
+    }]
+  }));
+  const result = reconcileUsageReceipts({
+    status: "needs-questions-or-approval",
+    usage: { codexCalls: 0, relayRetries: 0 },
+    usageReceipts: [],
+    usageReceiptFiles: [receiptFile],
+    relayCheckpoints: [checkpoint],
+    unconfirmedCodexDispatches: [{
+      receiptFile,
+      checkpoint,
+      requestIdentity,
+      sandbox: "read-only",
+      optional: true
+    }],
+    usageAccounting: "pending-checkpoint-reconciliation"
+  });
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.usage.codexCalls, 1);
+  assert.deepEqual(result.usageReceipts, ["optional-ui-exec"]);
+  assert.equal(result.usageAccounting, "complete");
+});
+
 test("receipt reconciliation classifies workspace interruption from its checkpoint", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-reconcile-workspace-"));
   const artifact = path.join(temp, "result.json");
@@ -1287,6 +1324,17 @@ function verifyResponse(prompt) {
   return { ok: true, payloads };
 }
 
+function planToken(text) {
+  let hash = 2166136261;
+  const normalized = String(text).replace(/\r\n/g, "\n")
+    .split("\n").map((line) => line.replace(/[ \t]+$/, "")).join("\n").replace(/\n+$/, "");
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${normalized.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 function planResponder(dropOnce) {
   const dropped = new Set();
   return (label, prompt = "") => {
@@ -1311,6 +1359,266 @@ function planResponder(dropOnce) {
     return APPROVE;
   };
 }
+
+test("Claude-only planning dispatches no Codex work", async () => {
+  const policy = normalizeRunPolicy({ provider: "claude" });
+  const { result, calls } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, runPolicy: policy },
+    planResponder([])
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.reasoningProvider, "claude");
+  assert.equal(result.assurance, "single-provider");
+  assert.equal(calls.some((call) => call.agentType === "tagteam:codex-runner"), false);
+  assert.equal(calls.some((call) => call.label.includes("codex")), false);
+  assert.ok(result.usage.claudeReasoningCalls > 0);
+  assert.ok(result.usage.haikuPlumbingCalls > 0);
+});
+
+test("Codex-only planning leaves Haiku on plumbing and routes every substantive step to Codex", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const prompts = new Map();
+  const responder = (label, prompt) => {
+    prompts.set(label, prompt);
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft") || label.startsWith("plan:codex-revise")) return draft;
+    if (label.startsWith("plan:codex-interaction-review")) return { issues: [], ui_decisions: [] };
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+  const { result, calls } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.reasoningProvider, "codex");
+  assert.equal(result.assurance, "single-provider");
+  assert.equal(result.usage.claudeReasoningCalls, 0);
+  assert.ok(result.usage.haikuPlumbingCalls > 0);
+  assert.equal(
+    calls.every((call) => ["tagteam:prompt-builder", "tagteam:codex-runner"].includes(call.agentType)),
+    true
+  );
+  assert.deepEqual(result.reviews[0].reviewers.map(({ provider, role }) => ({ provider, role })), [
+    { provider: "codex", role: "plan-review" },
+    { provider: "codex", role: "interaction-review" }
+  ]);
+  for (const label of [
+    "plan:codex-draft:request",
+    "plan:codex-interaction-review:1:request",
+    "plan:codex-revise:1:request",
+    "plan:codex-decompose:request"
+  ]) {
+    assert.match(prompts.get(label), /--fence-json "PROJECT_CONFIG=\/repo\/\.tagteam\/config\.json"/);
+  }
+});
+
+test("Codex-only planning keeps the interface lens advisory when its relay is unavailable", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-interaction-review")) return null;
+    if (label.startsWith("plan:codex-draft") || label.startsWith("plan:codex-revise")) return draft;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.deepEqual(result.reviews[0].reviewers.map(({ role }) => role), ["plan-review"]);
+});
+
+test("Codex-only revision fails closed instead of dropping a resumable question", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const carried = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
+  const dropped = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(carried.planMarkdown), chars: carried.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft")) return carried;
+    if (label.startsWith("plan:codex-revise")) return dropped;
+    return APPROVE;
+  };
+  const config = {
+    ...PLAN_CONFIG,
+    ui: { hasUserInterface: false, confirmDecisions: "off", conventionPaths: [] }
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /dropped 1 unresolved carried question/);
+});
+
+test("Codex-only continuation checksum-binds carried questions and interface decisions", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const uiDecision = {
+    id: "export-dialog",
+    decision: "where export lives",
+    surface: "new-dialog",
+    chosen: { label: "Dialog", sketch: "[ dialog ]", why: "existing flow" },
+    alternatives: [{ label: "Page", sketch: "[ page ]", why: "more space" }],
+    precedent: "src/ui/Dialog.tsx"
+  };
+  const draft = {
+    planMarkdown: "# Plan",
+    open_questions: ["Which rollout?"],
+    ui_decisions: [uiDecision]
+  };
+  const prompts = new Map();
+  const responder = (label, prompt) => {
+    prompts.set(label, prompt);
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft")) return draft;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+  const { result } = await harness("workflows/plan-forge.js", {
+    ...PLAN_ARGS,
+    runPolicy: policy,
+    passId: "pass-2",
+    seedPlan: "# Plan",
+    seedPlanPath: "/plans/slug/drafts/pass-1-integrated.md",
+    decisions: [{ question: "Use staged rollout?", answer: "Yes" }],
+    decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
+    openQuestions: ["Which rollout?"],
+    uiDecisions: [uiDecision],
+    uiDecisionsFile: "/plans/slug/drafts/pass-1-integrated.md.ui-decisions.json"
+  }, responder);
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  const request = prompts.get("plan:codex-draft:request");
+  assert.match(request, /CARRIED_QUESTIONS=/);
+  assert.match(request, /CARRIED_INTERFACE_DECISIONS=/);
+  assert.match(request, /--expect "CARRIED_QUESTIONS=/);
+  assert.match(request, /--expect "CARRIED_INTERFACE_DECISIONS=/);
+});
+
+test("Codex no-draft recovery re-enters the same initial or continuation invocation", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const responder = (dropDraft) => (label, prompt) => {
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) {
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
+      };
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft")) return dropDraft ? null : draft;
+    if (label.startsWith("plan:codex-interaction-review")) return { issues: [], ui_decisions: [] };
+    if (label.startsWith("plan:codex-revise")) return draft;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    return APPROVE;
+  };
+
+  const initialArgs = { ...PLAN_ARGS, runPolicy: policy };
+  const initialLost = await harness("workflows/plan-forge.js", initialArgs, responder(true));
+  assert.equal(initialLost.result.status, "plan-interrupted");
+  assert.equal(initialLost.labels.some((label) => label.startsWith("plan:materialize-draft")), false);
+  const initialRecovered = await harness("workflows/plan-forge.js", initialArgs, responder(false));
+  assert.equal(initialRecovered.result.status, "needs-questions-or-approval");
+
+  const continuationArgs = {
+    ...PLAN_ARGS,
+    runPolicy: policy,
+    passId: "pass-2",
+    seedPlan: "# Plan",
+    seedPlanPath: "/plans/slug/drafts/pass-1-integrated.md",
+    decisions: [{ question: "Ship?", answer: "Yes" }],
+    decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
+    openQuestions: [],
+    uiDecisions: [],
+    uiDecisionsFile: "/plans/slug/reviews/pass-2-recovered-ui-decisions.json"
+  };
+  const continuationLost = await harness("workflows/plan-forge.js", continuationArgs, responder(true));
+  assert.equal(continuationLost.result.status, "plan-interrupted");
+  const continuationRecovered = await harness("workflows/plan-forge.js", continuationArgs, responder(false));
+  assert.equal(continuationRecovered.result.status, "needs-questions-or-approval");
+});
 
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
   const { result, labels } = await harness(

@@ -35,7 +35,8 @@ export function reconcileUsageReceipts(result) {
       || typeof dispatch.receiptFile !== "string"
       || typeof dispatch.checkpoint !== "string"
       || !/^sha256:[0-9a-f]{64}$/.test(dispatch.requestIdentity ?? "")
-      || !["read-only", "workspace-write"].includes(dispatch.sandbox)) {
+      || !["read-only", "workspace-write"].includes(dispatch.sandbox)
+      || (dispatch.optional !== undefined && typeof dispatch.optional !== "boolean")) {
       throw new Error("invalid unconfirmed Codex dispatch record");
     }
     if (!receiptFiles.has(dispatch.receiptFile) || !checkpointFiles.has(dispatch.checkpoint)) {
@@ -55,7 +56,8 @@ export function reconcileUsageReceipts(result) {
       || typeof dispatch.executionId !== "string"
       || dispatch.executionId.length === 0
       || !/^sha256:[0-9a-f]{64}$/.test(dispatch.requestIdentity ?? "")
-      || !["read-only", "workspace-write"].includes(dispatch.sandbox)) {
+      || !["read-only", "workspace-write"].includes(dispatch.sandbox)
+      || (dispatch.optional !== undefined && typeof dispatch.optional !== "boolean")) {
       throw new Error("invalid confirmed Codex dispatch record");
     }
     if (!receiptFiles.has(dispatch.receiptFile) || !checkpointFiles.has(dispatch.checkpoint)) {
@@ -120,7 +122,7 @@ export function reconcileUsageReceipts(result) {
       }
     }
     const interruption = /interrupted/.test(String(result.status ?? ""));
-    if (!interruption) {
+    if (!interruption && expectedDispatch?.optional !== true) {
       const request = readJson(`${journal.artifact}.request.json`);
       if (!fs.existsSync(journal.artifact)
         || typeof request.executionId !== "string"
@@ -136,6 +138,7 @@ export function reconcileUsageReceipts(result) {
       if (confirmedByCheckpoint.has(checkpointFile)) {
         throw new Error(`confirmed Codex dispatch has no completion checkpoint: ${checkpointFile}`);
       }
+      if (unconfirmedByCheckpoint.get(checkpointFile)?.optional === true) continue;
       // A failed/invalid Codex invocation has a durable per-invocation journal
       // but no completed-artifact checkpoint. Usage can still be made exact;
       // the missing checkpoint remains a separate resume/recovery hard stop.
