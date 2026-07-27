@@ -1329,13 +1329,17 @@ const SHIP_ARGS = {
   existingCandidateOid: "c".repeat(40)
 };
 
-function snapshotFixture(label, candidateOid = SHIP_ARGS.existingCandidateOid, baseOid = SHIP_ARGS.baseOid) {
+function snapshotFixture(
+  label,
+  candidateOid = SHIP_ARGS.existingCandidateOid,
+  baseOid = SHIP_ARGS.baseOid,
+  overrides = {}
+) {
   const round = String(label).split(":").at(-1);
   const outDir = `/ships/s1/prs/PR-1/rounds/${round}-${candidateOid}`;
-  return {
+  const candidate = {
     baseOid,
     candidateOid,
-    candidatePath: `${outDir}/candidate.json`,
     diffPath: `${outDir}/candidate.diff`,
     diffHash: `sha256:${"c".repeat(64)}`,
     reviewDiffPath: `${outDir}/review.diff`,
@@ -1343,9 +1347,15 @@ function snapshotFixture(label, candidateOid = SHIP_ARGS.existingCandidateOid, b
     changedPaths: ["src/a.js"],
     addedLines: "+const a = 1;",
     excluded: [],
-    treeClean: "",
     diffBytes: 20,
-    fileCount: 1
+    fileCount: 1,
+    treeClean: "",
+    ...overrides
+  };
+  return {
+    candidatePath: `${outDir}/candidate.json`,
+    candidateHash: `sha256:${createHash("sha256").update(`${JSON.stringify(candidate, null, 2)}\n`).digest("hex")}`,
+    ...candidate
   };
 }
 
@@ -1402,6 +1412,21 @@ test("shipping preserves accounting when a post-dispatch helper throws", async (
   assert.deepEqual(result.tasks, []);
   assert.deepEqual(result.rounds, []);
   assert.deepEqual(result.ledger, []);
+});
+
+test("shipping rejects relay-transcribed snapshot metadata that does not match candidate.json", async () => {
+  const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label) => {
+    if (label.startsWith("candidate:snapshot")) {
+      return {
+        ...snapshotFixture(label),
+        changedPaths: ["wrong-candidate.js"]
+      };
+    }
+    throw new Error(`unexpected call after mismatched snapshot: ${label}`);
+  });
+  assert.equal(result.status, "ship-interrupted");
+  assert.match(result.message, /metadata does not match its immutable candidate\.json hash/);
+  assert.equal(labels.some((label) => label.startsWith("verify:")), false);
 });
 
 test("generic shipping interruption preserves completed tasks and candidate state", async () => {
@@ -1842,11 +1867,10 @@ test("implementation resume reuses completed dependency waves", async () => {
     }
     if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: tasks" };
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        ...snapshotFixture(label, "d".repeat(40), args.baseOid),
+      return snapshotFixture(label, "d".repeat(40), args.baseOid, {
         changedPaths: ["one.js", "two.js"],
         fileCount: 2
-      };
+      });
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };
@@ -1883,11 +1907,10 @@ test("Codex implementation tasks do not share a parallel writable batch", async 
     }
     if (label.startsWith("candidate:commit")) return { ok: true, candidateOid: "d".repeat(40), message: "feat: t" };
     if (label.startsWith("candidate:snapshot")) {
-      return {
-        ...snapshotFixture(label, "d".repeat(40), args.baseOid),
+      return snapshotFixture(label, "d".repeat(40), args.baseOid, {
         changedPaths: ["T1.js", "T2.js"],
         fileCount: 2
-      };
+      });
     }
     if (label.startsWith("verify:")) return { status: "passed", resultPath: "/ships/s1/verify.json", commands: [] };
     if (label.startsWith("ui:")) return { verdict: "no", reason: "internal only" };

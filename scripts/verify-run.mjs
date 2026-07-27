@@ -63,12 +63,13 @@ async function main() {
     return pairs;
   }, []));
   try {
-    if (!args.base || !args["candidate-oid"]) {
-      throw new Error("--base and --candidate-oid are required");
+    if (!args.base || !args["candidate-oid"] || !args["candidate-hash"]) {
+      throw new Error("--base, --candidate-oid, and --candidate-hash are required");
     }
     const candidate = validateCandidateSnapshot(args.candidate, {
       baseOid: args.base,
-      candidateOid: args["candidate-oid"]
+      candidateOid: args["candidate-oid"],
+      candidateHash: args["candidate-hash"]
     });
     const result = await verify({
       config: JSON.parse(fs.readFileSync(args.config, "utf8")),

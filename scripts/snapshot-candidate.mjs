@@ -49,13 +49,22 @@ function sha256File(file) {
   return `sha256:${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}`;
 }
 
-export function validateCandidateSnapshot(candidatePath, { baseOid, candidateOid } = {}) {
+export function validateCandidateSnapshot(candidatePath, {
+  baseOid,
+  candidateOid,
+  candidateHash: expectedCandidateHash
+} = {}) {
   const resolvedCandidatePath = path.resolve(candidatePath);
   const candidateStat = fs.lstatSync(resolvedCandidatePath);
   if (!candidateStat.isFile() || candidateStat.isSymbolicLink()) {
     throw new Error(`candidate snapshot metadata is not a regular file: ${resolvedCandidatePath}`);
   }
-  const candidate = JSON.parse(fs.readFileSync(resolvedCandidatePath, "utf8"));
+  const candidateBytes = fs.readFileSync(resolvedCandidatePath);
+  const candidateHash = `sha256:${createHash("sha256").update(candidateBytes).digest("hex")}`;
+  if (expectedCandidateHash && candidateHash !== expectedCandidateHash) {
+    throw new Error("candidate snapshot metadata bytes do not match the expected hash");
+  }
+  const candidate = JSON.parse(candidateBytes.toString("utf8"));
   const expectedDiffPath = path.join(path.dirname(resolvedCandidatePath), "candidate.diff");
   const expectedReviewDiffPath = path.join(path.dirname(resolvedCandidatePath), "review.diff");
   if (!/^[0-9a-f]{40}$/.test(candidate.baseOid ?? "")
@@ -86,7 +95,7 @@ export function validateCandidateSnapshot(candidatePath, { baseOid, candidateOid
     || candidate.treeClean !== "") {
     throw new Error("candidate snapshot metadata is internally inconsistent");
   }
-  return { candidatePath: resolvedCandidatePath, ...candidate };
+  return { candidatePath: resolvedCandidatePath, candidateHash, ...candidate };
 }
 
 export function snapshotCandidate(options) {
@@ -172,7 +181,8 @@ async function main() {
       }
       process.stdout.write(`${JSON.stringify(validateCandidateSnapshot(args["candidate-json"], {
         baseOid: args.base,
-        candidateOid: args["candidate-oid"]
+        candidateOid: args["candidate-oid"],
+        candidateHash: args["candidate-hash"]
       }))}\n`);
       return;
     }

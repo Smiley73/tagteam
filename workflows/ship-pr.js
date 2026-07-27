@@ -77,9 +77,10 @@ const commitSchema = {
 };
 const snapshotSchema = {
   type: "object", additionalProperties: false,
-  required: ["baseOid", "candidateOid", "candidatePath", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
+  required: ["baseOid", "candidateOid", "candidatePath", "candidateHash", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
   properties: {
     baseOid: { type: "string" }, candidateOid: { type: "string" }, candidatePath: { type: "string" },
+    candidateHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     diffPath: { type: "string" },
     diffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     reviewDiffPath: { type: "string" },
@@ -662,6 +663,24 @@ async function snapshot(input, round, candidateOid) {
     || result.treeClean !== "") {
     throw new Error(`candidate snapshot ${round} did not bind to the expected commits or the primary checkout changed`);
   }
+  const returnedMetadata = {
+    baseOid: result.baseOid,
+    candidateOid: result.candidateOid,
+    diffPath: result.diffPath,
+    diffHash: result.diffHash,
+    reviewDiffPath: result.reviewDiffPath,
+    reviewDiffHash: result.reviewDiffHash,
+    changedPaths: result.changedPaths,
+    addedLines: result.addedLines,
+    excluded: result.excluded,
+    diffBytes: result.diffBytes,
+    fileCount: result.fileCount,
+    treeClean: result.treeClean
+  };
+  const returnedMetadataHash = await sha256(`${JSON.stringify(returnedMetadata, null, 2)}\n`);
+  if (result.candidateHash !== returnedMetadataHash) {
+    throw new Error(`candidate snapshot ${round} metadata does not match its immutable candidate.json hash`);
+  }
   return result;
 }
 
@@ -673,6 +692,7 @@ async function runVerify(input, snapshotValue, round) {
     `--candidate "${snapshotValue.candidatePath}"`,
     `--base "${input.baseOid}"`,
     `--candidate-oid "${snapshotValue.candidateOid}"`,
+    `--candidate-hash "${snapshotValue.candidateHash}"`,
     `--worktree "${input.worktree}"`,
     `--out-dir "${input.shipDir}/prs/${input.pr.id}/verify/${round}"`,
     `--out "${resultPath}"`
