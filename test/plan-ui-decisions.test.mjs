@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
@@ -9,6 +11,18 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 function loadWorkflow(file) {
   const source = fs.readFileSync(path.join(root, file), "utf8").replace(/\bexport\s+const\s+meta\b/, "const meta");
   return new AsyncFunction("args", "agent", "parallel", "phase", "log", "budget", source);
+}
+
+function loadSandboxedWorkflow(file) {
+  const filename = path.join(root, file);
+  const source = fs.readFileSync(filename, "utf8").replace(/\bexport\s+const\s+meta\b/, "const meta");
+  const context = vm.createContext({});
+  const workflow = vm.runInContext(
+    `(async function(args, agent, parallel, phase, log, budget) {\n${source}\n})`,
+    context,
+    { filename }
+  );
+  return { context, workflow };
 }
 
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
@@ -28,7 +42,15 @@ const decision = (id, surface, precedent) => ({
 // Drives plan-forge with stubs that stand in for well-behaved models. Nothing
 // touches disk: this exercises how declared interface decisions are collected,
 // carried, and filtered, not how bytes reach Codex.
-async function forge({ ui, draftDecisions = [], reviewDecisions = [], seedDecisions, dropInteractionReview = false }) {
+async function forge({
+  ui,
+  draftDecisions = [],
+  reviewDecisions = [],
+  seedDecisions,
+  dropInteractionReview = false,
+  runPolicy,
+  workflow = loadWorkflow("workflows/plan-forge.js")
+}) {
   const labels = [];
   const prompts = new Map();
   const agent = async (prompt, options) => {
@@ -66,11 +88,12 @@ async function forge({ ui, draftDecisions = [], reviewDecisions = [], seedDecisi
     }
     return results;
   };
-  const result = await loadWorkflow("workflows/plan-forge.js")({
+  const result = await workflow({
     goal: "add an export flow",
     worktree: root,
     pluginRoot: root,
     planDir: "/tmp/plan",
+    ...(runPolicy ? { runPolicy } : {}),
     ...(seedDecisions ? { seedPlan: "# plan\n\nbody", uiDecisions: seedDecisions, resumeRound: 1 } : {}),
     config: {
       planning: { claude: { model: "opus", effort: "high" }, codex: { model: "gpt-test", effort: "high" }, reviewRounds: 1 },
@@ -81,6 +104,41 @@ async function forge({ ui, draftDecisions = [], reviewDecisions = [], seedDecisi
   }, agent, parallel, () => {}, () => {}, undefined);
   return { result, labels, prompts };
 }
+
+test("plan-forge runs end to end without Web Crypto or TextEncoder globals", async () => {
+  const { context, workflow } = loadSandboxedWorkflow("workflows/plan-forge.js");
+  assert.equal(vm.runInContext("globalThis.TextEncoder", context), undefined);
+  assert.equal(vm.runInContext("globalThis.crypto?.subtle", context), undefined);
+
+  const plumbingModel = `relay-${"x".repeat(80)}-sønnet-😀`;
+  const canonicalPolicy = JSON.stringify({
+    assurance: "cross-provider",
+    plumbingModel,
+    reasoningProvider: "both",
+    version: 1
+  });
+  const policyFingerprint = `sha256:${createHash("sha256").update(canonicalPolicy).digest("hex")}`;
+  const { result, labels } = await forge({
+    ui: { hasUserInterface: false, conventionPaths: [], confirmDecisions: "off" },
+    runPolicy: {
+      version: 1,
+      reasoningProvider: "both",
+      plumbingModel,
+      assurance: "cross-provider",
+      policyFingerprint
+    },
+    workflow
+  });
+
+  assert.equal(result.policyFingerprint, policyFingerprint);
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(labels.includes("plan:draft"), true, "drafting must start after run-policy hashing");
+  assert.equal(
+    labels.includes("plan:merge-final-questions"),
+    true,
+    "the final JSON-to-hex path must also run without TextEncoder"
+  );
+});
 
 test("a repository with no interface never runs the interface lens and declares nothing", async () => {
   const { result, labels, prompts } = await forge({
