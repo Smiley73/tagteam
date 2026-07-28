@@ -30,6 +30,20 @@ claude plugin marketplace add /absolute/path/to/tagteam
 claude plugin install tagteam@tagteam-local
 ```
 
+### Upgrade
+
+Update the repository checkout, refresh the local marketplace, and update the installed plugin:
+
+```bash
+git -C /absolute/path/to/tagteam pull --ff-only
+claude plugin marketplace update tagteam-local
+claude plugin update tagteam@tagteam-local
+```
+
+Start a new Claude Code session or run `/reload-plugins` in the current session. If you use `claude --plugin-dir` instead of an installed marketplace plugin, updating the repository checkout is sufficient.
+
+This updates the plugin itself. If Tagteam later reports that a repository’s project settings are stale, run `/tagteam:init --upgrade` in that repository to add only the configuration introduced by newer plugin versions.
+
 ## Configure
 
 Open Claude Code in the repository you want to ship:
