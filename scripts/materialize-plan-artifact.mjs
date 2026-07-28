@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { validateCompletionCheckpoint } from "./validate-relay-checkpoint.mjs";
 import { verifyPayloads } from "./verify-payload.mjs";
+import { expectToken, normalizeText } from "./compose-prompt.mjs";
 
 function parseArgs(argv) {
   const options = {};
@@ -56,6 +57,10 @@ export function materializePlanArtifact(options) {
   if (options.uiDecisions !== "off") {
     writeAtomic(`${plan}.ui-decisions.json`, `${JSON.stringify(result.ui_decisions, null, 2)}\n`);
   }
+  writeAtomic(`${plan}.continuation-receipt.json`, `${JSON.stringify({
+    version: 1,
+    planToken: expectToken(normalizeText(result.planMarkdown))
+  }, null, 2)}\n`);
   if (typeof options.beforePlanPublish === "function") options.beforePlanPublish();
   writeAtomic(plan, `${result.planMarkdown.replace(/\r\n/g, "\n").replace(/\n*$/, "")}\n`);
   return verifyPayloads({

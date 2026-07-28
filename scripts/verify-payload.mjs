@@ -8,14 +8,13 @@
 // for. This script closes that gap. Run beside the write, it reads the file that
 // was just saved and reports the checksum of what is really there.
 //
-// It reports rather than judges. A checksum that does not match is data for the
-// workflow to decide about, because the saved file — not the reply it came with —
-// is what every later step reads. Only a file that cannot serve as a payload at
-// all exits non-zero: missing, empty, unparseable, or missing the resume record
-// that must accompany it. Whatever token the workflow goes on to record is
-// re-checked against this same file by compose-prompt.mjs before a byte reaches
-// an engine, so a token misreported here can stop a pass but can never widen what
-// is sent.
+// Ordinarily it reports rather than judges: a checksum mismatch is data for the
+// workflow to decide about because the saved file is what later steps read. A
+// durable continuation receipt is different. When one is present, it binds what
+// a future resume may trust, so a mismatch exits non-zero alongside missing,
+// empty, unparseable payloads and missing resume records. Whatever token the
+// workflow records is re-checked against this same file by compose-prompt.mjs
+// before a byte reaches an engine.
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -29,7 +28,13 @@ function splitPair(flag, raw) {
 }
 
 export function parseArgs(argv) {
-  const options = { payloads: [], expects: new Map(), requireJson: [] };
+  const options = {
+    payloads: [],
+    expects: new Map(),
+    expectTokenFiles: new Map(),
+    expectTokenFilesIfPresent: new Map(),
+    requireJson: []
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
     if (!key.startsWith("--")) throw new Error(`unexpected argument: ${key}`);
@@ -41,6 +46,12 @@ export function parseArgs(argv) {
     } else if (key === "--expect") {
       const [name, token] = splitPair(key, value);
       options.expects.set(name, token);
+    } else if (key === "--expect-token-file") {
+      const [name, file] = splitPair(key, value);
+      options.expectTokenFiles.set(name, file);
+    } else if (key === "--expect-token-file-if-present") {
+      const [name, file] = splitPair(key, value);
+      options.expectTokenFilesIfPresent.set(name, file);
     } else if (key === "--require-json") options.requireJson.push(value);
     else throw new Error(`unexpected argument: ${key}`);
   }
@@ -50,7 +61,35 @@ export function parseArgs(argv) {
       throw new Error(`--expect names ${name}, but no --payload or --payload-json supplies it`);
     }
   }
+  for (const name of options.expectTokenFiles.keys()) {
+    if (!options.payloads.some((payload) => payload.name === name)) {
+      throw new Error(`--expect-token-file names ${name}, but no --payload or --payload-json supplies it`);
+    }
+  }
+  for (const name of options.expectTokenFilesIfPresent.keys()) {
+    if (!options.payloads.some((payload) => payload.name === name)) {
+      throw new Error(`--expect-token-file-if-present names ${name}, but no --payload or --payload-json supplies it`);
+    }
+  }
   return options;
+}
+
+function readExpectedToken(file, required) {
+  const resolved = path.resolve(file);
+  if (!fs.existsSync(resolved)) {
+    if (required) throw new Error(`The required saved-plan receipt at ${resolved} is missing.`);
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(resolved, "utf8"));
+  } catch (error) {
+    throw new Error(`The saved-plan receipt at ${resolved} is not readable JSON (${error.message}).`);
+  }
+  if (parsed?.version !== 1 || !/^\d+:[0-9a-f]{8}$/.test(parsed?.planToken ?? "")) {
+    throw new Error(`The saved-plan receipt at ${resolved} is invalid.`);
+  }
+  return { file: resolved, token: parsed.planToken };
 }
 
 // Compared exactly as compose-prompt.mjs compares it: text by its normalized
@@ -94,7 +133,29 @@ function readPayload({ name, file, json }, expected) {
 }
 
 export function verifyPayloads(options) {
-  const payloads = options.payloads.map((payload) => readPayload(payload, options.expects.get(payload.name)));
+  const expects = new Map(options.expects);
+  const durable = new Map();
+  const tokenFiles = [
+    ...[...(options.expectTokenFiles ?? [])].map(([name, file]) => ({ name, file, required: true })),
+    ...[...(options.expectTokenFilesIfPresent ?? [])].map(([name, file]) => ({ name, file, required: false }))
+  ];
+  for (const { name, file, required } of tokenFiles) {
+    const saved = readExpectedToken(file, required);
+    if (!saved) continue;
+    const explicit = expects.get(name);
+    if (explicit !== undefined && explicit !== saved.token) {
+      throw new Error(`The saved-plan receipt at ${saved.file} conflicts with this run's expected ${name} checksum.`);
+    }
+    expects.set(name, saved.token);
+    durable.set(name, saved);
+  }
+  const payloads = options.payloads.map((payload) => readPayload(payload, expects.get(payload.name)));
+  for (const payload of payloads) {
+    const saved = durable.get(payload.name);
+    if (saved && !payload.matches) {
+      throw new Error(`The ${payload.label} section at ${payload.file} does not match its saved-plan receipt at ${saved.file}.`);
+    }
+  }
   for (const file of options.requireJson) assertResumeRecord(file);
   return { ok: true, payloads };
 }
