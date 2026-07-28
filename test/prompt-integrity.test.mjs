@@ -107,6 +107,7 @@ async function forge({
   planDir,
   reviewRounds = 1,
   largePlanWarningChars,
+  continuation = false,
   corrupt = (_label, planMarkdown) => planMarkdown,
   corruptManifest = (manifest) => manifest,
   after = () => {}
@@ -115,7 +116,18 @@ async function forge({
   fs.mkdirSync(path.join(planDir, "reviews"), { recursive: true });
   fs.writeFileSync(path.join(planDir, "goal.json"), JSON.stringify({ goal: "harden the outbound relay" }, null, 2));
 
-  const plans = { draft: bigPlan("draft"), revised: bigPlan("revised") };
+  const plans = {
+    draft: bigPlan("draft"),
+    revised: bigPlan("revised"),
+    seed: bigPlan("approved"),
+    integrated: null
+  };
+  const seedPath = path.join(planDir, "drafts/pass-1-integrated.md");
+  if (continuation) {
+    fs.writeFileSync(seedPath, plans.seed, { mode: 0o600 });
+    fs.writeFileSync(`${seedPath}.questions.json`, JSON.stringify(["Choose deployment", "Choose cache"]), { mode: 0o600 });
+    fs.writeFileSync(`${seedPath}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
+  }
   const manifest = bigManifest();
   const train = bigTrain();
   const composed = [];
@@ -128,10 +140,19 @@ async function forge({
     prompts.set(label, prompt);
     after(label, { planDir });
     if (label === "plan:draft" || label.startsWith("plan:revise")) {
-      const file = persistPathFrom(prompt, /persist the complete plan at (\S+) with mode 0600/);
-      const planMarkdown = label === "plan:draft" ? plans.draft : plans.revised;
+      const targeted = prompt.includes("Apply only targeted Edit calls");
+      const file = targeted
+        ? persistPathFrom(prompt, /staged the complete seed plan at (\S+) with mode 0600/)
+        : persistPathFrom(prompt, /persist the complete plan at (\S+) with mode 0600/);
+      const planMarkdown = targeted
+        ? fs.readFileSync(file, "utf8")
+          .replace("## Step 7 — approved", "## Step 7 — approved (decision: blue-green)")
+          .replace("## Step 411 — approved", "## Step 411 — approved (decision: bounded cache)")
+        : (label === "plan:draft" ? plans.draft : plans.revised);
+      if (targeted) plans.integrated = planMarkdown;
       fs.writeFileSync(file, corrupt(label, planMarkdown), { mode: 0o600 });
       fs.writeFileSync(`${file}.questions.json`, JSON.stringify([]), { mode: 0o600 });
+      if (targeted) fs.writeFileSync(`${file}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
       const [plan_chars, plan_hash] = expectToken(normalizeText(planMarkdown)).split(":");
       return {
         plan_path: file,
@@ -153,7 +174,9 @@ async function forge({
     // Both plumbing steps run their real command against the real files, so what
     // the workflow learns here is what is actually on disk.
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
-    if (label.startsWith("plan:verify-")) {
+    if (label.startsWith("plan:verify-")
+      || label.startsWith("plan:prepare-continuation")
+      || label.startsWith("plan:publish-continuation")) {
       const result = runCommand(commandFrom(prompt));
       if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
       const parsed = JSON.parse(result.stdout.trim());
@@ -187,6 +210,16 @@ async function forge({
     worktree: root,
     pluginRoot: root,
     planDir,
+    ...(continuation ? {
+      passId: "pass-2",
+      seedPlan: { path: seedPath },
+      decisions: [
+        { question: "Which deployment?", answer: "Use blue-green" },
+        { question: "Which cache?", answer: "Use a bounded cache" }
+      ],
+      openQuestions: ["Choose deployment", "Choose cache"],
+      uiDecisions: []
+    } : {}),
     config: {
       planning: {
         claude: { model: "opus", effort: "high" },
@@ -198,7 +231,41 @@ async function forge({
       transport: { mode: "exec" }
     }
   }, agent, parallel, () => {}, (message) => logs.push(message), undefined);
-  return { result, composed, verified, plans, manifest, train, prompts, logs };
+  return { result, composed, verified, plans, manifest, train, prompts, logs, seedPath };
+}
+
+async function resumeFromPlan(planDir, seedPath) {
+  const labels = [];
+  const agent = async (prompt, options) => {
+    labels.push(options.label);
+    if (options.label.startsWith("plan:verify-")) {
+      const checked = runCommand(commandFrom(prompt));
+      return checked.status === 0
+        ? JSON.parse(checked.stdout.trim())
+        : { ok: false, error: checked.stderr.trim() };
+    }
+    throw new Error(`resume advanced unexpectedly to ${options.label}`);
+  };
+  const result = await loadWorkflow("workflows/plan-forge.js")({
+    goal: "harden the outbound relay",
+    worktree: root,
+    pluginRoot: root,
+    planDir,
+    passId: "pass-2",
+    seedPlan: { path: seedPath },
+    resumeRound: 1,
+    continuationReceiptRequired: true,
+    config: {
+      planning: {
+        claude: { model: "opus", effort: "high" },
+        codex: { model: "gpt-test", effort: "high" },
+        reviewRounds: 1
+      },
+      prTrain: { prSize: { guidance: "small" } },
+      transport: { mode: "exec" }
+    }
+  }, agent, async () => [], () => {}, () => {}, undefined);
+  return { result, labels };
 }
 
 test("a 130 KB plan reaches the cross-check whole, as the exact string the workflow specified", async () => {
@@ -255,6 +322,79 @@ test("Claude plan stages pass a large draft by receipt and path, never by value"
       && message.includes("pass-1-round-1-input.md")),
     true
   );
+});
+
+test("a large Claude continuation applies multiple decisions with bounded targeted edits", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-large-continuation-"));
+  const { result, plans, prompts, logs, seedPath } = await forge({
+    planDir,
+    continuation: true,
+    largePlanWarningChars: 100_000
+  });
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(normalizeText(plans.seed).length >= 100_000, true);
+  assert.equal(result.planPath, path.join(planDir, "drafts/pass-2-integrated.md"));
+  const saved = fs.readFileSync(result.planPath, "utf8");
+  assert.equal(saved, plans.integrated);
+  assert.match(saved, /Step 7 — approved \(decision: blue-green\)/);
+  assert.match(saved, /Step 411 — approved \(decision: bounded cache\)/);
+  assert.equal(saved.includes("## Step 500 — approved"), true, "the unchanged tail must survive");
+  const [characters, hash] = expectToken(normalizeText(saved)).split(":");
+  assert.deepEqual(result.planReceipt, {
+    planPath: result.planPath,
+    characterCount: Number(characters),
+    contentHash: hash
+  });
+
+  const draftPrompt = prompts.get("plan:draft");
+  assert.match(draftPrompt, /Apply only targeted Edit calls/);
+  assert.match(draftPrompt, /Do not regenerate or Write the complete plan/);
+  assert.equal(draftPrompt.includes(plans.seed), false);
+  assert.equal(fs.readFileSync(seedPath, "utf8"), plans.seed, "the approved seed must remain immutable");
+  assert.equal(
+    logs.some((message) => message.includes(seedPath)
+      && message.includes("largePlanWarningChars=100000")
+      && message.includes("targeted edits")),
+    true
+  );
+});
+
+test("a large continuation still stops on a mismatched published-plan receipt", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-large-continuation-mismatch-"));
+  let corrupted = false;
+  const { result } = await forge({
+    planDir,
+    continuation: true,
+    largePlanWarningChars: 100_000,
+    after: (label) => {
+      if (label !== "plan:verify-draft" || corrupted) return;
+      corrupted = true;
+      const published = path.join(planDir, "drafts/pass-2-integrated.md");
+      const saved = fs.readFileSync(published, "utf8");
+      fs.writeFileSync(published, saved.replace("Step 500 — approved", "Step 500 — tampered"), { mode: 0o600 });
+    }
+  });
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /The integrated plan was not saved as the text this run produced/);
+  assert.match(result.message, /pass-2-integrated\.md/);
+  assert.match(result.message, /does not match its saved-plan receipt/);
+  assert.match(result.message, /pass-2-integrated\.md\.continuation-receipt\.json/);
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-2-manifest.json")), false);
+
+  const resumed = await resumeFromPlan(planDir, path.join(planDir, "drafts/pass-2-integrated.md"));
+  assert.equal(resumed.result.status, "plan-interrupted");
+  assert.deepEqual(resumed.labels, ["plan:verify-seed:1"]);
+  assert.match(resumed.result.message, /does not match its saved-plan receipt/);
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-2-manifest.json")), false);
+
+  fs.unlinkSync(path.join(planDir, "drafts/pass-2-integrated.md.continuation-receipt.json"));
+  const missingReceipt = await resumeFromPlan(planDir, path.join(planDir, "drafts/pass-2-integrated.md"));
+  assert.equal(missingReceipt.result.status, "plan-interrupted");
+  assert.deepEqual(missingReceipt.labels, ["plan:verify-seed:1"]);
+  assert.match(missingReceipt.result.message, /required saved-plan receipt .* is missing/);
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-2-manifest.json")), false);
 });
 
 test("a completed pass leaves a resumable integrated draft matching the returned receipt", async () => {

@@ -60,6 +60,10 @@ test("Codex draft promotion writes the exact resumable payload without model tra
   assert.equal(fs.readFileSync(plan, "utf8"), "# Plan\n\nDo the work.\n");
   assert.deepEqual(JSON.parse(fs.readFileSync(`${plan}.questions.json`, "utf8")), ["Which rollout?"]);
   assert.deepEqual(JSON.parse(fs.readFileSync(`${plan}.ui-decisions.json`, "utf8")), []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${plan}.continuation-receipt.json`, "utf8")), {
+    version: 1,
+    planToken: "20:1d5cbb3a"
+  });
   assert.equal(fs.statSync(plan).mode & 0o777, 0o600);
   assert.equal(result.ok, true);
   assert.equal(result.payloads[0].name, "DRAFT_PLAN");
@@ -83,6 +87,9 @@ test("Claude plan drafter can execute only the receipt helper through Bash", () 
   const contract = fs.readFileSync(path.join(root, "agents/plan-drafter.md"), "utf8");
   assert.match(contract, /Bash\(node \*\/scripts\/plan-receipt\.mjs \*\)/);
   assert.doesNotMatch(contract, /Bash\(node \*\)(?:,|$)/);
+  assert.match(contract, /tools: Read, Write, Edit,/);
+  assert.match(contract, /targeted Edit calls/);
+  assert.match(contract, /do not regenerate or Write the whole plan/);
 });
 
 test("Codex draft promotion rejects an artifact from another immutable request", () => {
