@@ -77,17 +77,16 @@ const commitSchema = {
 };
 const snapshotSchema = {
   type: "object", additionalProperties: false,
-  required: ["baseOid", "candidateOid", "candidatePath", "candidateHash", "candidateMetadataHash", "diffPath", "diffHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "addedLines", "excluded", "treeClean", "diffBytes", "fileCount"],
+  required: ["baseOid", "candidateOid", "candidatePath", "candidateHash", "candidateMetadataHash", "reviewDiffPath", "reviewDiffHash", "changedPaths", "matchedKeywords", "excluded", "treeClean", "diffBytes", "fileCount"],
   properties: {
     baseOid: { type: "string" }, candidateOid: { type: "string" }, candidatePath: { type: "string" },
     candidateHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     candidateMetadataHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
-    diffPath: { type: "string" },
-    diffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     reviewDiffPath: { type: "string" },
     reviewDiffHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
     changedPaths: { type: "array", items: { type: "string" } },
-    addedLines: { type: "string" }, excluded: { type: "array" }, treeClean: { type: "string" },
+    matchedKeywords: { type: "array", items: { type: "string" } },
+    excluded: { type: "array" }, treeClean: { type: "string" },
     diffBytes: { type: "integer" }, fileCount: { type: "integer" }
   }
 };
@@ -177,12 +176,11 @@ async function sha256(value) {
 }
 
 async function codexRequestIdentity({
-  prompt, reviewDiffHash = null, schemaPath, model, effort, sandbox, worktree
+  prompt, schemaPath, model, effort, sandbox, worktree
 }) {
   return sha256(JSON.stringify({
     version: 1,
     promptHash: await sha256(prompt),
-    reviewDiffHash,
     schemaPath,
     model,
     effort,
@@ -301,8 +299,8 @@ function matchesWhen(when, snapshot) {
       matched = true;
     }
   }
-  const added = snapshot.addedLines.toLocaleLowerCase();
-  if ((when.keywords ?? []).some((keyword) => added.includes(String(keyword).toLocaleLowerCase()))) matched = true;
+  const hits = new Set((snapshot.matchedKeywords ?? []).map((keyword) => String(keyword).toLocaleLowerCase()));
+  if ((when.keywords ?? []).some((keyword) => hits.has(String(keyword).toLocaleLowerCase()))) matched = true;
   return { matched, errors };
 }
 
@@ -473,7 +471,7 @@ function relayEnvelopeSchema(resultSchema) {
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, {
   label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox,
-  reviewDiffPath, reviewDiffHash = null
+  reviewDiffPath
 }) {
   if (shipState.runPolicy?.reasoningProvider === "claude") {
     throw new Error(`Codex dispatch ${label} is forbidden by the claude-only run policy`);
@@ -481,16 +479,12 @@ async function codexCall(input, {
   const schemaPath = `${input.pluginRoot}/schemas/${schemaFile}`;
   const requestIdentity = await codexRequestIdentity({
     prompt,
-    reviewDiffHash,
     schemaPath,
     model: runtime.model,
     effort: runtime.effort,
     sandbox,
     worktree: input.worktree
   });
-  if (reviewDiffPath && !/^sha256:[0-9a-f]{64}$/.test(reviewDiffHash ?? "")) {
-    throw new Error(`Codex ${label} has no immutable review-diff identity`);
-  }
   const promptFile = `${artifact}.${requestIdentity.slice("sha256:".length)}.prompt.md`;
   // Declared from the prompt the workflow actually built, so a relay that
   // shortened or paraphrased it fails before Codex is invoked rather than
@@ -554,10 +548,6 @@ async function codexCall(input, {
       const envelope = schemaBoundEnvelope
         ? response
         : { reused: false, executionId: null, requestIdentity, result: response };
-      if (envelope.requestIdentity !== requestIdentity) {
-        log(`The Codex step ${label} returned a result for a different request identity; retrying the immutable request.`);
-        continue;
-      }
       relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
         .filter((item) => item.receiptFile !== receiptFile);
       if (schemaBoundEnvelope) {
@@ -641,7 +631,6 @@ async function snapshot(input, round, candidateOid) {
   }
   const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}-${candidateOid}`;
   const expectedCandidatePath = `${outDir}/candidate.json`;
-  const expectedDiffPath = `${outDir}/candidate.diff`;
   const expectedReviewDiffPath = `${outDir}/review.diff`;
   const command = [
     `node "${input.pluginRoot}/scripts/snapshot-candidate.mjs"`,
@@ -650,14 +639,15 @@ async function snapshot(input, round, candidateOid) {
     `--base "${input.baseOid}"`,
     `--candidate "${candidateOid}"`,
     `--out-dir "${outDir}"`,
-    `--exclude-json "${input.diffExcludePath}"`
+    `--exclude-json "${input.diffExcludePath}"`,
+    `--config "${input.configPath}"`
   ].join(" ");
   const codegraph = input.config.codegraph.enabled ? `Then run exactly: codegraph sync "${input.worktree}"` : "CodeGraph is disabled; do not run it.";
   const result = await plumbingCall([
     `Run exactly: ${command}`,
     codegraph,
     `Read ${outDir}/candidate.json.`,
-    `Return only the requested schema fields, setting candidatePath=${JSON.stringify(expectedCandidatePath)}, diffPath=${JSON.stringify(expectedDiffPath)}, and reviewDiffPath=${JSON.stringify(expectedReviewDiffPath)}. Do not copy either diff through the model response.`
+    `Return only the requested schema fields, setting candidatePath=${JSON.stringify(expectedCandidatePath)} and reviewDiffPath=${JSON.stringify(expectedReviewDiffPath)}. Do not copy the diff or the addedLines field through the model response.`
   ].join("\n"), {
     label: `candidate:snapshot:${round}`,
     phase: "Candidate",
@@ -670,7 +660,6 @@ async function snapshot(input, round, candidateOid) {
     || result.candidateOid !== candidateOid
     || result.baseOid !== input.baseOid
     || result.candidatePath !== expectedCandidatePath
-    || result.diffPath !== expectedDiffPath
     || result.reviewDiffPath !== expectedReviewDiffPath
     || result.treeClean !== "") {
     throw new Error(`candidate snapshot ${round} did not bind to the expected commits or the primary checkout changed`);
@@ -678,12 +667,10 @@ async function snapshot(input, round, candidateOid) {
   const returnedMetadata = {
     baseOid: result.baseOid,
     candidateOid: result.candidateOid,
-    diffPath: result.diffPath,
-    diffHash: result.diffHash,
     reviewDiffPath: result.reviewDiffPath,
     reviewDiffHash: result.reviewDiffHash,
     changedPaths: result.changedPaths,
-    addedLines: result.addedLines,
+    matchedKeywords: result.matchedKeywords,
     excluded: result.excluded,
     diffBytes: result.diffBytes,
     fileCount: result.fileCount,
@@ -740,8 +727,7 @@ async function classifyUi(input, snapshotValue, round, runPolicy) {
       prompt,
       runtime: input.config.reviewTiers.standard.codex,
       sandbox: "read-only",
-      reviewDiffPath: snapshotValue.reviewDiffPath,
-      reviewDiffHash: snapshotValue.reviewDiffHash
+      reviewDiffPath: snapshotValue.reviewDiffPath
     });
   } else if (runPolicy.reasoningProvider === "claude") {
     const runtime = input.config.reviewTiers.standard.claude;
@@ -1168,8 +1154,7 @@ async function main(raw) {
             prompt: specialistPrompt,
             runtime: specialistRuntime,
             sandbox: "read-only",
-            reviewDiffPath: snapshotValue.reviewDiffPath,
-            reviewDiffHash: snapshotValue.reviewDiffHash
+            reviewDiffPath: snapshotValue.reviewDiffPath
           })
         : claudeReasoningCall(specialistPrompt, {
             label: `specialist:${focus}:claude`,
@@ -1240,8 +1225,7 @@ async function main(raw) {
           prompt: promptParts.join("\n\n"),
           runtime,
           sandbox: "read-only",
-          reviewDiffPath: snapshotValue.reviewDiffPath,
-          reviewDiffHash: snapshotValue.reviewDiffHash
+          reviewDiffPath: snapshotValue.reviewDiffPath
         });
       } else {
         result = await claudeReasoningCall([
@@ -1301,7 +1285,9 @@ async function main(raw) {
       }
     }
 
-    const artifactFindings = roundFindings.map((finding, index) => ({ ...finding, artifactId: `F${round}.${index + 1}` }));
+    // Only the IDs are needed in memory; the findings themselves reach disk
+    // through reviewerResults, which the renderer flattens the same way.
+    const findingIds = roundFindings.map((_finding, index) => `F${round}.${index + 1}`);
     const roundRecord = {
       round,
       candidateOid,
@@ -1317,13 +1303,11 @@ async function main(raw) {
         verdict: item?.result?.verdict, summary: item?.result?.summary,
         dimensionSweep: item?.result?.dimension_sweep, loadBearingClaim: item?.result?.load_bearing_claim
       })),
-      findings: artifactFindings,
       reviewerResults: reviewResults.filter(Boolean).map((item) => ({
         engine: item.engine,
         dimension: item.dimension,
         result: item.result ?? null
       })),
-      ledgerSnapshot: ledger,
       reviewerFailures: lastRoundFailures,
       fixEngine: null,
       runPolicy,
@@ -1336,7 +1320,7 @@ async function main(raw) {
     const reviewPath = `${input.shipDir}/prs/${input.pr.id}/review.md`;
     const scribe = await plumbingCall([
       `Persist this round JSON at ${roundJsonPath} with mode 0600.`,
-      `Also persist each non-null reviewerResults entry at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/<engine>-<dimension>.findings.json and ledgerSnapshot at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/ledger.snapshot.json, all mode 0600.`,
+      `Also persist each non-null reviewerResults entry at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/<engine>-<dimension>.findings.json, mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/render-review-round.mjs" "${reviewPath}" "${roundJsonPath}"`,
       "Read and return the appender's JSON result exactly.",
       fence("round-record", roundRecord)
@@ -1362,7 +1346,10 @@ async function main(raw) {
     const independentCoverage = !independentEngine || selectedInfo.selected.every((dimension) =>
       reviewResults.some((item) => item?.engine === independentEngine && item?.dimension === dimension && item?.result)
     );
-    rounds.push({ ...roundRecord, findingIds: artifactFindings.map((finding) => finding.artifactId), independentCoverage });
+    // The caller gets the round's shape and IDs; the findings themselves live
+    // on disk and in the single top-level ledger.
+    const { reviewerResults, ...returnedRound } = roundRecord;
+    rounds.push({ ...returnedRound, findingIds, independentCoverage });
     if (open.length === 0 && lastRoundFailures.length === 0 && independentCoverage) {
       status = "clean";
       break;
@@ -1534,13 +1521,18 @@ async function main(raw) {
         break;
       }
     }
-    ui = await classifyUi(input, snapshotValue, round, runPolicy);
-    callCount += 1;
-    if (relayState.fatal.length > 0) {
-      return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
-    }
-    if (relayState.capacityExceeded) {
-      return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+    // Dimension selection only ever adds, so once the candidate is visible (or
+    // uncertain) a fresh verdict cannot change what runs, and could only
+    // downgrade a user-visible gate that has already tripped.
+    if (ui.verdict === "no") {
+      ui = await classifyUi(input, snapshotValue, round, runPolicy);
+      callCount += 1;
+      if (relayState.fatal.length > 0) {
+        return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
     }
     lastFixEngine = fixEngine;
   }

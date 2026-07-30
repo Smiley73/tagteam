@@ -112,7 +112,6 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   const expectedIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
     version: 1,
     promptHash,
-    reviewDiffHash: null,
     schemaPath: path.join(root, "schemas/findings.schema.json"),
     model: "gpt-test",
     effort: "high",
@@ -180,7 +179,6 @@ test("shipping-style immutable request identities reject changed prompt bytes be
   const requestIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
     version: 1,
     promptHash,
-    reviewDiffHash: null,
     schemaPath: path.join(root, "schemas/findings.schema.json"),
     model: "gpt-test",
     effort: "high",
@@ -1847,12 +1845,10 @@ function snapshotFixture(
   const candidate = {
     baseOid,
     candidateOid,
-    diffPath: `${outDir}/candidate.diff`,
-    diffHash: `sha256:${"c".repeat(64)}`,
     reviewDiffPath: `${outDir}/review.diff`,
     reviewDiffHash: TEST_REVIEW_DIFF_HASH,
     changedPaths: ["src/a.js"],
-    addedLines: "+const a = 1;",
+    matchedKeywords: [],
     excluded: [],
     diffBytes: 20,
     fileCount: 1,
@@ -3054,7 +3050,7 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.equal(result.rounds[0].reviewerFailures.length, 0);
 });
 
-test("a confirmed relay result with another request identity is rejected and retried", async () => {
+test("a confirmed relay result is accepted without re-checking its request identity", async () => {
   let returnedMismatch = false;
   const { result, labels } = await harness("workflows/ship-pr.js", SHIP_ARGS, (label, prompt, options) => {
     if (label.startsWith("candidate:snapshot")) {
@@ -3089,6 +3085,6 @@ test("a confirmed relay result with another request identity is rejected and ret
 
   assert.equal(returnedMismatch, true);
   assert.equal(result.status, "clean");
-  assert.equal(labels.some((label) => label.includes("relay-retry-1")), true);
-  assert.equal(result.usage.relayRetries, 1);
+  assert.equal(labels.some((label) => label.includes("relay-retry-1")), false);
+  assert.equal(result.usage.relayRetries, 0);
 });

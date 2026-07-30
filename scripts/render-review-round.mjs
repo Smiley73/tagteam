@@ -19,6 +19,24 @@ function token(value, fallback = "unknown") {
   return normalized || fallback;
 }
 
+// The findings are already present in reviewerResults, so the round travels
+// the relay once instead of three times. Ordering matches the workflow's own
+// flattening. Rounds written before this derivation still carry `findings`.
+export function deriveFindings(round) {
+  if (Array.isArray(round.findings)) return round.findings;
+  const findings = [];
+  for (const reviewer of round.reviewerResults ?? []) {
+    for (const finding of reviewer.result?.findings ?? []) {
+      findings.push({
+        ...finding,
+        engine: reviewer.engine,
+        artifactId: `F${round.round}.${findings.length + 1}`
+      });
+    }
+  }
+  return findings;
+}
+
 export function renderRound(round) {
   const date = String(round.recordedAt ?? new Date().toISOString()).slice(0, 10);
   const lines = [`## Round ${round.round}`];
@@ -29,9 +47,10 @@ export function renderRound(round) {
     lines.push(`- Dimension sweep: ${oneLine(reviewer.dimensionSweep)}`);
     lines.push(`- Load-bearing claim checked: ${oneLine(reviewer.loadBearingClaim)}`);
   }
+  const findings = deriveFindings(round);
   lines.push("### Findings");
-  if ((round.findings ?? []).length === 0) lines.push("- None");
-  for (const finding of round.findings ?? []) {
+  if (findings.length === 0) lines.push("- None");
+  for (const finding of findings) {
     if (!/^F[1-9][0-9]*\.[1-9][0-9]*$/.test(finding.artifactId)) throw new Error(`invalid finding artifact ID: ${finding.artifactId}`);
     lines.push(`- ${finding.artifactId} | [${finding.severity}] ${token(finding.dimension)} | ${oneLine(finding.file, "(unknown)")}:${finding.line_start}-${finding.line_end} | ${oneLine(finding.title, "Untitled finding")} | ${oneLine(finding.recommendation, "Review and resolve this finding.")}`);
   }
@@ -73,7 +92,7 @@ export function appendRound(reviewPath, roundPath) {
   const candidate = Buffer.concat([before, Buffer.from(rendered)]);
   const parsedAfter = parseReviewArtifact(candidate.toString("utf8"));
   if (!parsedAfter.ok) throw new Error(`appended review artifact would be malformed: ${parsedAfter.errors.join("; ")}`);
-  const expected = (round.findings ?? []).map((finding) => finding.artifactId).sort();
+  const expected = deriveFindings(round).map((finding) => finding.artifactId).sort();
   const actual = parsedAfter.rounds.at(-1).findings.map((finding) => finding.id).sort();
   if (JSON.stringify(expected) !== JSON.stringify(actual)) {
     throw new Error(`finding ID mismatch: expected ${expected.join(",")}; got ${actual.join(",")}`);

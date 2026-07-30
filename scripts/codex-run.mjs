@@ -464,14 +464,11 @@ function requestFingerprint({ options, prompt, schema }) {
   })).digest("hex");
 }
 
-function requestIdentity({ options, prompt, reviewDiff = null }) {
+function requestIdentity({ options, prompt }) {
   const promptHash = `sha256:${createHash("sha256").update(prompt).digest("hex")}`;
   const fields = {
     version: 1,
     promptHash,
-    reviewDiffHash: reviewDiff === null
-      ? null
-      : `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`,
     schemaPath: options.schema,
     model: options.model,
     effort: options.effort,
@@ -801,7 +798,7 @@ async function main() {
     if (options.reviewDiffPath) {
       reviewDiff = fs.readFileSync(path.resolve(options.reviewDiffPath), "utf8");
     }
-    options.requestIdentity = requestIdentity({ options, prompt, reviewDiff });
+    options.requestIdentity = requestIdentity({ options, prompt });
     if (options.expectedRequestIdentity) {
       const expected = options.expectedRequestIdentity;
       const promptName = path.basename(path.resolve(options.promptFile ?? ""));

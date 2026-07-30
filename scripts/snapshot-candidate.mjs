@@ -21,6 +21,20 @@ function parseArgs(argv) {
   return options;
 }
 
+// Every keyword any reviewer condition can key on, matched case-insensitively
+// against the added lines. Returns the hits, so the caller can evaluate
+// `when.keywords` without holding the change itself.
+function matchKeywords(configPath, addedLines) {
+  if (!configPath) return [];
+  const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
+  const keywords = new Set();
+  for (const setting of Object.values(config.reviewers ?? {})) {
+    for (const keyword of setting?.when?.keywords ?? []) keywords.add(String(keyword));
+  }
+  const haystack = addedLines.toLocaleLowerCase();
+  return [...keywords].filter((keyword) => haystack.includes(keyword.toLocaleLowerCase())).sort();
+}
+
 function blobAt(cwd, oid, file) {
   const result = git(cwd, ["rev-parse", `${oid}:${file}`], { allowFailure: true });
   return result.status === 0 ? result.stdout.trim() : null;
@@ -57,8 +71,17 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+// The snapshotter agent relays these fields into the workflow, which has no
+// filesystem of its own. Hashing exactly that subset lets the workflow confirm
+// the relay matches the file without the agent transcribing the bulky fields.
+const RELAYED_FIELDS = [
+  "baseOid", "candidateOid", "reviewDiffPath", "reviewDiffHash", "changedPaths",
+  "matchedKeywords", "excluded", "diffBytes", "fileCount", "treeClean"
+];
+
 function candidateMetadataHash(candidate) {
-  return `sha256:${createHash("sha256").update(canonicalJson(candidate)).digest("hex")}`;
+  const relayed = Object.fromEntries(RELAYED_FIELDS.map((key) => [key, candidate[key]]));
+  return `sha256:${createHash("sha256").update(canonicalJson(relayed)).digest("hex")}`;
 }
 
 export function validateCandidateSnapshot(candidatePath, {
@@ -77,7 +100,6 @@ export function validateCandidateSnapshot(candidatePath, {
     throw new Error("candidate snapshot metadata bytes do not match the expected hash");
   }
   const candidate = JSON.parse(candidateBytes.toString("utf8"));
-  const expectedDiffPath = path.join(path.dirname(resolvedCandidatePath), "candidate.diff");
   const expectedReviewDiffPath = path.join(path.dirname(resolvedCandidatePath), "review.diff");
   if (!/^[0-9a-f]{40}$/.test(candidate.baseOid ?? "")
     || !/^[0-9a-f]{40}$/.test(candidate.candidateOid ?? "")
@@ -85,24 +107,21 @@ export function validateCandidateSnapshot(candidatePath, {
     || (candidateOid && candidate.candidateOid !== candidateOid)) {
     throw new Error("candidate snapshot metadata does not match the expected commits");
   }
-  if (candidate.diffPath !== expectedDiffPath
-    || candidate.reviewDiffPath !== expectedReviewDiffPath) {
+  if (candidate.reviewDiffPath !== expectedReviewDiffPath) {
     throw new Error("candidate snapshot metadata points outside its immutable snapshot directory");
   }
-  for (const artifactPath of [expectedDiffPath, expectedReviewDiffPath]) {
-    const stat = fs.lstatSync(artifactPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new Error(`candidate snapshot artifact is not a regular file: ${artifactPath}`);
-    }
+  const reviewDiffStat = fs.lstatSync(expectedReviewDiffPath);
+  if (!reviewDiffStat.isFile() || reviewDiffStat.isSymbolicLink()) {
+    throw new Error(`candidate snapshot artifact is not a regular file: ${expectedReviewDiffPath}`);
   }
-  if (candidate.diffHash !== sha256File(expectedDiffPath)
-    || candidate.reviewDiffHash !== sha256File(expectedReviewDiffPath)) {
+  if (candidate.reviewDiffHash !== sha256File(expectedReviewDiffPath)) {
     throw new Error("candidate snapshot artifact bytes do not match their recorded hashes");
   }
-  if (candidate.diffBytes !== fs.statSync(expectedDiffPath).size
-    || !Array.isArray(candidate.changedPaths)
+  if (!Array.isArray(candidate.changedPaths)
     || !Array.isArray(candidate.excluded)
+    || !Array.isArray(candidate.matchedKeywords)
     || typeof candidate.addedLines !== "string"
+    || typeof candidate.diffBytes !== "number"
     || candidate.fileCount !== candidate.changedPaths.length
     || candidate.treeClean !== "") {
     throw new Error("candidate snapshot metadata is internally inconsistent");
@@ -149,6 +168,10 @@ export function snapshotCandidate(options) {
     .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
     .map((line) => line.slice(1))
     .join("\n");
+  // Reviewer selection keys off keywords in the added lines, but the workflow
+  // has no filesystem and must not relay the whole change through a model
+  // response. Resolve the keyword matches here and relay only the hits.
+  const matchedKeywords = matchKeywords(options.config, addedLines);
   const worktreeHead = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
   const worktreeStatus = git(worktree, ["status", "--porcelain"]).stdout;
   const treeClean = git(primary, ["status", "--porcelain"]).stdout;
@@ -161,21 +184,17 @@ export function snapshotCandidate(options) {
   if (baseOid === candidateOid || fullDiff.length === 0) throw new Error("candidate snapshot is empty; implementation was not committed");
   if (treeClean !== "") throw new Error(`the primary checkout changed during the ship:\n${treeClean}`);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
-  const diffPath = path.join(outDir, "candidate.diff");
   const reviewDiffPath = path.join(outDir, "review.diff");
-  writeImmutable(diffPath, fullDiff);
   writeImmutable(reviewDiffPath, reviewDiff);
-  const diffHash = `sha256:${createHash("sha256").update(fullDiff).digest("hex")}`;
   const reviewDiffHash = `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`;
   const candidate = {
     baseOid,
     candidateOid,
-    diffPath,
-    diffHash,
     reviewDiffPath,
     reviewDiffHash,
     changedPaths,
     addedLines,
+    matchedKeywords,
     excluded,
     diffBytes: Buffer.byteLength(fullDiff),
     fileCount: changedPaths.length,

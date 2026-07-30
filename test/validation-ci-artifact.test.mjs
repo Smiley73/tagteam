@@ -181,6 +181,59 @@ test("deterministic round appender preserves earlier bytes and cross-checks find
   assert.equal(fs.readFileSync(reviewPath).subarray(0, frozen.length).equals(frozen), true);
 });
 
+test("findings derived from reviewerResults render exactly like an inlined findings array", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-derive-"));
+  const reviewers = [
+    { engine: "codex", dimension: "security", ok: true, verdict: "needs-attention", summary: "One issue.", dimensionSweep: "Checked authorization.", loadBearingClaim: "One caller." },
+    { engine: "claude", dimension: "performance", ok: true, verdict: "clean", summary: "Fine.", dimensionSweep: "Checked hot paths.", loadBearingClaim: "One caller." }
+  ];
+  const codexFinding = {
+    severity: "major", dimension: "security", file: "src/a.ts",
+    line_start: 4, line_end: 4, title: "Missing guard", recommendation: "Add a guard."
+  };
+  const claudeFinding = {
+    severity: "minor", dimension: "performance", file: "src/b.ts",
+    line_start: 9, line_end: 11, title: "Redundant scan", recommendation: "Hoist the loop."
+  };
+  const shared = {
+    round: 1, recordedAt: "2026-07-25T12:00:00.000Z", reviewers,
+    skipped: [], matcherErrors: [], reviewerFailures: [], advisory: [],
+    verification: { status: "passed" }
+  };
+  const inlinedPath = path.join(temp, "inlined.json");
+  fs.writeFileSync(inlinedPath, JSON.stringify({
+    ...shared,
+    findings: [
+      { ...codexFinding, engine: "codex", artifactId: "F1.1" },
+      { ...claudeFinding, engine: "claude", artifactId: "F1.2" }
+    ]
+  }));
+  const derivedPath = path.join(temp, "derived.json");
+  fs.writeFileSync(derivedPath, JSON.stringify({
+    ...shared,
+    reviewerResults: [
+      { engine: "codex", dimension: "security", result: { findings: [codexFinding] } },
+      { engine: "claude", dimension: "performance", result: { findings: [claudeFinding] } }
+    ]
+  }));
+  const inlined = appendRound(path.join(temp, "inlined.md"), inlinedPath);
+  const derived = appendRound(path.join(temp, "derived.md"), derivedPath);
+  assert.deepEqual(derived.findingIds, ["F1.1", "F1.2"]);
+  assert.equal(derived.sha256, inlined.sha256);
+
+  // A reviewer that returned nothing contributes no findings and does not
+  // shift the IDs of the reviewers that follow it.
+  const sparsePath = path.join(temp, "sparse.json");
+  fs.writeFileSync(sparsePath, JSON.stringify({
+    ...shared,
+    reviewerResults: [
+      { engine: "codex", dimension: "security", result: null },
+      { engine: "claude", dimension: "performance", result: { findings: [claudeFinding] } }
+    ]
+  }));
+  assert.deepEqual(appendRound(path.join(temp, "sparse.md"), sparsePath).findingIds, ["F1.1"]);
+});
+
 test("review appenders sanitize model-controlled delimiters before mutating the artifact", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-review-sanitize-"));
   const reviewPath = path.join(temp, "review.md");

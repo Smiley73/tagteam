@@ -173,11 +173,9 @@ process.stdin.on("end", () => {
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const bridge = JSON.parse(result.stdout.trim());
-  const reviewDiff = fs.readFileSync(reviewDiffPath, "utf8");
   const requestIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
     version: 1,
     promptHash: `sha256:${createHash("sha256").update("Review the candidate.").digest("hex")}`,
-    reviewDiffHash: `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`,
     schemaPath: path.join(root, "schemas/findings.schema.json"),
     model: "gpt-test",
     effort: "high",
@@ -213,6 +211,30 @@ process.stdin.on("end", () => {
   assert.equal(reconciled.usage.codexCalls, 1);
 });
 
+// The bridge and both workflows each build this object independently, and a
+// relay only compares the finished hashes. A field added to or removed from one
+// of them therefore fails at run time as an unexplained identity mismatch, with
+// nothing in the stubbed relay tests to catch the drift.
+test("every Codex request identity is built from the same field list", () => {
+  const sources = {
+    "scripts/codex-run.mjs": /const fields = \{([\s\S]*?)\n {2}\};/,
+    "workflows/ship-pr.js": /async function codexRequestIdentity\([\s\S]*?JSON\.stringify\(\{([\s\S]*?)\n {2}\}\)\);/,
+    "workflows/plan-forge.js": /async function codexRequestIdentity\([\s\S]*?JSON\.stringify\(\{([\s\S]*?)\n {2}\}\)\);/
+  };
+  const fieldLists = Object.entries(sources).map(([file, pattern]) => {
+    const source = fs.readFileSync(path.join(root, file), "utf8");
+    const body = source.match(pattern);
+    assert.notEqual(body, null, `could not locate the request-identity fields in ${file}`);
+    // Fields appear both as `name: value` and as shorthand `name,`.
+    return [file, body[1].split("\n").map((line) => line.trim().match(/^(\w+)(?=\s*[:,]|\s*$)/)?.[1]).filter(Boolean)];
+  });
+  const [[referenceFile, reference]] = fieldLists;
+  assert.equal(reference.length > 0, true);
+  for (const [file, fields] of fieldLists.slice(1)) {
+    assert.deepEqual(fields, reference, `${file} does not match ${referenceFile}`);
+  }
+});
+
 test("candidate snapshot binds a non-empty committed diff and preserves excluded-file evidence", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-snapshot-"));
   git(repo, ["init", "-q"]);
@@ -221,7 +243,7 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
   fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
   fs.writeFileSync(path.join(repo, "package-lock.json"), "{}\n");
   // Ignore the test-only snapshot outputs so the primary-tree cleanliness guard remains meaningful.
-  fs.writeFileSync(path.join(repo, ".gitignore"), "out*/\nexclude.json\n");
+  fs.writeFileSync(path.join(repo, ".gitignore"), "out*/\nexclude.json\nconfig.json\n");
   git(repo, ["add", "-A"]);
   git(repo, ["commit", "-qm", "base"]);
   const base = git(repo, ["rev-parse", "HEAD"]);
@@ -232,15 +254,26 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
   const candidate = git(repo, ["rev-parse", "HEAD"]);
   const exclude = path.join(repo, "exclude.json");
   fs.writeFileSync(exclude, JSON.stringify(["**/package-lock.json"]));
+  const reviewerConfig = path.join(repo, "config.json");
+  fs.writeFileSync(reviewerConfig, JSON.stringify({
+    reviewers: {
+      security: { enabled: false, when: { keywords: ["CONST", "drop table"] } },
+      cost: { enabled: true }
+    }
+  }));
   const result = snapshotCandidate({
     worktree: repo,
     primary: repo,
     base,
     candidate,
     "out-dir": path.join(repo, "out"),
-    "exclude-json": exclude
+    "exclude-json": exclude,
+    config: reviewerConfig
   });
   assert.equal(result.diffBytes > 0, true);
+  // Keyword hits are resolved here so the workflow never has to hold the
+  // change itself: matching is case-insensitive and reports only real hits.
+  assert.deepEqual(result.matchedKeywords, ["CONST"]);
   assert.deepEqual(result.changedPaths.sort(), ["app.js", "package-lock.json"]);
   assert.equal(result.excluded.length, 1);
   assert.match(fs.readFileSync(result.reviewDiffPath, "utf8"), /old [0-9a-f]+ \| new [0-9a-f]+/);
@@ -261,7 +294,8 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
     base,
     candidate,
     "out-dir": path.join(repo, "out"),
-    "exclude-json": exclude
+    "exclude-json": exclude,
+    config: reviewerConfig
   }).candidateOid, candidate);
   fs.appendFileSync(result.reviewDiffPath, "\npost-snapshot drift\n");
   assert.throws(

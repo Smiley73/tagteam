@@ -99,11 +99,11 @@ test("shared ledger stays equivalent to the workflow production rules", () => {
 });
 
 test("matcher errors fail open and keywords inspect only the supplied added corpus", () => {
-  const malformed = workflow.matchesWhen({ globs: ["src/[ab].js"] }, { changedPaths: ["README.md"], addedLines: "" });
+  const malformed = workflow.matchesWhen({ globs: ["src/[ab].js"] }, { changedPaths: ["README.md"], matchedKeywords: [] });
   assert.equal(malformed.matched, true);
   assert.equal(malformed.errors.length, 1);
-  assert.equal(workflow.matchesWhen({ keywords: ["SELECT"] }, { changedPaths: ["db.ts"], addedLines: "const sql = 'select *'" }).matched, true);
-  assert.equal(workflow.matchesWhen({ keywords: ["deleted"] }, { changedPaths: ["db.ts"], addedLines: "only added text" }).matched, false);
+  assert.equal(workflow.matchesWhen({ keywords: ["SELECT"] }, { changedPaths: ["db.ts"], matchedKeywords: ["select"] }).matched, true);
+  assert.equal(workflow.matchesWhen({ keywords: ["deleted"] }, { changedPaths: ["db.ts"], matchedKeywords: [] }).matched, false);
 });
 
 test("UI uncertainty force-enables accessibility and explicit dimensions beat disabled config", () => {
@@ -114,9 +114,9 @@ test("UI uncertainty force-enables accessibility and explicit dimensions beat di
   };
   const selected = workflow.selectDimensions({
     reviewers,
-  }, { changedPaths: ["server/api.ts"], addedLines: "" }, ["cost"], "unknown");
+  }, { changedPaths: ["server/api.ts"], matchedKeywords: [] }, ["cost"], "unknown");
   assert.deepEqual(Array.from(selected.selected).sort(), ["accessibility", "cost", "functionality"]);
-  const all = workflow.selectDimensions({ reviewers }, { changedPaths: [], addedLines: "" }, ["all"], "no");
+  const all = workflow.selectDimensions({ reviewers }, { changedPaths: [], matchedKeywords: [] }, ["all"], "no");
   assert.deepEqual(Array.from(all.selected).sort(), ["accessibility", "cost", "functionality"]);
 });
 

@@ -174,7 +174,7 @@ Never amend, interactively rebase, bare-force push, hard-reset committed work, m
 - plan, manifest, train, and `pr-train-state.json`;
 - `prs/<id>/review.md`: append-only human review record;
 - `prs/<id>/tasks/<task>/`: implementation results;
-- `prs/<id>/rounds/<n>/`: candidate, diffs, prompts, findings, fixes, and ledger;
+- `prs/<id>/rounds/<n>/`: candidate, review diff, prompts, findings, and fixes;
 - `prs/<id>/verify/`: command results/logs;
 - `prs/<id>/ci/<candidateOid>.json`: every CI observation;
 - `report.md`: deterministic final summary.
