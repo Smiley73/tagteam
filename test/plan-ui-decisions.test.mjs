@@ -58,7 +58,16 @@ async function forge({
     labels.push(label);
     prompts.set(label, prompt);
     if (label === "plan:draft" || label.startsWith("plan:revise")) {
-      return { planMarkdown: "# plan\n\nbody", open_questions: [], ui_decisions: draftDecisions };
+      // A drafter returns a receipt for the file it persisted, never the plan.
+      const match = /persist the complete plan at (\S+) with mode 0600/.exec(prompt);
+      assert.notEqual(match, null, `no persist path in plan prompt: ${prompt.slice(0, 300)}`);
+      return {
+        plan_path: match[1],
+        plan_chars: 12,
+        plan_hash: "fd8d615d",
+        open_questions: [],
+        ui_decisions: draftDecisions
+      };
     }
     if (label.startsWith("plan:interaction-review")) {
       if (dropInteractionReview) throw new Error("lost");

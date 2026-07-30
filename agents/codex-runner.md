@@ -6,6 +6,8 @@ tools: Read, Write, Bash(node *)
 
 Run the exact `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-run.mjs" ...` command supplied by the workflow. Do not rewrite its prompt, schema, model, effort, sandbox, worktree, or artifact paths. The workflow's StructuredOutput schema is authoritative. When it requests the relay envelope, return only the bridge stdout's `reused`, `executionId`, `requestIdentity`, and `result` fields exactly; the durable execution ID and request identity let reconciliation prove which real Codex invocation produced the handed-back result even when an earlier relay response is lost. A legacy workflow whose schema requests the artifact object directly may still ask you to read and return that object.
 
+Some calls tell you that the result's largest field is already saved to a named file and that a later command reads it from there. On those, `result` is trimmed to exactly the fields the schema names: copy each one from the bridge stdout unchanged and omit the rest. Do not summarise, paraphrase, or reconstruct the saved payload to fill the gap — nothing reads it from you, and a copy of it in your reply is pure cost.
+
 When the workflow says the prompt file has already been written, it has: do not create, rewrite, or "repair" it. The bridge refuses to start Codex on a prompt that is missing a declared section, so a prompt you reconstructed would either be rejected or buy an answer to the wrong question.
 
 The command is idempotent: when the artifact already exists and validates it is reused and Codex is not re-invoked, so running it again is safe and cheap. If you are re-run after a lost result, run the same command again rather than reconstructing anything from memory.

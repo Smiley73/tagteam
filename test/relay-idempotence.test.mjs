@@ -1335,6 +1335,35 @@ function planToken(text) {
   return `${normalized.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
+// The plan text reaches disk through the Codex artifact and is published by
+// materialize-plan-artifact.mjs, so it appears in these stubs only as the
+// checksum that command reports back — never as a relayed field.
+const PLAN_TEXT = "# Plan";
+const PLAN_PAYLOAD = {
+  ok: true,
+  payloads: [{
+    name: "DRAFT_PLAN",
+    token: planToken(PLAN_TEXT),
+    chars: Number(planToken(PLAN_TEXT).split(":")[0])
+  }]
+};
+
+// A Claude drafter returns a receipt for the file it persisted, never the plan
+// itself, so the stub names the path the prompt told it to write.
+function planReceiptFrom(prompt) {
+  const match = /persist the complete plan at (\S+) with mode 0600/.exec(prompt)
+    ?? /staged the complete seed plan at (\S+) with mode 0600/.exec(prompt);
+  assert.notEqual(match, null, `no persist path in plan prompt: ${prompt.slice(0, 300)}`);
+  const [plan_chars, plan_hash] = planToken(PLAN_TEXT).split(":");
+  return {
+    plan_path: match[1],
+    plan_chars: Number(plan_chars),
+    plan_hash,
+    open_questions: [],
+    ui_decisions: []
+  };
+}
+
 function planResponder(dropOnce) {
   const dropped = new Set();
   return (label, prompt = "") => {
@@ -1353,7 +1382,7 @@ function planResponder(dropOnce) {
       };
     }
     if (label.startsWith("plan:draft") || label.startsWith("plan:revise")) {
-      return { planMarkdown: "# Plan", open_questions: [] };
+      return planReceiptFrom(prompt);
     }
     if (label.startsWith("plan:manifest")) return MANIFEST;
     if (label.startsWith("plan:decompose")) return TRAIN;
@@ -1380,18 +1409,13 @@ test("Claude-only planning dispatches no Codex work", async () => {
 
 test("Codex-only planning leaves Haiku on plumbing and routes every substantive step to Codex", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
-  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const draft = { open_questions: [], ui_decisions: [] };
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
-    if (label.startsWith("plan:materialize-")) {
-      return {
-        ok: true,
-        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
-      };
-    }
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
       || label.startsWith("plan:decomposition-request")) {
       return {
@@ -1436,18 +1460,52 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
   }
 });
 
+// The plan text no longer crosses the relay, so nothing compares the published
+// file against a returned copy of it. The materializer's own receipt is what
+// the rest of the pass is bound to, and this is the check that it arrived: an
+// unreadable one stops the pass at the write instead of becoming a checksum the
+// next request is composed against.
+test("Codex planning stops when the materializer hands back no usable receipt", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  for (const broken of [
+    { name: "DRAFT_PLAN", token: "", chars: 0 },
+    { name: "DRAFT_PLAN", token: "6:nothex!!", chars: 6 },
+    { name: "SOMETHING_ELSE", token: planToken(PLAN_TEXT), chars: 6 }
+  ]) {
+    const responder = (label, prompt) => {
+      if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+      if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+      if (label.startsWith("plan:materialize-")) return { ok: true, payloads: [broken] };
+      if (label.endsWith(":request") || label.startsWith("plan:review-request")
+        || label.startsWith("plan:decomposition-request")) {
+        return {
+          ok: true,
+          promptPath: "/plans/slug/reviews/codex.prompt.md",
+          promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+          bytes: 4096
+        };
+      }
+      if (label.startsWith("plan:codex-draft")) return { open_questions: [], ui_decisions: [] };
+      return APPROVE;
+    };
+    const { result } = await harness(
+      "workflows/plan-forge.js",
+      { ...PLAN_ARGS, runPolicy: policy },
+      responder
+    );
+
+    assert.equal(result.status, "plan-interrupted", `accepted ${JSON.stringify(broken)}`);
+    assert.match(result.message, /no usable file receipt/);
+  }
+});
+
 test("Codex-only planning keeps the interface lens advisory when its relay is unavailable", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
-  const draft = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const draft = { open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
-    if (label.startsWith("plan:materialize-")) {
-      return {
-        ok: true,
-        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
-      };
-    }
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
       || label.startsWith("plan:decomposition-request")) {
       return {
@@ -1475,17 +1533,12 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
 
 test("Codex-only revision fails closed instead of dropping a resumable question", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
-  const carried = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
-  const dropped = { planMarkdown: "# Plan", open_questions: [], ui_decisions: [] };
+  const carried = { open_questions: ["Which rollout?"], ui_decisions: [] };
+  const dropped = { open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
-    if (label.startsWith("plan:materialize-")) {
-      return {
-        ok: true,
-        payloads: [{ name: "DRAFT_PLAN", token: planToken(carried.planMarkdown), chars: carried.planMarkdown.length }]
-      };
-    }
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")) {
       return {
         ok: true,
@@ -1523,7 +1576,6 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
     precedent: "src/ui/Dialog.tsx"
   };
   const draft = {
-    planMarkdown: "# Plan",
     open_questions: ["Which rollout?"],
     ui_decisions: [uiDecision]
   };
@@ -1532,12 +1584,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
     prompts.set(label, prompt);
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
-    if (label.startsWith("plan:materialize-")) {
-      return {
-        ok: true,
-        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
-      };
-    }
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:decomposition-request")) {
       return {
         ok: true,
@@ -1575,16 +1622,11 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
 
 test("Codex no-draft recovery re-enters the same initial or continuation invocation", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
-  const draft = { planMarkdown: "# Plan", open_questions: ["Which rollout?"], ui_decisions: [] };
+  const draft = { open_questions: ["Which rollout?"], ui_decisions: [] };
   const responder = (dropDraft) => (label, prompt) => {
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
-    if (label.startsWith("plan:materialize-")) {
-      return {
-        ok: true,
-        payloads: [{ name: "DRAFT_PLAN", token: planToken(draft.planMarkdown), chars: draft.planMarkdown.length }]
-      };
-    }
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
       || label.startsWith("plan:decomposition-request")) {
       return {

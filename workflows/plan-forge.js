@@ -73,12 +73,19 @@ const planDraftSchema = {
     ui_decisions: { type: "array", items: uiDecisionSchema }
   }
 };
+// What a Codex plan step hands back through the relay. The plan document is not
+// here. Codex writes it into the artifact, materialize-plan-artifact.mjs reads
+// that file and publishes it, and the receipt for the published bytes comes back
+// from the script rather than from a model retyping the document. Only the two
+// small fields the workflow must hold in memory make the trip: the questions it
+// will put to a person, and the interface decisions it carries into the next
+// round. schemas/plan-draft.schema.json still requires planMarkdown — that file
+// is how the plan leaves Codex at all.
 const codexPlanDraftSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["planMarkdown", "open_questions", "ui_decisions"],
+  required: ["open_questions", "ui_decisions"],
   properties: {
-    planMarkdown: { type: "string", minLength: 1 },
     open_questions: { type: "array", items: { type: "string", minLength: 1 } },
     ui_decisions: { type: "array", items: uiDecisionSchema }
   }
@@ -614,6 +621,23 @@ function relayEnvelopeSchema(resultSchema) {
   };
 }
 
+// What the relay is told to hand back. The bridge always prints the whole
+// artifact object, so on a call whose payload a script reads off disk the
+// default "do not alter any field" would order the relay to retype bytes the
+// schema then refuses. resultFromDisk states the narrower contract instead: the
+// bookkeeping fields travel verbatim, the result is trimmed to exactly the
+// fields the schema names, and the saved payload is never copied at all.
+function relayReturnInstruction(resultFromDisk, artifact) {
+  if (!resultFromDisk) {
+    return "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field.";
+  }
+  return [
+    "From the bridge stdout, return reused, executionId, and requestIdentity exactly as printed.",
+    `The bridge also prints a result whose largest field is already saved at ${artifact}; a later command reads it from there, so it must not travel through you.`,
+    "Return as result only the fields this schema names, copied from the bridge stdout unchanged. Omit every other field rather than summarising it."
+  ].join(" ");
+}
+
 // Builds one request file out of text that is already on disk. The agent runs a
 // command and reports a byte count; the payload never passes through it. The
 // command is idempotent, so a lost reply costs one re-run and nothing else.
@@ -837,7 +861,7 @@ function promptNotBuilt({ what, promptFile, detail }) {
 
 async function relayCodex({
   prompt, label, phase: phaseName, schema, model, artifact, promptFile, what,
-  requestIdentity, sandbox = "read-only", optional = false
+  requestIdentity, sandbox = "read-only", optional = false, resultFromDisk = false
 }) {
   if (!/^sha256:[0-9a-f]{64}$/.test(requestIdentity ?? "")) {
     throw new Error(`Codex ${what} has no request-bound dispatch identity`);
@@ -848,15 +872,16 @@ async function relayCodex({
   relayState.unconfirmedDispatches = relayState.unconfirmedDispatches
     .filter((item) => item.receiptFile !== receiptFile);
   relayState.unconfirmedDispatches.push({ receiptFile, checkpoint, requestIdentity, sandbox, optional });
+  const returnInstruction = relayReturnInstruction(resultFromDisk, artifact);
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await planAgent(attempt === 1 ? [
       prompt,
-      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
+      returnInstruction
     ].join("\n\n") : [
       prompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
+      returnInstruction
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: phaseName,
@@ -1040,7 +1065,8 @@ async function main(raw) {
 
   const codexReasoning = async ({
     template, vars = {}, fences, expects = {}, requireJson = [], schemaFile,
-    schema, artifact, promptFile, label, phaseName, what, minBytes, optional = false
+    schema, artifact, promptFile, label, phaseName, what, minBytes, optional = false,
+    resultFromDisk = false
   }) => {
     const prepareCommand = composeCommand({
       pluginRoot: input.pluginRoot,
@@ -1098,12 +1124,18 @@ async function main(raw) {
       promptFile,
       what,
       requestIdentity,
-      optional
+      optional,
+      resultFromDisk
     });
     return { result, requestIdentity };
   };
 
-  const promoteCodexPlan = async ({ artifact, requestIdentity, file, label, phaseName, result, what }) => {
+  // Publishes a validated Codex artifact and reports what was published. The
+  // receipt is built from the materializer's own reading of the file it just
+  // wrote, so there is nothing here to compare against a relayed copy of the
+  // plan: no copy is relayed, and the artifact is the only source the published
+  // bytes ever had.
+  const promoteCodexPlan = async ({ artifact, requestIdentity, file, label, phaseName, what }) => {
     const command = [
       `node "${input.pluginRoot}/scripts/materialize-plan-artifact.mjs"`,
       `--artifact "${artifact}"`,
@@ -1120,17 +1152,21 @@ async function main(raw) {
       what,
       file
     });
-    const savedToken = adoptSavedToken({
-      payload: payloads.find((payload) => payload?.name === "DRAFT_PLAN") ?? null,
-      expected: expectText(result.planMarkdown),
-      expectedChars: normalizeText(result.planMarkdown).length,
-      drift: false,
-      what,
-      file
-    });
+    const payload = payloads.find((item) => item?.name === "DRAFT_PLAN") ?? null;
+    if (!/^\d+:[0-9a-f]{8}$/.test(payload?.token ?? "")
+      || !Number.isSafeInteger(payload.chars) || payload.chars < 1) {
+      throw new Error(payloadNotSaved({
+        what,
+        file,
+        detail: "the materializer returned no usable file receipt"
+      }));
+    }
+    const [chars, hash] = payload.token.split(":");
     return {
-      ...receiptFromText(file, result.planMarkdown),
-      savedToken
+      plan_path: file,
+      plan_chars: Number(chars),
+      plan_hash: hash,
+      savedToken: payload.token
     };
   };
   // A draft is only resumable together with the questions outstanding at that
@@ -1316,14 +1352,9 @@ async function main(raw) {
         detail: "the drafter returned no saved-plan receipt"
       }));
     }
-    // Compatibility for interrupted pre-receipt workflow replays in test or
-    // legacy state. New schema-bound Claude calls cannot return planMarkdown.
-    const claimed = result?.planMarkdown
-      ? receiptFromText(continuation ? continuationWorkPath : draftPath(1), result.planMarkdown)
-      : result;
     const savedWork = await recordPlanFile({
       file: continuation ? continuationWorkPath : draftPath(1),
-      receipt: claimed,
+      receipt: result,
       label: continuation ? "plan:verify-continuation-work" : "plan:verify-draft",
       phaseName: "Draft",
       what: continuation ? "integrated plan working copy" : "plan draft",
@@ -1359,7 +1390,6 @@ async function main(raw) {
       });
     }
     draft = { ...result, ...saved };
-    delete draft.planMarkdown;
   } else {
     if (continuation && (!seedPlanPath || !input.decisionsFile || !input.questionsFile)) {
       throw new Error("Codex plan continuation requires seedPlanPath, decisionsFile, and questionsFile");
@@ -1408,7 +1438,8 @@ async function main(raw) {
       promptFile,
       label: "plan:codex-draft",
       phaseName: "Draft",
-      what: continuation ? "integration of the reviewed plan" : "plan draft"
+      what: continuation ? "integration of the reviewed plan" : "plan draft",
+      resultFromDisk: true
     });
     if (continuation) {
       requireCarriedQuestions(response.result, input.openQuestions ?? [], decisions);
@@ -1420,7 +1451,6 @@ async function main(raw) {
       file: target,
       label: "plan:materialize-draft",
       phaseName: "Draft",
-      result: response.result,
       what: continuation ? "integrated plan" : "plan draft"
     });
     warnLargePlan(saved);
@@ -1648,18 +1678,14 @@ async function main(raw) {
         effort: claude.effort,
         schema: planDraftSchema
       });
-      const claimed = result?.planMarkdown
-        ? receiptFromText(revisedFile, result.planMarkdown)
-        : result;
       const saved = await recordPlanFile({
         file: revisedFile,
-        receipt: claimed,
+        receipt: result,
         label: `plan:verify-revision:${round}`,
         phaseName: `Cross-review ${round}`,
         what: `plan revised in round ${round}`
       });
       draft = { ...result, ...saved };
-      delete draft.planMarkdown;
     } else {
       const carriedDraft = draft;
       const revisionArtifact = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-revision-codex.json`;
@@ -1701,7 +1727,8 @@ async function main(raw) {
         promptFile: revisionPromptFile,
         label: `plan:codex-revise:${round}`,
         phaseName: `Cross-review ${round}`,
-        what: `revision of plan round ${round}`
+        what: `revision of plan round ${round}`,
+        resultFromDisk: true
       });
       requireCarriedQuestions(response.result, [
         ...(carriedDraft.open_questions ?? []),
@@ -1719,7 +1746,6 @@ async function main(raw) {
         file: revisedFile,
         label: `plan:materialize-revision:${round}`,
         phaseName: `Cross-review ${round}`,
-        result: response.result,
         what: `plan revised in round ${round}`
       });
       warnLargePlan(saved);

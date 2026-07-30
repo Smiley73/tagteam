@@ -468,10 +468,30 @@ function relayEnvelopeSchema(resultSchema) {
   };
 }
 
+// What the relay is told to hand back. The bridge always prints the whole
+// artifact object, so on a call whose payload a script reads off disk the
+// default "do not alter any field" would order the relay to retype bytes the
+// schema then refuses. resultFromDisk states the narrower contract instead: the
+// bookkeeping fields travel verbatim, the result is trimmed to exactly the
+// fields the schema names, and the saved payload is never copied at all. No ship
+// step sets it yet: every result here is read out of workflow memory, so routing
+// one through a script is a separate decision. plan-forge.js uses it for the
+// Codex plan draft and revision, and the two relays are kept identical.
+function relayReturnInstruction(resultFromDisk, artifact) {
+  if (!resultFromDisk) {
+    return "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field.";
+  }
+  return [
+    "From the bridge stdout, return reused, executionId, and requestIdentity exactly as printed.",
+    `The bridge also prints a result whose largest field is already saved at ${artifact}; a later command reads it from there, so it must not travel through you.`,
+    "Return as result only the fields this schema names, copied from the bridge stdout unchanged. Omit every other field rather than summarising it."
+  ].join(" ");
+}
+
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, {
   label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox,
-  reviewDiffPath
+  reviewDiffPath, resultFromDisk = false
 }) {
   if (shipState.runPolicy?.reasoningProvider === "claude") {
     throw new Error(`Codex dispatch ${label} is forbidden by the claude-only run policy`);
@@ -513,6 +533,7 @@ async function codexCall(input, {
     "Use the bridge's JSON stdout; do not re-read or retype the artifact.",
     fence("prompt", prompt)
   ].join("\n\n");
+  const returnInstruction = relayReturnInstruction(resultFromDisk, artifact);
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (relayState.dispatchedCalls >= relayState.maximumCalls) {
       relayState.capacityExceeded = true;
@@ -531,11 +552,11 @@ async function codexCall(input, {
     if (attempt > 1) relayState.extraCalls += 1;
     const response = await plumbingCall(attempt === 1 ? [
       basePrompt,
-      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
+      returnInstruction
     ].join("\n\n") : [
       basePrompt,
       `A previous attempt already ran this command, so the artifact at ${artifact} most likely exists and validates; the command will reuse it instead of re-running Codex.`,
-      "From the bridge stdout, return only reused, executionId, requestIdentity, and result. Do not infer or alter any field."
+      returnInstruction
     ].join("\n\n"), {
       label: attempt === 1 ? label : `${label}:relay-retry-${attempt - 1}`,
       phase: kind,
