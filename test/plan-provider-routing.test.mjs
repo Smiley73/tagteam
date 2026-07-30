@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { composePrompt } from "../scripts/compose-prompt.mjs";
+import { composePrompt, expectToken, normalizeText } from "../scripts/compose-prompt.mjs";
 import { materializePlanArtifact } from "../scripts/materialize-plan-artifact.mjs";
 import { mergePlanQuestions } from "../scripts/merge-plan-questions.mjs";
 import { planReceipt } from "../scripts/plan-receipt.mjs";
@@ -12,7 +12,7 @@ import { planReceipt } from "../scripts/plan-receipt.mjs";
 const root = path.resolve(import.meta.dirname, "..");
 const identity = `sha256:${"a".repeat(64)}`;
 
-function fixture() {
+function fixture(planMarkdown = "# Plan\n\nDo the work.") {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-provider-"));
   const artifact = path.join(directory, "draft.json");
   const plan = path.join(directory, "drafts", "pass-1.md");
@@ -20,7 +20,7 @@ function fixture() {
   const executionId = "11111111-1111-4111-8111-111111111111";
   const fingerprint = `sha256:${"f".repeat(64)}`;
   fs.writeFileSync(artifact, JSON.stringify({
-    planMarkdown: "# Plan\n\nDo the work.",
+    planMarkdown,
     open_questions: ["Which rollout?"],
     ui_decisions: []
   }));
@@ -90,6 +90,64 @@ test("Claude plan drafter can execute only the receipt helper through Bash", () 
   assert.match(contract, /tools: Read, Write, Edit,/);
   assert.match(contract, /targeted Edit calls/);
   assert.match(contract, /do not regenerate or Write the whole plan/);
+});
+
+// The plan text no longer crosses the relay, so the receipt plan-forge records
+// is built from the materializer's reading of the file it published rather than
+// from a returned copy of planMarkdown. This is the proof that swap is lossless:
+// for the same artifact, both routes must produce the identical receipt, down to
+// the checksum every later step is bound to. The cases carry the differences a
+// model's own copy could never have shown anyway — CRLF line endings, trailing
+// spaces, several trailing newlines — because that is exactly where a normalizer
+// mismatch between the two routes would hide.
+test("a receipt built from the materializer payload equals one built from the returned plan text", () => {
+  // What promoteCodexPlan used to compute from result.planMarkdown.
+  const receiptFromText = (file, text) => {
+    const normalized = normalizeText(text);
+    const token = expectToken(normalized);
+    return {
+      plan_path: file,
+      plan_chars: normalized.length,
+      plan_hash: token.split(":")[1],
+      savedToken: token
+    };
+  };
+  // What promoteCodexPlan now computes from the materializer's DRAFT_PLAN payload.
+  const receiptFromPayload = (file, payload) => {
+    const [chars, hash] = payload.token.split(":");
+    return {
+      plan_path: file,
+      plan_chars: Number(chars),
+      plan_hash: hash,
+      savedToken: payload.token
+    };
+  };
+
+  for (const planMarkdown of [
+    "# Plan\n\nDo the work.",
+    "# Plan\r\n\r\nDo the work.\r\n",
+    "# Plan   \n\nDo the work.\t\n\n\n",
+    "# Plan\n\nDo the work.",
+    `# Plan\n\n${"Do the work. ".repeat(500)}\n`
+  ]) {
+    const { artifact, plan } = fixture(planMarkdown);
+    const result = materializePlanArtifact({
+      artifact,
+      schema: path.join(root, "schemas", "plan-draft.schema.json"),
+      plan,
+      requestIdentity: identity,
+      uiDecisions: "on"
+    });
+    const payload = result.payloads.find((item) => item.name === "DRAFT_PLAN");
+    assert.deepEqual(
+      receiptFromPayload(plan, payload),
+      receiptFromText(plan, planMarkdown),
+      `receipt routes diverged for ${JSON.stringify(planMarkdown.slice(0, 40))}`
+    );
+    // And the token really describes the published bytes, not just the two
+    // routes agreeing with each other.
+    assert.equal(payload.token, expectToken(normalizeText(fs.readFileSync(plan, "utf8"))));
+  }
 });
 
 test("Codex draft promotion rejects an artifact from another immutable request", () => {
