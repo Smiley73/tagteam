@@ -56,6 +56,7 @@ function parseArgs(argv) {
     if (name === "dryRun") options.dryRun = true;
     else if (name === "noReuse") options.noReuse = true;
     else if (name === "requireFence") (options.requireFence ??= []).push(argv[++index]);
+    else if (name === "fenceFile") (options.fenceFile ??= []).push(argv[++index]);
     else options[name] = argv[++index];
   }
   options.timeoutSec = Number(options.timeoutSec);
@@ -743,6 +744,41 @@ export async function runCodex(options, prompt) {
   }
 }
 
+// Appends a section the workflow never had to carry. A ship prompt is written to
+// disk by a relay model, so anything fenced inline is paid for twice: once as
+// that model's input and again as its output. Read here, beside the engine, a
+// payload that is already on disk reaches Codex without being retyped at all --
+// the same trick --review-diff-path has always used, generalised to any section
+// whose producer already saved it.
+//
+// The contract matches compose-prompt.mjs deliberately, because the failure it
+// guards against is the same one: a section that is missing, empty, or carries
+// its own closing marker would buy a confident answer to a question that was
+// never fully asked. It stops the request instead.
+function fenceFromDisk(spec) {
+  const separator = String(spec ?? "").indexOf("=");
+  if (separator <= 0) throw new Error(`--fence-file expects LABEL=path, got: ${spec}`);
+  const label = spec.slice(0, separator);
+  const file = path.resolve(spec.slice(separator + 1));
+  if (!/^[a-z0-9-]+$/.test(label)) {
+    throw new Error(`--fence-file label must be lowercase letters, digits, or hyphens, got: ${label}`);
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    throw new Error(`The ${label} section is missing: nothing was saved at ${file}, so Codex was not started.`);
+  }
+  const body = raw.replace(/\s+$/, "");
+  if (body === "") throw new Error(`The ${label} section at ${file} is empty, so Codex was not started.`);
+  if (body.includes(`</untrusted-${label}>`)) {
+    throw new Error(`The ${label} section at ${file} contains its own closing marker and cannot be fenced safely.`);
+  }
+  // No trailing newline: each section opens with its own blank line, so several
+  // fences and the review diff separate cleanly however many are appended.
+  return `\n\n<untrusted-${label}>\n${body}\n</untrusted-${label}>`;
+}
+
 function readPromptFile(promptFile) {
   const resolved = path.resolve(promptFile);
   try {
@@ -808,6 +844,10 @@ async function main() {
         throw new Error("Codex request bytes do not match the immutable request identity");
       }
     }
+    // Appended after the identity check, exactly like the review diff: the
+    // identity binds the bytes the workflow authored, and these sections are
+    // read from files the workflow only names.
+    for (const spec of options.fenceFile ?? []) prompt += fenceFromDisk(spec);
     if (reviewDiff !== null) {
       prompt += `\n\n<untrusted-review-diff>\n${reviewDiff}${reviewDiff.endsWith("\n") ? "" : "\n"}</untrusted-review-diff>\n`;
     }

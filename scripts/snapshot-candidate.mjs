@@ -186,6 +186,13 @@ export function snapshotCandidate(options) {
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const reviewDiffPath = path.join(outDir, "review.diff");
   writeImmutable(reviewDiffPath, reviewDiff);
+  // The same list candidate.json carries, alone in a file the bridge can fence
+  // directly. candidate.json cannot serve that purpose: it also holds
+  // addedLines, so fencing it would put the whole change into the prompt a
+  // second time. Every reviewer needs the paths and none of them should be paid
+  // for through a relay model retyping them.
+  const changedPathsPath = path.join(outDir, "changed-paths.json");
+  writeImmutable(changedPathsPath, JSON.stringify(changedPaths, null, 2) + "\n");
   const reviewDiffHash = `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`;
   const candidate = {
     baseOid,
