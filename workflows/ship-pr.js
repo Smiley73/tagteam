@@ -128,6 +128,36 @@ const eventScribeSchema = {
   type: "object", additionalProperties: false, required: ["ok", "reviewPath", "eventPath"],
   properties: { ok: { type: "boolean" }, reviewPath: { type: "string" }, eventPath: { type: "string" } }
 };
+// What verify-payload.mjs reports about a file a step was told to write. The
+// checksum travels back so the run learns what is really on disk rather than
+// what the step said it wrote.
+const payloadVerifySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok"],
+  properties: {
+    ok: { type: "boolean" },
+    payloads: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "chars", "token"],
+        properties: {
+          name: { type: "string" },
+          label: { type: "string" },
+          file: { type: "string" },
+          json: { type: "boolean" },
+          chars: { type: "integer" },
+          token: { type: "string" },
+          expected: { type: ["string", "null"] },
+          matches: { type: "boolean" }
+        }
+      }
+    },
+    error: { type: "string" }
+  }
+};
 const BUILTIN_DIMENSIONS = new Set([
   "functionality", "code-quality", "test-coverage", "security", "reliability",
   "resiliency", "conventions", "documentation", "performance", "accessibility",
@@ -166,6 +196,33 @@ function canonicalPolicy(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalPolicy(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+// The exact checksum verify-payload.mjs computes for a JSON payload, so the
+// workflow can state in one short token which bytes a file it asked a step to
+// write must hold. Key order and indentation are formatting, not content, which
+// leaves a faithful copy nothing to differ by.
+function fnv1a(value) {
+  let hash = 2166136261;
+  const text = String(value);
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function expectJson(value) {
+  const text = canonicalJson(value);
+  return `${text.length}:${fnv1a(text)}`;
 }
 
 async function sha256(value) {
@@ -1160,6 +1217,11 @@ async function main(raw) {
   shipState.ledger = ledger;
   shipState.rounds = rounds;
   const specialistItems = [];
+  const specialistItemsPath = `${input.shipDir}/prs/${input.pr.id}/rounds/0/specialist-items.json`;
+  // Set only once the saved bytes are confirmed to be the ones this run holds.
+  // While it is null every reviewer inlines the set, which is what a claude-only
+  // policy always does: with no relay in between, inlining is already free.
+  let specialistItemsFile = null;
 
   if (config.specialistPrepass.enabled && roundOffset === 0) {
     if (callCount + 6 > callBudget()) {
@@ -1217,6 +1279,43 @@ async function main(raw) {
     specialists.filter(Boolean).forEach((result) => {
       for (const finding of result.findings ?? []) specialistItems.push({ ...finding, id: `S${sequence++}`, focus: result.focus });
     });
+    // Every round-one reviewer has to adopt or reject the same set, so this is
+    // the one payload here that more than one model call reads. Inlined, a Codex
+    // reviewer pays for it twice — once as the relay's input, once as the relay
+    // writing it into the prompt file — and that repeats per dimension. Writing
+    // it once costs the same two copies and then every reviewer fences it from
+    // disk for free. A payload with a single consumer would break even, so this
+    // call is worth making only because the set fans out.
+    if (specialistItems.length > 0 && runPolicy.reasoningProvider !== "claude") {
+      const expected = expectJson(specialistItems);
+      const written = await plumbingCall([
+        `Persist this specialist item list as JSON at ${specialistItemsPath} with mode 0600.`,
+        "Write every item exactly as given. Do not summarise, reorder, renumber, or drop any of them.",
+        `Then run exactly: node "${input.pluginRoot}/scripts/verify-payload.mjs" --payload-json "SPECIALIST_ITEMS=${specialistItemsPath}" --expect "SPECIALIST_ITEMS=${expected}"`,
+        "Return the verifier's JSON result exactly. If it exits non-zero, return ok=false with its exact stderr as error.",
+        fence("specialist-items", specialistItems)
+      ].join("\n\n"), {
+        label: "specialist:persist",
+        phase: "Specialist pre-pass",
+        agentType: "tagteam:scribe",
+        model: "haiku",
+        schema: payloadVerifySchema
+      });
+      callCount += 1;
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, ui, verify: verification, selected: initialSelectedInfo });
+      }
+      // The reviewers reason about this text and their adopt/reject decisions
+      // are matched back by id, so a paraphrased copy would have every reviewer
+      // judging items this run never raised. Falling back to inlining keeps the
+      // round honest at the cost this change was avoiding.
+      const payload = written?.payloads?.find((item) => item?.name === "SPECIALIST_ITEMS") ?? null;
+      if (written?.ok && payload?.token === expected) {
+        specialistItemsFile = specialistItemsPath;
+      } else {
+        log(`The specialist item list was not saved as this run produced it, so round-one Codex reviewers will carry it in their prompts instead. Details: ${specialistItemsPath}; reported problem ${String(written?.error ?? payload?.token ?? "no verifier result").split("\n")[0]}`);
+      }
+    }
   }
 
   let lastFixEngine = null;
@@ -1250,12 +1349,21 @@ async function main(raw) {
       // Codex leaves the changed-path list out of the authored prompt and names
       // the file instead; the bridge fences it in the same position. Claude
       // receives its prompt without a relay in between, so inlining is free.
-      const promptParts = (changedPaths) => [
+      const carriesSpecialists = round === 1 && specialistItems.length > 0;
+      // Only a Codex prompt is written to disk by a relay, and only the bridge
+      // can fence a file, so the saved copy serves Codex alone. A mixed round is
+      // the case to get right: a Claude reviewer beside it must still receive
+      // the set inline or it would be asked to adopt or reject nothing. Both
+      // routes deliver the same label, so the reviewer contract is unchanged.
+      const specialistFromDisk = (engine) => carriesSpecialists && engine === "codex" && Boolean(specialistItemsFile);
+      const promptParts = (engine, changedPaths) => [
         `Review ${assignment.dimension} for round ${round} against base ${input.baseOid} and candidate ${candidateOid}.`,
         dimensionInstruction,
         changedPaths,
         fence("pr-scope", input.pr),
-        round === 1 && specialistItems.length ? fence("specialist-findings-requiring-adopt-or-reject", specialistItems) : "",
+        carriesSpecialists && !specialistFromDisk(engine)
+          ? fence("specialist-findings-requiring-adopt-or-reject", specialistItems)
+          : "",
         fence("prior-round-summary", rounds.map((item) => ({ round: item.round, findings: item.findingIds, fixer: item.fixEngine })))
       ].filter(Boolean);
       let result;
@@ -1266,15 +1374,20 @@ async function main(raw) {
           schema: findingsSchema,
           schemaFile: "findings.schema.json",
           artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/codex-${assignment.dimension}.findings.json`,
-          prompt: promptParts("").join("\n\n"),
-          fenceFiles: [{ label: "changed-paths", file: snapshotValue.changedPathsPath }],
+          prompt: promptParts("codex", "").join("\n\n"),
+          fenceFiles: [
+            { label: "changed-paths", file: snapshotValue.changedPathsPath },
+            ...(specialistFromDisk("codex")
+              ? [{ label: "specialist-findings-requiring-adopt-or-reject", file: specialistItemsFile }]
+              : [])
+          ],
           runtime,
           sandbox: "read-only",
           reviewDiffPath: snapshotValue.reviewDiffPath
         });
       } else {
         result = await claudeReasoningCall([
-          ...promptParts(fence("changed-paths", snapshotValue.changedPaths)),
+          ...promptParts("claude", fence("changed-paths", snapshotValue.changedPaths)),
           `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
         ].join("\n\n"), {
           label: `review:${round}:claude:${assignment.dimension}`,
