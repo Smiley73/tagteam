@@ -317,7 +317,6 @@ async function codexRequestIdentity({ promptHash, schemaPath, model, effort, san
   return sha256(JSON.stringify({
     version: 1,
     promptHash,
-    reviewDiffHash: null,
     schemaPath,
     model,
     effort,

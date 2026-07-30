@@ -3,16 +3,16 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "baseOid", "candidateOid", "diffPath", "reviewDiffPath", "changedPaths",
-    "addedLines", "excluded", "diffBytes", "fileCount", "treeClean"
+    "baseOid", "candidateOid", "reviewDiffPath", "changedPaths",
+    "addedLines", "matchedKeywords", "excluded", "diffBytes", "fileCount", "treeClean"
   ],
   "properties": {
     "baseOid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
     "candidateOid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
-    "diffPath": { "type": "string", "minLength": 1 },
     "reviewDiffPath": { "type": "string", "minLength": 1 },
     "changedPaths": { "type": "array", "items": { "type": "string" } },
     "addedLines": { "type": "string" },
+    "matchedKeywords": { "type": "array", "items": { "type": "string" } },
     "excluded": {
       "type": "array",
       "items": {
