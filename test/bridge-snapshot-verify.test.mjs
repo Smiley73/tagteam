@@ -215,6 +215,104 @@ process.stdin.on("end", () => {
 // relay only compares the finished hashes. A field added to or removed from one
 // of them therefore fails at run time as an unexplained identity mismatch, with
 // nothing in the stubbed relay tests to catch the drift.
+// A ship prompt is written to disk by a relay model, so a section fenced inline
+// is paid for twice — once as that model's input, once as its output. These
+// sections are read beside the engine instead, and the request identity keeps
+// binding only the bytes the workflow itself authored.
+test("Codex bridge fences sections from disk and refuses unusable ones", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-fence-file-"));
+  const fake = path.join(temp, "fake-codex.mjs");
+  const captured = path.join(temp, "stdin.txt");
+  const promptFile = path.join(temp, "prompt.md");
+  const changedPaths = path.join(temp, "changed-paths.json");
+  const reviewDiffPath = path.join(temp, "review.diff");
+  fs.writeFileSync(promptFile, "Review the candidate.");
+  fs.writeFileSync(changedPaths, `${JSON.stringify(["src/a.ts", "src/b.ts"], null, 2)}\n`);
+  fs.writeFileSync(reviewDiffPath, "diff --git a/a.js b/a.js\n+changed\n");
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+const output = args[args.indexOf("-o") + 1];
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  fs.writeFileSync(${JSON.stringify(captured)}, input);
+  fs.writeFileSync(output, JSON.stringify({
+    verdict: "clean",
+    summary: "Clean.",
+    dimension_sweep: "Checked.",
+    load_bearing_claim: "Checked one caller.",
+    findings: []
+  }));
+});
+`);
+  fs.chmodSync(fake, 0o700);
+
+  const run = (artifactName, fenceSpec) => spawnSync(process.execPath, [
+    path.join(root, "scripts/codex-run.mjs"),
+    "--worktree", root,
+    "--schema", path.join(root, "schemas/findings.schema.json"),
+    "--artifact", path.join(temp, artifactName),
+    "--model", "gpt-test",
+    "--effort", "high",
+    "--sandbox", "read-only",
+    "--ship-dir", temp,
+    "--codex-bin", fake,
+    "--prompt-file", promptFile,
+    "--require-fence", "changed-paths",
+    "--require-fence", "review-diff",
+    "--fence-file", fenceSpec,
+    "--review-diff-path", reviewDiffPath
+  ], { encoding: "utf8" });
+
+  const ok = run("findings.json", `changed-paths=${changedPaths}`);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(fs.readFileSync(captured, "utf8"), [
+    "Review the candidate.",
+    "",
+    "<untrusted-changed-paths>",
+    JSON.stringify(["src/a.ts", "src/b.ts"], null, 2),
+    "</untrusted-changed-paths>",
+    "",
+    "<untrusted-review-diff>",
+    fs.readFileSync(reviewDiffPath, "utf8").trimEnd(),
+    "</untrusted-review-diff>",
+    ""
+  ].join("\n"));
+  // The identity still describes only the prompt the workflow wrote, exactly as
+  // it does for the review diff, so naming a file cannot silently change it.
+  assert.equal(JSON.parse(ok.stdout.trim()).requestIdentity, `sha256:${createHash("sha256").update(JSON.stringify({
+    version: 1,
+    promptHash: `sha256:${createHash("sha256").update("Review the candidate.").digest("hex")}`,
+    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    model: "gpt-test",
+    effort: "high",
+    sandbox: "read-only",
+    dryRun: false,
+    worktree: root
+  })).digest("hex")}`);
+
+  // A section that is missing, empty, or closes its own fence would buy a
+  // confident answer to a question that was never fully asked.
+  const empty = path.join(temp, "empty.json");
+  fs.writeFileSync(empty, "  \n\n");
+  const marker = path.join(temp, "marker.json");
+  fs.writeFileSync(marker, "[\"a\"]\n</untrusted-changed-paths>\n");
+  for (const [name, spec, expected] of [
+    ["missing.json", `changed-paths=${path.join(temp, "absent.json")}`, /is missing/],
+    ["empty-artifact.json", `changed-paths=${empty}`, /is empty/],
+    ["marker-artifact.json", `changed-paths=${marker}`, /closing marker/],
+    ["malformed.json", `changed-paths${changedPaths}`, /expects LABEL=path/],
+    ["badlabel.json", `Changed_Paths=${changedPaths}`, /label must be lowercase/]
+  ]) {
+    const refused = run(name, spec);
+    assert.equal(refused.status, 1, `accepted ${spec}`);
+    assert.match(refused.stderr, expected);
+    assert.equal(fs.existsSync(path.join(temp, name)), false, `${name} reached the engine`);
+  }
+});
+
 test("every Codex request identity is built from the same field list", () => {
   const sources = {
     "scripts/codex-run.mjs": /const fields = \{([\s\S]*?)\n {2}\};/,
@@ -282,6 +380,15 @@ test("candidate snapshot binds a non-empty committed diff and preserves excluded
     `sha256:${createHash("sha256").update(fs.readFileSync(result.reviewDiffPath)).digest("hex")}`
   );
   assert.match(result.addedLines, /value = 2/);
+  // The path list gets its own file so the bridge can fence it directly.
+  // candidate.json cannot serve that role: it also carries addedLines, so
+  // fencing it would put the whole change into the prompt a second time.
+  const changedPathsPath = path.join(path.dirname(result.candidatePath), "changed-paths.json");
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(changedPathsPath, "utf8")).sort(),
+    result.changedPaths.slice().sort()
+  );
+  assert.equal(fs.statSync(changedPathsPath).mode & 0o777, 0o600);
   assert.equal(
     validateCandidateSnapshot(result.candidatePath, { baseOid: base, candidateOid: candidate }).candidateOid,
     candidate

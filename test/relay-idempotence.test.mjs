@@ -1985,6 +1985,51 @@ test("Codex-only shipping uses Haiku only for plumbing", async () => {
     round.reviewers.every((reviewer) => reviewer.engine === "codex")), true);
 });
 
+// A Codex prompt is written to disk by a relay model, so anything fenced inline
+// is paid for as that model's input and again as its output. The changed-path
+// list is already on disk beside the candidate, so the Codex branch names the
+// file and the bridge fences it. Claude receives its prompt with no relay in
+// between, so inlining stays free there.
+test("Codex ship prompts name the changed-path file instead of carrying it", async () => {
+  const prompts = new Map();
+  const capture = (label, prompt) => {
+    prompts.set(label, prompt);
+    return cleanShipResponder(label);
+  };
+  const outDir = `/ships/s1/prs/PR-1/rounds/0-${SHIP_ARGS.existingCandidateOid}`;
+  const expectedFence = `--fence-file "changed-paths=${outDir}/changed-paths.json"`;
+
+  const { result } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: normalizeRunPolicy({ provider: "codex" }) },
+    capture
+  );
+  assert.equal(result.status, "clean");
+  const codexLabels = [...prompts.keys()].filter((name) =>
+    name === "ui:0:codex" || name.startsWith("review:1:codex:"));
+  assert.ok(codexLabels.length >= 2, `expected the UI and review calls, got ${codexLabels.join(", ")}`);
+  for (const label of codexLabels) {
+    const prompt = prompts.get(label);
+    assert.equal(prompt.includes("<untrusted-changed-paths>"), false, `${label} still carries the list`);
+    assert.equal(prompt.includes(expectedFence), true, `${label} does not name the file`);
+    // Declared explicitly: a bridge-read section never appears in the prompt the
+    // workflow authored, so nothing discovers it from the text.
+    assert.equal(prompt.includes("--require-fence changed-paths"), true, `${label} does not require the section`);
+  }
+
+  // The Claude side is unchanged: no relay, so no reason to move the list.
+  prompts.clear();
+  const claude = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, runPolicy: normalizeRunPolicy({ provider: "claude" }) },
+    capture
+  );
+  assert.equal(claude.result.status, "clean");
+  const claudeReview = [...prompts.keys()].find((name) => name.startsWith("review:1:claude:"));
+  assert.notEqual(claudeReview, undefined);
+  assert.equal(prompts.get(claudeReview).includes("<untrusted-changed-paths>"), true);
+});
+
 test("Codex-only UI classification relay loss interrupts before review", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
   const { result, labels } = await harness(

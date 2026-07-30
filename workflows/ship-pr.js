@@ -491,7 +491,7 @@ function relayReturnInstruction(resultFromDisk, artifact) {
 // TEST_SENTINEL_WORKFLOW_CORE_END
 async function codexCall(input, {
   label, kind, schema, schemaFile, artifact, prompt, runtime, sandbox,
-  reviewDiffPath, resultFromDisk = false
+  reviewDiffPath, resultFromDisk = false, fenceFiles = []
 }) {
   if (shipState.runPolicy?.reasoningProvider === "claude") {
     throw new Error(`Codex dispatch ${label} is forbidden by the claude-only run policy`);
@@ -510,6 +510,9 @@ async function codexCall(input, {
   // shortened or paraphrased it fails before Codex is invoked rather than
   // buying a confident answer to a question that was never fully asked.
   const requiredFences = [...new Set([...prompt.matchAll(/<untrusted-([a-z0-9-]+)>/g)].map((match) => match[1]))];
+  // A section the bridge reads off disk never appears in the prompt this
+  // workflow authored, so it has to be declared rather than discovered.
+  for (const { label } of fenceFiles) requiredFences.push(label);
   if (reviewDiffPath) requiredFences.push("review-diff");
   const command = [
     `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
@@ -524,6 +527,7 @@ async function codexCall(input, {
     `--prompt-file "${promptFile}"`,
     `--expected-request-identity "${requestIdentity}"`,
     ...requiredFences.map((label) => `--require-fence ${label}`),
+    ...fenceFiles.map(({ label, file }) => `--fence-file "${label}=${file}"`),
     `--min-prompt-bytes ${Math.floor(prompt.length * 0.8)}`,
     reviewDiffPath ? `--review-diff-path "${reviewDiffPath}"` : ""
   ].join(" ");
@@ -653,6 +657,11 @@ async function snapshot(input, round, candidateOid) {
   const outDir = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}-${candidateOid}`;
   const expectedCandidatePath = `${outDir}/candidate.json`;
   const expectedReviewDiffPath = `${outDir}/review.diff`;
+  // Derived rather than relayed. The snapshot script writes this file from the
+  // same array it puts in candidate.json, and the bridge refuses to start on a
+  // section that is missing or empty, so a lost write fails loudly at the
+  // request rather than quietly reviewing a change with no paths.
+  const expectedChangedPathsPath = `${outDir}/changed-paths.json`;
   const command = [
     `node "${input.pluginRoot}/scripts/snapshot-candidate.mjs"`,
     `--worktree "${input.worktree}"`,
@@ -701,7 +710,7 @@ async function snapshot(input, round, candidateOid) {
   if (result.candidateMetadataHash !== returnedMetadataHash) {
     throw new Error(`candidate snapshot ${round} metadata does not match its canonical candidate.json identity`);
   }
-  return result;
+  return { ...result, changedPathsPath: expectedChangedPathsPath };
 }
 
 async function runVerify(input, snapshotValue, round) {
@@ -731,21 +740,28 @@ async function runVerify(input, snapshotValue, round) {
   return result;
 }
 
+// The changed-path list is the same for every engine, but only Codex pays a
+// relay model to retype it into a prompt file. A Claude or Haiku step receives
+// its prompt directly, so inlining costs nothing there; the Codex branch names
+// the file the snapshot already wrote and lets the bridge fence it.
 async function classifyUi(input, snapshotValue, round, runPolicy) {
+  const instruction = "Independently answer whether a person using the product or developer tool would notice this actual candidate change.";
+  const diffInstruction = `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`;
   const prompt = [
-    "Independently answer whether a person using the product or developer tool would notice this actual candidate change.",
+    instruction,
     fence("changed-paths", snapshotValue.changedPaths),
-    `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
+    diffInstruction
   ].join("\n\n");
   let result;
   if (runPolicy.reasoningProvider === "codex") {
     result = await codexCall(input, {
+      prompt: [instruction, diffInstruction].join("\n\n"),
+      fenceFiles: [{ label: "changed-paths", file: snapshotValue.changedPathsPath }],
       label: `ui:${round}:codex`,
       kind: "Candidate UI classification",
       schema: uiSchema,
       schemaFile: "ui-verdict.schema.json",
       artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/codex-ui-${snapshotValue.candidateOid}.json`,
-      prompt,
       runtime: input.config.reviewTiers.standard.codex,
       sandbox: "read-only",
       reviewDiffPath: snapshotValue.reviewDiffPath
@@ -1160,11 +1176,10 @@ async function main(raw) {
       ? config.specialistPrepass.claude
       : config.reviewTiers.standard.codex;
     const specialists = await parallel(focuses.map((focus) => async () => {
-      const specialistPrompt = [
+      const specialistParts = [
       `Apply the ${focus} lens to candidate ${candidateOid} in ${input.worktree}.`,
-      fence("changed-paths", snapshotValue.changedPaths),
       `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
-      ].join("\n\n");
+      ];
       return specialistEngine === "codex"
         ? codexCall(input, {
             label: `specialist:${focus}:codex`,
@@ -1172,12 +1187,17 @@ async function main(raw) {
             schema: specialistSchema,
             schemaFile: "specialist.schema.json",
             artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/0/codex-specialist-${focus}.json`,
-            prompt: specialistPrompt,
+            prompt: specialistParts.join("\n\n"),
+            fenceFiles: [{ label: "changed-paths", file: snapshotValue.changedPathsPath }],
             runtime: specialistRuntime,
             sandbox: "read-only",
             reviewDiffPath: snapshotValue.reviewDiffPath
           })
-        : claudeReasoningCall(specialistPrompt, {
+        : claudeReasoningCall([
+            specialistParts[0],
+            fence("changed-paths", snapshotValue.changedPaths),
+            specialistParts[1]
+          ].join("\n\n"), {
             label: `specialist:${focus}:claude`,
             phase: "Specialist pre-pass",
             agentType: "tagteam:specialist",
@@ -1227,14 +1247,17 @@ async function main(raw) {
       const dimensionInstruction = BUILTIN_DIMENSIONS.has(assignment.dimension)
         ? `Read ${input.pluginRoot}/prompts/dimensions/${assignment.dimension}.md and ${input.pluginRoot}/prompts/claim-verification.md.`
         : `Apply this custom focus and the claim-verification discipline: ${config.reviewers[assignment.dimension].focus}`;
-      const promptParts = [
+      // Codex leaves the changed-path list out of the authored prompt and names
+      // the file instead; the bridge fences it in the same position. Claude
+      // receives its prompt without a relay in between, so inlining is free.
+      const promptParts = (changedPaths) => [
         `Review ${assignment.dimension} for round ${round} against base ${input.baseOid} and candidate ${candidateOid}.`,
         dimensionInstruction,
-        fence("changed-paths", snapshotValue.changedPaths),
+        changedPaths,
         fence("pr-scope", input.pr),
         round === 1 && specialistItems.length ? fence("specialist-findings-requiring-adopt-or-reject", specialistItems) : "",
         fence("prior-round-summary", rounds.map((item) => ({ round: item.round, findings: item.findingIds, fixer: item.fixEngine })))
-      ];
+      ].filter(Boolean);
       let result;
       if (assignment.engine === "codex") {
         result = await codexCall(input, {
@@ -1243,14 +1266,15 @@ async function main(raw) {
           schema: findingsSchema,
           schemaFile: "findings.schema.json",
           artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/codex-${assignment.dimension}.findings.json`,
-          prompt: promptParts.join("\n\n"),
+          prompt: promptParts("").join("\n\n"),
+          fenceFiles: [{ label: "changed-paths", file: snapshotValue.changedPathsPath }],
           runtime,
           sandbox: "read-only",
           reviewDiffPath: snapshotValue.reviewDiffPath
         });
       } else {
         result = await claudeReasoningCall([
-          ...promptParts,
+          ...promptParts(fence("changed-paths", snapshotValue.changedPaths)),
           `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
         ].join("\n\n"), {
           label: `review:${round}:claude:${assignment.dimension}`,
@@ -1339,9 +1363,12 @@ async function main(raw) {
     };
     const roundJsonPath = `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/round.json`;
     const reviewPath = `${input.shipDir}/prs/${input.pr.id}/review.md`;
+    // The round record is the only file written here. Per-reviewer findings
+    // files had no reader: render-review-round.mjs derives its findings from
+    // this record's reviewerResults, and for a Codex reviewer the scribe was
+    // writing a relayed copy over the bridge's own artifact at the same path.
     const scribe = await plumbingCall([
       `Persist this round JSON at ${roundJsonPath} with mode 0600.`,
-      `Also persist each non-null reviewerResults entry at ${input.shipDir}/prs/${input.pr.id}/rounds/${round}/<engine>-<dimension>.findings.json, mode 0600.`,
       `Then run exactly: node "${input.pluginRoot}/scripts/render-review-round.mjs" "${reviewPath}" "${roundJsonPath}"`,
       "Read and return the appender's JSON result exactly.",
       fence("round-record", roundRecord)
