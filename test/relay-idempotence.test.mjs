@@ -2110,6 +2110,133 @@ test("Codex-only specialist pre-pass routes all six lenses through Codex", async
   assert.equal(result.usage.claudeReasoningCalls, 0);
 });
 
+// Every round-one reviewer adopts or rejects the same specialist set, so it is
+// the one ship payload more than one model call reads. Saving it once and
+// fencing it from disk beats copying it into each Codex prompt, where the relay
+// pays for it twice per dimension.
+function specialistFixture({ policy, persistResult } = {}) {
+  const config = JSON.parse(JSON.stringify(SHIP_CONFIG));
+  config.specialistPrepass.enabled = true;
+  const prompts = new Map();
+  const respond = (label, prompt) => {
+    prompts.set(label, prompt);
+    if (label === "specialist:persist") {
+      if (persistResult) return persistResult(prompt);
+      // A file holding exactly what the workflow asked for: echo back the
+      // checksum the command was told to expect.
+      const expected = /--expect "SPECIALIST_ITEMS=(\d+:[0-9a-f]{8})"/.exec(prompt);
+      assert.notEqual(expected, null, `no --expect token in persist prompt: ${prompt.slice(0, 400)}`);
+      return {
+        ok: true,
+        payloads: [{ name: "SPECIALIST_ITEMS", token: expected[1], chars: Number(expected[1].split(":")[0]) }]
+      };
+    }
+    if (label.startsWith("specialist:")) {
+      const focus = label.split(":")[1];
+      return {
+        focus,
+        status: "ok",
+        findings: [{
+          title: `${focus} concern`,
+          body: "A paragraph of detail that a reviewer must weigh.",
+          file: "src/a.js",
+          line: 3,
+          severity: "minor",
+          recommendation: "Consider narrowing this."
+        }]
+      };
+    }
+    return cleanShipResponder(label);
+  };
+  return { config, prompts, respond, policy };
+}
+
+const SPECIALIST_FENCE = "<untrusted-specialist-findings-requiring-adopt-or-reject>";
+const SPECIALIST_FILE = "/ships/s1/prs/PR-1/rounds/0/specialist-items.json";
+
+test("round-one Codex reviewers fence the specialist set from disk instead of carrying it", async () => {
+  const { config, prompts, respond } = specialistFixture();
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config, runPolicy: normalizeRunPolicy({ provider: "codex" }) },
+    respond
+  );
+
+  assert.equal(result.status, "clean");
+  assert.equal(labels.filter((label) => label === "specialist:persist").length, 1, "the set is saved exactly once");
+  const reviewers = [...prompts.keys()].filter((label) => label.startsWith("review:1:codex:"));
+  assert.ok(reviewers.length >= 2, `expected several round-one reviewers, got ${reviewers.join(", ")}`);
+  for (const label of reviewers) {
+    const prompt = prompts.get(label);
+    assert.equal(prompt.includes(SPECIALIST_FENCE), false, `${label} still carries the set`);
+    assert.equal(
+      prompt.includes(`--fence-file "specialist-findings-requiring-adopt-or-reject=${SPECIALIST_FILE}"`),
+      true,
+      `${label} does not name the saved set`
+    );
+  }
+});
+
+// The case worth guarding: only the bridge can fence a file, so a Claude
+// reviewer sitting beside a Codex one in the same round must still receive the
+// set inline, or it would be asked to adopt or reject nothing.
+test("a mixed round-one keeps the specialist set inline for Claude reviewers", async () => {
+  const { config, prompts, respond } = specialistFixture();
+  const { result } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config }, respond);
+
+  assert.equal(result.status, "clean");
+  const claude = [...prompts.keys()].filter((label) => label.startsWith("review:1:claude:"));
+  const codex = [...prompts.keys()].filter((label) => label.startsWith("review:1:codex:"));
+  assert.ok(claude.length > 0 && codex.length > 0, `expected a mixed round, got ${[...claude, ...codex].join(", ")}`);
+  for (const label of claude) {
+    assert.equal(prompts.get(label).includes(SPECIALIST_FENCE), true, `${label} lost the specialist set`);
+  }
+  for (const label of codex) {
+    assert.equal(prompts.get(label).includes(SPECIALIST_FENCE), false, `${label} still carries the set`);
+  }
+});
+
+test("a specialist set that did not save as written falls back to inlining", async () => {
+  for (const persistResult of [
+    () => ({ ok: false, error: "verify-payload: checksum mismatch" }),
+    () => ({ ok: true, payloads: [{ name: "SPECIALIST_ITEMS", token: "12:deadbeef", chars: 12 }] }),
+    () => null
+  ]) {
+    const { config, prompts, respond } = specialistFixture({ persistResult });
+    const { result, logs } = await harness(
+      "workflows/ship-pr.js",
+      { ...SHIP_ARGS, config, runPolicy: normalizeRunPolicy({ provider: "codex" }) },
+      respond
+    );
+
+    assert.equal(result.status, "clean", "a drifted copy must not fail the round");
+    const reviewers = [...prompts.keys()].filter((label) => label.startsWith("review:1:codex:"));
+    assert.ok(reviewers.length > 0);
+    for (const label of reviewers) {
+      assert.equal(prompts.get(label).includes(SPECIALIST_FENCE), true, `${label} lost the specialist set`);
+      assert.equal(prompts.get(label).includes("--fence-file \"specialist-findings"), false);
+    }
+    assert.ok(logs.some((line) => line.includes("was not saved as this run produced it")), "the fallback is announced");
+  }
+});
+
+test("a claude-only policy never saves the specialist set", async () => {
+  const { config, prompts, respond } = specialistFixture();
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config, runPolicy: normalizeRunPolicy({ provider: "claude" }) },
+    respond
+  );
+
+  assert.equal(result.status, "clean");
+  // No relay stands between the workflow and a Claude reviewer, so inlining is
+  // already free and the extra call would buy nothing.
+  assert.equal(labels.includes("specialist:persist"), false);
+  for (const label of [...prompts.keys()].filter((name) => name.startsWith("review:1:claude:"))) {
+    assert.equal(prompts.get(label).includes(SPECIALIST_FENCE), true);
+  }
+});
+
 test("Codex-only shipping routes implementation verification repair through Codex", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
   let verifyCalls = 0;
