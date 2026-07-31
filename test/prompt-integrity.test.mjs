@@ -85,6 +85,12 @@ function persistPathFrom(prompt, pattern) {
 }
 
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
+const BLOCKER = {
+  severity: "blocking",
+  title: "Rollback is unspecified",
+  detail: "Step 12 changes the ledger schema and names no way back."
+};
+const REVISE = { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] };
 
 test("Codex relay agent contract matches both workflow envelope schemas", () => {
   const contract = fs.readFileSync(path.join(root, "agents/codex-runner.md"), "utf8");
@@ -102,12 +108,15 @@ test("Codex relay agent contract matches both workflow envelope schemas", () => 
 // Drives plan-forge with stub agents that behave like well-behaved models: they
 // persist what they produce, and they run the workflow's plumbing commands for
 // real. `corrupt` lets one test model a drafter that saved a shortened copy;
-// `after` lets one model a file changed behind the run's back once a step is done.
+// `after` lets one model a file changed behind the run's back once a step is done;
+// `review` lets one model reviewers that are not satisfied yet. Reviewers approve
+// by default, which is also what makes cross-review stop after round one.
 async function forge({
   planDir,
   reviewRounds = 1,
   largePlanWarningChars,
   continuation = false,
+  review = () => APPROVE,
   corrupt = (_label, planMarkdown) => planMarkdown,
   corruptManifest = (manifest) => manifest,
   after = () => {}
@@ -196,7 +205,7 @@ async function forge({
         bytes: parsed.bytes
       };
     }
-    return APPROVE;
+    return review(label);
   };
   const parallel = async (thunks) => {
     const results = [];
@@ -484,6 +493,9 @@ test("round two reviews the round-one revision even when its file drifted", asyn
   const { result, composed, plans } = await forge({
     planDir,
     reviewRounds: 2,
+    // Round one is what sends the pass into round two at all; round two approves,
+    // so the plan still reaches the cross-check with nothing left to re-read.
+    review: (label) => (label.endsWith("review:1") ? REVISE : APPROVE),
     corrupt: (label, planMarkdown) => (label === "plan:revise:1" ? drifted(planMarkdown) : planMarkdown)
   });
 
@@ -497,6 +509,68 @@ test("round two reviews the round-one revision even when its file drifted", asyn
   const saved = fs.readFileSync(path.join(planDir, "drafts/pass-1-round-2-input.md"), "utf8");
   assert.equal(prompt.includes(fenced("draft-plan", normalizeText(saved))), true);
   assert.equal(normalizeText(saved).length < normalizeText(plans.revised).length, true);
+});
+
+test("a round every reviewer approves ends cross-review instead of paying for the rest", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-converged-"));
+  const { result, prompts, logs } = await forge({ planDir, reviewRounds: 3 });
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.deepEqual(result.completedRounds, [1]);
+
+  // Nothing belonging to rounds two or three was assembled, dispatched, or revised.
+  for (const label of prompts.keys()) {
+    assert.equal(/:[23]$/.test(label), false, `round two or three still ran: ${label}`);
+  }
+  assert.equal(logs.some((line) => line.includes("cross-review stopped there")), true);
+
+  // The finished plan still lands on the one path a resume and the cross-check
+  // both look for, exactly as it would after the configured last round.
+  const integrated = path.join(planDir, "drafts/pass-1-integrated.md");
+  assert.equal(result.planPath, integrated);
+  assert.equal(fs.existsSync(integrated), true);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md")), false);
+});
+
+test("a last revision that left a blocking critique stops the pass before the manifest", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-unresolved-"));
+  // Reviewers keep raising the same blocker and the re-read agrees it survived
+  // the revision: the exact case that used to reach the cross-check anyway.
+  const { result, prompts } = await forge({ planDir, review: () => REVISE });
+
+  assert.equal(result.status, "needs-plan-revision");
+  assert.deepEqual(result.unresolvedIssues, [BLOCKER]);
+
+  // No manifest, no train, and nothing was paid to produce either.
+  assert.equal(result.manifest, null);
+  assert.equal(result.prTrain, null);
+  assert.equal(result.manifestPath, null);
+  assert.equal(result.prTrainPath, null);
+  assert.equal(prompts.has("plan:manifest"), false);
+  assert.equal(prompts.has("plan:decompose"), false);
+
+  // The re-read got the critique to confirm and the plan by reference, never inline.
+  const check = prompts.get("plan:claude-revision-check");
+  assert.notEqual(check, undefined, [...prompts.keys()].join(", "));
+  assert.equal(check.includes(fenced("critiques-to-confirm", JSON.stringify([BLOCKER], null, 2))), true);
+  assert.equal(check.includes(path.join(planDir, "drafts/pass-1-integrated.md")), true);
+
+  // A pass that stops early still leaves the record a continuation resumes from.
+  assert.equal(result.questionsPath, path.join(planDir, "drafts/pass-1-integrated.md.questions.json"));
+  assert.equal(fs.existsSync(result.questionsPath), true);
+});
+
+test("a last revision that answered its critique carries on to the manifest", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-resolved-"));
+  const { result, prompts } = await forge({
+    planDir,
+    review: (label) => (label.endsWith("-review:1") ? REVISE : APPROVE)
+  });
+
+  assert.equal(prompts.has("plan:claude-revision-check"), true);
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.notEqual(result.manifest, null);
+  assert.notEqual(result.prTrain, null);
 });
 
 test("a draft edited after it was verified still stops the pass before Codex", async () => {
