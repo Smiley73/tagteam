@@ -95,16 +95,30 @@ export function validateJson(schema, value) {
 }
 
 // The configuration version the current plugin writes. A configuration written
-// by an older plugin stays valid: it is missing answers, not wrong. Only the
-// keys listed here were added after version 1, so they are optional in the
+// by an older plugin stays valid: it is missing answers, not wrong. Every key
+// listed here arrived after version 1, so all of them are optional in the
 // schema and required only once a configuration claims to be current.
-export const CONFIG_VERSION = 2;
+export const CONFIG_VERSION = 3;
 
-const VERSION_2_KEYS = ["ui.hasUserInterface", "ui.conventionPaths", "ui.confirmDecisions"];
+// Keyed by the version that introduced them, so a configuration is only asked
+// for the answers it actually predates: a version-2 file is not re-asked the
+// interface questions it already carries.
+const VERSION_KEYS = {
+  2: ["ui.hasUserInterface", "ui.conventionPaths", "ui.confirmDecisions"],
+  3: ["policyPaths"]
+};
+
+const keysAddedAfter = (version) => Object.entries(VERSION_KEYS)
+  .filter(([added]) => Number(added) > (Number.isInteger(version) ? version : 0))
+  .sort(([left], [right]) => Number(left) - Number(right))
+  .flatMap(([, keys]) => keys);
 
 const missingKeys = (value, keys) => keys.filter((key) => {
-  const [group, name] = key.split(".");
-  return !Object.hasOwn(value?.[group] ?? {}, name);
+  const parts = key.split(".");
+  const name = parts.pop();
+  let scope = value;
+  for (const part of parts) scope = scope?.[part];
+  return !Object.hasOwn(scope ?? {}, name);
 });
 
 // Staleness is not an error, so it never joins the error list: a repository
@@ -115,7 +129,7 @@ export function configStaleness(value) {
   return {
     stale: version !== CONFIG_VERSION,
     version,
-    missing: version === CONFIG_VERSION ? [] : missingKeys(value, VERSION_2_KEYS)
+    missing: version === CONFIG_VERSION ? [] : missingKeys(value, keysAddedAfter(version))
   };
 }
 
@@ -186,6 +200,26 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
           }
         }
       }
+      // Tasks sharing an atomicGroup are only valid on the base branch together,
+      // and every PR squashes to exactly one commit there, so splitting a group
+      // across two PRs is what leaves that branch in the state the group exists
+      // to prevent. The plan forge checks this too; it is repeated here because
+      // a train can be produced outside that workflow and still be shipped, and
+      // an invariant enforced on only one of two paths is not enforced.
+      const groups = new Map();
+      for (const task of manifest.tasks ?? []) {
+        if (!task?.atomicGroup) continue;
+        if (!groups.has(task.atomicGroup)) groups.set(task.atomicGroup, new Map());
+        const placements = groups.get(task.atomicGroup);
+        const owner = prByTask.get(task.id) ?? "(no PR)";
+        if (!placements.has(owner)) placements.set(owner, []);
+        placements.get(owner).push(task.id);
+      }
+      for (const [group, placements] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+        if (placements.size < 2) continue;
+        const where = [...placements].map(([pr, ids]) => `${pr} holds ${ids.join(", ")}`).join("; ");
+        errors.push(`atomic group ${group} must land in one PR, but ${where}`);
+      }
     }
   }
   if (schemaName === "config.schema.json") {
@@ -198,7 +232,7 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
     // this version asks for; one that predates them is stale, reported
     // separately, and repaired by an upgrade rather than rejected here.
     if (value.version === CONFIG_VERSION) {
-      for (const key of missingKeys(value, VERSION_2_KEYS)) {
+      for (const key of missingKeys(value, keysAddedAfter(1))) {
         errors.push(`${key}: is required at configuration version ${CONFIG_VERSION}`);
       }
     }
@@ -210,27 +244,47 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
         errors.push("ui.conventionPaths must be empty in a repository with no user-facing interface");
       }
     }
-    for (const conventionPath of value.ui?.conventionPaths ?? []) {
+    // Both lists name repository files that planning prompts point a model at,
+    // so both are safe on exactly the same terms. Sharing one check is what
+    // keeps a second list of paths from becoming a second, weaker door.
+    // The shared checks are the safety ones. The two lists differ in what they
+    // mean, so they differ in exactly two further rules, named here rather than
+    // inferred from which list is being walked.
+    const conventionRules = { namesOneDocument: false, reachesAShellCommand: false };
+    const policyRules = { namesOneDocument: true, reachesAShellCommand: true };
+    for (const [label, namedPath, rules] of [
+      ...(value.ui?.conventionPaths ?? []).map((entry) => ["ui.conventionPaths", entry, conventionRules]),
+      ...(value.policyPaths ?? []).map((entry) => ["policyPaths", entry, policyRules])
+    ]) {
       let safePath;
       try {
-        safePath = assertSafeRelativePath(conventionPath);
+        safePath = assertSafeRelativePath(namedPath);
       } catch (error) {
-        errors.push(`ui.conventionPaths: ${error.message}`);
+        errors.push(`${label}: ${error.message}`);
         continue;
       }
       // These names are rendered into planning prompts as ordinary prose, so a
       // control character in one could add lines of its own. C0 and DEL are not
       // the whole set: NEL, the C1 block, and U+2028/U+2029 break a line too.
-      if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(conventionPath)) {
-        errors.push(`ui.conventionPaths may not contain control characters: ${JSON.stringify(conventionPath)}`);
+      if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(namedPath)) {
+        errors.push(`${label} may not contain control characters: ${JSON.stringify(namedPath)}`);
+        continue;
+      }
+      // policyPaths is named inside a command a model is asked to run, so it is
+      // held to the rule the repository path itself is held to. The command
+      // builder quotes this already; that quoting has to survive being copied by
+      // a model, and this is the lock that does not. Convention paths only ever
+      // reach prose, so they are not narrowed for a risk they do not carry.
+      if (rules.reachesAShellCommand && /[$`"'\\;&|<>(){}[\]!*?~\n]/.test(namedPath)) {
+        errors.push(`${label} may not contain shell metacharacters: ${JSON.stringify(namedPath)}`);
         continue;
       }
       if (!repo) continue;
       const target = path.resolve(repo, safePath);
-      // A convention path that points at nothing silently weakens every
-      // precedent check that reads it, so treat it as configuration error.
+      // A path that points at nothing silently weakens every check that reads
+      // it, so treat it as configuration error.
       if (!fs.existsSync(target)) {
-        errors.push(`ui.conventionPaths names a path that does not exist: ${conventionPath}`);
+        errors.push(`${label} names a path that does not exist: ${namedPath}`);
         continue;
       }
       // Lexical safety is not enough and neither is a symlink check on the last
@@ -241,10 +295,20 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
         const realRepo = fs.realpathSync(repo);
         const realTarget = fs.realpathSync(target);
         if (realTarget !== realRepo && !realTarget.startsWith(realRepo + path.sep)) {
-          errors.push(`ui.conventionPaths resolves outside the repository: ${conventionPath}`);
+          errors.push(`${label} resolves outside the repository: ${namedPath}`);
         }
       } catch (error) {
-        errors.push(`could not inspect ui.conventionPaths path ${conventionPath}: ${error.message}`);
+        errors.push(`could not inspect ${label} path ${namedPath}: ${error.message}`);
+      }
+      // Last, so a path that escapes the checkout is reported as an escape
+      // rather than as the wrong kind of thing. policyPaths names documents and
+      // the prompts built from it say to read them; a directory makes that
+      // instruction ambiguous, because a model may open one file, all of them,
+      // or none — the "which document is authoritative" guessing this key
+      // exists to end. Convention paths mean the opposite by design, where a
+      // component directory is the normal answer, so only this list is narrowed.
+      if (rules.namesOneDocument && !fs.statSync(target).isFile()) {
+        errors.push(`${label} must name a file, not a directory: ${namedPath}`);
       }
     }
     for (const [label, ref] of [

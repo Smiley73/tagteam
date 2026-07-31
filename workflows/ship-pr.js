@@ -880,6 +880,24 @@ async function main(raw) {
   }
   shipState.invocationId = input.invocationId;
   const config = input.config;
+  // The same repository rules the plan was drafted against, named for the
+  // reviewers who judge the code that came out of it. Reviewers would otherwise
+  // have to rediscover which document is authoritative here, and two reviewers
+  // rediscovering it can disagree. Rendered as trusted prose, so a name carrying
+  // a line break could add instructions of its own; validation rejects that at
+  // the config layer and this is the second lock on the same door.
+  const scrubName = (value) => [...String(value)]
+    .map((character) => {
+      const code = character.codePointAt(0);
+      const breaksLine = code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+      return breaksLine ? " " : character;
+    })
+    .join("")
+    .trim();
+  const policyPaths = (config.policyPaths ?? []).map(scrubName).filter(Boolean);
+  const policyBrief = policyPaths.length
+    ? `This repository states its own engineering rules in: ${policyPaths.join(", ")}. Read them and judge this change against them; a rule there outranks your general priors, and cite the document when a finding rests on one.`
+    : "No repository policy documents are configured, so take this repository's own rules from its contributing, coding-standards, or agent-instruction files if any exist.";
   relayState.extraCalls = 0;
   relayState.fatal = [];
   relayState.receiptFiles = [];
@@ -1239,7 +1257,7 @@ async function main(raw) {
       : config.reviewTiers.standard.codex;
     const specialists = await parallel(focuses.map((focus) => async () => {
       const specialistParts = [
-      `Apply the ${focus} lens to candidate ${candidateOid} in ${input.worktree}.`,
+      `Apply the ${focus} lens to candidate ${candidateOid} in ${input.worktree}.\n\n${policyBrief}`,
       `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
       ];
       return specialistEngine === "codex"
@@ -1359,6 +1377,7 @@ async function main(raw) {
       const promptParts = (engine, changedPaths) => [
         `Review ${assignment.dimension} for round ${round} against base ${input.baseOid} and candidate ${candidateOid}.`,
         dimensionInstruction,
+        policyBrief,
         changedPaths,
         fence("pr-scope", input.pr),
         carriesSpecialists && !specialistFromDisk(engine)

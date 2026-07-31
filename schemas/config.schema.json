@@ -9,7 +9,12 @@
     "transport", "limits"
   ],
   "properties": {
-    "version": { "enum": [1, 2] },
+    "version": { "enum": [1, 2, 3] },
+    "policyPaths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
     "planning": {
       "type": "object",
       "additionalProperties": false,

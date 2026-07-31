@@ -59,6 +59,13 @@ Show the current choices and ask whether to keep or edit them. Keeping every cho
 - implementation engine/routes and simple/medium/complex runtime mappings.
 - maximum concurrent Codex subprocesses (suggest 3 independently of implementation concurrency).
 - the three interface questions below.
+- `policyPaths` — the question below.
+
+### The repository's own rules
+
+Ask for `policyPaths`: which documents state this repository's engineering rules — the contributing guide, coding standards, `AGENTS.md`, or whatever the project calls them. Require repository-relative non-traversing paths that exist and name a file, not a directory: the prompts built from this list tell a model to read those documents, and a directory leaves it guessing which one is authoritative. List each document. An empty list is honest and allowed.
+
+Say what the answer buys, in plain terms: every planning step reads those documents and treats their rules as binding, so a hard limit on pull-request size, a set of edits that must land together, a required setup step, or exact required wording is respected in the first draft instead of being found by a review round later. Say plainly that this is a different question from `prTrain.prSize`, which is only tagteam's own preference and never blocks anything — tagteam having no opinion about size is not the same as the repository having no limit, and conflating the two is the specific mistake this key exists to prevent.
 
 ### Interface questions
 
@@ -82,7 +89,7 @@ User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects 
 2. Read the unanswered keys from the validator's own output. Never infer the list from this document, so that a plugin newer than this text still upgrades correctly.
 3. Ask only those questions, using the wording above, seeded from `~/.tagteam/config.json` when it answers one.
 4. State before writing that `.tagteam/config.json` is a committed file, so the new answers become a tracked change the rest of the team inherits. Get explicit confirmation.
-5. Write the merged object with `version` set to 2, preserving every existing choice byte for byte, then validate with `validate-json.mjs --repo` and require exit 0.
+5. Write the merged object with `version` set to 3, preserving every existing choice byte for byte, then validate with `validate-json.mjs --repo` and require exit 0.
 6. Do not touch `.gitignore`, do not re-run the preflight probes, and do not re-run the runtime probe. `--reconfigure` owns those.
 
 ## Write and verify
@@ -90,7 +97,7 @@ User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects 
 On confirmation:
 
 1. Create `<repo>/.tagteam/` if needed.
-2. Write `<repo>/.tagteam/config.json` as strict JSON version 2, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
+2. Write `<repo>/.tagteam/config.json` as strict JSON version 3, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
 3. Configure the repository `.gitignore`. Never hand-edit it; run:
 
    ```bash
