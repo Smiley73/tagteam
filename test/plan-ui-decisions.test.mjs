@@ -77,7 +77,13 @@ async function forge({
     if (label === "plan:decompose") return TRAIN;
     // A file that holds exactly what the step returned: the checksum reported back
     // is the one the workflow asked the read to expect.
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) {
+      // The helper always returns the merged list and the workflow requires it
+      // on success, so a bare {ok:true} is a reply the helper never produces.
+      const hex = /merge-plan-questions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
+      const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
+      return { ok: true, questions: hex ? JSON.parse(new TextDecoder().decode(bytes)) : [] };
+    }
     if (label.startsWith("plan:verify-")) {
       return {
         ok: true,

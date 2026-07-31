@@ -205,7 +205,14 @@ async function forge({
     }
     // Both plumbing steps run their real command against the real files, so what
     // the workflow learns here is what is actually on disk.
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    // Run for real, like every other plumbing step here: the merged sidecar is
+    // now the pass's answer rather than a copy checked against one, so a stub
+    // that skipped the merge would be testing nothing.
+    if (label.startsWith("plan:merge-final-questions")) {
+      const merged = runCommand(commandFrom(prompt));
+      if (merged.status !== 0) return { ok: false, error: merged.stderr.trim() };
+      return JSON.parse(merged.stdout.trim());
+    }
     if (label.startsWith("plan:verify-")
       || label.startsWith("plan:prepare-continuation")
       || label.startsWith("plan:publish-")) {
@@ -706,9 +713,12 @@ test("every checksum a request checks was read back off the file it names", asyn
       read.set(payload.token, payload.file);
     }
   }
+  // The question sidecar is no longer among these. It is written by the merge
+  // script and reported by it, not compared against a copy the run holds: those
+  // two lists are not the same list. Every payload that a later request fences
+  // is still read back off the file that produced it.
   assert.deepEqual([...read.values()].map((file) => path.basename(file)).sort(), [
     "pass-1-integrated.md",
-    "pass-1-integrated.md.questions.json",
     "pass-1-manifest.json",
     "pass-1-pr-train.json",
     "pass-1-round-1-input.md"
@@ -785,6 +795,29 @@ test("an atomic group kept inside one pull request is not a finding", async () =
   assert.equal(result.handoffReady, true);
   assert.deepEqual(result.handoffIssues, []);
   assert.equal(result.manifest.tasks[0].atomicGroup, "engine-version-bump");
+});
+
+test("a question raised in a round that the sidecar does not repeat no longer stops the pass", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-questions-tally-"));
+  // The pass-9 shape exactly. A reviewer raises a question; the decomposition
+  // cross-check does not repeat it, so only the run's running tally still holds
+  // it while the sidecar holds the current set. Comparing those two stopped a
+  // 12-pass plan whose sidecar was afterwards verified complete and correct.
+  const { result, prompts } = await forge({
+    planDir,
+    review: (label) => (label.includes("decomposition")
+      ? APPROVE
+      : { ...APPROVE, open_questions: ["Which cache should the ledger use?"] })
+  });
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  // The sidecar is the answer, and it is what the command reads.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(result.questionsPath, "utf8")),
+    result.openQuestions
+  );
+  // Nothing re-read the sidecar to argue with it.
+  assert.equal(prompts.has("plan:verify-final-questions"), false);
 });
 
 test("a missing resume record stops the pass even when the plan itself is whole", () => {
