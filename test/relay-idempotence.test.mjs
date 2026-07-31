@@ -1256,17 +1256,64 @@ function loadWorkflow(file) {
   return new AsyncFunction("args", "agent", "parallel", "phase", "log", "budget", source);
 }
 
+// The deterministic plan checks and the publication of an approved round are
+// plumbing every plan test now runs through, and none of them is what any single
+// test is about. They are answered here so each responder stays a statement
+// about the step it exercises; a test that is about the lint passes its own.
+// Models stage-plan-continuation.mjs copying a checksum-bound file: what comes
+// back describes the source bytes the workflow named, because that is all the
+// command can produce from an exact copy.
+function publishResponse(label, prompt) {
+  const token = /--expect "(\d+):([0-9a-f]{8})"/.exec(prompt);
+  assert.notEqual(token, null, `no expected token in publish prompt: ${prompt.slice(0, 300)}`);
+  return {
+    ok: true,
+    payloads: [{ name: "DRAFT_PLAN", token: `${token[1]}:${token[2]}`, chars: Number(token[1]) }]
+  };
+}
+
+function lintResult(issues = []) {
+  const review = {
+    verdict: issues.length ? "revise" : "approve",
+    issues,
+    open_questions: [],
+    suggestions: []
+  };
+  const canonical = canonicalJson(review);
+  return {
+    ok: true,
+    clean: issues.length === 0,
+    issues,
+    // The command computes this token over the bytes it wrote, and the workflow
+    // binds the revision's fence to it rather than to a copy of its own.
+    payloads: [{ name: "LINT_REVIEW", token: planToken(canonical), chars: canonical.length }]
+  };
+}
+
+function cleanLint() {
+  return lintResult();
+}
+
 // Runs a workflow with a stub agent. `respond` maps a call label to its result;
 // returning null models an unconfirmed relay: it may have completed on disk or
-// may have failed before it ever invoked the bridge.
-function harness(file, args, respond) {
+// may have failed before it ever invoked the bridge. `plumbing` overrides the
+// default answers above for the steps that are the same in every plan test.
+function harness(file, args, respond, plumbing = {}) {
   const labels = [];
   const calls = [];
   const parallelWidths = [];
   const logs = [];
+  const prompts = new Map();
   const agent = async (prompt, options) => {
     labels.push(options.label);
+    prompts.set(options.label, prompt);
     calls.push({ label: options.label, model: options.model, agentType: options.agentType });
+    if (options.label.startsWith("plan:lint")) {
+      return (plumbing.lint ?? cleanLint)(options.label, prompt);
+    }
+    if (options.label.startsWith("plan:publish-approved-round")) {
+      return (plumbing.publish ?? publishResponse)(options.label, prompt);
+    }
     return respond(options.label, prompt, options);
   };
   const parallel = async (thunks) => {
@@ -1278,7 +1325,7 @@ function harness(file, args, respond) {
     return results;
   };
   return loadWorkflow(file)(args, agent, parallel, () => {}, (message) => logs.push(message), undefined)
-    .then((result) => ({ result, labels, calls, parallelWidths, logs }));
+    .then((result) => ({ result, labels, calls, parallelWidths, logs, prompts }));
 }
 
 const PLAN_CONFIG = {
@@ -1295,9 +1342,22 @@ const PLAN_ARGS = {
   worktree: "/repo",
   pluginRoot: "/plugin",
   planDir: "/plans/slug",
+  // A fresh plan with no confirmed premises stops before drafting and asks, so
+  // every test about what happens after drafting starts from a pass whose
+  // premises a person has already settled.
+  premisesFile: "/plans/slug/drafts/pass-1-premises.json",
   config: PLAN_CONFIG
 };
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
+// A round that leaves something gating, which is what buys a revision. A clean
+// round publishes the bytes it approved and revises nothing, so a test that is
+// about the revision step has to fail a round to reach it.
+const REVISE = {
+  verdict: "revise",
+  issues: [{ severity: "blocking", title: "Name the migration", detail: "The plan does not say which migration reads the new field." }],
+  open_questions: [],
+  suggestions: []
+};
 const MANIFEST = {
   version: 1,
   goal: "improve the relay",
@@ -1343,8 +1403,20 @@ function verifyResponse(prompt, fixtures = HANDOFF_FIXTURES) {
         digest: skeletonOf(fixture.entries, fixture.fields)
       };
     });
-  assert.notEqual(payloads.length, 0, `no --expect token in verify prompt: ${prompt.slice(0, 300)}`);
-  return { ok: true, payloads };
+  if (payloads.length) return { ok: true, payloads };
+  // A read with nothing to expect — the workflow verifying a file it published
+  // rather than one a model claimed to write. The command reports whatever is
+  // there, which in this harness is the one plan text every stub persists.
+  const named = [...prompt.matchAll(/--payload(?:-json)? "([A-Z_]+)=/g)].map(([, name]) => name);
+  assert.notEqual(named.length, 0, `no payload in verify prompt: ${prompt.slice(0, 300)}`);
+  return {
+    ok: true,
+    payloads: named.map((name) => ({
+      name,
+      token: planToken(PLAN_TEXT),
+      chars: Number(planToken(PLAN_TEXT).split(":")[0])
+    }))
+  };
 }
 
 function planToken(text) {
@@ -1407,6 +1479,7 @@ function planResponder(dropOnce) {
     }
     if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:publish-")) return publishResponse(label, prompt);
     if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
       return {
         ok: true,
@@ -1449,6 +1522,7 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
     prompts.set(label, prompt);
     if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:publish-")) return publishResponse(label, prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
       || label.startsWith("plan:decomposition-request")) {
@@ -1463,6 +1537,8 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
     if (label.startsWith("plan:codex-interaction-review")) return { issues: [], ui_decisions: [] };
     if (label.startsWith("plan:codex-manifest")) return MANIFEST;
     if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    // Round one fails so the revision request exists to be inspected below.
+    if (label === "plan:codex-review:1") return REVISE;
     return APPROVE;
   };
   const { result, calls } = await harness(
@@ -1471,7 +1547,7 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
     responder
   );
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-questions-or-approval", result.message);
   assert.equal(result.reasoningProvider, "codex");
   assert.equal(result.assurance, "single-provider");
   assert.equal(result.usage.claudeReasoningCalls, 0);
@@ -1583,6 +1659,7 @@ test("Codex-only revision fails closed instead of dropping a resumable question"
     }
     if (label.startsWith("plan:codex-draft")) return carried;
     if (label.startsWith("plan:codex-revise")) return dropped;
+    if (label === "plan:codex-review:1") return REVISE;
     return APPROVE;
   };
   const config = {
@@ -1702,6 +1779,177 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   assert.equal(continuationLost.result.status, "plan-interrupted");
   const continuationRecovered = await harness("workflows/plan-forge.js", continuationArgs, responder(false));
   assert.equal(continuationRecovered.result.status, "needs-questions-or-approval");
+});
+
+// Review cannot catch a false premise: every reviewer reads the same document
+// and inherits the same assumption. Eight passes of one real run assumed a
+// feature's data existed in production when the feature had never shipped, and
+// the correction invalidated all eight at once.
+const PREMISES = {
+  premises: [
+    { claim: "The relay ships to production today", basis: "scripts/codex-run.mjs is on the release path", kind: "verified" },
+    { claim: "Live runs already emit usage receipts", basis: "no receipt journal was found; inferred from the schema", kind: "assumed" }
+  ]
+};
+
+test("a fresh plan states its premises and stops before drafting anything", async () => {
+  const base = planResponder([]);
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, premisesFile: undefined },
+    (label, prompt, options) => (label === "plan:premises" ? PREMISES : base(label, prompt, options))
+  );
+
+  assert.equal(result.status, "needs-premises-confirmation");
+  assert.deepEqual(result.premises, PREMISES.premises);
+  // Nothing was drafted, reviewed, or decomposed: the pass costs one call until
+  // a person has settled what it would take as given.
+  assert.deepEqual(labels, ["plan:premises"]);
+  // And the accounting a caller must persist before acting on any status is here
+  // like it is on every other exit.
+  assert.equal(result.usage.claudeReasoningCalls, 1);
+  assert.equal(result.usageAccounting, "complete");
+});
+
+test("confirmed premises reach the drafter and the gate does not fire again", async () => {
+  const base = planResponder([]);
+  const { result, labels, prompts } = await harness("workflows/plan-forge.js", PLAN_ARGS, base);
+
+  assert.equal(labels.includes("plan:premises"), false);
+  assert.match(prompts.get("plan:draft"), /Read the premises this plan rests on from \/plans\/slug\/drafts\/pass-1-premises\.json/);
+  assert.match(prompts.get("plan:draft"), /return that contradiction as an open question/);
+  assert.equal(result.status, "needs-questions-or-approval", result.message);
+});
+
+test("a continuation and a resume both pass the premises gate without re-asking", async () => {
+  const base = planResponder([]);
+  for (const entry of [
+    { seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" }, decisions: [{ question: "Which rollout?", answer: "Staged" }] },
+    { seedPlan: { path: "/plans/slug/drafts/pass-1-round-1-input.md" }, resumeRound: 1 }
+  ]) {
+    const { labels } = await harness(
+      "workflows/plan-forge.js",
+      { ...PLAN_ARGS, premisesFile: undefined, ...entry },
+      base
+    );
+    assert.equal(labels.includes("plan:premises"), false, JSON.stringify(entry));
+  }
+});
+
+// "Zero blocking or major" is satisfiable on a plan that is converging and close
+// to unsatisfiable on one that is not, because contradiction surface grows with
+// the document. Without this, a real run spent thirteen passes and ten and a
+// half million tokens producing no approved plan, and nothing in the loop could
+// notice that round N+1 was worse than round N.
+function issues(count) {
+  return {
+    verdict: "revise",
+    issues: Array.from({ length: count }, (_value, index) => ({
+      severity: "major",
+      title: `Finding ${index + 1}`,
+      detail: `The plan does not say what happens in case ${index + 1}.`
+    })),
+    open_questions: [],
+    suggestions: []
+  };
+}
+
+test("a round that does not reduce the issue count stops the pass instead of buying another", async () => {
+  const base = planResponder([]);
+  const rounds = { 1: issues(2), 2: issues(3) };
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config: { ...PLAN_CONFIG, planning: { ...PLAN_CONFIG.planning, reviewRounds: 3 } } },
+    (label, prompt, options) => {
+      const round = /^plan:claude-review:(\d+)$/.exec(label)?.[1];
+      if (round) return rounds[round] ?? APPROVE;
+      return base(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "needs-plan-revision", result.message);
+  assert.deepEqual(result.divergence, { round: 2, previous: 2, current: 3 });
+  assert.equal(result.unresolvedIssues.length, 3);
+  // Round three was never bought, and neither was the re-read: the pass already
+  // knows a revision did not reduce this count.
+  assert.equal(labels.includes("plan:claude-review:3"), false);
+  assert.equal(labels.includes("plan:claude-revision-check"), false);
+  // Nothing was decomposed, so there is nothing to approve.
+  assert.equal(result.manifest, null);
+  assert.equal(result.handoffReady, false);
+});
+
+test("the count a divergence is measured against carries in from the previous pass", async () => {
+  const base = planResponder([]);
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, priorGatingIssueCount: 2 },
+    (label, prompt, options) => (label === "plan:claude-review:1" ? issues(2) : base(label, prompt, options))
+  );
+
+  // A repair pass is bought on the promise that it reduces the count. The first
+  // round of this one did not, so it is the last.
+  assert.equal(result.status, "needs-plan-revision", result.message);
+  assert.deepEqual(result.divergence, { round: 1, previous: 2, current: 2 });
+});
+
+test("a plan the deterministic check stops never buys a reviewer", async () => {
+  const base = planResponder([]);
+  const finding = {
+    severity: "blocking",
+    title: "The plan carries a withdrawn decision",
+    detail: "Delete this text rather than qualifying it. line 40: \"That relocation is withdrawn.\""
+  };
+  let checked = 0;
+  const { result, labels, prompts } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    base,
+    {
+      // Dirty entering round one, clean once the revision has answered it.
+      lint: (label) => {
+        if (!label.startsWith("plan:lint:")) return cleanLint();
+        checked += 1;
+        return checked === 1 ? lintResult([finding]) : cleanLint();
+      }
+    }
+  );
+
+  // No review request was even assembled, let alone dispatched: these findings
+  // are certain, and a reviewer reading past them spends its round restating them.
+  assert.equal(labels.includes("plan:review-request:1"), false);
+  assert.equal(labels.includes("plan:claude-review:1"), false);
+  // The revision was handed them as the round's critiques, verbatim.
+  assert.match(prompts.get("plan:revise:1"), /<untrusted-deterministic-findings>/);
+  assert.match(prompts.get("plan:revise:1"), /The plan carries a withdrawn decision/);
+  // And confirming the revision answered them is the same check run again, not a
+  // model asked to agree with it.
+  assert.equal(labels.includes("plan:lint-revision-check"), true);
+  assert.equal(labels.includes("plan:claude-revision-check"), false);
+  assert.equal(result.status, "needs-questions-or-approval", result.message);
+});
+
+test("a deterministic finding about the split blocks the handoff whatever the cross-check said", async () => {
+  const base = planResponder([]);
+  const finding = {
+    severity: "blocking",
+    title: "Atomic group payload-shape is split across 2 pull requests",
+    detail: "PR-1 holds T1; PR-2 holds T2."
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    base,
+    {
+      lint: (label) => (label === "plan:lint-handoff" ? lintResult([finding]) : cleanLint())
+    }
+  );
+
+  assert.equal(result.status, "needs-handoff-revision", result.message);
+  assert.equal(result.handoffReady, false);
+  assert.deepEqual(result.handoffIssues, [finding]);
+  // The cross-check still ran and still approved; the arithmetic holds anyway.
+  assert.equal(result.decompositionReview.verdict, "approve");
 });
 
 test("planning persists questions introduced by the decomposition review", async () => {
@@ -1864,7 +2112,7 @@ test("a plan relay that never returns preserves interruption accounting", async 
   assert.equal(result.status, "plan-interrupted");
   assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.equal(result.usage.relayRetries, 2);
-  assert.equal(result.agentCalls, 8);
+  assert.equal(result.agentCalls, 9);
   assert.equal(result.relayCheckpoints.length, 1);
   assert.match(
     result.relayCheckpoints[0],
@@ -2509,6 +2757,9 @@ test("resume carries saved open questions and keeps persisting them", async () =
           questions: ["Which database should the cache front?", ...mergedQuestionsFrom(prompt).questions]
         };
       }
+      // The round has to leave something gating for a revision to run at all;
+      // a clean round publishes what it reviewed and edits nothing.
+      if (label === "plan:claude-review:1") return REVISE;
       return planResponder([])(label, prompt);
     }
   );

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { skeletonToken as skeletonOf } from "../scripts/verify-payload.mjs";
+import { canonicalJson, expectToken } from "../scripts/compose-prompt.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
@@ -57,6 +58,9 @@ async function forge({
   seedDecisions,
   dropInteractionReview = false,
   runPolicy,
+  // A clean round publishes the bytes it reviewed and revises nothing, so a
+  // test that needs the revision step to run has to fail its round.
+  planReview = APPROVE,
   workflow = loadWorkflow("workflows/plan-forge.js")
 }) {
   const labels = [];
@@ -92,22 +96,52 @@ async function forge({
       const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
       return { ok: true, questions: hex ? JSON.parse(new TextDecoder().decode(bytes)) : [] };
     }
-    if (label.startsWith("plan:verify-")) {
-      const digested = new Set([...prompt.matchAll(/--digest "([A-Z_]+)=/g)].map(([, name]) => name));
+    // The deterministic plan check finds nothing here: these stubs stand in for
+    // well-behaved models, and what the lint decides is not what this file is
+    // about.
+    if (label.startsWith("plan:lint")) {
+      const review = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
       return {
         ok: true,
-        payloads: [...prompt.matchAll(/--expect "([A-Z_]+)=(\d+):([0-9a-f]{8})"/g)]
-          .map(([, name, chars, hash]) => {
-            const payload = { name, token: `${chars}:${hash}`, chars: Number(chars) };
-            if (!digested.has(name)) return payload;
-            const { entries, fields } = HANDOFF_FIXTURES[name];
-            return { ...payload, entries: entries.length, digest: skeletonOf(entries, fields) };
-          })
+        clean: true,
+        issues: [],
+        payloads: [{
+          name: "LINT_REVIEW",
+          token: expectToken(canonicalJson(review)),
+          chars: canonicalJson(review).length
+        }]
+      };
+    }
+    if (label.startsWith("plan:publish-")) {
+      const token = /--expect "(\d+):([0-9a-f]{8})"/.exec(prompt);
+      assert.notEqual(token, null, `no expected token in publish prompt: ${prompt.slice(0, 300)}`);
+      return {
+        ok: true,
+        payloads: [{ name: "DRAFT_PLAN", token: `${token[1]}:${token[2]}`, chars: Number(token[1]) }]
+      };
+    }
+    if (label.startsWith("plan:verify-")) {
+      const digested = new Set([...prompt.matchAll(/--digest "([A-Z_]+)=/g)].map(([, name]) => name));
+      const payloads = [...prompt.matchAll(/--expect "([A-Z_]+)=(\d+):([0-9a-f]{8})"/g)]
+        .map(([, name, chars, hash]) => {
+          const payload = { name, token: `${chars}:${hash}`, chars: Number(chars) };
+          if (!digested.has(name)) return payload;
+          const { entries, fields } = HANDOFF_FIXTURES[name];
+          return { ...payload, entries: entries.length, digest: skeletonOf(entries, fields) };
+        });
+      if (payloads.length) return { ok: true, payloads };
+      // A read with nothing to expect: the workflow verifying a file it just
+      // published rather than one a model claimed to write.
+      return {
+        ok: true,
+        payloads: [...prompt.matchAll(/--payload(?:-json)? "([A-Z_]+)=/g)]
+          .map(([, name]) => ({ name, token: "12:fd8d615d", chars: 12 }))
       };
     }
     if (label.endsWith("-request") || label.includes("request:")) {
       return { ok: true, promptPath: "/tmp/p.md", promptHash: `sha256:${"a".repeat(64)}`, bytes: 10 };
     }
+    if (label.startsWith("plan:claude-review") || label.startsWith("plan:codex-review")) return planReview;
     return APPROVE;
   };
   const parallel = async (thunks) => {
@@ -122,6 +156,9 @@ async function forge({
     worktree: root,
     pluginRoot: root,
     planDir: "/tmp/plan",
+    // These tests start after the premises gate: a fresh plan with none stops
+    // before drafting and asks, which is not what they are about.
+    premisesFile: "/tmp/plan/drafts/pass-1-premises.json",
     ...(runPolicy ? { runPolicy } : {}),
     ...(seedDecisions ? { seedPlan: "# plan\n\nbody", uiDecisions: seedDecisions, resumeRound: 1 } : {}),
     config: {
@@ -257,7 +294,15 @@ test("a resumed pass keeps interface decisions declared before the interruption"
   const { result } = await forge({
     ui: { hasUserInterface: true, conventionPaths: [], confirmDecisions: "all-surfaces" },
     seedDecisions: [decision("earlier-dialog", "new-dialog", null)],
-    draftDecisions: [decision("export-dialog", "new-dialog", null)]
+    draftDecisions: [decision("export-dialog", "new-dialog", null)],
+    // The resumed round has to leave something gating for its revision — which
+    // is where a resumed pass declares anything new — to run at all.
+    planReview: {
+      verdict: "revise",
+      issues: [{ severity: "major", title: "Name the export format", detail: "The plan does not say which format the export writes." }],
+      open_questions: [],
+      suggestions: []
+    }
   });
   assert.deepEqual(
     result.uiDecisions.map((entry) => entry.id).sort(),

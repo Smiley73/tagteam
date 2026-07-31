@@ -31,6 +31,8 @@ Workflow({
     passId: <"pass-1", then "pass-2", ... one per forge invocation>,
     config: <merged config with run overrides>,
     runPolicy: <validated run policy>,
+    premisesFile: <absolute mode-0600 drafts/<passId>-premises.json, once the human has confirmed them; omit on the first invocation of a new plan>,
+    priorGatingIssueCount: <the previous pass's gatingIssueCount, on every repair continuation>,
     seedPlan: { path: <absolute source plan path> } for every resume or continuation; `seedPlanPath` remains accepted for recovery descriptors and older callers; never pass inline plan text,
     decisionsFile: <absolute mode-0600 JSON path whenever decisions are passed>,
     uiDecisionsFile: <absolute readable sidecar or normalized mode-0600 [] file on Codex resume/continuation>,
@@ -49,6 +51,18 @@ Before invoking the workflow, atomically persist `reviews/<passId>-invocation.js
 
 Write the raw workflow return to a mode-0600 temporary result file. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output. A missing receipt for a confirmed bridge handoff, or a mismatched or unreadable receipt, is a hard stop. When every relay reply was lost and its request-bound unconfirmed dispatch has no matching journal, reconciliation preserves all known counters as `legacy-incomplete` instead of discarding the snapshot or claiming an exact Codex total; stale evidence from another request at the same artifact path never completes or classifies the current recovery. Never persist pending accounting as authoritative state. Atomically persist every reconciled response's cumulative accounting snapshot before branching on its status. When the status is `plan-interrupted`, render `messages.mjs relayLost` when its message names a Codex result and `messages.mjs planInterrupted` otherwise, then show its message as supporting detail and stop. Resume passes the reconciled counters back unchanged.
 
+## Premises
+
+A new plan's first invocation carries no `premisesFile`, and the forge answers `needs-premises-confirmation` without drafting anything: it returns `premises`, a ranked list of `{claim, basis, kind}` rows stating what a plan for this goal would take as given, with `kind` either `verified` (the basis names the file, symbol, migration, or command it was read from) or `assumed`.
+
+This is the one thing review cannot do for you. Every reviewer reads the same document and inherits the same assumption, so a plan built on a false premise passes every round and is invalidated all at once when a person finally reads it. Ask before the drafting, not after.
+
+Ask the `assumed` rows first, in chunks of at most four, one `AskUserQuestion` per chunk with `multiSelect: true`: “Which of these is not true today?” The first option is `All of these hold (Recommended)`; each remaining option is one premise, labelled with the claim and described with its basis. Ask about `verified` rows only if fewer than four assumed ones exist and space remains. For each premise the user marks wrong, ask one free-text follow-up for what is true instead, and preserve the answer exactly.
+
+Then atomically write `drafts/<passId>-premises.json` at mode 0600, holding the same `{premises: [...]}` shape with every claim replaced by what the user said is true and `kind` set to `verified` for anything they confirmed or corrected. Re-invoke the forge with the **same** `passId` and that path as `premisesFile`. Record the exchange in `drafts/<passId>-decisions.json` like any other answers, so no later pass re-asks. Persist the accounting snapshot from this response before asking, exactly as for any other status.
+
+A resume, a continuation, and any invocation that already carries `premisesFile` skip this gate entirely; it costs one model call per plan, not per pass.
+
 ## Resume
 
 `--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
@@ -61,6 +75,8 @@ Write the raw workflow return to a mode-0600 temporary result file. If it says `
 5. `drafts/<passId>-integrated.md` is the finished plan of its pass: the last cross-review revision writes it, and so does a continuation. If it is the newest draft in the pass, resume from it with `seedPlan: { path: <integrated path> }`, its `.questions.json`, and its `.ui-decisions.json` when that file exists and parses — an absent, empty, or malformed one means no interface decisions are recoverable, which costs a re-declaration and is never a reason to stop; pass `[]` — and either `decisions` from `drafts/<passId>-decisions.json` when that file exists (a continuation), or `resumeRound: <reviewRounds + 1>` when it does not (cross-review finished; only the manifest, train, and cross-check remain). An integrated draft outranks every round input in its pass, whatever their timestamps: nothing writes it until a check cleared the plan, so its presence means cross-review is over however few rounds it took. A round every reviewer approved ends it early, so `reviewRounds + 1` is right even when no round-input file exists for the later rounds. When the same pass's validated invocation descriptor says `kind: "continuation"`, also pass `continuationReceiptRequired: true`; the workflow must reject a missing or mismatched durable continuation receipt instead of downgrading that known pass to legacy behavior. Never set this flag for a source plan from an earlier pass merely because the new invocation is a continuation. Never pass both `decisions` and `resumeRound`; the workflow warns and ignores decisions on a round resume.
 6. Continue with the normal question, cross-check, and approval flow below.
 
+Whenever any `drafts/*-premises.json` exists in the plan directory, pass the earliest one as `premisesFile` on every resumed or continued invocation. A resume with a saved round or an integrated plan skips the premises gate on its own, but a `kind: "fresh"` recovery does not, and re-asking settled premises is both a cost and a chance for the answers to drift.
+
 A resumed pass seeds itself from these files, so pass them through byte for byte and never from memory. The workflow reads each draft, manifest, and train back off disk right after the step that wrote it, records that file's checksum as what the pass produced, and stops the pass at that point rather than sending a shortened plan to either engine.
 
 `--resume` starts a fresh forge invocation, which is what makes it a recovery: every artifact is read off disk again. Resuming the workflow run itself instead replays each finished step's recorded result, so a plumbing failure would repeat with identical numbers however often the underlying file is repaired. If that is what you are seeing, run this command.
@@ -69,7 +85,9 @@ If the workflow fails before it can return an accounting envelope, do not show t
 
 The outstanding questions are whatever `questionsPath` holds; the workflow merged them into that file and recorded its checksum. `openQuestions` is a copy of it for convenience, and `null` means the copy did not survive the relay, not that there are none. Read `questionsPath` whenever `openQuestions` is null, and never substitute `[]` for a file you could not read: stop instead, the same as anywhere else a question sidecar is unreadable.
 
-If there are open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
+If there are open questions, first drop every one that any `drafts/*-decisions.json` in this plan directory already answers — every pass's file, not just this pass's. A question already settled is not an open question, and re-asking it is how one decision becomes three rows that disagree. Match on meaning rather than on exact text: the sidecar deduplicates by normalized string, so the same question rephrased between rounds survives as two entries.
+
+Then ask at most `planning.questionsPerRound` of them, defaulting to four, which is also the interface limit. Rank by how much work the answer changes and ask the top ones; the rest stay in the sidecar and are asked by the next pass. Asking sixteen questions in four chunks buys four rounds of answers against a plan that changed after the first. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
 
 ## Interface decisions
 
@@ -101,15 +119,25 @@ Then invoke `tagteam:plan-forge` once more with the same arguments plus:
 - `uiDecisions`: the array at the first result's `uiDecisionsPath`, so decisions the policy never surfaced survive the pass. A null path means this repository has no interface; a path naming a file that is absent or unreadable means none were declared. Pass `[]` in both cases and continue.
 - `uiDecisionsFile`: for a Codex continuation with an interface, the readable absolute `uiDecisionsPath`; if it is absent, empty, malformed, or unreadable, atomically write `[]` to a mode-0600 `reviews/<next-passId>-recovered-ui-decisions.json` and pass that path instead. Omit it when the repository has no interface.
 - `agentCalls`, `usage`, `usageReceipts`, and `usageAccounting`: the cumulative values from the newest usage snapshot at or before the prior pass.
+- `premisesFile`: the absolute `drafts/<first-passId>-premises.json` written when the premises were confirmed, so no later pass re-asks them. Omit it only when no plan in this directory ever had one.
+- `priorGatingIssueCount`: the prior response's `gatingIssueCount`, whenever this continuation exists to reduce issues.
 
 This continuation performs one integration pass and regenerates the manifest and train; it must not repeat the cross-review rounds.
 Persist its integrated draft and decomposition cross-check as new artifacts, leaving the first invocation byte-frozen.
 
-When the status is `needs-plan-revision`, the last cross-review revision left `unresolvedIssues` blocking or major and the pass stopped before the manifest, so `manifest`, `prTrain`, `manifestPath`, and `prTrainPath` are all null. Do not offer approval and do not ask for the plan to be re-reviewed. Feed `unresolvedIssues` into one continuation as explicit decisions to repair the plan, exactly as for a failed handoff cross-check, and count it against the same two-repair allowance. If it still fails, stop with the saved issues.
+When the status is `needs-plan-revision`, the pass stopped before the manifest, so `manifest`, `prTrain`, `manifestPath`, and `prTrainPath` are all null. Do not offer approval and do not ask for the plan to be re-reviewed. Read `divergence` and `roundsExhausted` before deciding what to do, because they mean different things:
+
+- `divergence` set to `{round, previous, current}` means a round left at least as many blocking or major issues as the one before it. The loop stopped itself. Do **not** feed the issues into another continuation: the pass has already established that revising did not reduce the count, and buying another round is the failure this detector exists to stop. Say so plainly — name the two counts — show `unresolvedIssues`, and ask whether to repair the plan anyway, narrow the goal and start a new plan, or stop. Only an explicit answer buys another pass, and that pass carries `priorGatingIssueCount: <current>`.
+- `roundsExhausted` true with no `divergence` means the plan was still improving when the configured `reviewRounds` ran out. That is not a verdict. Offer `Continue for more rounds (Recommended)` or `Stop and report`, and on `Continue` run one continuation carrying `priorGatingIssueCount`.
+- Neither set means the re-read of the last revision found `unresolvedIssues` still open. Feed them into one continuation as explicit decisions to repair the plan, exactly as for a failed handoff cross-check, and count it against the same two-repair allowance. If it still fails, stop with the saved issues.
+
+Every continuation that exists to reduce issues passes `priorGatingIssueCount: <the previous response's gatingIssueCount>`, so the detector measures across the whole planning run and not just inside one pass. A repair pass is bought on the promise that it reduces that number; stop paying when it does not.
 
 The final decomposition cross-check is a handoff-quality gate. If `handoffReady` is false, do not offer approval. Feed `handoffIssues` into one continuation as explicit decisions to repair the plan and regenerate the manifest/train, then rerun the cross-check. Use that list rather than the review's own issues: it also carries the findings the workflow decided arithmetically, such as one atomic group split across two pull requests, and those hold even when the cross-check returned `approve`. Allow at most two handoff-repair continuations; if it still fails, stop with the saved issues instead of approving an underspecified plan.
 
-Present the final plan followed by a compact PR table containing ID, title, tasks, dependencies, user-visible yes/no and reason, and size estimate. State that tagteam itself never gates on size or replans because of it. Do not say or imply that no size limit applies: if the repository's own `policyPaths` documents set one, that limit is real and the plan was drafted against it, and tagteam declining to enforce a limit is not the same as there being none.
+Present the final plan followed by a compact PR table containing ID, title, tasks, dependencies, user-visible yes/no and reason, and size estimate. Where a file list is wanted, use the computed one: it is the union of each pull request's tasks' `files`, derived from the manifest, and never a list anyone wrote. State that tagteam itself never gates on size or replans because of it. Do not say or imply that no size limit applies: if the repository's own `policyPaths` documents set one, that limit is real and the plan was drafted against it, and tagteam declining to enforce a limit is not the same as there being none.
+
+A single-pull-request train is the expected shape, not a degenerate one. Do not suggest splitting a train that fits.
 
 Ask exactly one approval question:
 

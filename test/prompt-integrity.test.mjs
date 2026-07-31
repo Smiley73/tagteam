@@ -12,11 +12,20 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // A plan of the size that broke the old relay: models asked to retype this much
 // truncate it, paraphrase it, or replace it with a pointer to the conversation.
+// A plan of the size that broke the old relay, written to the template so that
+// the deterministic check has nothing to say about it: these tests are about
+// bytes reaching an engine intact, and a plan the lint stops never gets that
+// far. The budget these tests configure is raised to match.
+const TEMPLATE_SECTIONS = [
+  "Goal", "Premises", "Decisions", "Scope", "File-by-file",
+  "Tests", "Acceptance criteria", "PR sequence", "Open questions"
+];
+
 function bigPlan(marker) {
-  const sections = [];
+  const sections = TEMPLATE_SECTIONS.map((heading) => `## ${heading}\n\n(stated below)\n`);
   for (let index = 1; index <= 500; index += 1) {
     sections.push([
-      `## Step ${index} — ${marker}`,
+      `### Step ${index} — ${marker}`,
       "",
       `Edit \`src/module-${index}.ts\` and \`test/module-${index}.test.ts\`. The invariant is that every`,
       "caller observes the same ordering it observed before the change, including the retry path.",
@@ -44,6 +53,10 @@ function bigManifest(label = () => ({})) {
   };
 }
 
+// Five pull requests that between them hold every task exactly once, in the
+// order their task dependencies require. A train that dropped nine of nineteen
+// tasks is a defect the deterministic check now names, and these tests are not
+// about that defect.
 function bigTrain() {
   return {
     version: 1,
@@ -52,7 +65,9 @@ function bigTrain() {
       id: `PR-${index + 1}`,
       title: `Pull request ${index + 1}`,
       scope: `Scope ${index + 1}. `.repeat(20),
-      taskIds: [`T${index * 4 + 1}`, `T${index * 4 + 2}`],
+      taskIds: Array.from({ length: 19 }, (_unused, task) => task + 1)
+        .filter((task) => task > index * 4 && task <= (index + 1) * 4)
+        .map((task) => `T${task}`),
       dependsOn: index === 0 ? [] : [`PR-${index}`],
       userVisible: "no",
       userVisibleReason: "internal plumbing only",
@@ -122,7 +137,10 @@ async function forge({
   largePlanWarningChars,
   continuation = false,
   resume = null,
-  review = () => APPROVE,
+  // Round one leaves something gating by default, because that is the round
+  // these tests are about: a clean round publishes the bytes it reviewed and
+  // revises nothing, so nothing downstream of a revision would run at all.
+  review = (label) => (label.endsWith("review:1") ? REVISE : APPROVE),
   corrupt = (_label, planMarkdown) => planMarkdown,
   corruptManifest = (manifest) => manifest,
   // Applied where the manifest is built, so the returned manifest and the saved
@@ -134,6 +152,12 @@ async function forge({
   fs.mkdirSync(path.join(planDir, "drafts"), { recursive: true });
   fs.mkdirSync(path.join(planDir, "reviews"), { recursive: true });
   fs.writeFileSync(path.join(planDir, "goal.json"), JSON.stringify({ goal: "harden the outbound relay" }, null, 2));
+  // The premises a person settled before any plan existed. A fresh plan without
+  // them stops before drafting and asks, which is a different test.
+  const premisesFile = path.join(planDir, "drafts/pass-1-premises.json");
+  fs.writeFileSync(premisesFile, JSON.stringify({
+    premises: [{ claim: "The relay is live in production", basis: "scripts/codex-run.mjs", kind: "verified" }]
+  }, null, 2), { mode: 0o600 });
 
   const plans = {
     draft: bigPlan("draft"),
@@ -213,6 +237,16 @@ async function forge({
       if (merged.status !== 0) return { ok: false, error: merged.stderr.trim() };
       return JSON.parse(merged.stdout.trim());
     }
+    // Run for real. Everything it decides is decided from files these stubs
+    // actually wrote, so a stubbed verdict here would be the one check in this
+    // file that never touches disk.
+    if (label.startsWith("plan:lint")) {
+      const linted = runCommand(commandFrom(prompt));
+      if (linted.status !== 0) return { ok: false, error: linted.stderr.trim() };
+      const parsed = JSON.parse(linted.stdout.trim());
+      verified.push({ label, ...parsed });
+      return parsed;
+    }
     if (label.startsWith("plan:verify-")
       || label.startsWith("plan:prepare-continuation")
       || label.startsWith("plan:publish-")) {
@@ -253,6 +287,7 @@ async function forge({
     worktree: root,
     pluginRoot: root,
     planDir,
+    premisesFile,
     ...(continuation ? {
       passId: "pass-2",
       seedPlan: { path: seedPath },
@@ -272,6 +307,9 @@ async function forge({
         claude: { model: "opus", effort: "high" },
         codex: { model: "gpt-test", effort: "high" },
         reviewRounds,
+        // These plans are deliberately enormous — that is the property under
+        // test — so the budget is raised to match rather than the plans shrunk.
+        planBudget: { targetChars: 200_000, hardCeilingChars: 400_000 },
         ...(largePlanWarningChars ? { largePlanWarningChars } : {})
       },
       policyPaths,
@@ -501,7 +539,10 @@ test("a revision saved short stops that round instead of the next one", async ()
   });
   assert.equal(result.status, "plan-interrupted");
   assert.match(result.message.split("\n")[0], /The plan revised in round 1 was not saved as the text this run produced/);
-  assert.match(result.message, /pass-1-integrated\.md/);
+  // A revision always writes the next round's input now. Only a check that
+  // cleared it publishes the integrated plan, so an interrupted pass leaves a
+  // round input for resume to review rather than a finished plan to trust.
+  assert.match(result.message, /pass-1-round-2-input\.md/);
   // Nothing downstream of the bad write ran: the manifest was never parsed and no
   // cross-check request exists.
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-manifest.json")), false);
@@ -555,10 +596,17 @@ test("round two reviews the round-one revision even when its file drifted", asyn
 
 test("a round every reviewer approves ends cross-review instead of paying for the rest", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-converged-"));
-  const { result, prompts, logs } = await forge({ planDir, reviewRounds: 3 });
+  const { result, prompts, logs } = await forge({
+    planDir,
+    reviewRounds: 3,
+    review: () => APPROVE
+  });
 
   assert.equal(result.status, "needs-questions-or-approval");
   assert.deepEqual(result.completedRounds, [1]);
+  // And the plan that goes on to the manifest is the exact text round one
+  // approved: a clean round publishes what it reviewed and edits nothing.
+  assert.equal(prompts.has("plan:revise:1"), false);
 
   // Nothing belonging to rounds two or three was assembled, dispatched, or revised.
   for (const label of prompts.keys()) {
@@ -668,8 +716,10 @@ test("a draft edited after it was verified still stops the pass before Codex", a
   });
   const lines = result.message.split("\n");
   assert.equal(result.status, "plan-interrupted");
-  assert.match(lines[0], /could not be assembled, so nothing was sent and nothing was paid for/);
-  assert.match(lines[3], /plan section at .*pass-1-integrated\.md is not the text this run produced/);
+  // Caught by the deterministic check, which is the first thing after the
+  // manifest to read the plan back against the checksum this run recorded.
+  assert.match(lines[0], /could not be checked, so the pass stopped before anything was sent/);
+  assert.match(lines[3], /the lint read different bytes than this run produced for: PLAN at .*pass-1-integrated\.md/);
 });
 
 test("a manifest saved with a task dropped stops the pass exactly, with no tolerance", async () => {
@@ -746,7 +796,11 @@ test("every checksum a request checks was read back off the file it names", asyn
     "pass-1-integrated.md",
     "pass-1-manifest.json",
     "pass-1-pr-train.json",
-    "pass-1-round-1-input.md"
+    "pass-1-round-1-input.md",
+    // The deterministic check saves its own findings so a read-only engine can
+    // be handed them as the round's critiques, and that file is fenced into the
+    // revision request like any other payload.
+    "pass-1-round-1-lint.json"
   ]);
 
   // And every token a request checks is one of those reads, so no request is
