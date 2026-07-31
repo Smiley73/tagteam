@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { expectToken, normalizeText } from "../scripts/compose-prompt.mjs";
+import { validateJson } from "../scripts/validate-json.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -26,11 +27,12 @@ function bigPlan(marker) {
   return [`# Implementation plan (${marker})`, "", ...sections].join("\n");
 }
 
-function bigManifest() {
+function bigManifest(label = () => ({})) {
   return {
     version: 1,
     goal: "harden the outbound relay",
     tasks: Array.from({ length: 19 }, (_value, index) => ({
+      ...label(`T${index + 1}`),
       id: `T${index + 1}`,
       title: `Task ${index + 1}`,
       description: `Bounded change ${index + 1}. `.repeat(60),
@@ -84,6 +86,9 @@ function persistPathFrom(prompt, pattern) {
   return match[1];
 }
 
+// What the workflow renders for a configuration that names no policy documents.
+const NO_POLICY_PATHS = "No repository policy documents are configured, so establish this repository's own rules from its contributing, coding-standards, or agent-instruction files if any exist, and treat what you find there as binding.";
+
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
 const BLOCKER = {
   severity: "blocking",
@@ -120,6 +125,10 @@ async function forge({
   review = () => APPROVE,
   corrupt = (_label, planMarkdown) => planMarkdown,
   corruptManifest = (manifest) => manifest,
+  // Applied where the manifest is built, so the returned manifest and the saved
+  // one agree: an atomic group is a property of the plan, not a corruption.
+  atomicGroups = () => ({}),
+  policyPaths = [],
   after = () => {}
 }) {
   fs.mkdirSync(path.join(planDir, "drafts"), { recursive: true });
@@ -138,13 +147,26 @@ async function forge({
     fs.writeFileSync(`${seedPath}.questions.json`, JSON.stringify(["Choose deployment", "Choose cache"]), { mode: 0o600 });
     fs.writeFileSync(`${seedPath}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
   }
-  const manifest = bigManifest();
+  const manifest = bigManifest(atomicGroups);
   const train = bigTrain();
   const composed = [];
   const prompts = new Map();
   const logs = [];
 
   const verified = [];
+  // A real dispatch validates the structured response against the schema the
+  // workflow supplied, so a stub that skips that check can pass a value the
+  // workflow itself would refuse. That gap hid a manifest schema in this file
+  // that forbade a field the parser is explicitly asked to produce, which no
+  // artifact-level test could see: the on-disk schema permitted it and the
+  // response schema did not. Every stub return is now held to the same bar.
+  const answer = (options, value) => {
+    if (options.schema && value !== null && value !== undefined) {
+      const errors = validateJson(options.schema, value);
+      assert.deepEqual(errors, [], `${options.label} returned a value its own schema rejects`);
+    }
+    return value;
+  };
   const agent = async (prompt, options) => {
     const label = options.label;
     prompts.set(label, prompt);
@@ -164,22 +186,22 @@ async function forge({
       fs.writeFileSync(`${file}.questions.json`, JSON.stringify([]), { mode: 0o600 });
       if (targeted) fs.writeFileSync(`${file}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
       const [plan_chars, plan_hash] = expectToken(normalizeText(planMarkdown)).split(":");
-      return {
+      return answer(options, {
         plan_path: file,
         plan_chars: Number(plan_chars),
         plan_hash,
         open_questions: [],
         ui_decisions: []
-      };
+      });
     }
     if (label === "plan:manifest") {
       fs.writeFileSync(persistPathFrom(prompt, /persist the identical manifest as JSON at (\S+) with mode 0600/), JSON.stringify(corruptManifest(manifest)), { mode: 0o600 });
-      return manifest;
+      return answer(options, manifest);
     }
     if (label === "plan:decompose") {
       // Written with different spacing than the workflow holds: layout is not content.
       fs.writeFileSync(persistPathFrom(prompt, /persist the identical PR train as JSON at (\S+) with mode 0600/), JSON.stringify(train, null, 4), { mode: 0o600 });
-      return train;
+      return answer(options, train);
     }
     // Both plumbing steps run their real command against the real files, so what
     // the workflow learns here is what is actually on disk.
@@ -206,6 +228,10 @@ async function forge({
         bytes: parsed.bytes
       };
     }
+    // Deliberately unchecked: this catch-all stands in for reviewers, relay
+    // envelopes, and the interface lens at once, so it answers several labels in
+    // a shape only one of them really uses. The three artifact stubs above are
+    // the ones that model a single agent's own response, and they are checked.
     return review(label);
   };
   const parallel = async (thunks) => {
@@ -241,6 +267,7 @@ async function forge({
         reviewRounds,
         ...(largePlanWarningChars ? { largePlanWarningChars } : {})
       },
+      policyPaths,
       prTrain: { prSize: { guidance: "small" } },
       transport: { mode: "exec" }
     }
@@ -302,6 +329,9 @@ test("a 130 KB plan reaches the cross-check whole, as the exact string the workf
 
   const expected = fs.readFileSync(path.join(root, "prompts/plan-decomposition-check.md"), "utf8")
     .replace("{{WORKTREE}}", root)
+    // No policyPaths in this configuration, so the brief is the "look for them
+    // yourself" form. It is rendered as trusted prose, never fenced.
+    .replace("{{POLICY}}", NO_POLICY_PATHS)
     .replace("{{PLAN}}", fenced("plan", normalizeText(plans.revised)))
     .replace("{{MANIFEST}}", fenced("manifest", JSON.stringify(manifest, null, 2)))
     .replace("{{PR_TRAIN}}", fenced("pr-train", JSON.stringify(train, null, 2)));
@@ -693,6 +723,70 @@ test("every checksum a request checks was read back off the file it names", asyn
   }
 });
 
+test("a configured policy path cannot reach the shell through the composed command", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-var-quoting-"));
+  const witness = path.join(planDir, "executed.txt");
+  // A file name of this shape can exist on disk and pass every path check, so
+  // the only thing standing between it and the shell is how the command is
+  // built. The harness runs these commands for real, so an unquoted var would
+  // run the substitution and leave the witness behind.
+  const hostile = `docs/p$(touch ${witness})q\`touch ${witness}\`r".md`;
+
+  const { result, composed } = await forge({ planDir, policyPaths: [hostile] });
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(fs.existsSync(witness), false, "the shell executed a substitution inside a --var value");
+
+  for (const label of ["plan:review-request:1", "plan:decomposition-request"]) {
+    const request = composed.find((item) => item.label === label);
+    assert.notEqual(request, undefined, composed.map((item) => item.label).join(", "));
+    // The value survived as text, and the command stayed on one line so the
+    // "Run this exact command" instruction cannot be split in half.
+    assert.equal(request.command.includes(hostile), true, `${label} lost the value`);
+    assert.equal(request.command.includes("\n"), false, `${label} spans more than one line`);
+    assert.match(fs.readFileSync(request.promptPath, "utf8"), /states its own engineering rules in/);
+  }
+});
+
+test("an atomic group split across two pull requests blocks the handoff on its own", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-atomic-split-"));
+  // The train puts T1 in PR-1 and T5 in PR-2. Every pull request squashes to one
+  // commit on the base branch, so merging PR-1 alone lands half of a group that
+  // is only valid whole. The cross-check approves, and that must not be enough.
+  const { result } = await forge({
+    planDir,
+    atomicGroups: (id) => (["T1", "T5"].includes(id) ? { atomicGroup: "engine-version-bump" } : {})
+  });
+
+  assert.equal(result.status, "needs-handoff-revision");
+  assert.equal(result.handoffReady, false);
+  assert.equal(result.decompositionReview.verdict, "approve");
+
+  // The finding is decided, not argued: it names the group and both placements.
+  assert.equal(result.handoffIssues.length, 1);
+  const [issue] = result.handoffIssues;
+  assert.equal(issue.severity, "blocking");
+  assert.match(issue.title, /engine-version-bump is split across 2 pull requests/);
+  assert.match(issue.detail, /PR-1 holds T1/);
+  assert.match(issue.detail, /PR-2 holds T5/);
+  assert.match(issue.detail, /squashes to one commit on the base branch/);
+});
+
+test("an atomic group kept inside one pull request is not a finding", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-atomic-intact-"));
+  // T1 and T2 share PR-1, so the group reaches the base branch in one commit.
+  // Splitting it across two tasks inside that pull request is not a defect, and
+  // a check that flagged it would push every plan toward coarser tasks.
+  const { result } = await forge({
+    planDir,
+    atomicGroups: (id) => (["T1", "T2"].includes(id) ? { atomicGroup: "engine-version-bump" } : {})
+  });
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.handoffReady, true);
+  assert.deepEqual(result.handoffIssues, []);
+  assert.equal(result.manifest.tasks[0].atomicGroup, "engine-version-bump");
+});
+
 test("a missing resume record stops the pass even when the plan itself is whole", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-questions-"));
   const plan = path.join(temp, "pass-1-integrated.md");
@@ -705,6 +799,7 @@ test("a missing resume record stops the pass even when the plan itself is whole"
     "--template", path.join(root, "prompts/plan-decomposition-check.md"),
     "--out", path.join(temp, "prompt.md"),
     "--var", `WORKTREE=${root}`,
+    "--var", `POLICY=${NO_POLICY_PATHS}`,
     "--fence", `PLAN=${plan}`,
     "--fence-json", `MANIFEST=${path.join(temp, "manifest.json")}`,
     "--fence-json", `PR_TRAIN=${path.join(temp, "train.json")}`,

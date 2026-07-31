@@ -11,6 +11,10 @@ import { planReceipt } from "../scripts/plan-receipt.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const identity = `sha256:${"a".repeat(64)}`;
+// The repository's own rules reach Codex as trusted prose, not as a fenced
+// payload: the paths are validated at the config layer and the rule itself is
+// the workflow speaking, not evidence being quoted.
+const POLICY_BRIEF = "This repository states its own engineering rules in: CONTRIBUTING.md. Read them before you decide.";
 
 function fixture(planMarkdown = "# Plan\n\nDo the work.") {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-provider-"));
@@ -289,7 +293,7 @@ test("composed Codex requests carry concrete UI and PR-size settings from disk",
   composePrompt({
     template: path.join(root, "prompts", "plan-draft-codex.md"),
     out: draftOut,
-    vars: [{ name: "WORKTREE", text: "/repo" }],
+    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }],
     fences: [
       { name: "GOAL", file: goalPath, json: true },
       { name: "PROJECT_CONFIG", file: configPath, json: true }
@@ -310,7 +314,7 @@ test("composed Codex requests carry concrete UI and PR-size settings from disk",
   composePrompt({
     template: path.join(root, "prompts", "plan-draft-codex.md"),
     out: noUiOut,
-    vars: [{ name: "WORKTREE", text: "/repo" }],
+    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }],
     fences: [
       { name: "GOAL", file: goalPath, json: true },
       { name: "PROJECT_CONFIG", file: configPath, json: true }
@@ -324,7 +328,7 @@ test("composed Codex requests carry concrete UI and PR-size settings from disk",
   composePrompt({
     template: path.join(root, "prompts", "plan-decompose-codex.md"),
     out: decomposeOut,
-    vars: [{ name: "WORKTREE", text: "/repo" }],
+    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }],
     fences: [
       { name: "PROJECT_CONFIG", file: configPath, json: true },
       { name: "PLAN", file: planPath, json: false },

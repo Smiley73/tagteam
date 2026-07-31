@@ -69,6 +69,44 @@ test("PR-train validation covers every task once and carries cross-PR task depen
   assert.match(errors, /must depend on PR p1/);
 });
 
+test("PR-train validation keeps an atomic group inside one pull request", () => {
+  // The plan forge checks this too, but a train can be produced outside that
+  // workflow and still reach approval, and an invariant enforced on one of two
+  // paths is not enforced. This is the second gate, on the artifact itself.
+  const manifest = {
+    tasks: [
+      { id: "a", dependsOn: [], atomicGroup: "engine-version-bump" },
+      { id: "b", dependsOn: ["a"], atomicGroup: "engine-version-bump" },
+      { id: "c", dependsOn: ["b"] }
+    ]
+  };
+
+  // Together in p1: every pull request squashes to one commit on the base
+  // branch, so the group reaches it whole. Two tasks is not the defect.
+  const together = {
+    prs: [
+      { id: "p1", taskIds: ["a", "b"], dependsOn: [] },
+      { id: "p2", taskIds: ["c"], dependsOn: ["p1"] }
+    ]
+  };
+  assert.deepEqual(semanticErrors("pr-train.schema.json", together, { manifest }), []);
+
+  const split = {
+    prs: [
+      { id: "p1", taskIds: ["a"], dependsOn: [] },
+      { id: "p2", taskIds: ["b", "c"], dependsOn: ["p1"] }
+    ]
+  };
+  const errors = semanticErrors("pr-train.schema.json", split, { manifest }).join("\n");
+  assert.match(errors, /atomic group engine-version-bump must land in one PR/);
+  assert.match(errors, /p1 holds a/);
+  assert.match(errors, /p2 holds b/);
+
+  // An unlabelled manifest is the common case and must stay silent.
+  const unlabelled = { tasks: manifest.tasks.map(({ atomicGroup, ...task }) => task) };
+  assert.deepEqual(semanticErrors("pr-train.schema.json", split, { manifest: unlabelled }), []);
+});
+
 test("copyUntracked validation rejects a destination Git would track", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ignore-"));
   spawnSync("git", ["init", "-q", repo]);
