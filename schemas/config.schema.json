@@ -23,7 +23,29 @@
         "claude": { "$ref": "#/$defs/planningClaude" },
         "codex": { "$ref": "#/$defs/planningCodex" },
         "reviewRounds": { "type": "integer", "minimum": 1, "maximum": 6 },
-        "largePlanWarningChars": { "type": "integer", "minimum": 1 }
+        "largePlanWarningChars": { "type": "integer", "minimum": 1 },
+        "planBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "targetChars": { "type": "integer", "minimum": 1 },
+            "hardCeilingChars": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "questionsPerRound": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "canonicalStrings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["wrong", "right"],
+            "properties": {
+              "wrong": { "type": "string", "minLength": 1 },
+              "right": { "type": "string", "minLength": 1 },
+              "note": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
       }
     },
     "prTrain": {
@@ -40,7 +62,8 @@
           "required": ["guidance", "enforce"],
           "properties": {
             "guidance": { "type": "string" },
-            "enforce": { "const": false }
+            "enforce": { "const": false },
+            "repoHardCapLines": { "type": "integer", "minimum": 1 }
           }
         },
         "branchPrefix": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._/-]+$" },

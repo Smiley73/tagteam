@@ -15,6 +15,10 @@ const identity = `sha256:${"a".repeat(64)}`;
 // payload: the paths are validated at the config layer and the rule itself is
 // the workflow speaking, not evidence being quoted.
 const POLICY_BRIEF = "This repository states its own engineering rules in: CONTRIBUTING.md. Read them before you decide.";
+// The size budget and the split rule reach Codex the same way: as the workflow's
+// own words, not as evidence to be weighed.
+const BUDGET_BRIEF = "Keep the plan under 25000 characters.";
+const SPLIT_BRIEF = "Default to one pull request.";
 
 function fixture(planMarkdown = "# Plan\n\nDo the work.") {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-provider-"));
@@ -293,7 +297,7 @@ test("composed Codex requests carry concrete UI and PR-size settings from disk",
   composePrompt({
     template: path.join(root, "prompts", "plan-draft-codex.md"),
     out: draftOut,
-    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }],
+    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }, { name: "BUDGET", text: BUDGET_BRIEF }],
     fences: [
       { name: "GOAL", file: goalPath, json: true },
       { name: "PROJECT_CONFIG", file: configPath, json: true }
@@ -314,7 +318,7 @@ test("composed Codex requests carry concrete UI and PR-size settings from disk",
   composePrompt({
     template: path.join(root, "prompts", "plan-draft-codex.md"),
     out: noUiOut,
-    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }],
+    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }, { name: "BUDGET", text: BUDGET_BRIEF }],
     fences: [
       { name: "GOAL", file: goalPath, json: true },
       { name: "PROJECT_CONFIG", file: configPath, json: true }
@@ -328,7 +332,7 @@ test("composed Codex requests carry concrete UI and PR-size settings from disk",
   composePrompt({
     template: path.join(root, "prompts", "plan-decompose-codex.md"),
     out: decomposeOut,
-    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }],
+    vars: [{ name: "WORKTREE", text: "/repo" }, { name: "POLICY", text: POLICY_BRIEF }, { name: "SPLIT", text: SPLIT_BRIEF }],
     fences: [
       { name: "PROJECT_CONFIG", file: configPath, json: true },
       { name: "PLAN", file: planPath, json: false },
