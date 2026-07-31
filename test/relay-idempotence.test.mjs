@@ -1685,7 +1685,10 @@ test("planning persists questions introduced by the decomposition review", async
 
   assert.equal(result.openQuestions.includes("Who owns rollback?"), true);
   assert.equal(labels.includes("plan:merge-final-questions"), true);
-  assert.equal(labels.includes("plan:verify-final-questions"), true);
+  // The merge is the whole step. There is no second pass reading the sidecar
+  // back to compare it against the run's tally: those two lists are not the
+  // same list, and requiring them to match stopped a correct plan.
+  assert.equal(labels.includes("plan:verify-final-questions"), false);
   assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
 });
 

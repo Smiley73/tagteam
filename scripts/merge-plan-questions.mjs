@@ -59,6 +59,11 @@ export function mergePlanQuestions(questionsFile, additionalQuestions) {
   const canonical = canonicalJson(merged);
   return {
     ok: true,
+    // The merged list itself, so a caller does not have to reconstruct it from
+    // its own memory. This file is the one a human is asked from, and the run's
+    // running tally is not the same list: it only ever grows, while the sidecar
+    // is meant to shrink as revisions resolve things.
+    questions: merged,
     payloads: [{
       name: "OPEN_QUESTIONS",
       label: "open-questions",

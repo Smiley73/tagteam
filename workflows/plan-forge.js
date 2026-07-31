@@ -520,6 +520,7 @@ const payloadVerifySchema = {
   required: ["ok"],
   properties: {
     ok: { type: "boolean" },
+    questions: { type: "array", items: { type: "string" } },
     payloads: {
       type: "array",
       items: {
@@ -819,7 +820,7 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, fi
       model,
       schema: payloadVerifySchema
     });
-    if (result?.ok) return;
+    if (result?.ok) return result;
     if (result && !result.ok) {
       throw new Error(payloadNotSaved({ what: "final open questions", file, detail: result.error }));
     }
@@ -1994,10 +1995,27 @@ async function main(raw) {
   // Normalizes the question sidecar to exactly what this pass reports and binds
   // the resulting bytes. Both exits below use it, so a pass that stops at an
   // unresolved critique leaves the same resumable record as one that finishes.
+  // The sidecar is the answer, not a copy of one to be checked against memory.
+  //
+  // This used to compare the merged file against dedupeQuestions([...questions,
+  // ...extra]) and stop the pass on any difference. Those two can only agree by
+  // luck. `questions` is a running tally that never removes anything: it is
+  // seeded from the draft and pushed to by every review round and every
+  // revision. The sidecar holds the current set instead, and dedupe matches on
+  // exact normalized text, so any question a later round rephrases lives in the
+  // tally twice and in the sidecar once. The gap therefore widens as a plan is
+  // worked, which is the opposite of what a correctness check should do. It
+  // stopped a real 12-pass plan whose sidecar was verified afterwards to be
+  // complete and correct, and the drift tolerance never applied because
+  // adoptSavedToken defaults drift to false.
+  //
+  // So the merge script — deterministic plumbing that reads the file, merges,
+  // and writes it back atomically — now returns the list it produced, and that
+  // list is what this pass reports. The command reads the sidecar itself, so the
+  // file was always the real answer; only the check disagreed with it.
   const settleQuestions = async (extra, phaseName) => {
-    const finalQuestions = dedupeQuestions([...questions, ...extra]);
     const file = `${draft.plan_path}.questions.json`;
-    await mergeFinalQuestions({
+    const merged = await mergeFinalQuestions({
       command: [
         `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
         `"${file}"`,
@@ -2008,25 +2026,12 @@ async function main(raw) {
       model: relayModel,
       file
     });
-    const payloads = await verifySaved({
-      command: verifyCommand({
-        pluginRoot: input.pluginRoot,
-        payloads: [{ name: "OPEN_QUESTIONS", file, json: true }],
-        expects: { OPEN_QUESTIONS: expectJson(finalQuestions) }
-      }),
-      label: "plan:verify-final-questions",
-      phase: phaseName,
-      model: relayModel,
-      what: "final open questions",
-      file
-    });
-    adoptSavedToken({
-      payload: payloads.find((payload) => payload?.name === "OPEN_QUESTIONS") ?? null,
-      expected: expectJson(finalQuestions),
-      expectedChars: canonicalJson(finalQuestions).length,
-      what: "final open questions",
-      file
-    });
+    // A relay that lost the payload but confirmed the merge leaves the file
+    // correct and this list absent. The command reads the sidecar itself, so
+    // falling back to the run's tally costs a superset, never a lost question.
+    const finalQuestions = Array.isArray(merged?.questions)
+      ? merged.questions
+      : dedupeQuestions([...questions, ...extra]);
     return { finalQuestions, finalQuestionsPath: file };
   };
 
