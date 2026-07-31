@@ -116,6 +116,7 @@ async function forge({
   reviewRounds = 1,
   largePlanWarningChars,
   continuation = false,
+  resume = null,
   review = () => APPROVE,
   corrupt = (_label, planMarkdown) => planMarkdown,
   corruptManifest = (manifest) => manifest,
@@ -185,7 +186,7 @@ async function forge({
     if (label.startsWith("plan:merge-final-questions")) return { ok: true };
     if (label.startsWith("plan:verify-")
       || label.startsWith("plan:prepare-continuation")
-      || label.startsWith("plan:publish-continuation")) {
+      || label.startsWith("plan:publish-")) {
       const result = runCommand(commandFrom(prompt));
       if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
       const parsed = JSON.parse(result.stdout.trim());
@@ -228,6 +229,10 @@ async function forge({
       ],
       openQuestions: ["Choose deployment", "Choose cache"],
       uiDecisions: []
+    } : {}),
+    ...(resume ? {
+      seedPlan: { path: resume.seedPath },
+      resumeRound: resume.round
     } : {}),
     config: {
       planning: {
@@ -549,15 +554,43 @@ test("a last revision that left a blocking critique stops the pass before the ma
   assert.equal(prompts.has("plan:manifest"), false);
   assert.equal(prompts.has("plan:decompose"), false);
 
+  // An uncleared revision is never the integrated plan, so a resume interrupted
+  // here re-reviews it instead of trusting it. It stays a discoverable round
+  // input, with the record a continuation seeds from beside it.
+  const uncleared = path.join(planDir, "drafts/pass-1-round-2-input.md");
+  assert.equal(result.planPath, uncleared);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-integrated.md")), false);
+  assert.equal(result.questionsPath, `${uncleared}.questions.json`);
+  assert.equal(fs.existsSync(result.questionsPath), true);
+
   // The re-read got the critique to confirm and the plan by reference, never inline.
   const check = prompts.get("plan:claude-revision-check");
   assert.notEqual(check, undefined, [...prompts.keys()].join(", "));
   assert.equal(check.includes(fenced("critiques-to-confirm", JSON.stringify([BLOCKER], null, 2))), true);
-  assert.equal(check.includes(path.join(planDir, "drafts/pass-1-integrated.md")), true);
+  assert.equal(check.includes(uncleared), true);
+});
 
-  // A pass that stops early still leaves the record a continuation resumes from.
-  assert.equal(result.questionsPath, path.join(planDir, "drafts/pass-1-integrated.md.questions.json"));
-  assert.equal(fs.existsSync(result.questionsPath), true);
+test("resuming past the last round re-reviews an uncleared revision instead of decomposing it", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-uncleared-resume-"));
+  // The interruption this guards: the final round's revision was saved with a
+  // blocker still open, and the run died before anything confirmed it. The
+  // critiques went with that run, so nothing in memory can gate the resume.
+  await forge({ planDir, review: () => REVISE });
+  const uncleared = path.join(planDir, "drafts/pass-1-round-2-input.md");
+  assert.equal(fs.existsSync(uncleared), true);
+
+  // `/tagteam:plan --resume` restarts past the configured last round from that file.
+  const { result, prompts } = await forge({
+    planDir,
+    resume: { round: 2, seedPath: uncleared },
+    review: () => APPROVE
+  });
+
+  // A real round judged it rather than the manifest being built on trust.
+  assert.deepEqual(result.completedRounds, [2]);
+  assert.equal(prompts.has("plan:claude-review:2"), true);
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.planPath, path.join(planDir, "drafts/pass-1-integrated.md"));
 });
 
 test("a last revision that answered its critique carries on to the manifest", async () => {
@@ -571,6 +604,17 @@ test("a last revision that answered its critique carries on to the manifest", as
   assert.equal(result.status, "needs-questions-or-approval");
   assert.notEqual(result.manifest, null);
   assert.notEqual(result.prTrain, null);
+
+  // Clearing it is what publishes the integrated plan, byte for byte from the
+  // round input the re-read judged, and that is what the manifest was built from.
+  const integrated = path.join(planDir, "drafts/pass-1-integrated.md");
+  assert.equal(result.planPath, integrated);
+  assert.equal(
+    normalizeText(fs.readFileSync(integrated, "utf8")),
+    normalizeText(fs.readFileSync(path.join(planDir, "drafts/pass-1-round-2-input.md"), "utf8"))
+  );
+  // Publication leaves the durable checksum every later read of this plan enforces.
+  assert.equal(fs.existsSync(`${integrated}.continuation-receipt.json`), true);
 });
 
 test("a draft edited after it was verified still stops the pass before Codex", async () => {

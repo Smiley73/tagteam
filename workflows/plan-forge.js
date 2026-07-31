@@ -1055,8 +1055,12 @@ async function main(raw) {
   // The draft entering round n; resume restarts a round from the same text it reviewed.
   const draftPath = (round) => `${input.planDir}/drafts/${passId}-round-${round}-input.md`;
   // Every pass ends at one file: the plan the manifest, the train, and the
-  // cross-check are all built from. Whatever produced it — a continuation or the
-  // last revision of a cross-review — writes it here.
+  // cross-check are all built from. Whatever produced it — a continuation or a
+  // cross-review revision — writes it here, and only once something cleared it:
+  // a round that ended with nothing blocking or major, or a re-read that
+  // confirmed the last revision answered what its round raised. Its existence is
+  // therefore the pass's clearance record, which is what makes an interrupted
+  // run resume into another check rather than past one.
   const integratedPath = `${input.planDir}/drafts/${passId}-integrated.md`;
   // This is deliberately outside drafts/: resume must not mistake the seed copy
   // for a completed continuation if the drafter is interrupted mid-edit.
@@ -1067,6 +1071,18 @@ async function main(raw) {
     ? (resumeRound <= lastRound ? draftPath(resumeRound) : integratedPath)
     : null;
   const seedPlanPath = seedPlanReference ?? inferredSeedPath;
+  // A resume seeded past the configured last round from a round input rather
+  // than from the integrated plan is an uncleared final revision: the pass saved
+  // it and was interrupted before anything confirmed it answered that round's
+  // critiques. Those critiques died with that run, so this invocation re-derives
+  // them with a real round instead of handing an unchecked plan to the manifest.
+  // The integrated path is the opposite signal — nothing writes it until a check
+  // has cleared it — so a resume seeded from it skips cross-review as before.
+  const unclearedRevision = Boolean(resumeRound)
+    && !continuation
+    && resumeRound > lastRound
+    && seedPlanPath !== integratedPath;
+  const finalRound = unclearedRevision ? resumeRound : lastRound;
   const goalPath = input.goalFile ?? `${input.planDir}/goal.json`;
   const configPath = input.configPath ?? `${input.worktree}/.tagteam/config.json`;
   const useClaude = runPolicy.reasoningProvider !== "codex";
@@ -1500,7 +1516,7 @@ async function main(raw) {
   let lastCodexReview = null;
   let lastReviewArtifact = null;
 
-  for (let round = resumeRound || 1; round <= lastRound; round += 1) {
+  for (let round = resumeRound || 1; round <= finalRound; round += 1) {
     phase(`Cross-review ${round}`);
     const planFile = draft.plan_path;
     const requestSeed = (await sha256(JSON.stringify({
@@ -1695,21 +1711,24 @@ async function main(raw) {
     // provider this policy never enabled rather than a silent approval.
     lastCodexReview = codexReview ?? null;
     lastReviewArtifact = artifact;
-    const roundIssues = gatingIssues([
+    // Severity decides this, not the verdict. The schema lets a reviewer return
+    // `revise` while listing nothing above minor, and minor feedback is never a
+    // reason to buy another round: the revision below runs either way and folds
+    // it in. Reading the verdict here would spend two more reviews on polish.
+    unresolvedIssues = dedupeIssues(gatingIssues([
       ...(claudeReview?.issues ?? []),
       ...(codexReview?.issues ?? [])
-    ]);
-    const roundClean = roundIssues.length === 0
-      && (claudeReview?.verdict ?? "approve") === "approve"
-      && (codexReview?.verdict ?? "approve") === "approve";
-    unresolvedIssues = roundClean ? [] : dedupeIssues(roundIssues);
+    ]));
+    const roundClean = unresolvedIssues.length === 0;
 
-    // The last revision of a pass is that pass's finished plan, so it lands on the
-    // one file the manifest, the train, and the cross-check all read. A round
-    // every reviewer approved is the last one: further rounds would re-read a
-    // plan nobody objected to and pay for two more reviews to say so again, so
-    // this revision writes the finished plan instead of the next round's input.
-    const revisedFile = round < lastRound && !roundClean ? draftPath(round + 1) : integratedPath;
+    // A round that left nothing blocking or major behind is the last one, and its
+    // revision is this pass's finished plan. A round that did leave something
+    // writes the next round's input instead — even at the configured last round,
+    // where the re-read below decides whether that file becomes the finished
+    // plan. So the integrated draft exists only once some check cleared it, and
+    // a run interrupted before that clearance leaves a round input for resume to
+    // review rather than a finished plan for it to trust.
+    const revisedFile = roundClean ? integratedPath : draftPath(round + 1);
     if (useClaude) {
       const result = await planAgent([
         "Revise the plan by resolving every supported critique. Preserve valid details and do not add a review transcript.",
@@ -1809,8 +1828,10 @@ async function main(raw) {
     planExpect = draft.savedToken;
     questions.push(...(draft.open_questions ?? []));
     uiDecisions.push(...(draft.ui_decisions ?? []));
-    if (roundClean && round < lastRound) {
-      log(`Every configured reviewer approved plan round ${round} with nothing blocking or major left, so cross-review stopped there instead of running ${lastRound - round} more round${lastRound - round === 1 ? "" : "s"} against a plan nobody objected to.`);
+    if (roundClean) {
+      if (round < finalRound) {
+        log(`Plan round ${round} left nothing blocking or major, so cross-review stopped there instead of running ${finalRound - round} more round${finalRound - round === 1 ? "" : "s"} against a plan with no gating objection left.`);
+      }
       break;
     }
   }
@@ -1924,7 +1945,8 @@ async function main(raw) {
   // the manifest. So when that round left something blocking or major behind,
   // one cheap re-read asks whether the revision actually landed it, before the
   // pass pays for a manifest, a train, and a cross-check built on a plan with a
-  // known hole. A clean round has nothing to re-read and skips this entirely.
+  // known hole. A clean round has nothing to re-read and skips this entirely,
+  // because its revision was already published as the integrated plan.
   //
   // Claude does the re-reading wherever it is enabled, because every critique
   // this pass raised is already in memory and can be handed over whole. Codex
@@ -1997,6 +2019,32 @@ async function main(raw) {
         questionsPath: settled.finalQuestionsPath
       });
     }
+    // Cleared, so this revision becomes the pass's finished plan. Deterministic
+    // plumbing copies the checksum-bound file and its sidecars; no model retypes
+    // a plan to move it. Publishing last is what makes the integrated path mean
+    // "some check cleared this": a run interrupted anywhere above leaves only the
+    // round input, which resume reviews rather than trusts.
+    await stageClaudeContinuation({
+      command: [
+        `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
+        `--source "${draft.plan_path}"`,
+        `--target "${integratedPath}"`,
+        `--expect "${planExpect}"`
+      ].join(" "),
+      label: "plan:publish-cleared-revision",
+      phaseName: "Revision check",
+      model: relayModel,
+      what: "cleared final plan revision",
+      file: integratedPath
+    });
+    const published = await recordPlanFile({
+      file: integratedPath,
+      label: "plan:verify-cleared-revision",
+      phaseName: "Revision check",
+      what: "cleared final plan revision"
+    });
+    draft = { ...draft, ...published };
+    planExpect = draft.savedToken;
   }
 
   phase("Manifest");
