@@ -121,6 +121,8 @@ Per-pull-request file lists are never written. Each one is the union of the file
 
 Over the plan: the size budget, revision history a subtractive revision should have deleted, missing template sections, and the exact strings `planning.canonicalStrings` pins — an ASCII arrow where a contract requires a glyph is a rewrite, not a round.
 
+A pass that runs no cross-review round at all — a continuation integrating human answers, a resume seeded from a plan an earlier round already cleared — is checked once before the manifest instead. Without that, the one entry that skips the loop is the one that buys a manifest, a train, and a full cross-check before anyone learns the plan is over its ceiling.
+
 Over the manifest and the train: every task landing in exactly one pull request; task and pull-request dependency graphs that resolve, do not cycle, and are listed in an order the train can be worked in; **every task dependency that crosses a pull-request boundary declared on the later pull request**, which is the decidable form of "a phase depends on its predecessor being merged, not opened"; atomic groups kept whole; line estimates against the repository's own cap; a split whose parts all fit inside it; a file list that disagrees with the tasks it holds; and a plan longer than the code it describes.
 
 Every one of those recurred across three or more rounds of a single real planning run. A defect a model has to rediscover on every round is one it will miss on some round.

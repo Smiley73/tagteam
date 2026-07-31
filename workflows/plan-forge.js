@@ -6,6 +6,7 @@ export const meta = {
     { title: "Draft", detail: "author a repository-grounded implementation plan" },
     { title: "Cross-review", detail: "the configured substantive provider or providers challenge each draft, stopping at the first round they all approve" },
     { title: "Revision check", detail: "re-read the last revision when that round left something blocking or major" },
+    { title: "Plan check", detail: "decide what needs no judgment about a plan that ran no cross-review round" },
     { title: "Manifest", detail: "turn the revised plan into dependency-valid tasks" },
     { title: "PR train", detail: "cut tasks at coherent review and merge seams" }
   ]
@@ -2631,6 +2632,39 @@ async function main(raw) {
     });
     draft = { ...draft, ...published };
     planExpect = draft.savedToken;
+  }
+
+  // Every entry that skips cross-review entirely reaches the manifest with a
+  // plan nothing in this pass has looked at: a continuation integrating human
+  // answers, and a resume seeded from an already-cleared integrated plan. The
+  // loop's own check runs at the top of a round, and these passes run no rounds,
+  // so without this they would buy a manifest, a train, and a full cross-check
+  // before anyone learned the plan was over its ceiling or still carrying its
+  // own revision history — which is the whole thing that check exists to stop.
+  if (!reviews.length) {
+    phase("Plan check");
+    const entryLint = await runPlanLint({
+      command: lintCommand({ plan: draft.plan_path, expects: { PLAN: planExpect } }),
+      label: "plan:lint-entry",
+      phase: "Plan check",
+      model: relayModel,
+      what: "plan entering the manifest",
+      file: draft.plan_path
+    });
+    if (entryLint.gating.length) {
+      log(`This pass ran no cross-review round, and the plan it would decompose has ${entryLint.gating.length} defect${entryLint.gating.length === 1 ? "" : "s"} that need no judgment, so it stopped before the manifest: ${entryLint.gating.map((issue) => issue.title).join("; ")}.`);
+      const settled = await settleQuestions([], "Plan check");
+      return planOutcome({
+        status: "needs-plan-revision",
+        unresolvedIssues: entryLint.gating,
+        revisionCheck: null,
+        decompositionReview: null,
+        handoffReady: false,
+        handoffIssues: [],
+        openQuestions: settled.finalQuestions,
+        questionsPath: settled.finalQuestionsPath
+      });
+    }
   }
 
   phase("Manifest");

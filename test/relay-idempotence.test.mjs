@@ -1479,7 +1479,11 @@ function planResponder(dropOnce) {
     }
     if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
-    if (label.startsWith("plan:publish-")) return publishResponse(label, prompt);
+    // Both halves of stage-plan-continuation.mjs: it copies a checksum-bound
+    // file between workflow-owned paths and reports what it copied.
+    if (label.startsWith("plan:publish-") || label.startsWith("plan:prepare-")) {
+      return publishResponse(label, prompt);
+    }
     if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
       return {
         ok: true,
@@ -1926,6 +1930,51 @@ test("a plan the deterministic check stops never buys a reviewer", async () => {
   // model asked to agree with it.
   assert.equal(labels.includes("plan:lint-revision-check"), true);
   assert.equal(labels.includes("plan:claude-revision-check"), false);
+  assert.equal(result.status, "needs-questions-or-approval", result.message);
+});
+
+// A resume seeded from an already-cleared integrated plan, and a continuation
+// integrating human answers, both run no cross-review round at all. Without a
+// check on that path they would buy a manifest, a train, and a full cross-check
+// before anyone learned the plan was over its ceiling.
+test("a pass that runs no round still checks the plan before it decomposes one", async () => {
+  const base = planResponder([]);
+  const finding = {
+    severity: "blocking",
+    title: "The plan is 203725 characters, over its 35000-character ceiling",
+    detail: "Compress it, or split the feature into separate plans."
+  };
+  for (const entry of [
+    // Resumed past the last round from the pass's cleared plan.
+    { seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" }, resumeRound: 2 },
+    // A continuation carrying human answers.
+    { seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" }, decisions: [{ question: "Which rollout?", answer: "Staged" }] }
+  ]) {
+    const { result, labels } = await harness(
+      "workflows/plan-forge.js",
+      { ...PLAN_ARGS, ...entry },
+      base,
+      { lint: (label) => (label === "plan:lint-entry" ? lintResult([finding]) : cleanLint()) }
+    );
+
+    assert.equal(result.status, "needs-plan-revision", result.message);
+    assert.deepEqual(result.unresolvedIssues, [finding]);
+    // Nothing downstream was bought: no manifest, no train, no cross-check.
+    assert.equal(labels.includes("plan:manifest"), false);
+    assert.equal(labels.includes("plan:decompose"), false);
+    assert.equal(result.manifest, null);
+    assert.equal(result.handoffReady, false);
+  }
+});
+
+test("a clean plan on that path decomposes as before", async () => {
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" }, resumeRound: 2 },
+    planResponder([])
+  );
+
+  assert.equal(labels.includes("plan:lint-entry"), true);
   assert.equal(result.status, "needs-questions-or-approval", result.message);
 });
 
