@@ -511,19 +511,15 @@ const promptBuildSchema = {
   }
 };
 
-// What verify-payload.mjs reports about the files a step was told to write. The
-// checksum travels back to the workflow so the run can record what is actually on
-// disk rather than what the step said it wrote.
-// The merge helper's reply. Unlike a payload verification, the merged list is
-// required: it is what the pass reports and what a human is asked from, so a
-// reply missing it is a lost reply rather than a quiet downgrade to the run's
-// own tally.
+// The merge helper's reply. Like a payload verification, what the caller
+// requires on the success path is the OPEN_QUESTIONS bookkeeping; the merged
+// list is prose and travels only if the relay can carry it word for word.
 const mergedQuestionsSchema = {
   type: "object",
   additionalProperties: false,
-  // Not required here: an `ok:false` failure reply legitimately carries none, and
-  // rejecting it at the schema would hide the helper's own error text. The
-  // caller requires it on the success path instead.
+  // Neither `payloads` nor `questions` is required here: an `ok:false` failure
+  // reply legitimately carries neither, and rejecting it at the schema would
+  // hide the helper's own error text. The caller judges the success path.
   required: ["ok"],
   properties: {
     ok: { type: "boolean" },
@@ -550,6 +546,9 @@ const mergedQuestionsSchema = {
   }
 };
 
+// What verify-payload.mjs reports about the files a step was told to write. The
+// checksum travels back to the workflow so the run can record what is actually on
+// disk rather than what the step said it wrote.
 const payloadVerifySchema = {
   type: "object",
   additionalProperties: false,
@@ -568,6 +567,9 @@ const payloadVerifySchema = {
           file: { type: "string" },
           json: { type: "boolean" },
           chars: { type: "integer" },
+          // Present only where the command was asked to summarize a named array.
+          entries: { type: "integer" },
+          digest: { type: "string" },
           token: { type: "string" },
           expected: { type: ["string", "null"] },
           matches: { type: "boolean" }
@@ -635,6 +637,19 @@ function expectJson(value) {
   return `${text.length}:${fnv1a(text)}`;
 }
 
+// The load-bearing skeleton of a list-shaped artifact: one named array reduced to
+// the fields this workflow decides from, in order. Computed here exactly as
+// verify-payload.mjs computes it from the file, so the two can never disagree
+// about which tasks a manifest holds or how they group.
+function skeletonToken(entries, fields) {
+  return expectJson((entries ?? []).map((entry) => fields.map((field) => entry?.[field] ?? null)));
+}
+
+// What atomicGroupIssues decides from, and the whole of what a dropped or
+// regrouped task would change. Everything else in these two artifacts is prose.
+const MANIFEST_SKELETON = ["id", "atomicGroup"];
+const TRAIN_SKELETON = ["id", "taskIds"];
+
 function receiptFromText(file, text) {
   const normalized = normalizeText(text);
   return {
@@ -684,13 +699,14 @@ function composeCommand({ pluginRoot, template, out, vars = {}, fences = [], exp
 }
 
 function verifyCommand({
-  pluginRoot, payloads = [], expects = {}, expectTokenFiles = {},
+  pluginRoot, payloads = [], expects = {}, digests = {}, expectTokenFiles = {},
   expectTokenFilesIfPresent = {}, requireJson = []
 }) {
   return [
     `node "${pluginRoot}/scripts/verify-payload.mjs"`,
     ...payloads.map((payload) => `${payload.json ? "--payload-json" : "--payload"} "${payload.name}=${payload.file}"`),
     ...Object.entries(expects).filter(([, token]) => token).map(([name, token]) => `--expect "${name}=${token}"`),
+    ...Object.entries(digests).map(([name, spec]) => `--digest "${name}=${spec}"`),
     ...Object.entries(expectTokenFiles)
       .map(([name, file]) => `--expect-token-file "${name}=${file}"`),
     ...Object.entries(expectTokenFilesIfPresent)
@@ -840,19 +856,26 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
 // question array is encoded as inert hex in the command; the relay only launches
 // the helper and hands back its result.
 //
-// That result is what the pass reports, and the command asks a human from the
-// returned array rather than from the file, so the array is required rather than
-// optional: a reply without it is treated as not handed back and the merge is
-// run again, which is idempotent. Falling back to the run's own tally would
-// reintroduce exactly the stale and rephrased entries this step exists to stop
-// reporting. The helper computes its token from the same array it returns, so
-// checking one against the other catches a relay that altered the list in
-// transit without touching the checksum beside it.
+// What proves the merge ran is its OPEN_QUESTIONS bookkeeping: the sidecar's
+// path, character count, and checksum. That is required. The merged list itself
+// is not, because it is prose, and every other relay in this file exists to keep
+// prose off the relay entirely. Requiring it here both contradicted this step's
+// own instruction not to retype a question and made a compliant relay fatal:
+// three attempts, each obediently omitting the list, then a dead pass sitting on
+// a sidecar that was correct the whole time. It stopped a real plan twice.
+//
+// So an absent list is reported as null and the caller settles from the file,
+// which is the list a human is asked from anyway. Null is not a fallback to the
+// run's own tally: the tally only grows, and reporting it would reintroduce the
+// stale and rephrased entries this step exists to stop reporting. When the list
+// does travel, the helper computes its token from the same array it returns, so
+// checking one against the other catches a relay that altered it in transit
+// without touching the checksum beside it.
 async function mergeFinalQuestions({ command, label, phase: phaseName, model, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
-    "It atomically merges the saved decomposition review's open questions into the plan's question sidecar. Do not write, edit, summarise, or retype any question yourself.",
-    "Return the command's JSON stdout unchanged. If it exits non-zero, return ok=false with its exact stderr as error."
+    "It atomically merges the saved decomposition review's open questions into the plan's question sidecar. Do not author, answer, edit, summarise, or reorder any question yourself.",
+    "Return the command's JSON stdout unchanged: ok, its payloads array, and the questions array it printed copied across verbatim. If copying the questions would mean rewording any of them, return ok and payloads alone; the file it just wrote is what gets read. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
@@ -863,16 +886,22 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, fi
       model,
       schema: mergedQuestionsSchema
     });
-    if (result?.ok && Array.isArray(result.questions)) {
-      const saved = (result.payloads ?? []).find((payload) => payload?.name === "OPEN_QUESTIONS");
-      if (saved && saved.token !== expectJson(result.questions)) {
+    const saved = result?.ok
+      ? (result.payloads ?? []).find((payload) => payload?.name === "OPEN_QUESTIONS")
+      : null;
+    const list = Array.isArray(result?.questions) ? result.questions : null;
+    // Either half is proof the merge ran, so the step survives a relay dropping
+    // whichever half it finds awkward — the bookkeeping, or the prose it was
+    // just told not to reword. Only a reply carrying neither is a lost reply.
+    if (result?.ok && (saved || list)) {
+      if (saved && list && saved.token !== expectJson(list)) {
         throw new Error(payloadNotSaved({
           what: "final open questions",
           file,
           detail: `the returned list does not match the checksum reported beside it (${saved.token})`
         }));
       }
-      return result;
+      return { ...result, questions: list };
     }
     if (result && !result.ok) {
       throw new Error(payloadNotSaved({ what: "final open questions", file, detail: result.error }));
@@ -968,7 +997,23 @@ const SAVED_DRIFT_FRACTION = 0.005;
 // pass. The relay's own `matches` flag is ignored: the workflow compares the
 // checksum itself, and whatever it records is re-checked against the same file by
 // compose-prompt.mjs before anything is sent.
-function adoptSavedToken({ payload, expected, expectedChars, drift = false, what, file }) {
+//
+// `expectedDigest` is the stronger check where one exists. A whole-document
+// checksum answers "are these the same bytes", and two emissions of one 100KB
+// artifact can differ by a reworded clause without anything being lost. The
+// digest answers "are these the same tasks, grouped the same way", which is what
+// this pass actually decides from and has one exact answer either way. Where the
+// caller supplies it, it is enforced exactly and the prose is allowed to drift.
+function adoptSavedToken({
+  payload, expected, expectedChars, expectedDigest, expectedEntries, drift = false, what, file
+}) {
+  if (expectedDigest !== undefined && payload?.digest !== expectedDigest) {
+    throw new Error(payloadNotSaved({
+      what,
+      file,
+      detail: `the file holds ${payload?.entries ?? "an unreadable number of"} entries (${payload?.digest ?? "unreadable"}) where this run produced ${expectedEntries} (${expectedDigest})`
+    }));
+  }
   if (payload?.token === expected) return expected;
   const chars = payload?.chars ?? 0;
   const distance = Math.abs(chars - expectedChars);
@@ -2079,10 +2124,10 @@ async function main(raw) {
       model: relayModel,
       file
     });
-    // No fallback to the run's tally. The command asks a human from what this
-    // returns, so answering with the tally would ask about entries the sidecar
-    // had already settled or rephrased. mergeFinalQuestions either hands back
-    // the merged list or fails, and re-running the merge is idempotent.
+    // No fallback to the run's tally, ever: answering with it would ask about
+    // entries the sidecar had already settled or rephrased. Either the merged
+    // list travelled back, or this is null and the path below is the answer.
+    // Both are exact; only one of them fits through a relay.
     return { finalQuestions: merged.questions, finalQuestionsPath: file };
   };
 
@@ -2280,10 +2325,17 @@ async function main(raw) {
   for (const issue of atomicIssues) log(issue.title);
 
   // Both handoff artifacts are read back in one command, so the pass learns what
-  // was really saved before it assembles a cross-check around it. Canonical JSON
-  // already absorbs key order and indentation, which leaves a faithful copy
-  // nothing to differ by: unlike the plan text, these must match exactly, and a
-  // dropped task or pull request stops the pass here.
+  // was really saved before it assembles a cross-check around it. What must hold
+  // exactly is that every task and every pull request survived the write, so the
+  // command counts them and a dropped one stops the pass here.
+  //
+  // The bytes themselves are allowed the same drift the plan text gets. This used
+  // to demand them identical, on the reasoning that canonical JSON absorbs key
+  // order and indentation and so leaves a faithful copy nothing to differ by.
+  // That is true of a faithful copy and false of these: the step is asked to
+  // persist a 100KB artifact and return it, and a model doing both slips — a
+  // reworded doneCriteria, a retyped digit. Two real passes died on differences
+  // of 1 and 196 characters with every task and pull request present in both.
   const handoffExpects = { MANIFEST: expectJson(manifest), PR_TRAIN: expectJson(train) };
   const savedHandoff = await verifySaved({
     command: verifyCommand({
@@ -2292,7 +2344,11 @@ async function main(raw) {
         { name: "MANIFEST", file: manifestPath, json: true },
         { name: "PR_TRAIN", file: trainPath, json: true }
       ],
-      expects: handoffExpects
+      expects: handoffExpects,
+      digests: {
+        MANIFEST: `tasks:${MANIFEST_SKELETON.join(",")}`,
+        PR_TRAIN: `prs:${TRAIN_SKELETON.join(",")}`
+      }
     }),
     label: "plan:verify-handoff",
     phase: "PR train",
@@ -2305,6 +2361,9 @@ async function main(raw) {
     payload: savedPayload("MANIFEST"),
     expected: handoffExpects.MANIFEST,
     expectedChars: canonicalJson(manifest).length,
+    expectedDigest: skeletonToken(manifest.tasks, MANIFEST_SKELETON),
+    expectedEntries: manifest.tasks.length,
+    drift: true,
     what: "manifest",
     file: manifestPath
   });
@@ -2312,6 +2371,9 @@ async function main(raw) {
     payload: savedPayload("PR_TRAIN"),
     expected: handoffExpects.PR_TRAIN,
     expectedChars: canonicalJson(train).length,
+    expectedDigest: skeletonToken(train.prs, TRAIN_SKELETON),
+    expectedEntries: train.prs.length,
+    drift: true,
     what: "pull-request train",
     file: trainPath
   });

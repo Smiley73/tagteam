@@ -33,6 +33,7 @@ export function parseArgs(argv) {
     expects: new Map(),
     expectTokenFiles: new Map(),
     expectTokenFilesIfPresent: new Map(),
+    digests: new Map(),
     requireJson: []
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -52,6 +53,13 @@ export function parseArgs(argv) {
     } else if (key === "--expect-token-file-if-present") {
       const [name, file] = splitPair(key, value);
       options.expectTokenFilesIfPresent.set(name, file);
+    } else if (key === "--digest") {
+      const [name, spec] = splitPair(key, value);
+      const colon = spec.indexOf(":");
+      if (colon <= 0) throw new Error(`--digest expects NAME=array:field[,field], got: ${value}`);
+      const fields = spec.slice(colon + 1).split(",").filter(Boolean);
+      if (!fields.length) throw new Error(`--digest names no fields: ${value}`);
+      options.digests.set(name, { arrayKey: spec.slice(0, colon), fields });
     } else if (key === "--require-json") options.requireJson.push(value);
     else throw new Error(`unexpected argument: ${key}`);
   }
@@ -71,7 +79,19 @@ export function parseArgs(argv) {
       throw new Error(`--expect-token-file-if-present names ${name}, but no --payload or --payload-json supplies it`);
     }
   }
+  for (const name of options.digests.keys()) {
+    if (!options.payloads.some((payload) => payload.name === name && payload.json)) {
+      throw new Error(`--digest names ${name}, but no --payload-json supplies it`);
+    }
+  }
   return options;
+}
+
+// The load-bearing skeleton of a list-shaped artifact: one named array reduced to
+// the fields a caller decides from, in order. Everything else in the document is
+// prose, and prose is what two emissions of one 100KB artifact disagree about.
+export function skeletonToken(entries, fields) {
+  return expectToken(canonicalJson((entries ?? []).map((entry) => fields.map((field) => entry?.[field] ?? null))));
 }
 
 function readExpectedToken(file, required) {
@@ -95,7 +115,13 @@ function readExpectedToken(file, required) {
 // Compared exactly as compose-prompt.mjs compares it: text by its normalized
 // form, JSON by its canonical one, so key order and indentation stay formatting
 // rather than content and the two scripts can never disagree about one file.
-function readPayload({ name, file, json }, expected) {
+//
+// `digest` additionally reports a checksum over the named array's load-bearing
+// fields alone. A document's checksum answers "are these the same bytes", which
+// a model that persists and returns the same 100KB artifact twice can fail on a
+// reworded clause. Which tasks survived the write, and how they group, is the
+// question the caller actually gates on, and it has one exact answer either way.
+function readPayload({ name, file, json }, expected, digest) {
   const label = fenceLabel(name);
   const resolved = path.resolve(file);
   let raw;
@@ -107,6 +133,7 @@ function readPayload({ name, file, json }, expected) {
   if (normalizeText(raw) === "") throw new Error(`The ${label} section at ${resolved} is empty.`);
 
   let compared;
+  let count;
   if (json) {
     let parsed;
     try {
@@ -115,6 +142,13 @@ function readPayload({ name, file, json }, expected) {
       throw new Error(`The ${label} section at ${resolved} is not readable JSON (${error.message}).`);
     }
     compared = canonicalJson(parsed);
+    if (digest !== undefined) {
+      const entries = parsed?.[digest.arrayKey];
+      if (!Array.isArray(entries)) {
+        throw new Error(`The ${label} section at ${resolved} has no ${digest.arrayKey} array to summarize.`);
+      }
+      count = { entries: entries.length, token: skeletonToken(entries, digest.fields) };
+    }
   } else {
     compared = normalizeText(raw);
   }
@@ -127,6 +161,7 @@ function readPayload({ name, file, json }, expected) {
     json: Boolean(json),
     chars: compared.length,
     token,
+    ...(count === undefined ? {} : { entries: count.entries, digest: count.token }),
     expected: expected ?? null,
     matches: expected === undefined ? true : token === expected
   };
@@ -149,7 +184,11 @@ export function verifyPayloads(options) {
     expects.set(name, saved.token);
     durable.set(name, saved);
   }
-  const payloads = options.payloads.map((payload) => readPayload(payload, expects.get(payload.name)));
+  const payloads = options.payloads.map((payload) => readPayload(
+    payload,
+    expects.get(payload.name),
+    options.digests?.get(payload.name)
+  ));
   for (const payload of payloads) {
     const saved = durable.get(payload.name);
     if (saved && !payload.matches) {

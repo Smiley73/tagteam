@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { skeletonToken as skeletonOf } from "../scripts/verify-payload.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
@@ -28,6 +29,13 @@ function loadSandboxedWorkflow(file) {
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
 const MANIFEST = { version: 1, goal: "g", tasks: [{ id: "t1", title: "t", description: "d", complexity: "simple", files: ["a.js"], dependsOn: [], doneCriteria: ["done"] }] };
 const TRAIN = { version: 1, base: null, prs: [{ id: "pr1", title: "t", scope: "s", taskIds: ["t1"], dependsOn: [], userVisible: "yes", userVisibleReason: "r", sizeEstimate: "small" }] };
+
+// What verify-payload.mjs reports back about the two handoff artifacts when the
+// command is asked to summarize them.
+const HANDOFF_FIXTURES = {
+  MANIFEST: { entries: MANIFEST.tasks, fields: ["id", "atomicGroup"] },
+  PR_TRAIN: { entries: TRAIN.prs, fields: ["id", "taskIds"] }
+};
 
 const option = (label) => ({ label, sketch: `[ ${label} ]`, why: `because ${label}` });
 const decision = (id, surface, precedent) => ({
@@ -85,10 +93,16 @@ async function forge({
       return { ok: true, questions: hex ? JSON.parse(new TextDecoder().decode(bytes)) : [] };
     }
     if (label.startsWith("plan:verify-")) {
+      const digested = new Set([...prompt.matchAll(/--digest "([A-Z_]+)=/g)].map(([, name]) => name));
       return {
         ok: true,
         payloads: [...prompt.matchAll(/--expect "([A-Z_]+)=(\d+):([0-9a-f]{8})"/g)]
-          .map(([, name, chars, hash]) => ({ name, token: `${chars}:${hash}`, chars: Number(chars) }))
+          .map(([, name, chars, hash]) => {
+            const payload = { name, token: `${chars}:${hash}`, chars: Number(chars) };
+            if (!digested.has(name)) return payload;
+            const { entries, fields } = HANDOFF_FIXTURES[name];
+            return { ...payload, entries: entries.length, digest: skeletonOf(entries, fields) };
+          })
       };
     }
     if (label.endsWith("-request") || label.includes("request:")) {
