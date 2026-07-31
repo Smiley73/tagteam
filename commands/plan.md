@@ -67,7 +67,9 @@ A resumed pass seeds itself from these files, so pass them through byte for byte
 
 If the workflow fails before it can return an accounting envelope, do not show the raw error. Render `messages.mjs planInterrupted` with `--artifact` set to the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
 
-If the workflow returns open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
+The outstanding questions are whatever `questionsPath` holds; the workflow merged them into that file and recorded its checksum. `openQuestions` is a copy of it for convenience, and `null` means the copy did not survive the relay, not that there are none. Read `questionsPath` whenever `openQuestions` is null, and never substitute `[]` for a file you could not read: stop instead, the same as anywhere else a question sidecar is unreadable.
+
+If there are open questions, deduplicate them case-insensitively and ask them all now in chunks of at most four using `AskUserQuestion`. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
 
 ## Interface decisions
 

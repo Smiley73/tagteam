@@ -684,20 +684,45 @@ test("a manifest saved with a task dropped stops the pass exactly, with no toler
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-decomposition-codex.json.prompt.md")), false);
 });
 
-test("a manifest saved the same length but not the same content still stops the pass", async () => {
-  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-swapped-manifest-"));
-  // Nothing about the size changed, so only the checksum can tell: the
-  // tolerance the plan text gets must not reach the handoff artifacts.
+// The step is asked to persist a manifest and return it, and a model doing both
+// slips: two real passes died here on differences of 1 and 196 characters with
+// every task present and identically grouped in both copies. The file is what
+// every later step reads, so a drifted word is adopted rather than fatal.
+test("a manifest whose prose drifted is adopted, and the run records the file", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-drifted-manifest-"));
+  const { result, verified, composed } = await forge({
+    planDir,
+    corruptManifest: (manifest) => ({
+      ...manifest,
+      tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, title: `${task.title}.` } : task))
+    })
+  });
+  assert.equal(result.status, "needs-questions-or-approval");
+
+  // What the cross-check is handed is the file, at the checksum the read
+  // reported — not the copy the run held when it asked for the write.
+  const saved = verified.flatMap((step) => step.payloads).find((payload) => payload.name === "MANIFEST");
+  assert.notEqual(saved, undefined);
+  const request = composed.find((item) => item.label === "plan:decomposition-request");
+  assert.match(request.command, new RegExp(`--expect "MANIFEST=${saved.token}"`));
+});
+
+// Drift is allowed in the prose, never in the skeleton. A task moving into an
+// atomic group is the same number of characters and changes what the pass
+// decides, so it is caught exactly rather than waved through as a slip.
+test("a manifest saved with a task regrouped stops the pass, whatever its length", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-regrouped-manifest-"));
   const { result } = await forge({
     planDir,
     corruptManifest: (manifest) => ({
       ...manifest,
-      tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, title: "Task 6" } : task))
+      tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, atomicGroup: "ship" } : task))
     })
   });
   assert.equal(result.status, "plan-interrupted");
   assert.match(result.message.split("\n")[0], /The manifest was not saved as the text this run produced/);
-  assert.match(result.message, /the file holds (\d+) characters .* where this run produced \1 /);
+  assert.match(result.message, /entries \(\d+:[0-9a-f]{8}\) where this run produced \d+ \(\d+:[0-9a-f]{8}\)/);
+  assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-decomposition-codex.json.prompt.md")), false);
 });
 
 test("every checksum a request checks was read back off the file it names", async () => {

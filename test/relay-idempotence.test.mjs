@@ -1315,11 +1315,34 @@ const TRAIN = {
   }]
 };
 
+// The skeleton digest verify-payload.mjs reports, computed the same way here so
+// a stub cannot claim a shape the real command never produces.
+function skeletonOf(entries, fields) {
+  return planToken(canonicalJson((entries ?? []).map((entry) => fields.map((field) => entry?.[field] ?? null))));
+}
+
+const HANDOFF_FIXTURES = {
+  MANIFEST: { entries: MANIFEST.tasks, fields: ["id", "atomicGroup"] },
+  PR_TRAIN: { entries: TRAIN.prs, fields: ["id", "taskIds"] }
+};
+
 // Models a payload file that holds exactly what the step returned: the checksum
-// the command reports back is the one the workflow asked it to expect.
-function verifyResponse(prompt) {
+// the command reports back is the one the workflow asked it to expect, and where
+// the command was asked for a skeleton digest it reports that too.
+function verifyResponse(prompt, fixtures = HANDOFF_FIXTURES) {
+  const digested = new Set([...prompt.matchAll(/--digest "([A-Z_]+)=/g)].map(([, name]) => name));
   const payloads = [...prompt.matchAll(/--expect "([A-Z_]+)=(\d+):([0-9a-f]{8})"/g)]
-    .map(([, name, chars, hash]) => ({ name, token: `${chars}:${hash}`, chars: Number(chars) }));
+    .map(([, name, chars, hash]) => {
+      const payload = { name, token: `${chars}:${hash}`, chars: Number(chars) };
+      if (!digested.has(name)) return payload;
+      const fixture = fixtures[name];
+      assert.notEqual(fixture, undefined, `no fixture models the ${name} skeleton`);
+      return {
+        ...payload,
+        entries: fixture.entries.length,
+        digest: skeletonOf(fixture.entries, fixture.fields)
+      };
+    });
   assert.notEqual(payloads.length, 0, `no --expect token in verify prompt: ${prompt.slice(0, 300)}`);
   return { ok: true, payloads };
 }
@@ -1701,6 +1724,101 @@ test("planning persists questions introduced by the decomposition review", async
   // same list, and requiring them to match stopped a correct plan.
   assert.equal(labels.includes("plan:verify-final-questions"), false);
   assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
+});
+
+// The shape a relay produces when it obeys this step's own instruction not to
+// retype any question: the command's bookkeeping travels back, the prose does
+// not. Canonical JSON is single-line and has no trailing whitespace, so the
+// plan-text normalizer that planToken applies leaves it untouched and the token
+// is the one merge-plan-questions.mjs computes.
+function mergedBookkeepingFrom(prompt) {
+  const canonical = canonicalJson(mergedQuestionsFrom(prompt).questions);
+  return {
+    ok: true,
+    payloads: [{
+      name: "OPEN_QUESTIONS",
+      label: "open-questions",
+      file: "/plans/slug/drafts/pass-1-integrated.md.questions.json",
+      json: true,
+      chars: canonical.length,
+      token: planToken(canonical),
+      expected: null,
+      matches: true
+    }]
+  };
+}
+
+// A relay that hands back the merge's bookkeeping without its list has run the
+// merge: the sidecar on disk is correct and its checksum travelled. Requiring
+// the prose too turned that into three retries and a dead pass, which is what
+// a real 13-pass plan hit twice on 0.4.3. The file is the answer, so the pass
+// settles from it rather than from a list the relay was told not to produce.
+test("a merge relay that returns bookkeeping without the list settles from the sidecar", async () => {
+  const baseResponder = planResponder([]);
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    (label, prompt, options) => {
+      if (label.startsWith("plan:merge-final-questions")) return mergedBookkeepingFrom(prompt);
+      if (label === "plan:codex-decomposition-review") {
+        return { ...APPROVE, open_questions: ["Who owns rollback?"] };
+      }
+      return baseResponder(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
+  // Null rather than the run's own tally: the tally only grows, and reporting it
+  // is exactly the stale-and-rephrased answer this step exists to stop giving.
+  // A null list means "read the sidecar", which is what the command already does.
+  assert.equal(result.openQuestions, null);
+  // One attempt was enough. The reply proved the merge ran, so nothing is retried.
+  assert.deepEqual(labels.filter((label) => label.startsWith("plan:merge-final-questions")),
+    ["plan:merge-final-questions"]);
+  assert.equal(result.usage.relayRetries, 0);
+});
+
+// The bookkeeping is the proof, so a reply carrying neither it nor the list is
+// still a lost reply: retried, then stopped with a resumable message.
+test("a merge relay that returns neither the list nor its bookkeeping is retried", async () => {
+  const baseResponder = planResponder([]);
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    (label, prompt, options) => {
+      if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+      return baseResponder(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /merge could not be confirmed after 3 attempts/);
+  assert.equal(labels.filter((label) => label.startsWith("plan:merge-final-questions")).length, 3);
+  assert.equal(result.usage.relayRetries, 2);
+});
+
+// A relay that alters the list in transit without touching the checksum beside
+// it is caught by comparing the two, and that check has to keep working now
+// that the list itself is optional.
+test("a merge relay that rewrites the list is caught by the checksum beside it", async () => {
+  const baseResponder = planResponder([]);
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    (label, prompt, options) => {
+      if (label.startsWith("plan:merge-final-questions")) {
+        return { ...mergedBookkeepingFrom(prompt), questions: ["a question nobody asked"] };
+      }
+      if (label === "plan:codex-decomposition-review") {
+        return { ...APPROVE, open_questions: ["Who owns rollback?"] };
+      }
+      return baseResponder(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /does not match the checksum reported beside it/);
 });
 
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
