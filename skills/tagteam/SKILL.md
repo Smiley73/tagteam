@@ -27,7 +27,7 @@ A complete editable example lives at `${CLAUDE_PLUGIN_ROOT}/examples/config.json
 
 | Key | Type | Meaning |
 |---|---|---|
-| `planning` | object | User-chosen Claude/Codex planning runtimes and cross-review rounds. Claude planning never uses low effort. |
+| `planning` | object | User-chosen Claude/Codex planning runtimes and `reviewRounds`, the ceiling on cross-review rounds rather than a fixed count. Claude planning never uses low effort. |
 | `prTrain.base` | string or null | Merge target. Null resolves once at ship start. |
 | `prTrain.mode` | enum | `github-pr` or `local-branch`. |
 | `prTrain.prSize` | object | Advisory prose only; `enforce` must be false. |
@@ -77,6 +77,14 @@ Two mechanisms then act on that channel, and they are gated differently on purpo
 The command asks in two steps and never one question per decision: one multi-select scan per three decisions, defaulting to keeping them all, then a single-select drill-down carrying each option's sketch as its preview only for the ones the user picked. Outcomes are recorded as ordinary decision rows, including the ones kept unchanged, so no later pass asks twice.
 
 None of this replaces the user-visible merge gate, which is not optional.
+
+## When cross-review stops
+
+`planning.reviewRounds` is a ceiling, not a quota. A round that leaves nothing blocking or major ends cross-review there: its revision writes `drafts/<passId>-integrated.md`, and the remaining rounds are not run. Repeating them would re-read a plan with no gating objection left and pay two more reviews to say so again. Severity decides this and the verdict does not: a reviewer may return `revise` while listing only minor issues, and minor feedback never buys another round — the revision runs either way and folds it in. The interface lens never participates in the judgment at all, because it is advisory.
+
+The other end is gated too. Every revision except the last is re-read by the round that follows it; the last one goes straight to the manifest. So when the final round left something blocking or major behind, one re-read asks whether that revision actually landed it, before the pass pays for a manifest, a train, and a cross-check built on a plan with a known hole. It is a regression check and nothing more: it judges only the critiques already raised and may not add its own. If any survive, the workflow returns `needs-plan-revision` with those issues and no manifest, and the plan is repaired through the same continuation that repairs a failed handoff cross-check.
+
+`drafts/<passId>-integrated.md` is what carries that guarantee across an interruption. Only a cleared plan is ever written there — a round that ended with nothing gating, a re-read that confirmed the last revision, or a continuation — so its presence is the pass's clearance record and it outranks every round input in the pass whatever the timestamps say. An uncleared final revision stays a plain `drafts/<passId>-round-<r>-input.md` with `r` past `reviewRounds`, which resume reviews as an ordinary round. A run interrupted between saving that revision and clearing it therefore resumes into the check rather than past it.
 
 ## Worktree and secret safety
 
@@ -187,7 +195,7 @@ The script is idempotent and verifies the result with `git check-ignore`, so `/t
 
 Resume parses artifacts and reconciles Git/GitHub before mutation. It never trusts conversation memory. A malformed review artifact means not converged.
 
-Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point and a `.ui-decisions.json` sidecar carrying the interface choices declared so far, `drafts/<passId>-integrated.md` (that pass's finished plan, written by its last cross-review revision or by a continuation, with the same sidecars), `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass manifest, PR train, prompts, and Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
+Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point and a `.ui-decisions.json` sidecar carrying the interface choices declared so far, `drafts/<passId>-integrated.md` (that pass's finished plan, written by a cleared cross-review revision or by a continuation, with the same sidecars), `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass manifest, PR train, prompts, and Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
 
 A pass cannot report success while that record is missing: the request that ends the pass is assembled from `drafts/<passId>-integrated.md` and refuses to build unless the draft is present, non-empty, matches the drafter's compact path/length/checksum receipt, and its `.questions.json` sidecar parses. The plan body never appears in the drafter's structured return. The `.ui-decisions.json` sidecar is deliberately not part of that hard record: a pass interrupted before it existed must still resume, and losing it costs a re-declaration rather than a plan.
 
