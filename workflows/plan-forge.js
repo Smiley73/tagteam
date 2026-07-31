@@ -514,13 +514,48 @@ const promptBuildSchema = {
 // What verify-payload.mjs reports about the files a step was told to write. The
 // checksum travels back to the workflow so the run can record what is actually on
 // disk rather than what the step said it wrote.
+// The merge helper's reply. Unlike a payload verification, the merged list is
+// required: it is what the pass reports and what a human is asked from, so a
+// reply missing it is a lost reply rather than a quiet downgrade to the run's
+// own tally.
+const mergedQuestionsSchema = {
+  type: "object",
+  additionalProperties: false,
+  // Not required here: an `ok:false` failure reply legitimately carries none, and
+  // rejecting it at the schema would hide the helper's own error text. The
+  // caller requires it on the success path instead.
+  required: ["ok"],
+  properties: {
+    ok: { type: "boolean" },
+    error: { type: "string" },
+    questions: { type: "array", items: { type: "string" } },
+    payloads: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "chars", "token"],
+        properties: {
+          name: { type: "string" },
+          label: { type: "string" },
+          file: { type: "string" },
+          json: { type: "boolean" },
+          chars: { type: "integer" },
+          token: { type: "string" },
+          expected: { type: ["string", "null"] },
+          matches: { type: "boolean" }
+        }
+      }
+    }
+  }
+};
+
 const payloadVerifySchema = {
   type: "object",
   additionalProperties: false,
   required: ["ok"],
   properties: {
     ok: { type: "boolean" },
-    questions: { type: "array", items: { type: "string" } },
     payloads: {
       type: "array",
       items: {
@@ -802,9 +837,17 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
 }
 
 // Runs the deterministic question-sidecar merge. The schema-bound, small
-// question array is encoded as inert hex in the command; Haiku only launches the
-// helper and relays its result. A follow-up verifySaved call binds the exact
-// final bytes.
+// question array is encoded as inert hex in the command; the relay only launches
+// the helper and hands back its result.
+//
+// That result is what the pass reports, and the command asks a human from the
+// returned array rather than from the file, so the array is required rather than
+// optional: a reply without it is treated as not handed back and the merge is
+// run again, which is idempotent. Falling back to the run's own tally would
+// reintroduce exactly the stale and rephrased entries this step exists to stop
+// reporting. The helper computes its token from the same array it returns, so
+// checking one against the other catches a relay that altered the list in
+// transit without touching the checksum beside it.
 async function mergeFinalQuestions({ command, label, phase: phaseName, model, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
@@ -818,9 +861,19 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, fi
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
-      schema: payloadVerifySchema
+      schema: mergedQuestionsSchema
     });
-    if (result?.ok) return result;
+    if (result?.ok && Array.isArray(result.questions)) {
+      const saved = (result.payloads ?? []).find((payload) => payload?.name === "OPEN_QUESTIONS");
+      if (saved && saved.token !== expectJson(result.questions)) {
+        throw new Error(payloadNotSaved({
+          what: "final open questions",
+          file,
+          detail: `the returned list does not match the checksum reported beside it (${saved.token})`
+        }));
+      }
+      return result;
+    }
     if (result && !result.ok) {
       throw new Error(payloadNotSaved({ what: "final open questions", file, detail: result.error }));
     }
@@ -2026,13 +2079,11 @@ async function main(raw) {
       model: relayModel,
       file
     });
-    // A relay that lost the payload but confirmed the merge leaves the file
-    // correct and this list absent. The command reads the sidecar itself, so
-    // falling back to the run's tally costs a superset, never a lost question.
-    const finalQuestions = Array.isArray(merged?.questions)
-      ? merged.questions
-      : dedupeQuestions([...questions, ...extra]);
-    return { finalQuestions, finalQuestionsPath: file };
+    // No fallback to the run's tally. The command asks a human from what this
+    // returns, so answering with the tally would ask about entries the sidecar
+    // had already settled or rephrased. mergeFinalQuestions either hands back
+    // the merged list or fails, and re-running the merge is idempotent.
+    return { finalQuestions: merged.questions, finalQuestionsPath: file };
   };
 
   // The last round's revision is the one nothing has looked at: every earlier

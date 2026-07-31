@@ -1339,6 +1339,17 @@ function planToken(text) {
 // materialize-plan-artifact.mjs, so it appears in these stubs only as the
 // checksum that command reports back — never as a relayed field.
 const PLAN_TEXT = "# Plan";
+
+// The real helper always returns the merged list, and the workflow now requires
+// it on success: a bare {ok:true} is a lost reply, not a success. Model that
+// faithfully by decoding the questions the command actually carries, so these
+// stubs cannot pass a shape the helper never produces.
+function mergedQuestionsFrom(prompt) {
+  const hex = /merge-plan-questions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
+  const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
+  return { ok: true, questions: hex ? JSON.parse(new TextDecoder().decode(bytes)) : [] };
+}
+
 const PLAN_PAYLOAD = {
   ok: true,
   payloads: [{
@@ -1371,7 +1382,7 @@ function planResponder(dropOnce) {
       dropped.add(label);
       return null;
     }
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:review-request") || label.startsWith("plan:decomposition-request")) {
       return {
@@ -1413,7 +1424,7 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -1473,7 +1484,7 @@ test("Codex planning stops when the materializer hands back no usable receipt", 
     { name: "SOMETHING_ELSE", token: planToken(PLAN_TEXT), chars: 6 }
   ]) {
     const responder = (label, prompt) => {
-      if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+      if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
       if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
       if (label.startsWith("plan:materialize-")) return { ok: true, payloads: [broken] };
       if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -1503,7 +1514,7 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -1536,7 +1547,7 @@ test("Codex-only revision fails closed instead of dropping a resumable question"
   const carried = { open_questions: ["Which rollout?"], ui_decisions: [] };
   const dropped = { open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")) {
@@ -1582,7 +1593,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:decomposition-request")) {
@@ -1624,7 +1635,7 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { open_questions: ["Which rollout?"], ui_decisions: [] };
   const responder = (dropDraft) => (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -2370,6 +2381,16 @@ test("resume carries saved open questions and keeps persisting them", async () =
     { ...PLAN_ARGS, seedPlan: "# Saved draft", resumeRound: 1, openQuestions: ["Which database should the cache front?"] },
     (label, prompt) => {
       if (prompt.includes(".questions.json")) persisted.push(label);
+      // This harness has no filesystem, so the shared stub can only see the
+      // questions the command adds. The real sidecar also holds the ones
+      // carried into the resume, and the pass now reports what that file says,
+      // so model a sidecar that has them.
+      if (label.startsWith("plan:merge-final-questions")) {
+        return {
+          ...mergedQuestionsFrom(prompt),
+          questions: ["Which database should the cache front?", ...mergedQuestionsFrom(prompt).questions]
+        };
+      }
       return planResponder([])(label, prompt);
     }
   );
