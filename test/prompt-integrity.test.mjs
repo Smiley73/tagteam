@@ -254,7 +254,10 @@ async function forge({
     // Run for real, like every other plumbing step here: the merged sidecar is
     // now the pass's answer rather than a copy checked against one, so a stub
     // that skipped the merge would be testing nothing.
-    if (label.startsWith("plan:merge-final-questions")) {
+    // Every question merge, not only the one a structured exit runs: the
+    // interrupted exit merges through the same command, and a stub that
+    // answered only the exit label would leave that path untested here.
+    if (label.startsWith("plan:merge-")) {
       const merged = runCommand(commandFrom(prompt));
       if (merged.status !== 0) return { ok: false, error: merged.stderr.trim() };
       return JSON.parse(merged.stdout.trim());
@@ -537,6 +540,75 @@ test("a Claude continuation may drop the carried questions its decisions answere
   assert.equal(result.openQuestionCount, 0);
 });
 
+// The fifth exit. The four structured ones settle the pass's reviewer questions
+// into the sidecar on their way out; a pass that stops with an error settles
+// nothing, and reviewers are read-only, so until the workflow merges them those
+// questions are in this run's memory and in no file. A resume seeds from the
+// newest round input's `.questions.json` (commands/plan.md step 4), which is why
+// that is the file they have to reach — and why the settle runs against the
+// published round input rather than the draft the run had last adopted.
+test("an interrupted pass writes its reviewers' questions to the sidecar a resume reads", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-interrupted-questions-"));
+  const roundInput = path.join(planDir, "drafts/pass-1-round-2-input.md");
+  const { result } = await forge({
+    planDir,
+    // Raised by round one's reviewers and by nothing else. The draft carries no
+    // questions, so the revision legitimately returns none and the sidecar
+    // published beside the round input holds an empty array.
+    review: (label) => (label.endsWith("review:1")
+      ? { ...REVISE, open_questions: ["Who owns rollback?"] }
+      : APPROVE),
+    // Fails the step immediately after the round input was published, which is
+    // the window that used to lose the question: the file a resume selects is
+    // already on disk, and the pass never reaches an exit that settles.
+    after: (label) => {
+      if (label !== "plan:verify-revision:1") return;
+      fs.writeFileSync(roundInput, `${fs.readFileSync(roundInput, "utf8")}\ntampered\n`, { mode: 0o600 });
+    }
+  });
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /pass-1-round-2-input\.md/);
+  assert.equal(result.questionsSettled, true);
+  // What the resume will read. Written by the real merge command against the
+  // real file, so this is the sidecar as it actually is, not a stub's account.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(`${roundInput}.questions.json`, "utf8")),
+    ["Who owns rollback?"]
+  );
+});
+
+// The settle is the last thing an already-failing pass does, so the one thing
+// it may never do is replace the failure that got there. A merge that cannot be
+// confirmed says so and stops; the interruption still reports what actually
+// broke, and the resume re-reviews the same plan, which raises the questions
+// again rather than losing them silently.
+test("an interrupted pass reports a failed question settle without masking what broke", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-interrupted-settle-failed-"));
+  const roundInput = path.join(planDir, "drafts/pass-1-round-2-input.md");
+  const { result, logs } = await forge({
+    planDir,
+    review: (label) => (label.endsWith("review:1")
+      ? { ...REVISE, open_questions: ["Who owns rollback?"] }
+      : APPROVE),
+    after: (label) => {
+      if (label !== "plan:verify-revision:1") return;
+      fs.writeFileSync(roundInput, `${fs.readFileSync(roundInput, "utf8")}\ntampered\n`, { mode: 0o600 });
+      // The sidecar the settle would merge into, gone: the merge command has
+      // nothing to read and exits non-zero.
+      fs.rmSync(`${roundInput}.questions.json`);
+    }
+  });
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /pass-1-round-2-input\.md/);
+  assert.equal(result.questionsSettled, false);
+  assert.equal(
+    logs.some((message) => message.includes("could not be written to the plan's sidecar")),
+    true
+  );
+});
+
 // The reason round revisions publish through the staging script rather than
 // writing the round input directly. The check stops the pass either way; what
 // it could not do before was stop the drop from outliving it, because the
@@ -544,7 +616,7 @@ test("a Claude continuation may drop the carried questions its decisions answere
 // reads.
 test("a revision that drops a question leaves no round input for a resume to trust", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-revision-dropped-"));
-  const { result } = await forge({
+  const { result, prompts } = await forge({
     planDir,
     // The draft raises a question, so the revision round one gates on is carried
     // it. The revision stub returns no questions at all, so it drops it.
@@ -555,6 +627,10 @@ test("a revision that drops a question leaves no round input for a resume to tru
   assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
   assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md")), false);
   assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md.questions.json")), false);
+  // No reviewer raised anything here, so the interrupted exit has nothing to
+  // settle and does not buy a call to rewrite a file with its own contents.
+  assert.equal(prompts.has("plan:merge-interrupted-questions"), false);
+  assert.equal(result.questionsSettled, null);
 });
 
 test("a completed pass leaves a resumable integrated draft matching the returned receipt", async () => {

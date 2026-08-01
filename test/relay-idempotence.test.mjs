@@ -1778,6 +1778,58 @@ test("Codex-only revision may merge a review's restatement into the question it 
   assert.deepEqual(result.openQuestions, ["Which rollout?", "Which rollout order ships first?"]);
 });
 
+// The Codex half of the interrupted exit. The plan a resume selects is the
+// round input this revision was promoted to, not the draft the round started
+// from, so that is the sidecar the accumulated reviewer questions have to be
+// merged into — this asserts the command names it, since the questions
+// themselves never travel through the reply.
+test("an interrupted Codex pass settles its reviewer questions into the promoted round input", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const plan = { open_questions: [], ui_decisions: [] };
+  const prompts = new Map();
+  const responder = (label, prompt) => {
+    prompts.set(label, prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    if (label.startsWith("plan:codex-draft") || label.startsWith("plan:codex-revise")) return plan;
+    // Raised by the round-one review and carried by nothing: the draft has no
+    // questions and the revision returns none, so this question exists in the
+    // run's accumulator and in no file.
+    if (label === "plan:codex-review:1") {
+      return { ...REVISE, open_questions: ["Who owns rollback?"] };
+    }
+    // The step after the revision was promoted. A lost re-read stops the pass
+    // there, which is the window the interrupted exit exists for.
+    if (label.startsWith("plan:codex-revision-check")) return null;
+    return APPROVE;
+  };
+  const config = {
+    ...PLAN_CONFIG,
+    ui: { hasUserInterface: false, confirmDecisions: "off", conventionPaths: [] }
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.equal(result.questionsSettled, true);
+  const merge = prompts.get("plan:merge-interrupted-questions");
+  assert.notEqual(merge, undefined, "the interrupted exit never settled");
+  assert.match(merge, /merge-plan-questions\.mjs"\s+"\/plans\/slug\/drafts\/pass-1-round-2-input\.md\.questions\.json"/);
+  assert.match(merge, /--additional-inline .*Who owns rollback\?/);
+});
+
 test("Codex-only continuation checksum-binds carried questions and interface decisions", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
   const uiDecision = {

@@ -885,7 +885,16 @@ const usageState = {
   codexCalls: 0
 };
 const codexReceiptState = new Set();
-const planState = { dispatchedCalls: 0, runPolicy: null, priorRelayRetries: 0, legacyUsageIncomplete: false };
+const planState = {
+  dispatchedCalls: 0,
+  runPolicy: null,
+  priorRelayRetries: 0,
+  legacyUsageIncomplete: false,
+  // What the interrupted exit runs to make this pass's reviewer questions
+  // durable. Held here because that exit is the top-level catch, which is
+  // outside every scope the round loop's state lives in.
+  settleInterruptedQuestions: null
+};
 
 async function planAgent(prompt, options) {
   planState.dispatchedCalls += 1;
@@ -1425,6 +1434,10 @@ async function main(raw) {
   const priorAgentCalls = persistedCount(input.agentCalls, "persisted planning agentCalls");
   planState.dispatchedCalls = priorAgentCalls;
   planState.runPolicy = null;
+  // Registered once the round loop has state worth settling. Cleared here so a
+  // second invocation in the same process cannot run the previous one's
+  // closure, which would name that pass's files and its accumulator.
+  planState.settleInterruptedQuestions = null;
   const priorUsage = input.usage ?? {};
   const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "plumbingCallsByModel", "codexCalls", "relayRetries"]
     .every((key) => Object.hasOwn(priorUsage, key));
@@ -2175,6 +2188,62 @@ async function main(raw) {
   // Reviewer-raised questions, accumulated so that every exit from the round
   // loop merges them into the sidecar rather than only the exits that revise.
   const reviewQuestions = [];
+  // The sidecar merge, named by file and carried set rather than read off
+  // `draft`, because the interrupted exit has to reach the round input a resume
+  // would select even when that is newer than the draft this run last adopted.
+  const mergeQuestionsInto = async ({ file, carried, extra, phaseName, label }) => {
+    const merged = dedupeQuestions([...(carried ?? []), ...extra]);
+    const expectedToken = expectJson([...new Set(merged.map(questionKey))].sort());
+    await mergeFinalQuestions({
+      command: assembleCommand([
+        `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
+        `"${file}"`,
+        extra.length ? `--additional-inline ${shellQuote(JSON.stringify(extra))}` : "",
+        `--expect "${expectedToken}"`
+      ], "merge-plan-questions"),
+      label,
+      phase: phaseName,
+      model: relayModel,
+      effort: relayEffort,
+      file,
+      expectedToken
+    });
+    return merged;
+  };
+  // What a resume would seed from at this instant. commands/plan.md selects the
+  // highest round input in the pass, and a file becomes that the moment its
+  // publication lands — one step before the verify that adopts it into `draft`.
+  // Merging into `draft` alone would therefore write the questions to the file
+  // one behind the one a resume reads whenever the interruption falls in that
+  // gap, which is exactly where a lost relay result lands.
+  //
+  // Updated after the publication rather than before it: a publication that
+  // never happened leaves no file to merge into, and naming one is how a
+  // best-effort settle turns into no settle at all. The residual window is a
+  // publication whose confirmation was lost after the file was written — the
+  // settle then reaches the previous sidecar while a resume reads the newer
+  // round input.
+  let resumeSeed = { file: `${draft.plan_path}.questions.json`, questions: draft.open_questions ?? [] };
+  // What the interrupted exit at the bottom of this file runs. A pass that
+  // stops still owes the human every question its reviewers raised: reviewers
+  // are read-only, so until this runs those questions exist in this array and
+  // nowhere else, and the resume that follows reads a file rather than this
+  // run's memory. The four structured exits settle on their way out; this is
+  // the fifth, and it used to settle nothing.
+  planState.settleInterruptedQuestions = async () => {
+    // Nothing raised, nothing to lose: the sidecar already holds what the last
+    // revision bound to it, and an interrupted pass should not buy a call to
+    // rewrite a file with its own contents.
+    if (!reviewQuestions.length) return null;
+    await mergeQuestionsInto({
+      file: resumeSeed.file,
+      carried: resumeSeed.questions,
+      extra: reviewQuestions,
+      phaseName: "Interrupted",
+      label: "plan:merge-interrupted-questions"
+    });
+    return true;
+  };
   const reviews = [];
   // What the last executed round left for the revision that follows it to fix,
   // and the Codex-side evidence a re-check is assembled from. Empty after a
@@ -2638,6 +2707,9 @@ async function main(raw) {
         what: `round ${round + 1} input publication`,
         file: revisedFile
       });
+      // Published, so this is now the newest round input and the file a resume
+      // selects — before the verify below adopts it into `draft`.
+      resumeSeed = { file: `${revisedFile}.questions.json`, questions: result.open_questions ?? [] };
       const saved = await recordPlanFile({
         file: revisedFile,
         receipt: {
@@ -2716,6 +2788,13 @@ async function main(raw) {
         what: `plan revised in round ${round}`
       });
       warnLargePlan(saved);
+      // The materializer writes the sidecar beside the plan it promotes, so
+      // this is the newest round input from here on, the same as the Claude
+      // publication above.
+      resumeSeed = {
+        file: `${revisedFile}.questions.json`,
+        questions: response.result.open_questions ?? []
+      };
       draft = {
         ...saved,
         open_questions: response.result.open_questions,
@@ -2849,24 +2928,14 @@ async function main(raw) {
   // silently carry on around.
   const settleQuestions = async (extra, phaseName) => {
     const file = `${draft.plan_path}.questions.json`;
-    const expectedMerged = dedupeQuestions([...(draft.open_questions ?? []), ...extra]);
-    const expectedToken = expectJson([...new Set(expectedMerged.map(questionKey))].sort());
-    await mergeFinalQuestions({
-      command: assembleCommand([
-        `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
-        `"${file}"`,
-        extra.length ? `--additional-inline ${shellQuote(JSON.stringify(extra))}` : "",
-        `--expect "${expectedToken}"`
-      ], "merge-plan-questions"),
-      label: "plan:merge-final-questions",
-      phase: phaseName,
-      model: relayModel,
-      effort: relayEffort,
-      file,
-      expectedToken
-    });
     return {
-      finalQuestions: expectedMerged,
+      finalQuestions: await mergeQuestionsInto({
+        file,
+        carried: draft.open_questions,
+        extra,
+        phaseName,
+        label: "plan:merge-final-questions"
+      }),
       finalQuestionsPath: file
     };
   };
@@ -3435,6 +3504,25 @@ try {
   return await main(args);
 } catch (error) {
   if (!planState.runPolicy) throw error;
+  // The fifth exit. The other four settle the pass's reviewer questions into
+  // the sidecar on their way out; this one used to settle nothing, so every
+  // question a reviewer raised that no revision happened to echo back stopped
+  // existing the moment this pass did — and the resume that follows reads that
+  // file, not this run's memory. A question that reaches nobody is a decision
+  // the plan assumed rather than one a person made.
+  //
+  // Best effort, and last: it must never replace the failure that got here.
+  // The merge is checked against a token this run computed before anything is
+  // written, so a sidecar that is not what this pass thinks it is fails the
+  // merge rather than being overwritten from a wrong memory of it. Run before
+  // the envelope is built so its calls are counted in the accounting below.
+  let questionsSettled = null;
+  try {
+    questionsSettled = await planState.settleInterruptedQuestions?.() ?? null;
+  } catch (settleError) {
+    questionsSettled = false;
+    log(`The questions this pass's reviewers raised could not be written to the plan's sidecar (${settleError instanceof Error ? settleError.message : String(settleError)}). Resuming will re-review the same plan, so they are raised again rather than lost silently.`);
+  }
   return {
     runPolicy: planState.runPolicy,
     reasoningProvider: planState.runPolicy.reasoningProvider,
@@ -3442,6 +3530,12 @@ try {
     policyFingerprint: planState.runPolicy.policyFingerprint,
     status: "plan-interrupted",
     message: error instanceof Error ? error.message : String(error),
+    // Whether the sidecar a resume reads holds this pass's reviewer questions:
+    // true when they were merged, null when the pass raised none, false when
+    // the merge itself could not be confirmed. Never a reason to stop — the
+    // resume re-reviews the plan — but the difference is worth reporting
+    // rather than leaving a reader to assume the record is complete.
+    questionsSettled,
     agentCalls: planState.dispatchedCalls,
     relayRetries: relayState.extraCalls,
     usage: {
