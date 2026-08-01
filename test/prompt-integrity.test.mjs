@@ -147,6 +147,14 @@ async function forge({
   // one agree: an atomic group is a property of the plan, not a corruption.
   atomicGroups = () => ({}),
   policyPaths = [],
+  // The decision rows a continuation integrates. They default to the carried
+  // questions verbatim, which is what the command records: a decision row is
+  // the answer to a question that was asked. Overriding them with rows that
+  // answer something else models a continuation whose questions are still open.
+  decisions = [
+    { question: "Choose deployment", answer: "Use blue-green" },
+    { question: "Choose cache", answer: "Use a bounded cache" }
+  ],
   after = () => {}
 }) {
   fs.mkdirSync(path.join(planDir, "drafts"), { recursive: true });
@@ -291,10 +299,7 @@ async function forge({
     ...(continuation ? {
       passId: "pass-2",
       seedPlan: { path: seedPath },
-      decisions: [
-        { question: "Which deployment?", answer: "Use blue-green" },
-        { question: "Which cache?", answer: "Use a bounded cache" }
-      ],
+      decisions,
       openQuestions: ["Choose deployment", "Choose cache"],
       uiDecisions: []
     } : {}),
@@ -358,7 +363,7 @@ test("a 130 KB plan reaches the cross-check whole, as the exact string the workf
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-compose-"));
   const { result, composed, plans, manifest, train } = await forge({ planDir });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(normalizeText(plans.revised).length > 130_000, true, "the fixture plan should exceed 130 KB");
 
   const decomposition = composed.find((item) => item.label === "plan:decomposition-request");
@@ -397,7 +402,7 @@ test("Claude plan stages pass a large draft by receipt and path, never by value"
     largePlanWarningChars: 100_000
   });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(Object.hasOwn(result, "planMarkdown"), false);
   for (const label of ["plan:revise:1", "plan:manifest", "plan:decompose"]) {
     const prompt = prompts.get(label);
@@ -421,7 +426,7 @@ test("a large Claude continuation applies multiple decisions with bounded target
     largePlanWarningChars: 100_000
   });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(normalizeText(plans.seed).length >= 100_000, true);
   assert.equal(result.planPath, path.join(planDir, "drafts/pass-2-integrated.md"));
   const saved = fs.readFileSync(result.planPath, "utf8");
@@ -484,6 +489,26 @@ test("a large continuation still stops on a mismatched published-plan receipt", 
   assert.deepEqual(missingReceipt.labels, ["plan:verify-seed:1"]);
   assert.match(missingReceipt.result.message, /required saved-plan receipt .* is missing/);
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-2-manifest.json")), false);
+});
+
+// The continuation is the step that integrates human answers, so it is the one
+// with a motive to return a shorter question list than it was given: every
+// answered question legitimately disappears there. A question the decisions did
+// not answer disappearing alongside them is the failure that looks like
+// success — the sidecar shrinks, the pass reports fewer questions, and the
+// decision that question stood for silently becomes an assumption nobody made.
+test("a Claude continuation may not drop a carried question its decisions never answered", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-continuation-dropped-"));
+  const { result } = await forge({
+    planDir,
+    continuation: true,
+    // Answers one of the two carried questions. The drafter stub returns no
+    // questions at all, so the other one is dropped rather than resolved.
+    decisions: [{ question: "Choose deployment", answer: "Use blue-green" }]
+  });
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
 });
 
 test("a completed pass leaves a resumable integrated draft matching the returned receipt", async () => {
@@ -560,7 +585,7 @@ test("a saved plan that drifts by a character is what the run records, not the r
   });
 
   // The pass finishes rather than stalling, and the cross-check judged the file.
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   const decomposition = composed.find((item) => item.label === "plan:decomposition-request");
   const prompt = fs.readFileSync(decomposition.promptPath, "utf8");
   assert.equal(prompt.includes(fenced("plan", normalizeText(drifted(plans.revised)))), true);
@@ -582,7 +607,7 @@ test("round two reviews the round-one revision even when its file drifted", asyn
     corrupt: (label, planMarkdown) => (label === "plan:revise:1" ? drifted(planMarkdown) : planMarkdown)
   });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.deepEqual(result.completedRounds, [1, 2]);
 
   // Round two was assembled and judged, from the bytes actually saved for it.
@@ -602,7 +627,7 @@ test("a round every reviewer approves ends cross-review instead of paying for th
     review: () => APPROVE
   });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.deepEqual(result.completedRounds, [1]);
   // And the plan that goes on to the manifest is the exact text round one
   // approved: a clean round publishes what it reviewed and edits nothing.
@@ -674,7 +699,7 @@ test("resuming past the last round re-reviews an uncleared revision instead of d
   // A real round judged it rather than the manifest being built on trust.
   assert.deepEqual(result.completedRounds, [2]);
   assert.equal(prompts.has("plan:claude-review:2"), true);
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.planPath, path.join(planDir, "drafts/pass-1-integrated.md"));
 });
 
@@ -686,7 +711,7 @@ test("a last revision that answered its critique carries on to the manifest", as
   });
 
   assert.equal(prompts.has("plan:claude-revision-check"), true);
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.notEqual(result.manifest, null);
   assert.notEqual(result.prTrain, null);
 
@@ -747,7 +772,7 @@ test("a manifest whose prose drifted is adopted, and the run records the file", 
       tasks: manifest.tasks.map((task) => (task.id === "T5" ? { ...task, title: `${task.title}.` } : task))
     })
   });
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
 
   // What the cross-check is handed is the file, at the checksum the read
   // reported — not the copy the run held when it asked for the write.
@@ -822,7 +847,7 @@ test("a configured policy path cannot reach the shell through the composed comma
   const hostile = `docs/p$(touch ${witness})q\`touch ${witness}\`r".md`;
 
   const { result, composed } = await forge({ planDir, policyPaths: [hostile] });
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(fs.existsSync(witness), false, "the shell executed a substitution inside a --var value");
 
   for (const label of ["plan:review-request:1", "plan:decomposition-request"]) {
@@ -870,7 +895,7 @@ test("an atomic group kept inside one pull request is not a finding", async () =
     atomicGroups: (id) => (["T1", "T2"].includes(id) ? { atomicGroup: "engine-version-bump" } : {})
   });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.handoffReady, true);
   assert.deepEqual(result.handoffIssues, []);
   assert.equal(result.manifest.tasks[0].atomicGroup, "engine-version-bump");
@@ -889,7 +914,13 @@ test("a question raised in a round that the sidecar does not repeat no longer st
       : { ...APPROVE, open_questions: ["Which cache should the ledger use?"] })
   });
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  // The question is real and unanswered, so it holds the pass short of
+  // approval rather than being counted against the plan as a defect. This
+  // asserted needs-approval while the reviewer's question was being discarded:
+  // the round was clean, so no revision ever carried it, and nothing else put
+  // it in the sidecar.
+  assert.equal(result.status, "needs-questions");
+  assert.deepEqual(result.openQuestions, ["Which cache should the ledger use?"]);
   // The sidecar is the answer, and it is what the command reads.
   assert.deepEqual(
     JSON.parse(fs.readFileSync(result.questionsPath, "utf8")),

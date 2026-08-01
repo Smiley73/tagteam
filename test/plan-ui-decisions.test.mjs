@@ -197,7 +197,7 @@ test("plan-forge runs end to end without Web Crypto or TextEncoder globals", asy
   });
 
   assert.equal(result.policyFingerprint, policyFingerprint);
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(labels.includes("plan:draft"), true, "drafting must start after run-policy hashing");
   assert.equal(
     labels.includes("plan:merge-final-questions"),
@@ -286,7 +286,7 @@ test("a lost interface check does not fail the pass", async () => {
     draftDecisions: [decision("export-dialog", "new-dialog", null)],
     dropInteractionReview: true
   });
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.uiDecisionsToConfirm.length, 1);
 });
 

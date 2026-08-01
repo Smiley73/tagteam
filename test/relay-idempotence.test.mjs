@@ -1072,7 +1072,7 @@ test("an optional read-only Codex failure counts durable usage without requiring
     }]
   }));
   const result = reconcileUsageReceipts({
-    status: "needs-questions-or-approval",
+    status: "needs-approval",
     usage: { codexCalls: 0, relayRetries: 0 },
     usageReceipts: [],
     usageReceiptFiles: [receiptFile],
@@ -1086,7 +1086,7 @@ test("an optional read-only Codex failure counts durable usage without requiring
     }],
     usageAccounting: "pending-checkpoint-reconciliation"
   });
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.usage.codexCalls, 1);
   assert.deepEqual(result.usageReceipts, ["optional-ui-exec"]);
   assert.equal(result.usageAccounting, "complete");
@@ -1454,6 +1454,15 @@ const PLAN_PAYLOAD = {
   }]
 };
 
+// The questions the prompt is carrying into this step. A compliant drafter
+// returns them alongside anything it raises, so the stub reads them out of the
+// fence rather than answering with an empty list: returning [] is the dropped-
+// question failure the workflow now stops on, not a well-behaved reply.
+function carriedQuestionsFrom(prompt) {
+  const fence = /<untrusted-questions-so-far>\n([\s\S]*?)\n<\/untrusted-questions-so-far>/.exec(prompt);
+  return fence ? JSON.parse(fence[1]) : [];
+}
+
 // A Claude drafter returns a receipt for the file it persisted, never the plan
 // itself, so the stub names the path the prompt told it to write.
 function planReceiptFrom(prompt) {
@@ -1465,7 +1474,7 @@ function planReceiptFrom(prompt) {
     plan_path: match[1],
     plan_chars: Number(plan_chars),
     plan_hash,
-    open_questions: [],
+    open_questions: carriedQuestionsFrom(prompt),
     ui_decisions: []
   };
 }
@@ -1509,7 +1518,7 @@ test("Claude-only planning dispatches no Codex work", async () => {
     planResponder([])
   );
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.reasoningProvider, "claude");
   assert.equal(result.assurance, "single-provider");
   assert.equal(calls.some((call) => call.agentType === "tagteam:codex-runner"), false);
@@ -1551,7 +1560,7 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
     responder
   );
 
-  assert.equal(result.status, "needs-questions-or-approval", result.message);
+  assert.equal(result.status, "needs-approval", result.message);
   assert.equal(result.reasoningProvider, "codex");
   assert.equal(result.assurance, "single-provider");
   assert.equal(result.usage.claudeReasoningCalls, 0);
@@ -1641,7 +1650,7 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
     responder
   );
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.deepEqual(result.reviews[0].reviewers.map(({ role }) => role), ["plan-review"]);
 });
 
@@ -1727,7 +1736,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
     uiDecisionsFile: "/plans/slug/drafts/pass-1-integrated.md.ui-decisions.json"
   }, responder);
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   const request = prompts.get("plan:codex-draft:request");
   assert.match(request, /CARRIED_QUESTIONS=/);
   assert.match(request, /CARRIED_INTERFACE_DECISIONS=/);
@@ -1764,7 +1773,7 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   assert.equal(initialLost.result.status, "plan-interrupted");
   assert.equal(initialLost.labels.some((label) => label.startsWith("plan:materialize-draft")), false);
   const initialRecovered = await harness("workflows/plan-forge.js", initialArgs, responder(false));
-  assert.equal(initialRecovered.result.status, "needs-questions-or-approval");
+  assert.equal(initialRecovered.result.status, "needs-approval");
 
   const continuationArgs = {
     ...PLAN_ARGS,
@@ -1782,7 +1791,7 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   const continuationLost = await harness("workflows/plan-forge.js", continuationArgs, responder(true));
   assert.equal(continuationLost.result.status, "plan-interrupted");
   const continuationRecovered = await harness("workflows/plan-forge.js", continuationArgs, responder(false));
-  assert.equal(continuationRecovered.result.status, "needs-questions-or-approval");
+  assert.equal(continuationRecovered.result.status, "needs-approval");
 });
 
 // Review cannot catch a false premise: every reviewer reads the same document
@@ -1822,7 +1831,7 @@ test("confirmed premises reach the drafter and the gate does not fire again", as
   assert.equal(labels.includes("plan:premises"), false);
   assert.match(prompts.get("plan:draft"), /Read the premises this plan rests on from \/plans\/slug\/drafts\/pass-1-premises\.json/);
   assert.match(prompts.get("plan:draft"), /return that contradiction as an open question/);
-  assert.equal(result.status, "needs-questions-or-approval", result.message);
+  assert.equal(result.status, "needs-approval", result.message);
 });
 
 test("a continuation and a resume both pass the premises gate without re-asking", async () => {
@@ -1930,7 +1939,7 @@ test("a plan the deterministic check stops never buys a reviewer", async () => {
   // model asked to agree with it.
   assert.equal(labels.includes("plan:lint-revision-check"), true);
   assert.equal(labels.includes("plan:claude-revision-check"), false);
-  assert.equal(result.status, "needs-questions-or-approval", result.message);
+  assert.equal(result.status, "needs-approval", result.message);
 });
 
 // A resume seeded from an already-cleared integrated plan, and a continuation
@@ -1975,7 +1984,7 @@ test("a clean plan on that path decomposes as before", async () => {
   );
 
   assert.equal(labels.includes("plan:lint-entry"), true);
-  assert.equal(result.status, "needs-questions-or-approval", result.message);
+  assert.equal(result.status, "needs-approval", result.message);
 });
 
 test("a deterministic finding about the split blocks the handoff whatever the cross-check said", async () => {
@@ -2064,12 +2073,16 @@ test("a merge relay that returns bookkeeping without the list settles from the s
     }
   );
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  // A pass that cannot say whether questions remain does not get to decide they
+  // do not: the lost list is reported as outstanding, and the command reads the
+  // sidecar this names to find out what they are.
+  assert.equal(result.status, "needs-questions");
   assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
   // Null rather than the run's own tally: the tally only grows, and reporting it
   // is exactly the stale-and-rephrased answer this step exists to stop giving.
   // A null list means "read the sidecar", which is what the command already does.
   assert.equal(result.openQuestions, null);
+  assert.equal(result.openQuestionCount, null);
   // One attempt was enough. The reply proved the merge ran, so nothing is retried.
   assert.deepEqual(labels.filter((label) => label.startsWith("plan:merge-final-questions")),
     ["plan:merge-final-questions"]);
@@ -2124,7 +2137,7 @@ test("a lost plan-review relay result is recovered from the saved artifact", asy
     PLAN_ARGS,
     planResponder(["plan:codex-review:1"])
   );
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.relayRetries, 1);
   assert.equal(labels.includes("plan:codex-review:1:relay-retry-1"), true);
   assert.equal(result.reviews.length, 1);
@@ -2148,7 +2161,7 @@ test("a lost decomposition cross-check relay result is recovered from the saved 
     PLAN_ARGS,
     planResponder(["plan:codex-decomposition-review"])
   );
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.handoffReady, true);
   assert.equal(labels.includes("plan:codex-decomposition-review:relay-retry-1"), true);
 });
@@ -2210,7 +2223,7 @@ test("a lost request-build reply is rebuilt rather than failing the pass", async
   );
   // Rebuilding the request rewrites the same file from the same saved sources,
   // so a lost reply costs one command and nothing else.
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(labels.includes("plan:decomposition-request:retry-1"), true);
   assert.equal(result.relayRetries, 1);
 });
@@ -2257,7 +2270,7 @@ test("plan resume accepts a saved path without an inline plan copy", async () =>
     }
   );
 
-  assert.equal(result.status, "needs-questions-or-approval");
+  assert.equal(result.status, "needs-approval");
   assert.equal(result.planPath, seedPath);
   assert.equal(labels.includes("plan:draft"), false);
   assert.equal(logs.some((message) => message.includes(seedPath) && message.includes("largePlanWarningChars=5")), true);
