@@ -476,15 +476,22 @@ function questionKey(value) {
   return String(value ?? "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
 }
 
-function requireCarriedQuestions(result, carried, resolved = []) {
+// A revision may resolve a question or return it, and nothing else. Dropping one
+// is the failure mode that looks like success: the sidecar shrinks, the pass
+// reports fewer questions than it was given, and the decision the question stood
+// for is now an assumption nobody made. The engine is named because both of them
+// revise plans and the message is the only thing that says which one to look at.
+function requireCarriedQuestions(engine, result, carried, resolved = []) {
   const returned = new Set((result?.open_questions ?? []).map(questionKey));
   const resolvedKeys = new Set((resolved ?? []).map((decision) => questionKey(decision?.question)));
-  const missing = (carried ?? []).filter((question) => {
+  // Deduped first: the same question reaching this check from two reviewers is
+  // one dropped question, not two, and the count is what the message reports.
+  const missing = dedupeQuestions(carried ?? []).filter((question) => {
     const key = questionKey(question);
     return key && !resolvedKeys.has(key) && !returned.has(key);
   });
   if (missing.length) {
-    throw new Error(`Codex plan result dropped ${missing.length} unresolved carried question(s)`);
+    throw new Error(`${engine} plan result dropped ${missing.length} unresolved carried question(s)`);
   }
 }
 
@@ -1567,6 +1574,18 @@ async function main(raw) {
       ? `The workflow has already staged the complete seed plan at ${file} with mode 0600. Apply only targeted Edit calls to the sections each human decision affects. Do not regenerate or Write the complete plan; unchanged text must remain untouched. This working file, not your reply, is what the workflow verifies and publishes.`
       : `Before returning, persist the complete plan at ${file} with mode 0600. This file, not your reply, is what every later step reads.`,
     `Also persist at ${file}.questions.json, mode 0600, a JSON array holding every still-open question you were given plus every one you are returning, deduplicated and verbatim.`,
+    // Said explicitly because the sidecar instruction above reads as though the
+    // returned field were the new questions alone, and a revision that returns
+    // only what it raised drops every question it was carrying. The Claude path
+    // left this to be inferred, and inferring it the other way is a lost
+    // decision that nothing downstream can tell from a resolved one.
+    //
+    // Stated as an absolute, with the single exception the check actually
+    // implements. The Codex integration templates said this already; the Codex
+    // revision templates said "every carried question that remains unresolved
+    // plus every material open question", and both qualifiers licensed
+    // omissions the same check throws on — they now match this wording.
+    `Return in open_questions every carried question plus every one you are raising. Omit a carried question only when a human decision supplied with this request answers it: a question is a decision a person owes, so deciding it no longer needs their answer is not yours to make.`,
     // Not part of the required resume record: a pass interrupted before these
     // existed must still resume, and a missing sidecar costs a re-declaration
     // rather than a lost plan.
@@ -1828,6 +1847,9 @@ async function main(raw) {
         detail: "the drafter returned no saved-plan receipt"
       }));
     }
+    if (continuation) {
+      requireCarriedQuestions("Claude", result, input.openQuestions ?? [], decisions);
+    }
     const savedWork = await recordPlanFile({
       file: continuation ? continuationWorkPath : draftPath(1),
       receipt: result,
@@ -1919,7 +1941,7 @@ async function main(raw) {
       resultFromDisk: true
     });
     if (continuation) {
-      requireCarriedQuestions(response.result, input.openQuestions ?? [], decisions);
+      requireCarriedQuestions("Codex", response.result, input.openQuestions ?? [], decisions);
       if (uiEnabled) requireCarriedUiDecisions(response.result, input.uiDecisions ?? []);
     }
     const saved = await promoteCodexPlan({
@@ -1942,8 +1964,10 @@ async function main(raw) {
   }
 
   let planExpect = draft.savedToken;
-  const questions = [...(draft.open_questions ?? [])];
   const uiDecisions = [...(input.uiDecisions ?? []), ...(draft.ui_decisions ?? [])];
+  // Reviewer-raised questions, accumulated so that every exit from the round
+  // loop merges them into the sidecar rather than only the exits that revise.
+  const reviewQuestions = [];
   const reviews = [];
   // What the last executed round left for the revision that follows it to fix,
   // and the Codex-side evidence a re-check is assembled from. Empty after a
@@ -2170,8 +2194,16 @@ async function main(raw) {
       codex: codexReview ?? null,
       interaction: uiReview ?? null
     });
-    questions.push(...(claudeReview?.open_questions ?? []), ...(codexReview?.open_questions ?? []));
     uiDecisions.push(...(uiReview?.ui_decisions ?? []));
+    // Every question a reviewer raised this pass, whether or not a revision ever
+    // carried it. Reviewers are read-only and the drafter that wrote the sidecar
+    // ran before them, so a round that ends the loop — a clean one, or a
+    // divergent one — leaves its reviewers' questions in no file at all. They
+    // were reaching the sidecar only by way of the revision that follows a round
+    // that left something, which is the one case that is not the problem. This
+    // list is merged at every exit instead; the merge dedupes, so a question a
+    // revision already carried costs nothing here.
+    reviewQuestions.push(...(claudeReview?.open_questions ?? []), ...(codexReview?.open_questions ?? []));
 
     // What this round found that a revision has to answer for. The interaction
     // lens is deliberately absent: it is advisory, so it neither ends a pass
@@ -2284,10 +2316,25 @@ async function main(raw) {
         claudeReview ? fenced("claude-review", JSON.stringify(claudeReview, null, 2)) : "",
         codexReview ? fenced("codex-review", JSON.stringify(codexReview, null, 2)) : "",
         uiReview ? fenced("interface-review", JSON.stringify(uiReview, null, 2)) : "",
+        // Said here because a review's questions arrive inside its JSON blob
+        // rather than in the carried-questions fence, so "every carried
+        // question" does not reach them on its own. Without it, the
+        // carry-forward check would demand back questions this prompt never
+        // called carried. No exception clause: the check below permits an
+        // omission only for a question a human decision answered, and a round
+        // revision is given no decisions at all, so any softer wording here
+        // would license exactly the reply that ends the pass.
+        "The reviews above raise open questions of their own. Return those in open_questions too, alongside the carried ones.",
         sizeBrief,
         policyBrief,
         uiBrief,
-        persist(revisedFile, questions, dedupeDecisions(uiDecisions))
+        // The current set, matching the CARRIED_QUESTIONS fence the Codex
+        // revision gets. This used to be a running tally that never removed
+        // anything, so a revision was shown questions earlier rounds had
+        // already resolved and asked to carry them — the growing-document
+        // failure the subtractive-revision rule exists to prevent, applied to
+        // the questions instead of the plan.
+        persist(revisedFile, draft.open_questions ?? [], dedupeDecisions(uiDecisions))
       ].join("\n\n"), {
         label: `plan:revise:${round}`,
         phase: `Cross-review ${round}`,
@@ -2296,6 +2343,17 @@ async function main(raw) {
         effort: claude.effort,
         schema: planDraftSchema
       });
+      // Checked against the current set rather than the `questions` tally the
+      // prompt carries. The tally never removes anything, so demanding it back
+      // would demand questions earlier rounds already resolved — the same
+      // mistake as the tally-vs-sidecar equality check settleQuestions
+      // documents. This revision reads both reviews, so both reviews' questions
+      // are its to resolve or return.
+      requireCarriedQuestions("Claude", result, [
+        ...(draft.open_questions ?? []),
+        ...(claudeReview?.open_questions ?? []),
+        ...(codexReview?.open_questions ?? [])
+      ]);
       const saved = await recordPlanFile({
         file: revisedFile,
         receipt: result,
@@ -2348,7 +2406,7 @@ async function main(raw) {
         what: `revision of plan round ${round}`,
         resultFromDisk: true
       });
-      requireCarriedQuestions(response.result, [
+      requireCarriedQuestions("Codex", response.result, [
         ...(carriedDraft.open_questions ?? []),
         ...(codexReview?.open_questions ?? [])
       ]);
@@ -2375,7 +2433,6 @@ async function main(raw) {
     }
     if (!draft?.plan_path || !draft?.savedToken) throw new Error(`plan revision ${round} failed`);
     planExpect = draft.savedToken;
-    questions.push(...(draft.open_questions ?? []));
     uiDecisions.push(...(draft.ui_decisions ?? []));
   }
 
@@ -2411,6 +2468,12 @@ async function main(raw) {
     manifestPath: savedManifestPath,
     prTrainPath: savedTrainPath,
     openQuestions,
+    // What the approval gate reads. The caller cannot count `openQuestions`
+    // safely on its own: null there means the merged list did not survive the
+    // relay, not that the sidecar is empty, and the two are the opposite
+    // answer at a gate. Null here says the same thing in a field whose only
+    // job is to be counted — read `questionsPath` and count that instead.
+    openQuestionCount: Array.isArray(openQuestions) ? openQuestions.length : null,
     // Everything the plan decided about surfaces, and the subset the configured
     // policy says is worth interrupting a person for. The full set travels so a
     // resumed pass keeps decisions the policy did not surface.
@@ -2502,7 +2565,7 @@ async function main(raw) {
   // round input the divergent round reviewed, so a resume restarts at that round
   // rather than trusting a plan nothing cleared.
   if (diverged) {
-    const settled = await settleQuestions([], `Cross-review ${diverged.round}`);
+    const settled = await settleQuestions(reviewQuestions, `Cross-review ${diverged.round}`);
     return planOutcome({
       status: "needs-plan-revision",
       unresolvedIssues,
@@ -2601,7 +2664,7 @@ async function main(raw) {
     const stillOpen = gatingIssues(revisionCheck.issues);
     if (stillOpen.length) {
       log(`The last plan revision left ${stillOpen.length} blocking or major critique${stillOpen.length === 1 ? "" : "s"} unresolved, so this pass stopped before the manifest rather than decomposing a plan with a known hole.`);
-      const settled = await settleQuestions([], "Revision check");
+      const settled = await settleQuestions(reviewQuestions, "Revision check");
       return planOutcome({
         status: "needs-plan-revision",
         unresolvedIssues: stillOpen,
@@ -2663,7 +2726,7 @@ async function main(raw) {
     });
     if (entryLint.gating.length) {
       log(`This pass ran no cross-review round, and the plan it would decompose has ${entryLint.gating.length} defect${entryLint.gating.length === 1 ? "" : "s"} that need no judgment, so it stopped before the manifest: ${entryLint.gating.map((issue) => issue.title).join("; ")}.`);
-      const settled = await settleQuestions([], "Plan check");
+      const settled = await settleQuestions(reviewQuestions, "Plan check");
       return planOutcome({
         status: "needs-plan-revision",
         unresolvedIssues: entryLint.gating,
@@ -2934,15 +2997,35 @@ async function main(raw) {
       schema: planReviewSchema
     });
   }
-  const settled = await settleQuestions(decompositionReview.open_questions ?? [], "PR train");
+  const settled = await settleQuestions([...reviewQuestions, ...(decompositionReview.open_questions ?? [])], "PR train");
 
   // The deterministic findings come first because they are the certain ones:
   // they were decided from the manifest and the train, not argued from them, and
   // they hold whatever verdict the cross-check returned.
   const handoffIssues = dedupeIssues([...handoffLint.gating, ...gatingIssues(decompositionReview.issues)]);
   const handoffReady = decompositionReview.verdict === "approve" && handoffIssues.length === 0;
+  // Three states, not two. This used to answer `needs-questions-or-approval`
+  // whenever the handoff was ready, and a status naming both as alternatives is
+  // what licensed approving over the questions: the caller reading it was told,
+  // in the status itself, that either was a finished pass. An unanswered
+  // question is a decision the plan assumed rather than one a person made, and
+  // the difference does not show up until an implementer hits it.
+  //
+  // A lost list counts as outstanding. `settleQuestions` returns null when the
+  // merged file did not travel back, and the sidecar it names is the real
+  // answer; treating unknown as zero would open the gate on exactly the pass
+  // that cannot say whether it should. `needs-questions` costs a re-read;
+  // guessing costs the gate.
+  const questionsOutstanding =
+    settled.finalQuestions === null || settled.finalQuestions.length > 0;
   return planOutcome({
-    status: handoffReady ? "needs-questions-or-approval" : "needs-handoff-revision",
+    // An unready handoff still outranks the questions: a plan whose manifest and
+    // train do not hold up is not one to be answering questions about yet.
+    status: !handoffReady
+      ? "needs-handoff-revision"
+      : questionsOutstanding
+        ? "needs-questions"
+        : "needs-approval",
     manifest,
     prTrain: train,
     manifestPath,
