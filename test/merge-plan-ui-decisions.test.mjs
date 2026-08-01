@@ -3,7 +3,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { mergePlanUiDecisions } from "../scripts/merge-plan-ui-decisions.mjs";
+import { canonicalJson, expectToken } from "../scripts/compose-prompt.mjs";
+
+const root = path.resolve(import.meta.dirname, "..");
+const script = path.join(root, "scripts", "merge-plan-ui-decisions.mjs");
+
+// The token this script computes for a merged set, exactly: the fnv1a digest
+// over the set sorted by id, not the merged array's own insertion order.
+function tokenFor(decisions) {
+  const key = (value) => String(value?.id ?? "").trim().toLocaleLowerCase();
+  return expectToken(canonicalJson([...decisions].sort((left, right) => key(left).localeCompare(key(right)))));
+}
 
 const decision = (id, chosen = `${id}-chosen`) => ({
   id,
@@ -123,4 +135,152 @@ test("the record may not be a symbolic link", () => {
   fs.symlinkSync(real, file);
 
   assert.throws(() => mergePlanUiDecisions(file, []), /may not be a symbolic link/);
+});
+
+// --expect is checked before anything is written, over the set sorted by id
+// rather than the merged array's own order, so two compliant copies of the
+// same decisions still agree even if one lists them differently.
+test("--expect accepts a token computed over the same set in a different order", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog")]));
+  const expect = tokenFor([decision("nav-entry"), decision("export-dialog")]);
+
+  const merged = mergePlanUiDecisions(file, [decision("nav-entry")], file, { expect });
+
+  assert.deepEqual(merged.uiDecisions.map((entry) => entry.id).sort(), ["export-dialog", "nav-entry"]);
+  assert.equal(merged.payloads[0].token, expect);
+});
+
+test("--expect fails closed on a mismatch and writes nothing", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog")]));
+  const before = read(file);
+
+  assert.throws(
+    () => mergePlanUiDecisions(file, [decision("nav-entry")], file, { expect: "0:00000000" }),
+    /does not match what this pass expected/
+  );
+  assert.deepEqual(read(file), before);
+});
+
+// out lets a caller merge into one file while writing the result to another
+// entirely, without the merged array ever leaving this process.
+test("--out writes the merged result to a different path than it read from", () => {
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
+  const out = path.join(dir, "elsewhere.json");
+
+  const merged = mergePlanUiDecisions(file, [decision("nav-entry")], out);
+
+  assert.deepEqual(read(file).map((entry) => entry.id), ["export-dialog"]);
+  assert.deepEqual(read(out).map((entry) => entry.id), ["export-dialog", "nav-entry"]);
+  assert.equal(merged.payloads[0].file, path.resolve(out));
+});
+
+// CLI-level coverage: the surface a plumbing agent actually retypes, not just
+// the function underneath it.
+test("CLI: a missing additional-decisions file is a named, immediate error", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog")]));
+  const missing = `${file}.does-not-exist`;
+
+  assert.throws(
+    () => execFileSync("node", [script, file, missing], { encoding: "utf8", stdio: "pipe" }),
+    /additional interface decisions file is missing/
+  );
+  assert.deepEqual(read(file).map((entry) => entry.id), ["export-dialog"]);
+});
+
+test("CLI: a corrupt additional-decisions file is a named, immediate error", () => {
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
+  const corrupt = path.join(dir, "additional.json");
+  fs.writeFileSync(corrupt, "not json", { mode: 0o600 });
+
+  assert.throws(
+    () => execFileSync("node", [script, file, corrupt], { encoding: "utf8", stdio: "pipe" }),
+    /not readable JSON/
+  );
+});
+
+test("CLI: a symlinked additional-decisions file is refused", () => {
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
+  const real = path.join(dir, "real.json");
+  fs.writeFileSync(real, JSON.stringify([decision("nav-entry")]), { mode: 0o600 });
+  const link = path.join(dir, "additional.json");
+  fs.symlinkSync(real, link);
+
+  assert.throws(
+    () => execFileSync("node", [script, file, link], { encoding: "utf8", stdio: "pipe" }),
+    /may not be a symbolic link/
+  );
+});
+
+test("CLI: --additional-inline carries a bounded set without a file, and the receipt names the exact file and token", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog")]));
+
+  const stdout = execFileSync("node", [
+    script, file, "--additional-inline", JSON.stringify([decision("nav-entry")])
+  ], { encoding: "utf8" });
+  const receipt = JSON.parse(stdout);
+
+  assert.deepEqual(read(file).map((entry) => entry.id), ["export-dialog", "nav-entry"]);
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.payloads[0].name, "INTERFACE_DECISIONS");
+  assert.equal(receipt.payloads[0].file, file);
+  assert.equal(receipt.payloads[0].token, tokenFor([decision("export-dialog"), decision("nav-entry")]));
+  // The list itself never crosses the CLI boundary — only the receipt does.
+  assert.equal(Object.hasOwn(receipt, "uiDecisions"), false);
+});
+
+test("CLI: --expect is honored and a mismatch fails closed over the wire, not only in-process", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog")]));
+  const expect = tokenFor([decision("export-dialog"), decision("nav-entry")]);
+
+  const ok = execFileSync("node", [
+    script, file, "--additional-inline", JSON.stringify([decision("nav-entry")]), "--expect", expect
+  ], { encoding: "utf8" });
+  assert.equal(JSON.parse(ok).payloads[0].token, expect);
+
+  const { file: other } = record(JSON.stringify([decision("export-dialog")]));
+  assert.throws(
+    () => execFileSync("node", [
+      script, other, "--additional-inline", JSON.stringify([decision("nav-entry")]), "--expect", "0:00000000"
+    ], { encoding: "utf8", stdio: "pipe" }),
+    /does not match what this pass expected/
+  );
+});
+
+test("CLI: --out writes the merged result to a different path than it read from", () => {
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
+  const out = path.join(dir, "elsewhere.json");
+
+  const stdout = execFileSync("node", [
+    script, file, "--additional-inline", JSON.stringify([decision("nav-entry")]), "--out", out
+  ], { encoding: "utf8" });
+  const receipt = JSON.parse(stdout);
+
+  assert.deepEqual(read(file).map((entry) => entry.id), ["export-dialog"]);
+  assert.deepEqual(read(out).map((entry) => entry.id), ["export-dialog", "nav-entry"]);
+  assert.equal(receipt.payloads[0].file, path.resolve(out));
+});
+
+test("CLI: only one of an additional-decisions file or --additional-inline may be given", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog")]));
+
+  assert.throws(
+    () => execFileSync("node", [script, file, file, "--additional-inline", "[]"], { encoding: "utf8", stdio: "pipe" }),
+    /only one of/
+  );
+});
+
+test("CLI: the merged result on disk is bit-for-bit what the receipt describes", () => {
+  const { file } = record(JSON.stringify([decision("export-dialog", "first")]));
+
+  const stdout = execFileSync("node", [
+    script, file, "--additional-inline", JSON.stringify([decision("export-dialog", "refined"), decision("nav-entry")])
+  ], { encoding: "utf8" });
+  const receipt = JSON.parse(stdout);
+  const onDisk = fs.readFileSync(file, "utf8");
+  const parsed = JSON.parse(onDisk);
+
+  assert.deepEqual(parsed.map((entry) => entry.id), ["export-dialog", "nav-entry"]);
+  assert.equal(parsed[0].chosen.label, "refined");
+  assert.equal(onDisk, `${JSON.stringify(parsed, null, 2)}\n`);
+  assert.equal(receipt.payloads[0].token, tokenFor(parsed));
 });

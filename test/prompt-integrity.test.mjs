@@ -216,7 +216,12 @@ async function forge({
       if (targeted) plans.integrated = planMarkdown;
       fs.writeFileSync(file, corrupt(label, planMarkdown), { mode: 0o600 });
       fs.writeFileSync(`${file}.questions.json`, JSON.stringify([]), { mode: 0o600 });
-      if (targeted) fs.writeFileSync(`${file}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
+      // A compliant model persists this sidecar on every draft/revision call
+      // when interface decisions are asked for, not only a targeted
+      // continuation edit: stage-plan-continuation.mjs now reads it by path
+      // and treats a named-but-missing file as a hard error, so a stub
+      // modelling a well-behaved model has to write it every time too.
+      fs.writeFileSync(`${file}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
       const [plan_chars, plan_hash] = expectToken(normalizeText(planMarkdown)).split(":");
       return answer(options, {
         plan_path: file,
@@ -949,10 +954,21 @@ test("a question raised in a round that the sidecar does not repeat no longer st
   // it in the sidecar.
   assert.equal(result.status, "needs-questions");
   assert.deepEqual(result.openQuestions, ["Which cache should the ledger use?"]);
-  // The sidecar is the answer, and it is what the command reads.
+  // settleQuestions reconciles the reported list from draft.open_questions
+  // plus this exit's own extra rather than from a list a model relays back —
+  // a sidecar that only ever grows across a pass must not ride a reply any
+  // more than a command, and the reviewer that raised this question has no
+  // way to persist it itself (plan-reviewer is read-only). Its finding now
+  // travels to the merge command as --additional-inline, bounded to this one
+  // round rather than the whole-pass tally, and the command refuses to write
+  // anything but the checksum this pass already expects — so the sidecar on
+  // disk is no longer allowed to lag what is reported; this is real end-to-end
+  // coverage, not a stub, so the file below is what the actual merge script
+  // wrote.
+  assert.equal(fs.existsSync(result.questionsPath), true);
   assert.deepEqual(
     JSON.parse(fs.readFileSync(result.questionsPath, "utf8")),
-    result.openQuestions
+    ["Which cache should the ledger use?"]
   );
   // Nothing re-read the sidecar to argue with it.
   assert.equal(prompts.has("plan:verify-final-questions"), false);

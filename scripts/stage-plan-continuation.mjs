@@ -14,14 +14,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { assertResumeRecord, expectToken, normalizeText } from "./compose-prompt.mjs";
+import { assertResumeRecord, canonicalJson, expectToken, normalizeText } from "./compose-prompt.mjs";
 import { verifyPayloads } from "./verify-payload.mjs";
 
 function parseArgs(argv) {
   const [action, ...rest] = argv;
   if (!["prepare", "publish"].includes(action)) {
-    throw new Error("usage: stage-plan-continuation.mjs <prepare|publish> --source <path> --target <path> --expect <length:checksum> [--receipt continuation|none] [--expect-questions <hex>] [--ui-decisions <hex>]");
+    throw new Error("usage: stage-plan-continuation.mjs <prepare|publish> --source <path> --target <path> --expect <length:checksum> [--receipt continuation|none] [--expect-questions <length:sha256-hex>] [--ui-decisions-file <path>]");
   }
   const options = { action };
   for (let index = 0; index < rest.length; index += 2) {
@@ -35,6 +36,13 @@ function parseArgs(argv) {
   }
   if (!/^\d+:[0-9a-f]{8}$/.test(options.expect)) {
     throw new Error("--expect must be a length:checksum token");
+  }
+  // A SHA-256 digest rather than the fnv1a "chars:hash" token --expect uses:
+  // this check asks the command to trust a value it cannot otherwise verify
+  // against anything a model wrote, so it gets the stronger guarantee instead
+  // of the one sized for catching an ordinary transcription drift.
+  if (options.expectQuestions !== undefined && !/^\d+:[0-9a-f]{64}$/.test(options.expectQuestions)) {
+    throw new Error("--expect-questions must be a length:sha256-hex token");
   }
   // What the published plan is, which decides whether it earns a continuation
   // receipt. A round input is published by the same staging discipline but is
@@ -91,21 +99,56 @@ function prepare({ source, target, expect }) {
   });
 }
 
-// The questions a step reported, as a comparable set. Order and duplicates are
-// not content: the sidecar and the structured reply are written by the same
-// model from the same set and need not agree on either.
-function questionSet(value) {
+// The questions a step reported, reduced to a fixed-size SHA-256 digest — see
+// questionSetDigest in workflows/plan-forge.js, which this mirrors exactly.
+// Order and duplicate phrasing are not content — the sidecar and the
+// structured reply are written by the same model from the same set and need
+// not agree on either — so the digest is taken over the sorted, deduplicated,
+// normalized text rather than the raw array. Deliberately not expectToken's
+// fnv1a "chars:hash": that token is sized for catching an ordinary
+// transcription drift, and this check asks the command to trust a value it
+// cannot otherwise verify against anything a model wrote.
+function questionSetDigest(value) {
   if (!Array.isArray(value)) throw new Error("open questions must be a JSON array");
-  return new Set(value.map((question) => String(question).trim().toLocaleLowerCase().replace(/\s+/g, " ")));
+  const normalized = [...new Set(value.map((question) =>
+    String(question).trim().toLocaleLowerCase().replace(/\s+/g, " ")))].sort();
+  const canonical = canonicalJson(normalized);
+  return `${canonical.length}:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
-// The interface record this publication intends to leave, as bytes. The
-// workflow supplies the set its carry-forward check just cleared, so the record
-// beside a published plan is written from a checked array rather than copied
-// from whatever a model left at the working path — which, because that path is
-// derived from the pass and round, may belong to an interrupted attempt.
-function uiDecisionBytes(hex) {
-  const decoded = JSON.parse(Buffer.from(hex, "hex").toString("utf8"));
+// The interface record this publication intends to leave, as bytes read from
+// a path rather than carried as content. The workflow names the file its
+// carry-forward check already cleared — the model's own persisted sidecar
+// when that is the checked value, a workflow-composed working file when it
+// is not — so the record beside a published plan comes from a path a model
+// only ever retypes once, never from an array it must reproduce whole.
+//
+// This is only ever called when --ui-decisions-file was actually given, so a
+// missing file here is a named path the caller explicitly told this
+// publication to trust that does not exist — a hard error, not "nothing
+// declared". Silently falling back to the source's implicit sidecar in that
+// case is exactly the stale-file risk naming the file was meant to rule out.
+// The absent-flag case (uiDecisionsFile === undefined) is the caller
+// declining to name anything at all, and takes the legacy fallback path in
+// publish() below; the two are deliberately not the same code path. A file
+// that exists but is corrupt or malformed is a different matter still: that
+// is content this publication was told to trust, and trusting it silently
+// would be the one place a model still decided what the record said.
+function uiDecisionBytesFromFile(file) {
+  const resolved = path.resolve(file);
+  let stat;
+  try {
+    stat = fs.lstatSync(resolved);
+  } catch {
+    throw new Error(`--ui-decisions-file is missing: ${resolved}`);
+  }
+  if (stat.isSymbolicLink()) throw new Error(`--ui-decisions-file may not be a symbolic link: ${resolved}`);
+  let decoded;
+  try {
+    decoded = JSON.parse(fs.readFileSync(resolved, "utf8"));
+  } catch (error) {
+    throw new Error(`--ui-decisions-file at ${resolved} is not readable JSON (${error.message})`);
+  }
   if (!Array.isArray(decoded)) throw new Error("interface decisions must be a JSON array");
   for (const decision of decoded) {
     if (!decision || typeof decision !== "object" || Array.isArray(decision)
@@ -123,10 +166,10 @@ function alreadyHolds(file, bytes) {
   return bytes !== null && fs.readFileSync(file).equals(bytes);
 }
 
-function publish({ source, target, expect, expectQuestions, uiDecisions, receipt }) {
+function publish({ source, target, expect, expectQuestions, uiDecisionsFile, receipt }) {
   // Argument validation before anything else: a publication that cannot even be
   // described must not clear a plan on its way to failing.
-  const declaredUiDecisions = uiDecisions === undefined ? null : uiDecisionBytes(uiDecisions);
+  const declaredUiDecisions = uiDecisionsFile === undefined ? null : uiDecisionBytesFromFile(uiDecisionsFile);
   const plan = readPlan(source, expect);
   const sourceQuestions = `${plan.resolved}.questions.json`;
   assertResumeRecord(sourceQuestions);
@@ -140,12 +183,9 @@ function publish({ source, target, expect, expectQuestions, uiDecisions, receipt
   // The plan is bound by its token; without this the sidecar beside it is bound
   // by nothing.
   if (expectQuestions !== undefined) {
-    const reported = questionSet(JSON.parse(Buffer.from(expectQuestions, "hex").toString("utf8")));
-    const staged = questionSet(JSON.parse(questions.toString("utf8")));
-    const missing = [...reported].filter((question) => !staged.has(question));
-    const extra = [...staged].filter((question) => !reported.has(question));
-    if (missing.length || extra.length) {
-      throw new Error(`${sourceQuestions} does not hold the questions this step reported: ${missing.length} missing, ${extra.length} unexpected`);
+    const actual = questionSetDigest(JSON.parse(questions.toString("utf8")));
+    if (actual !== expectQuestions) {
+      throw new Error(`${sourceQuestions} disagrees with what this step reported`);
     }
   }
   const sourceUiDecisions = `${plan.resolved}.ui-decisions.json`;

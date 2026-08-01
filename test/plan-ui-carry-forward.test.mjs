@@ -37,21 +37,41 @@ const decision = (id, surface = "new-dialog", precedent = null) => ({
   precedent
 });
 
-function decodeHex(hex) {
-  const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
-  return JSON.parse(new TextDecoder().decode(bytes));
-}
-
 function ids(decisions) {
   return (decisions ?? []).map((entry) => entry.id).sort();
 }
 
-// The set a publish command was told to write beside the plan.
-function publishedDecisions(prompts, label) {
+// The real merge scripts' receipt names the exact file and echoes back the
+// exact --expect token the command line already carried, so a stub standing
+// in for a well-behaved one has to read both off the prompt rather than
+// fabricate its own — matchingPayload now requires all three to agree with
+// what the workflow itself computed as the expected merged result.
+function mergeReceiptFrom(prompt, name) {
+  const script = name === "OPEN_QUESTIONS" ? "merge-plan-questions" : "merge-plan-ui-decisions";
+  const fileMatch = new RegExp(`${script}\\.mjs"\\s+"([^"]+)"`).exec(prompt);
+  const expectMatch = /--expect "([^"]+)"/.exec(prompt);
+  const token = expectMatch?.[1];
+  return {
+    name,
+    label: name === "OPEN_QUESTIONS" ? "open-questions" : "interface-decisions",
+    file: fileMatch?.[1],
+    json: true,
+    chars: token ? Number(token.split(":")[0]) : 0,
+    token,
+    expected: token ?? null,
+    matches: true
+  };
+}
+
+// The path a publish command was told to read the interface record from.
+// Content itself never appears in the command any more — only this path,
+// which stage-plan-continuation.mjs reads with its own filesystem access —
+// so this is what a stub can verify about what each publication would write.
+function publishedUiDecisionsFile(prompts, label) {
   const prompt = prompts.get(label);
   assert.notEqual(prompt, undefined, `no publish command was issued for ${label}`);
-  const hex = /--ui-decisions ([0-9a-f]*)/.exec(prompt)?.[1];
-  return hex === undefined ? null : decodeHex(hex);
+  const match = /--ui-decisions-file "([^"]*)"/.exec(prompt);
+  return match ? match[1] : null;
 }
 
 // Drives plan-forge with stubs standing in for well-behaved models, except where
@@ -66,13 +86,12 @@ async function forge({
   decisions = null,
   planReview = APPROVE,
   revisionCheck = APPROVE,
-  loseUiDecisionMerge = false,
+  mergeNeverConfirmed = false,
   dropCarried = false,
   reviewRounds = 1
 } = {}) {
   const labels = [];
   const prompts = new Map();
-  const merged = [];
   const agent = async (prompt, options) => {
     const label = options.label;
     labels.push(label);
@@ -102,15 +121,16 @@ async function forge({
     if (label === "plan:decompose") return TRAIN;
     if (label.endsWith("revision-check")) return revisionCheck;
     if (label.startsWith("plan:merge-final-ui-decisions")) {
-      if (loseUiDecisionMerge) return null;
-      const hex = /merge-plan-ui-decisions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
-      const list = hex ? decodeHex(hex) : [];
-      merged.push(list);
-      return { ok: true, uiDecisions: list };
+      // A total loss: no ok, no payloads, on every attempt. The command
+      // normalizes the file with its own filesystem access and reports only a
+      // receipt, so a lost reply here means the pass never learns whether the
+      // record on disk was normalized — never that a list failed to travel,
+      // since none ever does.
+      if (mergeNeverConfirmed) return null;
+      return { ok: true, payloads: [mergeReceiptFrom(prompt, "INTERFACE_DECISIONS")] };
     }
     if (label.startsWith("plan:merge-final-questions")) {
-      const hex = /merge-plan-questions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
-      return { ok: true, questions: hex ? decodeHex(hex) : [] };
+      return { ok: true, payloads: [mergeReceiptFrom(prompt, "OPEN_QUESTIONS")] };
     }
     if (label.startsWith("plan:lint")) {
       const review = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
@@ -183,7 +203,7 @@ async function forge({
       ui: { gateOnUserVisible: true, ...ui }
     }
   }, agent, parallel, () => {}, () => {}, undefined);
-  return { result, labels, prompts, merged };
+  return { result, labels, prompts };
 }
 
 // ---- The check ----
@@ -232,55 +252,64 @@ test("a repository with no interface never checks carry-forward and never merges
     planReview: REVISE
   });
   assert.equal(labels.some((label) => label.startsWith("plan:merge-final-ui-decisions")), false);
-  assert.equal(publishedDecisions(prompts, "plan:publish-revision:1"), null, "no interface means no record to write");
+  assert.equal(publishedUiDecisionsFile(prompts, "plan:publish-revision:1"), null, "no interface means no record to name");
   assert.equal(result.uiDecisionsPath, null);
 });
 
-// ---- What each publication writes ----
+// ---- What each publication names ----
+//
+// Content itself never rides in these commands any more: stage-plan-continuation.mjs
+// reads the named path with its own filesystem access, and a stub exercising
+// only the composed command text cannot see what ends up there — that is
+// covered where real files are involved, in test/plan-revision-publication.test.mjs
+// and test/prompt-integrity.test.mjs. What a stub can and does verify is that
+// each publish site names the exact working file the drafter or reviser was
+// just told to persist the full carried-plus-declared union to.
 
-test("the round revision publishes the accumulator plus its own declarations", async () => {
-  const { prompts } = await forge({
-    draftDecisions: [decision("export-dialog")],
-    reviewDecisions: [decision("lens-found-nav", "new-nav")],
-    revisionDecisions: [decision("export-dialog"), decision("lens-found-nav", "new-nav"), decision("revision-added")],
-    planReview: REVISE
-  });
-  // The revision's own return is not pushed into the accumulator until after
-  // this publication, so the command has to take the union itself.
-  assert.deepEqual(
-    ids(publishedDecisions(prompts, "plan:publish-revision:1")),
-    ["export-dialog", "lens-found-nav", "revision-added"]
-  );
-});
-
-test("a clean round publishes the interface findings of the round that ended the loop", async () => {
-  const { prompts } = await forge({
-    draftDecisions: [decision("export-dialog")],
-    reviewDecisions: [decision("lens-found-nav", "new-nav")]
-  });
-  // The sidecar beside the round input predates this round's lens. Copying it
-  // would publish the pass's finished plan next to a record missing what the
-  // round just found, and no revision runs after a clean round to fix it.
-  assert.deepEqual(
-    ids(publishedDecisions(prompts, "plan:publish-approved-round:1")),
-    ["export-dialog", "lens-found-nav"]
-  );
-});
-
-test("a continuation publishes what it carried plus what it returned", async () => {
+test("a continuation publish names the working copy's own interface sidecar", async () => {
   const { prompts } = await forge({
     decisions: [{ question: "Which format?", answer: "CSV" }],
     seedDecisions: [decision("earlier-dialog")],
     revisionDecisions: null,
     draftDecisions: [decision("continuation-added")]
   });
-  assert.deepEqual(
-    ids(publishedDecisions(prompts, "plan:publish-continuation")),
-    ["continuation-added", "earlier-dialog"]
+  assert.match(
+    publishedUiDecisionsFile(prompts, "plan:publish-continuation"),
+    /pass-1-continuation-work\.md\.ui-decisions\.json$/
   );
 });
 
-test("a cleared final revision publishes the whole accumulator", async () => {
+test("a round revision publish names the revision's own working sidecar", async () => {
+  const { prompts } = await forge({
+    draftDecisions: [decision("export-dialog")],
+    reviewDecisions: [decision("lens-found-nav", "new-nav")],
+    revisionDecisions: [decision("export-dialog"), decision("lens-found-nav", "new-nav"), decision("revision-added")],
+    planReview: REVISE
+  });
+  assert.match(
+    publishedUiDecisionsFile(prompts, "plan:publish-revision:1"),
+    /pass-1-round-1-revision-work\.md\.ui-decisions\.json$/
+  );
+});
+
+test("a clean round publish names the round input's own sidecar, not a freshly merged one", async () => {
+  const { prompts } = await forge({
+    draftDecisions: [decision("export-dialog")],
+    reviewDecisions: [decision("lens-found-nav", "new-nav")]
+  });
+  // The sidecar beside the round input predates this round's lens, and no
+  // revision runs after a clean round to fold the lens's finding into a file:
+  // the reviewing agent has no permission to persist one itself. That finding
+  // still reaches the reported result from this pass's own memory (see
+  // "the interface record is settled..." below); only the file named here
+  // lags by it, one round behind.
+  assert.match(
+    publishedUiDecisionsFile(prompts, "plan:publish-approved-round:1"),
+    /pass-1-round-1-input\.md\.ui-decisions\.json$/
+  );
+});
+
+test("a cleared final revision publish names the last revision's own sidecar", async () => {
   const { prompts } = await forge({
     reviewRounds: 1,
     draftDecisions: [decision("export-dialog")],
@@ -288,27 +317,32 @@ test("a cleared final revision publishes the whole accumulator", async () => {
     revisionDecisions: [decision("export-dialog"), decision("lens-found-nav", "new-nav")],
     planReview: REVISE
   });
-  assert.deepEqual(
-    ids(publishedDecisions(prompts, "plan:publish-cleared-revision")),
-    ["export-dialog", "lens-found-nav"]
+  assert.match(
+    publishedUiDecisionsFile(prompts, "plan:publish-cleared-revision"),
+    /pass-1-round-2-input\.md\.ui-decisions\.json$/
   );
 });
 
 // ---- Settlement at the exits ----
+//
+// dedupeDecisions(uiDecisions) is keyed by id with the last version winning,
+// and requireCarriedUiDecisions enforces on every revision that an id, once
+// carried, never disappears — so this pass's own accumulator is an accurate
+// answer without ever reading a file back, unlike the question tally the
+// carry-forward check for questions specifically warns against trusting.
 
 test("the interface record is settled when the pass reaches the train", async () => {
-  const { result, merged } = await forge({
+  const { result, labels } = await forge({
     draftDecisions: [decision("export-dialog")],
     reviewDecisions: [decision("lens-found-nav", "new-nav")]
   });
-  assert.equal(merged.length, 1, "one settlement, at the one exit this pass took");
-  assert.deepEqual(ids(merged[0]), ["export-dialog", "lens-found-nav"]);
+  assert.equal(labels.filter((label) => label.startsWith("plan:merge-final-ui-decisions")).length, 1, "one settlement, at the one exit this pass took");
   assert.equal(result.uiDecisionsSettled, true);
   assert.deepEqual(ids(result.uiDecisions), ["export-dialog", "lens-found-nav"]);
 });
 
 test("a divergent round settles the findings of the round that stopped the pass", async () => {
-  const { result, merged } = await forge({
+  const { result } = await forge({
     reviewRounds: 3,
     draftDecisions: [decision("export-dialog")],
     reviewDecisions: [decision("lens-found-nav", "new-nav")],
@@ -319,11 +353,11 @@ test("a divergent round settles the findings of the round that stopped the pass"
   // that round runs no revision, so nothing else would write its findings down.
   assert.equal(result.status, "needs-plan-revision");
   assert.notEqual(result.divergedFrom, undefined);
-  assert.deepEqual(ids(merged.at(-1)), ["export-dialog", "lens-found-nav"]);
+  assert.deepEqual(ids(result.uiDecisions), ["export-dialog", "lens-found-nav"]);
 });
 
 test("a revision the re-read leaves blocking still settles before it stops", async () => {
-  const { result, merged } = await forge({
+  const { result } = await forge({
     draftDecisions: [decision("export-dialog")],
     reviewDecisions: [decision("lens-found-nav", "new-nav")],
     revisionDecisions: [decision("export-dialog"), decision("lens-found-nav", "new-nav")],
@@ -331,29 +365,30 @@ test("a revision the re-read leaves blocking still settles before it stops", asy
     revisionCheck: REVISE
   });
   assert.equal(result.status, "needs-plan-revision");
-  assert.deepEqual(ids(merged.at(-1)), ["export-dialog", "lens-found-nav"]);
+  assert.deepEqual(ids(result.uiDecisions), ["export-dialog", "lens-found-nav"]);
 });
 
 test("settlement runs even when the pass declared no interface decisions at all", async () => {
-  const { labels, merged } = await forge({ draftDecisions: [], reviewDecisions: [] });
+  const { labels } = await forge({ draftDecisions: [], reviewDecisions: [] });
   // Skipping the empty case would save a call and leave an unreadable record
   // unreadable for the next pass to be handed nothing for again, forever.
   assert.equal(labels.filter((label) => label.startsWith("plan:merge-final-ui-decisions")).length, 1);
-  assert.deepEqual(merged[0], []);
 });
 
-test("a lost merge reply confirms from memory and says that is what it did", async () => {
+test("a final merge that never confirms at all still reports the accurate list from memory", async () => {
   const { result } = await forge({
     draftDecisions: [decision("export-dialog")],
     reviewDecisions: [decision("lens-found-nav", "new-nav")],
-    loseUiDecisionMerge: true
+    mergeNeverConfirmed: true
   });
-  // Never fatal: the record was written before the reply was lost, and this is
-  // the track that has never blocked a pass.
+  // Never fatal: this is the advisory track, and it has never blocked a pass.
+  // Unlike the question sidecar, the reported array does not depend on the
+  // merge confirming anything, so a lost confirmation costs only the flag
+  // that says the on-disk record might not have caught up.
   assert.equal(result.status, "needs-approval");
   assert.equal(result.uiDecisionsSettled, false, "the caller has to be able to tell these apart");
   assert.deepEqual(ids(result.uiDecisions), ["export-dialog", "lens-found-nav"]);
-  assert.notEqual(result.uiDecisionsPath, null, "the record is still where the next pass reads it");
+  assert.notEqual(result.uiDecisionsPath, null, "the path is named even when the merge could not be confirmed");
 });
 
 // ---- The prompts the checks depend on ----
