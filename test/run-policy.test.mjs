@@ -36,6 +36,20 @@ test("single-provider policies force Haiku plumbing and have stable fingerprints
   assert.equal(samePolicy(first, second), true);
 });
 
+test("relayEffort has no effect on the run policy fingerprint", () => {
+  const withoutEffort = normalizeRunPolicy({}, { transport: { relayModel: "opus" } });
+  const withEffort = normalizeRunPolicy({}, { transport: { relayModel: "opus", relayEffort: "max" } });
+  assert.equal(withEffort.policyFingerprint, withoutEffort.policyFingerprint);
+  assert.equal(samePolicy(withoutEffort, withEffort), true);
+
+  const codexWithoutEffort = normalizeRunPolicy({ provider: "codex" }, { transport: { relayModel: "opus" } });
+  const codexWithEffort = normalizeRunPolicy(
+    { provider: "codex" },
+    { transport: { relayModel: "opus", relayEffort: "xhigh" } }
+  );
+  assert.equal(codexWithEffort.policyFingerprint, codexWithoutEffort.policyFingerprint);
+});
+
 test("invalid providers fail before a run starts", () => {
   assert.throws(() => normalizeRunPolicy({ provider: "auto" }), /both, claude, codex/);
 });

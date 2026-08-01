@@ -206,7 +206,8 @@
       "required": ["mode"],
       "properties": {
         "mode": { "const": "exec" },
-        "relayModel": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] }
+        "relayModel": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] },
+        "relayEffort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
       }
     },
     "limits": {
