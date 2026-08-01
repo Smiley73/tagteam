@@ -129,7 +129,12 @@ async function forge({
       if (mergeNeverConfirmed) return null;
       return { ok: true, payloads: [mergeReceiptFrom(prompt, "INTERFACE_DECISIONS")] };
     }
-    if (label.startsWith("plan:merge-final-questions")) {
+    if (label.startsWith("plan:merge-")) {
+      // Every open-questions merge site, not only the final settle: the
+      // draft/revision carry-forward merges (continuation, round revision,
+      // and their Codex counterparts) run through the same command and label
+      // prefix, distinguished from the interface-decisions merge above only
+      // by not naming "ui-decisions".
       return { ok: true, payloads: [mergeReceiptFrom(prompt, "OPEN_QUESTIONS")] };
     }
     if (label.startsWith("plan:lint")) {

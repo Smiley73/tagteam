@@ -26,23 +26,6 @@ const HANDOFF_FIXTURES = {
   PR_TRAIN: { entries: TRAIN.prs, fields: ["id", "taskIds"] }
 };
 
-// The carried-questions fence alone: the set the prompt calls carried and the
-// only one the carry-forward check demands back. A stub that answers [] is
-// modelling the dropped-question failure, not a well-behaved reply.
-function fencedQuestionsFrom(prompt) {
-  const carried = /<untrusted-questions-so-far>\n([\s\S]*?)\n<\/untrusted-questions-so-far>/.exec(prompt);
-  return carried ? JSON.parse(carried[1]) : [];
-}
-
-// Everything the prompt puts in front of the revision: the fence plus the
-// questions the fenced reviews raise, which the revision prompt asks for by
-// name. A model that keeps every one of them apart returns this.
-function carriedQuestionsFrom(prompt) {
-  const reviewed = [...prompt.matchAll(/<untrusted-(?:claude|codex)-review>\n([\s\S]*?)\n<\/untrusted-(?:claude|codex)-review>/g)]
-    .flatMap(([, body]) => JSON.parse(body).open_questions ?? []);
-  return [...new Set([...fencedQuestionsFrom(prompt), ...reviewed])];
-}
-
 // The real script's receipt names the exact file and echoes back the exact
 // --expect token the command line already carried, so a stub standing in for
 // a well-behaved one has to read both off the prompt rather than fabricate
@@ -78,12 +61,11 @@ async function forge({
   mergeNeverConfirmed = false,
   handoffVerdict = APPROVE,
   planReview = APPROVE,
-  // A revision that returns fewer questions than it was carried, i.e. drops one.
-  dropCarried = false,
-  // A revision that recognized a reviewer's question as one it is already
-  // carrying and returned the single merged question: the fenced set comes
-  // back, the reviewer's separate wording does not.
-  mergeReviewParaphrase = false
+  // What the revision returns in open_questions: only what it is newly
+  // raising this round, per the current contract. Defaults to nothing new,
+  // which is the ordinary compliant reply once carried questions are the
+  // workflow's problem rather than the model's.
+  revisionRaises = []
 } = {}) {
   const labels = [];
   const prompts = new Map();
@@ -100,22 +82,21 @@ async function forge({
         plan_path: match[1],
         plan_chars: 12,
         plan_hash: "fd8d615d",
-        open_questions: revising
-          ? (dropCarried
-            ? []
-            : mergeReviewParaphrase ? fencedQuestionsFrom(prompt) : carriedQuestionsFrom(prompt))
-          : draftQuestions,
+        open_questions: revising ? revisionRaises : draftQuestions,
         ui_decisions: []
       };
     }
     if (label === "plan:manifest") return MANIFEST;
     if (label === "plan:decompose") return TRAIN;
-    if (label.startsWith("plan:merge-final-questions")) {
+    if (label.startsWith("plan:merge-")) {
       // A total loss: no ok, no payloads, on every attempt. The command reads
       // and normalizes the sidecar with its own filesystem access; the reply
       // never carries the list, only a receipt, so there is nothing left for
       // the workflow to fall back to when even that receipt never arrives.
-      if (mergeNeverConfirmed) return null;
+      // Scoped to "plan:merge-final-questions" only: the other merge sites
+      // (carrying the drafter/reviser's own forward set) are not what this
+      // flag models a loss of.
+      if (mergeNeverConfirmed && label.startsWith("plan:merge-final-questions")) return null;
       return { ok: true, payloads: [mergeReceiptFrom(prompt)] };
     }
     if (label.startsWith("plan:lint")) {
@@ -215,24 +196,43 @@ test("an unready handoff outranks the questions", async () => {
   assert.equal(result.status, "needs-handoff-revision");
 });
 
-test("a Claude revision may not drop a question it was carrying", async () => {
+// Ownership of the carried set moved to the workflow: a revision that returns
+// nothing new (the ordinary compliant reply) must still keep every carried
+// question, because the workflow adds the surviving carried set back after
+// the call returns rather than trusting the model's reply to include it.
+test("a Claude revision that returns nothing still keeps every carried question", async () => {
+  const { result } = await forge({
+    draftQuestions: ["Which database should the cache front?"],
+    planReview: { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] }
+  });
+
+  assert.equal(result.status, "needs-questions");
+  assert.equal(result.openQuestionCount, 1);
+  assert.deepEqual(result.openQuestions, ["Which database should the cache front?"]);
+});
+
+// A revision that also raises a genuinely new question of its own keeps both:
+// the carried one the workflow restored, and the new one it returned.
+test("a Claude revision that raises a new question keeps it alongside every carried one", async () => {
   const { result } = await forge({
     draftQuestions: ["Which database should the cache front?"],
     planReview: { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] },
-    dropCarried: true
+    revisionRaises: ["Who owns rollback?"]
   });
 
-  // Dropping one is the failure that looks like success: the sidecar shrinks,
-  // the pass reports fewer questions than it was given, and the decision the
-  // question stood for silently becomes an assumption nobody made.
-  assert.equal(result.status, "plan-interrupted");
-  assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
+  assert.equal(result.status, "needs-questions");
+  assert.equal(result.openQuestionCount, 2);
+  assert.deepEqual(result.openQuestions, [
+    "Who owns rollback?",
+    "Which database should the cache front?"
+  ]);
 });
 
-// The revision is handed the reviews as JSON, not as carried questions, so the
-// prompt asks for them by name. Returning them is the ordinary reply, and it
-// must not be read as anything but that.
-test("a revision returning the reviews' questions as well as its carried ones is not stopped", async () => {
+// The reviews' own questions reach the sidecar through a separate,
+// workflow-owned merge (`reviewQuestions`) regardless of what the revision
+// itself returns — the ordinary reply is nothing new, and the reviewer's
+// question still reaches the human.
+test("a revision returning nothing still surfaces the reviews' own questions", async () => {
   const { result } = await forge({
     draftQuestions: ["Which database should the cache front?"],
     planReview: {
@@ -263,13 +263,14 @@ test("a clean round's reviewer questions still reach the sidecar", async () => {
   assert.deepEqual(result.openQuestions, raised);
 });
 
-// The crash this check was scoped to stop causing. questionKey matches text, so
-// a reviewer restating a question the plan already carries is a second entry to
-// it, and a revision that merged the two looked exactly like one that dropped
-// one — a real --provider both pass died here after a full cross-review round.
-// Merging is the behaviour commands/plan.md asks for, so it cannot be the thing
-// that ends the pass.
-test("a Claude revision that merged a reviewer's restatement into a carried question is not stopped", async () => {
+// A reviewer restating a question the plan already carries used to be counted
+// as a second obligation the revision had to echo back verbatim, and a
+// revision that folded the two together looked exactly like one that dropped
+// one — a real pass died here after a full cross-review round. Now the
+// revision is not asked to echo or merge anything: the reviewer's own wording
+// reaches the sidecar through `reviewQuestions` regardless, distinct from the
+// carried question by key, so both simply coexist.
+test("a Claude revision that returns nothing still keeps both a carried question and a reviewer's paraphrase of it", async () => {
   const { result } = await forge({
     draftQuestions: ["Which database should the cache front?"],
     planReview: {
@@ -277,41 +278,93 @@ test("a Claude revision that merged a reviewer's restatement into a carried ques
       issues: [BLOCKER],
       open_questions: ["What database is the cache in front of?"],
       suggestions: []
-    },
-    mergeReviewParaphrase: true
+    }
   });
 
   assert.equal(result.status, "needs-questions");
-  // Nothing is lost by not demanding the echo: the workflow collects the
-  // reviewers' own wording itself and settles it into the sidecar at the exit,
-  // so the human still sees the question as the reviewer put it.
   assert.deepEqual(result.openQuestions, [
     "Which database should the cache front?",
     "What database is the cache in front of?"
   ]);
 });
 
-test("a Claude revision that carries its questions forward is not stopped", async () => {
-  const { result } = await forge({
-    draftQuestions: ["Which database should the cache front?"],
+// Every other question fixture in this file is a phrase; a real one is a
+// paragraph. The seven questions this repository's own plan-budget-split pass
+// left behind run 119 to 438 characters each and serialize to 2082 between
+// them. These are sized from that sidecar, and they exist because the carried
+// set once travelled to the merge command as a single inline `--additional-inline`
+// argument: a fully compliant pass carrying four ordinary questions composed an
+// argument twice the size of the ceiling assembleCommand enforces, and died on
+// the happy path. Short fixtures could never have shown that.
+const REALISTIC_QUESTIONS = [
+  "The per-section budget numbers in the plan are calibrated from a run whose per-section table is not reproducible in this tree: that run was on an earlier plugin version and the plan directory holds no record of it. Confirm the four bucket numbers and the nine allocations, or supply the run so they can be recomputed before the attribution work lands.",
+  "The accepted-overrun override records its owner as free text supplied by whoever answers the stop question. Should it instead require a value tagteam can verify, such as a git identity, given that approved.json already binds the config and policy fingerprints and this row is committed beside them?",
+  "Attribution currently charges a relay retry to the step that lost the reply rather than to the step that paid for it, which makes the per-phase table understate plumbing and overstate reasoning. Is that the intended reading, or should a retry be charged to the phase whose budget it actually consumes?",
+  "The reconciliation pass treats a missing usage receipt for a confirmed dispatch as a hard stop, but treats an unconfirmed dispatch with no journal entry as legacy-incomplete. Confirm that asymmetry is deliberate before the budget report starts quoting either number as authoritative."
+];
+
+test("a pass carrying realistic-length questions never composes an oversized merge argument", async () => {
+  const { result, prompts } = await forge({
+    draftQuestions: REALISTIC_QUESTIONS,
     planReview: { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] }
   });
 
   assert.equal(result.status, "needs-questions");
-  assert.equal(result.openQuestionCount, 1);
+  assert.deepEqual(result.openQuestions, REALISTIC_QUESTIONS);
+
+  // And it fits because the carried set travels as a path, not because this
+  // fixture happened to be short enough. A draft or revision merge that names
+  // its carried set inline is carrying a value that grows with the pass, which
+  // is the shape the per-argument ceiling exists to refuse.
+  const carriedMerges = [...prompts].filter(([label]) =>
+    label.startsWith("plan:merge-") && !label.startsWith("plan:merge-final-questions")
+      && !label.startsWith("plan:merge-interrupted-questions"));
+  assert.notEqual(carriedMerges.length, 0, "no draft/revision question merge ran at all");
+  for (const [label, prompt] of carriedMerges) {
+    assert.equal(
+      prompt.includes("--additional-inline"),
+      false,
+      `${label} carries its carried question set as inline command-line content`
+    );
+  }
 });
 
-// The continuation call site — the same check with the decisions as its
-// resolved set — needs a real filesystem to reach, so it is covered where that
-// harness already lives: see "a Claude continuation may not drop a carried
-// question its decisions never answered" in prompt-integrity.test.mjs.
+// The one set that exists in no file: a reviewer is read-only, so what it
+// raised is in the workflow's memory and nowhere else, and the only way it can
+// reach the merge command is as content on the command line. That set is not
+// one round's worth either — it accumulates across every round of the pass, and
+// both reviewers contribute — so it is batched, and the size of any one
+// argument is bounded by the batch rather than by how far the pass got.
+test("reviewer-raised questions are batched so no single argument carries the pass's tally", async () => {
+  const { result, labels, prompts } = await forge({
+    planReview: { ...APPROVE, open_questions: REALISTIC_QUESTIONS }
+  });
+
+  assert.equal(result.status, "needs-questions");
+  assert.deepEqual(result.openQuestions, REALISTIC_QUESTIONS);
+
+  const merges = labels.filter((label) => label.startsWith("plan:merge-final-questions"));
+  assert.ok(merges.length > 1, `a ${JSON.stringify(REALISTIC_QUESTIONS).length}-character reviewer set was not batched at all`);
+  for (const [label, prompt] of prompts) {
+    if (!label.startsWith("plan:merge-")) continue;
+    for (const [, inline] of prompt.matchAll(/(--additional-inline '(?:[^']|'\\'')*')/g)) {
+      assert.ok(inline.length <= 700, `${label} composed a ${inline.length}-character inline question argument`);
+    }
+  }
+});
+
+// The continuation call site needs a real filesystem to reach, so it is
+// covered where that harness already lives: see
+// "a Claude continuation still keeps a carried question its decisions never
+// answered" and "a realistic-length carried set survives a continuation" in
+// prompt-integrity.test.mjs.
 
 // The check is only fair if the prompt asked for what it demands, and a stub
 // cannot show that: a stub reads the fences whatever the prompt says. So the
 // instructions themselves are asserted. Each of these was written to fix a
 // prompt-and-check disagreement that ended a compliant pass, and deleting any
 // one of them puts it straight back without failing anything else.
-test("the revision prompt asks for the reviews' questions and licenses merging them", async () => {
+test("the revision prompt asks only for newly raised questions, not the carried set", async () => {
   const { prompts } = await forge({
     draftQuestions: ["Which database should the cache front?"],
     planReview: {
@@ -323,20 +376,15 @@ test("the revision prompt asks for the reviews' questions and licenses merging t
   });
   const revision = prompts.get("plan:revise:1");
 
-  // The carried fence holds only the draft's questions, so a reviewer's arrive
-  // solely inside the fenced review JSON. Without this line, "every carried
-  // question" never reaches them and a reviewer's question never enters the
-  // plan's own list.
-  assert.match(revision, /The reviews above raise open questions of their own\. Return those in open_questions too, alongside the carried ones\./);
-  // And merging is licensed, because the check no longer counts a reviewer's
-  // restatement of a carried question as a second obligation — bounded to a
-  // restatement, because nothing downstream can tell a wrong merge from a right
-  // one and the round input a resume reads is whatever this reply returned.
-  assert.match(revision, /Where a review restates a question you are already carrying, return the one merged question rather than both; where it asks for any decision the carried one does not, return both\./);
-  // No softer clause about the carried set itself: a round revision carries no
-  // human decisions, so the check permits no omission there at all.
-  assert.equal(/unless a review's question/.test(revision), false);
-  assert.match(revision, /Omit a carried question only when a human decision supplied with this request answers it/);
+  // The reviewer's own questions reach the sidecar through a separate,
+  // workflow-owned merge; the revision is not asked to relay them.
+  assert.match(revision, /those reach the plan's sidecar automatically and you do not need to return them/);
+  // The persist() contract: only what is newly raised, never the carried set.
+  assert.match(revision, /Return in open_questions only the question\(s\) you are newly raising this round/);
+  assert.match(revision, /Do not include any carried question in open_questions or in the sidecar — the workflow restores the carried set automatically/);
+  // The old "omit a carried question only when..." framing is gone: the model
+  // is never asked to reason about which carried questions to include.
+  assert.equal(/Omit a carried question only when/.test(revision), false);
 });
 
 // Binds the command's prose to the statuses the workflow actually returns, in

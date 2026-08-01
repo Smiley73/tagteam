@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { canonicalJson, expectToken } from "./compose-prompt.mjs";
+import { questionKey, readQuestionsFile, resolvedQuestionKeys, unionQuestions } from "./lib/plan-questions.mjs";
 
 function readJson(file, description) {
   const resolved = path.resolve(file);
@@ -12,37 +13,11 @@ function readJson(file, description) {
   return { resolved, value: JSON.parse(fs.readFileSync(resolved, "utf8")) };
 }
 
-function questionKey(value) {
-  return String(value ?? "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
-}
-
-// The additional-questions argument is a path, not content: a model composing
-// this command only ever retypes a path and a handful of short flags, never
-// the questions themselves. Reading the file is this process's own job — it
-// has real filesystem access even though the workflow that built this command
-// and the agent that ran it do not.
-function readQuestionsFile(file, description) {
-  const resolved = path.resolve(file);
-  let stat;
-  try {
-    stat = fs.lstatSync(resolved);
-  } catch {
-    throw new Error(`${description} is missing: ${resolved}`);
-  }
-  if (stat.isSymbolicLink()) throw new Error(`${description} may not be a symbolic link: ${resolved}`);
-  let value;
-  try {
-    value = JSON.parse(fs.readFileSync(resolved, "utf8"));
-  } catch (error) {
-    throw new Error(`${description} at ${resolved} is not readable JSON (${error.message})`);
-  }
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new Error(`${description} must decode to an array of strings`);
-  }
-  return value;
-}
-
-export function mergePlanQuestions(questionsFile, additionalQuestions, { expect } = {}) {
+// `resolvedKeys` names the questions a human already answered. It only ever
+// subtracts from `additionalQuestions` — the carried set — never from what the
+// sidecar itself holds, which is what the step that just ran newly raised. See
+// unionQuestions in lib/plan-questions.mjs for why the asymmetry is deliberate.
+export function mergePlanQuestions(questionsFile, additionalQuestions, { expect, resolvedKeys } = {}) {
   const questions = readJson(questionsFile, "question sidecar");
   if (!Array.isArray(questions.value) || questions.value.some((item) => typeof item !== "string")) {
     throw new Error("question sidecar must be an array of strings");
@@ -51,13 +26,7 @@ export function mergePlanQuestions(questionsFile, additionalQuestions, { expect 
     throw new Error("additional questions must be an array of strings");
   }
 
-  const seen = new Set();
-  const merged = [...questions.value, ...additionalQuestions].filter((question) => {
-    const key = questionKey(question);
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const merged = unionQuestions(questions.value, additionalQuestions, resolvedKeys);
 
   // Checked before anything is written: a caller that names the exact result
   // it expects is trusting this command to produce it, and writing a
@@ -116,6 +85,9 @@ function parseArgs(argv) {
     } else if (arg === "--additional-inline") {
       options.additionalInline = argv[++index];
       if (options.additionalInline === undefined) throw new Error("--additional-inline requires a value");
+    } else if (arg === "--resolved-file") {
+      options.resolvedFile = argv[++index];
+      if (options.resolvedFile === undefined) throw new Error("--resolved-file requires a value");
     } else {
       options.positional.push(arg);
     }
@@ -124,11 +96,18 @@ function parseArgs(argv) {
 }
 
 // --additional-inline is the one deliberate exception to "content is a path":
-// it carries only what a single reviewing pass round raised and no later
-// revision folded into a sidecar — bounded to one round's findings, never the
-// whole-pass tally — because the agent that raised it has no way to persist
-// a file of its own. It is still small enough to be composed safely and is
-// subject to the same composition-time size ceiling as everything else.
+// it carries only what a reviewing agent raised and no later revision folded
+// into a sidecar, because that agent is read-only and has no way to persist a
+// file of its own. The workflow batches it so a single inline argument stays
+// far below the composition-time per-argument ceiling however many questions a
+// pass accumulates; every other set — a carried set, a whole-pass tally —
+// travels as the positional <additional-questions-file> path instead, and must,
+// because those grow with the pass.
+//
+// --resolved-file names the human decisions this step was given, as
+// {question, answer} rows. It subtracts the carried questions those answers
+// settle, so a continuation can hand this command the carried set as a path
+// rather than pre-filtering it into a value it would have to type out.
 async function main() {
   let options;
   try {
@@ -140,7 +119,7 @@ async function main() {
   }
   const [questionsFile, additionalFile] = options.positional;
   if (!questionsFile) {
-    process.stderr.write("usage: merge-plan-questions.mjs <questions.json> [<additional-questions-file>] [--additional-inline <json>] [--expect <length:hash>]\n");
+    process.stderr.write("usage: merge-plan-questions.mjs <questions.json> [<additional-questions-file>] [--additional-inline <json>] [--resolved-file <decisions.json>] [--expect <length:hash>]\n");
     process.exitCode = 2;
     return;
   }
@@ -168,7 +147,10 @@ async function main() {
     }
     additional = value;
   }
-  const result = mergePlanQuestions(questionsFile, additional, { expect: options.expect });
+  const resolvedKeys = options.resolvedFile === undefined
+    ? undefined
+    : resolvedQuestionKeys(options.resolvedFile, "resolved decisions file");
+  const result = mergePlanQuestions(questionsFile, additional, { expect: options.expect, resolvedKeys });
   // The full array stops here: an agent running this command is handed only
   // the receipt, never the list, so its reply can never grow with the pass.
   const { questions: _questions, ...receipt } = result;

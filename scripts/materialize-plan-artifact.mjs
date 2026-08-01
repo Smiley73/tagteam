@@ -7,6 +7,9 @@ import { validateJson } from "./validate-json.mjs";
 import { validateCompletionCheckpoint } from "./validate-relay-checkpoint.mjs";
 import { verifyPayloads } from "./verify-payload.mjs";
 import { expectToken, normalizeText } from "./compose-prompt.mjs";
+import {
+  questionSetDigest, readQuestionsFile, resolvedQuestionKeys, unionQuestions
+} from "./lib/plan-questions.mjs";
 
 function parseArgs(argv) {
   const options = {};
@@ -22,6 +25,19 @@ function parseArgs(argv) {
   }
   if (!/^sha256:[0-9a-f]{64}$/.test(options.requestIdentity)) {
     throw new Error("--request-identity must be a SHA-256 identity");
+  }
+  // A carried set folded in here decides what the published sidecar says, and
+  // this command is the only thing that reads it, so the caller has to name the
+  // result it expects. Without that, the one file a resume trusts would be
+  // whatever this command happened to compute.
+  if (options.carriedQuestionsFile && !options.expectQuestions) {
+    throw new Error("--carried-questions-file requires --expect-questions");
+  }
+  if (options.resolvedFile && !options.carriedQuestionsFile) {
+    throw new Error("--resolved-file is only meaningful with --carried-questions-file");
+  }
+  if (options.expectQuestions !== undefined && !/^\d+:[0-9a-f]{64}$/.test(options.expectQuestions)) {
+    throw new Error("--expect-questions must be a length:sha256-hex token");
   }
   return options;
 }
@@ -50,10 +66,35 @@ export function materializePlanArtifact(options) {
   }
 
   const plan = path.resolve(options.plan);
+  // Ownership of the carried-question set lives in the workflow, not the model:
+  // the artifact holds only what Codex newly raised this round, and the carried
+  // set is folded in here, from a path, before anything is written. It has to
+  // happen inside this command rather than in a merge that follows it, because
+  // the plan below is the discoverability boundary — a sidecar completed
+  // afterwards leaves a real window in which a resume selects this plan and
+  // reads a question record with every carried question missing from it.
+  //
+  // --expect-questions is what stops this command deciding for itself what that
+  // record says: the workflow computes the union it expects independently and
+  // names its digest, and a disagreement fails before a single byte is written.
+  const carried = options.carriedQuestionsFile
+    ? readQuestionsFile(options.carriedQuestionsFile, "carried questions file")
+    : [];
+  const openQuestions = unionQuestions(
+    result.open_questions ?? [],
+    carried,
+    options.resolvedFile ? resolvedQuestionKeys(options.resolvedFile, "resolved decisions file") : undefined
+  );
+  if (options.expectQuestions !== undefined) {
+    const actual = questionSetDigest(openQuestions);
+    if (actual !== options.expectQuestions) {
+      throw new Error(`the question sidecar for ${plan} does not match what this step reported (expected ${options.expectQuestions}, produced ${actual})`);
+    }
+  }
   // The plan name is how resume discovers a draft. Publish it last so a crash
   // can leave harmless orphan sidecars, never a discoverable plan without its
   // required question record.
-  const questions = writeAtomic(`${plan}.questions.json`, `${JSON.stringify(result.open_questions, null, 2)}\n`);
+  const questions = writeAtomic(`${plan}.questions.json`, `${JSON.stringify(openQuestions, null, 2)}\n`);
   if (options.uiDecisions !== "off") {
     writeAtomic(`${plan}.ui-decisions.json`, `${JSON.stringify(result.ui_decisions, null, 2)}\n`);
   }

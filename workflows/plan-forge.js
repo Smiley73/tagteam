@@ -476,23 +476,33 @@ function questionKey(value) {
   return String(value ?? "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
 }
 
-// A revision may resolve a question or return it, and nothing else. Dropping one
-// is the failure mode that looks like success: the sidecar shrinks, the pass
-// reports fewer questions than it was given, and the decision the question stood
-// for is now an assumption nobody made. The engine is named because both of them
-// revise plans and the message is the only thing that says which one to look at.
-function requireCarriedQuestions(engine, result, carried, resolved = []) {
-  const returned = new Set((result?.open_questions ?? []).map(questionKey));
+// Ownership of the carried-question set lives in the workflow, not the model: a
+// drafter or revision agent returns only what it is newly raising this round
+// (see persist() and the Codex prompt templates), and the workflow itself
+// computes the surviving set below. This makes dropping a carried question
+// impossible by construction — the model never had the power to omit one, the
+// workflow always adds it back — and makes verbatim echoing unnecessary, so a
+// revision that merely rewords a carried question for clarity no longer looks
+// like a drop. A human decision retires a carried question from this set; the
+// same key comparison the old check used, but subtractive rather than a
+// demand for equality.
+//
+// The accepted cost, stated plainly because nothing enforces it: a reviser that
+// reformulates a carried question against instructions now yields two
+// near-duplicate entries rather than a loud failure, and within a pass the set
+// only ever grows. That is the smaller problem. Only a human settles a
+// question, a decision row binds to it by its exact normalized text, and stable
+// text is therefore what lets an answer bind at all — a stale duplicate costs
+// one extra row in an AskUserQuestion chunk, where a question whose text moved
+// under an answer costs the answer. commands/plan.md already tells the command
+// to subtract answered questions by meaning, which is where that duplicate is
+// meant to disappear.
+function survivingCarriedQuestions(carried, resolved = []) {
   const resolvedKeys = new Set((resolved ?? []).map((decision) => questionKey(decision?.question)));
-  // Deduped first: the same question reaching this check from two reviewers is
-  // one dropped question, not two, and the count is what the message reports.
-  const missing = dedupeQuestions(carried ?? []).filter((question) => {
+  return dedupeQuestions(carried ?? []).filter((question) => {
     const key = questionKey(question);
-    return key && !resolvedKeys.has(key) && !returned.has(key);
+    return key && !resolvedKeys.has(key);
   });
-  if (missing.length) {
-    throw new Error(`${engine} plan result dropped ${missing.length} unresolved carried question(s)`);
-  }
 }
 
 // The same rule as questions, for a record nobody is ever asked about. A
@@ -837,6 +847,36 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
+// Questions that reach a command as content rather than as a path. Only one set
+// ever needs this — what a read-only reviewer raised, which no agent can write
+// to a file for itself — and it is held to a far tighter bound than
+// ARGUMENT_CHAR_CEILING above. That ceiling exists to catch a value which
+// escaped the path discipline, so the single argument that legitimately carries
+// text must never be the thing that trips it; keeping it well clear is what
+// makes the ceiling a real check rather than a limit the normal path lives
+// against. Anything larger is batched, so the argument's size is bounded by the
+// batch rather than by how many rounds the pass has run.
+const INLINE_QUESTIONS_CHAR_CEILING = 700;
+function inlineQuestionsArg(questions) {
+  return `--additional-inline ${shellQuote(JSON.stringify(questions))}`;
+}
+function inlineQuestionBatches(questions) {
+  const batches = [];
+  let current = [];
+  for (const question of questions) {
+    if (current.length && inlineQuestionsArg([...current, question]).length > INLINE_QUESTIONS_CHAR_CEILING) {
+      batches.push(current);
+      current = [];
+    }
+    if (!current.length && inlineQuestionsArg([question]).length > INLINE_QUESTIONS_CHAR_CEILING) {
+      throw new Error(`a single open question is ${String(question).length} characters, past the ${INLINE_QUESTIONS_CHAR_CEILING}-character bound on the one command argument that carries question text; a question that long is a document, not a decision someone can answer`);
+    }
+    current.push(question);
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
 function composeCommand({ pluginRoot, template, out, vars = {}, fences = [], expects = {}, requireJson = [], minBytes }) {
   return assembleCommand([
     `node "${pluginRoot}/scripts/compose-prompt.mjs"`,
@@ -1082,21 +1122,21 @@ function matchingPayload(payloads, name, file, expectedToken) {
     payload?.name === name && payload?.file === file && payload?.token === expectedToken);
 }
 
-// Runs the deterministic question-sidecar merge. What proves the merge ran is
-// its OPEN_QUESTIONS bookkeeping: the sidecar's path, character count, and a
-// checksum this call already knows to expect — expectedToken is the digest of
-// the exact merged result this pass computed from draft.open_questions and
-// this exit's own extra, and the command itself refuses to write anything
+// Runs the deterministic question-sidecar merge. Called from every site that
+// folds anything into a sidecar — the continuation draft, both round
+// revisions, and each of the pass's exits — with different inputs each time,
+// so expectedToken is simply whatever union that caller independently computed
+// and requires this file to hold. The command itself refuses to write anything
 // else, so a mismatched or missing receipt is this run's own proof that the
 // file does not hold what it should, not a gap to quietly report around.
 // The merged list itself never travels, in either direction — the command
-// reads any additional questions from a file (or a small inline argument
-// bounded to one round's findings, when no reviewing agent could persist a
-// file for it) rather than an unbounded accumulator, and its reply carries
-// only the receipt, never the array. A sidecar that only ever grows across a
-// pass is exactly the shape that must not ride through a command a model
-// retypes or a reply a model composes; a multi-kilobyte value did both, and
-// mangled in the retyping before it ever reached the point of being refused.
+// reads any additional questions from a file (or, only for what a read-only
+// reviewer raised and no file yet holds, from a small batched inline argument)
+// rather than from an unbounded accumulator, and its reply carries only the
+// receipt, never the array. A sidecar that only ever grows across a pass is
+// exactly the shape that must not ride through a command a model retypes or a
+// reply a model composes; a multi-kilobyte value did both, and mangled in the
+// retyping before it ever reached the point of being refused.
 async function mergeFinalQuestions({ command, label, phase: phaseName, model, effort, file, expectedToken }) {
   const prompt = [
     `Run this exact command: ${command}`,
@@ -1720,14 +1760,29 @@ async function main(raw) {
   // wrote, so there is nothing here to compare against a relayed copy of the
   // plan: no copy is relayed, and the artifact is the only source the published
   // bytes ever had.
-  const promoteCodexPlan = async ({ artifact, requestIdentity, file, label, phaseName, what }) => {
+  //
+  // `carriedQuestionsFile` is the workflow-owned carried set this publication
+  // must fold into the sidecar it writes, named as a path and paired with
+  // `expectQuestions` — the digest of the union this run independently expects.
+  // It is done inside this one command rather than by a merge that follows it
+  // because the plan is written last, deliberately: a sidecar completed after
+  // the plan exists is a sidecar a resume can read while it is still short.
+  // That is the whole asymmetry with the Claude paths, which have an
+  // undiscoverable working copy to merge into before they publish at all.
+  const promoteCodexPlan = async ({
+    artifact, requestIdentity, file, label, phaseName, what,
+    carriedQuestionsFile = null, resolvedFile = null, expectQuestions = null
+  }) => {
     const command = assembleCommand([
       `node "${input.pluginRoot}/scripts/materialize-plan-artifact.mjs"`,
       `--artifact "${artifact}"`,
       `--schema "${input.pluginRoot}/schemas/plan-draft.schema.json"`,
       `--plan "${file}"`,
       `--request-identity "${requestIdentity}"`,
-      `--ui-decisions "${uiEnabled ? "on" : "off"}"`
+      `--ui-decisions "${uiEnabled ? "on" : "off"}"`,
+      carriedQuestionsFile ? `--carried-questions-file "${carriedQuestionsFile}"` : "",
+      resolvedFile ? `--resolved-file "${resolvedFile}"` : "",
+      expectQuestions ? `--expect-questions "${expectQuestions}"` : ""
     ], "materialize-plan-artifact");
     const payloads = await materializeCodexPlan({
       command,
@@ -1756,27 +1811,24 @@ async function main(raw) {
     };
   };
   // A draft is only resumable together with the questions outstanding at that
-  // point: reviewers are read-only, so the drafter records the running set.
-  // These two files are the pass's resumable record, and the request that ends
-  // the pass is assembled from them, so a draft that was not written or was not
-  // written whole stops the pass instead of quietly costing a Codex review.
+  // point. The drafter writes only what it newly raised; the workflow folds the
+  // carried set in on top, before the file is published. These two files are
+  // the pass's resumable record, and the request that ends the pass is
+  // assembled from them, so a draft that was not written or was not written
+  // whole stops the pass instead of quietly costing a Codex review.
   const persist = (file, carried = [], carriedDecisions = [], targeted = false) => [
     targeted
       ? `The workflow has already staged the complete seed plan at ${file} with mode 0600. Apply only targeted Edit calls to the sections each human decision affects. Do not regenerate or Write the complete plan; unchanged text must remain untouched. This working file, not your reply, is what the workflow verifies and publishes.`
       : `Before returning, persist the complete plan at ${file} with mode 0600. This file, not your reply, is what every later step reads.`,
-    `Also persist at ${file}.questions.json, mode 0600, a JSON array holding every still-open question you were given plus every one you are returning, deduplicated and verbatim.`,
-    // Said explicitly because the sidecar instruction above reads as though the
-    // returned field were the new questions alone, and a revision that returns
-    // only what it raised drops every question it was carrying. The Claude path
-    // left this to be inferred, and inferring it the other way is a lost
-    // decision that nothing downstream can tell from a resolved one.
-    //
-    // Stated as an absolute, with the single exception the check actually
-    // implements. The Codex integration templates said this already; the Codex
-    // revision templates said "every carried question that remains unresolved
-    // plus every material open question", and both qualifiers licensed
-    // omissions the same check throws on — they now match this wording.
-    `Return in open_questions every carried question plus every one you are raising. Omit a carried question only when a human decision supplied with this request answers it: a question is a decision a person owes, so deciding it no longer needs their answer is not yours to make.`,
+    `Also persist at ${file}.questions.json, mode 0600, a JSON array holding only the question(s) you are newly raising this round, deduplicated. Write an empty array when you have nothing new to add.`,
+    // The workflow, not the model, now owns the carried set: it adds every
+    // still-open carried question back after this call returns, filtering out
+    // only the ones a supplied human decision answers. Asking the model for the
+    // union and grading it on verbatim-matching the carried text was the
+    // original defect this replaces — a revision that merely reworded a
+    // carried question for clarity produced a key that did not match the
+    // original, which this check misread as a silent drop.
+    `Return in open_questions only the question(s) you are newly raising this round; leave it empty if you have nothing new to add. Do not include any carried question in open_questions or in the sidecar — the workflow restores the carried set automatically, so retyping it here does nothing but risk a mismatch.`,
     // Not part of the required resume record: a pass interrupted before these
     // existed must still resume, and a missing sidecar costs a re-declaration
     // rather than a lost plan.
@@ -1930,6 +1982,16 @@ async function main(raw) {
   if (continuation && !seedPlanPath) {
     throw new Error("plan-forge requires seedPlan: { path } or seedPlanPath for a continuation; inline seedPlan is accepted only when its saved path is known");
   }
+  // Required of every continuation now, not just a Codex one. The carried
+  // question set and the decisions that retire part of it reach the merge as
+  // paths a command reads for itself, because a carried set grows with the pass
+  // and must never travel as content; without both files there is no path form
+  // to use. commands/plan.md has always passed both on every continuation, and
+  // stopping here costs nothing but names the missing input before any model
+  // work is bought.
+  if (continuation && (!input.decisionsFile || !input.questionsFile)) {
+    throw new Error("a plan continuation requires decisionsFile and questionsFile: the carried questions and the decisions that answer them travel as paths, never as command-line content");
+  }
   let seedReceipt = null;
   if (hasSeedPlan) {
     seedReceipt = await recordPlanFile({
@@ -2038,6 +2100,78 @@ async function main(raw) {
     };
   }
 
+  // The sidecar merge, named by file and carried set rather than read off
+  // `draft`, because the interrupted exit has to reach the round input a resume
+  // would select even when that is newer than the draft this run last adopted.
+  // Also the mechanism that folds the workflow-owned carried set back into a
+  // drafter or reviser's sidecar: `carried` is what the file named by `file`
+  // already holds (the model's own newly-raised questions, or an empty array),
+  // and `additional` is whatever this call is folding in.
+  //
+  // `additional` says both what and how. `questions` is always what this run
+  // independently expects to be folded in, and the --expect digest is computed
+  // over it, so the command can never write a set the workflow did not name.
+  // The rest decides how those questions reach the command, and the two shapes
+  // are not interchangeable:
+  //
+  //   { questions, file, resolvedFile } — a set that is already on disk. It
+  //     travels as a path and may be of any size; `resolvedFile` names the
+  //     human decisions whose answers retire part of it, so the script does the
+  //     subtraction from the file rather than the workflow typing the survivors
+  //     out. Every carried set uses this, because a carried set grows with the
+  //     pass.
+  //   { questions } — inline, for the one set that exists in no file: what this
+  //     pass's read-only reviewers raised, which no agent can persist for
+  //     itself. Batched below so no single argument ever approaches
+  //     ARGUMENT_CHAR_CEILING however many rounds have accumulated.
+  //
+  // The distinction is load-bearing rather than stylistic. The carried set once
+  // travelled inline, and seven ordinary questions serialize to over two
+  // kilobytes: a fully compliant pass composed an argument twice the size of
+  // the ceiling and died on the happy path, on every fresh pass, continuation,
+  // and resume with roughly four questions or more.
+  const mergeQuestionsInto = async ({ file, carried, additional, phaseName, label }) => {
+    const extra = additional.questions ?? [];
+    const merged = dedupeQuestions([...(carried ?? []), ...extra]);
+    const runMerge = async (expected, extraArgs, callLabel) => {
+      const expectedToken = expectJson([...new Set(expected.map(questionKey))].sort());
+      await mergeFinalQuestions({
+        command: assembleCommand([
+          `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
+          `"${file}"`,
+          ...extraArgs,
+          `--expect "${expectedToken}"`
+        ], "merge-plan-questions"),
+        label: callLabel,
+        phase: phaseName,
+        model: relayModel,
+        effort: relayEffort,
+        file,
+        expectedToken
+      });
+    };
+    if (additional.file) {
+      await runMerge(merged, [
+        `"${additional.file}"`,
+        additional.resolvedFile ? `--resolved-file "${additional.resolvedFile}"` : ""
+      ].filter(Boolean), label);
+      return merged;
+    }
+    if (!extra.length) {
+      await runMerge(merged, [], label);
+      return merged;
+    }
+    // One call per batch, each naming the union as it stands after that batch.
+    // Merging is idempotent and additive, so a retried or repeated batch lands
+    // on the same set, and the last call's expectation is the whole union.
+    let union = dedupeQuestions([...(carried ?? [])]);
+    for (const [index, batch] of inlineQuestionBatches(extra).entries()) {
+      union = dedupeQuestions([...union, ...batch]);
+      await runMerge(union, [inlineQuestionsArg(batch)], index === 0 ? label : `${label}:part-${index + 1}`);
+    }
+    return merged;
+  };
+
   phase("Draft");
   let draft;
   if (resumeRound) {
@@ -2062,12 +2196,11 @@ async function main(raw) {
         detail: "the drafter returned no saved-plan receipt"
       }));
     }
-    if (continuation) {
-      requireCarriedQuestions("Claude", result, input.openQuestions ?? [], decisions);
-      // The set this prompt fenced at persist(), so the check demands back
-      // exactly what the drafter was shown and nothing more.
-      if (uiEnabled) requireCarriedUiDecisions("Claude", result, input.uiDecisions ?? []);
-    }
+    // Interface decisions only: the set this prompt fenced at persist(), so the
+    // check demands back exactly what the drafter was shown and nothing more.
+    // Questions are not checked here at all — the workflow restores them below
+    // rather than asking the drafter to echo them.
+    if (continuation && uiEnabled) requireCarriedUiDecisions("Claude", result, input.uiDecisions ?? []);
     const savedWork = await recordPlanFile({
       file: continuation ? continuationWorkPath : draftPath(1),
       receipt: result,
@@ -2077,13 +2210,36 @@ async function main(raw) {
       warn: !continuation
     });
     let saved = savedWork;
+    let draftOpenQuestions = result?.open_questions ?? [];
     if (continuation) {
+      // The drafter returned only what it newly raised; the surviving carried
+      // set — every carried question not answered by a supplied human
+      // decision — is folded back in here, in the working sidecar the
+      // drafter already wrote, before that file is ever published. Both inputs
+      // travel as paths the command reads for itself: the carried sidecar this
+      // pass was seeded from, and the decisions file whose rows retire part of
+      // it. What the workflow contributes is the digest of the union it
+      // expects, so the subtraction the command performs is checked against the
+      // one survivingCarriedQuestions computes here rather than trusted.
+      draftOpenQuestions = await mergeQuestionsInto({
+        file: `${continuationWorkPath}.questions.json`,
+        carried: result?.open_questions ?? [],
+        additional: {
+          questions: survivingCarriedQuestions(input.openQuestions ?? [], decisions),
+          file: input.questionsFile,
+          resolvedFile: input.decisionsFile
+        },
+        phaseName: "Draft",
+        label: "plan:merge-continuation-questions"
+      });
+      const continuationQuestionsDigest = await questionSetDigest(draftOpenQuestions);
       await stageClaudeContinuation({
         command: assembleCommand([
           `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
           `--source "${continuationWorkPath}"`,
           `--target "${integratedPath}"`,
           `--expect "${savedWork.savedToken}"`,
+          `--expect-questions "${continuationQuestionsDigest}"`,
           ...uiDecisionsFileArg(continuationWorkPath)
         ], "stage-plan-continuation publish"),
         label: "plan:publish-continuation",
@@ -2107,11 +2263,8 @@ async function main(raw) {
         requireContinuationReceipt: true
       });
     }
-    draft = { ...result, ...saved };
+    draft = { ...result, ...saved, open_questions: draftOpenQuestions };
   } else {
-    if (continuation && (!seedPlanPath || !input.decisionsFile || !input.questionsFile)) {
-      throw new Error("Codex plan continuation requires seedPlanPath, decisionsFile, and questionsFile");
-    }
     if (!continuation && decisions.length) {
       throw new Error("a fresh Codex plan with human decisions requires a saved continuation");
     }
@@ -2160,22 +2313,38 @@ async function main(raw) {
       what: continuation ? "integration of the reviewed plan" : "plan draft",
       resultFromDisk: true
     });
-    if (continuation) {
-      requireCarriedQuestions("Codex", response.result, input.openQuestions ?? [], decisions);
-      if (uiEnabled) requireCarriedUiDecisions("Codex", response.result, input.uiDecisions ?? []);
-    }
+    if (continuation && uiEnabled) requireCarriedUiDecisions("Codex", response.result, input.uiDecisions ?? []);
+    // Codex returned only what it newly raised, per the integration templates.
+    // Unlike the Claude path there is no working copy to fold the carried set
+    // into before publishing: the materializer is the publication, and it
+    // writes the plan last precisely because the plan's name is what a resume
+    // discovers. So the carried set goes *into* that command, by path, and the
+    // sidecar it writes is complete before the plan beside it exists. Merging
+    // afterwards left a real window in which a resume selected this plan and
+    // read a question record with every carried question missing.
+    const draftOpenQuestions = continuation
+      ? dedupeQuestions([
+        ...(response.result.open_questions ?? []),
+        ...survivingCarriedQuestions(input.openQuestions ?? [], decisions)
+      ])
+      : (response.result.open_questions ?? []);
     const saved = await promoteCodexPlan({
       artifact,
       requestIdentity: response.requestIdentity,
       file: target,
       label: "plan:materialize-draft",
       phaseName: "Draft",
-      what: continuation ? "integrated plan" : "plan draft"
+      what: continuation ? "integrated plan" : "plan draft",
+      ...(continuation ? {
+        carriedQuestionsFile: input.questionsFile,
+        resolvedFile: input.decisionsFile,
+        expectQuestions: await questionSetDigest(draftOpenQuestions)
+      } : {})
     });
     warnLargePlan(saved);
     draft = {
       ...saved,
-      open_questions: response.result.open_questions,
+      open_questions: draftOpenQuestions,
       ui_decisions: response.result.ui_decisions
     };
   }
@@ -2188,28 +2357,6 @@ async function main(raw) {
   // Reviewer-raised questions, accumulated so that every exit from the round
   // loop merges them into the sidecar rather than only the exits that revise.
   const reviewQuestions = [];
-  // The sidecar merge, named by file and carried set rather than read off
-  // `draft`, because the interrupted exit has to reach the round input a resume
-  // would select even when that is newer than the draft this run last adopted.
-  const mergeQuestionsInto = async ({ file, carried, extra, phaseName, label }) => {
-    const merged = dedupeQuestions([...(carried ?? []), ...extra]);
-    const expectedToken = expectJson([...new Set(merged.map(questionKey))].sort());
-    await mergeFinalQuestions({
-      command: assembleCommand([
-        `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
-        `"${file}"`,
-        extra.length ? `--additional-inline ${shellQuote(JSON.stringify(extra))}` : "",
-        `--expect "${expectedToken}"`
-      ], "merge-plan-questions"),
-      label,
-      phase: phaseName,
-      model: relayModel,
-      effort: relayEffort,
-      file,
-      expectedToken
-    });
-    return merged;
-  };
   // What a resume would seed from at this instant. commands/plan.md selects the
   // highest round input in the pass, and a file becomes that the moment its
   // publication lands — one step before the verify that adopts it into `draft`.
@@ -2238,7 +2385,9 @@ async function main(raw) {
     await mergeQuestionsInto({
       file: resumeSeed.file,
       carried: resumeSeed.questions,
-      extra: reviewQuestions,
+      // Inline: a reviewer is read-only and these exist in this array and in no
+      // file at all, which is the one case the bounded inline argument is for.
+      additional: { questions: reviewQuestions },
       phaseName: "Interrupted",
       label: "plan:merge-interrupted-questions"
     });
@@ -2614,18 +2763,14 @@ async function main(raw) {
         claudeReview ? fenced("claude-review", JSON.stringify(claudeReview, null, 2)) : "",
         codexReview ? fenced("codex-review", JSON.stringify(codexReview, null, 2)) : "",
         uiReview ? fenced("interface-review", JSON.stringify(uiReview, null, 2)) : "",
-        // Said here because a review's questions arrive inside its JSON blob
-        // rather than in the carried-questions fence, so "every carried
-        // question" does not reach them on its own. Asking for them is what
-        // gets a reviewer's question into the plan's own list; merging is
-        // explicitly licensed because a reviewer restating a question the plan
-        // already carries is one question, and returning both would grow the
-        // list by a paraphrase every round. The check below is scoped to the
-        // fenced set precisely so that a merge here is not read as a drop —
-        // which is also why the licence is bounded to a question asking for the
-        // same decision. Nothing downstream can tell a wrong merge from a right
-        // one, so the bar is stated here rather than enforced later.
-        "The reviews above raise open questions of their own. Return those in open_questions too, alongside the carried ones. Where a review restates a question you are already carrying, return the one merged question rather than both; where it asks for any decision the carried one does not, return both.",
+        // A review's own questions reach the sidecar through a separate,
+        // workflow-owned merge (`reviewQuestions`) regardless of what this
+        // reply says, so the model is not asked to relay them. It is only
+        // asked to add a question of its own when a review surfaces a
+        // decision that is genuinely new — not a restatement of one it is
+        // already carrying, which the workflow's carried-set merge already
+        // covers.
+        "The reviews above may raise open questions of their own; those reach the plan's sidecar automatically and you do not need to return them. Add a question of your own in open_questions only when reviewing this round surfaced a decision that is genuinely new — not one you are already carrying.",
         sizeBrief,
         policyBrief,
         uiBrief,
@@ -2644,29 +2789,23 @@ async function main(raw) {
         effort: claude.effort,
         schema: planDraftSchema
       });
-      // Exactly the set persist() fenced as questions-so-far, and nothing else.
-      // Checked against the current set rather than the `questions` tally the
-      // prompt carries: the tally never removes anything, so demanding it back
-      // would demand questions earlier rounds already resolved — the same
-      // mistake as the tally-vs-sidecar equality check settleQuestions
-      // documents.
+      // Exactly the set persist() fenced as interface-decisions-so-far, and
+      // nothing else: a decision is a choice already made, so a revision may
+      // update one under its id but never drop it, and demanding back more than
+      // this prompt fenced would fail a model that did as it was told.
       //
-      // The reviews' own questions used to be demanded back here too, and that
-      // is the same disease one round later: questionKey matches text, so a
-      // reviewer restating a carried question in its own words counts as a
-      // second obligation, and a revision that merged the two — the behaviour
-      // commands/plan.md asks for, matching questions on meaning — was failed
-      // for dropping one. Left in, every round would add another paraphrase
-      // that every later round had to echo verbatim. Nothing is lost by not
-      // checking: `reviewQuestions` collects both reviews' questions in this
-      // loop and settleQuestions merges them into the sidecar at every exit, so
-      // they reach the human whether or not the revision echoed them.
-      requireCarriedQuestions("Claude", result, draft.open_questions ?? []);
-      // The whole accumulator, because that is what persist() fenced above. The
-      // Codex branch is checked against a narrower set for the same reason: it
-      // is given a narrower one. Once every path enforces this the two hold the
-      // same ids, but matching the fence is what makes each check safe without
-      // relying on that.
+      // Questions have no such check any more, and need none. The reviser
+      // returned only what it newly raised; every carried question (a round
+      // revision is given no human decisions, so nothing resolves one away
+      // here) is folded back in below, into the working sidecar the reviser
+      // already wrote, before that file is ever published. Dropping one is
+      // impossible by construction.
+      //
+      // A reviewer's own questions travel a separate path: `reviewQuestions`
+      // collects both reviews' questions across this loop and settleQuestions
+      // merges them into the sidecar at every exit, so they reach the human
+      // whether or not the revision folded a restatement of one into a carried
+      // question it already had.
       if (uiEnabled) requireCarriedUiDecisions("Claude", result, dedupeDecisions(uiDecisions));
       const savedWork = await recordPlanFile({
         file: revisionWorkPath,
@@ -2675,7 +2814,21 @@ async function main(raw) {
         phaseName: `Cross-review ${round}`,
         what: `plan revised in round ${round}`
       });
-      const revisionQuestionsDigest = await questionSetDigest(result.open_questions ?? []);
+      // The carried set is already a file: it is the sidecar beside the plan
+      // this round reviewed, which the merge or materialization that published
+      // that plan bound to this exact set. So it travels as that path, and the
+      // digest below is what holds the command to the union this run expects.
+      const revisedOpenQuestions = await mergeQuestionsInto({
+        file: `${revisionWorkPath}.questions.json`,
+        carried: result.open_questions ?? [],
+        additional: {
+          questions: dedupeQuestions(draft.open_questions ?? []),
+          file: `${draft.plan_path}.questions.json`
+        },
+        phaseName: `Cross-review ${round}`,
+        label: `plan:merge-revision-questions:${round}`
+      });
+      const revisionQuestionsDigest = await questionSetDigest(revisedOpenQuestions);
       await stageClaudeContinuation({
         command: assembleCommand([
           `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
@@ -2688,16 +2841,16 @@ async function main(raw) {
           // The work path is derived from the pass and round, so an interrupted
           // attempt leaves its sidecar where this one writes. The plan is bound
           // by its token; this binds the sidecar beside it to the same reply the
-          // carry-forward check just cleared, so a retry cannot publish the
+          // carry-forward merge just wrote, so a retry cannot publish the
           // interrupted attempt's questions. Travels as a fixed-size SHA-256
           // digest, not as the questions themselves: whether the sidecar holds
-          // what this step reported has one exact answer regardless of how
+          // what this step computed has one exact answer regardless of how
           // long the list has grown.
           `--expect-questions "${revisionQuestionsDigest}"`,
-          // Names the working copy's own sidecar, which persist() just told
-          // this revision to write with every carried decision plus its own —
-          // exactly the union this publication needs, without asking a model
-          // to retype it.
+          // Names the working copy's own sidecar, which mergeQuestionsInto just
+          // wrote with every carried question plus this round's own — exactly
+          // the union this publication needs, without asking a model to
+          // retype it.
           ...uiDecisionsFileArg(revisionWorkPath)
         ], "stage-plan-continuation publish"),
         label: `plan:publish-revision:${round}`,
@@ -2709,7 +2862,7 @@ async function main(raw) {
       });
       // Published, so this is now the newest round input and the file a resume
       // selects — before the verify below adopts it into `draft`.
-      resumeSeed = { file: `${revisedFile}.questions.json`, questions: result.open_questions ?? [] };
+      resumeSeed = { file: `${revisedFile}.questions.json`, questions: revisedOpenQuestions };
       const saved = await recordPlanFile({
         file: revisedFile,
         receipt: {
@@ -2722,7 +2875,7 @@ async function main(raw) {
         what: `plan revised in round ${round}`,
         drift: false
       });
-      draft = { ...result, ...saved };
+      draft = { ...result, ...saved, open_questions: revisedOpenQuestions };
     } else {
       const carriedDraft = draft;
       const revisionArtifact = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-revision-codex.json`;
@@ -2767,37 +2920,43 @@ async function main(raw) {
         what: `revision of plan round ${round}`,
         resultFromDisk: true
       });
-      // The CARRIED_QUESTIONS fence alone, for the reason the Claude site
-      // records: the review's questions travel to the sidecar through
-      // `reviewQuestions` regardless, and demanding them back verbatim fails a
-      // revision that folded a reviewer's restatement into the question it was
-      // already carrying.
-      requireCarriedQuestions("Codex", response.result, carriedDraft.open_questions ?? []);
       if (uiEnabled) {
         requireCarriedUiDecisions("Codex", response.result, [
           ...(carriedDraft.ui_decisions ?? []),
           ...(uiReview?.ui_decisions ?? [])
         ]);
       }
+      // Codex returned only what it newly raised, per the revision templates,
+      // and a round revision is given no human decisions, so the whole carried
+      // set survives. It reaches the sidecar through the materialization
+      // itself — by the path the reviewed plan's own sidecar already occupies —
+      // rather than through a merge afterwards: this file becomes the newest
+      // round input the instant the plan beside it is written, and a resume
+      // reading it half-finished would find every carried question gone.
+      const revisedOpenQuestions = dedupeQuestions([
+        ...(response.result.open_questions ?? []),
+        ...dedupeQuestions(carriedDraft.open_questions ?? [])
+      ]);
       const saved = await promoteCodexPlan({
         artifact: revisionArtifact,
         requestIdentity: response.requestIdentity,
         file: revisedFile,
         label: `plan:materialize-revision:${round}`,
         phaseName: `Cross-review ${round}`,
-        what: `plan revised in round ${round}`
+        what: `plan revised in round ${round}`,
+        carriedQuestionsFile: `${carriedDraft.plan_path}.questions.json`,
+        expectQuestions: await questionSetDigest(revisedOpenQuestions)
       });
       warnLargePlan(saved);
-      // The materializer writes the sidecar beside the plan it promotes, so
-      // this is the newest round input from here on, the same as the Claude
-      // publication above.
+      // Published, so this is now the newest round input and the file a resume
+      // selects, with its complete sidecar already beside it.
       resumeSeed = {
         file: `${revisedFile}.questions.json`,
-        questions: response.result.open_questions ?? []
+        questions: revisedOpenQuestions
       };
       draft = {
         ...saved,
-        open_questions: response.result.open_questions,
+        open_questions: revisedOpenQuestions,
         ui_decisions: response.result.ui_decisions
       };
     }
@@ -2913,26 +3072,26 @@ async function main(raw) {
   // list it produced instead — but a sidecar that only ever grows across a
   // pass is exactly the shape that must not ride through a reply a model
   // composes, so that list no longer travels either. `draft.open_questions` is
-  // the fix that replaces it: the exact array the carry-forward check already
-  // bound to this file on every revision, so unioning it with what this exit's
-  // own reviews raised is accurate without reading the file back, and neither
-  // side of that union is the ever-growing whole-pass tally.
+  // the fix that replaces it: the exact array the publication of this plan
+  // bound to this file, so unioning it with what this exit's own reviews raised
+  // is accurate without reading the file back, and neither side of that union
+  // is the ever-growing whole-pass tally.
   //
   // The union is not just returned from memory any more: it is the exact
-  // result this call requires the sidecar to hold. `extra` — bounded to what
-  // this exit's own review rounds raised, never the whole-pass tally — travels
-  // as --additional-inline when it is non-empty, and the expected token is the
-  // fnv1a digest merge-plan-questions.mjs itself computes over the same
-  // deduplicated, sorted key set, so a receipt that does not match this exact
-  // value is this run's own proof the sidecar disagrees, not a gap to
-  // silently carry on around.
+  // result this call requires the sidecar to hold. `extra` is what this pass's
+  // read-only reviewers raised — the one set that exists in no file, and so the
+  // one that travels as --additional-inline, batched to stay well inside the
+  // per-argument ceiling. The expected token is the fnv1a digest
+  // merge-plan-questions.mjs itself computes over the same deduplicated, sorted
+  // key set, so a receipt that does not match this exact value is this run's
+  // own proof the sidecar disagrees, not a gap to silently carry on around.
   const settleQuestions = async (extra, phaseName) => {
     const file = `${draft.plan_path}.questions.json`;
     return {
       finalQuestions: await mergeQuestionsInto({
         file,
         carried: draft.open_questions,
-        extra,
+        additional: { questions: extra },
         phaseName,
         label: "plan:merge-final-questions"
       }),

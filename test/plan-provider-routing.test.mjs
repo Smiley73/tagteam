@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { composePrompt, expectToken, normalizeText } from "../scripts/compose-prompt.mjs";
+import { questionSetDigest } from "../scripts/lib/plan-questions.mjs";
 import { materializePlanArtifact } from "../scripts/materialize-plan-artifact.mjs";
 import { mergePlanQuestions } from "../scripts/merge-plan-questions.mjs";
 import { planReceipt } from "../scripts/plan-receipt.mjs";
@@ -211,6 +213,103 @@ test("Codex draft promotion publishes the discoverable plan only after required 
   assert.equal(fs.existsSync(plan), false, "resume must not discover a partial promotion");
   assert.equal(fs.existsSync(`${plan}.questions.json`), true, "the durable question sidecar may be orphaned safely");
   assert.equal(fs.existsSync(`${plan}.ui-decisions.json`), true, "the optional UI sidecar may be orphaned safely");
+});
+
+// The Codex paths have no undiscoverable working copy to merge into before
+// they publish: this command is the publication. So the carried set is folded
+// in here, from a path, and the sidecar is complete before the plan beside it
+// exists — the plan being written last is the whole reason a resume can trust
+// what it finds. Folding it in afterwards left a window in which the round
+// input or integrated plan was discoverable with every carried question gone.
+test("a carried question set is folded into the sidecar before the plan is published", () => {
+  const { directory, artifact, plan } = fixture();
+  const carried = path.join(directory, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify(["Who owns rollback?", "Which rollout?"]));
+  const expected = ["Which rollout?", "Who owns rollback?"];
+
+  assert.throws(() => materializePlanArtifact({
+    artifact,
+    schema: path.join(root, "schemas", "plan-draft.schema.json"),
+    plan,
+    requestIdentity: identity,
+    uiDecisions: "on",
+    carriedQuestionsFile: carried,
+    expectQuestions: questionSetDigest(expected),
+    beforePlanPublish() {
+      throw new Error("simulated crash before plan publication");
+    }
+  }), /simulated crash/);
+
+  assert.equal(fs.existsSync(plan), false);
+  // The orphaned sidecar already holds the union, deduplicated against the
+  // artifact's own "Which rollout?".
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${plan}.questions.json`, "utf8")), expected);
+});
+
+test("a carried set the caller did not expect is refused before anything is written", () => {
+  const { directory, artifact, plan } = fixture();
+  const carried = path.join(directory, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify(["Who owns rollback?"]));
+
+  assert.throws(() => materializePlanArtifact({
+    artifact,
+    schema: path.join(root, "schemas", "plan-draft.schema.json"),
+    plan,
+    requestIdentity: identity,
+    uiDecisions: "on",
+    carriedQuestionsFile: carried,
+    // What the caller would expect if it thought the carried file were empty.
+    expectQuestions: questionSetDigest(["Which rollout?"])
+  }), /does not match what this step reported/);
+
+  assert.equal(fs.existsSync(plan), false);
+  assert.equal(fs.existsSync(`${plan}.questions.json`), false);
+});
+
+test("a human decision retires the carried question it answers, and only that one", () => {
+  const { directory, artifact, plan } = fixture();
+  const carried = path.join(directory, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify(["Who owns rollback?", "Which cache?"]));
+  const decisions = path.join(directory, "decisions.json");
+  fs.writeFileSync(decisions, JSON.stringify([{ question: "who owns   ROLLBACK?", answer: "The release owner." }]));
+
+  materializePlanArtifact({
+    artifact,
+    schema: path.join(root, "schemas", "plan-draft.schema.json"),
+    plan,
+    requestIdentity: identity,
+    uiDecisions: "on",
+    carriedQuestionsFile: carried,
+    resolvedFile: decisions,
+    expectQuestions: questionSetDigest(["Which rollout?", "Which cache?"])
+  });
+
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(`${plan}.questions.json`, "utf8")),
+    ["Which rollout?", "Which cache?"]
+  );
+});
+
+// The workflow's own expectation is the only thing standing between this
+// command and deciding for itself what the one file a resume trusts says.
+test("naming a carried set without naming the expected result is refused outright", () => {
+  const { directory, artifact, plan } = fixture();
+  const carried = path.join(directory, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify(["Who owns rollback?"]));
+
+  const run = spawnSync("node", [
+    path.join(root, "scripts", "materialize-plan-artifact.mjs"),
+    "--artifact", artifact,
+    "--schema", path.join(root, "schemas", "plan-draft.schema.json"),
+    "--plan", plan,
+    "--request-identity", identity,
+    "--ui-decisions", "on",
+    "--carried-questions-file", carried
+  ], { encoding: "utf8" });
+
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /--carried-questions-file requires --expect-questions/);
+  assert.equal(fs.existsSync(plan), false);
 });
 
 test("decomposition-review questions are atomically merged into the authoritative sidecar", () => {
