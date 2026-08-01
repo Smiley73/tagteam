@@ -2304,6 +2304,15 @@ async function main(raw) {
     // leaves a round input for resume to review rather than a finished plan for
     // it to trust.
     const revisedFile = draftPath(round + 1);
+    // Where a Claude revision is written before anything has checked it. The
+    // Codex branch materializes its plan from the artifact after its checks, and
+    // the Claude continuation edits under `reviews/` and publishes after its
+    // own; this path used to be the one exception, letting the drafter write
+    // straight to the round input resume selects. A carry-forward failure then
+    // left the shortened sidecar exactly where the next resume would read it, so
+    // the check stopped the pass and the drop survived it. Same discipline here:
+    // the plan becomes discoverable only once it has earned it.
+    const revisionWorkPath = `${input.planDir}/reviews/${passId}-round-${round}-revision-work.md`;
     if (round === finalRound) roundsExhausted = true;
     if (useClaude) {
       const result = await planAgent([
@@ -2334,7 +2343,7 @@ async function main(raw) {
         // already resolved and asked to carry them — the growing-document
         // failure the subtractive-revision rule exists to prevent, applied to
         // the questions instead of the plan.
-        persist(revisedFile, draft.open_questions ?? [], dedupeDecisions(uiDecisions))
+        persist(revisionWorkPath, draft.open_questions ?? [], dedupeDecisions(uiDecisions))
       ].join("\n\n"), {
         label: `plan:revise:${round}`,
         phase: `Cross-review ${round}`,
@@ -2354,12 +2363,46 @@ async function main(raw) {
         ...(claudeReview?.open_questions ?? []),
         ...(codexReview?.open_questions ?? [])
       ]);
-      const saved = await recordPlanFile({
-        file: revisedFile,
+      const savedWork = await recordPlanFile({
+        file: revisionWorkPath,
         receipt: result,
-        label: `plan:verify-revision:${round}`,
+        label: `plan:verify-revision-work:${round}`,
         phaseName: `Cross-review ${round}`,
         what: `plan revised in round ${round}`
+      });
+      await stageClaudeContinuation({
+        command: [
+          `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
+          `--source "${revisionWorkPath}"`,
+          `--target "${revisedFile}"`,
+          `--expect "${savedWork.savedToken}"`,
+          // A round input is not a continuation, and a receipt beside it would
+          // tell a resume that it was.
+          `--receipt none`,
+          // The work path is derived from the pass and round, so an interrupted
+          // attempt leaves its sidecar where this one writes. The plan is bound
+          // by its token; this binds the sidecar beside it to the same reply the
+          // carry-forward check just cleared, so a retry cannot publish the
+          // interrupted attempt's questions.
+          `--expect-questions ${jsonHex(result.open_questions ?? [])}`
+        ].join(" "),
+        label: `plan:publish-revision:${round}`,
+        phaseName: `Cross-review ${round}`,
+        model: relayModel,
+        what: `round ${round + 1} input publication`,
+        file: revisedFile
+      });
+      const saved = await recordPlanFile({
+        file: revisedFile,
+        receipt: {
+          plan_path: revisedFile,
+          plan_chars: savedWork.plan_chars,
+          plan_hash: savedWork.plan_hash
+        },
+        label: `plan:verify-revision:${round}`,
+        phaseName: `Cross-review ${round}`,
+        what: `plan revised in round ${round}`,
+        drift: false
       });
       draft = { ...result, ...saved };
     } else {

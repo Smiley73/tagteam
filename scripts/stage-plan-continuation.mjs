@@ -6,6 +6,11 @@
 // only the final integrated path, so an interrupted edit cannot masquerade as a
 // completed continuation. Publication writes the required question sidecar
 // first and the discoverable plan last, matching materialize-plan-artifact.mjs.
+//
+// Round revisions publish through here too, with `--receipt none`. They are not
+// continuations and earn no continuation receipt, but they want the same
+// property: a plan a model wrote becomes discoverable only after the checks
+// that guard it have passed.
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -16,7 +21,7 @@ import { verifyPayloads } from "./verify-payload.mjs";
 function parseArgs(argv) {
   const [action, ...rest] = argv;
   if (!["prepare", "publish"].includes(action)) {
-    throw new Error("usage: stage-plan-continuation.mjs <prepare|publish> --source <path> --target <path> --expect <length:checksum>");
+    throw new Error("usage: stage-plan-continuation.mjs <prepare|publish> --source <path> --target <path> --expect <length:checksum> [--receipt continuation|none] [--expect-questions <hex>]");
   }
   const options = { action };
   for (let index = 0; index < rest.length; index += 2) {
@@ -30,6 +35,13 @@ function parseArgs(argv) {
   }
   if (!/^\d+:[0-9a-f]{8}$/.test(options.expect)) {
     throw new Error("--expect must be a length:checksum token");
+  }
+  // What the published plan is, which decides whether it earns a continuation
+  // receipt. A round input is published by the same staging discipline but is
+  // not a continuation, and a receipt beside it would tell a resume it was one.
+  options.receipt = options.receipt ?? "continuation";
+  if (!["continuation", "none"].includes(options.receipt)) {
+    throw new Error("--receipt must be continuation or none");
   }
   return options;
 }
@@ -79,11 +91,36 @@ function prepare({ source, target, expect }) {
   });
 }
 
-function publish({ source, target, expect }) {
+// The questions a step reported, as a comparable set. Order and duplicates are
+// not content: the sidecar and the structured reply are written by the same
+// model from the same set and need not agree on either.
+function questionSet(value) {
+  if (!Array.isArray(value)) throw new Error("open questions must be a JSON array");
+  return new Set(value.map((question) => String(question).trim().toLocaleLowerCase().replace(/\s+/g, " ")));
+}
+
+function publish({ source, target, expect, expectQuestions, receipt }) {
   const plan = readPlan(source, expect);
   const sourceQuestions = `${plan.resolved}.questions.json`;
   assertResumeRecord(sourceQuestions);
   const questions = fs.readFileSync(sourceQuestions);
+
+  // Binds the sidecar about to be published to the question list the caller
+  // already checked. The working path is derived from the pass and round, so an
+  // interrupted attempt leaves its sidecar exactly where the retry writes: a
+  // drafter that rewrites the plan but not the sidecar would otherwise publish
+  // the interrupted attempt's questions under this attempt's checked receipt.
+  // The plan is bound by its token; without this the sidecar beside it is bound
+  // by nothing.
+  if (expectQuestions !== undefined) {
+    const reported = questionSet(JSON.parse(Buffer.from(expectQuestions, "hex").toString("utf8")));
+    const staged = questionSet(JSON.parse(questions.toString("utf8")));
+    const missing = [...reported].filter((question) => !staged.has(question));
+    const extra = [...staged].filter((question) => !reported.has(question));
+    if (missing.length || extra.length) {
+      throw new Error(`${sourceQuestions} does not hold the questions this step reported: ${missing.length} missing, ${extra.length} unexpected`);
+    }
+  }
   const sourceUiDecisions = `${plan.resolved}.ui-decisions.json`;
   const targetUiDecisions = `${path.resolve(target)}.ui-decisions.json`;
   const targetReceipt = `${path.resolve(target)}.continuation-receipt.json`;
@@ -97,7 +134,14 @@ function publish({ source, target, expect }) {
   } else if (fs.existsSync(targetUiDecisions)) {
     fs.unlinkSync(targetUiDecisions);
   }
-  writeAtomic(targetReceipt, `${JSON.stringify({ version: 1, planToken: expect }, null, 2)}\n`);
+  // A stale receipt from an earlier continuation at this path would outlive the
+  // plan it described, so the non-continuation case removes it rather than
+  // leaving it to be read as evidence about the bytes published now.
+  if (receipt === "continuation") {
+    writeAtomic(targetReceipt, `${JSON.stringify({ version: 1, planToken: expect }, null, 2)}\n`);
+  } else if (fs.existsSync(targetReceipt)) {
+    fs.unlinkSync(targetReceipt);
+  }
   const published = writeAtomic(target, plan.raw);
   return verifyPayloads({
     payloads: [{ name: "DRAFT_PLAN", file: published, json: false }],
