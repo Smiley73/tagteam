@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { expectToken, normalizeText } from "../scripts/compose-prompt.mjs";
+import { createHash } from "node:crypto";
+import { canonicalJson, expectToken, normalizeText } from "../scripts/compose-prompt.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts", "stage-plan-continuation.mjs");
@@ -12,8 +13,14 @@ const script = path.join(root, "scripts", "stage-plan-continuation.mjs");
 const PLAN = "# Plan\n\nOne decision, stated once.\n";
 const QUESTIONS = ["Who owns rollback?", "Which cache fronts the ledger?"];
 
-function hex(value) {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("hex");
+// The set --expect-questions checks against, reduced to the same fixed-size
+// SHA-256 digest workflows/plan-forge.js composes it as (questionSetDigest
+// there, mirrored by stage-plan-continuation.mjs).
+function questionSetToken(questions) {
+  const normalized = [...new Set(questions.map((question) =>
+    String(question).trim().toLocaleLowerCase().replace(/\s+/g, " ")))].sort();
+  const canonical = canonicalJson(normalized);
+  return `${canonical.length}:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
 // A staged working copy as the drafter leaves it: the plan, and the sidecar the
@@ -29,15 +36,26 @@ function stage({ questions = QUESTIONS, uiDecisions = null } = {}) {
   return { dir, source, target: path.join(dir, "pass-1-round-2-input.md") };
 }
 
-function publish({ source, target, receipt, expectQuestions, uiDecisions }) {
+// The declared interface record travels as a path, the same way the workflow
+// composes it: a small working file this test writes once, distinct from
+// whatever the source's own (possibly stale) sidecar holds.
+function declareUiDecisions(dir, uiDecisions) {
+  const file = path.join(dir, `declared-${Math.random().toString(36).slice(2)}.ui-decisions.json`);
+  fs.writeFileSync(file, JSON.stringify(uiDecisions), { mode: 0o600 });
+  return file;
+}
+
+function publish({ source, target, receipt, expectQuestions, uiDecisions, uiDecisionsFile }) {
+  const dir = path.dirname(target);
+  const resolvedUiDecisionsFile = uiDecisionsFile ?? (uiDecisions ? declareUiDecisions(dir, uiDecisions) : undefined);
   return execFileSync("node", [
     script, "publish",
     "--source", source,
     "--target", target,
     "--expect", expectToken(normalizeText(PLAN)),
     ...(receipt ? ["--receipt", receipt] : []),
-    ...(expectQuestions ? ["--expect-questions", hex(expectQuestions)] : []),
-    ...(uiDecisions ? ["--ui-decisions", hex(uiDecisions)] : [])
+    ...(expectQuestions ? ["--expect-questions", questionSetToken(expectQuestions)] : []),
+    ...(resolvedUiDecisionsFile ? ["--ui-decisions-file", resolvedUiDecisionsFile] : [])
   ], { encoding: "utf8" });
 }
 
@@ -89,9 +107,13 @@ test("a sidecar that disagrees with the reported questions is not published", ()
   // and round, so an interrupted attempt's sidecar is sitting where this
   // attempt writes. A drafter that rewrites the plan but not the sidecar would
   // publish the interrupted attempt's questions under this attempt's receipt.
+  // A mismatch is a plain, named failure rather than a missing/extra
+  // breakdown: the digest either matches what this step reported or it does
+  // not, and there is nothing more precise to say about which entries differ
+  // without decoding the very payload this check exists to avoid retyping.
   assert.throws(
     () => publish({ source, target, receipt: "none", expectQuestions: ["Who owns rollback?"] }),
-    /does not hold the questions this step reported: 0 missing, 1 unexpected/
+    /disagrees with what this step reported/
   );
   assert.equal(fs.existsSync(target), false);
 });
@@ -154,6 +176,39 @@ test("the supplied interface decisions are written, not the ones at the working 
   assert.deepEqual(
     JSON.parse(fs.readFileSync(`${target}.ui-decisions.json`, "utf8")).map((entry) => entry.id),
     ["this-attempt"]
+  );
+});
+
+// A named-but-missing file must fail loudly rather than quietly falling back
+// to the source's own (possibly stale) sidecar: that fallback is reserved for
+// when the flag is not passed at all, so a caller that explicitly names a
+// path is trusting that exact file, and a missing one is that trust broken,
+// not "nothing declared".
+test("a named but missing interface-decisions file is a hard error, not a silent fallback", () => {
+  const { dir, source, target } = stage({ uiDecisions: [uiDecision("stale-sidecar")] });
+
+  assert.throws(
+    () => publish({
+      source,
+      target,
+      receipt: "none",
+      uiDecisionsFile: path.join(dir, "does-not-exist.ui-decisions.json")
+    }),
+    /--ui-decisions-file is missing/
+  );
+  // A publication that cannot even be described must not clear a plan on its
+  // way to failing.
+  assert.equal(fs.existsSync(target), false);
+});
+
+test("an absent flag still falls back to the source's own sidecar", () => {
+  const { source, target } = stage({ uiDecisions: [uiDecision("from-source-sidecar")] });
+
+  publish({ source, target, receipt: "none" });
+
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(`${target}.ui-decisions.json`, "utf8")).map((entry) => entry.id),
+    ["from-source-sidecar"]
   );
 });
 

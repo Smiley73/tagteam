@@ -38,6 +38,27 @@ function carriedQuestionsFrom(prompt) {
   return [...new Set([...(carried ? JSON.parse(carried[1]) : []), ...reviewed])];
 }
 
+// The real script's receipt names the exact file and echoes back the exact
+// --expect token the command line already carried, so a stub standing in for
+// a well-behaved one has to read both off the prompt rather than fabricate
+// its own — matchingPayload now requires all three to agree with what the
+// workflow itself computed as the expected merged result.
+function mergeReceiptFrom(prompt) {
+  const fileMatch = /merge-plan-questions\.mjs"\s+"([^"]+)"/.exec(prompt);
+  const expectMatch = /--expect "([^"]+)"/.exec(prompt);
+  const token = expectMatch?.[1];
+  return {
+    name: "OPEN_QUESTIONS",
+    label: "open-questions",
+    file: fileMatch?.[1],
+    json: true,
+    chars: token ? Number(token.split(":")[0]) : 0,
+    token,
+    expected: token ?? null,
+    matches: true
+  };
+}
+
 // Drives plan-forge with stubs standing in for well-behaved models. Nothing
 // touches disk: this is about which status the pass reports for a given set of
 // outstanding questions, and about what a revision is allowed to do with the
@@ -46,12 +67,10 @@ async function forge({
   // What the first draft raises. The round that follows carries these into its
   // revision, which is the seam the carry-forward check guards.
   draftQuestions = [],
-  // What the drafter already wrote into the sidecar on disk. It persists what it
-  // raised, so that is the default; the merge unions this with whatever each
-  // exit hands over.
-  sidecarSeed = draftQuestions,
-  // null models a relay that ran the merge but did not carry the list back.
-  sidecarLost = false,
+  // Models a relay that never confirmed the final merge ran at all, across
+  // every retry: the command itself is unaffected, so the pass has no way to
+  // learn whether the sidecar it names holds what it should.
+  mergeNeverConfirmed = false,
   handoffVerdict = APPROVE,
   planReview = APPROVE,
   // A revision that returns fewer questions than it was carried, i.e. drops one.
@@ -81,33 +100,12 @@ async function forge({
     if (label === "plan:manifest") return MANIFEST;
     if (label === "plan:decompose") return TRAIN;
     if (label.startsWith("plan:merge-final-questions")) {
-      // Models merge-plan-questions.mjs: it merges the extra questions this exit
-      // hands it into the file the drafter persisted, and returns the union. The
-      // extra list is read out of the command rather than assumed, so a pass
-      // that stops handing its reviewers' questions over shows up here as a
-      // shorter answer instead of being papered over by the stub.
-      const hex = /merge-plan-questions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
-      const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
-      const extra = hex ? JSON.parse(new TextDecoder().decode(bytes)) : [];
-      const merged = [...new Set([...sidecarSeed, ...extra])];
-      const canonical = canonicalJson(merged);
-      // A relay that carried the merge's bookkeeping but not its list has still
-      // run the merge: the file on disk is correct and its checksum travelled.
-      // What did not travel is the list itself.
-      const bookkeeping = {
-        ok: true,
-        payloads: [{
-          name: "OPEN_QUESTIONS",
-          label: "open-questions",
-          file: "/tmp/plan/drafts/pass-1-integrated.md.questions.json",
-          json: true,
-          chars: canonical.length,
-          token: expectToken(canonical),
-          expected: null,
-          matches: true
-        }]
-      };
-      return sidecarLost ? bookkeeping : { ...bookkeeping, questions: merged };
+      // A total loss: no ok, no payloads, on every attempt. The command reads
+      // and normalizes the sidecar with its own filesystem access; the reply
+      // never carries the list, only a receipt, so there is nothing left for
+      // the workflow to fall back to when even that receipt never arrives.
+      if (mergeNeverConfirmed) return null;
+      return { ok: true, payloads: [mergeReceiptFrom(prompt)] };
     }
     if (label.startsWith("plan:lint")) {
       const review = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
@@ -175,9 +173,9 @@ test("a drained sidecar is the only thing that offers approval", async () => {
   assert.equal(result.openQuestionCount, 0);
 });
 
-test("questions left in the sidecar hold the pass short of approval", async () => {
+test("questions left outstanding by the draft hold the pass short of approval", async () => {
   const outstanding = ["Who owns rollback?", "Which cache fronts the ledger?"];
-  const { result } = await forge({ sidecarSeed: outstanding });
+  const { result } = await forge({ draftQuestions: outstanding });
 
   // The status is the gate. `needs-questions-or-approval` named them as
   // alternatives, which is what licensed approving over the top of them.
@@ -186,21 +184,18 @@ test("questions left in the sidecar hold the pass short of approval", async () =
   assert.deepEqual(result.openQuestions, outstanding);
 });
 
-test("a sidecar the relay lost counts as outstanding, never as drained", async () => {
-  const { result } = await forge({ sidecarLost: true });
-
-  // A pass that cannot say whether questions remain does not get to decide that
-  // they do not. Null costs a re-read of the file it names; guessing zero costs
-  // the gate on exactly the pass least able to afford it.
-  assert.equal(result.status, "needs-questions");
-  assert.equal(result.openQuestions, null);
-  assert.equal(result.openQuestionCount, null);
-  assert.equal(result.questionsPath, "/tmp/plan/drafts/pass-1-integrated.md.questions.json");
+test("a final merge that never confirms at all stops the pass rather than guessing", async () => {
+  // The merge command normalizes the sidecar with its own filesystem access
+  // and reports only a receipt, never the list; when even that receipt never
+  // arrives after every retry, this pass has no file-verified answer to
+  // report and refuses to approve on the strength of a guess.
+  const { result } = await forge({ draftQuestions: ["Who owns rollback?"], mergeNeverConfirmed: true });
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /could not be confirmed after 3 attempts/);
 });
 
 test("an unready handoff outranks the questions", async () => {
   const { result } = await forge({
-    sidecarSeed: ["Who owns rollback?"],
     handoffVerdict: { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] }
   });
 
@@ -235,8 +230,7 @@ test("a revision returning the reviews' questions as well as its carried ones is
       issues: [BLOCKER],
       open_questions: ["Who owns rollback?"],
       suggestions: []
-    },
-    sidecarSeed: ["Which database should the cache front?"]
+    }
   });
 
   assert.equal(result.status, "needs-questions");
@@ -250,8 +244,7 @@ test("a revision returning the reviews' questions as well as its carried ones is
 test("a clean round's reviewer questions still reach the sidecar", async () => {
   const raised = ["Which cache fronts the ledger?"];
   const { result, labels } = await forge({
-    planReview: { ...APPROVE, open_questions: raised },
-    sidecarSeed: []
+    planReview: { ...APPROVE, open_questions: raised }
   });
 
   // No revision ran: the round was clean.
@@ -263,8 +256,7 @@ test("a clean round's reviewer questions still reach the sidecar", async () => {
 test("a Claude revision that carries its questions forward is not stopped", async () => {
   const { result } = await forge({
     draftQuestions: ["Which database should the cache front?"],
-    planReview: { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] },
-    sidecarSeed: ["Which database should the cache front?"]
+    planReview: { verdict: "revise", issues: [BLOCKER], open_questions: [], suggestions: [] }
   });
 
   assert.equal(result.status, "needs-questions");
@@ -289,8 +281,7 @@ test("the revision prompt asks for exactly what the carry-forward check demands"
       issues: [BLOCKER],
       open_questions: ["Who owns rollback?"],
       suggestions: []
-    },
-    sidecarSeed: ["Which database should the cache front?"]
+    }
   });
   const revision = prompts.get("plan:revise:1");
 

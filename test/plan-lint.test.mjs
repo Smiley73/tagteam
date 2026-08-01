@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { canonicalJson, expectToken } from "../scripts/compose-prompt.mjs";
 import {
   DEFAULT_PLAN_BUDGET,
   derivePullRequestFiles,
@@ -11,6 +13,9 @@ import {
   parseSizeEstimate,
   planLint
 } from "../scripts/plan-lint.mjs";
+
+const root = path.resolve(import.meta.dirname, "..");
+const script = path.join(root, "scripts", "plan-lint.mjs");
 
 const SECTIONS = [
   "Goal", "Premises", "Decisions", "Scope", "File-by-file",
@@ -372,4 +377,92 @@ test("planLint refuses to report a verdict on bytes other than the ones it was g
     () => planLint({ plan: file, expects: { PLAN: "1:00000000" } }),
     /different bytes than this run produced/
   );
+});
+
+// --canonical-config names a path, never the canonical-strings array itself:
+// a repository's list travels only as the same validated config.json the
+// workflow already fences elsewhere, so the CLI carries a path a model only
+// ever retypes once, however many rows that repository configures.
+test("--canonical-config reads a repository's list from the config file it names", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-cli-"));
+  const planFile = path.join(directory, "plan.md");
+  fs.writeFileSync(planFile, plan("The version moves 66 -> 67 in this step."), { mode: 0o600 });
+  const configFile = path.join(directory, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify({
+    planning: { canonicalStrings: [{ wrong: "66 -> 67", right: "66 → 67", note: "AGENTS.md pins the arrow glyph." }] }
+  }), { mode: 0o600 });
+
+  const result = execFileSync("node", [
+    script, "--plan", planFile, "--canonical-config", configFile
+  ], { encoding: "utf8" });
+  const parsed = JSON.parse(result);
+
+  assert.equal(parsed.clean, false);
+  const found = parsed.issues.filter((issue) => /where the contract requires/.test(issue.title));
+  assert.equal(found.length, 1);
+  assert.match(found[0].detail, /AGENTS\.md pins the arrow glyph/);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("--canonical-config fails closed on a config file that is not readable JSON", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-cli-"));
+  const planFile = path.join(directory, "plan.md");
+  fs.writeFileSync(planFile, plan(), { mode: 0o600 });
+  const configFile = path.join(directory, "config.json");
+  fs.writeFileSync(configFile, "{ not json", { mode: 0o600 });
+
+  assert.throws(
+    () => execFileSync("node", [script, "--plan", planFile, "--canonical-config", configFile], { encoding: "utf8" }),
+    /is not readable JSON/
+  );
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+// --expect-canonical binds the config path to the exact array plan-forge.js
+// already validated in memory, so a config edited between that validation
+// and this lint call cannot silently change what gets linted.
+test("--expect-canonical accepts a config whose canonicalStrings match the digest", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-cli-"));
+  const planFile = path.join(directory, "plan.md");
+  fs.writeFileSync(planFile, plan("The version moves 66 -> 67 in this step."), { mode: 0o600 });
+  const canonicalStrings = [{ wrong: "66 -> 67", right: "66 → 67", note: "AGENTS.md pins the arrow glyph." }];
+  const configFile = path.join(directory, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify({ planning: { canonicalStrings } }), { mode: 0o600 });
+  const expectCanonical = expectToken(canonicalJson(canonicalStrings));
+
+  const result = execFileSync("node", [
+    script, "--plan", planFile, "--canonical-config", configFile, "--expect-canonical", expectCanonical
+  ], { encoding: "utf8" });
+  const parsed = JSON.parse(result);
+
+  assert.equal(parsed.clean, false);
+  assert.equal(parsed.issues.filter((issue) => /where the contract requires/.test(issue.title)).length, 1);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("--expect-canonical refuses a config whose canonicalStrings have changed since this pass validated it", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-cli-"));
+  const planFile = path.join(directory, "plan.md");
+  fs.writeFileSync(planFile, plan(), { mode: 0o600 });
+  const validated = [{ wrong: "66 -> 67", right: "66 → 67" }];
+  const expectCanonical = expectToken(canonicalJson(validated));
+  // The config on disk now names a different list than the one this run
+  // validated in memory and computed expectCanonical from — as if a person
+  // edited it mid-run.
+  const configFile = path.join(directory, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify({
+    planning: { canonicalStrings: [{ wrong: "N/A", right: "not applicable" }] }
+  }), { mode: 0o600 });
+
+  assert.throws(
+    () => execFileSync("node", [
+      script, "--plan", planFile, "--canonical-config", configFile, "--expect-canonical", expectCanonical
+    ], { encoding: "utf8" }),
+    /disagrees with what this run expected/
+  );
+
+  fs.rmSync(directory, { recursive: true, force: true });
 });

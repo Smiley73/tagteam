@@ -1435,14 +1435,34 @@ function planToken(text) {
 // checksum that command reports back — never as a relayed field.
 const PLAN_TEXT = "# Plan";
 
-// The real helper always returns the merged list, and the workflow now requires
-// it on success: a bare {ok:true} is a lost reply, not a success. Model that
-// faithfully by decoding the questions the command actually carries, so these
-// stubs cannot pass a shape the helper never produces.
-function mergedQuestionsFrom(prompt) {
-  const hex = /merge-plan-questions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
-  const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
-  return { ok: true, questions: hex ? JSON.parse(new TextDecoder().decode(bytes)) : [] };
+// The real script's reply: a receipt only, proof the command ran and wrote
+// the sidecar, never the list itself — that never rides through a reply a
+// model composes any more than it rides through the command that invoked it.
+// The workflow now requires this non-empty payloads array as the proof; a
+// bare {ok:true} is a lost reply, not a success.
+// The real script's receipt names the exact file and echoes back the exact
+// token the command line already carried in --expect, so a well-behaved stub
+// has to read both off the prompt rather than fabricate its own: the workflow
+// now requires the receipt to match what it itself computed as the expected
+// merged result, not merely be present.
+function mergedQuestionsFrom(prompt = "") {
+  const fileMatch = /merge-plan-questions\.mjs"\s+"([^"]+)"/.exec(prompt);
+  const expectMatch = /--expect "([^"]+)"/.exec(prompt);
+  const file = fileMatch?.[1] ?? "/plans/slug/drafts/pass-1-integrated.md.questions.json";
+  const token = expectMatch?.[1] ?? planToken(canonicalJson([]));
+  return {
+    ok: true,
+    payloads: [{
+      name: "OPEN_QUESTIONS",
+      label: "open-questions",
+      file,
+      json: true,
+      chars: Number(token.split(":")[0]),
+      token,
+      expected: token,
+      matches: true
+    }]
+  };
 }
 
 const PLAN_PAYLOAD = {
@@ -1756,7 +1776,11 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
     uiDecisionsFile: "/plans/slug/drafts/pass-1-integrated.md.ui-decisions.json"
   }, responder);
 
-  assert.equal(result.status, "needs-approval");
+  // "Which rollout?" is carried forward, and the one decision this pass
+  // supplies ("Use staged rollout?") answers a different question, so a
+  // compliant draft still reports it open — settleQuestions reconciles that
+  // from draft.open_questions rather than from a file no stub here models.
+  assert.equal(result.status, "needs-questions");
   const request = prompts.get("plan:codex-draft:request");
   assert.match(request, /CARRIED_QUESTIONS=/);
   assert.match(request, /CARRIED_INTERFACE_DECISIONS=/);
@@ -1793,7 +1817,11 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   assert.equal(initialLost.result.status, "plan-interrupted");
   assert.equal(initialLost.labels.some((label) => label.startsWith("plan:materialize-draft")), false);
   const initialRecovered = await harness("workflows/plan-forge.js", initialArgs, responder(false));
-  assert.equal(initialRecovered.result.status, "needs-approval");
+  // "Which rollout?" stays open in every fixture below so the carry-forward
+  // check has something consistent to bind the continuation case to;
+  // settleQuestions reconciles it from draft.open_questions honestly rather
+  // than a stub silently zeroing out a question no file here ever modeled.
+  assert.equal(initialRecovered.result.status, "needs-questions");
 
   const continuationArgs = {
     ...PLAN_ARGS,
@@ -1811,7 +1839,7 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   const continuationLost = await harness("workflows/plan-forge.js", continuationArgs, responder(true));
   assert.equal(continuationLost.result.status, "plan-interrupted");
   const continuationRecovered = await harness("workflows/plan-forge.js", continuationArgs, responder(false));
-  assert.equal(continuationRecovered.result.status, "needs-approval");
+  assert.equal(continuationRecovered.result.status, "needs-questions");
 });
 
 // Review cannot catch a false premise: every reviewer reads the same document
@@ -2052,66 +2080,18 @@ test("planning persists questions introduced by the decomposition review", async
   assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
 });
 
-// The shape a relay produces when it obeys this step's own instruction not to
-// retype any question: the command's bookkeeping travels back, the prose does
-// not. Canonical JSON is single-line and has no trailing whitespace, so the
-// plan-text normalizer that planToken applies leaves it untouched and the token
-// is the one merge-plan-questions.mjs computes.
-function mergedBookkeepingFrom(prompt) {
-  const canonical = canonicalJson(mergedQuestionsFrom(prompt).questions);
-  return {
-    ok: true,
-    payloads: [{
-      name: "OPEN_QUESTIONS",
-      label: "open-questions",
-      file: "/plans/slug/drafts/pass-1-integrated.md.questions.json",
-      json: true,
-      chars: canonical.length,
-      token: planToken(canonical),
-      expected: null,
-      matches: true
-    }]
-  };
-}
+// Confirmed success is always just the receipt now — the merge script never
+// hands the list back, so there is no "with or without the list" distinction
+// left to draw. What used to be tested here is covered above: "planning
+// persists questions introduced by the decomposition review" already checks
+// that a confirmed merge settles openQuestions from draft.open_questions and
+// this exit's own extra, not from any content the reply might have carried.
 
-// A relay that hands back the merge's bookkeeping without its list has run the
-// merge: the sidecar on disk is correct and its checksum travelled. Requiring
-// the prose too turned that into three retries and a dead pass, which is what
-// a real 13-pass plan hit twice on 0.4.3. The file is the answer, so the pass
-// settles from it rather than from a list the relay was told not to produce.
-test("a merge relay that returns bookkeeping without the list settles from the sidecar", async () => {
-  const baseResponder = planResponder([]);
-  const { result, labels } = await harness(
-    "workflows/plan-forge.js",
-    PLAN_ARGS,
-    (label, prompt, options) => {
-      if (label.startsWith("plan:merge-final-questions")) return mergedBookkeepingFrom(prompt);
-      if (label === "plan:codex-decomposition-review") {
-        return { ...APPROVE, open_questions: ["Who owns rollback?"] };
-      }
-      return baseResponder(label, prompt, options);
-    }
-  );
-
-  // A pass that cannot say whether questions remain does not get to decide they
-  // do not: the lost list is reported as outstanding, and the command reads the
-  // sidecar this names to find out what they are.
-  assert.equal(result.status, "needs-questions");
-  assert.equal(result.questionsPath, "/plans/slug/drafts/pass-1-integrated.md.questions.json");
-  // Null rather than the run's own tally: the tally only grows, and reporting it
-  // is exactly the stale-and-rephrased answer this step exists to stop giving.
-  // A null list means "read the sidecar", which is what the command already does.
-  assert.equal(result.openQuestions, null);
-  assert.equal(result.openQuestionCount, null);
-  // One attempt was enough. The reply proved the merge ran, so nothing is retried.
-  assert.deepEqual(labels.filter((label) => label.startsWith("plan:merge-final-questions")),
-    ["plan:merge-final-questions"]);
-  assert.equal(result.usage.relayRetries, 0);
-});
-
-// The bookkeeping is the proof, so a reply carrying neither it nor the list is
-// still a lost reply: retried, then stopped with a resumable message.
-test("a merge relay that returns neither the list nor its bookkeeping is retried", async () => {
+// The payloads receipt is the proof the command ran; a reply that omits it is
+// indistinguishable from a relay that composed a plausible-looking `ok:true`
+// without actually running anything, so it is retried like any other lost
+// reply and the pass stops rather than trusting an unconfirmed sidecar.
+test("a merge relay that omits its receipt is retried, then stops the pass", async () => {
   const baseResponder = planResponder([]);
   const { result, labels } = await harness(
     "workflows/plan-forge.js",
@@ -2128,17 +2108,17 @@ test("a merge relay that returns neither the list nor its bookkeeping is retried
   assert.equal(result.usage.relayRetries, 2);
 });
 
-// A relay that alters the list in transit without touching the checksum beside
-// it is caught by comparing the two, and that check has to keep working now
-// that the list itself is optional.
-test("a merge relay that rewrites the list is caught by the checksum beside it", async () => {
+// A reply carrying an extra field the schema never asked for is not proof of
+// anything: the receipt is what confirms the merge ran, so a bogus list
+// alongside a valid receipt changes nothing about what this pass reports.
+test("a merge relay reply padded with a bogus list is not trusted for it", async () => {
   const baseResponder = planResponder([]);
   const { result } = await harness(
     "workflows/plan-forge.js",
     PLAN_ARGS,
     (label, prompt, options) => {
       if (label.startsWith("plan:merge-final-questions")) {
-        return { ...mergedBookkeepingFrom(prompt), questions: ["a question nobody asked"] };
+        return { ...mergedQuestionsFrom(prompt), questions: ["a question nobody asked"] };
       }
       if (label === "plan:codex-decomposition-review") {
         return { ...APPROVE, open_questions: ["Who owns rollback?"] };
@@ -2147,8 +2127,8 @@ test("a merge relay that rewrites the list is caught by the checksum beside it",
     }
   );
 
-  assert.equal(result.status, "plan-interrupted");
-  assert.match(result.message, /does not match the checksum reported beside it/);
+  assert.equal(result.status, "needs-questions");
+  assert.deepEqual(result.openQuestions, ["Who owns rollback?"]);
 });
 
 test("a lost plan-review relay result is recovered from the saved artifact", async () => {
@@ -2851,16 +2831,11 @@ test("resume carries saved open questions and keeps persisting them", async () =
     { ...PLAN_ARGS, seedPlan: "# Saved draft", resumeRound: 1, openQuestions: ["Which database should the cache front?"] },
     (label, prompt) => {
       if (prompt.includes(".questions.json")) persisted.push(label);
-      // This harness has no filesystem, so the shared stub can only see the
-      // questions the command adds. The real sidecar also holds the ones
-      // carried into the resume, and the pass now reports what that file says,
-      // so model a sidecar that has them.
-      if (label.startsWith("plan:merge-final-questions")) {
-        return {
-          ...mergedQuestionsFrom(prompt),
-          questions: ["Which database should the cache front?", ...mergedQuestionsFrom(prompt).questions]
-        };
-      }
+      // draft.open_questions carries the resumed question through the resume
+      // seed and, via the carried-questions fence the revision prompt shows,
+      // through the revision's own reply too — settleQuestions reconciles the
+      // reported list from that, not from anything the merge command returns.
+      if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
       // The round has to leave something gating for a revision to run at all;
       // a clean round publishes what it reviewed and edits nothing.
       if (label === "plan:claude-review:1") return REVISE;

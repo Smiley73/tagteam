@@ -739,17 +739,36 @@ export function planLint({
   return { ok: true, clean: gating.length === 0, issues, payloads, derivedFiles };
 }
 
-// Inert hexadecimal, the same encoding the question merge uses: this value is a
-// small array a caller holds in memory, and passing it through a shell as prose
-// is how a quote or a backtick in a note becomes something else.
-function decodeCanonicalStrings(hex) {
-  if (!/^(?:[0-9a-f]{2})*$/i.test(String(hex ?? ""))) {
-    throw new Error("--canonical expects even-length hexadecimal bytes");
+// --canonical-config names the same validated .tagteam/config.json the
+// workflow already fences into other requests as PROJECT_CONFIG, so the
+// canonical-strings list this process reads is a path and nothing more: a
+// model composing this command only ever retypes that path, never the array
+// itself, however many rows a repository configures.
+//
+// The path names a file this process does not own, so it re-reads it rather
+// than trusting a value handed to it once — but a config a person edits mid
+// run could then silently change what this check lints against. --expect-
+// canonical is what closes that: the workflow computes the digest once, up
+// front, from the exact array it already validated in memory, and this
+// refuses to lint against a config whose canonicalStrings have since moved
+// out from under it, the same way `--expect` refuses a plan whose bytes moved.
+function readCanonicalStrings(file, expectDigest) {
+  const resolved = path.resolve(file);
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(resolved, "utf8"));
+  } catch (error) {
+    throw new Error(`--canonical-config at ${resolved} is not readable JSON (${error.message})`);
   }
-  const bytes = Uint8Array.from(String(hex).match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
-  const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  if (!Array.isArray(value)) throw new Error("--canonical must decode to an array");
-  return value;
+  const canonicalStrings = config?.planning?.canonicalStrings ?? [];
+  if (!Array.isArray(canonicalStrings)) throw new Error(`--canonical-config's planning.canonicalStrings must be an array: ${resolved}`);
+  if (expectDigest !== undefined) {
+    const actual = expectToken(canonicalJson(canonicalStrings));
+    if (actual !== expectDigest) {
+      throw new Error(`${resolved}'s planning.canonicalStrings disagrees with what this run expected — the config changed since this pass validated it`);
+    }
+  }
+  return canonicalStrings;
 }
 
 function parseLintArgs(argv) {
@@ -773,11 +792,18 @@ function parseLintArgs(argv) {
       const cap = Number(value);
       if (!Number.isSafeInteger(cap) || cap < 1) throw new Error(`--cap-lines expects a positive integer, got: ${value}`);
       options.capLines = cap;
-    } else if (key === "--canonical") {
-      options.canonicalStrings = decodeCanonicalStrings(value);
+    } else if (key === "--canonical-config") {
+      options.canonicalConfig = value;
+    } else if (key === "--expect-canonical") {
+      options.expectCanonical = value;
     } else if (["--plan", "--manifest", "--train", "--out"].includes(key)) {
       options[key.slice(2)] = value;
     } else throw new Error(`unexpected argument: ${key}`);
+  }
+  // Resolved after the whole command line is parsed: --expect-canonical may
+  // arrive before or after --canonical-config, and the digest check needs both.
+  if (options.canonicalConfig) {
+    options.canonicalStrings = readCanonicalStrings(options.canonicalConfig, options.expectCanonical);
   }
   return options;
 }
@@ -785,7 +811,7 @@ function parseLintArgs(argv) {
 async function main() {
   const options = parseLintArgs(process.argv.slice(2));
   if (!options.plan && !options.manifest) {
-    process.stderr.write("usage: plan-lint.mjs [--plan <plan.md>] [--manifest <m.json> --train <t.json>] [--budget <target>:<ceiling>] [--cap-lines <n>] [--canonical <hex>] [--out <lint-review.json>] [--expect NAME=token]\n");
+    process.stderr.write("usage: plan-lint.mjs [--plan <plan.md>] [--manifest <m.json> --train <t.json>] [--budget <target>:<ceiling>] [--cap-lines <n>] [--canonical-config <config.json> --expect-canonical <token>] [--out <lint-review.json>] [--expect NAME=token]\n");
     process.exitCode = 2;
     return;
   }

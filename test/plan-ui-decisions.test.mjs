@@ -53,6 +53,24 @@ function dedupeById(decisions) {
   return [...byId.values()];
 }
 
+// The real merge scripts' receipt names the exact file and echoes back the
+// exact --expect token the command line already carried, so a stub standing
+// in for a well-behaved one has to read both off the prompt rather than
+// fabricate its own — matchingPayload now requires all three to agree with
+// what the workflow itself computed as the expected merged result.
+function mergeReceiptFrom(prompt, name) {
+  const script = name === "OPEN_QUESTIONS" ? "merge-plan-questions" : "merge-plan-ui-decisions";
+  const fileMatch = new RegExp(`${script}\\.mjs"\\s+"([^"]+)"`).exec(prompt);
+  const expectMatch = /--expect "([^"]+)"/.exec(prompt);
+  const token = expectMatch?.[1];
+  return {
+    name,
+    file: fileMatch?.[1],
+    chars: token ? Number(token.split(":")[0]) : 0,
+    token
+  };
+}
+
 const option = (label) => ({ label, sketch: `[ ${label} ]`, why: `because ${label}` });
 const decision = (id, surface, precedent) => ({
   id,
@@ -121,18 +139,18 @@ async function forge({
     // the record.
     if (label.startsWith("plan:merge-final-ui-decisions")) {
       if (loseUiDecisionMerge) return null;
-      const hex = /merge-plan-ui-decisions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
-      const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
-      const merged = hex ? JSON.parse(new TextDecoder().decode(bytes)) : [];
-      mergedUiDecisions.push(merged);
-      return { ok: true, uiDecisions: merged };
+      mergedUiDecisions.push([]);
+      // The receipt is the proof the merge ran; the workflow no longer asks
+      // for the list itself back, so a receipt naming this exact file and
+      // token is a real success.
+      return { ok: true, payloads: [mergeReceiptFrom(prompt, "INTERFACE_DECISIONS")] };
     }
     if (label.startsWith("plan:merge-final-questions")) {
-      // The helper always returns the merged list and the workflow requires it
-      // on success, so a bare {ok:true} is a reply the helper never produces.
-      const hex = /merge-plan-questions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
-      const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
-      return { ok: true, questions: hex ? JSON.parse(new TextDecoder().decode(bytes)) : [] };
+      // The receipt is the proof the merge ran; the workflow reconciles the
+      // reported list itself from draft.open_questions rather than asking for
+      // it back, so a receipt naming this exact file and token is a real
+      // success.
+      return { ok: true, payloads: [mergeReceiptFrom(prompt, "OPEN_QUESTIONS")] };
     }
     // The deterministic plan check finds nothing here: these stubs stand in for
     // well-behaved models, and what the lint decides is not what this file is

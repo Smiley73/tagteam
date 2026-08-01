@@ -513,16 +513,31 @@ function requireCarriedUiDecisions(engine, result, carried) {
   }
 }
 
+// The same normalization merge-plan-ui-decisions.mjs's own decisionKey uses,
+// kept as one function so the two can never quietly drift apart.
+function decisionKey(decision) {
+  return String(decision?.id ?? "").trim().toLocaleLowerCase();
+}
+
 // Later rounds refine the same decision under the same id, so the last version
 // wins while the order the decisions were first raised in is preserved.
 function dedupeDecisions(decisions) {
   const byId = new Map();
   for (const decision of decisions) {
-    const key = String(decision?.id ?? "").trim().toLocaleLowerCase();
+    const key = decisionKey(decision);
     if (!key) continue;
     byId.set(key, decision);
   }
   return [...byId.values()];
+}
+
+// The token merge-plan-ui-decisions.mjs computes for the same merged list: a
+// fnv1a token over the set sorted by id rather than the list's own insertion
+// order, because two independently-built copies of "the same decisions" (this
+// workflow's own accumulator vs. what a file was built up from) may legitimately
+// list them in a different order, and order is not content this check is about.
+function uiDecisionsExpectedToken(decisions) {
+  return expectJson([...decisions].sort((left, right) => decisionKey(left).localeCompare(decisionKey(right))));
 }
 
 const NEW_SURFACES = new Set(["new-dialog", "new-page", "new-nav", "new-input"]);
@@ -548,20 +563,21 @@ const promptBuildSchema = {
   }
 };
 
-// The merge helper's reply. Like a payload verification, what the caller
-// requires on the success path is the OPEN_QUESTIONS bookkeeping; the merged
-// list is prose and travels only if the relay can carry it word for word.
+// The merge helper's reply: a receipt only, never the list itself. A sidecar
+// that only ever grows across a pass is exactly the shape a model must not be
+// asked to retype into its own reply, so what the schema requires on the
+// success path is the OPEN_QUESTIONS bookkeeping alone; the file it describes
+// is what the pass reads from, by path, not by relay.
 const mergedQuestionsSchema = {
   type: "object",
   additionalProperties: false,
-  // Neither `payloads` nor `questions` is required here: an `ok:false` failure
-  // reply legitimately carries neither, and rejecting it at the schema would
-  // hide the helper's own error text. The caller judges the success path.
+  // Neither `payloads` is required here: an `ok:false` failure reply
+  // legitimately carries none, and rejecting it at the schema would hide the
+  // helper's own error text. The caller judges the success path.
   required: ["ok"],
   properties: {
     ok: { type: "boolean" },
     error: { type: "string" },
-    questions: { type: "array", items: { type: "string" } },
     payloads: {
       type: "array",
       items: {
@@ -594,7 +610,6 @@ const mergedUiDecisionsSchema = {
     ok: { type: "boolean" },
     error: { type: "string" },
     quarantined: { type: "string" },
-    uiDecisions: { type: "array", items: uiDecisionSchema },
     payloads: mergedQuestionsSchema.properties.payloads
   }
 };
@@ -753,10 +768,62 @@ function receiptToken(receipt) {
   return `${receipt.plan_chars}:${receipt.plan_hash}`;
 }
 
-function jsonHex(value) {
-  return utf8Bytes(JSON.stringify(value))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+// The canonical text a question-set digest is taken over. Order and duplicate
+// phrasing are not content — the sidecar and the structured reply are written
+// by the same model from the same set and need not agree on either — so this
+// is the sorted, deduplicated, normalized text rather than the raw array.
+function questionSetCanonical(questions) {
+  return canonicalJson([...new Set((questions ?? []).map(questionKey))].sort());
+}
+
+// A fixed-size SHA-256 digest, deliberately distinct from the fnv1a
+// "chars:hash" token (expectJson/skeletonToken) every other checked array in
+// this file travels as. Those exist to catch an ordinary transcription drift
+// and are sized for speed, not collision resistance; --expect-questions asks
+// a plumbing script to trust a value it cannot otherwise verify against
+// anything a model wrote, so it gets the stronger guarantee instead of
+// sharing the weaker one used for a plan or manifest already bound by its own
+// content and re-read from the same file that produced it.
+async function questionSetDigest(questions) {
+  const canonical = questionSetCanonical(questions);
+  const digest = (await sha256(canonical)).slice("sha256:".length);
+  return `${canonical.length}:${digest}`;
+}
+
+// Composed commands travel as prose a model must reproduce verbatim, not as
+// an argv array a shell parses on its own, so their size is bounded here
+// rather than left to whatever a model's own tool-call ceiling tolerates.
+// Every value that used to carry real content now travels as a file a script
+// reads with its own filesystem access, or as a checksum a script recomputes
+// and compares — with one deliberate exception. `--var` entries (see
+// shellQuote below) have always carried fixed, workflow-authored prose: the
+// budget, split, and policy briefs are several sentences of static guidance
+// with light config interpolation, not growing, model- or goal-influenced
+// content, so they are exempt from the tighter per-argument ceiling below and
+// bounded only by the total. Two ceilings catch two different failures:
+// ARGUMENT_CHAR_CEILING is what a single path, token, or short flag should
+// never approach, so it is the one that actually catches a value that escaped
+// the path/digest discipline; COMMAND_CHAR_CEILING is far more generous
+// precisely because a legitimate command can carry several long, ordinary
+// paths (a deep worktree, a long plan directory) and the briefs above, none
+// of which would trip the first check but could still add up, and it exists
+// only to catch that aggregate case. Either failure is a named, immediate
+// error instead of a refusal surfacing as a dead agent three rounds into a
+// paid pass, or worse, a transcription that silently mangled mid-command.
+const ARGUMENT_CHAR_CEILING = 1_000;
+const COMMAND_CHAR_CEILING = 5_000;
+function assembleCommand(parts, what) {
+  const kept = parts.filter(Boolean);
+  const oversized = kept.find((part) => part.length > ARGUMENT_CHAR_CEILING && !part.startsWith("--var "));
+  if (oversized !== undefined) {
+    const flag = oversized.match(/^--?[A-Za-z][\w-]*/)?.[0] ?? oversized.slice(0, 40);
+    throw new Error(`the ${what} command's "${flag}" argument is ${oversized.length} characters, over the ${ARGUMENT_CHAR_CEILING}-character ceiling a single path, token, or flag should ever need`);
+  }
+  const command = kept.join(" ");
+  if (command.length > COMMAND_CHAR_CEILING) {
+    throw new Error(`the ${what} command is ${command.length} characters, over the ${COMMAND_CHAR_CEILING}-character ceiling a plumbing agent should ever be asked to retype, even with no single oversized argument`);
+  }
+  return command;
 }
 
 // Every other value in these commands is a workflow-built path or a
@@ -771,7 +838,7 @@ function shellQuote(value) {
 }
 
 function composeCommand({ pluginRoot, template, out, vars = {}, fences = [], expects = {}, requireJson = [], minBytes }) {
-  return [
+  return assembleCommand([
     `node "${pluginRoot}/scripts/compose-prompt.mjs"`,
     `--template "${pluginRoot}/prompts/${template}"`,
     `--out "${out}"`,
@@ -780,14 +847,14 @@ function composeCommand({ pluginRoot, template, out, vars = {}, fences = [], exp
     ...Object.entries(expects).filter(([, token]) => token).map(([name, token]) => `--expect "${name}=${token}"`),
     ...requireJson.map((file) => `--require-json "${file}"`),
     Number.isFinite(minBytes) ? `--min-bytes ${minBytes}` : ""
-  ].filter(Boolean).join(" ");
+  ], "compose-prompt");
 }
 
 function verifyCommand({
   pluginRoot, payloads = [], expects = {}, digests = {}, expectTokenFiles = {},
   expectTokenFilesIfPresent = {}, requireJson = []
 }) {
-  return [
+  return assembleCommand([
     `node "${pluginRoot}/scripts/verify-payload.mjs"`,
     ...payloads.map((payload) => `${payload.json ? "--payload-json" : "--payload"} "${payload.name}=${payload.file}"`),
     ...Object.entries(expects).filter(([, token]) => token).map(([name, token]) => `--expect "${name}=${token}"`),
@@ -797,7 +864,7 @@ function verifyCommand({
     ...Object.entries(expectTokenFilesIfPresent)
       .map(([name, file]) => `--expect-token-file-if-present "${name}=${file}"`),
     ...requireJson.map((file) => `--require-json "${file}"`)
-  ].join(" ");
+  ], "verify-payload");
 }
 
 // A relay is instructed to run the bridge and return its validated file. If no
@@ -995,30 +1062,37 @@ async function runPlanLint({ command, label, phase: phaseName, model, effort, wh
   ].join("\n"));
 }
 
-// Runs the deterministic question-sidecar merge. The schema-bound, small
-// question array is encoded as inert hex in the command; the relay only launches
-// the helper and hands back its result.
-//
-// What proves the merge ran is its OPEN_QUESTIONS bookkeeping: the sidecar's
-// path, character count, and checksum. That is required. The merged list itself
-// is not, because it is prose, and every other relay in this file exists to keep
-// prose off the relay entirely. Requiring it here both contradicted this step's
-// own instruction not to retype a question and made a compliant relay fatal:
-// three attempts, each obediently omitting the list, then a dead pass sitting on
-// a sidecar that was correct the whole time. It stopped a real plan twice.
-//
-// So an absent list is reported as null and the caller settles from the file,
-// which is the list a human is asked from anyway. Null is not a fallback to the
-// run's own tally: the tally only grows, and reporting it would reintroduce the
-// stale and rephrased entries this step exists to stop reporting. When the list
-// does travel, the helper computes its token from the same array it returns, so
-// checking one against the other catches a relay that altered it in transit
-// without touching the checksum beside it.
-async function mergeFinalQuestions({ command, label, phase: phaseName, model, effort, file }) {
+// A payloads entry is proof of nothing on its own: a relay that fabricates a
+// plausible-looking, non-empty payloads array would pass a bare "is it
+// present" check. This requires the entry to name the exact payload and file
+// this call is about and to carry the exact token this run already computed
+// as the expected result — the same rigor recordPlanFile and adoptSavedToken
+// already hold a saved plan to, applied to a merged sidecar instead.
+function matchingPayload(payloads, name, file, expectedToken) {
+  return (payloads ?? []).find((payload) =>
+    payload?.name === name && payload?.file === file && payload?.token === expectedToken);
+}
+
+// Runs the deterministic question-sidecar merge. What proves the merge ran is
+// its OPEN_QUESTIONS bookkeeping: the sidecar's path, character count, and a
+// checksum this call already knows to expect — expectedToken is the digest of
+// the exact merged result this pass computed from draft.open_questions and
+// this exit's own extra, and the command itself refuses to write anything
+// else, so a mismatched or missing receipt is this run's own proof that the
+// file does not hold what it should, not a gap to quietly report around.
+// The merged list itself never travels, in either direction — the command
+// reads any additional questions from a file (or a small inline argument
+// bounded to one round's findings, when no reviewing agent could persist a
+// file for it) rather than an unbounded accumulator, and its reply carries
+// only the receipt, never the array. A sidecar that only ever grows across a
+// pass is exactly the shape that must not ride through a command a model
+// retypes or a reply a model composes; a multi-kilobyte value did both, and
+// mangled in the retyping before it ever reached the point of being refused.
+async function mergeFinalQuestions({ command, label, phase: phaseName, model, effort, file, expectedToken }) {
   const prompt = [
     `Run this exact command: ${command}`,
-    "It atomically merges the saved decomposition review's open questions into the plan's question sidecar. Do not author, answer, edit, summarise, or reorder any question yourself.",
-    "Return the command's JSON stdout unchanged: ok, its payloads array, and the questions array it printed copied across verbatim. If copying the questions would mean rewording any of them, return ok and payloads alone; the file it just wrote is what gets read. If it exits non-zero, return ok=false with its exact stderr as error."
+    "It atomically normalizes the plan's question sidecar, folding in any additional questions the command names, and refuses if the result does not match the checksum already on the command line. Do not author, answer, edit, summarise, or reorder any question yourself.",
+    "Return the command's JSON stdout unchanged: ok and its payloads array. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
@@ -1030,25 +1104,22 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, ef
       effort,
       schema: mergedQuestionsSchema
     });
-    const saved = result?.ok
-      ? (result.payloads ?? []).find((payload) => payload?.name === "OPEN_QUESTIONS")
-      : null;
-    const list = Array.isArray(result?.questions) ? result.questions : null;
-    // Either half is proof the merge ran, so the step survives a relay dropping
-    // whichever half it finds awkward — the bookkeeping, or the prose it was
-    // just told not to reword. Only a reply carrying neither is a lost reply.
-    if (result?.ok && (saved || list)) {
-      if (saved && list && saved.token !== expectJson(list)) {
-        throw new Error(payloadNotSaved({
-          what: "final open questions",
-          file,
-          detail: `the returned list does not match the checksum reported beside it (${saved.token})`
-        }));
-      }
-      return { ...result, questions: list };
-    }
+    if (result?.ok && matchingPayload(result.payloads, "OPEN_QUESTIONS", file, expectedToken)) return result;
     if (result && !result.ok) {
       throw new Error(payloadNotSaved({ what: "final open questions", file, detail: result.error }));
+    }
+    // An ok:true reply that names a payloads array is an active claim about
+    // what the command produced, not a lost reply — a wrong one will not
+    // resolve itself on a retry, so it is fatal immediately. An ok:true reply
+    // that carries no payloads array at all is schema-valid but proves
+    // nothing either way, indistinguishable from one truncated in transit, so
+    // it is retried like any other lost reply below.
+    if (result?.ok && Array.isArray(result.payloads)) {
+      throw new Error(payloadNotSaved({
+        what: "final open questions",
+        file,
+        detail: `the sidecar's own receipt does not name this file and checksum (expected ${expectedToken})`
+      }));
     }
     log(`The final question sidecar was merged, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Merging it again is idempotent.`);
   }
@@ -1059,17 +1130,16 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, ef
   }));
 }
 
-// The interface counterpart of mergeFinalQuestions. The two differ in what a
-// lost reply costs: a question list that does not travel is answered from the
-// file, because that file is what a person is asked from, while an interface
-// list that does not travel only means this pass confirms from its own memory
-// of a record that was written either way. So this returns null for the list
-// rather than failing, and the caller says which happened.
-async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, effort, file }) {
+// The interface counterpart of mergeFinalQuestions, with the same no-content
+// and same-receipt discipline. It differs in what a lost or mismatched reply
+// costs: never fatal, because this is the advisory track (it removes bad
+// surfaces without spending a question and has never blocked a pass), where a
+// lost question sidecar would stop the pass outright.
+async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, effort, file, expectedToken }) {
   const prompt = [
     `Run this exact command: ${command}`,
-    "It atomically merges the interface decisions this pass collected into the record beside the saved plan. Do not author, edit, reword, reorder, or drop any decision yourself.",
-    "Return the command's JSON stdout unchanged: ok, its payloads array, the uiDecisions array it printed copied across verbatim, and quarantined when it is present. If copying the decisions would mean altering any of them, return ok and payloads alone; the file it just wrote is what gets read. If it exits non-zero, return ok=false with its exact stderr as error."
+    "It atomically normalizes the interface-decision record beside the saved plan, quarantining it if it cannot be read, folding in any additional decisions the command names, and refuses if the result does not match the checksum already on the command line. Do not author, edit, reword, reorder, or drop any decision yourself.",
+    "Return the command's JSON stdout unchanged: ok, its payloads array, and quarantined when it is present. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
@@ -1081,35 +1151,29 @@ async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, 
       effort,
       schema: mergedUiDecisionsSchema
     });
-    const saved = result?.ok
-      ? (result.payloads ?? []).find((payload) => payload?.name === "INTERFACE_DECISIONS")
-      : null;
-    const list = Array.isArray(result?.uiDecisions) ? result.uiDecisions : null;
-    if (result?.ok && (saved || list)) {
-      if (saved && list && saved.token !== expectJson(list)) {
-        throw new Error(payloadNotSaved({
-          what: "final interface decisions",
-          file,
-          detail: `the returned list does not match the checksum reported beside it (${saved.token})`
-        }));
-      }
-      return { uiDecisions: list, quarantined: result.quarantined ?? null };
+    if (result?.ok && matchingPayload(result.payloads, "INTERFACE_DECISIONS", file, expectedToken)) {
+      return { ok: true, quarantined: result.quarantined ?? null };
     }
-    // A command that reported failure is not retried: it will fail the same way,
-    // and unlike a lost reply it says why. It is not fatal either — see below.
+    // A command that reported failure, or whose own receipt names a payloads
+    // array that does not match, is not retried: it will not resolve on its
+    // own, and unlike a lost reply it says why. It is not fatal either — see
+    // below. An ok:true reply with no payloads array at all is indistinguishable
+    // from one truncated in transit, so it falls through to the same retry as
+    // any other lost reply.
     if (result && !result.ok) {
       log(`The interface record beside this plan could not be merged: ${result.error ?? "the command reported failure"}. The plan and its questions are unaffected; the record may be missing decisions this pass collected.`);
       break;
     }
+    if (result?.ok && Array.isArray(result.payloads)) {
+      log(`The interface record beside this plan was merged, but its own receipt did not name the expected file and checksum. The plan and its questions are unaffected; the record may be missing decisions this pass collected.`);
+      break;
+    }
     log(`The interface record was merged, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Merging it again is idempotent.`);
   }
-  // Never fatal, whichever way it went. This is the advisory track: it removes
-  // bad surfaces without spending a question and it has never blocked a pass,
-  // and the command that reads a pass is already told to carry on with no
-  // interface decisions when the record is unreadable. Stopping a finished plan
-  // at the last step over a record nobody is gated on would be a worse trade
-  // than confirming from memory and saying so.
-  return { uiDecisions: null, quarantined: null };
+  // Never fatal, whichever way it went. Stopping a finished plan at the last
+  // step over a record nobody is gated on would be a worse trade than
+  // confirming from memory and saying so, which settleUiDecisions does.
+  return { ok: false, quarantined: null };
 }
 
 // Promotes a validated Codex draft artifact into the exact files that make a
@@ -1520,6 +1584,11 @@ async function main(raw) {
   // arithmetic rather than judgment, so it is checked rather than reviewed.
   const repoHardCapLines = config.prTrain.prSize.repoHardCapLines ?? null;
   const canonicalStrings = config.planning.canonicalStrings ?? [];
+  // Computed once, from the exact array this run already validated in memory,
+  // so a config a person edits mid-run cannot silently change what a later
+  // lint call reads back from disk: plan-lint.mjs refuses to lint against a
+  // canonicalStrings that no longer matches this.
+  const canonicalStringsExpect = expectJson(canonicalStrings);
   // A repository that states its rules in documents states some of them as exact
   // wording, and a document is read probabilistically where this list is checked
   // arithmetically. An unstated default reads as "this repository requires no
@@ -1536,7 +1605,7 @@ async function main(raw) {
   // on the command line rather than being re-read from the settings file: this
   // run already resolved it, and a second reading is a second chance for the two
   // to disagree about what the plan was written against.
-  const lintCommand = ({ plan = null, manifest = null, train = null, out = null, expects = {} }) => [
+  const lintCommand = ({ plan = null, manifest = null, train = null, out = null, expects = {} }) => assembleCommand([
     `node "${input.pluginRoot}/scripts/plan-lint.mjs"`,
     plan ? `--plan "${plan}"` : "",
     manifest ? `--manifest "${manifest}"` : "",
@@ -1544,9 +1613,15 @@ async function main(raw) {
     out ? `--out "${out}"` : "",
     `--budget ${planBudget.targetChars}:${planBudget.hardCeilingChars}`,
     repoHardCapLines ? `--cap-lines ${repoHardCapLines}` : "",
-    canonicalStrings.length ? `--canonical ${jsonHex(canonicalStrings)}` : "",
+    // Names the same validated config.json this run already fences elsewhere
+    // as PROJECT_CONFIG, so the canonical-strings list a repository configures
+    // never travels as content: however many rows it holds, the command only
+    // ever carries this one path. --expect-canonical binds it to the exact
+    // array validated above, so a config edited mid-run cannot silently
+    // change what gets linted.
+    canonicalStrings.length ? `--canonical-config "${configPath}" --expect-canonical "${canonicalStringsExpect}"` : "",
     ...Object.entries(expects).filter(([, token]) => token).map(([name, token]) => `--expect "${name}=${token}"`)
-  ].filter(Boolean).join(" ");
+  ], "plan-lint");
   const largePlanWarningChars = config.planning.largePlanWarningChars ?? 100_000;
   if (!Number.isSafeInteger(largePlanWarningChars) || largePlanWarningChars < 1) {
     throw new Error('plan-forge config key "config.planning.largePlanWarningChars" must be a positive integer');
@@ -1593,7 +1668,7 @@ async function main(raw) {
     });
     const requiredFences = fences.map(({ name }) =>
       `--require-fence ${String(name).toLocaleLowerCase().replaceAll("_", "-")}`);
-    const command = [
+    const command = assembleCommand([
       `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
       `--worktree "${input.worktree}"`,
       `--schema "${schemaPath}"`,
@@ -1605,7 +1680,7 @@ async function main(raw) {
       `--prompt-file "${promptFile}"`,
       ...requiredFences,
       Number.isFinite(minBytes) ? `--min-prompt-bytes ${minBytes}` : ""
-    ].filter(Boolean).join(" ");
+    ], "codex-run");
     const result = await relayCodex({
       prompt: [
         `The ${what} request has already been written to disk. Run this exact command and use its JSON stdout.`,
@@ -1633,14 +1708,14 @@ async function main(raw) {
   // plan: no copy is relayed, and the artifact is the only source the published
   // bytes ever had.
   const promoteCodexPlan = async ({ artifact, requestIdentity, file, label, phaseName, what }) => {
-    const command = [
+    const command = assembleCommand([
       `node "${input.pluginRoot}/scripts/materialize-plan-artifact.mjs"`,
       `--artifact "${artifact}"`,
       `--schema "${input.pluginRoot}/schemas/plan-draft.schema.json"`,
       `--plan "${file}"`,
       `--request-identity "${requestIdentity}"`,
       `--ui-decisions "${uiEnabled ? "on" : "off"}"`
-    ].join(" ");
+    ], "materialize-plan-artifact");
     const payloads = await materializeCodexPlan({
       command,
       label,
@@ -1722,15 +1797,16 @@ async function main(raw) {
       : "No convention paths are configured, so establish precedent from the closest comparable surface already in the repository."
   ].join("\n") : "This repository ships no user-facing interface, so return an empty ui_decisions array and spend no effort on interface questions.";
 
-  // What a publication writes beside the plan as the interface record. Every
-  // publish site passes it, because a discoverable plan's record is the
-  // workflow's to write: the Codex materializer already writes that file from
-  // the array its carry-forward check cleared, and copying whatever a model left
-  // at a working path was the one place a model still decided what the record
-  // said. The only file a model still writes is the fresh draft's, which has no
-  // publication and nothing carried it could shorten.
-  const uiDecisionsArg = (decisions) => uiEnabled
-    ? [`--ui-decisions ${jsonHex(dedupeDecisions(decisions))}`]
+  // What a publication reads as the interface record, by naming the exact
+  // file the model just persisted (the working copy's own `.ui-decisions.json`
+  // sidecar, per the persist() instruction below) rather than the source's
+  // implicit default: that default is derived from the pass and round, so an
+  // interrupted attempt may leave a stale file exactly there, and this is what
+  // lets a caller name the checked file instead of trusting it. No content
+  // ever travels through this: stage-plan-continuation.mjs reads the path with
+  // its own filesystem access.
+  const uiDecisionsFileArg = (workingPath) => uiEnabled
+    ? [`--ui-decisions-file "${workingPath}.ui-decisions.json"`]
     : [];
   const draftPrompt = continuation ? [
     `Integrate the human decisions into this already cross-reviewed plan for ${input.worktree}.`,
@@ -1854,12 +1930,12 @@ async function main(raw) {
   }
   if (continuation && useClaude) {
     await stageClaudeContinuation({
-      command: [
+      command: assembleCommand([
         `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" prepare`,
         `--source "${seedPlanPath}"`,
         `--target "${continuationWorkPath}"`,
         `--expect "${seedReceipt.savedToken}"`
-      ].join(" "),
+      ], "stage-plan-continuation prepare"),
       label: "plan:prepare-continuation",
       phaseName: "Draft",
       model: relayModel,
@@ -1990,13 +2066,13 @@ async function main(raw) {
     let saved = savedWork;
     if (continuation) {
       await stageClaudeContinuation({
-        command: [
+        command: assembleCommand([
           `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
           `--source "${continuationWorkPath}"`,
           `--target "${integratedPath}"`,
           `--expect "${savedWork.savedToken}"`,
-          ...uiDecisionsArg([...(input.uiDecisions ?? []), ...(result.ui_decisions ?? [])])
-        ].join(" "),
+          ...uiDecisionsFileArg(continuationWorkPath)
+        ], "stage-plan-continuation publish"),
         label: "plan:publish-continuation",
         phaseName: "Draft",
         model: relayModel,
@@ -2187,7 +2263,7 @@ async function main(raw) {
         sandbox: "read-only",
         worktree: input.worktree
       });
-      codexCommand = [
+      codexCommand = assembleCommand([
         `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
         `--worktree "${input.worktree}"`,
         `--schema "${input.pluginRoot}/schemas/plan-review.schema.json"`,
@@ -2200,7 +2276,7 @@ async function main(raw) {
         "--require-fence goal",
         "--require-fence draft-plan",
         `--min-prompt-bytes ${minBytes}`
-      ].join(" ");
+      ], "codex-run");
     }
 
     const uiArtifact = `${input.planDir}/reviews/${passId}-round-${round}-${requestSeed}-interaction-codex.json`;
@@ -2395,18 +2471,21 @@ async function main(raw) {
     if (roundClean) {
       if (planFile !== integratedPath) {
         await stageClaudeContinuation({
-          command: [
+          command: assembleCommand([
             `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
             `--source "${planFile}"`,
             `--target "${integratedPath}"`,
             `--expect "${planExpect}"`,
-            // This round's interface review is already in the accumulator, and
-            // the sidecar beside planFile predates it. Copying that file would
-            // publish the pass's finished plan next to a record missing the
-            // findings the round just collected, and no revision runs after a
-            // clean round to put them back.
-            ...uiDecisionsArg(uiDecisions)
-          ].join(" "),
+            // The sidecar beside planFile predates this round's interface
+            // review, which no revision runs after a clean round to fold in.
+            // Publishing it as-is is the same trade settleUiDecisions makes
+            // at the pass's own exit: this round's fresh findings still reach
+            // the reported result from memory even where they lag one round
+            // behind on disk, and neither the workflow nor the plumbing agent
+            // that runs this command can write that finding to a file no
+            // reviewing agent has permission to persist itself.
+            ...uiDecisionsFileArg(planFile)
+          ], "stage-plan-continuation publish"),
           label: `plan:publish-approved-round:${round}`,
           phaseName: `Cross-review ${round}`,
           model: relayModel,
@@ -2517,8 +2596,9 @@ async function main(raw) {
         phaseName: `Cross-review ${round}`,
         what: `plan revised in round ${round}`
       });
+      const revisionQuestionsDigest = await questionSetDigest(result.open_questions ?? []);
       await stageClaudeContinuation({
-        command: [
+        command: assembleCommand([
           `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
           `--source "${revisionWorkPath}"`,
           `--target "${revisedFile}"`,
@@ -2530,14 +2610,17 @@ async function main(raw) {
           // attempt leaves its sidecar where this one writes. The plan is bound
           // by its token; this binds the sidecar beside it to the same reply the
           // carry-forward check just cleared, so a retry cannot publish the
-          // interrupted attempt's questions.
-          //
-          `--expect-questions ${jsonHex(result.open_questions ?? [])}`,
-          // The interface record is written rather than bound: this revision's
-          // own declarations are not pushed into the accumulator until after
-          // this publication, so the union is taken here.
-          ...uiDecisionsArg([...uiDecisions, ...(result.ui_decisions ?? [])])
-        ].join(" "),
+          // interrupted attempt's questions. Travels as a fixed-size SHA-256
+          // digest, not as the questions themselves: whether the sidecar holds
+          // what this step reported has one exact answer regardless of how
+          // long the list has grown.
+          `--expect-questions "${revisionQuestionsDigest}"`,
+          // Names the working copy's own sidecar, which persist() just told
+          // this revision to write with every carried decision plus its own —
+          // exactly the union this publication needs, without asking a model
+          // to retype it.
+          ...uiDecisionsFileArg(revisionWorkPath)
+        ], "stage-plan-continuation publish"),
         label: `plan:publish-revision:${round}`,
         phaseName: `Cross-review ${round}`,
         model: relayModel,
@@ -2668,22 +2751,22 @@ async function main(raw) {
     manifestPath: savedManifestPath,
     prTrainPath: savedTrainPath,
     openQuestions,
-    // What the approval gate reads. The caller cannot count `openQuestions`
-    // safely on its own: null there means the merged list did not survive the
-    // relay, not that the sidecar is empty, and the two are the opposite
-    // answer at a gate. Null here says the same thing in a field whose only
-    // job is to be counted — read `questionsPath` and count that instead.
+    // What the approval gate reads. settleQuestions either returns an accurate
+    // array (reconciled from the carry-forward-bound draft.open_questions, not
+    // the relay) or the pass has already stopped with an error, so this is
+    // never null: a merge that cannot be confirmed fails the pass outright
+    // rather than reporting a gate-relevant count it cannot stand behind.
     openQuestionCount: Array.isArray(openQuestions) ? openQuestions.length : null,
     // Everything the plan decided about surfaces, and the subset the configured
     // policy says is worth interrupting a person for. The full set travels so a
     // resumed pass keeps decisions the policy did not surface.
     uiDecisions: settledUiDecisions,
     uiDecisionsToConfirm: decisionsToConfirm(settledUiDecisions, uiPolicy),
-    // Whether the two lines above are the record or this pass's memory of it.
-    // `uiDecisionsPath` is always the record; when this is false the merge reply
-    // did not survive the relay, and a decision the file names that
-    // `uiDecisions` does not is one this pass will not ask about. Nothing is
-    // lost either way — the file was written before the reply was lost.
+    // Whether the on-disk record at `uiDecisionsPath` was itself confirmed
+    // normalized, not whether `uiDecisions` above is accurate — it always is,
+    // reconciled from this pass's own memory rather than the relay. When this
+    // is false the file may still lag by whatever a lost or refused merge
+    // could not fold in; nothing this pass knows about is lost either way.
     uiDecisionsSettled,
     uiPolicy,
     reviews,
@@ -2724,46 +2807,56 @@ async function main(raw) {
     ...rest
   });
 
-  // Normalizes the question sidecar to exactly what this pass reports and binds
-  // the resulting bytes. Both exits below use it, so a pass that stops at an
-  // unresolved critique leaves the same resumable record as one that finishes.
-  // The sidecar is the answer, not a copy of one to be checked against memory.
+  // Normalizes the question sidecar and binds the resulting bytes. Both exits
+  // below use it, so a pass that stops at an unresolved critique leaves the
+  // same resumable record as one that finishes.
   //
   // This used to compare the merged file against dedupeQuestions([...questions,
-  // ...extra]) and stop the pass on any difference. Those two can only agree by
-  // luck. `questions` is a running tally that never removes anything: it is
-  // seeded from the draft and pushed to by every review round and every
-  // revision. The sidecar holds the current set instead, and dedupe matches on
-  // exact normalized text, so any question a later round rephrases lives in the
-  // tally twice and in the sidecar once. The gap therefore widens as a plan is
-  // worked, which is the opposite of what a correctness check should do. It
+  // ...extra]) — `questions`, a running tally seeded from the draft and pushed
+  // to by every review round and every revision — and stop the pass on any
+  // difference. Those two could only agree by luck: the tally never removes
+  // anything, dedupe matches on exact normalized text, and any question a
+  // later round rephrases lives in the tally twice and in the sidecar once. It
   // stopped a real 12-pass plan whose sidecar was verified afterwards to be
-  // complete and correct, and the drift tolerance never applied because
-  // adoptSavedToken defaults drift to false.
+  // complete and correct. The fix after that had the merge script return the
+  // list it produced instead — but a sidecar that only ever grows across a
+  // pass is exactly the shape that must not ride through a reply a model
+  // composes, so that list no longer travels either. `draft.open_questions` is
+  // the fix that replaces it: the exact array the carry-forward check already
+  // bound to this file on every revision, so unioning it with what this exit's
+  // own reviews raised is accurate without reading the file back, and neither
+  // side of that union is the ever-growing whole-pass tally.
   //
-  // So the merge script — deterministic plumbing that reads the file, merges,
-  // and writes it back atomically — now returns the list it produced, and that
-  // list is what this pass reports. The command reads the sidecar itself, so the
-  // file was always the real answer; only the check disagreed with it.
+  // The union is not just returned from memory any more: it is the exact
+  // result this call requires the sidecar to hold. `extra` — bounded to what
+  // this exit's own review rounds raised, never the whole-pass tally — travels
+  // as --additional-inline when it is non-empty, and the expected token is the
+  // fnv1a digest merge-plan-questions.mjs itself computes over the same
+  // deduplicated, sorted key set, so a receipt that does not match this exact
+  // value is this run's own proof the sidecar disagrees, not a gap to
+  // silently carry on around.
   const settleQuestions = async (extra, phaseName) => {
     const file = `${draft.plan_path}.questions.json`;
-    const merged = await mergeFinalQuestions({
-      command: [
+    const expectedMerged = dedupeQuestions([...(draft.open_questions ?? []), ...extra]);
+    const expectedToken = expectJson([...new Set(expectedMerged.map(questionKey))].sort());
+    await mergeFinalQuestions({
+      command: assembleCommand([
         `node "${input.pluginRoot}/scripts/merge-plan-questions.mjs"`,
         `"${file}"`,
-        `"${jsonHex(extra)}"`
-      ].join(" "),
+        extra.length ? `--additional-inline ${shellQuote(JSON.stringify(extra))}` : "",
+        `--expect "${expectedToken}"`
+      ], "merge-plan-questions"),
       label: "plan:merge-final-questions",
       phase: phaseName,
       model: relayModel,
       effort: relayEffort,
-      file
+      file,
+      expectedToken
     });
-    // No fallback to the run's tally, ever: answering with it would ask about
-    // entries the sidecar had already settled or rephrased. Either the merged
-    // list travelled back, or this is null and the path below is the answer.
-    // Both are exact; only one of them fits through a relay.
-    return { finalQuestions: merged.questions, finalQuestionsPath: file };
+    return {
+      finalQuestions: expectedMerged,
+      finalQuestionsPath: file
+    };
   };
 
   // The same normalization for the interface record, and for the same reason.
@@ -2776,32 +2869,55 @@ async function main(raw) {
   // declared nothing. Skipping the empty case would save a call and leave a
   // record that could not be read unreadable for the next pass to be handed
   // nothing for again, which is a state that never repairs itself.
+  //
+  // `draft.ui_decisions` is what the last successful persist already bound to
+  // this file (the same guarantee draft.open_questions carries above), so only
+  // what is new or changed since then — decisions a read-only reviewer raised
+  // that no later revision folded in — needs to travel at all. That delta is
+  // what --additional-inline carries: bounded to what has not yet reached the
+  // sidecar, never the whole running accumulator. The expected token is the
+  // fnv1a digest merge-plan-ui-decisions.mjs itself computes over the same
+  // merged set sorted by id, so a receipt that does not match this exact value
+  // is this run's own proof the record disagrees, not tolerated silently.
   const settleUiDecisions = async (phaseName) => {
     if (!uiEnabled) return { uiDecisions: dedupeDecisions(uiDecisions), settled: false };
     const file = `${draft.plan_path}.ui-decisions.json`;
+    const expectedMerged = dedupeDecisions(uiDecisions);
+    const filed = new Map((draft.ui_decisions ?? []).map((decision) => [decisionKey(decision), decision]));
+    const extra = expectedMerged.filter((decision) => {
+      const key = decisionKey(decision);
+      return !filed.has(key) || canonicalJson(filed.get(key)) !== canonicalJson(decision);
+    });
+    const expectedToken = uiDecisionsExpectedToken(expectedMerged);
     const merged = await mergeFinalUiDecisions({
-      command: [
+      command: assembleCommand([
         `node "${input.pluginRoot}/scripts/merge-plan-ui-decisions.mjs"`,
         `"${file}"`,
-        `"${jsonHex(dedupeDecisions(uiDecisions))}"`
-      ].join(" "),
+        extra.length ? `--additional-inline ${shellQuote(JSON.stringify(extra))}` : "",
+        `--expect "${expectedToken}"`
+      ], "merge-plan-ui-decisions"),
       label: "plan:merge-final-ui-decisions",
       phase: phaseName,
       model: relayModel,
       effort: relayEffort,
-      file
+      file,
+      expectedToken
     });
     if (merged.quarantined) {
       log(`The interface record beside this plan could not be read, so it was set aside at ${merged.quarantined} and rewritten from what this pass collected. Nothing was overwritten; the original bytes are still there if a decision needs recovering by hand.`);
     }
-    // A lost list costs the confirmation surface and nothing else: the file was
-    // written either way, and what was merged into it is exactly this memory.
-    // The flag is what lets the command tell the two apart, because a decision
-    // can be in the file and not in memory — the fresh draft writes its own
-    // sidecar and nothing binds that file to what it returned.
     return {
-      uiDecisions: merged.uiDecisions ?? dedupeDecisions(uiDecisions),
-      settled: merged.uiDecisions !== null
+      // Safe from memory alone, unlike the question tally above: dedupeDecisions
+      // is keyed by id with the last version winning, and requireCarriedUiDecisions
+      // enforces on every revision that an id, once carried, never disappears —
+      // so the running accumulator does not carry the rephrased-duplicate risk a
+      // text-matched tally does, and needs no file read back to confirm it.
+      uiDecisions: expectedMerged,
+      // Whether the on-disk record was itself confirmed normalized just now, not
+      // whether the array above is accurate — it always is. A lost or refused
+      // merge costs only the confirmation that the file agrees; the array a
+      // reader gets back is the same either way.
+      settled: merged.ok === true
     };
   };
 
@@ -2938,13 +3054,13 @@ async function main(raw) {
     // "some check cleared this": a run interrupted anywhere above leaves only the
     // round input, which resume reviews rather than trusts.
     await stageClaudeContinuation({
-      command: [
+      command: assembleCommand([
         `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
         `--source "${draft.plan_path}"`,
         `--target "${integratedPath}"`,
         `--expect "${planExpect}"`,
-        ...uiDecisionsArg(uiDecisions)
-      ].join(" "),
+        ...uiDecisionsFileArg(draft.plan_path)
+      ], "stage-plan-continuation publish"),
       label: "plan:publish-cleared-revision",
       phaseName: "Revision check",
       model: relayModel,
@@ -3206,7 +3322,7 @@ async function main(raw) {
   });
   let decompositionReview;
   if (useCodex) {
-    const decompositionCommand = [
+    const decompositionCommand = assembleCommand([
       `node "${input.pluginRoot}/scripts/codex-run.mjs"`,
       `--worktree "${input.worktree}"`,
       `--schema "${input.pluginRoot}/schemas/plan-review.schema.json"`,
@@ -3220,7 +3336,7 @@ async function main(raw) {
       "--require-fence manifest",
       "--require-fence pr-train",
       `--min-prompt-bytes ${decompositionMinBytes}`
-    ].join(" ");
+    ], "codex-run");
     const decompositionRequestIdentity = await codexRequestIdentity({
       promptHash: builtDecompositionPrompt.promptHash,
       schemaPath: `${input.pluginRoot}/schemas/plan-review.schema.json`,
@@ -3275,11 +3391,10 @@ async function main(raw) {
   // question is a decision the plan assumed rather than one a person made, and
   // the difference does not show up until an implementer hits it.
   //
-  // A lost list counts as outstanding. `settleQuestions` returns null when the
-  // merged file did not travel back, and the sidecar it names is the real
-  // answer; treating unknown as zero would open the gate on exactly the pass
-  // that cannot say whether it should. `needs-questions` costs a re-read;
-  // guessing costs the gate.
+  // `settleQuestions` throws rather than returning an unusable count when the
+  // merge cannot be confirmed, so `finalQuestions` reaching here is always the
+  // reconciled array; the null check is the same defense in depth every other
+  // gate in this file applies rather than trusting a shape by convention alone.
   const questionsOutstanding =
     settled.finalQuestions === null || settled.finalQuestions.length > 0;
   return planOutcome({
