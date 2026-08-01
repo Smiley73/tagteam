@@ -147,6 +147,11 @@ async function forge({
   // one agree: an atomic group is a property of the plan, not a corruption.
   atomicGroups = () => ({}),
   policyPaths = [],
+  // What the first draft raises, and so what a round revision is carried. The
+  // revision stub returns none of it, which is what models a dropped question:
+  // only the fenced carried set is demanded back, so a reviewer's question is
+  // not what this knob is for.
+  draftQuestions = [],
   // The decision rows a continuation integrates. They default to the carried
   // questions verbatim, which is what the command records: a decision row is
   // the answer to a question that was asked. Overriding them with rows that
@@ -214,8 +219,12 @@ async function forge({
           .replace("## Step 411 — approved", "## Step 411 — approved (decision: bounded cache)")
         : (label === "plan:draft" ? plans.draft : plans.revised);
       if (targeted) plans.integrated = planMarkdown;
+      // A revision returns nothing, so it drops whatever the draft raised; with
+      // the default empty set there is nothing to drop and every other test here
+      // is unaffected.
+      const questions = label === "plan:draft" ? draftQuestions : [];
       fs.writeFileSync(file, corrupt(label, planMarkdown), { mode: 0o600 });
-      fs.writeFileSync(`${file}.questions.json`, JSON.stringify([]), { mode: 0o600 });
+      fs.writeFileSync(`${file}.questions.json`, JSON.stringify(questions), { mode: 0o600 });
       // A compliant model persists this sidecar on every draft/revision call
       // when interface decisions are asked for, not only a targeted
       // continuation edit: stage-plan-continuation.mjs now reads it by path
@@ -227,7 +236,7 @@ async function forge({
         plan_path: file,
         plan_chars: Number(plan_chars),
         plan_hash,
-        open_questions: [],
+        open_questions: questions,
         ui_decisions: []
       });
     }
@@ -516,6 +525,18 @@ test("a Claude continuation may not drop a carried question its decisions never 
   assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
 });
 
+// The other half of that rule, and the reason the check keeps a resolved set at
+// all: an answered question is meant to disappear. The default decision rows
+// answer both carried questions verbatim, so the continuation returning none of
+// them is a complete integration rather than a drop.
+test("a Claude continuation may drop the carried questions its decisions answered", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-continuation-answered-"));
+  const { result } = await forge({ planDir, continuation: true });
+
+  assert.equal(result.status, "needs-approval");
+  assert.equal(result.openQuestionCount, 0);
+});
+
 // The reason round revisions publish through the staging script rather than
 // writing the round input directly. The check stops the pass either way; what
 // it could not do before was stop the drop from outliving it, because the
@@ -525,12 +546,9 @@ test("a revision that drops a question leaves no round input for a resume to tru
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-revision-dropped-"));
   const { result } = await forge({
     planDir,
-    // Round one leaves something gating, so a revision runs, and raises a
-    // question the revision is then required to carry. The drafter stub returns
-    // no questions at all, so it drops it.
-    review: (label) => (label.endsWith("review:1")
-      ? { ...REVISE, open_questions: ["Who owns rollback?"] }
-      : APPROVE)
+    // The draft raises a question, so the revision round one gates on is carried
+    // it. The revision stub returns no questions at all, so it drops it.
+    draftQuestions: ["Who owns rollback?"]
   });
 
   assert.equal(result.status, "plan-interrupted");

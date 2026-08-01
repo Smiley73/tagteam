@@ -26,16 +26,21 @@ const HANDOFF_FIXTURES = {
   PR_TRAIN: { entries: TRAIN.prs, fields: ["id", "taskIds"] }
 };
 
-// What the prompt is carrying into this step: the carried-questions fence plus
-// the questions the fenced reviews raise, which the revision prompt asks for by
-// name. A compliant drafter returns all of them alongside anything it raises; a
-// stub that answers [] is modelling the dropped-question failure, not a
-// well-behaved reply.
-function carriedQuestionsFrom(prompt) {
+// The carried-questions fence alone: the set the prompt calls carried and the
+// only one the carry-forward check demands back. A stub that answers [] is
+// modelling the dropped-question failure, not a well-behaved reply.
+function fencedQuestionsFrom(prompt) {
   const carried = /<untrusted-questions-so-far>\n([\s\S]*?)\n<\/untrusted-questions-so-far>/.exec(prompt);
+  return carried ? JSON.parse(carried[1]) : [];
+}
+
+// Everything the prompt puts in front of the revision: the fence plus the
+// questions the fenced reviews raise, which the revision prompt asks for by
+// name. A model that keeps every one of them apart returns this.
+function carriedQuestionsFrom(prompt) {
   const reviewed = [...prompt.matchAll(/<untrusted-(?:claude|codex)-review>\n([\s\S]*?)\n<\/untrusted-(?:claude|codex)-review>/g)]
     .flatMap(([, body]) => JSON.parse(body).open_questions ?? []);
-  return [...new Set([...(carried ? JSON.parse(carried[1]) : []), ...reviewed])];
+  return [...new Set([...fencedQuestionsFrom(prompt), ...reviewed])];
 }
 
 // The real script's receipt names the exact file and echoes back the exact
@@ -74,7 +79,11 @@ async function forge({
   handoffVerdict = APPROVE,
   planReview = APPROVE,
   // A revision that returns fewer questions than it was carried, i.e. drops one.
-  dropCarried = false
+  dropCarried = false,
+  // A revision that recognized a reviewer's question as one it is already
+  // carrying and returned the single merged question: the fenced set comes
+  // back, the reviewer's separate wording does not.
+  mergeReviewParaphrase = false
 } = {}) {
   const labels = [];
   const prompts = new Map();
@@ -92,7 +101,9 @@ async function forge({
         plan_chars: 12,
         plan_hash: "fd8d615d",
         open_questions: revising
-          ? (dropCarried ? [] : carriedQuestionsFrom(prompt))
+          ? (dropCarried
+            ? []
+            : mergeReviewParaphrase ? fencedQuestionsFrom(prompt) : carriedQuestionsFrom(prompt))
           : draftQuestions,
         ui_decisions: []
       };
@@ -218,10 +229,9 @@ test("a Claude revision may not drop a question it was carrying", async () => {
   assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
 });
 
-// The revision is handed the reviews as JSON, not as carried questions, so a
-// prompt that asks only for "every carried question" never reaches the ones a
-// reviewer raised — while the check demands them back. Prompt and check have to
-// agree, or a compliant drafter fails the pass.
+// The revision is handed the reviews as JSON, not as carried questions, so the
+// prompt asks for them by name. Returning them is the ordinary reply, and it
+// must not be read as anything but that.
 test("a revision returning the reviews' questions as well as its carried ones is not stopped", async () => {
   const { result } = await forge({
     draftQuestions: ["Which database should the cache front?"],
@@ -253,6 +263,34 @@ test("a clean round's reviewer questions still reach the sidecar", async () => {
   assert.deepEqual(result.openQuestions, raised);
 });
 
+// The crash this check was scoped to stop causing. questionKey matches text, so
+// a reviewer restating a question the plan already carries is a second entry to
+// it, and a revision that merged the two looked exactly like one that dropped
+// one — a real --provider both pass died here after a full cross-review round.
+// Merging is the behaviour commands/plan.md asks for, so it cannot be the thing
+// that ends the pass.
+test("a Claude revision that merged a reviewer's restatement into a carried question is not stopped", async () => {
+  const { result } = await forge({
+    draftQuestions: ["Which database should the cache front?"],
+    planReview: {
+      verdict: "revise",
+      issues: [BLOCKER],
+      open_questions: ["What database is the cache in front of?"],
+      suggestions: []
+    },
+    mergeReviewParaphrase: true
+  });
+
+  assert.equal(result.status, "needs-questions");
+  // Nothing is lost by not demanding the echo: the workflow collects the
+  // reviewers' own wording itself and settles it into the sidecar at the exit,
+  // so the human still sees the question as the reviewer put it.
+  assert.deepEqual(result.openQuestions, [
+    "Which database should the cache front?",
+    "What database is the cache in front of?"
+  ]);
+});
+
 test("a Claude revision that carries its questions forward is not stopped", async () => {
   const { result } = await forge({
     draftQuestions: ["Which database should the cache front?"],
@@ -270,10 +308,10 @@ test("a Claude revision that carries its questions forward is not stopped", asyn
 
 // The check is only fair if the prompt asked for what it demands, and a stub
 // cannot show that: a stub reads the fences whatever the prompt says. So the
-// instructions themselves are asserted. Both of these were written to fix a
-// prompt-and-check disagreement that ended a compliant pass, and deleting
-// either one puts it straight back without failing anything else.
-test("the revision prompt asks for exactly what the carry-forward check demands", async () => {
+// instructions themselves are asserted. Each of these was written to fix a
+// prompt-and-check disagreement that ended a compliant pass, and deleting any
+// one of them puts it straight back without failing anything else.
+test("the revision prompt asks for the reviews' questions and licenses merging them", async () => {
   const { prompts } = await forge({
     draftQuestions: ["Which database should the cache front?"],
     planReview: {
@@ -287,10 +325,16 @@ test("the revision prompt asks for exactly what the carry-forward check demands"
 
   // The carried fence holds only the draft's questions, so a reviewer's arrive
   // solely inside the fenced review JSON. Without this line, "every carried
-  // question" never reaches them while the check still demands them back.
+  // question" never reaches them and a reviewer's question never enters the
+  // plan's own list.
   assert.match(revision, /The reviews above raise open questions of their own\. Return those in open_questions too, alongside the carried ones\./);
-  // And no softer clause anywhere: a round revision carries no human decisions,
-  // so the check permits no omission at all.
+  // And merging is licensed, because the check no longer counts a reviewer's
+  // restatement of a carried question as a second obligation — bounded to a
+  // restatement, because nothing downstream can tell a wrong merge from a right
+  // one and the round input a resume reads is whatever this reply returned.
+  assert.match(revision, /Where a review restates a question you are already carrying, return the one merged question rather than both; where it asks for any decision the carried one does not, return both\./);
+  // No softer clause about the carried set itself: a round revision carries no
+  // human decisions, so the check permits no omission there at all.
   assert.equal(/unless a review's question/.test(revision), false);
   assert.match(revision, /Omit a carried question only when a human decision supplied with this request answers it/);
 });
