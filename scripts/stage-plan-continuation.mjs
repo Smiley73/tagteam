@@ -14,9 +14,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { assertResumeRecord, canonicalJson, expectToken, normalizeText } from "./compose-prompt.mjs";
+import { assertResumeRecord, expectToken, normalizeText } from "./compose-prompt.mjs";
+import { questionSetDigest } from "./lib/plan-questions.mjs";
 import { verifyPayloads } from "./verify-payload.mjs";
 
 function parseArgs(argv) {
@@ -97,23 +97,6 @@ function prepare({ source, target, expect }) {
     expects: new Map([["DRAFT_PLAN", expect]]),
     requireJson: []
   });
-}
-
-// The questions a step reported, reduced to a fixed-size SHA-256 digest — see
-// questionSetDigest in workflows/plan-forge.js, which this mirrors exactly.
-// Order and duplicate phrasing are not content — the sidecar and the
-// structured reply are written by the same model from the same set and need
-// not agree on either — so the digest is taken over the sorted, deduplicated,
-// normalized text rather than the raw array. Deliberately not expectToken's
-// fnv1a "chars:hash": that token is sized for catching an ordinary
-// transcription drift, and this check asks the command to trust a value it
-// cannot otherwise verify against anything a model wrote.
-function questionSetDigest(value) {
-  if (!Array.isArray(value)) throw new Error("open questions must be a JSON array");
-  const normalized = [...new Set(value.map((question) =>
-    String(question).trim().toLocaleLowerCase().replace(/\s+/g, " ")))].sort();
-  const canonical = canonicalJson(normalized);
-  return `${canonical.length}:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
 // The interface record this publication intends to leave, as bytes read from

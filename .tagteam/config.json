@@ -134,7 +134,7 @@
   },
   "worktree": { "setupCommands": [], "copyUntracked": [], "setupTimeoutSec": 1800 },
   "diffExclude": ["**/package-lock.json", "**/*.lock"],
-  "transport": { "mode": "exec", "relayModel": "sonnet" },
+  "transport": { "mode": "exec", "relayModel": "sonnet", "relayEffort": "low" },
   "limits": {
     "agentCallsPerPr": 60,
     "maxConcurrentCodex": 3

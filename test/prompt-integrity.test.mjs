@@ -152,6 +152,11 @@ async function forge({
   // only the fenced carried set is demanded back, so a reviewer's question is
   // not what this knob is for.
   draftQuestions = [],
+  // What a continuation is carrying in from the pass before it, on disk and in
+  // `openQuestions`. Overridable so one test can carry a realistic-length set:
+  // a real question is a paragraph, and the carried set used to travel to the
+  // merge command as one inline argument.
+  carriedQuestions = ["Choose deployment", "Choose cache"],
   // The decision rows a continuation integrates. They default to the carried
   // questions verbatim, which is what the command records: a decision row is
   // the answer to a question that was asked. Overriding them with rows that
@@ -179,10 +184,15 @@ async function forge({
     integrated: null
   };
   const seedPath = path.join(planDir, "drafts/pass-1-integrated.md");
+  const decisionsFile = path.join(planDir, "drafts/pass-1-decisions.json");
   if (continuation) {
     fs.writeFileSync(seedPath, plans.seed, { mode: 0o600 });
-    fs.writeFileSync(`${seedPath}.questions.json`, JSON.stringify(["Choose deployment", "Choose cache"]), { mode: 0o600 });
+    fs.writeFileSync(`${seedPath}.questions.json`, JSON.stringify(carriedQuestions), { mode: 0o600 });
     fs.writeFileSync(`${seedPath}.ui-decisions.json`, JSON.stringify([]), { mode: 0o600 });
+    // The carried set and the answers that retire part of it reach the merge
+    // command as paths, exactly as commands/plan.md passes them, so this
+    // harness has to leave both on disk like a real caller does.
+    fs.writeFileSync(decisionsFile, JSON.stringify(decisions), { mode: 0o600 });
   }
   const manifest = bigManifest(atomicGroups);
   const train = bigTrain();
@@ -317,7 +327,9 @@ async function forge({
       passId: "pass-2",
       seedPlan: { path: seedPath },
       decisions,
-      openQuestions: ["Choose deployment", "Choose cache"],
+      decisionsFile,
+      openQuestions: carriedQuestions,
+      questionsFile: `${seedPath}.questions.json`,
       uiDecisions: []
     } : {}),
     ...(resume ? {
@@ -508,24 +520,28 @@ test("a large continuation still stops on a mismatched published-plan receipt", 
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-2-manifest.json")), false);
 });
 
-// The continuation is the step that integrates human answers, so it is the one
-// with a motive to return a shorter question list than it was given: every
-// answered question legitimately disappears there. A question the decisions did
-// not answer disappearing alongside them is the failure that looks like
-// success — the sidecar shrinks, the pass reports fewer questions, and the
-// decision that question stood for silently becomes an assumption nobody made.
-test("a Claude continuation may not drop a carried question its decisions never answered", async () => {
+// The continuation is the step that integrates human answers. It used to be
+// the one with a motive to return a shorter question list than it was given —
+// every answered question legitimately disappears there — which made a
+// question the decisions did not answer disappearing alongside them look like
+// success. Ownership of the carried set now lives in the workflow: the
+// drafter returns only what it newly raises (here, nothing), and the workflow
+// itself folds every carried question a decision did not answer back in, so
+// dropping one this way is no longer possible.
+test("a Claude continuation still keeps a carried question its decisions never answered", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-continuation-dropped-"));
   const { result } = await forge({
     planDir,
     continuation: true,
     // Answers one of the two carried questions. The drafter stub returns no
-    // questions at all, so the other one is dropped rather than resolved.
+    // questions at all, so the other one must survive through the workflow's
+    // own carry-forward merge rather than the drafter's reply.
     decisions: [{ question: "Choose deployment", answer: "Use blue-green" }]
   });
 
-  assert.equal(result.status, "plan-interrupted");
-  assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
+  assert.equal(result.status, "needs-questions");
+  assert.equal(result.openQuestionCount, 1);
+  assert.deepEqual(result.openQuestions, ["Choose cache"]);
 });
 
 // The other half of that rule, and the reason the check keeps a resolved set at
@@ -538,6 +554,83 @@ test("a Claude continuation may drop the carried questions its decisions answere
 
   assert.equal(result.status, "needs-approval");
   assert.equal(result.openQuestionCount, 0);
+});
+
+// The continuation working path is derived from the pass alone, so an
+// interrupted attempt's sidecar sits exactly where this attempt's merge writes.
+// The plan is bound to the publication by its own checksum; --expect-questions
+// is what binds the sidecar beside it to the set this step actually computed,
+// and without it the publication would happily carry the other attempt's
+// questions into `drafts/<passId>-integrated.md` under a receipt that says
+// nothing about them.
+test("a continuation whose working sidecar changed under it publishes nothing", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-continuation-sidecar-drift-"));
+  const { result } = await forge({
+    planDir,
+    continuation: true,
+    decisions: [{ question: "Choose deployment", answer: "Use blue-green" }],
+    // Runs at the start of the publish call, after the merge has already bound
+    // the sidecar: the shape a same-pass retry takes when an earlier attempt's
+    // file is still sitting at the derived working path.
+    after: (label) => {
+      if (label !== "plan:publish-continuation") return;
+      fs.writeFileSync(
+        path.join(planDir, "reviews/pass-2-continuation-work.md.questions.json"),
+        JSON.stringify(["A question from the interrupted attempt"]),
+        { mode: 0o600 }
+      );
+    }
+  });
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /disagrees with what this step reported/);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-2-integrated.md")), false);
+});
+
+// A real open question is a paragraph, not a phrase: the seven this
+// repository's own plan-budget-split pass left behind run 119 to 438 characters
+// each and serialize to 2082 between them. The carried set once travelled to
+// the merge command as a single inline `--additional-inline` argument, so a
+// compliant pass carrying four ordinary questions composed an argument twice
+// the 1000-character per-argument ceiling and died on the happy path — on every
+// continuation and every resume, not on some unlucky one. Every question
+// fixture in this suite was short enough to hide that. This one is not, and it
+// runs the real merge command against the real files a continuation leaves.
+const REALISTIC_CARRIED = [
+  "The per-section budget numbers in the plan are calibrated from a run whose per-section table is not reproducible in this tree: that run was on an earlier plugin version and the plan directory holds no record of it. Confirm the four bucket numbers and the nine allocations, or supply the run so they can be recomputed before the attribution work lands.",
+  "The accepted-overrun override records its owner as free text supplied by whoever answers the stop question. Should it instead require a value tagteam can verify, such as a git identity, given that approved.json already binds the config and policy fingerprints and this row is committed beside them?",
+  "Attribution currently charges a relay retry to the step that lost the reply rather than to the step that paid for it, which makes the per-phase table understate plumbing and overstate reasoning. Is that the intended reading, or should a retry be charged to the phase whose budget it actually consumes?",
+  "The reconciliation pass treats a missing usage receipt for a confirmed dispatch as a hard stop, but treats an unconfirmed dispatch with no journal entry as legacy-incomplete. Confirm that asymmetry is deliberate before the budget report starts quoting either number as authoritative."
+];
+
+test("a realistic-length carried set survives a continuation, and never rides on the command line", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-continuation-large-questions-"));
+  const { result, prompts } = await forge({
+    planDir,
+    continuation: true,
+    carriedQuestions: REALISTIC_CARRIED,
+    // Answers exactly one of the four, verbatim.
+    decisions: [{ question: REALISTIC_CARRIED[1], answer: "Require a git identity." }]
+  });
+
+  assert.equal(result.status, "needs-questions");
+  assert.deepEqual(result.openQuestions, [
+    REALISTIC_CARRIED[0],
+    REALISTIC_CARRIED[2],
+    REALISTIC_CARRIED[3]
+  ]);
+  // The real merge command ran, and the published sidecar is what a resume
+  // would read.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(planDir, "drafts/pass-2-integrated.md.questions.json"), "utf8")),
+    result.openQuestions
+  );
+  // And it fits because the carried set travelled as a path, not because this
+  // fixture happened to be short: the subtraction was done by the command from
+  // the decisions file, not by the workflow typing the survivors out.
+  const merge = prompts.get("plan:merge-continuation-questions");
+  assert.equal(merge.includes("--additional-inline"), false);
+  assert.match(merge, /--resolved-file "[^"]*pass-1-decisions\.json"/);
 });
 
 // The fifth exit. The four structured ones settle the pass's reviewer questions
@@ -609,28 +702,30 @@ test("an interrupted pass reports a failed question settle without masking what 
   );
 });
 
-// The reason round revisions publish through the staging script rather than
-// writing the round input directly. The check stops the pass either way; what
-// it could not do before was stop the drop from outliving it, because the
-// drafter had already written the shortened sidecar to the exact path a resume
-// reads.
-test("a revision that drops a question leaves no round input for a resume to trust", async () => {
+// Round revisions publish through the staging script rather than writing the
+// round input directly, so the published round input's sidecar is always
+// exactly what the workflow computed — carried plus newly raised — never what
+// a revision's reply alone would have left. A revision returning no questions
+// used to shorten the sidecar it was about to publish; now the workflow folds
+// the carried question back in before publication, so the round input a
+// resume reads still names it.
+test("a revision that returns no questions still publishes a round input carrying the one it was given", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-revision-dropped-"));
-  const { result, prompts } = await forge({
+  const { result } = await forge({
     planDir,
-    // The draft raises a question, so the revision round one gates on is carried
-    // it. The revision stub returns no questions at all, so it drops it.
+    // The draft raises a question, so the revision round one gates on is
+    // carrying it. The revision stub returns no questions at all.
     draftQuestions: ["Who owns rollback?"]
   });
 
-  assert.equal(result.status, "plan-interrupted");
-  assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
-  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md")), false);
-  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md.questions.json")), false);
-  // No reviewer raised anything here, so the interrupted exit has nothing to
-  // settle and does not buy a call to rewrite a file with its own contents.
-  assert.equal(prompts.has("plan:merge-interrupted-questions"), false);
-  assert.equal(result.questionsSettled, null);
+  assert.equal(result.status, "needs-questions");
+  assert.equal(result.openQuestionCount, 1);
+  assert.deepEqual(result.openQuestions, ["Who owns rollback?"]);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md")), true);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(planDir, "drafts/pass-1-round-2-input.md.questions.json"), "utf8")),
+    ["Who owns rollback?"]
+  );
 });
 
 test("a completed pass leaves a resumable integrated draft matching the returned receipt", async () => {

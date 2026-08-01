@@ -180,6 +180,80 @@ test("CLI: the merged result on disk is bit-for-bit what the receipt describes",
   assert.equal(receipt.payloads[0].token, tokenFor(["Alpha", "Beta", "Gamma"]));
 });
 
+// --resolved-file is what lets a continuation hand this command the carried set
+// as a path instead of pre-filtering it into a value it would have to type out.
+// The subtraction has to be the same one workflows/plan-forge.js applies in
+// survivingCarriedQuestions, down to the normalization, or a compliant pass
+// would compose an --expect the command could never satisfy.
+test("CLI: --resolved-file subtracts the answered carried question and only that one", () => {
+  const { dir, file } = record(JSON.stringify(["A question this round raised"]));
+  const carried = path.join(dir, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify(["Which rollout?", "Which cache?"]), { mode: 0o600 });
+  const answered = path.join(dir, "decisions.json");
+  // Recorded with the casing and spacing a person's editor left behind: the
+  // rows bind by normalized text, not by bytes.
+  fs.writeFileSync(answered, JSON.stringify([{ question: "  which   ROLLOUT? ", answer: "Staged." }]), { mode: 0o600 });
+
+  execFileSync("node", [script, file, carried, "--resolved-file", answered], { encoding: "utf8" });
+
+  assert.deepEqual(read(file), ["A question this round raised", "Which cache?"]);
+});
+
+// The subtraction applies to the carried set alone. A decision answers a
+// question that was asked, and what this step newly raised is by definition
+// newer than the answers it was given, so an old answer must not delete it.
+test("CLI: --resolved-file never subtracts from what the step itself just raised", () => {
+  const { dir, file } = record(JSON.stringify(["Which rollout?"]));
+  const carried = path.join(dir, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify([]), { mode: 0o600 });
+  const answered = path.join(dir, "decisions.json");
+  fs.writeFileSync(answered, JSON.stringify([{ question: "Which rollout?", answer: "Staged." }]), { mode: 0o600 });
+
+  execFileSync("node", [script, file, carried, "--resolved-file", answered], { encoding: "utf8" });
+
+  assert.deepEqual(read(file), ["Which rollout?"]);
+});
+
+test("CLI: --expect still fails closed before any write when a resolved file is given", () => {
+  const { dir, file } = record(JSON.stringify(["A question this round raised"]));
+  const before = read(file);
+  const carried = path.join(dir, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify(["Which rollout?"]), { mode: 0o600 });
+  const answered = path.join(dir, "decisions.json");
+  fs.writeFileSync(answered, JSON.stringify([]), { mode: 0o600 });
+
+  assert.throws(
+    () => execFileSync("node", [
+      script, file, carried, "--resolved-file", answered,
+      // The union a caller would expect if it thought the decision file
+      // answered the carried question. It does not.
+      "--expect", tokenFor(["A question this round raised"])
+    ], { encoding: "utf8", stdio: "pipe" }),
+    /does not match what this pass expected/
+  );
+  assert.deepEqual(read(file), before);
+});
+
+test("CLI: a missing or unreadable resolved file is a named, immediate error", () => {
+  const { dir, file } = record(JSON.stringify(["Q1"]));
+  const carried = path.join(dir, "carried.json");
+  fs.writeFileSync(carried, JSON.stringify([]), { mode: 0o600 });
+
+  assert.throws(
+    () => execFileSync("node", [
+      script, file, carried, "--resolved-file", path.join(dir, "nope.json")
+    ], { encoding: "utf8", stdio: "pipe" }),
+    /resolved decisions file is missing/
+  );
+  const corrupt = path.join(dir, "decisions.json");
+  fs.writeFileSync(corrupt, "not json", { mode: 0o600 });
+  assert.throws(
+    () => execFileSync("node", [script, file, carried, "--resolved-file", corrupt], { encoding: "utf8", stdio: "pipe" }),
+    /not readable JSON/
+  );
+  assert.deepEqual(read(file), ["Q1"]);
+});
+
 // A boundary just under and just over the composition-time ceiling
 // plan-forge.js enforces before this command is ever composed
 // (test/plan-command-size-guard.test.mjs covers the guard itself); this

@@ -1506,7 +1506,7 @@ function planResponder(dropOnce) {
       dropped.add(label);
       return null;
     }
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     // Both halves of stage-plan-continuation.mjs: it copies a checksum-bound
     // file between workflow-owned paths and reports what it copied.
@@ -1553,7 +1553,7 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:publish-")) return publishResponse(label, prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
@@ -1636,7 +1636,7 @@ test("Codex planning stops when the materializer hands back no usable receipt", 
     { name: "SOMETHING_ELSE", token: planToken(PLAN_TEXT), chars: 6 }
   ]) {
     const responder = (label, prompt) => {
-      if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+      if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
       if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
       if (label.startsWith("plan:materialize-")) return { ok: true, payloads: [broken] };
       if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -1666,7 +1666,7 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -1694,15 +1694,24 @@ test("Codex-only planning keeps the interface lens advisory when its relay is un
   assert.deepEqual(result.reviews[0].reviewers.map(({ role }) => role), ["plan-review"]);
 });
 
-test("Codex-only revision fails closed instead of dropping a resumable question", async () => {
+// Ownership of the carried set moved to the workflow: a Codex revision that
+// returns nothing new (the ordinary compliant reply, modelled by `dropped`
+// here) still keeps the question it was carrying, because the workflow folds
+// the surviving carried set into the sidecar the materializer just wrote
+// rather than trusting the reply to include it.
+test("Codex-only revision keeps a carried question even when it returns nothing new", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
   const carried = { open_questions: ["Which rollout?"], ui_decisions: [] };
   const dropped = { open_questions: [], ui_decisions: [] };
   const responder = (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
-    if (label.endsWith(":request") || label.startsWith("plan:review-request")) {
+    if (label.startsWith("plan:publish-") || label.startsWith("plan:prepare-")) {
+      return publishResponse(label, prompt);
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
       return {
         ok: true,
         promptPath: "/plans/slug/reviews/codex.prompt.md",
@@ -1712,6 +1721,8 @@ test("Codex-only revision fails closed instead of dropping a resumable question"
     }
     if (label.startsWith("plan:codex-draft")) return carried;
     if (label.startsWith("plan:codex-revise")) return dropped;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
     if (label === "plan:codex-review:1") return REVISE;
     return APPROVE;
   };
@@ -1725,8 +1736,8 @@ test("Codex-only revision fails closed instead of dropping a resumable question"
     responder
   );
 
-  assert.equal(result.status, "plan-interrupted");
-  assert.match(result.message, /dropped 1 unresolved carried question/);
+  assert.equal(result.status, "needs-questions");
+  assert.deepEqual(result.openQuestions, ["Which rollout?"]);
 });
 
 // The Codex half of the crash the carry-forward check was scoped to stop
@@ -1737,7 +1748,7 @@ test("Codex-only revision may merge a review's restatement into the question it 
   const policy = normalizeRunPolicy({ provider: "codex" });
   const carried = { open_questions: ["Which rollout?"], ui_decisions: [] };
   const responder = (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.startsWith("plan:publish-") || label.startsWith("plan:prepare-")) {
@@ -1847,7 +1858,7 @@ test("Codex-only continuation checksum-binds carried questions and interface dec
   const prompts = new Map();
   const responder = (label, prompt) => {
     prompts.set(label, prompt);
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:decomposition-request")) {
@@ -1893,7 +1904,7 @@ test("Codex no-draft recovery re-enters the same initial or continuation invocat
   const policy = normalizeRunPolicy({ provider: "codex" });
   const draft = { open_questions: ["Which rollout?"], ui_decisions: [] };
   const responder = (dropDraft) => (label, prompt) => {
-    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
     if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
     if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
     if (label.endsWith(":request") || label.startsWith("plan:review-request")
@@ -2105,8 +2116,15 @@ test("a pass that runs no round still checks the plan before it decomposes one",
   for (const entry of [
     // Resumed past the last round from the pass's cleared plan.
     { seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" }, resumeRound: 2 },
-    // A continuation carrying human answers.
-    { seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" }, decisions: [{ question: "Which rollout?", answer: "Staged" }] }
+    // A continuation carrying human answers. Both files are named because a
+    // continuation hands the carried set and the decisions that retire part of
+    // it to the merge as paths, never as command-line content.
+    {
+      seedPlan: { path: "/plans/slug/drafts/pass-1-integrated.md" },
+      decisions: [{ question: "Which rollout?", answer: "Staged" }],
+      decisionsFile: "/plans/slug/drafts/pass-1-decisions.json",
+      questionsFile: "/plans/slug/drafts/pass-1-integrated.md.questions.json"
+    }
   ]) {
     const { result, labels } = await harness(
       "workflows/plan-forge.js",
@@ -2198,14 +2216,14 @@ test("a merge relay that omits its receipt is retried, then stops the pass", asy
     "workflows/plan-forge.js",
     PLAN_ARGS,
     (label, prompt, options) => {
-      if (label.startsWith("plan:merge-final-questions")) return { ok: true };
+      if (label.startsWith("plan:merge-")) return { ok: true };
       return baseResponder(label, prompt, options);
     }
   );
 
   assert.equal(result.status, "plan-interrupted");
   assert.match(result.message, /merge could not be confirmed after 3 attempts/);
-  assert.equal(labels.filter((label) => label.startsWith("plan:merge-final-questions")).length, 3);
+  assert.equal(labels.filter((label) => label.startsWith("plan:merge-")).length, 3);
   assert.equal(result.usage.relayRetries, 2);
 });
 
@@ -2218,7 +2236,7 @@ test("a merge relay reply padded with a bogus list is not trusted for it", async
     "workflows/plan-forge.js",
     PLAN_ARGS,
     (label, prompt, options) => {
-      if (label.startsWith("plan:merge-final-questions")) {
+      if (label.startsWith("plan:merge-")) {
         return { ...mergedQuestionsFrom(prompt), questions: ["a question nobody asked"] };
       }
       if (label === "plan:codex-decomposition-review") {
@@ -2936,7 +2954,7 @@ test("resume carries saved open questions and keeps persisting them", async () =
       // seed and, via the carried-questions fence the revision prompt shows,
       // through the revision's own reply too — settleQuestions reconciles the
       // reported list from that, not from anything the merge command returns.
-      if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+      if (label.startsWith("plan:merge-")) return mergedQuestionsFrom(prompt);
       // The round has to leave something gating for a revision to run at all;
       // a clean round publishes what it reviewed and edits nothing.
       if (label === "plan:claude-review:1") return REVISE;

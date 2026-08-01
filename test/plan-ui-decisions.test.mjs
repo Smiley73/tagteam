@@ -145,11 +145,13 @@ async function forge({
       // token is a real success.
       return { ok: true, payloads: [mergeReceiptFrom(prompt, "INTERFACE_DECISIONS")] };
     }
-    if (label.startsWith("plan:merge-final-questions")) {
+    if (label.startsWith("plan:merge-")) {
       // The receipt is the proof the merge ran; the workflow reconciles the
       // reported list itself from draft.open_questions rather than asking for
       // it back, so a receipt naming this exact file and token is a real
-      // success.
+      // success. Covers every open-questions merge site, not only the final
+      // settle: the draft/revision carry-forward merges run through the same
+      // command and label prefix.
       return { ok: true, payloads: [mergeReceiptFrom(prompt, "OPEN_QUESTIONS")] };
     }
     // The deterministic plan check finds nothing here: these stubs stand in for
