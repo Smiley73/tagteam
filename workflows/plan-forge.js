@@ -1413,6 +1413,16 @@ async function main(raw) {
   // arithmetic rather than judgment, so it is checked rather than reviewed.
   const repoHardCapLines = config.prTrain.prSize.repoHardCapLines ?? null;
   const canonicalStrings = config.planning.canonicalStrings ?? [];
+  // A repository that states its rules in documents states some of them as exact
+  // wording, and a document is read probabilistically where this list is checked
+  // arithmetically. An unstated default reads as "this repository requires no
+  // exact wording", so it is said once rather than left to be inferred from
+  // findings that never arrive. An absent key is what says nobody was ever asked;
+  // an empty list is somebody answering none, and answering is not a thing to be
+  // reminded about.
+  if (policyPaths.length && config.planning.canonicalStrings === undefined) {
+    log("Note: this repository names policy documents but was never asked for config.planning.canonicalStrings, so wording those documents require character for character is only ever reviewed for, never checked. Adding {wrong, right, note} rows makes an ASCII stand-in for a glyph a rewrite before a reviewer is paid. /tagteam:init --reconfigure asks for them.");
+  }
   const splitBrief = splitBriefFor(repoHardCapLines);
   // Every lint invocation is the same command with different inputs, so the bar
   // cannot differ between the draft check and the handoff check. The bar travels
