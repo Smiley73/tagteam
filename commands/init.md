@@ -50,6 +50,7 @@ Show the current choices and ask whether to keep or edit them. Keeping every cho
 - planning Claude model: `opus` or `fable`;
 - planning Claude effort: `medium`, `high`, `xhigh`, or `max` (never offer low);
 - planning Codex effort: `medium`, `high`, or `xhigh` (model is editable too);
+- `transport.relayEffort`: `low` (default), `medium`, `high`, `xhigh`, or `max` — reasoning effort for plumbing agents, which run a deterministic command and return JSON rather than exercise judgment; `transport.relayModel` is editable too;
 - PR mode and base branch;
 - reviewer dimensions and maximum loops. Do not ask only how many reviewers: show the built-in dimensions, then explicitly offer project-defined custom reviewers. Each custom reviewer needs a slug-like name and concrete focus text; also offer an existing review tier, optional path/keyword conditions, and an optional severity gate;
 - local verification commands, each with path conditions and timeout;

@@ -148,7 +148,7 @@
   },
   "worktree": { "setupCommands": [], "copyUntracked": [], "setupTimeoutSec": 1800 },
   "diffExclude": ["**/*.pbxproj", "**/pnpm-lock.yaml", "**/package-lock.json", "**/*.lock", "**/generated/**"],
-  "transport": { "mode": "exec", "relayModel": "sonnet" },
+  "transport": { "mode": "exec", "relayModel": "sonnet", "relayEffort": "low" },
   "limits": {
     "agentCallsPerPr": 60,
     "maxConcurrentCodex": 3

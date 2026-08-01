@@ -1307,7 +1307,7 @@ function harness(file, args, respond, plumbing = {}) {
   const agent = async (prompt, options) => {
     labels.push(options.label);
     prompts.set(options.label, prompt);
-    calls.push({ label: options.label, model: options.model, agentType: options.agentType });
+    calls.push({ label: options.label, model: options.model, effort: options.effort, agentType: options.agentType });
     if (options.label.startsWith("plan:lint")) {
       return (plumbing.lint ?? cleanLint)(options.label, prompt);
     }
@@ -1569,6 +1569,10 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
     calls.every((call) => ["tagteam:prompt-builder", "tagteam:codex-runner"].includes(call.agentType)),
     true
   );
+  // The single-provider run policy pins plumbing to Haiku regardless of
+  // transport.relayEffort, and Haiku dispatches never carry an effort value
+  // (some harnesses reject it), so every call's effort stays undefined.
+  assert.equal(calls.every((call) => call.effort === undefined), true);
   assert.deepEqual(result.reviews[0].reviewers.map(({ provider, role }) => ({ provider, role })), [
     { provider: "codex", role: "plan-review" },
     { provider: "codex", role: "interaction-review" }
@@ -1581,6 +1585,22 @@ test("Codex-only planning leaves Haiku on plumbing and routes every substantive 
   ]) {
     assert.match(prompts.get(label), /--fence-json "PROJECT_CONFIG=\/repo\/\.tagteam\/config\.json"/);
   }
+});
+
+test("a configured transport.relayEffort reaches every plan plumbing agent", async () => {
+  const config = { ...PLAN_CONFIG, transport: { ...PLAN_CONFIG.transport, relayModel: "opus", relayEffort: "medium" } };
+  const { result, calls } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config },
+    planResponder([])
+  );
+
+  assert.equal(result.status, "needs-approval", result.message);
+  const plumbingCalls = calls.filter((call) =>
+    ["tagteam:prompt-builder", "tagteam:codex-runner"].includes(call.agentType));
+  assert.ok(plumbingCalls.length > 0);
+  assert.equal(plumbingCalls.every((call) => call.model === "opus"), true);
+  assert.equal(plumbingCalls.every((call) => call.effort === "medium"), true);
 });
 
 // The plan text no longer crosses the relay, so nothing compares the published
@@ -2423,8 +2443,30 @@ test("Codex-only shipping uses Haiku only for plumbing", async () => {
     .every((call) => call.model === "haiku"), true);
   assert.equal(calls.filter((call) => call.agentType === "tagteam:codex-runner")
     .every((call) => call.model === "haiku"), true);
+  // Every plumbing agent here is pinned to Haiku, so none carries an effort
+  // value regardless of transport.relayEffort — some harnesses reject effort
+  // on Haiku.
+  assert.equal(calls.every((call) => call.effort === undefined), true);
   assert.equal(result.rounds.every((round) =>
     round.reviewers.every((reviewer) => reviewer.engine === "codex")), true);
+});
+
+test("a configured transport.relayEffort reaches every ship plumbing agent", async () => {
+  const config = { ...SHIP_CONFIG, transport: { ...SHIP_CONFIG.transport, relayModel: "opus", relayEffort: "xhigh" } };
+  const { result, calls } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config },
+    cleanShipResponder
+  );
+
+  assert.equal(result.status, "clean");
+  const plumbingAgentTypes = new Set([
+    "tagteam:codex-runner", "tagteam:committer", "tagteam:snapshotter", "tagteam:verifier", "tagteam:scribe"
+  ]);
+  const plumbingCalls = calls.filter((call) => plumbingAgentTypes.has(call.agentType));
+  assert.ok(plumbingCalls.length > 0);
+  assert.equal(plumbingCalls.every((call) => call.model === "opus"), true);
+  assert.equal(plumbingCalls.every((call) => call.effort === "xhigh"), true);
 });
 
 // A Codex prompt is written to disk by a relay model, so anything fenced inline
@@ -2856,10 +2898,14 @@ test("shipping preserves accounting when a post-dispatch helper throws", async (
   assert.match(result.message, /candidate snapshot 0/);
   assert.equal(result.agentCalls, 1);
   assert.equal(result.agentCalls, calls.length);
+  // Committer, snapshotter, verifier, and scribe now share transport.relayModel
+  // with the Codex relay instead of being pinned to Haiku, so under the
+  // dual-provider default policy this dispatches on SHIP_CONFIG's configured
+  // "sonnet" rather than Haiku.
   assert.deepEqual(result.usage, {
     claudeReasoningCalls: 0,
-    haikuPlumbingCalls: 1,
-    plumbingCallsByModel: { haiku: 1 },
+    haikuPlumbingCalls: 0,
+    plumbingCallsByModel: { sonnet: 1 },
     codexCalls: 0,
     relayRetries: 0
   });
@@ -3063,7 +3109,9 @@ test("every early exit reports the relay retries it spent", async () => {
   assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
   assert.equal(result.usage.relayRetries, 1);
   assert.equal(result.usage.claudeReasoningCalls, 1);
-  assert.ok(result.usage.haikuPlumbingCalls > 0);
+  // Committer, snapshotter, and verifier now share transport.relayModel (here
+  // "sonnet") with the Codex relay rather than being pinned to Haiku.
+  assert.ok((result.usage.plumbingCallsByModel.sonnet ?? 0) > 0);
 });
 
 test("shipping rejects a run policy whose fingerprint does not match its fields", async () => {
@@ -3167,8 +3215,21 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
   const shipRelays = ship.calls.filter((call) => call.agentType === "tagteam:codex-runner");
   assert.ok(shipRelays.length > 0);
   assert.equal(shipRelays.every((call) => call.model === "sonnet"), true);
-  assert.equal(ship.result.usage.haikuPlumbingCalls, 4);
-  assert.equal(ship.result.usage.plumbingCallsByModel.sonnet, shipRelays.length);
+  // The run policy's plumbingModel ("sonnet") wins over transport.relayModel
+  // ("opus") for every plumbing agent, not just the Codex relay: committer,
+  // snapshotter, verifier, and scribe all share relayModelFor with
+  // tagteam:codex-runner, so none of them fall back to Haiku here.
+  const shipPlumbingTypes = new Set([
+    "tagteam:codex-runner", "tagteam:committer", "tagteam:snapshotter", "tagteam:verifier", "tagteam:scribe"
+  ]);
+  const shipPlumbing = ship.calls.filter((call) => shipPlumbingTypes.has(call.agentType));
+  assert.ok(shipPlumbing.length > shipRelays.length);
+  assert.equal(shipPlumbing.every((call) => call.model === "sonnet"), true);
+  // The single remaining Haiku call is the dual-provider UI classifier's own
+  // cheap fallback (tagteam:ui-classifier), which is intentionally out of
+  // scope for transport.relayModel/relayEffort.
+  assert.equal(ship.result.usage.haikuPlumbingCalls, 1);
+  assert.equal(ship.result.usage.plumbingCallsByModel.sonnet, shipPlumbing.length);
 });
 
 test("validated Codex artifact reuse is not counted as a new Codex call", async () => {
@@ -3705,10 +3766,15 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.equal(result.status, "clean");
   assert.equal(result.relayRetries, 1);
   assert.equal(result.policyFingerprint, result.runPolicy.policyFingerprint);
+  // Committer, snapshotter, verifier, and scribe now share transport.relayModel
+  // ("sonnet", from SHIP_CONFIG) with the Codex relay rather than being pinned
+  // to Haiku; only the retried Codex review's plumbing dispatch remains Haiku
+  // here (SHIP_ARGS carries no explicit run policy, so this is the plan's
+  // default-dual-provider plumbingModel resolution for the codex-runner call).
   assert.deepEqual(result.usage, {
     claudeReasoningCalls: 3,
-    haikuPlumbingCalls: 4,
-    plumbingCallsByModel: { haiku: 4, sonnet: 4 },
+    haikuPlumbingCalls: 1,
+    plumbingCallsByModel: { haiku: 1, sonnet: 7 },
     codexCalls: 0,
     relayRetries: 1
   });

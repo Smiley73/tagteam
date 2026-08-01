@@ -511,6 +511,28 @@ function relayModelFor(policy, config) {
   return policy?.plumbingModel ?? config.transport?.relayModel ?? "sonnet";
 }
 
+// Reasoning effort for plumbing agents — deterministic-command dispatchers
+// that exercise no judgment (tagteam:codex-runner, tagteam:committer,
+// tagteam:snapshotter, tagteam:verifier, tagteam:scribe). Unlike
+// relayModelFor, this has no run-policy enforcement counterpart:
+// scripts/lib/run-policy.mjs's policyFields()/fingerprint() intentionally
+// excludes effort, so it is read straight off config at dispatch time and
+// never affects a saved run policy's fingerprint or `restore`. Default "low"
+// is safe even for tagteam:codex-runner, which is told to write the exact
+// fenced prompt it's handed and relies on the request-identity check to catch
+// drift: a low-effort model deviating from that is a loud failure (a
+// fingerprint, checksum, or request-identity mismatch, or an outright
+// refusal) that stops the pass rather than one that silently corrupts state.
+// Haiku is excluded: some harnesses reject an `effort` value on Haiku
+// dispatches (see commands/init.md's runtime probe), and single-provider run
+// policies force plumbingModel to Haiku regardless of transport.relayModel
+// (scripts/lib/run-policy.mjs validateRunPolicy). Sending effort only when the
+// resolved model isn't Haiku keeps every Haiku dispatch byte-identical to
+// before this feature existed, so it can never trip that rejection.
+function relayEffortFor(model, config) {
+  return model === "haiku" ? undefined : (config.transport?.relayEffort ?? "low");
+}
+
 function relayEnvelopeSchema(resultSchema) {
   return {
     type: "object",
@@ -623,6 +645,7 @@ async function codexCall(input, {
       phase: kind,
       agentType: "tagteam:codex-runner",
       model: relayModelFor(input.runPolicy, input.config),
+      effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
@@ -699,7 +722,8 @@ async function commitCandidate(input, round, summary) {
     label: `candidate:commit:${round}`,
     phase: "Candidate",
     agentType: "tagteam:committer",
-    model: "haiku",
+    model: relayModelFor(input.runPolicy, input.config),
+    effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
     schema: commitSchema
   });
   if (!result && relayState.capacityExceeded) return null;
@@ -739,7 +763,8 @@ async function snapshot(input, round, candidateOid) {
     label: `candidate:snapshot:${round}`,
     phase: "Candidate",
     agentType: "tagteam:snapshotter",
-    model: "haiku",
+    model: relayModelFor(input.runPolicy, input.config),
+    effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
     schema: snapshotSchema
   });
   if (!result && relayState.capacityExceeded) return null;
@@ -790,7 +815,8 @@ async function runVerify(input, snapshotValue, round) {
     label: `verify:${round}`,
     phase: "Verify",
     agentType: "tagteam:verifier",
-    model: "haiku",
+    model: relayModelFor(input.runPolicy, input.config),
+    effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
     schema: verifySchema
   });
   if (!result) return { status: "failed", resultPath, commands: [] };
@@ -1316,7 +1342,8 @@ async function main(raw) {
         label: "specialist:persist",
         phase: "Specialist pre-pass",
         agentType: "tagteam:scribe",
-        model: "haiku",
+        model: relayModelFor(input.runPolicy, input.config),
+        effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
         schema: payloadVerifySchema
       });
       callCount += 1;
@@ -1508,7 +1535,8 @@ async function main(raw) {
       label: `scribe:${round}`,
       phase: `Review ${round}`,
       agentType: "tagteam:scribe",
-      model: "haiku",
+      model: relayModelFor(input.runPolicy, input.config),
+      effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
       schema: scribeSchema
     });
     callCount += 1;
@@ -1610,7 +1638,8 @@ async function main(raw) {
       label: `scribe:fix:${round}`,
       phase: `Fix ${round}`,
       agentType: "tagteam:scribe",
-      model: "haiku",
+      model: relayModelFor(input.runPolicy, input.config),
+      effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
       schema: eventScribeSchema
     });
     callCount += 1;

@@ -870,7 +870,7 @@ function relayReturnInstruction(resultFromDisk, artifact) {
 // Builds one request file out of text that is already on disk. The agent runs a
 // command and reports a byte count; the payload never passes through it. The
 // command is idempotent, so a lost reply costs one re-run and nothing else.
-async function buildPrompt({ command, label, phase: phaseName, model, what, promptFile }) {
+async function buildPrompt({ command, label, phase: phaseName, model, effort, what, promptFile }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It assembles a request file from text this plan already saved. Do not write, edit, summarise, or retype any of that text yourself.",
@@ -883,6 +883,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: promptBuildSchema
     });
     if (result?.ok && /^sha256:[0-9a-f]{64}$/.test(result.promptHash ?? "")) return result;
@@ -906,7 +907,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, what, prom
 
 // Reports what the files a step was just told to write actually hold. The command
 // only reads, so a lost reply costs one re-read and nothing else.
-async function verifySaved({ command, label, phase: phaseName, model, what, file }) {
+async function verifySaved({ command, label, phase: phaseName, model, effort, what, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It reads files this plan already saved and reports a checksum for each. Do not write, edit, summarise, or retype any of that text yourself.",
@@ -919,6 +920,7 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: payloadVerifySchema
     });
     if (result?.ok && Array.isArray(result.payloads) && result.payloads.length) return result.payloads;
@@ -945,7 +947,7 @@ async function verifySaved({ command, label, phase: phaseName, model, what, file
 // A refusal is fatal on purpose. The lint refuses when the bytes on disk are not
 // the bytes this run produced, which means it judged a document nobody is going
 // to implement — the one condition under which a clean verdict would be a lie.
-async function runPlanLint({ command, label, phase: phaseName, model, what, file, requireReview = false }) {
+async function runPlanLint({ command, label, phase: phaseName, model, effort, what, file, requireReview = false }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It reads files this plan already saved and decides, in code, everything about them that does not need judgment. The only file it writes is its own findings.",
@@ -958,6 +960,7 @@ async function runPlanLint({ command, label, phase: phaseName, model, what, file
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: planLintSchema
     });
     const saved = result?.ok === true
@@ -1011,7 +1014,7 @@ async function runPlanLint({ command, label, phase: phaseName, model, what, file
 // does travel, the helper computes its token from the same array it returns, so
 // checking one against the other catches a relay that altered it in transit
 // without touching the checksum beside it.
-async function mergeFinalQuestions({ command, label, phase: phaseName, model, file }) {
+async function mergeFinalQuestions({ command, label, phase: phaseName, model, effort, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It atomically merges the saved decomposition review's open questions into the plan's question sidecar. Do not author, answer, edit, summarise, or reorder any question yourself.",
@@ -1024,6 +1027,7 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, fi
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: mergedQuestionsSchema
     });
     const saved = result?.ok
@@ -1061,7 +1065,7 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, fi
 // list that does not travel only means this pass confirms from its own memory
 // of a record that was written either way. So this returns null for the list
 // rather than failing, and the caller says which happened.
-async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, file }) {
+async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, effort, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It atomically merges the interface decisions this pass collected into the record beside the saved plan. Do not author, edit, reword, reorder, or drop any decision yourself.",
@@ -1074,6 +1078,7 @@ async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, 
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: mergedUiDecisionsSchema
     });
     const saved = result?.ok
@@ -1110,7 +1115,7 @@ async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, 
 // Promotes a validated Codex draft artifact into the exact files that make a
 // planning pass resumable. Haiku executes the command but never receives the
 // plan text; the script reads the request-bound artifact directly.
-async function materializeCodexPlan({ command, label, phase: phaseName, model, what, file }) {
+async function materializeCodexPlan({ command, label, phase: phaseName, model, effort, what, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It validates a completed Codex artifact and atomically writes its plan and resume sidecars. Do not write, edit, summarise, or retype any plan text yourself.",
@@ -1123,6 +1128,7 @@ async function materializeCodexPlan({ command, label, phase: phaseName, model, w
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: payloadVerifySchema
     });
     if (result?.ok && Array.isArray(result.payloads) && result.payloads.length) return result.payloads;
@@ -1142,7 +1148,7 @@ async function materializeCodexPlan({ command, label, phase: phaseName, model, w
 // body through a model response. The prepare target is intentionally not a
 // discoverable integrated draft; publication makes the final path visible only
 // after its required question sidecar exists.
-async function stageClaudeContinuation({ command, label, phase: phaseName, model, what, file }) {
+async function stageClaudeContinuation({ command, label, phase: phaseName, model, effort, what, file }) {
   const prompt = [
     `Run this exact command: ${command}`,
     "It copies an already saved plan between workflow-owned paths and reports the resulting checksum. Do not write, edit, summarise, or retype any plan text yourself.",
@@ -1155,6 +1161,7 @@ async function stageClaudeContinuation({ command, label, phase: phaseName, model
       phase: phaseName,
       agentType: "tagteam:prompt-builder",
       model,
+      effort,
       schema: payloadVerifySchema
     });
     if (result?.ok && Array.isArray(result.payloads) && result.payloads.length) return result.payloads;
@@ -1243,7 +1250,7 @@ function promptNotBuilt({ what, promptFile, detail }) {
 }
 
 async function relayCodex({
-  prompt, label, phase: phaseName, schema, model, artifact, promptFile, what,
+  prompt, label, phase: phaseName, schema, model, effort, artifact, promptFile, what,
   requestIdentity, sandbox = "read-only", optional = false, resultFromDisk = false
 }) {
   if (!/^sha256:[0-9a-f]{64}$/.test(requestIdentity ?? "")) {
@@ -1270,6 +1277,7 @@ async function relayCodex({
       phase: phaseName,
       agentType: "tagteam:codex-runner",
       model,
+      effort,
       schema: relayEnvelopeSchema(schema)
     });
     if (response) {
@@ -1382,6 +1390,24 @@ async function main(raw) {
   const codex = config.planning.codex;
   const decisions = input.decisions ?? [];
   const relayModel = relayModelFor(runPolicy, config);
+  // Reasoning effort for plumbing agents — deterministic-command dispatchers
+  // that exercise no judgment. There is no run-policy enforcement analogue to
+  // plumbingModel's Haiku pin here on purpose: effort is read straight off
+  // config at dispatch time and never folded into policyFields()/fingerprint()
+  // in scripts/lib/run-policy.mjs, so an existing saved run policy's
+  // fingerprint (and any `restore` against it) is unaffected by this key.
+  // Default "low" is safe even for tagteam:prompt-builder and
+  // tagteam:codex-runner, whose prompts carry an explicit "do not write, edit,
+  // or re-create the prompt file" instruction: a low-effort model deviating
+  // from that is a loud failure (a fingerprint/token mismatch, or an outright
+  // refusal) that stops the pass rather than one that silently corrupts state.
+  // Haiku is excluded: some harnesses reject an `effort` value on Haiku
+  // dispatches (see commands/init.md's runtime probe), and single-provider
+  // run policies force plumbingModel to Haiku regardless of transport.relayModel
+  // (scripts/lib/run-policy.mjs validateRunPolicy). Sending effort only when the
+  // resolved model isn't Haiku keeps every Haiku dispatch byte-identical to
+  // before this feature existed, so it can never trip that rejection.
+  const relayEffort = relayModel === "haiku" ? undefined : (config.transport?.relayEffort ?? "low");
   // Settings written before these questions existed leave hasUserInterface
   // undefined. The lens is free to the user, so it runs; confirmation is not,
   // so it stays off until the answers exist. Ship makes the same choice.
@@ -1552,6 +1578,7 @@ async function main(raw) {
       label: `${label}:request`,
       phase: phaseName,
       model: relayModel,
+      effort: relayEffort,
       what,
       promptFile
     });
@@ -1589,6 +1616,7 @@ async function main(raw) {
       phase: phaseName,
       schema,
       model: relayModel,
+      effort: relayEffort,
       artifact,
       promptFile,
       what,
@@ -1618,6 +1646,7 @@ async function main(raw) {
       label,
       phase: phaseName,
       model: relayModel,
+      effort: relayEffort,
       what,
       file
     });
@@ -1780,6 +1809,7 @@ async function main(raw) {
       label,
       phase: phaseName,
       model: relayModel,
+      effort: relayEffort,
       what,
       file
     });
@@ -1833,6 +1863,7 @@ async function main(raw) {
       label: "plan:prepare-continuation",
       phaseName: "Draft",
       model: relayModel,
+      effort: relayEffort,
       what: "plan continuation working copy",
       file: continuationWorkPath
     });
@@ -1969,6 +2000,7 @@ async function main(raw) {
         label: "plan:publish-continuation",
         phaseName: "Draft",
         model: relayModel,
+        effort: relayEffort,
         what: "integrated plan publication",
         file: integratedPath
       });
@@ -2098,6 +2130,7 @@ async function main(raw) {
       label: `plan:lint:${round}`,
       phase: `Cross-review ${round}`,
       model: relayModel,
+      effort: relayEffort,
       what: `plan entering round ${round}`,
       file: planFile,
       requireReview: true
@@ -2139,6 +2172,7 @@ async function main(raw) {
       label: `plan:review-request:${round}`,
       phase: `Cross-review ${round}`,
       model: relayModel,
+      effort: relayEffort,
       what: `review of plan round ${round}`,
       promptFile
     });
@@ -2204,6 +2238,7 @@ async function main(raw) {
         phase: `Cross-review ${round}`,
         schema: planReviewSchema,
         model: relayModel,
+        effort: relayEffort,
         artifact,
         promptFile,
         what: `review of plan round ${round}`,
@@ -2375,6 +2410,7 @@ async function main(raw) {
           label: `plan:publish-approved-round:${round}`,
           phaseName: `Cross-review ${round}`,
           model: relayModel,
+          effort: relayEffort,
           what: "cross-reviewed plan",
           file: integratedPath
         });
@@ -2505,6 +2541,7 @@ async function main(raw) {
         label: `plan:publish-revision:${round}`,
         phaseName: `Cross-review ${round}`,
         model: relayModel,
+        effort: relayEffort,
         what: `round ${round + 1} input publication`,
         file: revisedFile
       });
@@ -2719,6 +2756,7 @@ async function main(raw) {
       label: "plan:merge-final-questions",
       phase: phaseName,
       model: relayModel,
+      effort: relayEffort,
       file
     });
     // No fallback to the run's tally, ever: answering with it would ask about
@@ -2750,6 +2788,7 @@ async function main(raw) {
       label: "plan:merge-final-ui-decisions",
       phase: phaseName,
       model: relayModel,
+      effort: relayEffort,
       file
     });
     if (merged.quarantined) {
@@ -2814,6 +2853,7 @@ async function main(raw) {
         label: "plan:lint-revision-check",
         phase: "Revision check",
         model: relayModel,
+        effort: relayEffort,
         what: "re-check of the last plan revision",
         file: draft.plan_path
       });
@@ -2908,6 +2948,7 @@ async function main(raw) {
       label: "plan:publish-cleared-revision",
       phaseName: "Revision check",
       model: relayModel,
+      effort: relayEffort,
       what: "cleared final plan revision",
       file: integratedPath
     });
@@ -2935,6 +2976,7 @@ async function main(raw) {
       label: "plan:lint-entry",
       phase: "Plan check",
       model: relayModel,
+      effort: relayEffort,
       what: "plan entering the manifest",
       file: draft.plan_path
     });
@@ -3066,6 +3108,7 @@ async function main(raw) {
     label: "plan:verify-handoff",
     phase: "PR train",
     model: relayModel,
+    effort: relayEffort,
     what: "manifest and pull-request train",
     file: `${manifestPath} and ${trainPath}`
   });
@@ -3107,6 +3150,7 @@ async function main(raw) {
     label: "plan:lint-handoff",
     phase: "PR train",
     model: relayModel,
+    effort: relayEffort,
     what: "manifest and pull-request train",
     file: `${manifestPath} and ${trainPath}`
   });
@@ -3156,6 +3200,7 @@ async function main(raw) {
     label: "plan:decomposition-request",
     phase: "PR train",
     model: relayModel,
+    effort: relayEffort,
     what: "cross-check of the pull-request split",
     promptFile: decompositionPromptFile
   });
@@ -3194,6 +3239,7 @@ async function main(raw) {
       phase: "PR train",
       schema: planReviewSchema,
       model: relayModel,
+      effort: relayEffort,
       artifact: decompositionArtifact,
       promptFile: decompositionPromptFile,
       what: "cross-check of the pull-request split",
