@@ -104,7 +104,7 @@ Two things bound the loop, and both are stops rather than another pass:
 
 ## Interface decisions
 
-`uiDecisionsToConfirm` holds the interface choices the plan made on its own that the project's policy says are worth a person's attention; `uiDecisions` holds all of them. These are not questions, and they were not blocking anything: the plan already decided. Ask only whether it decided right, and ask it cheaply.
+`uiDecisionsToConfirm` holds the interface choices the plan made on its own that the project's policy says are worth a person's attention; `uiDecisions` holds all of them when `uiDecisionsSettled` is true. When it is false the merged record did not survive the relay and these two are the pass's own memory of it: `uiDecisionsPath` is the complete record, and a decision it names that `uiDecisions` does not is one this pass will not ask about. Nothing is lost either way — the record is written before that reply is lost — so this is a confirmation not offered rather than a decision dropped, and it is never a reason to stop. These are not questions, and they were not blocking anything: the plan already decided. Ask only whether it decided right, and ask it cheaply.
 
 Skip a decision whose `id` already has an answer in **any** `drafts/*-decisions.json` in this plan directory, not only the current pass's: each pass writes its own file, so a choice confirmed in pass 1 is only visibly settled in pass 2 if every pass's answers are read. If nothing remains, say nothing and move on to the cross-check.
 

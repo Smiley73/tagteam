@@ -29,16 +29,26 @@ function stage({ questions = QUESTIONS, uiDecisions = null } = {}) {
   return { dir, source, target: path.join(dir, "pass-1-round-2-input.md") };
 }
 
-function publish({ source, target, receipt, expectQuestions }) {
+function publish({ source, target, receipt, expectQuestions, uiDecisions }) {
   return execFileSync("node", [
     script, "publish",
     "--source", source,
     "--target", target,
     "--expect", expectToken(normalizeText(PLAN)),
     ...(receipt ? ["--receipt", receipt] : []),
-    ...(expectQuestions ? ["--expect-questions", hex(expectQuestions)] : [])
+    ...(expectQuestions ? ["--expect-questions", hex(expectQuestions)] : []),
+    ...(uiDecisions ? ["--ui-decisions", hex(uiDecisions)] : [])
   ], { encoding: "utf8" });
 }
+
+const uiDecision = (id) => ({
+  id,
+  decision: `where ${id} lives`,
+  surface: "new-dialog",
+  chosen: { label: "a", sketch: "[ a ]", why: "because" },
+  alternatives: [{ label: "b", sketch: "[ b ]", why: "because" }],
+  precedent: null
+});
 
 test("a round input is published with its sidecar and no continuation receipt", () => {
   const { source, target } = stage();
@@ -130,4 +140,69 @@ test("a matching sidecar publishes", () => {
   publish({ source, target, receipt: "none", expectQuestions: QUESTIONS });
 
   assert.deepEqual(JSON.parse(fs.readFileSync(`${target}.questions.json`, "utf8")), QUESTIONS);
+});
+
+// The interface record beside a published plan is the workflow's to write. The
+// Codex materializer already writes it from the array its carry-forward check
+// cleared; copying whatever the drafting model left at a working path was the
+// one place a model still decided what the record said.
+test("the supplied interface decisions are written, not the ones at the working path", () => {
+  const { source, target } = stage({ uiDecisions: [uiDecision("interrupted-attempt")] });
+
+  publish({ source, target, receipt: "none", uiDecisions: [uiDecision("this-attempt")] });
+
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(`${target}.ui-decisions.json`, "utf8")).map((entry) => entry.id),
+    ["this-attempt"]
+  );
+});
+
+test("an interface decision with no id is rejected before anything is touched", () => {
+  const { source, target } = stage();
+  fs.writeFileSync(target, "# Plan\n\nA different decision, from the attempt before.\n", { mode: 0o600 });
+
+  assert.throws(
+    () => publish({ source, target, receipt: "none", uiDecisions: [{ decision: "nameless" }] }),
+    /every interface decision must be an object with a non-empty id/
+  );
+  // A publication that cannot even be described must not clear a plan on its
+  // way to failing.
+  assert.equal(fs.existsSync(target), true);
+});
+
+// #29 keeps an identical plan in place so a failure downstream does not take it
+// with it. That was justified by identical bytes meaning a retry of the same
+// command, which is false: a same-pass resume from an integrated continuation
+// redrafts against the same seed and can reproduce the plan byte for byte while
+// the decisions beside it differ.
+test("an identical plan with different decisions beside it is republished, not patched in place", () => {
+  const { source, target } = stage();
+  fs.writeFileSync(target, PLAN, { mode: 0o600 });
+  fs.writeFileSync(`${target}.questions.json`, JSON.stringify(QUESTIONS), { mode: 0o600 });
+  fs.writeFileSync(`${target}.ui-decisions.json`, JSON.stringify([uiDecision("earlier-attempt")]), { mode: 0o600 });
+
+  publish({ source, target, receipt: "none", uiDecisions: [uiDecision("this-attempt")] });
+
+  assert.equal(fs.readFileSync(target, "utf8"), PLAN);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(`${target}.ui-decisions.json`, "utf8")).map((entry) => entry.id),
+    ["this-attempt"]
+  );
+});
+
+test("a republication that changes nothing at all mutates nothing at all", () => {
+  const { source, target } = stage();
+  const decisions = [uiDecision("settled")];
+  publish({ source, target, receipt: "none", uiDecisions: decisions });
+  const before = [target, `${target}.questions.json`, `${target}.ui-decisions.json`]
+    .map((file) => fs.statSync(file).mtimeMs);
+
+  // The true retry: same plan, same sidecars, nothing to supersede. It is a
+  // no-op rather than a rewrite, so there is no window to be interrupted in.
+  publish({ source, target, receipt: "none", uiDecisions: decisions });
+
+  assert.deepEqual(
+    [target, `${target}.questions.json`, `${target}.ui-decisions.json`].map((file) => fs.statSync(file).mtimeMs),
+    before
+  );
 });

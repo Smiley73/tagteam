@@ -38,6 +38,21 @@ const HANDOFF_FIXTURES = {
   PR_TRAIN: { entries: TRAIN.prs, fields: ["id", "taskIds"] }
 };
 
+// The interface decisions a prompt is carrying, read out of the fence the
+// workflow put them in. A drafter is told to return these alongside whatever it
+// declares, so a stub that ignores them is not modelling a compliant one.
+function carriedDecisions(prompt) {
+  const fence = /<untrusted-interface-decisions-so-far>\n([\s\S]*?)\n<\/untrusted-interface-decisions-so-far>/.exec(prompt);
+  return fence ? JSON.parse(fence[1]) : [];
+}
+
+// dedupeDecisions in the workflow: last version of an id wins, first position kept.
+function dedupeById(decisions) {
+  const byId = new Map();
+  for (const entry of decisions) byId.set(String(entry?.id ?? "").trim().toLocaleLowerCase(), entry);
+  return [...byId.values()];
+}
+
 const option = (label) => ({ label, sketch: `[ ${label} ]`, why: `because ${label}` });
 const decision = (id, surface, precedent) => ({
   id,
@@ -57,6 +72,8 @@ async function forge({
   reviewDecisions = [],
   seedDecisions,
   dropInteractionReview = false,
+  dropCarriedDecisions = false,
+  loseUiDecisionMerge = false,
   runPolicy,
   // A clean round publishes the bytes it reviewed and revises nothing, so a
   // test that needs the revision step to run has to fail its round.
@@ -65,6 +82,9 @@ async function forge({
 }) {
   const labels = [];
   const prompts = new Map();
+  // Every set the workflow sent to the interface merge, which is what the record
+  // beside the plan ends up holding.
+  const mergedUiDecisions = [];
   const agent = async (prompt, options) => {
     const label = options.label;
     labels.push(label);
@@ -78,7 +98,14 @@ async function forge({
         plan_chars: 12,
         plan_hash: "fd8d615d",
         open_questions: [],
-        ui_decisions: draftDecisions
+        // A compliant drafter returns what it was carrying plus what it is
+        // declaring. Returning `draftDecisions` alone modelled a drafter that
+        // drops every carried decision, which is the failure the carry-forward
+        // check exists to catch — the harness must not be the one thing in the
+        // suite that behaves that way.
+        ui_decisions: dropCarriedDecisions
+          ? draftDecisions
+          : dedupeById([...carriedDecisions(prompt), ...draftDecisions])
       };
     }
     if (label.startsWith("plan:interaction-review")) {
@@ -89,6 +116,17 @@ async function forge({
     if (label === "plan:decompose") return TRAIN;
     // A file that holds exactly what the step returned: the checksum reported back
     // is the one the workflow asked the read to expect.
+    // Models merge-plan-ui-decisions.mjs by decoding the set the workflow
+    // actually sent, so a test cannot pass while the accumulator never reaches
+    // the record.
+    if (label.startsWith("plan:merge-final-ui-decisions")) {
+      if (loseUiDecisionMerge) return null;
+      const hex = /merge-plan-ui-decisions\.mjs" "[^"]*" "([0-9a-fA-F]*)"/.exec(prompt)?.[1] ?? "";
+      const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((pair) => Number.parseInt(pair, 16)) ?? []);
+      const merged = hex ? JSON.parse(new TextDecoder().decode(bytes)) : [];
+      mergedUiDecisions.push(merged);
+      return { ok: true, uiDecisions: merged };
+    }
     if (label.startsWith("plan:merge-final-questions")) {
       // The helper always returns the merged list and the workflow requires it
       // on success, so a bare {ok:true} is a reply the helper never produces.
@@ -168,7 +206,7 @@ async function forge({
       ui: { gateOnUserVisible: true, ...ui }
     }
   }, agent, parallel, () => {}, () => {}, undefined);
-  return { result, labels, prompts };
+  return { result, labels, prompts, mergedUiDecisions };
 }
 
 test("plan-forge runs end to end without Web Crypto or TextEncoder globals", async () => {
