@@ -2384,6 +2384,18 @@ async function main(raw) {
           // by its token; this binds the sidecar beside it to the same reply the
           // carry-forward check just cleared, so a retry cannot publish the
           // interrupted attempt's questions.
+          //
+          // The `.ui-decisions.json` beside it is deliberately not bound the
+          // same way, and this is the note saying so rather than an oversight.
+          // Binding a sidecar to a returned field requires the prompt and a
+          // check to already agree on what that field holds, and for interface
+          // decisions on this path they do not: requireCarriedUiDecisions runs
+          // only on the Codex branches, so nothing establishes whether a Claude
+          // revision's ui_decisions are the carried set plus new ones or only
+          // the new ones. Asserting against it here would fail well-behaved
+          // runs, which is exactly how the question version of this went wrong
+          // the first time. Extending the carry-forward guarantee to interface
+          // decisions comes first; the binding is the step after it.
           `--expect-questions ${jsonHex(result.open_questions ?? [])}`
         ].join(" "),
         label: `plan:publish-revision:${round}`,

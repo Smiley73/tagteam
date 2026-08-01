@@ -125,6 +125,22 @@ function publish({ source, target, expect, expectQuestions, receipt }) {
   const targetUiDecisions = `${path.resolve(target)}.ui-decisions.json`;
   const targetReceipt = `${path.resolve(target)}.continuation-receipt.json`;
 
+  // A target that already holds a plan is a publication that finished, because
+  // the plan is written last. When it holds different bytes, it is removed
+  // before the sidecars move: otherwise the window between the first sidecar
+  // write and the rename shows the previous plan beside this step's questions,
+  // which is a pair no reader can tell is wrong. Resume selects a round by the
+  // plan file, so "not published yet" is a state it already handles.
+  //
+  // Nothing has been traced that publishes different bytes over a finished
+  // target — resume re-runs a round only when its plan is absent, and a relay
+  // retry repeats the same source and token. That is a property of two other
+  // components agreeing rather than of this script, so it is enforced here too.
+  const resolvedTarget = path.resolve(target);
+  if (fs.existsSync(resolvedTarget) && !fs.readFileSync(resolvedTarget).equals(plan.raw)) {
+    fs.unlinkSync(resolvedTarget);
+  }
+
   // The plan name is the discoverability boundary. Sidecars may be harmless
   // orphans after a crash, but the final plan never appears without questions.
   writeAtomic(`${target}.questions.json`, questions);
