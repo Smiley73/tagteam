@@ -495,15 +495,21 @@ function requireCarriedQuestions(engine, result, carried, resolved = []) {
   }
 }
 
-function requireCarriedUiDecisions(result, carried) {
+// The same rule as questions, for a record nobody is ever asked about. A
+// decision is a choice already made, so a revision may update one under its id
+// but never drop it: no human answer resolves it away, which is why there is no
+// resolved set here. Each caller passes back exactly what its own prompt fenced
+// — demanding more than that fails a model that did as it was told — and the
+// engine is named because both of them revise plans.
+function requireCarriedUiDecisions(engine, result, carried) {
   const returned = new Set((result?.ui_decisions ?? []).map((decision) =>
     String(decision?.id ?? "").trim().toLocaleLowerCase()));
-  const missing = (carried ?? []).filter((decision) => {
+  const missing = dedupeDecisions(carried ?? []).filter((decision) => {
     const id = String(decision?.id ?? "").trim().toLocaleLowerCase();
     return id && !returned.has(id);
   });
   if (missing.length) {
-    throw new Error(`Codex plan result dropped ${missing.length} carried interface decision(s)`);
+    throw new Error(`${engine} plan result dropped ${missing.length} carried interface decision(s)`);
   }
 }
 
@@ -574,6 +580,22 @@ const mergedQuestionsSchema = {
         }
       }
     }
+  }
+};
+
+// The same reply shape for the interface record. `quarantined` travels because
+// a record that could not be read is something the pass says out loud rather
+// than something it silently writes over.
+const mergedUiDecisionsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok"],
+  properties: {
+    ok: { type: "boolean" },
+    error: { type: "string" },
+    quarantined: { type: "string" },
+    uiDecisions: { type: "array", items: uiDecisionSchema },
+    payloads: mergedQuestionsSchema.properties.payloads
   }
 };
 
@@ -1031,6 +1053,58 @@ async function mergeFinalQuestions({ command, label, phase: phaseName, model, fi
     file,
     detail: `merge could not be confirmed after ${RELAY_ATTEMPTS} attempts`
   }));
+}
+
+// The interface counterpart of mergeFinalQuestions. The two differ in what a
+// lost reply costs: a question list that does not travel is answered from the
+// file, because that file is what a person is asked from, while an interface
+// list that does not travel only means this pass confirms from its own memory
+// of a record that was written either way. So this returns null for the list
+// rather than failing, and the caller says which happened.
+async function mergeFinalUiDecisions({ command, label, phase: phaseName, model, file }) {
+  const prompt = [
+    `Run this exact command: ${command}`,
+    "It atomically merges the interface decisions this pass collected into the record beside the saved plan. Do not author, edit, reword, reorder, or drop any decision yourself.",
+    "Return the command's JSON stdout unchanged: ok, its payloads array, the uiDecisions array it printed copied across verbatim, and quarantined when it is present. If copying the decisions would mean altering any of them, return ok and payloads alone; the file it just wrote is what gets read. If it exits non-zero, return ok=false with its exact stderr as error."
+  ].join("\n\n");
+  for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) relayState.extraCalls += 1;
+    const result = await planAgent(prompt, {
+      label: attempt === 1 ? label : `${label}:retry-${attempt - 1}`,
+      phase: phaseName,
+      agentType: "tagteam:prompt-builder",
+      model,
+      schema: mergedUiDecisionsSchema
+    });
+    const saved = result?.ok
+      ? (result.payloads ?? []).find((payload) => payload?.name === "INTERFACE_DECISIONS")
+      : null;
+    const list = Array.isArray(result?.uiDecisions) ? result.uiDecisions : null;
+    if (result?.ok && (saved || list)) {
+      if (saved && list && saved.token !== expectJson(list)) {
+        throw new Error(payloadNotSaved({
+          what: "final interface decisions",
+          file,
+          detail: `the returned list does not match the checksum reported beside it (${saved.token})`
+        }));
+      }
+      return { uiDecisions: list, quarantined: result.quarantined ?? null };
+    }
+    // A command that reported failure is not retried: it will fail the same way,
+    // and unlike a lost reply it says why. It is not fatal either — see below.
+    if (result && !result.ok) {
+      log(`The interface record beside this plan could not be merged: ${result.error ?? "the command reported failure"}. The plan and its questions are unaffected; the record may be missing decisions this pass collected.`);
+      break;
+    }
+    log(`The interface record was merged, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Merging it again is idempotent.`);
+  }
+  // Never fatal, whichever way it went. This is the advisory track: it removes
+  // bad surfaces without spending a question and it has never blocked a pass,
+  // and the command that reads a pass is already told to carry on with no
+  // interface decisions when the record is unreadable. Stopping a finished plan
+  // at the last step over a record nobody is gated on would be a worse trade
+  // than confirming from memory and saying so.
+  return { uiDecisions: null, quarantined: null };
 }
 
 // Promotes a validated Codex draft artifact into the exact files that make a
@@ -1592,6 +1666,16 @@ async function main(raw) {
     uiEnabled
       ? `Also persist at ${file}.ui-decisions.json, mode 0600, a JSON array holding every interface decision you were given plus every one you are returning, one entry per decision id, last version winning.`
       : "",
+    // The same omission the question contract above had to close, for a record
+    // that is never asked about and so has nothing to notice it shrinking. The
+    // sidecar instruction reads as being about the file alone, and the returned
+    // field is what the workflow writes the published record from, so a
+    // decision left out of it stops existing however complete the file was.
+    // No exception clause: the check permits none, and a human answer changes a
+    // decision's chosen option rather than removing the decision.
+    uiEnabled
+      ? `Return in ui_decisions every interface decision you were given plus every one you are declaring, one entry per id, last version winning. A decision is a record of a choice already made: a revision may update one under its id, but a decision left out of ui_decisions is one that stops existing.`
+      : "",
     carried.length ? fenced("questions-so-far", JSON.stringify(carried, null, 2)) : "",
     carriedDecisions.length ? fenced("interface-decisions-so-far", JSON.stringify(carriedDecisions, null, 2)) : "",
     `Run node "${input.pluginRoot}/scripts/plan-receipt.mjs" "${file}" after the write. Return its plan_path, plan_chars, and plan_hash fields unchanged alongside open_questions and ui_decisions. Do not return the plan text.`
@@ -1608,6 +1692,17 @@ async function main(raw) {
       ? `Look for that precedent first in: ${conventionPaths.join(", ")}.`
       : "No convention paths are configured, so establish precedent from the closest comparable surface already in the repository."
   ].join("\n") : "This repository ships no user-facing interface, so return an empty ui_decisions array and spend no effort on interface questions.";
+
+  // What a publication writes beside the plan as the interface record. Every
+  // publish site passes it, because a discoverable plan's record is the
+  // workflow's to write: the Codex materializer already writes that file from
+  // the array its carry-forward check cleared, and copying whatever a model left
+  // at a working path was the one place a model still decided what the record
+  // said. The only file a model still writes is the fresh draft's, which has no
+  // publication and nothing carried it could shorten.
+  const uiDecisionsArg = (decisions) => uiEnabled
+    ? [`--ui-decisions ${jsonHex(dedupeDecisions(decisions))}`]
+    : [];
   const draftPrompt = continuation ? [
     `Integrate the human decisions into this already cross-reviewed plan for ${input.worktree}.`,
     fenced("goal", input.goal),
@@ -1849,6 +1944,9 @@ async function main(raw) {
     }
     if (continuation) {
       requireCarriedQuestions("Claude", result, input.openQuestions ?? [], decisions);
+      // The set this prompt fenced at persist(), so the check demands back
+      // exactly what the drafter was shown and nothing more.
+      if (uiEnabled) requireCarriedUiDecisions("Claude", result, input.uiDecisions ?? []);
     }
     const savedWork = await recordPlanFile({
       file: continuation ? continuationWorkPath : draftPath(1),
@@ -1865,7 +1963,8 @@ async function main(raw) {
           `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
           `--source "${continuationWorkPath}"`,
           `--target "${integratedPath}"`,
-          `--expect "${savedWork.savedToken}"`
+          `--expect "${savedWork.savedToken}"`,
+          ...uiDecisionsArg([...(input.uiDecisions ?? []), ...(result.ui_decisions ?? [])])
         ].join(" "),
         label: "plan:publish-continuation",
         phaseName: "Draft",
@@ -1942,7 +2041,7 @@ async function main(raw) {
     });
     if (continuation) {
       requireCarriedQuestions("Codex", response.result, input.openQuestions ?? [], decisions);
-      if (uiEnabled) requireCarriedUiDecisions(response.result, input.uiDecisions ?? []);
+      if (uiEnabled) requireCarriedUiDecisions("Codex", response.result, input.uiDecisions ?? []);
     }
     const saved = await promoteCodexPlan({
       artifact,
@@ -2265,7 +2364,13 @@ async function main(raw) {
             `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
             `--source "${planFile}"`,
             `--target "${integratedPath}"`,
-            `--expect "${planExpect}"`
+            `--expect "${planExpect}"`,
+            // This round's interface review is already in the accumulator, and
+            // the sidecar beside planFile predates it. Copying that file would
+            // publish the pass's finished plan next to a record missing the
+            // findings the round just collected, and no revision runs after a
+            // clean round to put them back.
+            ...uiDecisionsArg(uiDecisions)
           ].join(" "),
           label: `plan:publish-approved-round:${round}`,
           phaseName: `Cross-review ${round}`,
@@ -2363,6 +2468,12 @@ async function main(raw) {
         ...(claudeReview?.open_questions ?? []),
         ...(codexReview?.open_questions ?? [])
       ]);
+      // The whole accumulator, because that is what persist() fenced above. The
+      // Codex branch is checked against a narrower set for the same reason: it
+      // is given a narrower one. Once every path enforces this the two hold the
+      // same ids, but matching the fence is what makes each check safe without
+      // relying on that.
+      if (uiEnabled) requireCarriedUiDecisions("Claude", result, dedupeDecisions(uiDecisions));
       const savedWork = await recordPlanFile({
         file: revisionWorkPath,
         receipt: result,
@@ -2385,18 +2496,11 @@ async function main(raw) {
           // carry-forward check just cleared, so a retry cannot publish the
           // interrupted attempt's questions.
           //
-          // The `.ui-decisions.json` beside it is deliberately not bound the
-          // same way, and this is the note saying so rather than an oversight.
-          // Binding a sidecar to a returned field requires the prompt and a
-          // check to already agree on what that field holds, and for interface
-          // decisions on this path they do not: requireCarriedUiDecisions runs
-          // only on the Codex branches, so nothing establishes whether a Claude
-          // revision's ui_decisions are the carried set plus new ones or only
-          // the new ones. Asserting against it here would fail well-behaved
-          // runs, which is exactly how the question version of this went wrong
-          // the first time. Extending the carry-forward guarantee to interface
-          // decisions comes first; the binding is the step after it.
-          `--expect-questions ${jsonHex(result.open_questions ?? [])}`
+          `--expect-questions ${jsonHex(result.open_questions ?? [])}`,
+          // The interface record is written rather than bound: this revision's
+          // own declarations are not pushed into the accumulator until after
+          // this publication, so the union is taken here.
+          ...uiDecisionsArg([...uiDecisions, ...(result.ui_decisions ?? [])])
         ].join(" "),
         label: `plan:publish-revision:${round}`,
         phaseName: `Cross-review ${round}`,
@@ -2466,7 +2570,7 @@ async function main(raw) {
         ...(codexReview?.open_questions ?? [])
       ]);
       if (uiEnabled) {
-        requireCarriedUiDecisions(response.result, [
+        requireCarriedUiDecisions("Codex", response.result, [
           ...(carriedDraft.ui_decisions ?? []),
           ...(uiReview?.ui_decisions ?? [])
         ]);
@@ -2500,6 +2604,10 @@ async function main(raw) {
   const planOutcome = ({
     status, openQuestions, questionsPath, manifest = null, prTrain = null,
     manifestPath: savedManifestPath = null, prTrainPath: savedTrainPath = null,
+    // What settleUiDecisions produced. Defaulted to this pass's own memory so
+    // an exit that returns before settlement still reports a usable shape.
+    settledUiDecisions = dedupeDecisions(uiDecisions),
+    uiDecisionsSettled = false,
     ...rest
   }) => ({
     runPolicy,
@@ -2532,8 +2640,14 @@ async function main(raw) {
     // Everything the plan decided about surfaces, and the subset the configured
     // policy says is worth interrupting a person for. The full set travels so a
     // resumed pass keeps decisions the policy did not surface.
-    uiDecisions: dedupeDecisions(uiDecisions),
-    uiDecisionsToConfirm: decisionsToConfirm(dedupeDecisions(uiDecisions), uiPolicy),
+    uiDecisions: settledUiDecisions,
+    uiDecisionsToConfirm: decisionsToConfirm(settledUiDecisions, uiPolicy),
+    // Whether the two lines above are the record or this pass's memory of it.
+    // `uiDecisionsPath` is always the record; when this is false the merge reply
+    // did not survive the relay, and a decision the file names that
+    // `uiDecisions` does not is one this pass will not ask about. Nothing is
+    // lost either way — the file was written before the reply was lost.
+    uiDecisionsSettled,
     uiPolicy,
     reviews,
     passId,
@@ -2614,6 +2728,44 @@ async function main(raw) {
     return { finalQuestions: merged.questions, finalQuestionsPath: file };
   };
 
+  // The same normalization for the interface record, and for the same reason.
+  // Reviewers are read-only and only a revision writes a sidecar, so a round
+  // that ends the loop — a clean one, or a divergent one — leaves the interface
+  // lens's findings in memory and in no file. The next pass is seeded from the
+  // file, so they would stop existing at the pass boundary.
+  //
+  // Run whenever this repository has an interface, including when the pass
+  // declared nothing. Skipping the empty case would save a call and leave a
+  // record that could not be read unreadable for the next pass to be handed
+  // nothing for again, which is a state that never repairs itself.
+  const settleUiDecisions = async (phaseName) => {
+    if (!uiEnabled) return { uiDecisions: dedupeDecisions(uiDecisions), settled: false };
+    const file = `${draft.plan_path}.ui-decisions.json`;
+    const merged = await mergeFinalUiDecisions({
+      command: [
+        `node "${input.pluginRoot}/scripts/merge-plan-ui-decisions.mjs"`,
+        `"${file}"`,
+        `"${jsonHex(dedupeDecisions(uiDecisions))}"`
+      ].join(" "),
+      label: "plan:merge-final-ui-decisions",
+      phase: phaseName,
+      model: relayModel,
+      file
+    });
+    if (merged.quarantined) {
+      log(`The interface record beside this plan could not be read, so it was set aside at ${merged.quarantined} and rewritten from what this pass collected. Nothing was overwritten; the original bytes are still there if a decision needs recovering by hand.`);
+    }
+    // A lost list costs the confirmation surface and nothing else: the file was
+    // written either way, and what was merged into it is exactly this memory.
+    // The flag is what lets the command tell the two apart, because a decision
+    // can be in the file and not in memory — the fresh draft writes its own
+    // sidecar and nothing binds that file to what it returned.
+    return {
+      uiDecisions: merged.uiDecisions ?? dedupeDecisions(uiDecisions),
+      settled: merged.uiDecisions !== null
+    };
+  };
+
   // A pass that stopped itself does not buy a re-read: the issues it is holding
   // are the ones it already knows a revision would not have reduced, and the
   // cheapest true thing it can do is hand them over. `draft.plan_path` is the
@@ -2621,7 +2773,10 @@ async function main(raw) {
   // rather than trusting a plan nothing cleared.
   if (diverged) {
     const settled = await settleQuestions(reviewQuestions, `Cross-review ${diverged.round}`);
+    const settledUi = await settleUiDecisions(`Cross-review ${diverged.round}`);
     return planOutcome({
+      settledUiDecisions: settledUi.uiDecisions,
+      uiDecisionsSettled: settledUi.settled,
       status: "needs-plan-revision",
       unresolvedIssues,
       divergedFrom: diverged,
@@ -2720,7 +2875,10 @@ async function main(raw) {
     if (stillOpen.length) {
       log(`The last plan revision left ${stillOpen.length} blocking or major critique${stillOpen.length === 1 ? "" : "s"} unresolved, so this pass stopped before the manifest rather than decomposing a plan with a known hole.`);
       const settled = await settleQuestions(reviewQuestions, "Revision check");
+      const settledUi = await settleUiDecisions("Revision check");
       return planOutcome({
+        settledUiDecisions: settledUi.uiDecisions,
+        uiDecisionsSettled: settledUi.settled,
         status: "needs-plan-revision",
         unresolvedIssues: stillOpen,
         revisionCheck,
@@ -2744,7 +2902,8 @@ async function main(raw) {
         `node "${input.pluginRoot}/scripts/stage-plan-continuation.mjs" publish`,
         `--source "${draft.plan_path}"`,
         `--target "${integratedPath}"`,
-        `--expect "${planExpect}"`
+        `--expect "${planExpect}"`,
+        ...uiDecisionsArg(uiDecisions)
       ].join(" "),
       label: "plan:publish-cleared-revision",
       phaseName: "Revision check",
@@ -2782,7 +2941,10 @@ async function main(raw) {
     if (entryLint.gating.length) {
       log(`This pass ran no cross-review round, and the plan it would decompose has ${entryLint.gating.length} defect${entryLint.gating.length === 1 ? "" : "s"} that need no judgment, so it stopped before the manifest: ${entryLint.gating.map((issue) => issue.title).join("; ")}.`);
       const settled = await settleQuestions(reviewQuestions, "Plan check");
+      const settledUi = await settleUiDecisions("Plan check");
       return planOutcome({
+        settledUiDecisions: settledUi.uiDecisions,
+        uiDecisionsSettled: settledUi.settled,
         status: "needs-plan-revision",
         unresolvedIssues: entryLint.gating,
         revisionCheck: null,
@@ -3053,6 +3215,7 @@ async function main(raw) {
     });
   }
   const settled = await settleQuestions([...reviewQuestions, ...(decompositionReview.open_questions ?? [])], "PR train");
+  const settledUi = await settleUiDecisions("PR train");
 
   // The deterministic findings come first because they are the certain ones:
   // they were decided from the manifest and the train, not argued from them, and
@@ -3074,6 +3237,8 @@ async function main(raw) {
   const questionsOutstanding =
     settled.finalQuestions === null || settled.finalQuestions.length > 0;
   return planOutcome({
+    settledUiDecisions: settledUi.uiDecisions,
+    uiDecisionsSettled: settledUi.settled,
     // An unready handoff still outranks the questions: a plan whose manifest and
     // train do not hold up is not one to be answering questions about yet.
     status: !handoffReady

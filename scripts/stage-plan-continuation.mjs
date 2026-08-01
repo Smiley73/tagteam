@@ -21,7 +21,7 @@ import { verifyPayloads } from "./verify-payload.mjs";
 function parseArgs(argv) {
   const [action, ...rest] = argv;
   if (!["prepare", "publish"].includes(action)) {
-    throw new Error("usage: stage-plan-continuation.mjs <prepare|publish> --source <path> --target <path> --expect <length:checksum> [--receipt continuation|none] [--expect-questions <hex>]");
+    throw new Error("usage: stage-plan-continuation.mjs <prepare|publish> --source <path> --target <path> --expect <length:checksum> [--receipt continuation|none] [--expect-questions <hex>] [--ui-decisions <hex>]");
   }
   const options = { action };
   for (let index = 0; index < rest.length; index += 2) {
@@ -99,7 +99,34 @@ function questionSet(value) {
   return new Set(value.map((question) => String(question).trim().toLocaleLowerCase().replace(/\s+/g, " ")));
 }
 
-function publish({ source, target, expect, expectQuestions, receipt }) {
+// The interface record this publication intends to leave, as bytes. The
+// workflow supplies the set its carry-forward check just cleared, so the record
+// beside a published plan is written from a checked array rather than copied
+// from whatever a model left at the working path — which, because that path is
+// derived from the pass and round, may belong to an interrupted attempt.
+function uiDecisionBytes(hex) {
+  const decoded = JSON.parse(Buffer.from(hex, "hex").toString("utf8"));
+  if (!Array.isArray(decoded)) throw new Error("interface decisions must be a JSON array");
+  for (const decision of decoded) {
+    if (!decision || typeof decision !== "object" || Array.isArray(decision)
+      || typeof decision.id !== "string" || !decision.id.trim()) {
+      throw new Error("every interface decision must be an object with a non-empty id");
+    }
+  }
+  return Buffer.from(`${JSON.stringify(decoded, null, 2)}\n`, "utf8");
+}
+
+// True when the file already holds exactly what this publication would leave
+// there, absence included.
+function alreadyHolds(file, bytes) {
+  if (!fs.existsSync(file)) return bytes === null;
+  return bytes !== null && fs.readFileSync(file).equals(bytes);
+}
+
+function publish({ source, target, expect, expectQuestions, uiDecisions, receipt }) {
+  // Argument validation before anything else: a publication that cannot even be
+  // described must not clear a plan on its way to failing.
+  const declaredUiDecisions = uiDecisions === undefined ? null : uiDecisionBytes(uiDecisions);
   const plan = readPlan(source, expect);
   const sourceQuestions = `${plan.resolved}.questions.json`;
   assertResumeRecord(sourceQuestions);
@@ -122,8 +149,22 @@ function publish({ source, target, expect, expectQuestions, receipt }) {
     }
   }
   const sourceUiDecisions = `${plan.resolved}.ui-decisions.json`;
-  const targetUiDecisions = `${path.resolve(target)}.ui-decisions.json`;
-  const targetReceipt = `${path.resolve(target)}.continuation-receipt.json`;
+  const resolvedTarget = path.resolve(target);
+  const targetUiDecisions = `${resolvedTarget}.ui-decisions.json`;
+  const targetReceipt = `${resolvedTarget}.continuation-receipt.json`;
+  // Everything this publication would leave beside the plan. Null means the file
+  // must not be there: a stale receipt from an earlier continuation would
+  // outlive the plan it was evidence about, and so would an interface record
+  // for a plan that no longer declares one.
+  const intendedUiDecisions = () => {
+    if (declaredUiDecisions) return declaredUiDecisions;
+    if (!fs.existsSync(sourceUiDecisions)) return null;
+    assertResumeRecord(sourceUiDecisions);
+    return fs.readFileSync(sourceUiDecisions);
+  };
+  const intendedReceipt = receipt === "continuation"
+    ? Buffer.from(`${JSON.stringify({ version: 1, planToken: expect }, null, 2)}\n`, "utf8")
+    : null;
 
   // A target that already holds a plan is a publication that finished, because
   // the plan is written last. When it holds different bytes, it is removed
@@ -132,31 +173,46 @@ function publish({ source, target, expect, expectQuestions, receipt }) {
   // which is a pair no reader can tell is wrong. Resume selects a round by the
   // plan file, so "not published yet" is a state it already handles.
   //
-  // Nothing has been traced that publishes different bytes over a finished
-  // target — resume re-runs a round only when its plan is absent, and a relay
-  // retry repeats the same source and token. That is a property of two other
-  // components agreeing rather than of this script, so it is enforced here too.
-  const resolvedTarget = path.resolve(target);
-  if (fs.existsSync(resolvedTarget) && !fs.readFileSync(resolvedTarget).equals(plan.raw)) {
+  // An identical plan used to be left in place while the sidecars beside it were
+  // replaced one at a time, on the reasoning that identical bytes mean a relay
+  // retry of the same command. That is false: a same-pass resume from an
+  // integrated continuation redrafts against the same seed and republishes here,
+  // and targeted edits can reproduce the plan byte for byte while the decisions
+  // beside it differ. So the retention is conditional on the whole publication
+  // being a no-op. When it is, nothing is written at all; when it is not, this
+  // is a superseding publication that happens to share plan bytes, and it takes
+  // the ordinary path.
+  const sidecars = [
+    [`${resolvedTarget}.questions.json`, questions],
+    [targetUiDecisions, null],
+    [targetReceipt, intendedReceipt]
+  ];
+  const planPresent = fs.existsSync(resolvedTarget);
+  if (planPresent && fs.readFileSync(resolvedTarget).equals(plan.raw)) {
+    // Reading the source interface record can fail, and on this branch it does
+    // so before anything has been touched: there is a plan here worth keeping
+    // and this publication was going to leave it exactly as it is.
+    sidecars[1][1] = intendedUiDecisions();
+    if (sidecars.every(([file, bytes]) => alreadyHolds(file, bytes))) {
+      return verifyPayloads({
+        payloads: [{ name: "DRAFT_PLAN", file: resolvedTarget, json: false }],
+        expects: new Map([["DRAFT_PLAN", expect]]),
+        requireJson: [`${resolvedTarget}.questions.json`]
+      });
+    }
     fs.unlinkSync(resolvedTarget);
+  } else {
+    // A plan being superseded goes first, so a failure below leaves no plan
+    // rather than the old one beside this step's sidecars.
+    if (planPresent) fs.unlinkSync(resolvedTarget);
+    sidecars[1][1] = intendedUiDecisions();
   }
 
   // The plan name is the discoverability boundary. Sidecars may be harmless
   // orphans after a crash, but the final plan never appears without questions.
-  writeAtomic(`${target}.questions.json`, questions);
-  if (fs.existsSync(sourceUiDecisions)) {
-    assertResumeRecord(sourceUiDecisions);
-    writeAtomic(targetUiDecisions, fs.readFileSync(sourceUiDecisions));
-  } else if (fs.existsSync(targetUiDecisions)) {
-    fs.unlinkSync(targetUiDecisions);
-  }
-  // A stale receipt from an earlier continuation at this path would outlive the
-  // plan it described, so the non-continuation case removes it rather than
-  // leaving it to be read as evidence about the bytes published now.
-  if (receipt === "continuation") {
-    writeAtomic(targetReceipt, `${JSON.stringify({ version: 1, planToken: expect }, null, 2)}\n`);
-  } else if (fs.existsSync(targetReceipt)) {
-    fs.unlinkSync(targetReceipt);
+  for (const [file, bytes] of sidecars) {
+    if (bytes !== null) writeAtomic(file, bytes);
+    else if (fs.existsSync(file)) fs.unlinkSync(file);
   }
   const published = writeAtomic(target, plan.raw);
   return verifyPayloads({
