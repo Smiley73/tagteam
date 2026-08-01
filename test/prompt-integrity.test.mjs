@@ -511,6 +511,29 @@ test("a Claude continuation may not drop a carried question its decisions never 
   assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
 });
 
+// The reason round revisions publish through the staging script rather than
+// writing the round input directly. The check stops the pass either way; what
+// it could not do before was stop the drop from outliving it, because the
+// drafter had already written the shortened sidecar to the exact path a resume
+// reads.
+test("a revision that drops a question leaves no round input for a resume to trust", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-revision-dropped-"));
+  const { result } = await forge({
+    planDir,
+    // Round one leaves something gating, so a revision runs, and raises a
+    // question the revision is then required to carry. The drafter stub returns
+    // no questions at all, so it drops it.
+    review: (label) => (label.endsWith("review:1")
+      ? { ...REVISE, open_questions: ["Who owns rollback?"] }
+      : APPROVE)
+  });
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /Claude plan result dropped 1 unresolved carried question/);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md")), false);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md.questions.json")), false);
+});
+
 test("a completed pass leaves a resumable integrated draft matching the returned receipt", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-integrated-"));
   const { result } = await forge({ planDir });
@@ -564,10 +587,15 @@ test("a revision saved short stops that round instead of the next one", async ()
   });
   assert.equal(result.status, "plan-interrupted");
   assert.match(result.message.split("\n")[0], /The plan revised in round 1 was not saved as the text this run produced/);
-  // A revision always writes the next round's input now. Only a check that
-  // cleared it publishes the integrated plan, so an interrupted pass leaves a
-  // round input for resume to review rather than a finished plan to trust.
-  assert.match(result.message, /pass-1-round-2-input\.md/);
+  // The short write is caught on the working copy under reviews/, which resume
+  // does not discover.
+  assert.match(result.message, /pass-1-round-1-revision-work\.md/);
+  // And the round input it would have been published to does not exist. That is
+  // the property: a plan a model wrote becomes discoverable only after the
+  // checks that guard it pass, so a failed check cannot leave a bad plan — or a
+  // sidecar missing a question — exactly where the next resume reads.
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md")), false);
+  assert.equal(fs.existsSync(path.join(planDir, "drafts/pass-1-round-2-input.md.questions.json")), false);
   // Nothing downstream of the bad write ran: the manifest was never parsed and no
   // cross-check request exists.
   assert.equal(fs.existsSync(path.join(planDir, "reviews/pass-1-manifest.json")), false);
