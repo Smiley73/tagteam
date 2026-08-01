@@ -85,6 +85,36 @@ test("a configuration claiming the current version must carry the answers that v
   }
 });
 
+// A key the plan forge consumes but init never collects ships implemented,
+// documented, and off in every repository. Both of these turn a rule a model
+// reads into a rule code checks, so being off by default is the failure mode
+// they exist to prevent, and the example file claims to be complete.
+test("init collects the enforcement keys the plan forge reads, and the example carries them", () => {
+  const init = fs.readFileSync(path.join(root, "commands/init.md"), "utf8");
+  const forge = fs.readFileSync(path.join(root, "workflows/plan-forge.js"), "utf8");
+  const config = example();
+
+  // Bound to the expression that reads the key, not to the word: the forge also
+  // names `canonicalStrings` inside a log message, and a grep for the word alone
+  // would go on passing after the read itself was deleted.
+  for (const [key, read] of [
+    ["prTrain.prSize.repoHardCapLines", "config.prTrain.prSize.repoHardCapLines ?? null"],
+    ["planning.canonicalStrings", "config.planning.canonicalStrings ?? []"]
+  ]) {
+    assert.ok(forge.includes(read), `workflows/plan-forge.js must read ${key} as \`${read}\``);
+    assert.match(init, new RegExp(key.replace(/\./g, "\\.")), `commands/init.md must ask for ${key}`);
+  }
+
+  assert.ok(Number.isInteger(config.prTrain.prSize.repoHardCapLines));
+  assert.ok(config.planning.canonicalStrings?.length);
+  // A finding that cannot name the document it enforces reads as tagteam's own
+  // opinion, so the example shows the note being written.
+  for (const row of config.planning.canonicalStrings) {
+    assert.ok(row.wrong && row.right && row.note);
+    assert.notEqual(row.wrong, row.right);
+  }
+});
+
 test("an invalid configuration is still rejected outright and never mistaken for a stale one", () => {
   const config = example();
   config.ui.gateOnUserVisible = false;

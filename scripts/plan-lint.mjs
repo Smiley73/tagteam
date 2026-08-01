@@ -157,6 +157,23 @@ function sectionIssues(text) {
   )];
 }
 
+// A character no policy document carries, rather than a space: a run of spaces is
+// text a substitution could plausibly be looking for, and the mask must not be
+// able to answer the search it exists to suppress.
+const CANONICAL_MASK = String.fromCharCode(0);
+
+// The required text usually contains the substitution it replaces — "N/A" inside
+// "N/A — no user-facing change", "66 -> 67" inside a sentence that also gets the
+// glyph right — so a bare search for the wrong form reports text that is already
+// correct, and no rewrite can satisfy the finding. Every occurrence of the right
+// form is masked out before the search, and the mask keeps the length and the
+// line breaks of what it replaces so a reported line number still points where it
+// did.
+function maskCanonical(text, right) {
+  if (!right || !text.includes(right)) return text;
+  return text.split(right).join(right.replace(/[^\n]/g, CANONICAL_MASK));
+}
+
 // Copy a repository's own documents specify has to be reproduced character for
 // character, and the substitution that breaks it is always the same shape: an
 // ASCII stand-in for a glyph. Configured per repository, checked here so it costs
@@ -166,15 +183,23 @@ function canonicalStringIssues(text, canonicalStrings) {
   for (const entry of canonicalStrings ?? []) {
     const wrong = String(entry?.wrong ?? "");
     const right = String(entry?.right ?? "");
-    if (!wrong || !right || !text.includes(wrong)) continue;
-    const lines = text.split("\n")
+    if (!wrong || !right) continue;
+    const masked = maskCanonical(text, right);
+    if (!masked.includes(wrong)) continue;
+    const lines = masked.split("\n")
       .map((line, index) => (line.includes(wrong) ? index + 1 : null))
       .filter(Boolean);
+    // A substitution that spans a line break sits on no single line, so the
+    // clause that would name one is dropped rather than emitted empty. The
+    // finding still fires; it just points at the document instead of a line.
+    const where = lines.length
+      ? ` Lines ${lines.slice(0, 10).join(", ")}${lines.length > 10 ? `, and ${lines.length - 10} more` : ""}.`
+      : "";
     issues.push(issue(
       "blocking",
       `The plan writes ${JSON.stringify(wrong)} where the contract requires ${JSON.stringify(right)}`,
       [
-        `Replace every occurrence. Lines ${lines.slice(0, 10).join(", ")}${lines.length > 10 ? `, and ${lines.length - 10} more` : ""}.`,
+        `Replace every occurrence.${where}`,
         entry?.note ? String(entry.note) : "Copy a policy document specifies is reproduced character for character."
       ].join(" ")
     ));
@@ -511,6 +536,69 @@ function altitudeIssues(planChars, train) {
   )];
 }
 
+// The strings a JSON document carries, as text rather than as a serialization of
+// itself. Searching `JSON.stringify(task)` instead would answer a different
+// question in two ways that both fail silently: a substitution naming a quote, a
+// backslash, or a tab could never match, because stringify escapes exactly those;
+// and a substitution naming an ordinary word could match a schema key name that
+// no implementer ever reads. Values only, so a key is never mistaken for content.
+function stringValuesOf(value, into = []) {
+  if (typeof value === "string") into.push(value);
+  else if (Array.isArray(value)) for (const item of value) stringValuesOf(item, into);
+  else if (value && typeof value === "object") for (const item of Object.values(value)) stringValuesOf(item, into);
+  return into;
+}
+
+// Everything either document says, labelled by whatever an implementer can act
+// on. A task or pull-request id is that label wherever one exists, and a line
+// number in generated JSON is not; the manifest's goal and the train's own header
+// belong to no id, so they are named as themselves rather than skipped.
+// A malformed document reaches every other check here as a finding rather than
+// as a crash — `tasks` that is not a list leaves its tasks in no pull request,
+// which is a sentence somebody can act on. This one is walked the same way, so
+// the same input keeps producing that sentence.
+function handoffCarriers(manifest, train) {
+  const { tasks: manifestTasks, ...manifestHeader } = manifest ?? {};
+  const { prs: trainPullRequests, ...trainHeader } = train ?? {};
+  const tasks = Array.isArray(manifestTasks) ? manifestTasks : [];
+  const pullRequests = Array.isArray(trainPullRequests) ? trainPullRequests : [];
+  return [
+    ...tasks.map((task) => ({ label: `manifest task ${task?.id ?? "(unidentified)"}`, value: task })),
+    ...pullRequests.map((pullRequest) => ({ label: `pull request ${pullRequest?.id ?? "(unidentified)"}`, value: pullRequest })),
+    { label: "the manifest outside its tasks", value: manifestHeader },
+    { label: "the train outside its pull requests", value: trainHeader }
+  ];
+}
+
+// Same contract as canonicalStringIssues, applied to the manifest and train: the
+// artifacts an implementer actually follows, and where a repository's own tests
+// parse the exact wording literally. The one difference is what each reads — the
+// plan check reads the normalized document, this one reads raw string values — so
+// a substitution whose wrong form ends in whitespace can be found here and not
+// there. Configure those without the trailing whitespace.
+function handoffCanonicalStringIssues(manifest, train, canonicalStrings) {
+  const carriers = handoffCarriers(manifest, train);
+  const issues = [];
+  for (const entry of canonicalStrings ?? []) {
+    const wrong = String(entry?.wrong ?? "");
+    const right = String(entry?.right ?? "");
+    if (!wrong || !right) continue;
+    const hits = carriers
+      .filter((carrier) => stringValuesOf(carrier.value).some((text) => maskCanonical(text, right).includes(wrong)))
+      .map((carrier) => carrier.label);
+    if (!hits.length) continue;
+    issues.push(issue(
+      "blocking",
+      `The manifest or pull-request train writes ${JSON.stringify(wrong)} where the contract requires ${JSON.stringify(right)}`,
+      [
+        `Replace every occurrence, in: ${hits.join("; ")}.`,
+        entry?.note ? String(entry.note) : "Copy a policy document specifies is reproduced character for character."
+      ].join(" ")
+    ));
+  }
+  return issues;
+}
+
 function manifestIssues(manifest) {
   const tasks = taskIndex(manifest);
   const dangling = [];
@@ -531,7 +619,7 @@ function manifestIssues(manifest) {
   return issues;
 }
 
-export function lintHandoff({ manifest, train, planChars = 0, capLines = null }) {
+export function lintHandoff({ manifest, train, planChars = 0, capLines = null, canonicalStrings = [] }) {
   const coverage = coverageIssues(manifest, train);
   return [
     ...manifestIssues(manifest),
@@ -541,7 +629,8 @@ export function lintHandoff({ manifest, train, planChars = 0, capLines = null })
     ...fileListIssues(manifest, train),
     ...sizeIssues(train, capLines),
     ...splitIssues(train, capLines),
-    ...altitudeIssues(planChars, train)
+    ...altitudeIssues(planChars, train),
+    ...handoffCanonicalStringIssues(manifest, train, canonicalStrings)
   ];
 }
 
@@ -628,7 +717,8 @@ export function planLint({
       manifest: manifestFile.value,
       train: trainFile.value,
       planChars,
-      capLines
+      capLines,
+      canonicalStrings
     }));
     // The per-pull-request file lists, computed rather than authored. A caller
     // that wants to show them has them here, so nothing downstream has to write

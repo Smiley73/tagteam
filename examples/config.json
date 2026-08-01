@@ -5,13 +5,25 @@
     "claude": { "model": "opus", "effort": "xhigh" },
     "codex": { "model": "gpt-5.6-sol", "effort": "high" },
     "reviewRounds": 2,
-    "largePlanWarningChars": 100000
+    "largePlanWarningChars": 100000,
+    "canonicalStrings": [
+      {
+        "wrong": "N/A - no user-facing change",
+        "right": "N/A — no user-facing change",
+        "note": "docs/coding-standards.md pins the em dash in this checkbox."
+      },
+      {
+        "wrong": "ENGINE_VERSION 66 -> 67",
+        "right": "ENGINE_VERSION 66 → 67",
+        "note": "CONTRIBUTING.md pins the arrow glyph; a contract test parses this exact phrasing."
+      }
+    ]
   },
   "prTrain": {
     "enabled": true,
     "base": null,
     "mode": "github-pr",
-    "prSize": { "guidance": "~400 changed lines", "enforce": false },
+    "prSize": { "guidance": "~400 changed lines", "enforce": false, "repoHardCapLines": 600 },
     "branchPrefix": "tagteam/",
     "mergeStrategy": "squash",
     "pauseOn": ["ui"],

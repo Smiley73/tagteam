@@ -60,12 +60,20 @@ Show the current choices and ask whether to keep or edit them. Keeping every cho
 - maximum concurrent Codex subprocesses (suggest 3 independently of implementation concurrency).
 - the three interface questions below.
 - `policyPaths` — the question below.
+- `prTrain.prSize.repoHardCapLines` and `planning.canonicalStrings` — the two questions below, asked right after it.
 
 ### The repository's own rules
 
 Ask for `policyPaths`: which documents state this repository's engineering rules — the contributing guide, coding standards, `AGENTS.md`, or whatever the project calls them. Require repository-relative non-traversing paths that exist and name a file, not a directory: the prompts built from this list tell a model to read those documents, and a directory leaves it guessing which one is authoritative. List each document. An empty list is honest and allowed.
 
 Say what the answer buys, in plain terms: every planning step reads those documents and treats their rules as binding, so a hard limit on pull-request size, a set of edits that must land together, a required setup step, or exact required wording is respected in the first draft instead of being found by a review round later. Say plainly that this is a different question from `prTrain.prSize`, which is only tagteam's own preference and never blocks anything — tagteam having no opinion about size is not the same as the repository having no limit, and conflating the two is the specific mistake this key exists to prevent.
+
+### The two rules worth checking rather than reading
+
+Ask these two immediately after `policyPaths`, while the user still has those documents in mind. `policyPaths` makes a rule readable by a model, which is probabilistic; these two make the same rule checkable in code, which is certain, and the check runs before a reviewer is paid rather than as part of one. Say that, in the same register as the sentence above. Both answers are optional, and a blank one is an answer rather than a gap.
+
+1. `prTrain.prSize.repoHardCapLines` — “Do your standards set a maximum number of changed lines per pull request? A number here is checked by arithmetic every round; leaving it blank means the limit is only ever reviewed for.” Accept a positive whole number, or blank. On blank, omit the key entirely rather than writing a zero or a null. Do not offer tagteam's own `prTrain.prSize.guidance` as a default for it: that is tagteam's preference and this is the repository's rule, and copying one into the other is how a preference becomes a cap nobody agreed to.
+2. `planning.canonicalStrings` — “Is there wording your documents require character for character — a marker a test parses, a checkbox phrase, a transition tag? The usual failure is an ASCII stand-in for a glyph.” Collect rows of `{wrong, right, note}`: the substitution that gets written, the text the contract requires, and one line naming the document it came from. Ask for the note; a finding that cannot say which document it enforces reads as tagteam's opinion. Where the user has no note, omit the `note` key rather than writing an empty string, which is rejected outright. An empty list is valid, and on an empty answer write the key as `[]` rather than leaving it out: an absent key is what planning reads as nobody having been asked, and it is what makes it say so once per run. Say that these are checked against the plan, the task manifest, and the pull-request train alike, because the manifest and the train are what an implementer follows and what a repository's own tests parse literally.
 
 ### Interface questions
 

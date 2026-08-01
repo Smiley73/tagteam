@@ -181,6 +181,121 @@ test("an atomic group split across pull requests blocks", () => {
   assert.match(issues[0].title, /Atomic group payload-shape/);
 });
 
+// The plan document is prose a person reads; the manifest's done criteria and the
+// train's scopes are what an implementer follows and what a repository's own tests
+// parse literally. A real run put every violation in the second pair while the plan
+// itself was perfect, so checking only the plan clears the artifact that cannot be
+// wrong and ships the two that are.
+test("a required glyph written as its ASCII substitute blocks in the manifest and the train, not only in the plan", () => {
+  const canonicalStrings = [{ wrong: "ENGINE_VERSION 66 -> 67", right: "ENGINE_VERSION 66 → 67", note: "AGENTS.md pins the arrow glyph." }];
+
+  const clean = {
+    ...manifest,
+    tasks: manifest.tasks.map((task) => ({ ...task, doneCriteria: ["ENGINE_VERSION 66 → 67 in the version table"] }))
+  };
+  assert.deepEqual(lintHandoff({ manifest: clean, train: train(), canonicalStrings }), []);
+
+  const substituted = {
+    ...manifest,
+    tasks: manifest.tasks.map((task, index) => (index === 0
+      ? { ...task, doneCriteria: ["ENGINE_VERSION 66 -> 67 in the version table"] }
+      : task))
+  };
+  const authored = train();
+  authored.prs[1].scope = "Bump ENGINE_VERSION 66 -> 67 and update the fixtures.";
+
+  const issues = lintHandoff({ manifest: substituted, train: authored, canonicalStrings });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].severity, "blocking");
+  // Reported against the ids that carry it: a line number in generated JSON is
+  // not something a repair pass can act on.
+  assert.match(issues[0].detail, /t1/);
+  assert.match(issues[0].detail, /pr2/);
+  assert.match(issues[0].detail, /AGENTS\.md/);
+});
+
+// A substitution naming a quote, a backslash, or a tab is ordinary — a checkbox
+// phrase, a marker with an escape in it — and searching a serialization of the
+// manifest instead of its content would match none of them while reporting
+// nothing at all. The plan side and the handoff side have to agree about the same
+// text, so each case is asserted against both.
+test("a substitution naming a character JSON escapes is found in the manifest, not silently skipped", () => {
+  for (const wrong of ['the "Ready" checkbox', "use \\t not a tab", "a\tb", "Step 1\nStep 2"]) {
+    const canonicalStrings = [{ wrong, right: `${wrong} (corrected)` }];
+    const substituted = {
+      ...manifest,
+      tasks: manifest.tasks.map((task, index) => (index === 0 ? { ...task, doneCriteria: [wrong] } : task))
+    };
+    const issues = lintHandoff({ manifest: substituted, train: train(), canonicalStrings });
+    assert.equal(issues.length, 1, `${JSON.stringify(wrong)} must be found in the manifest`);
+    assert.match(issues[0].detail, /manifest task t1/);
+    // And the plan check has to agree, or the two disagree about one string.
+    assert.equal(lintPlanDocument({ text: plan(wrong), canonicalStrings }).length, 1);
+  }
+});
+
+// The required form routinely contains the wrong one — "N/A" inside "N/A — no
+// user-facing change" — and a bare search then reports the text that is already
+// correct. Nothing can satisfy such a finding, so a handoff repair pass would be
+// asked to fix an artifact that is right and would never clear.
+test("text that is already correct is not reported when the right form contains the wrong one", () => {
+  const canonicalStrings = [{ wrong: "N/A", right: "N/A — no user-facing change" }];
+  const correct = {
+    ...manifest,
+    tasks: manifest.tasks.map((task) => ({ ...task, doneCriteria: ["N/A — no user-facing change"] }))
+  };
+  assert.deepEqual(lintHandoff({ manifest: correct, train: train(), canonicalStrings }), []);
+  assert.deepEqual(lintPlanDocument({ text: plan("N/A — no user-facing change"), canonicalStrings }), []);
+
+  // The bare wrong form on its own is still a finding, and the line number the
+  // plan check reports still points at the line that carries it.
+  const bare = { ...correct, tasks: correct.tasks.map((task) => ({ ...task, doneCriteria: ["N/A"] })) };
+  assert.equal(lintHandoff({ manifest: bare, train: train(), canonicalStrings }).length, 1);
+  const planIssues = lintPlanDocument({
+    text: plan("N/A — no user-facing change\n\nN/A"),
+    canonicalStrings
+  });
+  assert.equal(planIssues.length, 1);
+  const body = plan("N/A — no user-facing change\n\nN/A").split("\n");
+  assert.match(planIssues[0].detail, new RegExp(`Lines ${body.lastIndexOf("N/A") + 1}\\b`));
+});
+
+// The manifest's goal and the train's base are prose an implementer reads and
+// belong to no task, so reporting only against ids would skip them entirely.
+test("a substitution in the manifest goal or the train header is found and named as something other than a task", () => {
+  const canonicalStrings = [{ wrong: "66 -> 67", right: "66 → 67", note: "AGENTS.md pins the arrow glyph." }];
+  const headers = train();
+  headers.base = "release/66 -> 67";
+  const issues = lintHandoff({
+    manifest: { ...manifest, goal: "Bump ENGINE_VERSION 66 -> 67 across the tree" },
+    train: headers,
+    canonicalStrings
+  });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].severity, "blocking");
+  assert.match(issues[0].detail, /the manifest outside its tasks/);
+  assert.match(issues[0].detail, /the train outside its pull requests/);
+});
+
+// Every other check here turns a malformed document into a sentence somebody can
+// act on. This one walks the same document, so it must not be what converts that
+// into a stack trace.
+test("a manifest whose tasks are not a list still reports findings rather than throwing", () => {
+  const canonicalStrings = [{ wrong: "66 -> 67", right: "66 → 67" }];
+  const broken = { version: 1, goal: "Bump ENGINE_VERSION 66 -> 67", tasks: "not a list" };
+  const issues = lintHandoff({ manifest: broken, train: train(), canonicalStrings });
+  assert.ok(issues.some((item) => /no manifest task/.test(item.title)));
+  // And the goal is still prose, so the substitution in it is still found.
+  assert.ok(issues.some((item) => /where the contract requires/.test(item.title)));
+});
+
+// The check reads what the documents say, not the schema they say it in, so a
+// row naming an ordinary word cannot be answered by a key name no one reads.
+test("a substitution matching a schema key name is not reported against the key", () => {
+  const canonicalStrings = [{ wrong: "complexity", right: "difficulty" }];
+  assert.deepEqual(lintHandoff({ manifest, train: train(), canonicalStrings }), []);
+});
+
 test("per-pull-request file lists are the sorted union of their tasks' files", () => {
   assert.deepEqual(derivePullRequestFiles(manifest, train()), [
     { id: "pr1", files: ["a.ts", "b.ts"] },
@@ -215,6 +330,31 @@ test("a plan longer than the code it describes is flagged", () => {
   const issues = lintHandoff({ manifest, train: train(), planChars: 40_000 });
   assert.equal(issues.length, 1);
   assert.match(issues[0].title, /longer than the code it describes/);
+});
+
+test("planLint carries the canonical strings into the handoff, not only into the plan", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-canonical-"));
+  const planFile = path.join(directory, "plan.md");
+  const manifestFile = path.join(directory, "manifest.json");
+  const trainFile = path.join(directory, "pr-train.json");
+  // The plan says it correctly and the manifest does not, which is the exact
+  // shape the run that motivated this check produced.
+  fs.writeFileSync(planFile, plan("The tag reads `66 → 67`."), { mode: 0o600 });
+  fs.writeFileSync(manifestFile, JSON.stringify({
+    ...manifest,
+    tasks: manifest.tasks.map((task, index) => (index === 0 ? { ...task, doneCriteria: ["66 -> 67"] } : task))
+  }), { mode: 0o600 });
+  fs.writeFileSync(trainFile, JSON.stringify(train()), { mode: 0o600 });
+
+  const canonicalStrings = [{ wrong: "66 -> 67", right: "66 → 67" }];
+  const result = planLint({ plan: planFile, manifest: manifestFile, train: trainFile, canonicalStrings });
+  assert.equal(result.clean, false);
+  const found = result.issues.filter((item) => /where the contract requires/.test(item.title));
+  assert.equal(found.length, 1);
+  assert.match(found[0].title, /manifest or pull-request train/);
+  assert.match(found[0].detail, /t1/);
+
+  fs.rmSync(directory, { recursive: true, force: true });
 });
 
 test("planLint refuses to report a verdict on bytes other than the ones it was given", () => {
