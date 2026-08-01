@@ -95,6 +95,36 @@ test("order and duplicates in the sidecar are not disagreement", () => {
   assert.equal(fs.existsSync(target), true);
 });
 
+// The plan is written last, so a publication that fails partway leaves sidecars
+// without a plan and resume simply does not select the round. What it must
+// never leave is a plan paired with a sidecar describing different bytes: both
+// files look valid and nothing downstream can tell they disagree.
+test("a publication that fails partway leaves no plan rather than a mismatched pair", () => {
+  const { dir, source, target } = stage();
+  const previous = "# Plan\n\nA different decision, from the attempt before.\n";
+  fs.writeFileSync(target, previous, { mode: 0o600 });
+  fs.writeFileSync(`${target}.questions.json`, JSON.stringify(["Stale question"]), { mode: 0o600 });
+  // Fails after the target is cleared and the questions sidecar is written:
+  // the optional interface sidecar is present but unreadable as a record.
+  fs.writeFileSync(`${source}.ui-decisions.json`, "{ not json", { mode: 0o600 });
+
+  assert.throws(() => publish({ source, target, receipt: "none" }));
+
+  assert.equal(fs.existsSync(target), false, "the superseded plan is still discoverable");
+  assert.equal(fs.existsSync(dir), true);
+});
+
+test("a publication that replaces identical bytes leaves the plan in place", () => {
+  const { source, target } = stage();
+  fs.writeFileSync(target, PLAN, { mode: 0o600 });
+  fs.writeFileSync(`${source}.ui-decisions.json`, "{ not json", { mode: 0o600 });
+
+  // Same bytes: there is nothing to supersede, so a failure downstream of here
+  // must not take the plan with it. A relay retry is exactly this shape.
+  assert.throws(() => publish({ source, target, receipt: "none" }));
+  assert.equal(fs.readFileSync(target, "utf8"), PLAN);
+});
+
 test("a matching sidecar publishes", () => {
   const { source, target } = stage();
   publish({ source, target, receipt: "none", expectQuestions: QUESTIONS });
