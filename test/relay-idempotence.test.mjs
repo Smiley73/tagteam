@@ -1729,6 +1729,55 @@ test("Codex-only revision fails closed instead of dropping a resumable question"
   assert.match(result.message, /dropped 1 unresolved carried question/);
 });
 
+// The Codex half of the crash the carry-forward check was scoped to stop
+// causing: the review restates the carried question in its own words, and the
+// revision returns the one question it was carrying rather than both. Demanding
+// the review's wording back failed that reply, which is the correct one.
+test("Codex-only revision may merge a review's restatement into the question it carries", async () => {
+  const policy = normalizeRunPolicy({ provider: "codex" });
+  const carried = { open_questions: ["Which rollout?"], ui_decisions: [] };
+  const responder = (label, prompt) => {
+    if (label.startsWith("plan:merge-final-questions")) return mergedQuestionsFrom(prompt);
+    if (label.startsWith("plan:verify-")) return verifyResponse(prompt);
+    if (label.startsWith("plan:materialize-")) return PLAN_PAYLOAD;
+    if (label.startsWith("plan:publish-") || label.startsWith("plan:prepare-")) {
+      return publishResponse(label, prompt);
+    }
+    if (label.endsWith(":request") || label.startsWith("plan:review-request")
+      || label.startsWith("plan:decomposition-request")) {
+      return {
+        ok: true,
+        promptPath: "/plans/slug/reviews/codex.prompt.md",
+        promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+        bytes: 4096
+      };
+    }
+    // Both the draft and the revision hold exactly one question: the revision
+    // folded the review's rewording into it instead of carrying two.
+    if (label.startsWith("plan:codex-draft") || label.startsWith("plan:codex-revise")) return carried;
+    if (label.startsWith("plan:codex-manifest")) return MANIFEST;
+    if (label.startsWith("plan:codex-decompose")) return TRAIN;
+    if (label === "plan:codex-review:1") {
+      return { ...REVISE, open_questions: ["Which rollout order ships first?"] };
+    }
+    return APPROVE;
+  };
+  const config = {
+    ...PLAN_CONFIG,
+    ui: { hasUserInterface: false, confirmDecisions: "off", conventionPaths: [] }
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, config, runPolicy: policy },
+    responder
+  );
+
+  assert.equal(result.status, "needs-questions", result.message);
+  // The review's own wording still reaches the human: the workflow collects it
+  // rather than relying on the revision to echo it back.
+  assert.deepEqual(result.openQuestions, ["Which rollout?", "Which rollout order ships first?"]);
+});
+
 test("Codex-only continuation checksum-binds carried questions and interface decisions", async () => {
   const policy = normalizeRunPolicy({ provider: "codex" });
   const uiDecision = {

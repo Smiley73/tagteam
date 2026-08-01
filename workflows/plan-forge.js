@@ -2547,13 +2547,16 @@ async function main(raw) {
         uiReview ? fenced("interface-review", JSON.stringify(uiReview, null, 2)) : "",
         // Said here because a review's questions arrive inside its JSON blob
         // rather than in the carried-questions fence, so "every carried
-        // question" does not reach them on its own. Without it, the
-        // carry-forward check would demand back questions this prompt never
-        // called carried. No exception clause: the check below permits an
-        // omission only for a question a human decision answered, and a round
-        // revision is given no decisions at all, so any softer wording here
-        // would license exactly the reply that ends the pass.
-        "The reviews above raise open questions of their own. Return those in open_questions too, alongside the carried ones.",
+        // question" does not reach them on its own. Asking for them is what
+        // gets a reviewer's question into the plan's own list; merging is
+        // explicitly licensed because a reviewer restating a question the plan
+        // already carries is one question, and returning both would grow the
+        // list by a paraphrase every round. The check below is scoped to the
+        // fenced set precisely so that a merge here is not read as a drop —
+        // which is also why the licence is bounded to a question asking for the
+        // same decision. Nothing downstream can tell a wrong merge from a right
+        // one, so the bar is stated here rather than enforced later.
+        "The reviews above raise open questions of their own. Return those in open_questions too, alongside the carried ones. Where a review restates a question you are already carrying, return the one merged question rather than both; where it asks for any decision the carried one does not, return both.",
         sizeBrief,
         policyBrief,
         uiBrief,
@@ -2572,17 +2575,24 @@ async function main(raw) {
         effort: claude.effort,
         schema: planDraftSchema
       });
+      // Exactly the set persist() fenced as questions-so-far, and nothing else.
       // Checked against the current set rather than the `questions` tally the
-      // prompt carries. The tally never removes anything, so demanding it back
+      // prompt carries: the tally never removes anything, so demanding it back
       // would demand questions earlier rounds already resolved — the same
       // mistake as the tally-vs-sidecar equality check settleQuestions
-      // documents. This revision reads both reviews, so both reviews' questions
-      // are its to resolve or return.
-      requireCarriedQuestions("Claude", result, [
-        ...(draft.open_questions ?? []),
-        ...(claudeReview?.open_questions ?? []),
-        ...(codexReview?.open_questions ?? [])
-      ]);
+      // documents.
+      //
+      // The reviews' own questions used to be demanded back here too, and that
+      // is the same disease one round later: questionKey matches text, so a
+      // reviewer restating a carried question in its own words counts as a
+      // second obligation, and a revision that merged the two — the behaviour
+      // commands/plan.md asks for, matching questions on meaning — was failed
+      // for dropping one. Left in, every round would add another paraphrase
+      // that every later round had to echo verbatim. Nothing is lost by not
+      // checking: `reviewQuestions` collects both reviews' questions in this
+      // loop and settleQuestions merges them into the sidecar at every exit, so
+      // they reach the human whether or not the revision echoed them.
+      requireCarriedQuestions("Claude", result, draft.open_questions ?? []);
       // The whole accumulator, because that is what persist() fenced above. The
       // Codex branch is checked against a narrower set for the same reason: it
       // is given a narrower one. Once every path enforces this the two hold the
@@ -2685,10 +2695,12 @@ async function main(raw) {
         what: `revision of plan round ${round}`,
         resultFromDisk: true
       });
-      requireCarriedQuestions("Codex", response.result, [
-        ...(carriedDraft.open_questions ?? []),
-        ...(codexReview?.open_questions ?? [])
-      ]);
+      // The CARRIED_QUESTIONS fence alone, for the reason the Claude site
+      // records: the review's questions travel to the sidecar through
+      // `reviewQuestions` regardless, and demanding them back verbatim fails a
+      // revision that folded a reviewer's restatement into the question it was
+      // already carrying.
+      requireCarriedQuestions("Codex", response.result, carriedDraft.open_questions ?? []);
       if (uiEnabled) {
         requireCarriedUiDecisions("Codex", response.result, [
           ...(carriedDraft.ui_decisions ?? []),
