@@ -211,11 +211,18 @@ test("CLI: a symlinked additional-decisions file is refused", () => {
   );
 });
 
-test("CLI: --additional-inline carries a bounded set without a file, and the receipt names the exact file and token", () => {
-  const { file } = record(JSON.stringify([decision("export-dialog")]));
+// Writes an additional-decisions file beside a record and returns its path.
+function additional(dir, decisions, name = "additional.json") {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, JSON.stringify(decisions), { mode: 0o600 });
+  return file;
+}
+
+test("CLI: the additional set is named by path, and the receipt names the exact file and token", () => {
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
 
   const stdout = execFileSync("node", [
-    script, file, "--additional-inline", JSON.stringify([decision("nav-entry")])
+    script, file, additional(dir, [decision("nav-entry")])
   ], { encoding: "utf8" });
   const receipt = JSON.parse(stdout);
 
@@ -228,19 +235,37 @@ test("CLI: --additional-inline carries a bounded set without a file, and the rec
   assert.equal(Object.hasOwn(receipt, "uiDecisions"), false);
 });
 
+// The reviewer that raised these decisions persists its own findings, and the
+// Codex path's findings file is its whole review artifact. Accepting that shape
+// is what lets the additional set always be a path: nothing has to rewrite the
+// reviewer's file into a bare array first, and rewriting it would mean a model
+// retyping the very content that must not travel through one.
+test("CLI: an interaction reviewer's own artifact is accepted as the additional set", () => {
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
+  const artifact = path.join(dir, "interaction-codex.json");
+  fs.writeFileSync(artifact, JSON.stringify({
+    issues: [{ severity: "minor", title: "t", detail: "d" }],
+    ui_decisions: [decision("nav-entry")]
+  }), { mode: 0o600 });
+
+  execFileSync("node", [script, file, artifact], { encoding: "utf8" });
+
+  assert.deepEqual(read(file).map((entry) => entry.id), ["export-dialog", "nav-entry"]);
+});
+
 test("CLI: --expect is honored and a mismatch fails closed over the wire, not only in-process", () => {
-  const { file } = record(JSON.stringify([decision("export-dialog")]));
+  const { dir, file } = record(JSON.stringify([decision("export-dialog")]));
   const expect = tokenFor([decision("export-dialog"), decision("nav-entry")]);
 
   const ok = execFileSync("node", [
-    script, file, "--additional-inline", JSON.stringify([decision("nav-entry")]), "--expect", expect
+    script, file, additional(dir, [decision("nav-entry")]), "--expect", expect
   ], { encoding: "utf8" });
   assert.equal(JSON.parse(ok).payloads[0].token, expect);
 
-  const { file: other } = record(JSON.stringify([decision("export-dialog")]));
+  const { dir: otherDir, file: other } = record(JSON.stringify([decision("export-dialog")]));
   assert.throws(
     () => execFileSync("node", [
-      script, other, "--additional-inline", JSON.stringify([decision("nav-entry")]), "--expect", "0:00000000"
+      script, other, additional(otherDir, [decision("nav-entry")]), "--expect", "0:00000000"
     ], { encoding: "utf8", stdio: "pipe" }),
     /does not match what this pass expected/
   );
@@ -251,7 +276,7 @@ test("CLI: --out writes the merged result to a different path than it read from"
   const out = path.join(dir, "elsewhere.json");
 
   const stdout = execFileSync("node", [
-    script, file, "--additional-inline", JSON.stringify([decision("nav-entry")]), "--out", out
+    script, file, additional(dir, [decision("nav-entry")]), "--out", out
   ], { encoding: "utf8" });
   const receipt = JSON.parse(stdout);
 
@@ -260,20 +285,27 @@ test("CLI: --out writes the merged result to a different path than it read from"
   assert.equal(receipt.payloads[0].file, path.resolve(out));
 });
 
-test("CLI: only one of an additional-decisions file or --additional-inline may be given", () => {
+// The unsafe shape is unrepresentable rather than bounded: a single interface
+// decision can outgrow the composition ceiling on its own, so there is no batch
+// size that would make an inline argument safe. A caller built against the old
+// interface is told why rather than left with "unexpected argument".
+test("CLI: --additional-inline is refused outright, naming the reason", () => {
   const { file } = record(JSON.stringify([decision("export-dialog")]));
 
   assert.throws(
-    () => execFileSync("node", [script, file, file, "--additional-inline", "[]"], { encoding: "utf8", stdio: "pipe" }),
-    /only one of/
+    () => execFileSync("node", [
+      script, file, "--additional-inline", JSON.stringify([decision("nav-entry")])
+    ], { encoding: "utf8", stdio: "pipe" }),
+    /--additional-inline was removed; name the additional interface decisions by file path/
   );
+  assert.deepEqual(read(file).map((entry) => entry.id), ["export-dialog"]);
 });
 
 test("CLI: the merged result on disk is bit-for-bit what the receipt describes", () => {
-  const { file } = record(JSON.stringify([decision("export-dialog", "first")]));
+  const { dir, file } = record(JSON.stringify([decision("export-dialog", "first")]));
 
   const stdout = execFileSync("node", [
-    script, file, "--additional-inline", JSON.stringify([decision("export-dialog", "refined"), decision("nav-entry")])
+    script, file, additional(dir, [decision("export-dialog", "refined"), decision("nav-entry")])
   ], { encoding: "utf8" });
   const receipt = JSON.parse(stdout);
   const onDisk = fs.readFileSync(file, "utf8");

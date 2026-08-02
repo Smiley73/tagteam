@@ -174,9 +174,9 @@ process.stdin.on("end", () => {
   assert.equal(result.status, 0, result.stderr);
   const bridge = JSON.parse(result.stdout.trim());
   const requestIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
-    version: 1,
+    version: 2,
     promptHash: `sha256:${createHash("sha256").update("Review the candidate.").digest("hex")}`,
-    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    schemaName: "findings.schema.json",
     model: "gpt-test",
     effort: "high",
     sandbox: "read-only",
@@ -282,10 +282,13 @@ process.stdin.on("end", () => {
   ].join("\n"));
   // The identity still describes only the prompt the workflow wrote, exactly as
   // it does for the review diff, so naming a file cannot silently change it.
+  // The schema travels as its basename: the directory it sits in carries the
+  // plugin version, and an upgrade must not invalidate an artifact whose schema
+  // bytes are unchanged. Its contents are bound by the fingerprint instead.
   assert.equal(JSON.parse(ok.stdout.trim()).requestIdentity, `sha256:${createHash("sha256").update(JSON.stringify({
-    version: 1,
+    version: 2,
     promptHash: `sha256:${createHash("sha256").update("Review the candidate.").digest("hex")}`,
-    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    schemaName: "findings.schema.json",
     model: "gpt-test",
     effort: "high",
     sandbox: "read-only",

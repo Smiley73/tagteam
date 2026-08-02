@@ -29,6 +29,18 @@ export const MANAGED_ENTRIES = [
   { pattern: ".tagteam/**/.quota/", probe: ".tagteam/ships/ship-1/.quota/gpt-high.json" }
 ];
 
+// `/tagteam:init` runs `codegraph init` when the user opts in, which creates
+// `.codegraph/` in the repository root. Its database self-ignores; the
+// directory shell does not, so setup left a new untracked directory behind
+// without saying anything about it. Managed only when the caller passes
+// --codegraph, because a repository that declined the index has no such
+// directory and a rule for one would be a claim about a tool it does not use.
+export const CODEGRAPH_ENTRY = { pattern: ".codegraph/", probe: ".codegraph/graph.db" };
+
+export function managedEntries({ codegraph = false } = {}) {
+  return codegraph ? [...MANAGED_ENTRIES, CODEGRAPH_ENTRY] : [...MANAGED_ENTRIES];
+}
+
 // Committable on purpose: an approved plan is the reviewed record a ship runs
 // from, and the config is how a project pins its own settings.
 export const KEPT_PATHS = [
@@ -40,15 +52,48 @@ export const KEPT_PATHS = [
   ".tagteam/plans/<slug>/approved.json"
 ];
 
-const PATTERNS = new Set(MANAGED_ENTRIES.map((entry) => entry.pattern));
+function block(entries) {
+  return [BEGIN, ...entries.map((entry) => entry.pattern), END];
+}
 
-function block() {
-  return [BEGIN, ...MANAGED_ENTRIES.map((entry) => entry.pattern), END];
+const isComment = (line) => line.trim().startsWith("#");
+
+// A comment the user wrote to introduce rules this run just absorbed into the
+// managed block, and that now sits above something else entirely — the observed
+// case left "# tagteam run state — config and approved plans are committable,
+// the rest is not" describing `coverage/`.
+//
+// The choice here is to leave user comments strictly alone and name them. The
+// alternative — absorbing an immediately-preceding comment along with the rules
+// it introduced — has to guess that the comment was only ever about those
+// rules, and a wrong guess deletes a line a person wrote and cannot get back
+// from this script's output. Reporting costs one line of setup output and
+// leaves the edit to whoever wrote the comment. What was never defensible was
+// doing neither, which is what made it a trap.
+//
+// A comment counts as orphaned when every line of the contiguous non-blank,
+// non-comment run directly beneath it was removed: that run is what it
+// introduced, and nothing of it is left.
+function orphanedComments(lines, removedIndexes) {
+  const orphans = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!isComment(lines[index]) || lines[index] === BEGIN || lines[index] === END) continue;
+    let cursor = index + 1;
+    const run = [];
+    while (cursor < lines.length && lines[cursor].trim() !== "" && !isComment(lines[cursor])) {
+      run.push(cursor);
+      cursor += 1;
+    }
+    if (run.length > 0 && run.every((line) => removedIndexes.has(line))) orphans.push(lines[index].trim());
+  }
+  return orphans;
 }
 
 // Rewrites the managed block and drops loose copies of its patterns that older
 // setups wrote by hand. Lines outside the block are never reordered or edited.
-export function renderGitignore(existing) {
+export function renderGitignore(existing, { codegraph = false } = {}) {
+  const entries = managedEntries({ codegraph });
+  const patterns = new Set(entries.map((entry) => entry.pattern));
   const original = existing ?? "";
   const lines = original.length === 0 ? [] : original.replace(/\n$/, "").split("\n");
   const begin = lines.indexOf(BEGIN);
@@ -58,21 +103,29 @@ export function renderGitignore(existing) {
   const after = managed ? lines.slice(end + 1) : [];
 
   const removed = [];
-  const keep = (line) => {
-    if (!PATTERNS.has(line.trim())) return true;
+  const removedIndexes = new Set();
+  const keep = (offset) => (line, index) => {
+    if (!patterns.has(line.trim())) return true;
     removed.push(line.trim());
+    removedIndexes.add(offset + index);
     return false;
   };
-  const head = before.filter(keep);
-  const tail = after.filter(keep);
+  const head = before.filter(keep(0));
+  const tail = after.filter(keep(managed ? end + 1 : 0));
 
   const body = [...head];
   if (body.length > 0 && body.at(-1).trim() !== "") body.push("");
-  body.push(...block());
+  body.push(...block(entries));
   if (tail.length > 0) body.push(...tail);
 
   const content = `${body.join("\n")}\n`;
-  return { content, changed: content !== original, removedDuplicates: removed, hadBlock: managed };
+  return {
+    content,
+    changed: content !== original,
+    removedDuplicates: removed,
+    orphanedComments: orphanedComments(lines, removedIndexes),
+    hadBlock: managed
+  };
 }
 
 // Git is the only authority on whether a pattern took effect: a later negation
@@ -86,10 +139,11 @@ export function verifyIgnored(repo, entries = MANAGED_ENTRIES) {
   return entries.filter((entry) => !ignored.has(entry.probe)).map((entry) => entry.pattern);
 }
 
-export function ensureGitignore(repo, { check = false } = {}) {
+export function ensureGitignore(repo, { check = false, codegraph = false } = {}) {
+  const entries = managedEntries({ codegraph });
   const target = path.join(repo, ".gitignore");
   const existing = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null;
-  const rendered = renderGitignore(existing);
+  const rendered = renderGitignore(existing, { codegraph });
   if (rendered.changed && !check) fs.writeFileSync(target, rendered.content);
   return {
     path: target,
@@ -97,9 +151,12 @@ export function ensureGitignore(repo, { check = false } = {}) {
     changed: rendered.changed,
     applied: rendered.changed && !check,
     removedDuplicates: rendered.removedDuplicates,
+    // Comments this run left describing rules it absorbed. Never edited, only
+    // named: see orphanedComments above for why the script does not guess.
+    orphanedComments: rendered.orphanedComments,
     // Verification reflects what is on disk, so in --check mode a pending
     // change is reported as still unresolved rather than as already correct.
-    notIgnored: rendered.changed && check ? MANAGED_ENTRIES.map((entry) => entry.pattern) : verifyIgnored(repo),
+    notIgnored: rendered.changed && check ? entries.map((entry) => entry.pattern) : verifyIgnored(repo, entries),
     kept: KEPT_PATHS
   };
 }
@@ -108,11 +165,12 @@ function main() {
   try {
     const argv = process.argv.slice(2);
     const check = argv.includes("--check");
+    const codegraph = argv.includes("--codegraph");
     const repo = argv.find((value) => !value.startsWith("--"));
-    if (!repo) throw new Error("usage: ensure-gitignore.mjs <repo> [--check]");
+    if (!repo) throw new Error("usage: ensure-gitignore.mjs <repo> [--check] [--codegraph]");
     const root = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
     if (root.status !== 0) throw new Error(`not a Git repository: ${repo}`);
-    const report = ensureGitignore(root.stdout.trim(), { check });
+    const report = ensureGitignore(root.stdout.trim(), { check, codegraph });
     process.stdout.write(JSON.stringify({ ok: report.notIgnored.length === 0, ...report }, null, 2) + "\n");
     if (report.notIgnored.length > 0) process.exitCode = 1;
   } catch (error) {

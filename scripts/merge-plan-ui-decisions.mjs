@@ -9,12 +9,13 @@
 // and in no file, and the file is what the next pass is seeded from. This runs
 // at every exit instead.
 //
-// Two differences from the question merger, both deliberate. Merging is by
+// Three differences from the question merger, all deliberate. Merging is by
 // decision id rather than by text, because a later round refines the same
-// decision under the same id and the last version wins. And an unreadable file
+// decision under the same id and the last version wins. An unreadable file
 // is quarantined rather than thrown on: questions are a gate and interface
 // decisions are not, so unreadable bytes must not kill a finished plan when the
-// command that reads them would have carried on with none.
+// command that reads them would have carried on with none. And the additional
+// set has no inline form at all — see readDecisionsFile below.
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -40,11 +41,25 @@ function assertDecisions(value, description) {
   return value;
 }
 
-// The additional-decisions argument is a path, not content: a model composing
-// this command only ever retypes a path and a handful of short flags, never
-// the decisions themselves. Reading the file is this process's own job — it
-// has real filesystem access even though the workflow that built this command
-// and the agent that ran it do not.
+// The additional-decisions argument is a path, and only a path: a model
+// composing this command only ever retypes a path and a handful of short
+// flags, never the decisions themselves. Reading the file is this process's
+// own job — it has real filesystem access even though the workflow that built
+// this command and the agent that ran it do not.
+//
+// There is deliberately no inline form. The question merger keeps one, because
+// a question is a sentence and a batch of them fits in a few hundred
+// characters however many rounds a pass has run. An interface decision is not:
+// its schema alone allows an 800-character sketch per option and at least one
+// alternative, so a single decision can outgrow the per-argument ceiling and
+// one round's findings measured 11KB in a real pass. There is no batch size
+// that makes that safe, so the unsafe shape is not representable rather than
+// bounded by an assertion in a comment.
+//
+// Two file shapes are accepted, because the file is written by whoever
+// produced the decisions rather than by the workflow that names it: a bare
+// JSON array, and the interaction reviewer's own artifact — an object with a
+// `ui_decisions` array — which the Codex path already writes to disk in full.
 function readDecisionsFile(file, description) {
   const resolved = path.resolve(file);
   let stat;
@@ -59,6 +74,9 @@ function readDecisionsFile(file, description) {
     value = JSON.parse(fs.readFileSync(resolved, "utf8"));
   } catch (error) {
     throw new Error(`${description} at ${resolved} is not readable JSON (${error.message})`);
+  }
+  if (value && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.ui_decisions)) {
+    return assertDecisions(value.ui_decisions, `${description} ui_decisions`);
   }
   return assertDecisions(value, description);
 }
@@ -172,8 +190,10 @@ function parseArgs(argv) {
       options.expect = argv[++index];
       if (options.expect === undefined) throw new Error("--expect requires a value");
     } else if (arg === "--additional-inline") {
-      options.additionalInline = argv[++index];
-      if (options.additionalInline === undefined) throw new Error("--additional-inline requires a value");
+      // Named explicitly so a caller built against the old interface gets the
+      // reason rather than "unexpected argument", and so the flag can never be
+      // silently re-added as a positional.
+      throw new Error("--additional-inline was removed; name the additional interface decisions by file path instead, because that set grows across a pass");
     } else {
       options.positional.push(arg);
     }
@@ -181,12 +201,10 @@ function parseArgs(argv) {
   return options;
 }
 
-// --additional-inline is the one deliberate exception to "content is a path":
-// it carries only what a single interaction-review round found undeclared and
-// no later revision folded into a sidecar — bounded to one round's findings,
-// never the whole-pass tally — because the agent that raised it has no way to
-// persist a file of its own. It is still small enough to be composed safely
-// and is subject to the same composition-time size ceiling as everything else.
+// Every set this command acts on arrives as a path. The additional set is what
+// a single interaction-review round found undeclared and no later revision
+// folded into a sidecar; the reviewer that raised it persists it itself, which
+// is what makes a path available at all.
 async function main() {
   let options;
   try {
@@ -198,29 +216,13 @@ async function main() {
   }
   const [decisionsFile, additionalFile] = options.positional;
   if (!decisionsFile) {
-    process.stderr.write("usage: merge-plan-ui-decisions.mjs <ui-decisions.json> [<additional-decisions-file>] [--additional-inline <json>] [--out <path>] [--expect <length:hash>]\n");
+    process.stderr.write("usage: merge-plan-ui-decisions.mjs <ui-decisions.json> [<additional-decisions-file>] [--out <path>] [--expect <length:hash>]\n");
     process.exitCode = 2;
     return;
   }
-  if (additionalFile !== undefined && options.additionalInline !== undefined) {
-    process.stderr.write("only one of <additional-decisions-file> or --additional-inline may be given\n");
-    process.exitCode = 2;
-    return;
-  }
-  let additional = [];
-  if (additionalFile !== undefined) {
-    additional = readDecisionsFile(additionalFile, "additional interface decisions file");
-  } else if (options.additionalInline !== undefined) {
-    let value;
-    try {
-      value = JSON.parse(options.additionalInline);
-    } catch (error) {
-      process.stderr.write(`--additional-inline is not readable JSON (${error.message})\n`);
-      process.exitCode = 2;
-      return;
-    }
-    additional = assertDecisions(value, "--additional-inline");
-  }
+  const additional = additionalFile === undefined
+    ? []
+    : readDecisionsFile(additionalFile, "additional interface decisions file");
   const result = mergePlanUiDecisions(decisionsFile, additional, options.out ?? decisionsFile, { expect: options.expect });
   // The full array stops here: an agent running this command is handed only
   // the receipt, never the list, so its reply can never grow with the pass.

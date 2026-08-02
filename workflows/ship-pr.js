@@ -232,13 +232,20 @@ async function sha256(value) {
   return `sha256:${digest}`;
 }
 
+// Kept field-for-field identical to requestIdentity in scripts/codex-run.mjs,
+// which states why the schema is identified by name rather than by the
+// absolute path it was loaded from: that path carries the plugin version, and
+// hashing it made every upgrade mid-run re-buy every artifact in flight even
+// when the schema bytes were identical. The schema's contents are still bound —
+// by the fingerprint the bridge computes from the parsed schema — so a schema
+// that really changed still invalidates reuse.
 async function codexRequestIdentity({
   prompt, schemaPath, model, effort, sandbox, worktree
 }) {
   return sha256(JSON.stringify({
-    version: 1,
+    version: 2,
     promptHash: await sha256(prompt),
-    schemaPath,
+    schemaName: schemaPath.split("/").pop(),
     model,
     effort,
     sandbox,

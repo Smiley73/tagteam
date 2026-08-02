@@ -46,6 +46,22 @@ const REQUIRED_SECTIONS = [
 // Each pattern is anchored to review-history phrasing rather than to a bare
 // word, because a plan legitimately discusses rounding, prior art, and reviews
 // of its own subject matter.
+//
+// Every pattern here is self-evidencing: "supersedes", "previously said",
+// "earlier draft", "pass 3 decided", a struck-through line — each is revision
+// history wherever it appears, whatever the document is about. The transcript
+// phrase is not, and used to be in this list anyway, which was a category
+// error: "review log" is equally the proper name of an artifact, so matching it
+// as a bare phrase forbade a plan from ever naming the thing it was detecting.
+// Where a repository's own standards require a `## Review Log` section — and
+// tagteam enforces those standards through `policyPaths` — the two rules were
+// unsatisfiable together, and the only way past was to describe the required
+// section without naming it, a circumlocution that then propagated into the
+// generated manifest. Naming an artifact is not carrying one, and no line-level
+// pattern can tell those apart: a requirement statement puts the phrase and its
+// details on one line, while a transcript puts the phrase in a heading and its
+// verdicts on the lines below. transcriptSectionIssues below decides it
+// structurally instead.
 const HISTORY_MARKERS = [
   { label: "a withdrawn decision", pattern: /\b(?:is|are|was|were|now)\s+withdrawn\b/i },
   { label: "a numbered review round", pattern: /\bround\s+\d+\s+(?:said|placed|proposed|decided|chose|asked|added|removed|flagged|raised)\b/i },
@@ -53,9 +69,24 @@ const HISTORY_MARKERS = [
   { label: "a superseded decision", pattern: /\bsupersed(?:ed|es)\b/i },
   { label: "what an earlier version said", pattern: /\bpreviously\s+(?:said|placed|proposed|specified|planned|stated|required|chose)\b/i },
   { label: "a reference to an earlier draft", pattern: /\b(?:earlier|prior|previous)\s+(?:draft|revision|round|version|pass)\b/i },
-  { label: "an embedded review transcript", pattern: /\breview(?:er)?\s+(?:transcript|log)\b/i },
   { label: "a struck-through decision", pattern: /~~[^~\n]+~~/ }
 ];
+
+// A section of the plan that *is* a review transcript, rather than a sentence
+// that mentions one. Two things have to hold together: a heading whose name is
+// the artifact, and entries beneath it that only a transcript has — a round or
+// pass number, a date, or a verdict. Either alone is ordinary. A plan that
+// requires some other document to carry a `## Review Log` never opens such a
+// section; a plan that carries a `## Review Log` heading with "(none)" under it
+// satisfies a repository that mandates the section without pasting history into
+// it; and a plan that pastes two rounds of verdicts under that heading is
+// caught however its entries are worded, which is what the line-level phrase
+// could never do.
+const TRANSCRIPT_HEADINGS = /^(?:cross-)?review(?:er)?\s+(?:transcript|log|history|rounds?)$/;
+const TRANSCRIPT_ENTRY = /\b(?:rounds?|pass)\s*\d+\b|\b\d{4}-\d{2}-\d{2}\b|\b(?:approve[ds]?|reject(?:ed)?|revise[ds]?|verdict|sign-?off|lgtm)\b/i;
+// Two, because one is a note and two is a log. A section holding a single dated
+// line is as likely to be a template someone filled in once.
+const TRANSCRIPT_ENTRY_FLOOR = 2;
 
 function readTextFile(file, description) {
   const resolved = path.resolve(file);
@@ -75,21 +106,77 @@ function issue(severity, title, detail) {
   return { severity, title, detail };
 }
 
+// Strip decoration a heading may carry — numbering, a trailing parenthetical
+// gloss, punctuation, emphasis — so "## 0. Goal (one sentence)" matches the
+// same section as "## Goal".
+function normalizeHeading(heading) {
+  return String(heading)
+    .replace(/[*_`]/g, "")
+    .replace(/^\s*\d+(?:\.\d+)*[.)]?\s+/, "")
+    .replace(/\s*\([^)]*\)\s*$/, "")
+    .replace(/[:.\s]+$/, "")
+    .trim()
+    .toLocaleLowerCase();
+}
+
 function headingsOf(text) {
   return String(text ?? "")
     .split("\n")
     .map((line) => /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)?.[1])
     .filter(Boolean)
-    // Strip decoration a heading may carry — numbering, a trailing parenthetical
-    // gloss, punctuation, emphasis — so "## 0. Goal (one sentence)" matches the
-    // same section as "## Goal".
-    .map((heading) => heading
-      .replace(/[*_`]/g, "")
-      .replace(/^\s*\d+(?:\.\d+)*[.)]?\s+/, "")
-      .replace(/\s*\([^)]*\)\s*$/, "")
-      .replace(/[:.\s]+$/, "")
-      .trim()
-      .toLocaleLowerCase());
+    .map(normalizeHeading);
+}
+
+// As much structure as this one check needs and no more: find a heading that
+// names the artifact, read forward to the next heading at the same level or
+// higher, and count the lines beneath it that only a transcript entry carries.
+// Fences are skipped, so a plan that shows `## Review Log` inside a code block —
+// specifying the section another document must have, which is the ordinary way
+// to say it — is describing a heading rather than opening one.
+function transcriptSectionIssues(text) {
+  const lines = String(text ?? "").split("\n");
+  const findings = [];
+  let fenced = false;
+  let section = null;
+  const close = () => {
+    if (section && section.hits.length >= TRANSCRIPT_ENTRY_FLOOR) findings.push(section);
+    section = null;
+  };
+  lines.forEach((line, index) => {
+    if (/^\s{0,3}(?:```|~~~)/.test(line)) {
+      fenced = !fenced;
+      return;
+    }
+    if (fenced) return;
+    const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      // A deeper heading is part of the section — "### Round 2 — claude" is how
+      // a pasted transcript writes an entry, so it is body, not a boundary.
+      if (section && level > section.level) {
+        if (TRANSCRIPT_ENTRY.test(line)) section.hits.push({ line: index + 1, text: line.trim().slice(0, 160) });
+        return;
+      }
+      close();
+      if (TRANSCRIPT_HEADINGS.test(normalizeHeading(heading[2]))) {
+        section = { heading: heading[2].trim(), line: index + 1, level, hits: [] };
+      }
+      return;
+    }
+    if (section && TRANSCRIPT_ENTRY.test(line)) {
+      section.hits.push({ line: index + 1, text: line.trim().slice(0, 160) });
+    }
+  });
+  close();
+  return findings.map((found) => issue(
+    "blocking",
+    "The plan carries an embedded review transcript",
+    [
+      `Line ${found.line} opens a "${found.heading}" section and ${found.hits.length} line${found.hits.length === 1 ? "" : "s"} beneath it carry round numbers, dates, or verdicts. That is a transcript pasted into the plan, not a decision the plan states.`,
+      "Delete the section and fold whatever it settled into the decision it settled, because the annotation is what makes revision purely additive: every round that answers a critique by explaining what the plan used to say leaves a longer document for the next round to find contradictions in.",
+      `Naming the section is fine — a plan may say another document must carry one, and may carry an empty one where a repository's standards require it. What this finding is about is the entries. ${found.hits.map((hit) => `line ${hit.line}: ${JSON.stringify(hit.text)}`).slice(0, 5).join("; ")}.`
+    ].join(" ")
+  ));
 }
 
 // One aggregated finding per marker rather than one per line: a plan carrying
@@ -101,15 +188,15 @@ function historyIssues(text) {
   lines.forEach((line, index) => {
     for (const marker of HISTORY_MARKERS) {
       if (!marker.pattern.test(line)) continue;
-      if (!found.has(marker.label)) found.set(marker.label, []);
-      const hits = found.get(marker.label);
+      if (!found.has(marker)) found.set(marker, []);
+      const hits = found.get(marker);
       if (hits.length < 5) hits.push({ line: index + 1, text: line.trim().slice(0, 160) });
       else hits.overflow = (hits.overflow ?? 0) + 1;
     }
   });
-  return [...found].map(([label, hits]) => issue(
+  return [...found].map(([marker, hits]) => issue(
     "blocking",
-    `The plan carries ${label}`,
+    `The plan carries ${marker.label}`,
     [
       "The plan states current decisions only, and this text exists only because an earlier round said something different. Superseded text is deleted rather than annotated, because the annotation is what makes revision purely additive: every round that answers a critique by explaining what the plan used to say leaves a longer document for the next round to find contradictions in.",
       `Delete this text rather than qualifying it. ${hits.map((hit) => `line ${hit.line}: ${JSON.stringify(hit.text)}`).join("; ")}${hits.overflow ? `; and ${hits.overflow} more line${hits.overflow === 1 ? "" : "s"}` : ""}.`
@@ -212,6 +299,7 @@ export function lintPlanDocument({ text, budget = DEFAULT_PLAN_BUDGET, canonical
   return [
     ...budgetIssues(normalized.length, budget),
     ...historyIssues(normalized),
+    ...transcriptSectionIssues(normalized),
     ...sectionIssues(normalized),
     ...canonicalStringIssues(normalized, canonicalStrings)
   ];

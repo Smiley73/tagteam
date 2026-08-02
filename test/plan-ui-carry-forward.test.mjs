@@ -303,10 +303,10 @@ test("a clean round publish names the round input's own sidecar, not a freshly m
     reviewDecisions: [decision("lens-found-nav", "new-nav")]
   });
   // The sidecar beside the round input predates this round's lens, and no
-  // revision runs after a clean round to fold the lens's finding into a file:
-  // the reviewing agent has no permission to persist one itself. That finding
-  // still reaches the reported result from this pass's own memory (see
-  // "the interface record is settled..." below); only the file named here
+  // revision runs after a clean round to fold the lens's finding into it. That
+  // finding still reaches the reported result from this pass's own memory, and
+  // the record on disk from the findings file the lens persisted for itself
+  // (see "the interface record is settled..." below); only the file named here
   // lags by it, one round behind.
   assert.match(
     publishedUiDecisionsFile(prompts, "plan:publish-approved-round:1"),
@@ -344,6 +344,42 @@ test("the interface record is settled when the pass reaches the train", async ()
   assert.equal(labels.filter((label) => label.startsWith("plan:merge-final-ui-decisions")).length, 1, "one settlement, at the one exit this pass took");
   assert.equal(result.uiDecisionsSettled, true);
   assert.deepEqual(ids(result.uiDecisions), ["export-dialog", "lens-found-nav"]);
+});
+
+// The interface record is the fastest-growing artifact in a pass — 4,678 bytes
+// at one real round's input, 19,177 by the next — and it once travelled to this
+// command as a single `--additional-inline` argument. A compliant pass composed
+// an 11,336-character argument and died at its exit path, after everything had
+// been paid for. A decision's schema allows an 800-character sketch per option
+// and at least one alternative, so no batch size fixes that; the shape is gone
+// instead, and what the lens found reaches the merge as the path it persisted
+// its own findings to.
+test("the interface settle names a findings path and carries no inline content", async () => {
+  const { prompts } = await forge({
+    draftDecisions: [decision("export-dialog")],
+    reviewDecisions: [decision("lens-found-nav", "new-nav")]
+  });
+  const settle = [...prompts].find(([label]) => label.startsWith("plan:merge-final-ui-decisions"))?.[1];
+  assert.notEqual(settle, undefined);
+  assert.equal(settle.includes("--additional-inline"), false);
+  assert.match(settle, /merge-plan-ui-decisions\.mjs" "[^"]+\.ui-decisions\.json" "[^"]*interaction-findings\.json"/);
+  // Nothing composed here is content, so nothing composed here can grow: the
+  // per-argument ceiling this once tripped is far above every argument left.
+  for (const argument of settle.match(/"[^"]*"/g) ?? []) {
+    assert.equal(argument.length < 1000, true, `oversized argument: ${argument.slice(0, 80)}`);
+  }
+});
+
+// The other half of the same contract: the lens is told to write exactly the
+// array it returns, because the settle reads that file rather than its reply.
+test("the interaction reviewer is told to persist the findings the settle reads", async () => {
+  const { prompts } = await forge({
+    draftDecisions: [decision("export-dialog")],
+    reviewDecisions: [decision("lens-found-nav", "new-nav")]
+  });
+  const review = prompts.get("plan:interaction-review:1");
+  assert.notEqual(review, undefined);
+  assert.match(review, /persist at \S*interaction-findings\.json, mode 0600, a JSON array holding exactly the entries you return in ui_decisions/);
 });
 
 test("a divergent round settles the findings of the round that stopped the pass", async () => {

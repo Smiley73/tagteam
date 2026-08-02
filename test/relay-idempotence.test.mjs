@@ -110,9 +110,9 @@ test("the bridge reuses a validated artifact instead of re-invoking Codex", () =
   const checkpoint = JSON.parse(fs.readFileSync(`${artifact}.relay-checkpoint.json`, "utf8"));
   const promptHash = `sha256:${createHash("sha256").update("review this").digest("hex")}`;
   const expectedIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
-    version: 1,
+    version: 2,
     promptHash,
-    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    schemaName: "findings.schema.json",
     model: "gpt-test",
     effort: "high",
     sandbox: "read-only",
@@ -177,9 +177,9 @@ test("shipping-style immutable request identities reject changed prompt bytes be
   const expectedPrompt = "expected prompt";
   const promptHash = `sha256:${createHash("sha256").update(expectedPrompt).digest("hex")}`;
   const requestIdentity = `sha256:${createHash("sha256").update(JSON.stringify({
-    version: 1,
+    version: 2,
     promptHash,
-    schemaPath: path.join(root, "schemas/findings.schema.json"),
+    schemaName: "findings.schema.json",
     model: "gpt-test",
     effort: "high",
     sandbox: "read-only",
