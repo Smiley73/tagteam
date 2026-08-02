@@ -17,6 +17,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { canonicalJson, expectToken, normalizeText } from "./compose-prompt.mjs";
+import { conditionalAllocations, terminalTaskGaps } from "./lib/handoff-invariants.mjs";
 
 // A plan should be materially smaller than the code it produces. Past that, the
 // code is being written twice, once in a language that cannot be compiled. These
@@ -690,6 +691,48 @@ function atomicGroupIssues(manifest, train) {
   return issues;
 }
 
+// Every closing artifact a phase produces — the gate run, the CI run, the
+// changed-line measurement, the reviewer round — is evidence about the whole
+// pull request, so it is only true once everything else in that pull request is
+// done. One task must therefore transitively depend on every other task in it,
+// and that terminal task is the only valid home for the phase's own close.
+//
+// This is the same arithmetic as the atomic-group and cross-boundary checks
+// above, on the same graph, and a reviewer reading a thirty-task manifest finds
+// most of it: one real cross-check round named four of the five pull requests
+// that had no such task, and cost a round to do it. Code finds all five.
+function terminalTaskIssues(manifest, train) {
+  const gaps = terminalTaskGaps(manifest, train);
+  if (!gaps.length) return [];
+  return [issue(
+    "blocking",
+    `${gaps.length} pull request${gaps.length === 1 ? " has" : "s have"} no task that depends on every other task in it`,
+    [
+      `${gaps.map((gap) => `${gap.id} holds ${gap.taskIds.join(", ")}`).join("; ")}.`,
+      "A phase's gate run, CI run, changed-line count, and review round are evidence about the whole pull request and are only true after everything else in it is done, so every one of these pull requests would have to record its own completion from a task with work still outstanding behind it.",
+      "Give each one a closing task that depends on every other task it holds, and put that evidence there and nowhere else."
+    ].join(" ")
+  )];
+}
+
+// A task's edit surface is unconditional or it is not a handoff. An implementer
+// cannot act on "this file belongs to phase 5, or to phase 7, depending on what
+// a linter says at the time", and the per-pull-request file list is computed as
+// the union of its tasks' files, so a conditional entry silently makes that
+// computed list wrong for one of the two branches.
+function conditionalAllocationIssues(manifest) {
+  const found = conditionalAllocations(manifest);
+  if (!found.length) return [];
+  return [issue(
+    "blocking",
+    `${found.length} task ${found.length === 1 ? "entry leaves its edit surface" : "entries leave their edit surfaces"} conditional`,
+    [
+      `${found.map((entry) => `${entry.id} ${entry.field}: ${JSON.stringify(entry.text)}`).join("; ")}.`,
+      "The manifest is the handoff contract and the file list of every pull request is computed from it, so a fork left in either place is a file list that is wrong on one branch with nothing downstream able to say which. Decide the allocation here and state it unconditionally."
+    ].join(" ")
+  )];
+}
+
 // A per-pull-request file list is the union of the files its tasks name. Authored
 // rather than computed, it disagrees with the manifest, and the disagreement is
 // found by a reviewer comparing two lists by eye — which is the reviewing a
@@ -883,6 +926,8 @@ export function lintHandoff({ manifest, train, planChars = 0, capLines = null, c
     ...coverage,
     ...dependencyIssues(manifest, train),
     ...atomicGroupIssues(manifest, train),
+    ...terminalTaskIssues(manifest, train),
+    ...conditionalAllocationIssues(manifest),
     ...fileListIssues(manifest, train),
     ...sizeIssues(train, capLines),
     ...splitIssues(train, capLines),

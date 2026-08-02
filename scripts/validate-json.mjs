@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
+import { conditionalAllocations, terminalTaskGaps } from "./lib/handoff-invariants.mjs";
 
 function typeMatches(value, expected) {
   if (expected === "null") return value === null;
@@ -167,6 +168,13 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
   const errors = [];
   if (schemaName === "manifest.schema.json") {
     errors.push(...graphErrors(value.tasks ?? [], "task", "dependsOn"));
+    // A task's edit surface is unconditional or it is not a handoff: the file
+    // list every pull request gets is computed as the union of its tasks'
+    // files, so an entry that names a condition makes that computed list wrong
+    // for one of the two branches, and nothing downstream can tell which.
+    for (const allocation of conditionalAllocations(value)) {
+      errors.push(`task ${allocation.id} makes its ${allocation.field} conditional, so its edit surface is unresolved: ${JSON.stringify(allocation.text)}`);
+    }
   }
   if (schemaName === "pr-train.schema.json") {
     errors.push(...graphErrors(value.prs ?? [], "PR", "dependsOn"));
@@ -219,6 +227,11 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
         if (placements.size < 2) continue;
         const where = [...placements].map(([pr, ids]) => `${pr} holds ${ids.join(", ")}`).join("; ");
         errors.push(`atomic group ${group} must land in one PR, but ${where}`);
+      }
+      // The same family of arithmetic as the three checks above, and the one it
+      // was missing: a pull request whose closing evidence has no valid home.
+      for (const gap of terminalTaskGaps(manifest, value)) {
+        errors.push(`PR ${gap.id} has no task depending on every other task in it, so its phase-close evidence — the gate run, the CI run, the changed-line count, the review round — has no valid position`);
       }
     }
   }

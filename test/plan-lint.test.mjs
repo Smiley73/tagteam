@@ -462,6 +462,167 @@ test("an atomic group split across pull requests blocks", () => {
   assert.match(issues[0].title, /Atomic group payload-shape/);
 });
 
+// A phase's gate run, CI run, changed-line count, and review round are evidence
+// about the whole phase, so they are only true after everything else in it is
+// done. One real cross-check round paid to find four of the five pull requests
+// that had nowhere to put them, and missed the fifth. The arithmetic misses none.
+test("a pull request with no task depending on every other task in it blocks", () => {
+  const twoTasks = {
+    ...manifest,
+    tasks: [
+      manifest.tasks[0],
+      { ...manifest.tasks[1], dependsOn: [] },
+      { id: "t3", title: "t3", description: "d", complexity: "simple", files: ["d.ts"], dependsOn: [], doneCriteria: ["x"] }
+    ]
+  };
+  const together = train();
+  together.prs[0].taskIds = ["t1", "t2"];
+  together.prs[1].taskIds = ["t3"];
+  together.prs[1].dependsOn = [];
+
+  const issues = lintHandoff({ manifest: twoTasks, train: together });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].severity, "blocking");
+  assert.match(issues[0].title, /no task that depends on every other task/);
+  assert.match(issues[0].detail, /pr1 holds t1, t2/);
+  // pr2 holds one task, which is its own terminus, so it is not named.
+  assert.doesNotMatch(issues[0].detail, /pr2/);
+
+  // The repair: one closing task behind both of the others.
+  const closed = {
+    ...twoTasks,
+    tasks: twoTasks.tasks.map((task) => (task.id === "t2" ? { ...task, dependsOn: ["t1"] } : task))
+  };
+  assert.deepEqual(lintHandoff({ manifest: closed, train: together }), []);
+});
+
+test("a closing task reaches the rest of its phase transitively, and a second sink does not", () => {
+  const diamond = {
+    ...manifest,
+    tasks: [
+      { id: "t1", title: "t1", description: "d", complexity: "simple", files: ["a.ts"], dependsOn: [], doneCriteria: ["x"] },
+      { id: "t2", title: "t2", description: "d", complexity: "simple", files: ["b.ts"], dependsOn: ["t1"], doneCriteria: ["x"] },
+      { id: "t3", title: "t3", description: "d", complexity: "simple", files: ["c.ts"], dependsOn: ["t1"], doneCriteria: ["x"] },
+      { id: "t4", title: "t4", description: "d", complexity: "simple", files: ["d.ts"], dependsOn: ["t2", "t3"], doneCriteria: ["x"] }
+    ]
+  };
+  const one = {
+    version: 1,
+    base: null,
+    prs: [{
+      id: "pr1", title: "one", scope: "s", taskIds: ["t1", "t2", "t3", "t4"], dependsOn: [],
+      userVisible: "no", userVisibleReason: "r", sizeEstimate: "100 lines"
+    }]
+  };
+  // t4 reaches t2 and t3 directly and t1 through either of them.
+  assert.deepEqual(lintHandoff({ manifest: diamond, train: one }), []);
+
+  const forked = { ...diamond, tasks: diamond.tasks.map((task) => (task.id === "t4" ? { ...task, dependsOn: ["t2"] } : task)) };
+  assert.ok(titles(lintHandoff({ manifest: forked, train: one })).some((title) => /no task that depends on every other task/.test(title)));
+});
+
+// The task graph is checked for cycles by the same lint, but nothing orders the
+// two checks, so this one has to survive the input the other one rejects.
+test("a cyclic task graph is reported rather than walked forever", () => {
+  const cyclic = {
+    ...manifest,
+    tasks: [
+      { ...manifest.tasks[0], dependsOn: ["t2"] },
+      { ...manifest.tasks[1], dependsOn: ["t1"] }
+    ]
+  };
+  const one = {
+    version: 1,
+    base: null,
+    prs: [{
+      id: "pr1", title: "one", scope: "s", taskIds: ["t1", "t2"], dependsOn: [],
+      userVisible: "no", userVisibleReason: "r", sizeEstimate: "100 lines"
+    }]
+  };
+  assert.ok(titles(lintHandoff({ manifest: cyclic, train: one })).some((title) => /cycle/.test(title)));
+});
+
+const withFiles = (files) => ({
+  ...manifest,
+  tasks: manifest.tasks.map((task, index) => (index === 0 ? { ...task, files } : task))
+});
+const withCriteria = (doneCriteria) => ({
+  ...manifest,
+  tasks: manifest.tasks.map((task, index) => (index === 1 ? { ...task, doneCriteria } : task))
+});
+
+test("a conditional file allocation blocks, and a path that merely spells one does not", () => {
+  const issues = lintHandoff({ manifest: withFiles(["db/roth-fact-validation.ts or PR7 if knip rejects unused exports"]), train: train() });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].severity, "blocking");
+  assert.match(issues[0].detail, /t1 files/);
+
+  // Paths hold ordinary words and real directories hold spaces, so nothing here
+  // is a fork: a conditional word inside a path segment is part of the path, and
+  // bare alternation between two filenames is a filename.
+  for (const files of [
+    ["src/if.ts", "app/or/page.tsx"],
+    ["src/components/Optional/index.tsx", "tests/e2e/login-or-signup.spec.ts"],
+    ["docs/Getting Started or Setup.md"],
+    ["docs/adr/0007 - either way we log.md"],
+    ["content/blog/2021-05-03-tbd or not.md"]
+  ]) {
+    assert.deepEqual(lintHandoff({ manifest: withFiles(files), train: train() }), [], files.join(", "));
+  }
+});
+
+test("a done criterion that defers work to another phase on a condition blocks, and phase-close prose does not", () => {
+  for (const criterion of [
+    "The two constants are exported, or deferred to PR7 with its consumer if knip rejects unused exports.",
+    "MIN_ROTH_TAX_YEAR moves to a later task if the linter objects to an unused export."
+  ]) {
+    const issues = lintHandoff({ manifest: withCriteria([criterion]), train: train() });
+    assert.equal(issues.length, 1, criterion);
+    assert.match(issues[0].detail, /t2 doneCriteria/);
+  }
+
+  // The prose this same change asks a closing task to write. A criterion that
+  // names its own phase and states a condition is what a phase close looks
+  // like, so a detector that reads those two as a fork would reject the shape
+  // the prompts now require — the two invariants would contradict each other.
+  for (const criterion of [
+    "The gate run and CI run for PR 3 are green; if any command fails, the phase does not land.",
+    "The review round for phase 3 records no blocking findings; if any exist the phase does not land.",
+    "No files outside the ones listed for phase 2 are left modified if the task reruns.",
+    "The helper moved in phase 1 is still imported by its consumer unless the import is removed.",
+    "The migration added in PR 2 leaves the existing rows untouched unless the flag is set.",
+    "The constant moved out of config.ts still resolves from its consumer, otherwise the build fails.",
+    "The renamed module belongs to PR 2 and the import site is updated, so if the rename is reverted the test fails.",
+    "The prior-year row is hidden if no prior year exists.",
+    "The banner moves to the footer unless the table is empty."
+  ]) {
+    assert.deepEqual(lintHandoff({ manifest: withCriteria([criterion]), train: train() }), [], criterion);
+  }
+});
+
+// Three indexes of one map: this one, the lint's own task index, and the
+// validator's graph walk. They disagreed about which copy of a duplicated id
+// was real, and the disagreement surfaced as a blocking finding against a
+// manifest that, as written, has a valid closing task.
+test("a duplicated task id is read the same way the rest of the lint reads it", () => {
+  const duplicated = {
+    ...manifest,
+    tasks: [
+      { id: "t2", title: "t2", description: "d", complexity: "simple", files: ["c.ts"], dependsOn: [], doneCriteria: ["x"] },
+      ...manifest.tasks
+    ]
+  };
+  const one = {
+    version: 1,
+    base: null,
+    prs: [{
+      id: "pr1", title: "one", scope: "s", taskIds: ["t1", "t2"], dependsOn: [],
+      userVisible: "no", userVisibleReason: "r", sizeEstimate: "100 lines"
+    }]
+  };
+  assert.deepEqual(lintHandoff({ manifest: duplicated, train: one }), []);
+});
+
 // The plan document is prose a person reads; the manifest's done criteria and the
 // train's scopes are what an implementer follows and what a repository's own tests
 // parse literally. A real run put every violation in the second pair while the plan

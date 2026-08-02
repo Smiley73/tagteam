@@ -423,6 +423,24 @@ const atomicGroupBrief = [
   "Each pull request squashes to exactly one commit on the base branch, so tasks sharing an atomicGroup must all appear in the same pull request. Splitting them into separate tasks inside that one pull request is fine and often clearer."
 ].join("\n");
 
+// A phase's closing evidence is evidence about the whole phase, so it is only
+// true once the phase is complete, and the only place it can validly sit is a
+// task that transitively depends on every other task in the same pull request.
+// The deterministic lint rejects a train whose phases have no such task, so
+// this is what lets both steps produce that shape rather than be corrected into
+// it — a defect repaired by a repair instruction is one every run re-rolls.
+const phaseCloseBrief = [
+  "A phase's closing evidence — its gate run, its CI run, its changed-line measurement, its reviewer round — is evidence about the whole pull request, and it is only true once everything else in that pull request is done.",
+  "So every pull request needs exactly one closing task that depends on every other task in it, and that task owns all of that evidence exclusively: no other task in the same pull request may claim a gate, a CI run, a line count, or a review round for the phase.",
+  "That dependency is a real one: the closing task is work that genuinely comes last. Never add an edge between two independent tasks to satisfy this rule, because dependencies also decide what can be implemented in parallel and what a failure blocks."
+].join("\n");
+
+// The manifest is a handoff contract, and a contract that names two possible
+// answers has named none. Only the step that writes tasks is told this: the
+// decomposer writes neither files nor done criteria and is forbidden a file
+// list of its own, so sending it this paragraph would invite exactly that.
+const unconditionalSurfaceBrief = "A task's edit surface is unconditional. Never write a file entry or a done criterion that leaves an allocation to be decided later — deferring a file to a different phase if a linter objects is not a handoff, and each pull request's file list is computed as the union of these entries, so a fork makes that list wrong on one branch with nothing able to say which.";
+
 // One pull request is the default, and a split is derived rather than chosen. A
 // twelve-phase train multiplies sequencing surface — per-phase dependency
 // wiring, line estimates, atomic grouping, approval rules — and most of what a
@@ -3440,6 +3458,8 @@ async function main(raw) {
       "Each task must be a self-contained handoff: its description states the bounded implementation approach and invariants; files names the likely edit surface; doneCriteria are independently observable and include applicable verification.",
       policyBrief,
       atomicGroupBrief,
+      `${phaseCloseBrief}\nGive every phase the plan's PR sequence names one such closing task, and make each phase's closing task depend on the previous phase's, so that two phases merged into one pull request still leave exactly one task behind everything.`,
+      unconditionalSurfaceBrief,
       `Before returning, persist the identical manifest as JSON at ${manifestPath} with mode 0600. Write every task: that file, not your reply, is what the cross-check reads, and it is checked against what you return.`
     ].join("\n\n"), {
       label: "plan:manifest",
@@ -3481,6 +3501,7 @@ async function main(raw) {
       "Never write a per-pull-request file list: it is the union of the files its tasks name and is computed from the manifest wherever it is needed.",
       policyBrief,
       atomicGroupBrief,
+      `${phaseCloseBrief}\nCut so that every pull request holds such a task. You group tasks and never write them, so where a grouping has no task depending on every other task in it, either the seam is wrong — cut it where the manifest already has a closing task — or the manifest is missing one. Say which in that pull request's scope; never invent a task or a dependency to cover it.`,
       "State in sizeEstimate the changed-line count you expect, and say so plainly when a pull request is near or over a limit this repository sets.",
       `Before returning, persist the identical PR train as JSON at ${trainPath} with mode 0600. Write every pull request: that file, not your reply, is what the cross-check reads, and it is checked against what you return.`
     ].join("\n\n"), {
