@@ -62,15 +62,33 @@ const REQUIRED_SECTIONS = [
 // details on one line, while a transcript puts the phrase in a heading and its
 // verdicts on the lines below. transcriptSectionIssues below decides it
 // structurally instead.
+//
+// The other six markers had the same defect one level down. Being self-evidencing
+// as *phrases* does not make them self-evidencing as *occurrences*: a plan that
+// proposes to change this detector has to say which patterns it is changing, and
+// saying so trips them. That is the use/mention distinction, and it is the whole
+// of what annotationHits below decides — an occurrence counts only when the plan
+// is using the phrase to annotate a decision, not mentioning it as a name.
+// `named` marks the six markers that have a name — a phrase a plan can quote in
+// order to talk about the rule. Strikethrough has none: the marker is the
+// formatting, so struck-through text is the annotation itself wherever it
+// appears, and a plan showing the syntax shows it inside a code block.
 const HISTORY_MARKERS = [
-  { label: "a withdrawn decision", pattern: /\b(?:is|are|was|were|now)\s+withdrawn\b/i },
-  { label: "a numbered review round", pattern: /\bround\s+\d+\s+(?:said|placed|proposed|decided|chose|asked|added|removed|flagged|raised)\b/i },
-  { label: "a numbered planning pass", pattern: /\bpass\s+\d+\s+(?:said|placed|proposed|decided|chose)\b/i },
-  { label: "a superseded decision", pattern: /\bsupersed(?:ed|es)\b/i },
-  { label: "what an earlier version said", pattern: /\bpreviously\s+(?:said|placed|proposed|specified|planned|stated|required|chose)\b/i },
-  { label: "a reference to an earlier draft", pattern: /\b(?:earlier|prior|previous)\s+(?:draft|revision|round|version|pass)\b/i },
-  { label: "a struck-through decision", pattern: /~~[^~\n]+~~/ }
-];
+  { label: "a withdrawn decision", named: true, pattern: /\b(?:is|are|was|were|now)\s+withdrawn\b/i },
+  { label: "a numbered review round", named: true, pattern: /\bround\s+\d+\s+(?:said|placed|proposed|decided|chose|asked|added|removed|flagged|raised)\b/i },
+  { label: "a numbered planning pass", named: true, pattern: /\bpass\s+\d+\s+(?:said|placed|proposed|decided|chose)\b/i },
+  { label: "a superseded decision", named: true, pattern: /\bsupersed(?:ed|es)\b/i },
+  { label: "what an earlier version said", named: true, pattern: /\bpreviously\s+(?:said|placed|proposed|specified|planned|stated|required|chose)\b/i },
+  { label: "a reference to an earlier draft", named: true, pattern: /\b(?:earlier|prior|previous)\s+(?:draft|revision|round|version|pass)\b/i },
+  { label: "a struck-through decision", named: false, pattern: /~~[^~\n]+~~/ }
+].map((marker) => ({
+  ...marker,
+  // Sticky, because an occurrence has to be located rather than merely detected,
+  // and a marker can appear twice on one line — once as a name and once for real.
+  pattern: marker.pattern.flags.includes("g")
+    ? marker.pattern
+    : new RegExp(marker.pattern.source, `${marker.pattern.flags}g`)
+}));
 
 // A section of the plan that *is* a review transcript, rather than a sentence
 // that mentions one. Two things have to hold together: a heading whose name is
@@ -179,15 +197,166 @@ function transcriptSectionIssues(text) {
   ));
 }
 
+const FENCE = /^\s*(`{3,}|~{3,})\s*(.*)$/;
+const LIST_ITEM = /^\s{0,3}(?:[-*+]|\d+[.)])\s/;
+const INDENTED = /^(?: {4,}|\t)/;
+
+function fenceAt(line) {
+  const match = FENCE.exec(line);
+  if (!match) return null;
+  return { marker: match[1][0], length: match[1].length, info: match[2].trim() };
+}
+
+// The lines of a document that display text rather than assert it.
+// transcriptSectionIssues has skipped fenced regions since it was written, for
+// exactly this reason, and historyIssues never did — so a plan could not show
+// the pattern it was proposing to change even inside a code block.
+//
+// A fence is matched rather than toggled. transcriptSectionIssues toggles, and
+// that is a live gap in it: a `~~~` line inside a backtick fence, or a
+// three-backtick block nested in a four-backtick one — the ordinary way to write
+// a markdown example — flips the parity and silences the rest of the document.
+// So a fence here closes only on its own character, at its own length or longer,
+// with nothing after it, and an unterminated fence un-flags itself at the end: a
+// document that never closes a block is a defect, and the safe reading of a
+// defect in a gate is that the text was never code.
+//
+// Indented blocks are the same category, with one caveat that matters here: four
+// spaces under a list item is a continuation paragraph, not code, and a plan
+// writes its decisions as lists. Treating those as code would turn this fix into
+// a bypass, so an indented block opens only after a blank line and only outside
+// a list.
+function codeLines(lines) {
+  const flags = new Array(lines.length).fill(false);
+  let fence = null;
+  let fenceStart = -1;
+  let indentedBlock = false;
+  let inList = false;
+  let previousBlank = true;
+  lines.forEach((line, index) => {
+    if (fence) {
+      flags[index] = true;
+      const closing = fenceAt(line);
+      if (closing && closing.marker === fence.marker && closing.length >= fence.length && !closing.info) fence = null;
+      previousBlank = false;
+      return;
+    }
+    if (!line.trim()) {
+      // A blank line suspends an indented block; the next unindented line ends it.
+      flags[index] = indentedBlock;
+      previousBlank = true;
+      return;
+    }
+    const indented = INDENTED.test(line);
+    if (indentedBlock && indented) {
+      flags[index] = true;
+      previousBlank = false;
+      return;
+    }
+    indentedBlock = false;
+    // Any indent, because a fence attached to a list item is indented to the
+    // item's content, and three spaces versus four is not a rule a drafter can
+    // be expected to discover from a finding.
+    const opening = fenceAt(line);
+    if (opening && !(opening.marker === "`" && opening.info.includes("`"))) {
+      fence = opening;
+      fenceStart = index;
+      flags[index] = true;
+      previousBlank = false;
+      return;
+    }
+    if (LIST_ITEM.test(line)) inList = true;
+    else if (!indented && previousBlank) inList = false;
+    if (indented && previousBlank && !inList) {
+      indentedBlock = true;
+      flags[index] = true;
+    }
+    previousBlank = false;
+  });
+  if (fence) flags.fill(false, fenceStart);
+  return flags;
+}
+
+// Where one item of an enumeration ends and the next begins: separating
+// punctuation, a bracket, or the end of the line, with an Oxford "and" allowed
+// before the last item so that adding one does not change the verdict. A name
+// sits between these with nothing else. An annotation carries the decision it
+// annotates, and that decision is what fills the space these require to be empty.
+//
+// A table pipe is deliberately not a separator. A cell holding exactly a marker
+// phrase is the ordinary shape of a decision log — "| card above the table |
+// round 2 decided | superseded |" — where the subject sits in a neighbouring
+// cell rather than in the same one.
+const SEGMENT_OPENS = /(?:^|[,;:·—–([])\s*(?:and|or)?\s*$/;
+const SEGMENT_CLOSES = /^\s*(?:[,;·—–.)\]]|$)/;
+// Three distinct markers, because a plan naming two is naming two, while three
+// is the set being listed. Two also stays blockable, which matters: "previously
+// specified, superseded" is revision history written tersely.
+const NAME_LIST_FLOOR = 3;
+
+// Which markers a line actually carries, as opposed to names.
+//
+// The rule: an occurrence is a name when it is exactly one item of an
+// enumeration, on a line that enumerates three or more distinct markers.
+// Everything else is an annotation and blocks.
+//
+// The line that forced this enumerates the marker set — "withdrawn, numbered
+// review round, numbered planning pass, superseded, previously said, earlier
+// draft, struck-through" — and trips three markers at once, so every plan that
+// proposes to change this detector was blocked by it. The two cheaper rules both
+// fail. Backticks do not clear it, because those names are bare prose — and
+// exempting a backticked phrase outright is worse than not covering the case,
+// since `superseded` is one keystroke away from every annotation. Counting
+// markers per line does clear it and is also a bypass, because "see the earlier
+// draft, superseded by this one" holds two as well.
+//
+// What separates them is that a name fills its item exactly. Revision history
+// needs a subject — the decision being withdrawn — and the subject sits inside
+// the item, so the item is no longer just the phrase. That is why an annotation
+// written beside three names on one line still blocks.
+//
+// What this does not reach: a marker named once in running prose, and an
+// enumeration written one name per line. Both still block, as they did before.
+function annotationHits(line) {
+  const occurrences = [];
+  for (const marker of HISTORY_MARKERS) {
+    marker.pattern.lastIndex = 0;
+    let match;
+    while ((match = marker.pattern.exec(line))) {
+      // No marker can match the empty string; the guard is here so that one
+      // written later that can costs findings rather than hanging the gate.
+      if (!match[0].length) {
+        marker.pattern.lastIndex += 1;
+        continue;
+      }
+      const bare = marker.named
+        && SEGMENT_OPENS.test(line.slice(0, match.index))
+        && SEGMENT_CLOSES.test(line.slice(match.index + match[0].length));
+      occurrences.push({ marker, bare });
+    }
+  }
+  const named = new Set(occurrences
+    .filter((occurrence) => occurrence.bare)
+    .map((occurrence) => occurrence.marker));
+  const listed = named.size >= NAME_LIST_FLOOR;
+  const carried = new Set(occurrences
+    .filter((occurrence) => !(listed && occurrence.bare))
+    .map((occurrence) => occurrence.marker));
+  // Declaration order, so a plan carrying several kinds of history reads its
+  // findings in the same order every round.
+  return HISTORY_MARKERS.filter((marker) => carried.has(marker));
+}
+
 // One aggregated finding per marker rather than one per line: a plan carrying
 // revision history carries a lot of it, and thirty findings that say the same
 // thing crowd out the one that does not.
 function historyIssues(text) {
   const lines = String(text ?? "").split("\n");
+  const code = codeLines(lines);
   const found = new Map();
   lines.forEach((line, index) => {
-    for (const marker of HISTORY_MARKERS) {
-      if (!marker.pattern.test(line)) continue;
+    if (code[index]) return;
+    for (const marker of annotationHits(line)) {
       if (!found.has(marker)) found.set(marker, []);
       const hits = found.get(marker);
       if (hits.length < 5) hits.push({ line: index + 1, text: line.trim().slice(0, 160) });

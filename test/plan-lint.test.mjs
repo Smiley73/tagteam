@@ -162,6 +162,192 @@ test("ordinary planning prose is not mistaken for revision history", () => {
   assert.deepEqual(lintPlanDocument({ text: clean }), []);
 });
 
+// Verbatim from the round that found it: a premise about the detector, which
+// enumerates the marker set and so trips three markers at once. Every plan that
+// proposes to change this rule has to write a line like it, so the rule blocked
+// its own repair — the same self-blocking shape the transcript phrase had.
+const ENUMERATING_PREMISE = "3. **The embedded-history rule is already structural.** `HISTORY_MARKERS` holds exactly seven patterns — withdrawn, numbered review round, numbered planning pass, superseded, previously said, earlier draft, struck-through — and none matches review-transcript-or-log phrasing; the comment above it records that the phrase marker was removed because naming an artifact is not carrying one.";
+
+test("a premise that enumerates the markers is naming them, not carrying them", () => {
+  assert.deepEqual(lintPlanDocument({ text: plan(ENUMERATING_PREMISE) }), []);
+});
+
+// The escape is that a name fills its list item exactly, so it cannot be reached
+// by a line that also annotates a decision: the annotation puts the decision
+// inside the item.
+test("naming a marker does not license annotating one on the same line", () => {
+  const found = lintPlanDocument({
+    text: plan("The markers are: withdrawn, superseded, previously said, earlier draft — and this decision supersedes the flex grid.")
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].severity, "blocking");
+  assert.match(found[0].title, /superseded decision/);
+});
+
+// Terse revision history looks like a list and is not one. A cell holding a
+// marker phrase is the ordinary shape of a decision log, with the subject in the
+// neighbouring cell, so a table pipe is not a separator.
+test("terse revision history is not mistaken for a list of names", () => {
+  const annotations = [
+    "The card layout is withdrawn / superseded by the flex grid.",
+    "See the earlier draft, superseded by this one.",
+    "~~use Redis~~, superseded by Postgres.",
+    "The polling interval is withdrawn, superseded, previously specified at 30s.",
+    "| ~~Redis cache~~ | superseded by Postgres |",
+    "| 400ms debounce | previously specified, superseded |",
+    "| superseded | earlier draft | 400ms debounce | previously specified |",
+    "| Card above the table | round 2 decided | superseded | earlier revision |",
+    "~~use Redis~~, ~~use Kafka~~, ~~use Mongo~~ — Postgres wins."
+  ];
+  for (const line of annotations) {
+    assert.ok(
+      lintPlanDocument({ text: plan(line) }).length > 0,
+      `${JSON.stringify(line)} should still block`
+    );
+  }
+});
+
+// Three names is the set being listed; two is a plan naming two, and two is
+// also how revision history is written tersely.
+test("the floor counts distinct markers, and two never clears it", () => {
+  assert.equal(lintPlanDocument({ text: plan("The markers are: superseded, previously said.") }).length, 2);
+  assert.deepEqual(
+    lintPlanDocument({ text: plan("The markers are: superseded, previously said, earlier draft.") }),
+    []
+  );
+});
+
+// An Oxford "and" or a parenthesis should not change the verdict; a rule a
+// drafter cannot predict is one they cannot satisfy.
+test("an enumeration is recognized through ordinary punctuation", () => {
+  const forms = [
+    "The markers are: withdrawn, superseded, previously said, and earlier draft.",
+    "(superseded, previously said, earlier draft)",
+    "The markers are: superseded, previously said, earlier draft — and nothing else."
+  ];
+  for (const line of forms) {
+    assert.deepEqual(lintPlanDocument({ text: plan(line) }), [], `${JSON.stringify(line)} should be clean`);
+  }
+});
+
+// Three names beside one annotation: the names go free and the annotation does
+// not, which is the property that keeps the escape from being a bypass.
+test("an annotation on a line of names still blocks, alone", () => {
+  const found = lintPlanDocument({
+    text: plan("The markers are: withdrawn, superseded, previously said, earlier draft, struck-through — and this decision is withdrawn.")
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0].title, /withdrawn/);
+});
+
+test("each marker on its own still blocks", () => {
+  const annotations = [
+    ["a withdrawn decision", "That relocation is withdrawn."],
+    ["a numbered review round", "Round 3 placed the card between the table and the charts."],
+    ["a numbered planning pass", "Pass 2 decided the opposite."],
+    ["a superseded decision", "This supersedes the earlier layout."],
+    ["what an earlier version said", "The plan previously specified 400ms."],
+    ["a reference to an earlier draft", "See the earlier draft for the rejected shape."],
+    ["a struck-through decision", "~~use Redis~~ use Postgres."]
+  ];
+  for (const [label, line] of annotations) {
+    const found = lintPlanDocument({ text: plan(line) });
+    assert.ok(
+      titles(found).some((title) => title.includes(label)),
+      `${JSON.stringify(line)} should report ${label}, got ${JSON.stringify(titles(found))}`
+    );
+  }
+});
+
+// A marker inside a code region is an example of the pattern, never an
+// annotation. historyIssues had no fence awareness at all, which is why a plan
+// could not so much as quote the rule it was changing. Backticks are not an
+// escape: `superseded` is one keystroke from every annotation, so a phrase in a
+// code span blocks exactly as it does in prose.
+test("markers inside code regions are examples, not annotations", () => {
+  const fenced = [
+    "```js",
+    "{ label: \"a superseded decision\", pattern: /\\bsupersed(?:ed|es)\\b/i }",
+    "// That relocation is withdrawn.",
+    "```",
+    "",
+    "~~~text",
+    "Round 3 placed the card here. The plan previously specified 400ms.",
+    "~~~",
+    "",
+    "    See the earlier draft; ~~use Redis~~ was the shape it proposed."
+  ].join("\n");
+  assert.deepEqual(lintPlanDocument({ text: plan(fenced) }), []);
+
+  assert.equal(lintPlanDocument({ text: plan("The toolbar placement is `superseded`.") }).length, 1);
+  assert.equal(lintPlanDocument({ text: plan("`The 400ms debounce is withdrawn.`") }).length, 1);
+});
+
+// A toggle would have made every one of these silence the rest of the document,
+// which historyIssues cannot afford: skipping a line is what a mismatched fence
+// buys, and a plan that carries history after one would ship unchecked.
+test("a fence closes only on its own delimiter, and detection resumes after it", () => {
+  const nested = [
+    "````markdown",
+    "```json",
+    "{ \"a\": 1 }",
+    "````",
+    "",
+    "That relocation is withdrawn."
+  ].join("\n");
+  assert.equal(lintPlanDocument({ text: plan(nested) }).length, 1);
+
+  const crossed = [
+    "```text",
+    "~~~",
+    "```",
+    "",
+    "That relocation is withdrawn."
+  ].join("\n");
+  assert.equal(lintPlanDocument({ text: plan(crossed) }).length, 1);
+
+  const closed = ["```js", "const x = 1;", "```", "", "This supersedes the layout."].join("\n");
+  assert.equal(lintPlanDocument({ text: plan(closed) }).length, 1);
+});
+
+// An unterminated fence is a defect in the document, and the safe reading of a
+// defect in a gate is that nothing was code.
+test("an unterminated fence does not swallow the rest of the plan", () => {
+  const found = lintPlanDocument({
+    text: plan(["```js", "const x = 1;", "", "That relocation is withdrawn."].join("\n"))
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0].title, /withdrawn/);
+});
+
+// A fence attached to a list item is indented to the item's content, which is
+// past the three spaces a top-level fence is allowed.
+test("a fence indented under a list item is still a fence", () => {
+  const clean = plan([
+    "1. Change the debounce.",
+    "",
+    "    ```js",
+    "    // That relocation is withdrawn.",
+    "    ```"
+  ].join("\n"));
+  assert.deepEqual(lintPlanDocument({ text: clean }), []);
+});
+
+// Four spaces under a list item is a continuation paragraph, not a code block,
+// and a plan writes its decisions as lists. If that read as code the fix would
+// be a bypass for every plan willing to indent.
+test("an indented list continuation is prose, not a code block", () => {
+  const found = lintPlanDocument({
+    text: plan([
+      "1. The export dialog moves to the settings page.",
+      "",
+      "    That relocation is withdrawn."
+    ].join("\n"))
+  });
+  assert.equal(found.length, 1);
+  assert.ok(/withdrawn/.test(found[0].title));
+});
+
 test("template sections are matched through numbering and parenthetical glosses", () => {
   const decorated = [
     "# A plan",
