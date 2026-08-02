@@ -107,6 +107,54 @@ test("PR-train validation keeps an atomic group inside one pull request", () => 
   assert.deepEqual(semanticErrors("pr-train.schema.json", split, { manifest: unlabelled }), []);
 });
 
+test("PR-train validation requires a task that closes each pull request", () => {
+  // A phase's gate run, CI run, changed-line count, and review round are
+  // evidence about the whole phase and are only true once it is complete, so
+  // the one task that transitively depends on every other task in the pull
+  // request is the only valid place for them.
+  const manifest = {
+    tasks: [
+      { id: "a", dependsOn: [] },
+      { id: "b", dependsOn: [] },
+      { id: "c", dependsOn: ["a", "b"] }
+    ]
+  };
+  const closed = { prs: [{ id: "p1", taskIds: ["a", "b", "c"], dependsOn: [] }] };
+  assert.deepEqual(semanticErrors("pr-train.schema.json", closed, { manifest }), []);
+
+  const open = { prs: [{ id: "p1", taskIds: ["a", "b"], dependsOn: [] }, { id: "p2", taskIds: ["c"], dependsOn: ["p1"] }] };
+  const errors = semanticErrors("pr-train.schema.json", open, { manifest }).join("\n");
+  assert.match(errors, /PR p1 has no task depending on every other task in it/);
+  // p2 holds one task, which is its own terminus.
+  assert.doesNotMatch(errors, /PR p2 has no task/);
+
+  // Nothing orders this against the manifest's own cycle check, which runs on a
+  // different document, so it has to terminate on a graph that has one.
+  const cyclic = { tasks: [{ id: "a", dependsOn: ["b"] }, { id: "b", dependsOn: ["a"] }] };
+  const both = { prs: [{ id: "p1", taskIds: ["a", "b"], dependsOn: [] }] };
+  assert.deepEqual(semanticErrors("pr-train.schema.json", both, { manifest: cyclic }), []);
+});
+
+test("manifest validation rejects a task whose edit surface is conditional", () => {
+  const forked = {
+    tasks: [
+      { id: "a", dependsOn: [], files: ["db/roth-fact-validation.ts or PR7 if knip rejects unused exports"], doneCriteria: ["x"] },
+      { id: "b", dependsOn: ["a"], files: ["src/if.ts"], doneCriteria: ["The two constants are deferred to PR7 with their consumer if knip rejects them here."] }
+    ]
+  };
+  const errors = semanticErrors("manifest.schema.json", forked).join("\n");
+  assert.match(errors, /task a makes its files conditional/);
+  assert.match(errors, /task b makes its doneCriteria conditional/);
+
+  const decided = {
+    tasks: [
+      { id: "a", dependsOn: [], files: ["db/roth-fact-validation.ts"], doneCriteria: ["Both constants are exported."] },
+      { id: "b", dependsOn: ["a"], files: ["src/if.ts"], doneCriteria: ["The prior-year row is hidden if no prior year exists.", "The gate run for PR 2 is green; if it fails, the phase does not land."] }
+    ]
+  };
+  assert.deepEqual(semanticErrors("manifest.schema.json", decided), []);
+});
+
 test("copyUntracked validation rejects a destination Git would track", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ignore-"));
   spawnSync("git", ["init", "-q", repo]);
