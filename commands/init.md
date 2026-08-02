@@ -24,13 +24,15 @@ Run these read-only checks and retain their exact output:
 4. Probe schema output in a temporary directory with a tiny object schema and `codex exec --ephemeral --sandbox read-only -c 'approval_policy="never"' --output-schema ...`. Delete only that exact temporary directory afterward. A missing or invalid artifact is failure regardless of exit code.
 5. `git remote get-url origin`. In `github-pr` mode also run `gh auth status` and `gh repo view --json nameWithOwner,defaultBranchRef`.
 6. Report whether Codex's config contains a trust entry for this repository; never edit the user's global Codex config.
-7. Check for `.codegraph/`. If absent, ask once: “Should tagteam build a CodeGraph index for this project?” Explain that yes gives both engines caller/data-flow context and runs `codegraph init`; no is supported but loses that context. Store the answer as `codegraph.enabled`. On yes, run `codegraph init` in the repository and validate `.codegraph/` now exists.
+7. Check for `.codegraph/`. If it is already there, set `codegraph.enabled` to true without asking — the index exists and the `.gitignore` step below has to know that. If absent, ask once: “Should tagteam build a CodeGraph index for this project?” Explain that yes gives both engines caller/data-flow context and runs `codegraph init`; no is supported but loses that context. Say in the same breath that the index is a local build artifact, not a reviewed record, so the managed `.gitignore` block will cover `.codegraph/` — the directory would otherwise appear untracked the moment setup created it. Store the answer as `codegraph.enabled`. On yes, run `codegraph init` in the repository and validate `.codegraph/` now exists.
 8. In GitHub PR mode, query `gh api repos/<owner>/<repo>/branches/<base>/protection`. Never change repository settings. Record whether protection prevents unsynchronized direct pushes and print the exact repository-specific `gh api --method PUT ...` guidance if it is absent. State plainly that an unprotected base can still be shipped to a ready PR, but tagteam will not merge it automatically.
 9. Report whether Git already ignores tagteam's working state, without writing anything:
 
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-gitignore.mjs" "<repo>" --check
    ```
+
+   Append `--codegraph` when step 7 set `codegraph.enabled` to true, so this preflight checks the same rule set the write below applies. Without it a repository destined for that rule reports clean here and changes at write time, which reads as the check having been wrong.
 
    Say plainly whether the repository would otherwise commit ships, worktrees, locks, and plan drafts. Setup fixes this at write time; do not fix it here.
 10. Invoke `Workflow({name:"tagteam:runtime-probe",args:{}})`. Record whether Workflow budget reporting exists (reporting only, never a gate) and whether this harness accepts `effort` on Haiku. If Haiku effort is rejected, do not allow a Haiku runtime in any config slot that dispatches an effort value; offer Sonnet instead. Save the capability result in gitignored `.tagteam/transport.json`.
@@ -99,7 +101,7 @@ User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects 
 3. Ask only those questions, using the wording above, seeded from `~/.tagteam/config.json` when it answers one.
 4. State before writing that `.tagteam/config.json` is a committed file, so the new answers become a tracked change the rest of the team inherits. Get explicit confirmation.
 5. Write the merged object with `version` set to 3, preserving every existing choice byte for byte, then validate with `validate-json.mjs --repo` and require exit 0.
-6. Do not touch `.gitignore`, do not re-run the preflight probes, and do not re-run the runtime probe. `--reconfigure` owns those.
+6. Do not touch `.gitignore`, do not re-run the preflight probes, and do not re-run the runtime probe. `--reconfigure` owns those. One read-only exception, because it reports rather than repairs: when `codegraph.enabled` is true, run `ensure-gitignore.mjs "<repo>" --check --codegraph`, and if `.codegraph/` comes back unignored, say that the index directory is untracked and name `--reconfigure` as the one command that fixes it. An upgraded repository that predates that rule is exactly the case this catches, and silence is what made it a trap the first time.
 
 ## Write and verify
 
@@ -113,9 +115,13 @@ On confirmation:
    node "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-gitignore.mjs" "<repo>"
    ```
 
-   This rewrites one managed block covering ships, worktrees, locks, `transport.json`, plan drafts and reviews, and Codex slot/quota bookkeeping, leaving every other line untouched. Approved plans (`plan.md`, `manifest.json`, `pr-train.json`, `decisions.json`, `approved.json`) and `.tagteam/config.json` stay committable on purpose. It is idempotent, so `--reconfigure` repairs a drifted or hand-edited block.
+   Append `--codegraph` when `codegraph.enabled` is true, so the block also covers `.codegraph/`. Omit it otherwise: a repository that declined the index has no such directory, and a rule for one would be a claim about a tool it does not use.
+
+   This rewrites one managed block covering ships, worktrees, locks, `transport.json`, plan drafts and reviews, Codex slot/quota bookkeeping, and — with the flag — the CodeGraph index, leaving every other line untouched. Approved plans (`plan.md`, `manifest.json`, `pr-train.json`, `decisions.json`, `approved.json`) and `.tagteam/config.json` stay committable on purpose. It is idempotent, so `--reconfigure` repairs a drifted or hand-edited block.
 
    The command reports `ok`, whether the file was created or changed, and any hand-written duplicates it folded into the block. A non-empty `notIgnored` means a rule elsewhere in the file — usually a later negation — still re-includes tagteam's working state; report exactly which patterns, name that as the one thing to fix by hand, and do not report setup as complete.
+
+   A non-empty `orphanedComments` lists comments the user wrote that introduced rules this run absorbed into the block, and that now sit above unrelated lines. The script never edits a line a person wrote, so quote each one verbatim, say plainly that it no longer describes what follows it, and leave the edit to the user. This is a report, not a failure: setup is still complete.
 4. Validate the file with `validate-json.mjs --repo`.
 5. Print what is ready, what still needs human action, and the next command `/tagteam:plan <goal>`.
 

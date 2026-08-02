@@ -152,6 +152,11 @@ async function forge({
   // only the fenced carried set is demanded back, so a reviewer's question is
   // not what this knob is for.
   draftQuestions = [],
+  // What the interaction lens finds and persists. Non-null makes the lens stub
+  // model a compliant one: it writes the findings file the workflow named and
+  // returns the same array, which is the contract the interface settle depends
+  // on now that that set travels as a path rather than as a command argument.
+  lensDecisions = null,
   // What a continuation is carrying in from the pass before it, on disk and in
   // `openQuestions`. Overridable so one test can carry a realistic-length set:
   // a real question is a paragraph, and the carried set used to travel to the
@@ -249,6 +254,15 @@ async function forge({
         open_questions: questions,
         ui_decisions: []
       });
+    }
+    // A compliant lens writes the array it returns to the path it was named,
+    // because the settle reads that file rather than this reply. Nothing else
+    // in this suite exercises that file: the interface record is the one set
+    // too large to travel as an argument, so the file is the whole mechanism.
+    if (lensDecisions && label.startsWith("plan:interaction-review")) {
+      const file = persistPathFrom(prompt, /persist at (\S+?), mode 0600, a JSON array/);
+      fs.writeFileSync(file, JSON.stringify(lensDecisions), { mode: 0o600 });
+      return answer(options, { issues: [], ui_decisions: lensDecisions });
     }
     if (label === "plan:manifest") {
       fs.writeFileSync(persistPathFrom(prompt, /persist the identical manifest as JSON at (\S+) with mode 0600/), JSON.stringify(corruptManifest(manifest)), { mode: 0o600 });
@@ -631,6 +645,69 @@ test("a realistic-length carried set survives a continuation, and never rides on
   const merge = prompts.get("plan:merge-continuation-questions");
   assert.equal(merge.includes("--additional-inline"), false);
   assert.match(merge, /--resolved-file "[^"]*pass-1-decisions\.json"/);
+});
+
+// The interface counterpart of the carried-set test above, and the same defect:
+// this record once travelled to its merge command as a single inline argument,
+// and it is the fastest-growing artifact in a pass — 4,678 bytes at one real
+// round's input, 19,177 by the next — so a compliant pass composed an 11,336-
+// character argument and died at its exit path. Unlike a question, one decision
+// can outgrow the ceiling by itself: the schema allows an 800-character sketch
+// per option and at least one alternative. These two are that size, so a
+// fixture that happened to be short cannot hide a regression here.
+const option = (label, filler) => ({
+  label,
+  sketch: `[ ${label} ] ${filler.repeat(20)}`.slice(0, 780),
+  why: `Chosen because ${filler.repeat(12)}`
+});
+const REALISTIC_UI_DECISIONS = [
+  {
+    id: "budget-overrun-stop",
+    decision: "How a pass tells someone it is about to spend past the budget they set",
+    surface: "new-dialog",
+    chosen: option("Stop and ask once, naming the overrun", "the run halts at the phase boundary and states what it has spent, "),
+    alternatives: [option("Warn in the log and continue", "the number is recorded but nothing waits on a person, ")],
+    precedent: "commands/plan.md"
+  },
+  {
+    id: "per-phase-attribution-table",
+    decision: "Where the per-phase spend table is shown when a pass finishes",
+    surface: "existing-flow",
+    chosen: option("Inline in the completion report", "the table follows the plan receipt in the same block, "),
+    alternatives: [option("A separate status subcommand", "the report stays short and the detail is asked for, ")],
+    precedent: null
+  }
+];
+
+test("a realistic-length interface record settles through a file, never on the command line", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ui-settle-"));
+  const { result, prompts } = await forge({
+    planDir,
+    // A clean round revises nothing, which is exactly the case the settle
+    // exists for: no revision runs afterwards to fold the lens's findings into
+    // the record beside the plan.
+    review: () => APPROVE,
+    lensDecisions: REALISTIC_UI_DECISIONS
+  });
+
+  assert.equal(result.status, "needs-approval");
+  assert.equal(result.uiDecisionsSettled, true);
+  // The real merge command ran against the real findings file, and the record
+  // a later pass is seeded from is what it wrote.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(`${result.uiDecisionsPath}`, "utf8")).map((entry) => entry.id),
+    ["budget-overrun-stop", "per-phase-attribution-table"]
+  );
+
+  const settle = prompts.get("plan:merge-final-ui-decisions");
+  assert.equal(settle.includes("--additional-inline"), false);
+  assert.match(settle, /merge-plan-ui-decisions\.mjs" "[^"]+" "[^"]*interaction-findings\.json"/);
+  // Serialized inline this would have been thousands of characters; every
+  // argument the command actually carries is a path or a token.
+  assert.equal(JSON.stringify(REALISTIC_UI_DECISIONS).length > 2_000, true, "the fixture should be large");
+  for (const argument of settle.match(/"[^"]*"/g) ?? []) {
+    assert.equal(argument.length < 1_000, true, `oversized argument: ${argument.slice(0, 80)}`);
+  }
 });
 
 // The fifth exit. The four structured ones settle the pass's reviewer questions

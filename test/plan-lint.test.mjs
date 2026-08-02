@@ -63,6 +63,96 @@ test("revision history in the plan body is a blocking finding, not a style note"
   assert.match(found[0].detail, /line \d+/);
 });
 
+// A repository whose standards require a `## Review Log` section, enforced
+// through policyPaths, could not satisfy both rules at once: the plan was
+// blocked for naming a section the standards mandate. The first three lines are
+// verbatim from the run that found it; the rest are the ordinary ways a plan
+// specifies such a section. None of them is a transcript.
+test("naming a review log the standards require is not carrying one", () => {
+  const clean = plan([
+    "sections incl. Review Log) · :63-73 (two consecutive clean alternating",
+    "at `.plan/roth-conversions-on-balances.md` carrying a `## Review Log`",
+    "`.plan/roth-conversions-on-balances.md` carries a `## Review Log` whose two",
+    "Each Review Log block records the reviewer, the round, and the verdict.",
+    "The Review Log is the sign-off record the standards require.",
+    "The review log records which pull requests were approved.",
+    "| Review Log | one block per reviewer | approved by a human |",
+    "The review log lists pre-approved changes so nobody re-reads them.",
+    "",
+    "The section that document requires looks like this:",
+    "",
+    "```markdown",
+    "## Review Log",
+    "### Round 1 — codex: approve",
+    "```"
+  ].join("\n"));
+  assert.deepEqual(lintPlanDocument({ text: clean }), []);
+});
+
+// The plan may carry the section itself where a repository mandates one. What
+// it may not do is paste rounds into it.
+test("an empty review-log section the standards mandate is allowed", () => {
+  const clean = plan("", { headings: [...SECTIONS, "Review Log"] });
+  assert.deepEqual(lintPlanDocument({ text: clean }), []);
+});
+
+// The canonical pasted transcript: the phrase is a heading on its own line and
+// every verdict is on a line below it. Detection has to be structural, because
+// no line here carries both halves.
+test("a review-log section with rounds pasted under it blocks", () => {
+  const found = lintPlanDocument({
+    text: plan([
+      "## Review Transcript",
+      "",
+      "### Round 2 — claude",
+      "- Verdict: revise",
+      "- The export dialog should move to the settings page.",
+      "### Round 3 — codex",
+      "- Verdict: approve"
+    ].join("\n"))
+  }).filter((issue) => /embedded review transcript/.test(issue.title));
+
+  assert.equal(found.length, 1);
+  assert.equal(found[0].severity, "blocking");
+  // It says which section, and quotes the entries rather than the heading.
+  assert.match(found[0].detail, /opens a "Review Transcript" section/);
+  assert.match(found[0].detail, /line \d+/);
+  // And it says plainly that naming the section was never the problem.
+  assert.match(found[0].detail, /Naming the section is fine/);
+});
+
+// The section ends where the next same-or-higher heading starts, so entries
+// belonging to a later section are not counted against it.
+test("a review-log section is bounded by the heading that follows it", () => {
+  const clean = plan([
+    "## Review Log",
+    "",
+    "(none — the reviewer record lives in the pull request.)",
+    "",
+    "## Rollout",
+    "",
+    "Round 2 of the rollout lands on 2026-03-14 and needs a verdict from ops."
+  ].join("\n"));
+  assert.deepEqual(
+    lintPlanDocument({ text: clean }).filter((issue) => /embedded review transcript/.test(issue.title)),
+    []
+  );
+});
+
+// One dated line is a note someone left; a log is entries. The floor is what
+// keeps a filled-in template from reading as history.
+test("a single entry under the heading is below the floor", () => {
+  const clean = plan([
+    "## Review Log",
+    "",
+    "Reviewed 2026-03-14; see the pull request for the discussion."
+  ].join("\n"));
+  assert.deepEqual(
+    lintPlanDocument({ text: clean }).filter((issue) => /embedded review transcript/.test(issue.title)),
+    []
+  );
+});
+
 test("ordinary planning prose is not mistaken for revision history", () => {
   const clean = plan([
     "Round the projected balance to whole cents before comparing.",

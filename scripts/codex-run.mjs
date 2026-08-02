@@ -465,12 +465,25 @@ function requestFingerprint({ options, prompt, schema }) {
   })).digest("hex");
 }
 
+// The schema is identified by name rather than by the absolute path it was
+// loaded from, and the reason is worth stating because it is exactly the case a
+// reader will want to re-litigate. The path a plugin's schema lives at contains
+// the plugin version, so upgrading mid-plan changed this identity for every
+// saved artifact in flight and forced a re-buy of work whose prompt and schema
+// bytes were unchanged — measured at four re-buys of one round-1 review in a
+// single plan. Nothing about correctness is given up: what a schema *says* is
+// already bound by requestFingerprint above, which hashes the parsed schema
+// itself, and the request record beside every artifact carries its schemaHash.
+// So a schema whose bytes really did change still invalidates reuse; only the
+// case where the path moved and the bytes did not stops invalidating it.
+// version 2 is what marks that change: an artifact written under version 1
+// carries a different identity and is simply not reused.
 function requestIdentity({ options, prompt }) {
   const promptHash = `sha256:${createHash("sha256").update(prompt).digest("hex")}`;
   const fields = {
-    version: 1,
+    version: 2,
     promptHash,
-    schemaPath: options.schema,
+    schemaName: path.basename(options.schema),
     model: options.model,
     effort: options.effort,
     sandbox: options.sandbox,

@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { BEGIN, END, MANAGED_ENTRIES, ensureGitignore, renderGitignore } from "../scripts/ensure-gitignore.mjs";
+import {
+  BEGIN, CODEGRAPH_ENTRY, END, MANAGED_ENTRIES, ensureGitignore, renderGitignore
+} from "../scripts/ensure-gitignore.mjs";
 
 function repo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ignore-"));
@@ -104,6 +106,64 @@ test("the CLI reports success as JSON and fails when a pattern does not take eff
   const broken = spawnSync(process.execPath, [script, dir, "--check"], { encoding: "utf8" });
   assert.equal(broken.status, 1);
   assert.deepEqual(JSON.parse(broken.stdout).notIgnored, [".tagteam/locks/"]);
+});
+
+// Setup itself creates .codegraph/ when the user opts in, and its database
+// self-ignores while the directory shell does not — so the repository showed a
+// new untracked directory the moment init finished. Managed only on request:
+// a repository that declined the index has no such directory, and a rule for
+// one would be a claim about a tool it does not use.
+test("--codegraph covers the index init creates, and its absence leaves it alone", () => {
+  const dir = repo();
+  const report = ensureGitignore(dir, { codegraph: true });
+  assert.deepEqual(report.notIgnored, []);
+  const lines = fs.readFileSync(path.join(dir, ".gitignore"), "utf8").trimEnd().split("\n");
+  assert.deepEqual(lines.slice(lines.indexOf(BEGIN) + 1, lines.indexOf(END)), [
+    ...MANAGED_ENTRIES.map((entry) => entry.pattern),
+    CODEGRAPH_ENTRY.pattern
+  ]);
+  assert.equal(spawnSync("git", [
+    "-C", dir, "check-ignore", "--no-index", "--", CODEGRAPH_ENTRY.probe
+  ], { encoding: "utf8" }).stdout.trim(), CODEGRAPH_ENTRY.probe);
+
+  const without = repo();
+  ensureGitignore(without);
+  assert.equal(fs.readFileSync(path.join(without, ".gitignore"), "utf8").includes(".codegraph/"), false);
+});
+
+// The script folds hand-written copies of its own patterns into the block, and
+// once left the comment that introduced them behind — describing whatever line
+// happened to follow. It never edits a line a person wrote, so it names the
+// comment instead and leaves the decision to whoever wrote it.
+test("a comment left describing rules the block absorbed is reported, never edited", () => {
+  const dir = repo();
+  fs.writeFileSync(path.join(dir, ".gitignore"), [
+    "# tagteam run state — config and approved plans are committable, the rest is not",
+    ".tagteam/ships/",
+    ".tagteam/worktrees/",
+    "",
+    "# build output",
+    "coverage/",
+    ""
+  ].join("\n"));
+  const report = ensureGitignore(dir);
+  assert.deepEqual(report.orphanedComments, ["# tagteam run state — config and approved plans are committable, the rest is not"]);
+  // Reported, not removed: the line is still there for the user to decide about.
+  const content = fs.readFileSync(path.join(dir, ".gitignore"), "utf8");
+  assert.equal(content.includes("# tagteam run state"), true);
+  // A comment whose rules survived is nobody's business.
+  assert.equal(report.orphanedComments.includes("# build output"), false);
+});
+
+test("a comment that introduces both absorbed and surviving rules is left unreported", () => {
+  const rendered = renderGitignore([
+    "# machine state",
+    ".tagteam/locks/",
+    "node_modules/",
+    ""
+  ].join("\n"));
+  assert.deepEqual(rendered.removedDuplicates, [".tagteam/locks/"]);
+  assert.deepEqual(rendered.orphanedComments, []);
 });
 
 test("rendering keeps every user line, ends with exactly one newline, and needs no file to exist", () => {
