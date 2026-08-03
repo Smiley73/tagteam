@@ -380,6 +380,76 @@ test("fix log appends without changing a frozen review round", () => {
   assert.match(fs.readFileSync(reviewPath, "utf8"), /### Fix log — round 1/);
 });
 
+test("a final challenge appends a record the round grammar reads straight past", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-final-challenge-event-"));
+  const reviewPath = path.join(temp, "review.md");
+  const roundPath = path.join(temp, "round.json");
+  fs.writeFileSync(roundPath, JSON.stringify({
+    round: 1,
+    recordedAt: "2026-07-25T12:00:00.000Z",
+    reviewers: [{ engine: "claude", dimension: "functionality", ok: true, verdict: "clean", summary: "Clean.", dimensionSweep: "Checked.", loadBearingClaim: "One caller." }],
+    findings: [], skipped: [], matcherErrors: [], reviewerFailures: [], advisory: [],
+    verification: { status: "passed" }
+  }));
+  appendRound(reviewPath, roundPath);
+  const frozen = fs.readFileSync(reviewPath);
+  const parsedBefore = parseReviewArtifact(frozen.toString("utf8"));
+
+  const eventPath = path.join(temp, "final-challenge-event.json");
+  fs.writeFileSync(eventPath, JSON.stringify({
+    kind: "final-challenge",
+    round: 1,
+    engine: "codex",
+    candidateOid: "a".repeat(40),
+    challenge: {
+      ran: true,
+      verdict: "block",
+      summary: "The contract is not met.",
+      findings: [{
+        severity: "blocking", file: "src/a.js", line_start: 10, line_end: 14,
+        title: "The retry path never runs",
+        failure_path: "A 503 returns before the retry, so the caller sees the error the contract absorbs.",
+        recommendation: "Move the return inside the catch."
+      }]
+    }
+  }));
+  appendEvent(reviewPath, eventPath);
+
+  const text = fs.readFileSync(reviewPath, "utf8");
+  assert.equal(fs.readFileSync(reviewPath).subarray(0, frozen.length).equals(frozen), true);
+  assert.match(text, /### Final challenge — round 1/);
+  assert.match(text, /The retry path never runs/);
+  // The block carries no round header, no reviewer header, and no F<round>.<n>
+  // identity, so the artifact still parses and still says exactly one round
+  // happened with exactly the findings that round recorded.
+  const parsedAfter = parseReviewArtifact(text);
+  assert.equal(parsedAfter.ok, true, parsedAfter.errors.join("; "));
+  assert.deepEqual(parsedAfter.findingIds, parsedBefore.findingIds);
+  assert.equal(parsedAfter.highestRound, 1);
+});
+
+test("a record for a round that is not the latest is refused by name", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-final-challenge-round-"));
+  const reviewPath = path.join(temp, "review.md");
+  const roundPath = path.join(temp, "round.json");
+  fs.writeFileSync(roundPath, JSON.stringify({
+    round: 1, recordedAt: "2026-07-25T12:00:00.000Z",
+    reviewers: [{ engine: "claude", dimension: "functionality", ok: true, verdict: "clean", summary: "Clean.", dimensionSweep: "Checked.", loadBearingClaim: "One caller." }],
+    findings: [], skipped: [], matcherErrors: [], reviewerFailures: [], advisory: [],
+    verification: { status: "passed" }
+  }));
+  appendRound(reviewPath, roundPath);
+  const eventPath = path.join(temp, "event.json");
+  fs.writeFileSync(eventPath, JSON.stringify({
+    kind: "final-challenge", round: 2, engine: "claude", candidateOid: "a".repeat(40),
+    challenge: { ran: true, verdict: "merge", summary: "Nothing to stop this.", findings: [] }
+  }));
+  assert.throws(() => appendEvent(reviewPath, eventPath), /final-challenge event round 2 is not the latest review round 1/);
+
+  fs.writeFileSync(eventPath, JSON.stringify({ kind: "reflection", round: 1 }));
+  assert.throws(() => appendEvent(reviewPath, eventPath), /unsupported review event kind: reflection/);
+});
+
 test("quota classifier checks model access before quota-shaped status and enforces the persisted ceiling", () => {
   assert.equal(classifyProviderError("429 model not found").kind, "model-unavailable");
   assert.equal(classifyProviderError("Retry-After: 30").kind, "quota");
@@ -555,6 +625,41 @@ test("the final report discloses provider assurance and split usage", () => {
   assert.match(report, /Usage: Claude reasoning 0; Haiku plumbing 8; Codex 6; relay retries 1/);
   assert.match(report, /Plumbing by model: haiku 8; sonnet 3/);
   assert.match(report, /Usage accounting: legacy-incomplete/);
+});
+
+test("the report carries a final-challenge finding's failure path, not just its title", () => {
+  // The one finding a person is asked to judge that no reviewer raised, so it
+  // arrives with no dimension charter to explain it. The row is shaped exactly
+  // as the workflow pushes it onto the ledger.
+  const shipDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-report-challenge-"));
+  fs.writeFileSync(path.join(shipDir, "ship-meta.json"), JSON.stringify({ shipId: "s1" }));
+  fs.writeFileSync(path.join(shipDir, "pr-train-state.json"), JSON.stringify({
+    prs: [{
+      id: "PR-1",
+      state: "awaiting-approval",
+      ledger: [
+        {
+          id: "TT-9f2c1a04", dimension: "final-challenge", severity: "blocking",
+          title: "The retry path never runs", file: "src/a.js", line_start: 10, line_end: 14,
+          failure_path: "A 503 returns before the retry, so the caller sees the error the contract absorbs.",
+          body: "A 503 returns before the retry, so the caller sees the error the contract absorbs.",
+          recommendation: "Move the return inside the catch.",
+          confidence: 1, engine: "codex", round: 1, occurrences: 1, status: "needs-human"
+        },
+        {
+          id: "TT-1", dimension: "reliability", severity: "major", title: "Unbounded retry",
+          status: "wont-fix", fixExplanation: "Deliberate for now."
+        }
+      ]
+    }]
+  }));
+
+  const report = renderReport(shipDir);
+  assert.match(report, /- PR-1 · TT-9f2c1a04 · \[blocking\] The retry path never runs \(src\/a\.js:10-14\)/);
+  assert.match(report, /- Failure path: A 503 returns before the retry/);
+  assert.match(report, /- Repair: Move the return inside the catch\./);
+  // Every other human-decision finding keeps the one-line form it had.
+  assert.match(report, /- PR-1 · TT-1 · \[major\] Unbounded retry — Deliberate for now\./);
 });
 
 test("merge lock serializes ships, supports a lease heartbeat, and validates ownership", () => {

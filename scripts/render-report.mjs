@@ -76,9 +76,18 @@ export function renderReport(shipDir) {
     ? deferred.map((finding) => `- ${finding.pr} · ${finding.id} · [${finding.severity}] ${finding.title}`).join("\n")
     : "- None");
   lines.push("", "## Won't-fix or human-decision findings", "");
-  lines.push(wontFix.length
-    ? wontFix.map((finding) => `- ${finding.pr} · ${finding.id} · [${finding.severity}] ${finding.title} — ${finding.fixExplanation ?? "needs a decision"}`).join("\n")
-    : "- None");
+  // A final-challenge finding is the only one here that no reviewer raised, so
+  // it arrives without a dimension charter to explain it. The report is where a
+  // person actually reads, so it carries the failure path and the repair rather
+  // than a title and a shrug.
+  const decision = (finding) => (finding.dimension === "final-challenge"
+    ? [
+      `- ${finding.pr} · ${finding.id} · [${finding.severity}] ${finding.title} (${finding.file}:${finding.line_start}-${finding.line_end})`,
+      `  - Failure path: ${finding.failure_path ?? "not stated"}`,
+      `  - Repair: ${finding.recommendation ?? "not stated"}`
+    ].join("\n")
+    : `- ${finding.pr} · ${finding.id} · [${finding.severity}] ${finding.title} — ${finding.fixExplanation ?? "needs a decision"}`);
+  lines.push(wontFix.length ? wontFix.map(decision).join("\n") : "- None");
   lines.push("");
   return lines.join("\n").trimEnd() + "\n";
 }

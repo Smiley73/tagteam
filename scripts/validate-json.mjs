@@ -99,14 +99,15 @@ export function validateJson(schema, value) {
 // by an older plugin stays valid: it is missing answers, not wrong. Every key
 // listed here arrived after version 1, so all of them are optional in the
 // schema and required only once a configuration claims to be current.
-export const CONFIG_VERSION = 3;
+export const CONFIG_VERSION = 4;
 
 // Keyed by the version that introduced them, so a configuration is only asked
 // for the answers it actually predates: a version-2 file is not re-asked the
 // interface questions it already carries.
 const VERSION_KEYS = {
   2: ["ui.hasUserInterface", "ui.conventionPaths", "ui.confirmDecisions"],
-  3: ["policyPaths"]
+  3: ["policyPaths"],
+  4: ["planning.premiseChallenge", "review.finalChallenge"]
 };
 
 const keysAddedAfter = (version) => Object.entries(VERSION_KEYS)
@@ -357,6 +358,10 @@ export function semanticErrors(schemaName, value, { repo, manifest } = {}) {
       if (ignored.status !== 0) {
         errors.push(`worktree.copyUntracked path is not ignored at its destination and could be committed: ${configuredPath}`);
       }
+    }
+    const challengeTier = value.review?.finalChallenge?.tier;
+    if (challengeTier && !value.reviewTiers?.[challengeTier]) {
+      errors.push(`review.finalChallenge names unknown tier ${challengeTier}`);
     }
     for (const [name, reviewer] of Object.entries(value.reviewers ?? {})) {
       if (reviewer.tier && !value.reviewTiers?.[reviewer.tier]) errors.push(`reviewer ${name} names unknown tier ${reviewer.tier}`);

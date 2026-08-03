@@ -11,7 +11,7 @@
     {
       "name": "tagteam",
       "description": "Cross-engine plan, implement, review, and merge workflows for Claude Code and Codex.",
-      "version": "0.5.11",
+      "version": "0.5.12",
       "author": {
         "name": "tagteam contributors"
       },

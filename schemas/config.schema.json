@@ -9,7 +9,7 @@
     "transport", "limits"
   ],
   "properties": {
-    "version": { "enum": [1, 2, 3] },
+    "version": { "enum": [1, 2, 3, 4] },
     "policyPaths": {
       "type": "array",
       "uniqueItems": true,
@@ -33,6 +33,7 @@
           }
         },
         "questionsPerRound": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "premiseChallenge": { "type": "boolean" },
         "canonicalStrings": {
           "type": "array",
           "items": {
@@ -162,7 +163,18 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["firstReviewer"],
-      "properties": { "firstReviewer": { "type": "string", "enum": ["claude", "codex"] } }
+      "properties": {
+        "firstReviewer": { "type": "string", "enum": ["claude", "codex"] },
+        "finalChallenge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "tier"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "tier": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
     },
     "verify": {
       "type": "object",

@@ -402,6 +402,51 @@ async function resumeFromPlan(planDir, seedPath) {
   return { result, labels };
 }
 
+test("the premise-challenge request is assembled from the file the premises were saved to", () => {
+  // The one template this feature adds. It reaches Codex through the same
+  // compose-and-check path as every other request, and the checksum the
+  // workflow computed over the saved premises is checked before a byte is sent.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-premise-compose-"));
+  const goalFile = path.join(dir, "goal.json");
+  const premisesFile = path.join(dir, "premises.json");
+  const out = path.join(dir, "request.md");
+  const goal = { version: 1, goal: "improve the relay" };
+  const premises = {
+    premises: [
+      { claim: "The relay ships to production today", basis: "scripts/codex-run.mjs is on the release path", kind: "verified" }
+    ]
+  };
+  fs.writeFileSync(goalFile, JSON.stringify(goal, null, 2));
+  fs.writeFileSync(premisesFile, JSON.stringify(premises, null, 2));
+
+  const compose = (expected) => spawnSync(process.execPath, [
+    path.join(root, "scripts/compose-prompt.mjs"),
+    "--template", path.join(root, "prompts/premise-challenge-codex.md"),
+    "--out", out,
+    "--var", `WORKTREE=${root}`,
+    "--fence-json", `GOAL=${goalFile}`,
+    "--fence-json", `STATED_PREMISES=${premisesFile}`,
+    ...(expected ? ["--expect", `STATED_PREMISES=${expected}`] : [])
+  ], { encoding: "utf8" });
+
+  const clean = compose(null);
+  assert.equal(clean.status, 0, clean.stderr);
+  const prompt = fs.readFileSync(out, "utf8");
+  assert.equal(prompt.includes(fenced("stated-premises", JSON.stringify(premises, null, 2))), true);
+  assert.equal(prompt.includes("<untrusted-goal>"), true);
+  assert.equal(prompt.includes("{{"), false, "an unsubstituted placeholder reached the request");
+  // The challenger is told what it may not do with the list it is judging.
+  assert.match(prompt, /Do not rewrite a claim, add a premise, drop one, or reorder the list/);
+
+  // A checksum from any other bytes stops the request before it is sent. What
+  // the matching token looks like is settled where it is produced: the harness
+  // test for the both-provider path runs the real verifier over the real file.
+  const wrong = compose(expectToken("something this run never wrote"));
+  assert.notEqual(wrong.status, 0);
+  assert.match(wrong.stderr, /stated-premises section at .* is not the text this run produced/);
+  assert.match(wrong.stderr, /Nothing was sent to Codex/);
+});
+
 test("a 130 KB plan reaches the cross-check whole, as the exact string the workflow specified", async () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-compose-"));
   const { result, composed, plans, manifest, train } = await forge({ planDir });

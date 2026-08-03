@@ -122,6 +122,35 @@ const premisesSchema = {
   }
 };
 
+// One row per stated premise, in the order they were stated. The claim is
+// repeated back so the rows can be checked against what was actually stated:
+// telling a model not to reorder a list is prose, and a row that lines up with
+// the wrong premise downgrades the wrong premise. Only `contradicted` carries a
+// conflicting fact, and only `contradicted` changes anything.
+const premiseChallengeSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["challenges"],
+  properties: {
+    challenges: {
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["claim", "verdict", "basisChecked"],
+        properties: {
+          claim: { type: "string", minLength: 1, maxLength: 300 },
+          verdict: { type: "string", enum: ["contradicted", "unsupported", "unchallenged"] },
+          basisChecked: { type: "string", minLength: 1, maxLength: 400 },
+          evidence: { type: "string", minLength: 1, maxLength: 600 }
+        }
+      }
+    }
+  }
+};
+
 // The interaction lens runs on the plan, before any code exists, because moving
 // a dialog in a plan costs a sentence and moving it in a diff costs a PR. It is
 // advisory by design: it never blocks a pass and never asks the human anything.
@@ -966,7 +995,7 @@ const planState = {
 
 async function planAgent(prompt, options) {
   planState.dispatchedCalls += 1;
-  if (["tagteam:prompt-builder", "tagteam:codex-runner"].includes(options.agentType)) {
+  if (["tagteam:prompt-builder", "tagteam:codex-runner", "tagteam:scribe"].includes(options.agentType)) {
     const model = String(options.model ?? "unknown");
     usageState.plumbingCallsByModel[model] = (usageState.plumbingCallsByModel[model] ?? 0) + 1;
     if (model === "haiku") usageState.haikuPlumbingCalls += 1;
@@ -1041,7 +1070,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, effort, wh
     }
     log(`The request for the Codex ${what} was built, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Building it again is free.`);
   }
-  throw new Error([
+  throw relayExhausted([
     `The request for the Codex ${what} was built, but that could not be confirmed after ${RELAY_ATTEMPTS} attempts.`,
     "Nothing was sent to the second opinion and nothing was paid for.",
     "Run the same plan command again with --resume; every finished check is reused rather than repaid.",
@@ -1451,7 +1480,18 @@ async function relayCodex({
   // parallel() turns a thrown error into null, so callers inside parallel must
   // raise relayLost themselves rather than rely on this throw.
   relayState.fatal.push(`${artifact}.relay-checkpoint.json`);
-  throw new Error(relayLost({ what, artifact, promptFile }));
+  throw relayExhausted(relayLost({ what, artifact, promptFile }));
+}
+
+// A reply that never came back, on either half of a Codex dispatch: the request
+// build or the run itself. Both are the same kind of failure — nothing about the
+// repository or this pass makes them repeat — and a step that may proceed
+// without its result has to be able to tell them from the ones that do repeat.
+// Presence of a fatal checkpoint cannot say it: only the second half raises one.
+function relayExhausted(message) {
+  const error = new Error(message);
+  error.relayExhausted = true;
+  return error;
 }
 
 function relayLost({ what, artifact, promptFile }) {
@@ -2094,15 +2134,199 @@ async function main(raw) {
         `Details: plan directory ${input.planDir}`
       ].join("\n"));
     }
-    const assumed = stated.premises.filter((premise) => premise.kind === "assumed");
-    log(`Stated ${stated.premises.length} premise${stated.premises.length === 1 ? "" : "s"} this plan would rest on, ${assumed.length} of them assumed rather than established from the repository.`);
+    log(`Stated ${stated.premises.length} premise${stated.premises.length === 1 ? "" : "s"} this plan would rest on, ${stated.premises.filter((premise) => premise.kind === "assumed").length} of them assumed rather than established from the repository.`);
+
+    // The model that stated those premises also labelled its own claims, and a
+    // basis only has to *name* a file to be labelled verified. This is the one
+    // step that opens the named file. It runs before the person is asked, so a
+    // premise the repository contradicts arrives as a question rather than as a
+    // given, and it can only ever move a premise toward doubt: a plan built on
+    // a challenge that was itself wrong is the failure this must not cause.
+    // Downgrades land here rather than on `stated`: what a model returned is
+    // what it returned, and a step that edits its own input in place cannot say
+    // afterwards what it was given.
+    let premises = stated.premises;
+    let premiseChallenge = { ran: false, reason: "disabled" };
+    if (config.planning.premiseChallenge !== false) {
+      // Under `both` the challenger is the other engine. Under one provider it
+      // is a fresh agent or a fresh codex process on that provider, which is
+      // still an independent reader of the repository and never the context
+      // that stated them; `independent` records which of the two it was.
+      const challengerEngine = runPolicy.reasoningProvider === "both"
+        ? (useClaude ? "codex" : "claude")
+        : runPolicy.reasoningProvider;
+      premiseChallenge = { ran: false, reason: "not-returned", engine: challengerEngine, independent: runPolicy.reasoningProvider === "both" };
+      let challenged = null;
+      if (challengerEngine === "claude") {
+        challenged = await planAgent([
+          `Challenge the premises an implementation plan for ${input.worktree} would rest on. Do not write the plan.`,
+          `Read ${input.pluginRoot}/prompts/premise-challenge.md and apply it to the premises below.`,
+          fenced("goal", input.goal),
+          fenced("stated-premises", JSON.stringify(premises, null, 2)),
+          "Persist nothing and return only the required object."
+        ].join("\n\n"), {
+          label: "plan:premise-challenge",
+          phase: "Premises",
+          agentType: "tagteam:premise-challenger",
+          model: claude.model,
+          effort: claude.effort,
+          schema: premiseChallengeSchema
+        });
+      } else {
+        // Codex reads the premises from a file rather than from prose. Under
+        // `codex` they are already on disk as the bridge's own artifact from
+        // the call that stated them; only under `both` does a Claude-stated
+        // list have no file yet, and that is the one case worth a scribe.
+        let statedPath = useClaude ? null : `${input.planDir}/reviews/${passId}-premises-codex.json`;
+        // Bound only where this pass wrote the bytes itself. Where Codex stated
+        // the premises, the file is the bridge's own artifact: this workflow
+        // never wrote it and holds no token for it, and inventing one over a
+        // shape it never wrote would refuse a file that is perfectly good. The
+        // positional check on the returned rows is what catches a drift there.
+        let statedExpect = null;
+        if (!statedPath) {
+          const target = `${input.planDir}/reviews/${passId}-premises-stated.json`;
+          // verify-payload.mjs tokenizes the whole parsed file, so the token
+          // has to describe the object that lands on disk rather than the array
+          // inside it. The specialist list this was modelled on persists a bare
+          // array, which is why its token is computed the other way.
+          const expected = expectJson({ premises });
+          const written = await planAgent([
+            `Persist this premise list as JSON at ${target} with mode 0600, as the object {"premises": [...]}.`,
+            "Write every row exactly as given. Do not summarise, reorder, renumber, or drop any of them.",
+            `Then run exactly: ${verifyCommand({
+              pluginRoot: input.pluginRoot,
+              payloads: [{ name: "STATED_PREMISES", file: target, json: true }],
+              expects: { STATED_PREMISES: expected }
+            })}`,
+            "Return the verifier's JSON result exactly. If it exits non-zero, return ok=false with its exact stderr as error.",
+            fenced("stated-premises", JSON.stringify({ premises }, null, 2))
+          ].join("\n\n"), {
+            label: "plan:premise-challenge:persist",
+            phase: "Premises",
+            agentType: "tagteam:scribe",
+            model: relayModel,
+            effort: relayEffort,
+            schema: payloadVerifySchema
+          });
+          // The challenger reasons about these rows and its verdicts are matched
+          // back by position, so a paraphrased copy would have it judging
+          // premises this pass never stated. Nothing is challenged rather than
+          // something else being challenged.
+          const payload = written?.payloads?.find((item) => item?.name === "STATED_PREMISES") ?? null;
+          if (written?.ok && payload?.token === expected) {
+            statedPath = target;
+            statedExpect = expected;
+          } else {
+            premiseChallenge = { ...premiseChallenge, reason: "premises-not-saved" };
+            log(`The stated premises could not be confirmed on disk as this run produced them, so they were not challenged. They are unchanged. Details: ${target}; reported problem ${String(written?.error ?? payload?.token ?? "no verifier result").split("\n")[0]}`);
+          }
+        }
+        if (statedPath) {
+          // The premises have already been paid for, and this gate writes no
+          // file a resume could reuse, so a lost challenge must not take them
+          // with it: a fresh resume would state them a second time. `optional`
+          // marks the dispatch record but does not suppress relayCodex's throw
+          // — the other optional caller survives it only because parallel()
+          // turns a throw into null — so the throw is caught here, and the
+          // checkpoint it raised is dropped with it. What Codex may already
+          // have been paid for stays in the receipts either way.
+          const fatalBefore = relayState.fatal.length;
+          try {
+            challenged = (await codexReasoning({
+              template: "premise-challenge-codex.md",
+              vars: { WORKTREE: input.worktree },
+              fences: [
+                { name: "GOAL", file: goalPath, json: true },
+                { name: "STATED_PREMISES", file: statedPath, json: true }
+              ],
+              ...(statedExpect ? { expects: { STATED_PREMISES: statedExpect } } : {}),
+              schemaFile: "plan-premise-challenge.schema.json",
+              schema: premiseChallengeSchema,
+              artifact: `${input.planDir}/reviews/${passId}-premise-challenge-codex.json`,
+              promptFile: `${input.planDir}/reviews/${passId}-premise-challenge-codex.json.prompt.md`,
+              label: "plan:codex-premise-challenge",
+              phaseName: "Premises",
+              what: "challenge to the premises this plan would rest on",
+              optional: true
+            }))?.result ?? null;
+          } catch (error) {
+            // Only a relay that gave up is degraded here, on either half of the
+            // dispatch. Anything else — a template section that cannot be
+            // assembled, a fence file that is missing or unreadable, a checksum
+            // that does not match, a dispatch with no request identity — fails
+            // the same way on every run, and swallowing it would skip this gate
+            // forever behind one log line, which is the silence this pass exists
+            // to end. The fatal checkpoint cannot make that distinction: a lost
+            // request build raises none, and it is exactly as transient as a
+            // lost run.
+            if (!error?.relayExhausted) throw error;
+            relayState.fatal.length = fatalBefore;
+            premiseChallenge = { ...premiseChallenge, reason: "not-returned" };
+            log(`The premises were stated but not challenged: ${String(error?.message ?? error).split("\n")[0]} They are unchanged, and a person is asked about them as they stand.`);
+          }
+        }
+      }
+      const rows = challenged?.challenges ?? null;
+      if (rows) {
+        // Position is what binds a verdict to a premise, so the claims are
+        // compared before anything is applied. A list that drifted is discarded
+        // whole: applying part of it downgrades premises nobody judged.
+        // Matched on a normalized form, never byte for byte. Grading a model on
+        // retyping carried text verbatim is the defect this repository already
+        // removed once: a compliant reviser that reworded a carried question
+        // produced a key that did not match, and the check read that as a drop.
+        // A claim that came back with different spacing or a different dash is
+        // the same claim; a claim that came back saying something else is not.
+        const claimKey = (value) => String(value ?? "")
+          .replace(/[\u2010-\u2015]/g, "-")
+          .replace(/[\u2018\u2019]/g, "'")
+          .replace(/[\u201c\u201d]/g, '"')
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+        const aligned = rows.length === premises.length
+          && rows.every((row, index) => claimKey(row.claim) === claimKey(premises[index].claim));
+        if (!aligned) {
+          premiseChallenge = { ...premiseChallenge, reason: "misaligned" };
+          log(`The premise challenge returned ${rows.length} row${rows.length === 1 ? "" : "s"} for ${premises.length} premise${premises.length === 1 ? "" : "s"}, or restated one of them, so it was discarded rather than applied to premises it may not have judged.`);
+        } else {
+          // Only a contradiction moves a premise, and only downward. An
+          // unsupported basis is worth telling a person about and is not
+          // evidence that the claim is false, so it changes nothing here.
+          // The verdict travels on the row a person is asked about. Everything
+          // else in this block refuses to trust index correlation — that is what
+          // the alignment check above is for — so the command is not asked to
+          // redo it in prose to find out which rows may not be bulk-confirmed.
+          premises = premises.map((premise, index) => (
+            rows[index].verdict === "unchallenged"
+              ? premise
+              : {
+                ...premise,
+                ...(rows[index].verdict === "contradicted" ? { kind: "assumed" } : {}),
+                challenged: rows[index].verdict
+              }
+          ));
+          premiseChallenge = { ran: true, engine: challengerEngine, independent: runPolicy.reasoningProvider === "both", challenges: rows };
+          const contradicted = rows.filter((row) => row.verdict === "contradicted").length;
+          const unsupported = rows.filter((row) => row.verdict === "unsupported").length;
+          log(`Challenged every stated premise against the repository: ${contradicted} contradicted and downgraded, ${unsupported} resting on a basis that does not establish them.`);
+        }
+      }
+    }
+
+    const assumed = premises.filter((premise) => premise.kind === "assumed");
+    log(assumed.length === 0
+      ? "Every stated premise is established from the repository, so nothing is put to a person before drafting."
+      : `${assumed.length} premise${assumed.length === 1 ? " is" : "s are"} assumed rather than established from the repository, and ${assumed.length === 1 ? "goes" : "go"} to a person before anything is drafted.`);
     return {
+      premiseChallenge,
       runPolicy,
       reasoningProvider: runPolicy.reasoningProvider,
       assurance: runPolicy.assurance,
       policyFingerprint: runPolicy.policyFingerprint,
       status: "needs-premises-confirmation",
-      premises: stated.premises,
+      premises,
       passId,
       agentCalls: planState.dispatchedCalls,
       relayRetries: relayState.extraCalls,

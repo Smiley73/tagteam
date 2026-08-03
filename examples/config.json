@@ -1,10 +1,11 @@
 {
-  "version": 3,
+  "version": 4,
   "policyPaths": ["CONTRIBUTING.md", "docs/coding-standards.md"],
   "planning": {
     "claude": { "model": "opus", "effort": "xhigh" },
     "codex": { "model": "gpt-5.6-sol", "effort": "high" },
     "reviewRounds": 2,
+    "premiseChallenge": true,
     "largePlanWarningChars": 100000,
     "canonicalStrings": [
       {
@@ -139,7 +140,10 @@
     }
   },
   "implementation": { "engine": "claude", "routes": [], "maxParallel": 1 },
-  "review": { "firstReviewer": "codex" },
+  "review": {
+    "firstReviewer": "codex",
+    "finalChallenge": { "enabled": true, "tier": "standard" }
+  },
   "verify": {
     "runAfter": ["implement", "fix"],
     "commands": [
