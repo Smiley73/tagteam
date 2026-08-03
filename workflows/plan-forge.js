@@ -227,7 +227,21 @@ const trainSchema = {
           dependsOn: { type: "array", items: { type: "string" } },
           userVisible: { type: "string", enum: ["yes", "no"] },
           userVisibleReason: { type: "string" },
-          sizeEstimate: { type: "string" }
+          sizeEstimate: { type: "string" },
+          // Mirrors schemas/pr-train.schema.json. A response schema that omits
+          // what the on-disk schema permits refuses the decomposer's own
+          // instruction back to it: the reply is rejected, the retries are
+          // paid, and the field can never reach the file it validates against.
+          sizeWaiver: {
+            type: "object",
+            additionalProperties: false,
+            required: ["reason", "rule", "approvedBy"],
+            properties: {
+              reason: { type: "string" },
+              rule: { type: "string" },
+              approvedBy: { type: "string" }
+            }
+          }
         }
       }
     }
@@ -724,6 +738,27 @@ const planLintSchema = {
     clean: { type: "boolean" },
     error: { type: "string" },
     issues: { type: "array", items: issueSchema },
+    // The exceptions the command let past the repository's line cap, computed
+    // by it from the saved train. They travel for the same reason the issues do
+    // — small, bounded, and the point of the step — and they must come from the
+    // command rather than from the reply the train arrived in: the file is what
+    // the check read, and the reply is bound to it only loosely enough that a
+    // waiver could sit in one and not the other.
+    waivers: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "reason", "rule", "approvedBy"],
+        properties: {
+          id: { type: ["string", "null"] },
+          sizeEstimate: { type: ["string", "null"] },
+          reason: { type: "string" },
+          rule: { type: "string" },
+          approvedBy: { type: "string" }
+        }
+      }
+    },
     payloads: {
       type: "array",
       items: {
@@ -1124,7 +1159,7 @@ async function runPlanLint({ command, label, phase: phaseName, model, effort, wh
   const prompt = [
     `Run this exact command: ${command}`,
     "It reads files this plan already saved and decides, in code, everything about them that does not need judgment. The only file it writes is its own findings.",
-    "Return its JSON stdout unchanged: ok, clean, the payloads array, and the issues array exactly as printed, each issue keeping its severity, title, and detail verbatim. These are the command's words, not a plan payload, and they are what the pass acts on. If it exits non-zero, return ok=false with its exact stderr as error."
+    "Return its JSON stdout unchanged: ok, clean, the payloads array, the issues array, and the waivers array exactly as printed, each issue keeping its severity, title, and detail verbatim and each waiver keeping its id, reason, rule, and approvedBy verbatim. These are the command's words, not a plan payload, and they are what the pass acts on. If it exits non-zero, return ok=false with its exact stderr as error."
   ].join("\n\n");
   for (let attempt = 1; attempt <= RELAY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) relayState.extraCalls += 1;
@@ -1143,12 +1178,21 @@ async function runPlanLint({ command, label, phase: phaseName, model, effort, wh
     // checksum of that file is not optional: without it the fence would be the
     // one payload in the pass that nothing binds. Re-running the command is a
     // file read, so an incomplete reply costs one.
-    if (result?.ok === true && (!requireReview || /^\d+:[0-9a-f]{8}$/.test(saved?.token ?? ""))) {
-      const issues = result.issues ?? [];
+    const issues = result?.issues ?? [];
+    const waivers = result?.waivers ?? [];
+    // The command reports a waived pull request in both arrays or in neither, so
+    // a reply carrying one without the other is a reply that dropped something.
+    // It matters more here than anywhere else in this relay: the thing dropped
+    // is the exception nothing else stops, and a caller shown an empty list
+    // cannot tell a plan that waived nothing from a reply that lost the waiver.
+    // Re-running the command is a file read, so catching it costs one.
+    const waiverIssues = issues.filter((entry) => /under a recorded waiver/.test(entry?.title ?? "")).length;
+    const waiverMismatch = (waiverIssues > 0) !== (waivers.length > 0);
+    if (result?.ok === true && !waiverMismatch && (!requireReview || /^\d+:[0-9a-f]{8}$/.test(saved?.token ?? ""))) {
       // What the pass reasons from is the relayed list; what a read-only engine
       // is handed is the file, bound to the checksum the command itself computed
       // over the bytes it wrote. Neither is a copy of the other.
-      return { issues, gating: gatingIssues(issues), reviewToken: saved?.token ?? null };
+      return { issues, waivers, gating: gatingIssues(issues), reviewToken: saved?.token ?? null };
     }
     if (result && result.ok === false) {
       throw new Error([
@@ -3261,6 +3305,10 @@ async function main(raw) {
     // an exit that returns before settlement still reports a usable shape.
     settledUiDecisions = dedupeDecisions(uiDecisions),
     uiDecisionsSettled = false,
+    // What the deterministic check let past this repository's line cap. Empty
+    // for every exit that stops before a train exists, which is every exit but
+    // one, so the shape a caller reads is the same either way.
+    sizeWaivers = [],
     ...rest
   }) => ({
     runPolicy,
@@ -3275,6 +3323,11 @@ async function main(raw) {
     },
     manifest,
     prTrain,
+    // Every pull request the cap check let past, with the rule cited and the
+    // name attached. An exception the caller cannot show a person is one nobody
+    // approved in any sense that survives the pass, so it travels beside the
+    // train rather than only inside it.
+    sizeWaivers,
     // Verified copies of the returned values. Each cross-check ran from these
     // exact files, so they are the safe source for anything that must be
     // byte-identical to what was reviewed.
@@ -3832,6 +3885,12 @@ async function main(raw) {
     file: `${manifestPath} and ${trainPath}`
   });
   for (const issue of handoffLint.gating) log(issue.title);
+  // Waived pull requests clear the gate, which is exactly why they are said out
+  // loud here: the one finding that stops nothing is the one a reader would
+  // otherwise never learn happened.
+  for (const waiver of handoffLint.waivers) {
+    log(`${waiver.id ?? "A pull request"} estimates ${waiver.sizeEstimate ?? "more"} against this repository's ${repoHardCapLines}-line cap, under a waiver approved by ${waiver.approvedBy} citing ${waiver.rule}.`);
+  }
 
   const decompositionSeed = (await sha256(JSON.stringify({
     goal: input.goal,
@@ -3970,6 +4029,11 @@ async function main(raw) {
         : "needs-approval",
     manifest,
     prTrain: train,
+    // From the lint rather than from this pass's copy of the train: the lint
+    // read the saved file, which is what it judged and what an implementer will
+    // follow, and the reply the train arrived in is bound to that file loosely
+    // enough that a waiver could sit in one and not the other.
+    sizeWaivers: handoffLint.waivers,
     manifestPath,
     prTrainPath: trainPath,
     openQuestions: settled.finalQuestions,

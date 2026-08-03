@@ -772,21 +772,104 @@ function fileListIssues(manifest, train) {
   )];
 }
 
+// A waiver is an exception with an owner's name on it, so it counts only when it
+// says all three things: which repository rule splitting would break, why that
+// rule binds harder than the cap here, and who approved the exception. Anything
+// less is an assertion that the cap does not apply, which is the one thing a
+// waiver may not be — so a half-written one blocks exactly as no waiver does,
+// and says which part is missing rather than failing as if it were absent.
+export function sizeWaiverOf(pullRequest) {
+  const waiver = pullRequest?.sizeWaiver;
+  if (waiver === undefined || waiver === null) return null;
+  // A waiver that is not an object at all is its own defect, and naming its
+  // three fields as missing would describe the wrong repair: a string reading
+  // "approved by the owner" is not two fields short of a waiver.
+  if (typeof waiver !== "object" || Array.isArray(waiver)) {
+    return { wellFormed: false, defect: "is not an object of {reason, rule, approvedBy}", value: null };
+  }
+  const fields = ["reason", "rule", "approvedBy"];
+  const missing = fields.filter((field) => typeof waiver[field] !== "string" || !waiver[field].trim());
+  if (missing.length) return { wellFormed: false, defect: `is missing ${missing.join(", ")}`, value: null };
+  return {
+    wellFormed: true,
+    defect: null,
+    value: { reason: waiver.reason.trim(), rule: waiver.rule.trim(), approvedBy: waiver.approvedBy.trim() }
+  };
+}
+
+// The waivers that actually waived something: complete, and on a pull request
+// this repository's cap would otherwise have blocked. A caller showing a person
+// "this was let past the cap by name" must be shown exactly the set the check
+// let past — a complete waiver on a pull request inside the cap waived nothing,
+// and a repository with no cap has nothing to waive, so neither appears here.
+export function sizeWaivers(train, capLines = null) {
+  if (!capLines) return [];
+  const waived = [];
+  for (const pullRequest of train?.prs ?? []) {
+    const waiver = sizeWaiverOf(pullRequest);
+    if (!waiver?.wellFormed) continue;
+    const estimate = parseSizeEstimate(pullRequest?.sizeEstimate);
+    if (estimate === null || estimate <= capLines) continue;
+    waived.push({
+      id: pullRequest?.id ?? null,
+      sizeEstimate: pullRequest?.sizeEstimate ?? null,
+      ...waiver.value
+    });
+  }
+  return waived;
+}
+
 function sizeIssues(train, capLines) {
   if (!capLines) return [];
   const over = [];
   const unreadable = [];
+  const waived = [];
+  const inert = [];
   for (const pullRequest of train?.prs ?? []) {
     const estimate = parseSizeEstimate(pullRequest.sizeEstimate);
+    const waiver = sizeWaiverOf(pullRequest);
     if (estimate === null) unreadable.push(pullRequest.id);
-    else if (estimate > capLines) over.push(`${pullRequest.id} estimates ${estimate}`);
+    else if (estimate > capLines) {
+      // The default stays strict: over the cap blocks unless a complete waiver
+      // says which rule binds harder and who approved it. The waived case is
+      // still reported, one severity down, because an exception nobody can see
+      // in the review record is indistinguishable from a cap nobody set.
+      if (waiver?.wellFormed) {
+        waived.push(`${pullRequest.id} estimates ${estimate}, waived by ${waiver.value.approvedBy} under ${waiver.value.rule}: ${waiver.value.reason}`);
+      } else if (waiver) {
+        over.push(`${pullRequest.id} estimates ${estimate} and carries a size waiver that ${waiver.defect}`);
+      } else {
+        over.push(`${pullRequest.id} estimates ${estimate}`);
+      }
+    } else if (waiver?.wellFormed) {
+      // A waiver excuses one thing and one thing only, so one on a pull request
+      // the cap was never going to stop excuses nothing. Said out loud because
+      // the shape it makes — an owner's name attached to an exception nothing
+      // needed — is what an unnecessary split would look like if it were
+      // dressed as an authorized one.
+      inert.push(`${pullRequest.id} estimates ${estimate}`);
+    }
   }
   const issues = [];
   if (over.length) {
     issues.push(issue(
       "blocking",
       `${over.length} pull request${over.length === 1 ? "" : "s"} exceed${over.length === 1 ? "s" : ""} this repository's ${capLines}-line cap`,
-      `${over.join("; ")}. That cap is the repository's own rule, which tagteam neither enforces for the plan nor overrides. Split these, keeping every atomic group whole.`
+      `${over.join("; ")}. That cap is the repository's own rule, which tagteam neither enforces for the plan nor overrides. Split these, keeping every atomic group whole. Where splitting would break a rule this repository documents as binding harder than the cap, record a sizeWaiver of {reason, rule, approvedBy} on that pull request instead — only with the owner's explicit approval in the plan.`
+    ));
+  }
+  if (waived.length) {
+    issues.push(issue(
+      "minor",
+      `${waived.length} pull request${waived.length === 1 ? "" : "s"} exceed${waived.length === 1 ? "s" : ""} this repository's ${capLines}-line cap under a recorded waiver`,
+      `${waived.join("; ")}. This is reported rather than blocked: it clears the gate, and the same exception is returned as this command's waivers array so a caller can put the name attached to it in front of whoever approves the plan. Confirm the named approval is the plan's own and that the rule cited genuinely forbids the split.`
+    ));
+  }
+  if (inert.length) {
+    issues.push(issue(
+      "minor",
+      `${inert.length} size waiver${inert.length === 1 ? " excuses" : "s excuse"} nothing: the pull request is already inside the ${capLines}-line cap`,
+      `${inert.join("; ")}. A sizeWaiver excuses one pull request from this cap and says nothing about how the train is divided, so remove it and let the split stand on the rule that actually requires it.`
     ));
   }
   if (unreadable.length) {
@@ -807,6 +890,14 @@ function sizeIssues(train, capLines) {
 function splitIssues(train, capLines) {
   const prs = train?.prs ?? [];
   if (prs.length < 2 || !capLines) return [];
+  // This and sizeIssues pull in opposite directions, so the one thing they must
+  // never do is both fire on the same train. They cannot: this one fires only
+  // when every part together fits the cap, which means no single part exceeds
+  // it, which is the only condition a waiver operates under. So a waiver is
+  // never a reason to skip this check — it is a claim about one pull request's
+  // size, not about where the seams belong — and a waiver sitting on a train
+  // this check does flag is a waiver excusing nothing, which sizeIssues says so
+  // rather than being quietly answered here.
   const estimates = prs.map((pullRequest) => parseSizeEstimate(pullRequest.sizeEstimate));
   if (estimates.some((estimate) => estimate === null)) return [];
   const total = estimates.reduce((sum, estimate) => sum + estimate, 0);
@@ -982,6 +1073,7 @@ export function planLint({
   const payloads = [];
   const issues = [];
   let derivedFiles = [];
+  let waivers = [];
 
   let planChars = 0;
   if (plan) {
@@ -1026,6 +1118,10 @@ export function planLint({
     // that wants to show them has them here, so nothing downstream has to write
     // a second copy that can disagree with the manifest.
     derivedFiles = derivePullRequestFiles(manifestFile.value, trainFile.value);
+    // The exceptions this train claimed, in the same computed-not-authored sense
+    // as the file lists above: a caller that wants to show a person what was
+    // waived and by whom reads them here rather than parsing the train again.
+    waivers = sizeWaivers(trainFile.value, capLines);
   }
 
   // A lint that ran against bytes other than the ones this pass produced has
@@ -1038,7 +1134,7 @@ export function planLint({
 
   const gating = issues.filter((item) => ["blocking", "major"].includes(item.severity));
   if (out) payloads.push(writeLintReview(out, gating));
-  return { ok: true, clean: gating.length === 0, issues, payloads, derivedFiles };
+  return { ok: true, clean: gating.length === 0, issues, payloads, derivedFiles, waivers };
 }
 
 // --canonical-config names the same validated .tagteam/config.json the

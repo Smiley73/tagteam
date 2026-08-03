@@ -1285,6 +1285,40 @@ test("a question raised in a round that the sidecar does not repeat no longer st
   assert.equal(prompts.has("plan:verify-final-questions"), false);
 });
 
+// A field the on-disk schema permits and the response schema forbids is a
+// feature that can never fire: the decomposer is told to produce it, its reply
+// is refused, and the retries are paid before the pass fails. sizeWaiver is the
+// field that has to travel that whole path, so both ends are held to one train.
+test("the workflow's PR-train response schema accepts what the on-disk schema permits", () => {
+  const source = fs.readFileSync(path.join(root, "workflows/plan-forge.js"), "utf8");
+  const start = source.indexOf("const trainSchema = {");
+  assert.notEqual(start, -1, "workflows/plan-forge.js must define trainSchema");
+  const end = source.indexOf("\n};\n", start);
+  assert.notEqual(end, -1);
+  const responseSchema = new Function(`${source.slice(start, end + 3)}\nreturn trainSchema;`)();
+  const diskSchema = JSON.parse(fs.readFileSync(path.join(root, "schemas/pr-train.schema.json"), "utf8"));
+
+  const waived = bigTrain();
+  waived.prs[0].sizeEstimate = "900 lines";
+  waived.prs[0].sizeWaiver = {
+    reason: "the migration, its demo data and its specs must land in one commit",
+    rule: "docs/standards.md: schema changes ship whole",
+    approvedBy: "A. Owner"
+  };
+  // bigTrain's ids are the shape these tests have always used, which the
+  // on-disk pattern separately rejects; this test is about the waiver alone.
+  const waiverErrors = (schema, train) =>
+    validateJson(schema, train).filter((error) => /sizeWaiver|additional/i.test(error));
+  assert.deepEqual(waiverErrors(diskSchema, waived), []);
+  assert.deepEqual(waiverErrors(responseSchema, waived), []);
+
+  // And both refuse the same half-written waiver, so neither is the lenient one.
+  const partial = bigTrain();
+  partial.prs[0].sizeWaiver = { reason: "r", rule: "x" };
+  assert.notDeepEqual(waiverErrors(diskSchema, partial), []);
+  assert.notDeepEqual(waiverErrors(responseSchema, partial), []);
+});
+
 test("a missing resume record stops the pass even when the plan itself is whole", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-questions-"));
   const plan = path.join(temp, "pass-1-integrated.md");

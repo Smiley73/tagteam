@@ -156,6 +156,8 @@ The final decomposition cross-check is a handoff-quality gate. If `handoffReady`
 
 Present the final plan followed by a compact PR table containing ID, title, tasks, dependencies, user-visible yes/no and reason, and size estimate. Where a file list is wanted, use the computed one: it is the union of each pull request's tasks' `files`, derived from the manifest, and never a list anyone wrote. State that tagteam itself never gates on size or replans because of it. Do not say or imply that no size limit applies: if the repository's own `policyPaths` documents set one, that limit is real and the plan was drafted against it, and tagteam declining to enforce a limit is not the same as there being none.
 
+When `sizeWaivers` is non-empty, name each entry beside that pull request's row: which pull request, the rule it cites, and who approved it. A waiver is the one finding that clears the gate rather than stopping it, so a reader who is not told learns nothing happened. Say plainly that the pull request is over the repository's own cap and was let past on that named approval, and say that approving the plan adopts that exception — the approval question below is where the user accepts or rejects it, so do not ask a separate one.
+
 A single-pull-request train is the expected shape, not a degenerate one. Do not suggest splitting a train that fits.
 
 Outstanding questions are a gate, exactly like `handoffReady`. The status says which one applies: `needs-approval` means the sidecar is empty and the plan is ready to be approved; `needs-questions` means it is not, and so is what the workflow answers when the merged list did not survive the relay, because a pass that cannot say whether questions remain must not be the one that decides they do not.

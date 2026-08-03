@@ -2492,6 +2492,72 @@ test("a deterministic finding about the split blocks the handoff whatever the cr
   assert.equal(result.decompositionReview.verdict, "approve");
 });
 
+// A waived pull request is the one finding that clears the gate, so the pass
+// has to carry it out to the caller: nothing downstream stops on it, and a
+// caller shown nothing cannot tell a plan that waived nothing from one whose
+// exception got lost on the way back.
+test("a waived pull request reaches the caller instead of clearing the gate silently", async () => {
+  const waiver = {
+    id: "pr1",
+    sizeEstimate: "900 lines",
+    reason: "the migration, its demo data and its specs must land in one commit",
+    rule: "docs/standards.md: schema changes ship whole",
+    approvedBy: "A. Owner"
+  };
+  const finding = {
+    severity: "minor",
+    title: "1 pull request exceeds this repository's 400-line cap under a recorded waiver",
+    detail: "pr1 estimates 900, waived by A. Owner."
+  };
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    planResponder([]),
+    {
+      lint: (label) => (label === "plan:lint-handoff"
+        ? { ...lintResult([finding]), clean: true, waivers: [waiver] }
+        : cleanLint())
+    }
+  );
+
+  // Minor is not gating, so the waiver stops nothing.
+  assert.equal(result.status, "needs-approval", result.message);
+  assert.equal(result.handoffReady, true);
+  assert.deepEqual(result.handoffIssues, []);
+  // And it is still reported, by name.
+  assert.deepEqual(result.sizeWaivers, [waiver]);
+});
+
+// The command reports a waived pull request in both arrays or in neither, so a
+// reply with one and not the other lost something. Re-reading is a file read.
+test("a lint reply that reports a waiver in only one of its two arrays is read again", async () => {
+  const finding = {
+    severity: "minor",
+    title: "1 pull request exceeds this repository's 400-line cap under a recorded waiver",
+    detail: "pr1 estimates 900, waived by A. Owner."
+  };
+  let attempts = 0;
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    PLAN_ARGS,
+    planResponder([]),
+    {
+      lint: (label) => {
+        if (!label.startsWith("plan:lint-handoff")) return cleanLint();
+        attempts += 1;
+        // The first reply keeps the finding and drops the waivers array.
+        return attempts === 1
+          ? { ...lintResult([finding]), clean: true }
+          : { ...lintResult([finding]), clean: true, waivers: [{ id: "pr1", reason: "r", rule: "x", approvedBy: "A. Owner" }] };
+      }
+    }
+  );
+
+  assert.equal(attempts > 1, true, "the incomplete reply must be read again");
+  assert.equal(labels.includes("plan:lint-handoff:retry-1"), true);
+  assert.deepEqual(result.sizeWaivers.map((entry) => entry.approvedBy), ["A. Owner"]);
+});
+
 test("planning persists questions introduced by the decomposition review", async () => {
   const baseResponder = planResponder([]);
   const { result, labels } = await harness(

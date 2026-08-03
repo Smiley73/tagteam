@@ -30,4 +30,6 @@ A phase's closing evidence — its gate run, its CI run, its changed-line measur
 
 `prTrain.prSize.guidance` in the project config is tagteam's own preference and tagteam never blocks a train for exceeding it, so never split a coherent change merely to hit that number. That says nothing about this repository: a limit its own policy documents place on pull-request or commit size is a real constraint this train must respect. State the changed-line count you expect in `sizeEstimate`, and say plainly when a pull request is near or over such a limit.
 
+Where this repository states that limit as a number, it is checked arithmetically and blocks the handoff, and one narrow exception exists: `sizeWaiver`, an optional `{reason, rule, approvedBy}` on a single pull request. Set it only when splitting that pull request would break a rule this repository documents as binding — `rule` names that rule and `reason` says why it forbids this split — and only when the plan records the repository owner's explicit approval, whose name goes in `approvedBy`. Never write a waiver to avoid the work of splitting or with a name the plan does not record; a waiver missing any of the three fields blocks exactly as no waiver does.
+
 Return only the schema-valid PR train. Do not edit the repository or planning files.

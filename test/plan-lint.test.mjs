@@ -11,7 +11,8 @@ import {
   lintHandoff,
   lintPlanDocument,
   parseSizeEstimate,
-  planLint
+  planLint,
+  sizeWaivers
 } from "../scripts/plan-lint.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -759,6 +760,140 @@ test("a pull request over the repository's own cap blocks", () => {
   const issues = lintHandoff({ manifest, train: big, capLines: 400 });
   assert.equal(issues.length, 1);
   assert.match(issues[0].title, /400-line cap/);
+});
+
+test("a complete size waiver reports the exception instead of blocking it", () => {
+  const big = train();
+  big.prs[0].sizeEstimate = "900 lines";
+  big.prs[0].sizeWaiver = {
+    reason: "the migration, its demo data and its specs must land in one commit",
+    rule: "docs/standards.md: schema changes ship whole",
+    approvedBy: "A. Owner"
+  };
+  const issues = lintHandoff({ manifest, train: big, capLines: 400 });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].severity, "minor");
+  assert.match(issues[0].title, /under a recorded waiver/);
+  assert.match(issues[0].detail, /A\. Owner/);
+  assert.match(issues[0].detail, /schema changes ship whole/);
+});
+
+test("an incomplete size waiver blocks and says what is wrong with it", () => {
+  for (const [waiver, defect] of [
+    [{ reason: "r", rule: "" }, /missing rule, approvedBy/],
+    [{ reason: "r", rule: "x", approvedBy: "   " }, /missing approvedBy/],
+    [{}, /missing reason, rule, approvedBy/],
+    ["approved by the owner", /is not an object/],
+    [["A. Owner"], /is not an object/]
+  ]) {
+    const big = train();
+    big.prs[0].sizeEstimate = "900 lines";
+    big.prs[0].sizeWaiver = waiver;
+    const issues = lintHandoff({ manifest, train: big, capLines: 400 });
+    const blocking = issues.filter((item) => item.severity === "blocking");
+    assert.equal(blocking.length, 1, JSON.stringify(waiver));
+    assert.match(blocking[0].title, /400-line cap/);
+    assert.match(blocking[0].detail, defect);
+    assert.equal(issues.filter((item) => /recorded waiver/.test(item.title)).length, 0);
+  }
+});
+
+// A waiver excuses one pull request from the cap. Attaching one to a pull
+// request the cap was never going to stop is how a split with no reason behind
+// it would be dressed as an authorized one, so it is named rather than ignored.
+test("a waiver on a pull request inside the cap waives nothing and says so", () => {
+  const waived = train();
+  waived.prs[0].sizeWaiver = { reason: "r", rule: "x", approvedBy: "A. Owner" };
+  const issues = lintHandoff({ manifest, train: waived, capLines: 400 });
+  assert.equal(issues.filter((item) => /recorded waiver/.test(item.title)).length, 0);
+  const inert = issues.filter((item) => /excuses nothing/.test(item.title));
+  assert.equal(inert.length, 1);
+  assert.equal(inert[0].severity, "minor");
+  // And it does not buy the train an exemption from the merge finding.
+  assert.equal(issues.filter((item) => /split into 2 pull requests/.test(item.title)).length, 1);
+});
+
+// The two size checks pull in opposite directions, so the property that matters
+// is that no train can ever receive both findings.
+test("the cap check and the split check never fire on the same train", () => {
+  // Both halves are asserted, so neither case can pass by both findings being
+  // absent: a waived train still reaches the cap finding, and a waiver never
+  // buys a train an exemption from the merge finding.
+  for (const [first, second, expected] of [
+    ["900 lines", "100 lines", "cap"],
+    ["100 lines", "100 lines", "merge"],
+    ["300 lines", "300 lines", "neither"]
+  ]) {
+    const shaped = train();
+    shaped.prs[0].sizeEstimate = first;
+    shaped.prs[1].sizeEstimate = second;
+    shaped.prs[0].sizeWaiver = { reason: "r", rule: "x", approvedBy: "A. Owner" };
+    const titles = lintHandoff({ manifest, train: shaped, capLines: 400 }).map((item) => item.title);
+    const overCap = titles.some((title) => /exceeds? this repository's 400-line cap/.test(title));
+    const merge = titles.some((title) => /split into 2 pull requests/.test(title));
+    assert.equal(overCap, expected === "cap", `${first} + ${second}`);
+    assert.equal(merge, expected === "merge", `${first} + ${second}`);
+  }
+});
+
+test("sizeWaivers reports the waivers that were actually spent", () => {
+  const mixed = train();
+  mixed.prs[0].sizeEstimate = "900 lines";
+  mixed.prs[0].sizeWaiver = { reason: "r", rule: "x", approvedBy: " A. Owner " };
+  mixed.prs[1].sizeWaiver = { reason: "r", rule: "x" };
+  assert.deepEqual(sizeWaivers(mixed, 400), [
+    { id: "pr1", sizeEstimate: "900 lines", reason: "r", rule: "x", approvedBy: "A. Owner" }
+  ]);
+  // Complete, but on a pull request the cap would not have stopped, and on a
+  // repository that sets no cap at all: nothing was waived in either.
+  assert.deepEqual(sizeWaivers(train(), 400), []);
+  assert.deepEqual(sizeWaivers(mixed, null), []);
+});
+
+test("planLint returns the waivers the handoff spent", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-waiver-"));
+  const manifestFile = path.join(directory, "manifest.json");
+  const trainFile = path.join(directory, "pr-train.json");
+  const waived = train();
+  waived.prs[0].sizeEstimate = "900 lines";
+  waived.prs[0].sizeWaiver = {
+    reason: "the migration, its demo data and its specs must land in one commit",
+    rule: "docs/standards.md: schema changes ship whole",
+    approvedBy: "A. Owner"
+  };
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
+  fs.writeFileSync(trainFile, JSON.stringify(waived), { mode: 0o600 });
+
+  const result = planLint({ manifest: manifestFile, train: trainFile, capLines: 400 });
+  // A waived pull request is reported, not blocked: the handoff is clean.
+  assert.equal(result.clean, true);
+  assert.deepEqual(result.waivers.map((entry) => [entry.id, entry.approvedBy]), [["pr1", "A. Owner"]]);
+  assert.equal(result.issues.filter((item) => /under a recorded waiver/.test(item.title)).length, 1);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+// The cap is read the same way the estimate is: at the top of a range, with the
+// boundary itself inside the cap rather than over it, and the same set the lint
+// waived is the set a caller is handed.
+test("sizeWaivers reads an estimate exactly as the cap check does", () => {
+  const complete = { reason: "r", rule: "x", approvedBy: "A. Owner" };
+  const waivedIds = (estimate) => {
+    const shaped = train();
+    shaped.prs[0].sizeEstimate = estimate;
+    shaped.prs[0].sizeWaiver = complete;
+    const spent = sizeWaivers(shaped, 400).map((entry) => entry.id);
+    // Whatever the caller is shown is exactly what the check stopped blocking.
+    const waived = lintHandoff({ manifest, train: shaped, capLines: 400 })
+      .some((item) => /under a recorded waiver/.test(item.title));
+    assert.equal(spent.length > 0, waived, estimate);
+    return spent;
+  };
+  assert.deepEqual(waivedIds("1,200 lines"), ["pr1"]);
+  assert.deepEqual(waivedIds("300-500 lines"), ["pr1"]);
+  assert.deepEqual(waivedIds("401 lines"), ["pr1"]);
+  assert.deepEqual(waivedIds("400 lines"), []);
+  assert.deepEqual(waivedIds("about a page"), []);
 });
 
 test("a split whose parts all fit inside one pull request is flagged", () => {
