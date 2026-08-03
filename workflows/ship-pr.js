@@ -1039,6 +1039,10 @@ async function main(raw) {
       : (legacyUsageIncomplete ? "legacy-incomplete" : "complete"),
     legacyUsageIncomplete,
     taskAttempts: { ...taskAttempts },
+    // Every result says something about the last gate, including the ones that
+    // stop long before it. The ship command reads this field unconditionally,
+    // and a run that never got near a clean candidate has an answer too.
+    finalChallenge: { ran: false, reason: "not-reached" },
     ...result,
     agentCalls: relayState.dispatchedCalls
   });
@@ -1092,9 +1096,12 @@ async function main(raw) {
     rounds,
     tallies: tally(ledger),
     ledger,
-    gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit.`],
     candidateOid,
-    ...extra
+    ...extra,
+    // Concatenated, never replaced: a gate failure raised before capacity ran
+    // out is still a fact about this candidate, and the limit is what stops the
+    // run rather than what makes the rest untrue.
+    gateFailures: [`This PR reached its ${config.limits.agentCallsPerPr}-call limit.`, ...(extra.gateFailures ?? [])]
   });
 
   if (!input.existingCandidateOid) {
@@ -1785,18 +1792,32 @@ async function main(raw) {
   // it, and nothing it finds is repaired automatically: a fix here would mint a
   // new candidate and invalidate the gates this state just earned.
   let finalChallenge = { ran: false, reason: "not-clean" };
-  if (status === "clean" && config.review?.finalChallenge?.enabled !== false) {
+  if (status === "clean" && config.review?.finalChallenge?.enabled === false) {
+    // Two different facts, reported as two different reasons: a repository that
+    // switched the gate off is not a candidate that never went clean, and the
+    // ship command tells a person which of the two it is looking at.
+    finalChallenge = { ran: false, reason: "disabled" };
+  } else if (status === "clean") {
     const challengeRound = rounds.at(-1)?.round ?? roundOffset;
     const challengeEngine = lastFixEngine
       ? (runPolicy.reasoningProvider === "both"
           ? (lastFixEngine === "claude" ? "codex" : "claude")
           : runPolicy.reasoningProvider)
       : selectedEngine(runPolicy, config.review.firstReviewer === "claude" ? "codex" : "claude");
-    const challengeRuntime = config.reviewTiers[config.review.finalChallenge?.tier ?? "standard"][challengeEngine];
+    // A configuration written before this key existed never named a tier, and
+    // nothing requires a repository to define one called `standard`. The gate is
+    // on by default for those, and it runs at the end of a ship that was going
+    // well, so an unknown tier reports a gate that did not run rather than
+    // throwing away the whole invocation on its last call.
+    const challengeTier = config.review.finalChallenge?.tier ?? "standard";
+    const challengeRuntime = config.reviewTiers[challengeTier]?.[challengeEngine] ?? null;
     // Reserved here rather than inside the round loop: a reservation there would
     // charge every round, and its shortfall path returns before any round can go
     // clean, so this record could never be written.
-    if (callCount + 2 > callBudget()) {
+    if (!challengeRuntime) {
+      finalChallenge = { ran: false, reason: "unknown-tier", tier: challengeTier, engine: challengeEngine, round: challengeRound };
+      gateFailures.push(`The final challenge did not run: review.finalChallenge names the tier ${challengeTier}, which this configuration does not define.`);
+    } else if (callCount + 2 > callBudget()) {
       finalChallenge = { ran: false, reason: "agent-call-budget", engine: challengeEngine, round: challengeRound };
       gateFailures.push("The final challenge did not run: this PR reached its call limit after the last review round.");
     } else {
@@ -1834,10 +1855,10 @@ async function main(raw) {
           });
       callCount += 1;
       if (relayState.fatal.length > 0) {
-        return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+        return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo, finalChallenge });
       }
       if (relayState.capacityExceeded) {
-        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo, finalChallenge });
       }
       if (!challenge) {
         // A gate that did not run is never a gate that passed. On a candidate
@@ -1891,7 +1912,7 @@ async function main(raw) {
         });
         callCount += 1;
         if (relayState.capacityExceeded) {
-          return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+          return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo, finalChallenge, gateFailures });
         }
         if (!challengeScribe?.ok) gateFailures.push("The final challenge ran but its record did not persist.");
       }

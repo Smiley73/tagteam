@@ -2029,8 +2029,39 @@ test("a contradicted premise is downgraded and an unsupported one is left standi
   assert.equal(result.premiseChallenge.engine, "claude");
   assert.equal(result.premiseChallenge.independent, false);
   assert.deepEqual(result.premiseChallenge.challenges.map((row) => row.verdict), ["contradicted", "unsupported"]);
-  // The premise rows keep the shape the settled file is written back in.
-  assert.deepEqual(Object.keys(result.premises[0]).sort(), ["basis", "claim", "kind"]);
+  // The verdict travels on the row itself, so the command filters structurally
+  // instead of re-deriving the correlation this workflow refused to trust.
+  assert.equal(result.premises[0].challenged, "contradicted");
+  assert.equal(result.premises[1].challenged, "unsupported");
+  assert.deepEqual(Object.keys(result.premises[0]).sort(), ["basis", "challenged", "claim", "kind"]);
+});
+
+test("an unchallenged premise carries no verdict at all", async () => {
+  const { result } = await challengeHarness(() => ({
+    challenges: PREMISES.premises.map(unchallenged)
+  }));
+
+  assert.deepEqual(result.premises, PREMISES.premises);
+  assert.equal(result.premises.some((premise) => "challenged" in premise), false);
+});
+
+test("a claim that comes back reworded is still the same claim", async () => {
+  // Grading a model on retyping carried text verbatim is the defect this
+  // repository already removed once. Spacing and a different dash are not drift.
+  const { result } = await challengeHarness(() => ({
+    challenges: [
+      {
+        claim: PREMISES.premises[0].claim.replace(/ /g, "  ").toUpperCase(),
+        verdict: "contradicted",
+        basisChecked: "scripts/codex-run.mjs",
+        evidence: "scripts/codex-run.mjs:12 is behind a flag that is off in production."
+      },
+      { ...unchallenged(PREMISES.premises[1]), claim: `${PREMISES.premises[1].claim} ` }
+    ]
+  }));
+
+  assert.equal(result.premiseChallenge.ran, true);
+  assert.equal(result.premises[0].kind, "assumed");
 });
 
 test("an unsupported verdict never moves a verified premise", async () => {
@@ -2085,6 +2116,105 @@ test("a challenge that does not come back leaves the stated premises intact", as
   assert.equal(result.status, "needs-premises-confirmation");
   assert.deepEqual(result.premises, PREMISES.premises);
   assert.equal(result.premiseChallenge.ran, false);
+});
+
+test("under both providers the stated premises reach Codex and are challenged there", async () => {
+  // The scribe is modelled honestly: it writes the bytes it was handed and runs
+  // the real verify-payload.mjs against them. A token computed over the wrong
+  // shape fails here exactly as it would on disk, which is the only way this
+  // path can be trusted — echoing the expected token back proves nothing.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-premise-persist-"));
+  const honestScribe = (prompt) => {
+    const fenced = /<untrusted-stated-premises>\n([\s\S]*?)\n<\/untrusted-stated-premises>/.exec(prompt);
+    assert.ok(fenced, "the scribe was given no payload to write");
+    const expect = /--expect "STATED_PREMISES=([^"]+)"/.exec(prompt);
+    assert.ok(expect, "the scribe was given no checksum to check");
+    const file = path.join(temp, "premises-stated.json");
+    fs.writeFileSync(file, fenced[1]);
+    const run = spawnSync(process.execPath, [
+      path.join(root, "scripts/verify-payload.mjs"),
+      `--payload-json`, `STATED_PREMISES=${file}`,
+      `--expect`, `STATED_PREMISES=${expect[1]}`
+    ], { encoding: "utf8" });
+    if (run.status !== 0) return { ok: false, error: run.stderr.trim() };
+    return JSON.parse(run.stdout);
+  };
+
+  const base = planResponder([]);
+  const { result, labels } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, premisesFile: undefined },
+    (label, prompt, options) => {
+      if (label === "plan:premises") return PREMISES;
+      if (label === "plan:premise-challenge:persist") return honestScribe(prompt);
+      if (label === "plan:codex-premise-challenge:request") {
+        return {
+          ok: true,
+          promptPath: "/plans/slug/reviews/codex.prompt.md",
+          promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+          bytes: 4096
+        };
+      }
+      if (label === "plan:codex-premise-challenge") {
+        return {
+          challenges: [
+            {
+              claim: PREMISES.premises[0].claim,
+              verdict: "contradicted",
+              basisChecked: "scripts/codex-run.mjs",
+              evidence: "scripts/codex-run.mjs:12 sits behind a flag that is off in production."
+            },
+            unchallenged(PREMISES.premises[1])
+          ]
+        };
+      }
+      return base(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "needs-premises-confirmation");
+  assert.ok(labels.includes("plan:codex-premise-challenge"), labels.join(", "));
+  assert.equal(result.premiseChallenge.ran, true);
+  // The whole point of the default provider: the engine that states the
+  // premises is not the engine that checks them.
+  assert.equal(result.premiseChallenge.engine, "codex");
+  assert.equal(result.premiseChallenge.independent, true);
+  assert.equal(result.premises[0].kind, "assumed");
+});
+
+test("a lost Codex challenge keeps the premises the pass already paid for", async () => {
+  // The stating call is the expensive one and this gate saves no file a resume
+  // could reuse, so a relay that never comes back must not take it with it.
+  const base = planResponder([]);
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, premisesFile: undefined, runPolicy: normalizeRunPolicy({ provider: "codex" }) },
+    (label, prompt, options) => {
+      if (label === "plan:codex-premises") return PREMISES;
+      // Lost on the first attempt and on every retry, which is what makes the
+      // relay give up and throw rather than hand back a null.
+      if (label.startsWith("plan:codex-premise-challenge") && !label.endsWith(":request")) return null;
+      if (label.endsWith(":request")) {
+        return {
+          ok: true,
+          promptPath: "/plans/slug/reviews/codex.prompt.md",
+          promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+          bytes: 4096
+        };
+      }
+      return base(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "needs-premises-confirmation", result.message);
+  assert.deepEqual(result.premises, PREMISES.premises);
+  assert.equal(result.premiseChallenge.ran, false);
+  assert.equal(result.premiseChallenge.reason, "not-returned");
+  // What was lost is the challenge, not the evidence: the dispatch Codex may
+  // already have been paid for is still recorded for reconciliation. Only the
+  // fatal marker that would have ended the pass is dropped.
+  assert.equal(result.unconfirmedCodexDispatches.length, 1);
+  assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
 });
 
 test("a resume and a continuation never challenge premises a person already settled", async () => {
@@ -2609,9 +2739,12 @@ const CHALLENGE_FINDING = {
   recommendation: "Move the return inside the catch."
 };
 
-function challengeShipResponder(challenge, { policy } = {}) {
+function challengeShipResponder(challenge) {
   return (label, prompt, options) => {
-    if (label.startsWith("final-challenge:")) return challenge;
+    // Called rather than returned when it is a function, so a test that says
+    // "this must not run" fails when it does instead of quietly accepting the
+    // function itself as an empty result.
+    if (label.startsWith("final-challenge:")) return typeof challenge === "function" ? challenge(prompt) : challenge;
     return cleanShipResponder(label, prompt, options);
   };
 }
@@ -2692,6 +2825,41 @@ test("a call budget with no room for the last gate says so rather than skipping 
   assert.match(result.gateFailures.join("\n"), /did not run/);
 });
 
+test("an unknown review tier reports a gate that did not run rather than crashing the ship", async () => {
+  // A configuration written before this key existed never named a tier, and
+  // nothing requires a repository to define one called `standard`.
+  const config = {
+    ...SHIP_CONFIG,
+    reviewTiers: { deep: SHIP_CONFIG.reviewTiers.deep, light: SHIP_CONFIG.reviewTiers.light },
+    review: { firstReviewer: "codex" },
+    reviewers: { functionality: { enabled: true, tier: "deep" } }
+  };
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config },
+    challengeShipResponder(() => assert.fail("the challenge ran with no runtime to run on"))
+  );
+
+  assert.equal(result.status, "failed-gates");
+  assert.equal(labels.some((label) => label.startsWith("final-challenge:")), false);
+  assert.equal(result.finalChallenge.reason, "unknown-tier");
+  assert.match(result.gateFailures.join("\n"), /names the tier standard, which this configuration does not define/);
+});
+
+test("every result says something about the last gate, including the ones that never reach it", async () => {
+  // The ship command reads this field unconditionally, so a run that stopped
+  // long before the loop still has an answer rather than an undefined.
+  const { result } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, existingCandidateOid: undefined, tasks: [], config: { ...SHIP_CONFIG, limits: { ...SHIP_CONFIG.limits, agentCallsPerPr: 1 } } },
+    cleanShipResponder
+  );
+
+  assert.equal(result.status, "agent-budget-gate");
+  assert.equal(result.finalChallenge.ran, false);
+  assert.equal(result.finalChallenge.reason, "not-reached");
+});
+
 test("the final challenge can be switched off and then costs nothing", async () => {
   const config = { ...SHIP_CONFIG, review: { ...SHIP_CONFIG.review, finalChallenge: { enabled: false, tier: "standard" } } };
   const { result, labels } = await harness(
@@ -2703,6 +2871,9 @@ test("the final challenge can be switched off and then costs nothing", async () 
   assert.equal(result.status, "clean");
   assert.equal(labels.some((label) => label.startsWith("final-challenge:")), false);
   assert.equal(result.finalChallenge.ran, false);
+  // A repository that switched the gate off is not a candidate that never went
+  // clean, and the ship command tells a person which of the two it is reading.
+  assert.equal(result.finalChallenge.reason, "disabled");
   assert.deepEqual(result.gateFailures, []);
 });
 

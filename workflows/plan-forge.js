@@ -2167,9 +2167,18 @@ async function main(raw) {
         // the call that stated them; only under `both` does a Claude-stated
         // list have no file yet, and that is the one case worth a scribe.
         let statedPath = useClaude ? null : `${input.planDir}/reviews/${passId}-premises-codex.json`;
+        // Bound only where this pass wrote the bytes itself. The bridge's own
+        // artifact is already checksum-bound by the relay checkpoint that
+        // produced it, and a second token computed over a shape this workflow
+        // never wrote would refuse a file that is perfectly good.
+        let statedExpect = null;
         if (!statedPath) {
           const target = `${input.planDir}/reviews/${passId}-premises-stated.json`;
-          const expected = expectJson(premises);
+          // verify-payload.mjs tokenizes the whole parsed file, so the token
+          // has to describe the object that lands on disk rather than the array
+          // inside it. The specialist list this was modelled on persists a bare
+          // array, which is why its token is computed the other way.
+          const expected = expectJson({ premises });
           const written = await planAgent([
             `Persist this premise list as JSON at ${target} with mode 0600, as the object {"premises": [...]}.`,
             "Write every row exactly as given. Do not summarise, reorder, renumber, or drop any of them.",
@@ -2193,32 +2202,47 @@ async function main(raw) {
           // premises this pass never stated. Nothing is challenged rather than
           // something else being challenged.
           const payload = written?.payloads?.find((item) => item?.name === "STATED_PREMISES") ?? null;
-          if (written?.ok && payload?.token === expected) statedPath = target;
-          else {
+          if (written?.ok && payload?.token === expected) {
+            statedPath = target;
+            statedExpect = expected;
+          } else {
             premiseChallenge = { ...premiseChallenge, reason: "premises-not-saved" };
-            log(`The stated premises were not saved as this run produced them, so they were not challenged. Details: ${target}; reported problem ${String(written?.error ?? payload?.token ?? "no verifier result").split("\n")[0]}`);
+            log(`The stated premises could not be confirmed on disk as this run produced them, so they were not challenged. They are unchanged. Details: ${target}; reported problem ${String(written?.error ?? payload?.token ?? "no verifier result").split("\n")[0]}`);
           }
         }
         if (statedPath) {
-          // Optional on purpose: the premises have already been paid for, and a
-          // lost relay must not throw away that call. This gate has no saved
-          // file yet, so a fresh resume would state them a second time.
-          challenged = (await codexReasoning({
-            template: "premise-challenge-codex.md",
-            vars: { WORKTREE: input.worktree },
-            fences: [
-              { name: "GOAL", file: goalPath, json: true },
-              { name: "STATED_PREMISES", file: statedPath, json: true }
-            ],
-            schemaFile: "plan-premise-challenge.schema.json",
-            schema: premiseChallengeSchema,
-            artifact: `${input.planDir}/reviews/${passId}-premise-challenge-codex.json`,
-            promptFile: `${input.planDir}/reviews/${passId}-premise-challenge-codex.json.prompt.md`,
-            label: "plan:codex-premise-challenge",
-            phaseName: "Premises",
-            what: "challenge to the premises this plan would rest on",
-            optional: true
-          }))?.result ?? null;
+          // The premises have already been paid for, and this gate writes no
+          // file a resume could reuse, so a lost challenge must not take them
+          // with it: a fresh resume would state them a second time. `optional`
+          // marks the dispatch record but does not suppress relayCodex's throw
+          // — the other optional caller survives it only because parallel()
+          // turns a throw into null — so the throw is caught here, and the
+          // checkpoint it raised is dropped with it. What Codex may already
+          // have been paid for stays in the receipts either way.
+          const fatalBefore = relayState.fatal.length;
+          try {
+            challenged = (await codexReasoning({
+              template: "premise-challenge-codex.md",
+              vars: { WORKTREE: input.worktree },
+              fences: [
+                { name: "GOAL", file: goalPath, json: true },
+                { name: "STATED_PREMISES", file: statedPath, json: true }
+              ],
+              ...(statedExpect ? { expects: { STATED_PREMISES: statedExpect } } : {}),
+              schemaFile: "plan-premise-challenge.schema.json",
+              schema: premiseChallengeSchema,
+              artifact: `${input.planDir}/reviews/${passId}-premise-challenge-codex.json`,
+              promptFile: `${input.planDir}/reviews/${passId}-premise-challenge-codex.json.prompt.md`,
+              label: "plan:codex-premise-challenge",
+              phaseName: "Premises",
+              what: "challenge to the premises this plan would rest on",
+              optional: true
+            }))?.result ?? null;
+          } catch (error) {
+            relayState.fatal.length = fatalBefore;
+            premiseChallenge = { ...premiseChallenge, reason: "not-returned" };
+            log(`The premises were stated but not challenged: ${String(error?.message ?? error).split("\n")[0]} They are unchanged, and a person is asked about them as they stand.`);
+          }
         }
       }
       const rows = challenged?.challenges ?? null;
@@ -2226,8 +2250,21 @@ async function main(raw) {
         // Position is what binds a verdict to a premise, so the claims are
         // compared before anything is applied. A list that drifted is discarded
         // whole: applying part of it downgrades premises nobody judged.
+        // Matched on a normalized form, never byte for byte. Grading a model on
+        // retyping carried text verbatim is the defect this repository already
+        // removed once: a compliant reviser that reworded a carried question
+        // produced a key that did not match, and the check read that as a drop.
+        // A claim that came back with different spacing or a different dash is
+        // the same claim; a claim that came back saying something else is not.
+        const claimKey = (value) => String(value ?? "")
+          .replace(/[\u2010-\u2015]/g, "-")
+          .replace(/[\u2018\u2019]/g, "'")
+          .replace(/[\u201c\u201d]/g, '"')
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
         const aligned = rows.length === premises.length
-          && rows.every((row, index) => row.claim === premises[index].claim);
+          && rows.every((row, index) => claimKey(row.claim) === claimKey(premises[index].claim));
         if (!aligned) {
           premiseChallenge = { ...premiseChallenge, reason: "misaligned" };
           log(`The premise challenge returned ${rows.length} row${rows.length === 1 ? "" : "s"} for ${premises.length} premise${premises.length === 1 ? "" : "s"}, or restated one of them, so it was discarded rather than applied to premises it may not have judged.`);
@@ -2235,8 +2272,18 @@ async function main(raw) {
           // Only a contradiction moves a premise, and only downward. An
           // unsupported basis is worth telling a person about and is not
           // evidence that the claim is false, so it changes nothing here.
+          // The verdict travels on the row a person is asked about. Everything
+          // else in this block refuses to trust index correlation — that is what
+          // the alignment check above is for — so the command is not asked to
+          // redo it in prose to find out which rows may not be bulk-confirmed.
           premises = premises.map((premise, index) => (
-            rows[index].verdict === "contradicted" ? { ...premise, kind: "assumed" } : premise
+            rows[index].verdict === "unchallenged"
+              ? premise
+              : {
+                ...premise,
+                ...(rows[index].verdict === "contradicted" ? { kind: "assumed" } : {}),
+                challenged: rows[index].verdict
+              }
           ));
           premiseChallenge = { ran: true, engine: challengerEngine, independent: runPolicy.reasoningProvider === "both", challenges: rows };
           const contradicted = rows.filter((row) => row.verdict === "contradicted").length;
@@ -2247,7 +2294,9 @@ async function main(raw) {
     }
 
     const assumed = premises.filter((premise) => premise.kind === "assumed");
-    log(`${assumed.length} premise${assumed.length === 1 ? " is" : "s are"} assumed rather than established from the repository, and go to a person before anything is drafted.`);
+    log(assumed.length === 0
+      ? "Every stated premise is established from the repository, so nothing is put to a person before drafting."
+      : `${assumed.length} premise${assumed.length === 1 ? " is" : "s are"} assumed rather than established from the repository, and ${assumed.length === 1 ? "goes" : "go"} to a person before anything is drafted.`);
     return {
       premiseChallenge,
       runPolicy,
