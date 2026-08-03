@@ -2892,6 +2892,23 @@ test("a call budget with no room for the last gate says so rather than skipping 
   assert.match(result.gateFailures.join("\n"), /did not run/);
 });
 
+test("a ship leaves the arguments it was handed exactly as it found them", async () => {
+  // The run resolves its own policy and records it on its input. A real
+  // invocation builds those arguments once and throws them away, so the write
+  // is invisible there — and wrong for anything that invokes the workflow twice
+  // from one object, which would start its second run already holding the
+  // first run's policy.
+  const args = { ...SHIP_ARGS };
+  const before = JSON.stringify(args);
+  const { result } = await harness("workflows/ship-pr.js", args, cleanShipResponder);
+
+  assert.equal(result.status, "clean");
+  assert.equal(Object.hasOwn(args, "runPolicy"), false);
+  assert.equal(JSON.stringify(args), before);
+  // The policy the run resolved is still reported, on the result where it belongs.
+  assert.equal(result.runPolicy.reasoningProvider, "both");
+});
+
 test("a lost challenge relay says the challenge was lost, not that the candidate was never clean", async () => {
   // The record is read by a person. A run that got all the way to a clean
   // candidate and then lost its last gate must not report the opposite.

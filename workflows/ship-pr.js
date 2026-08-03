@@ -188,11 +188,20 @@ const BUILTIN_DIMENSIONS = new Set([
   "concurrency", "error-handling", "cost"
 ]);
 
+// A copy, because the run resolves its own policy and records it on this object
+// (`input.runPolicy` below). The string form already produced a fresh object and
+// the object form did not, so the same assignment reached back into whatever the
+// caller passed. That is invisible to a real invocation, whose arguments are
+// built once and thrown away, and it is exactly wrong for anything that invokes
+// the workflow twice from one object — a test fixture, a caller looping over a
+// train — which then starts its second run holding the first run's policy.
+// Shallow is sufficient: this is the only write, and nothing writes through a
+// nested reference.
 function parseInput(input) {
   if (typeof input === "string") {
     try { return JSON.parse(input); } catch { return {}; }
   }
-  return input && typeof input === "object" ? input : {};
+  return input && typeof input === "object" ? { ...input } : {};
 }
 
 function persistedCount(value, name) {
