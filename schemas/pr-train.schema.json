@@ -21,7 +21,17 @@
           "dependsOn": { "type": "array", "items": { "type": "string" } },
           "userVisible": { "type": "string", "enum": ["yes", "no"] },
           "userVisibleReason": { "type": "string", "minLength": 1 },
-          "sizeEstimate": { "type": "string", "minLength": 1 }
+          "sizeEstimate": { "type": "string", "minLength": 1 },
+          "sizeWaiver": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["reason", "rule", "approvedBy"],
+            "properties": {
+              "reason": { "type": "string", "minLength": 1 },
+              "rule": { "type": "string", "minLength": 1 },
+              "approvedBy": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       }
     }
