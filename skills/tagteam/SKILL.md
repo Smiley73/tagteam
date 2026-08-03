@@ -113,6 +113,16 @@ Every plan a model writes reaches a discoverable path the same way: it is writte
 
 The same boundary is why the Codex paths fold the carried set into `materialize-plan-artifact.mjs` itself rather than into a merge that follows it. That command *is* the publication, and it writes the plan last; a sidecar completed afterwards is a sidecar a resume can select while it is still short.
 
+## The last opinion is bought where scrutiny stops
+
+A candidate that goes clean has nothing left looking at it: the loop breaks, gates are assembled, and a person sees a pull request. Every reviewer that produced that state read the change through one dimension's charter, so nobody was ever asked whether the change, taken whole, is the change its contract claims. `review.finalChallenge` buys exactly one pass for that question, on the engine that did not write the last fix — or, where no round fixed anything, the one that did not open review. It runs on the candidate the loop cleared and on nothing else, and only on a clean one: a ship that already failed its gates has a person reading it either way.
+
+Its findings are `needs-human` and are never handed to a fixer. That is the whole shape of the thing: a fix would commit a new candidate, a new candidate invalidates every gate this one just earned, and the challenge would re-arm on its own output. Because it cannot write code, it cannot create the candidate that would restart it, so the pass is bounded by construction rather than by a counter. A person may still ask for a repair through the ordinary `Send it back for changes` path; that is a decision, and it re-arms every gate exactly as any other new candidate does.
+
+A surviving finding is a gate failure, so the run stops and offers the same three answers as every other gate. `Merge it` records approval against the current candidate only, which is what acceptance means here: `bindNewCandidate` wipes it the moment the bytes change, and the challenge runs again on whatever replaced them. Nothing carries an acceptance onto code it was never read against, and nobody is asked twice about a candidate that no longer exists.
+
+A challenge that could not run — no result, or no room left in `limits.agentCallsPerPr` — is recorded as not run and fails the gate rather than passing it. Elsewhere a check that did not run proceeds on other evidence; here there is none, because being the last thing that could still object is the entire point.
+
 ## Questions are drained, not deferred
 
 Cross-review stopping does not mean the questions are done. A pass that cleared every round and produced a manifest, a train, and a passing cross-check can still be holding decisions nobody made, and those are reported separately from every verdict above.

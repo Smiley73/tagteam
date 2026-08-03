@@ -14,7 +14,28 @@ function oneLine(value, fallback = "Unavailable.") {
   return normalized || fallback;
 }
 
+// The heading and the bullets are deliberately outside the grammar
+// parse-review-artifact.mjs enforces: this block is not a round, its author is
+// not a dimension reviewer, and its findings carry no F<round>.<n> identity.
+// The parser therefore reads straight past it, which is what keeps an appended
+// record from rewriting what the rounds before it say.
+function renderFinalChallenge(event) {
+  const challenge = event.challenge ?? {};
+  const lines = [
+    `### Final challenge — round ${event.round}`,
+    `- Engine: ${oneLine(event.engine)}`,
+    `- Candidate: ${oneLine(event.candidateOid)}`,
+    `- Verdict: ${oneLine(challenge.ran === false ? `did not run (${challenge.reason ?? "unknown"})` : challenge.verdict)}`,
+    `- Summary: ${oneLine(challenge.summary)}`
+  ];
+  for (const finding of challenge.findings ?? []) {
+    lines.push(`- ${oneLine(finding.severity)} / ${oneLine(finding.file)}:${oneLine(finding.line_start)}-${oneLine(finding.line_end)} / ${oneLine(finding.title)} / ${oneLine(finding.failure_path)} / ${oneLine(finding.recommendation)}`);
+  }
+  return lines.join("\n") + "\n\n";
+}
+
 function render(event) {
+  if (event.kind === "final-challenge") return renderFinalChallenge(event);
   if (event.kind !== "fix") throw new Error(`unsupported review event kind: ${event.kind}`);
   const lines = [
     `### Fix log — round ${event.round}`,
@@ -33,7 +54,7 @@ export function appendEvent(reviewPath, eventPath) {
   const parsedBefore = parseReviewArtifact(before.toString("utf8"));
   if (!parsedBefore.ok) throw new Error(`review artifact is malformed before event append: ${parsedBefore.errors.join("; ")}`);
   const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-  if (event.round !== parsedBefore.highestRound) throw new Error(`fix event round ${event.round} is not the latest review round ${parsedBefore.highestRound}`);
+  if (event.round !== parsedBefore.highestRound) throw new Error(`${event.kind ?? "fix"} event round ${event.round} is not the latest review round ${parsedBefore.highestRound}`);
   const rendered = render(event);
   const candidate = Buffer.concat([before, Buffer.from(rendered)]);
   const parsedAfter = parseReviewArtifact(candidate.toString("utf8"));

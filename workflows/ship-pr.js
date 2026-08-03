@@ -56,6 +56,30 @@ const findingsSchema = {
     findings: { type: "array", items: findingItem }
   }
 };
+// The last opinion on a candidate every dimension reviewer already cleared. It
+// is deliberately not the findings schema: there is no dimension to sweep, no
+// severity below major worth stopping a merge for, and a finding here has to
+// carry the failure path that makes it worth a person's time. An empty list is
+// the expected result, which is why `verdict` exists at all.
+const finalChallengeSchema = {
+  type: "object", additionalProperties: false, required: ["verdict", "summary", "findings"],
+  properties: {
+    verdict: { type: "string", enum: ["merge", "block"] },
+    summary: { type: "string", minLength: 1 },
+    findings: {
+      type: "array", items: {
+        type: "object", additionalProperties: false,
+        required: ["title", "file", "line_start", "line_end", "severity", "failure_path", "recommendation"],
+        properties: {
+          title: { type: "string", minLength: 1 }, file: { type: "string", minLength: 1 },
+          line_start: { type: "integer" }, line_end: { type: "integer" },
+          severity: { type: "string", enum: ["blocking", "major"] },
+          failure_path: { type: "string", minLength: 1 }, recommendation: { type: "string", minLength: 1 }
+        }
+      }
+    }
+  }
+};
 const fixReportSchema = {
   type: "object", additionalProperties: false, required: ["summary", "results"],
   properties: {
@@ -1754,6 +1778,126 @@ async function main(raw) {
   }
 
   const gateFailures = [];
+  // Every reviewer that produced a clean candidate was scoped to one dimension's
+  // charter, and this is where scrutiny otherwise stops. One pass argues against
+  // the change as a whole, on the candidate the loop cleared and nothing else.
+  // It cannot write code, so it can never create the candidate that would re-arm
+  // it, and nothing it finds is repaired automatically: a fix here would mint a
+  // new candidate and invalidate the gates this state just earned.
+  let finalChallenge = { ran: false, reason: "not-clean" };
+  if (status === "clean" && config.review?.finalChallenge?.enabled !== false) {
+    const challengeRound = rounds.at(-1)?.round ?? roundOffset;
+    const challengeEngine = lastFixEngine
+      ? (runPolicy.reasoningProvider === "both"
+          ? (lastFixEngine === "claude" ? "codex" : "claude")
+          : runPolicy.reasoningProvider)
+      : selectedEngine(runPolicy, config.review.firstReviewer === "claude" ? "codex" : "claude");
+    const challengeRuntime = config.reviewTiers[config.review.finalChallenge?.tier ?? "standard"][challengeEngine];
+    // Reserved here rather than inside the round loop: a reservation there would
+    // charge every round, and its shortfall path returns before any round can go
+    // clean, so this record could never be written.
+    if (callCount + 2 > callBudget()) {
+      finalChallenge = { ran: false, reason: "agent-call-budget", engine: challengeEngine, round: challengeRound };
+      gateFailures.push("The final challenge did not run: this PR reached its call limit after the last review round.");
+    } else {
+      const challengeParts = [
+        `Challenge candidate ${candidateOid} against base ${input.baseOid} as a whole. Every configured reviewer has already cleared it.`,
+        `Read ${input.pluginRoot}/prompts/final-challenge.md and ${input.pluginRoot}/prompts/claim-verification.md.`,
+        policyBrief,
+        fence("pr-scope", input.pr),
+        fence("review-history", rounds.map((item) => ({ round: item.round, findings: item.findingIds, fixer: item.fixEngine })))
+      ].filter(Boolean);
+      const challenge = challengeEngine === "codex"
+        ? await codexCall(input, {
+            label: "final-challenge:codex",
+            kind: "Final challenge",
+            schema: finalChallengeSchema,
+            schemaFile: "final-challenge.schema.json",
+            artifact: `${input.shipDir}/prs/${input.pr.id}/final-challenge.codex.json`,
+            prompt: challengeParts.join("\n\n"),
+            fenceFiles: [{ label: "changed-paths", file: snapshotValue.changedPathsPath }],
+            runtime: challengeRuntime,
+            sandbox: "read-only",
+            reviewDiffPath: snapshotValue.reviewDiffPath
+          })
+        : await claudeReasoningCall([
+            ...challengeParts,
+            fence("changed-paths", snapshotValue.changedPaths),
+            `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`
+          ].join("\n\n"), {
+            label: "final-challenge:claude",
+            phase: "Final challenge",
+            agentType: "tagteam:final-challenger",
+            model: challengeRuntime.model,
+            effort: challengeRuntime.effort,
+            schema: finalChallengeSchema
+          });
+      callCount += 1;
+      if (relayState.fatal.length > 0) {
+        return relayInterruption({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
+      if (relayState.capacityExceeded) {
+        return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+      }
+      if (!challenge) {
+        // A gate that did not run is never a gate that passed. On a candidate
+        // every other check has already cleared, there is no second source of
+        // evidence to fall back on, so this stops for a person.
+        finalChallenge = { ran: false, reason: "no-result", engine: challengeEngine, round: challengeRound };
+        gateFailures.push("The final challenge did not run: no usable result came back from the last gate.");
+      } else {
+        const challengeFindings = (challenge.findings ?? []).map((finding) => ({
+          ...finding,
+          dimension: "final-challenge",
+          body: finding.failure_path,
+          confidence: 1,
+          engine: challengeEngine,
+          round: challengeRound,
+          occurrences: 1,
+          // Pushed rather than merged: mergeLedger stamps every finding `open`,
+          // and `open` is what a fixer collects. These are for a person.
+          status: "needs-human",
+          id: stableId({ ...finding, dimension: "final-challenge" })
+        }));
+        ledger.push(...challengeFindings);
+        finalChallenge = {
+          ran: true,
+          engine: challengeEngine,
+          round: challengeRound,
+          candidateOid,
+          verdict: challenge.verdict,
+          summary: challenge.summary,
+          findings: challengeFindings
+        };
+        if (challengeFindings.length > 0) {
+          // The status stays `clean` here and `finish` derives `failed-gates`
+          // from the gate failure, the same as for every other gate.
+          gateFailures.push(`The final challenge argues this must not merge: ${challengeFindings.length} finding${challengeFindings.length === 1 ? "" : "s"} waiting for a human decision.`);
+        }
+        const challengeEventPath = `${input.shipDir}/prs/${input.pr.id}/final-challenge-event.json`;
+        const challengeScribe = await plumbingCall([
+          `Persist this final-challenge event at ${challengeEventPath} with mode 0600.`,
+          `Persist the event's challenge object at ${input.shipDir}/prs/${input.pr.id}/final-challenge.json with mode 0600.`,
+          `Then run exactly: node "${input.pluginRoot}/scripts/append-review-event.mjs" "${input.shipDir}/prs/${input.pr.id}/review.md" "${challengeEventPath}"`,
+          "Read and return the appender's JSON result exactly.",
+          fence("final-challenge-event", { kind: "final-challenge", round: challengeRound, engine: challengeEngine, candidateOid, challenge: finalChallenge })
+        ].join("\n\n"), {
+          label: "scribe:final-challenge",
+          phase: "Final challenge",
+          agentType: "tagteam:scribe",
+          model: relayModelFor(input.runPolicy, input.config),
+          effort: relayEffortFor(relayModelFor(input.runPolicy, input.config), input.config),
+          schema: eventScribeSchema
+        });
+        callCount += 1;
+        if (relayState.capacityExceeded) {
+          return capacityGate({ candidateOid, rounds, ledger, ui, verify: verification, selected: selectedInfo });
+        }
+        if (!challengeScribe?.ok) gateFailures.push("The final challenge ran but its record did not persist.");
+      }
+    }
+  }
+
   if (status !== "clean") gateFailures.push(`Review status: ${status}`);
   if (lastRoundFailures.length) gateFailures.push(`Reviewers without usable results: ${lastRoundFailures.join(", ")}`);
   for (const [dimension, setting] of Object.entries(config.reviewers)) {
@@ -1765,6 +1909,7 @@ async function main(raw) {
     }
   }
   return finish({
+    finalChallenge,
     status: gateFailures.length > 0 && status === "clean" ? "failed-gates" : status,
     tasks: taskResults,
     rounds,

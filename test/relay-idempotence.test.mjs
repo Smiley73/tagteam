@@ -2596,6 +2596,139 @@ function cleanShipResponder(label) {
   return CLEAN_FINDINGS;
 }
 
+// A candidate every dimension reviewer cleared is where scrutiny stops, so one
+// pass argues against the change as a whole. These tests are about what it may
+// and may not do to a run that was otherwise finished.
+const CHALLENGE_FINDING = {
+  title: "The retry path never runs",
+  file: "src/a.js",
+  line_start: 10,
+  line_end: 14,
+  severity: "blocking",
+  failure_path: "A 503 from the first call returns before the retry, so the caller sees the error the contract promises to absorb.",
+  recommendation: "Move the return inside the catch."
+};
+
+function challengeShipResponder(challenge, { policy } = {}) {
+  return (label, prompt, options) => {
+    if (label.startsWith("final-challenge:")) return challenge;
+    return cleanShipResponder(label, prompt, options);
+  };
+}
+
+test("a clean candidate is challenged once, on the engine that did not open review", async () => {
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    // A copy, never the shared object: the workflow records the run policy it
+    // resolved onto its own input, which is per-invocation in a real ship and
+    // would otherwise travel from one test to the next.
+    { ...SHIP_ARGS },
+    challengeShipResponder({ verdict: "merge", summary: "Nothing to stop this.", findings: [] })
+  );
+
+  assert.equal(result.status, "clean");
+  // SHIP_CONFIG opens review with Codex, and no round fixed anything, so the
+  // last opinion comes from the other engine.
+  assert.deepEqual(labels.filter((label) => label.startsWith("final-challenge:")), ["final-challenge:claude"]);
+  assert.equal(result.finalChallenge.ran, true);
+  assert.equal(result.finalChallenge.verdict, "merge");
+  assert.equal(result.finalChallenge.candidateOid, SHIP_ARGS.existingCandidateOid);
+  assert.deepEqual(result.gateFailures, []);
+  // Nothing was reserved or spent inside the loop: every round still costs what
+  // it costed before this pass existed.
+  assert.equal(labels.filter((label) => label.startsWith("final-challenge:")).length, 1);
+});
+
+test("a finding from the final challenge stops the PR and is never handed to a fixer", async () => {
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS },
+    challengeShipResponder({ verdict: "block", summary: "The contract is not met.", findings: [CHALLENGE_FINDING] })
+  );
+
+  assert.equal(result.status, "failed-gates");
+  assert.match(result.gateFailures.join("\n"), /final challenge argues this must not merge/);
+  const finding = result.ledger.find((item) => item.dimension === "final-challenge");
+  // needs-human is what keeps it out of `fixTargets`, and a stable id is what
+  // the report prints for a human-decision finding.
+  assert.equal(finding.status, "needs-human");
+  assert.match(finding.id, /^TT-/);
+  assert.equal(finding.severity, "blocking");
+  // No fix round follows it. A fix would mint a new candidate and invalidate
+  // every gate this candidate just earned.
+  assert.equal(labels.some((label) => label.startsWith("fix:")), false);
+  assert.equal(result.candidateOid, SHIP_ARGS.existingCandidateOid);
+});
+
+test("a final challenge that returns nothing usable fails the gate instead of passing it", async () => {
+  const { result } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS }, challengeShipResponder(null));
+
+  assert.equal(result.status, "failed-gates");
+  assert.equal(result.finalChallenge.ran, false);
+  assert.equal(result.finalChallenge.reason, "no-result");
+  assert.match(result.gateFailures.join("\n"), /did not run/);
+});
+
+test("a call budget with no room for the last gate says so rather than skipping it", async () => {
+  // What the same run costs with the gate switched off, so the budget below is
+  // derived from the pipeline rather than pinned to a number that drifts.
+  const single = { ...SHIP_CONFIG, maxReviewLoops: 1 };
+  const off = { ...single, review: { ...single.review, finalChallenge: { enabled: false, tier: "standard" } } };
+  const baseline = await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config: off }, cleanShipResponder);
+  assert.equal(baseline.result.status, "clean");
+
+  // One call of headroom, and the challenge needs two: itself and the scribe
+  // that records it.
+  const config = { ...single, limits: { ...single.limits, agentCallsPerPr: baseline.result.agentCalls + 1 } };
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config },
+    challengeShipResponder(() => assert.fail("the challenge ran without budget"))
+  );
+
+  assert.equal(labels.some((label) => label.startsWith("final-challenge:")), false);
+  assert.equal(result.finalChallenge.ran, false);
+  assert.equal(result.finalChallenge.reason, "agent-call-budget");
+  assert.match(result.gateFailures.join("\n"), /did not run/);
+});
+
+test("the final challenge can be switched off and then costs nothing", async () => {
+  const config = { ...SHIP_CONFIG, review: { ...SHIP_CONFIG.review, finalChallenge: { enabled: false, tier: "standard" } } };
+  const { result, labels } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config },
+    challengeShipResponder(() => assert.fail("the challenge ran while it was disabled"))
+  );
+
+  assert.equal(result.status, "clean");
+  assert.equal(labels.some((label) => label.startsWith("final-challenge:")), false);
+  assert.equal(result.finalChallenge.ran, false);
+  assert.deepEqual(result.gateFailures, []);
+});
+
+test("a run that never reached clean is not challenged", async () => {
+  // The pass exists for a candidate nothing else can still check. One that
+  // already failed its gates has a person reading it either way.
+  const blocking = {
+    ...CLEAN_FINDINGS,
+    verdict: "needs-attention",
+    findings: [{
+      title: "Unbounded retry", body: "b", file: "src/a.js", line_start: 1, line_end: 2,
+      severity: "blocking", dimension: "reliability", confidence: 0.9, recommendation: "Bound it."
+    }]
+  };
+  const { result, labels } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS }, (label, prompt, options) => {
+    if (label.startsWith("review:")) return blocking;
+    if (label.startsWith("fix:")) return { summary: "no", results: [{ id: "TT-none", status: "wont-fix", explanation: "human" }] };
+    return challengeShipResponder(() => assert.fail("challenged a candidate that never went clean"))(label, prompt, options);
+  });
+
+  assert.notEqual(result.status, "clean");
+  assert.equal(labels.some((label) => label.startsWith("final-challenge:")), false);
+  assert.equal(result.finalChallenge.ran, false);
+  assert.equal(result.finalChallenge.reason, "not-clean");
+});
+
 test("Claude-only shipping dispatches no Codex work", async () => {
   const policy = normalizeRunPolicy({ provider: "claude" });
   const { result, calls } = await harness(
@@ -3983,10 +4116,13 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   // to Haiku; only the retried Codex review's plumbing dispatch remains Haiku
   // here (SHIP_ARGS carries no explicit run policy, so this is the plan's
   // default-dual-provider plumbingModel resolution for the codex-runner call).
+  // The clean candidate then buys the final challenge and the scribe that
+  // records it: one reasoning call on the engine that did not open review, and
+  // one plumbing call, both outside the round loop.
   assert.deepEqual(result.usage, {
-    claudeReasoningCalls: 3,
+    claudeReasoningCalls: 4,
     haikuPlumbingCalls: 1,
-    plumbingCallsByModel: { haiku: 1, sonnet: 7 },
+    plumbingCallsByModel: { haiku: 1, sonnet: 8 },
     codexCalls: 0,
     relayRetries: 1
   });

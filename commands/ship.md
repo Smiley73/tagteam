@@ -1,7 +1,7 @@
 ---
 description: Implement, review, verify, publish, and merge an approved plan as an isolated PR train
 argument-hint: '[plan-dir|plan-file] [--resume] [--dry-run] [--provider both|claude|codex] [--reviewers all|dim,dim]'
-allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:ship-pr), Agent(tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-drafter, tagteam:fixer, tagteam:ui-classifier), Bash(node *), Bash(git *), Bash(gh *), Bash(codex *), Bash(codegraph *)
+allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:ship-pr), Agent(tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-drafter, tagteam:fixer, tagteam:ui-classifier, tagteam:final-challenger), Bash(node *), Bash(git *), Bash(gh *), Bash(codex *), Bash(codegraph *)
 ---
 
 # Ship an approved plan
@@ -80,6 +80,8 @@ For revalidation of an already committed candidate, also pass `existingCandidate
 
 Any new candidate OID invalidates every prior review, verification, UI, CI, and human-approval record. Never copy a gate record across OIDs.
 
+The result also carries `finalChallenge`, the last opinion on a candidate every dimension reviewer cleared. `ran: false` names why in `reason`: `not-clean` where the loop never got there and there was nothing to challenge, `disabled` where the repository switched it off, and `agent-call-budget` or `no-result` where it should have run and did not — those two are gate failures, because a gate that did not run is never a gate that passed, and on a candidate every other check has already cleared there is no other evidence to fall back on. When it ran and returned findings, they are in the ledger as `needs-human` and the run is at the gates below. Show each one's `failure_path` and `recommendation` with its `file` and line range: it is the only finding a person is asked to judge that no reviewer raised, so it arrives without a dimension charter to explain it. Never repair one on your own initiative — `Send it back for changes` is how a person asks for that, and it creates a new candidate that re-arms every gate including this one.
+
 Use the CLI in `${CLAUDE_PLUGIN_ROOT}/scripts/lib/gates.mjs` for state transitions, candidate invalidation, call-capacity checks, and final gate evaluation (`transition`, `bind`, `record`, `capacity`, `evaluate`). Pass `run-policy.json` to `bind` and `evaluate`, and its fingerprint to `record`; persist the returned JSON. Do not reproduce that math in prose or model judgment.
 
 ## Publish and CI
@@ -105,7 +107,7 @@ If CI did not run and local verification is `not-applicable`, there is no execut
 
 ## Gates
 
-Wait for the user when any of these is true: workflow gate failures; local verification failure; real CI failure; either user-visible judgment is yes/unknown; the judgments disagree; `.github/workflows/**` changed; `pauseOn` contains `every-merge`; no executable evidence; base is unprotected; branch protection requires an external approval; agent-call limit reached.
+Wait for the user when any of these is true: workflow gate failures, including a final challenge that found something or did not run; local verification failure; real CI failure; either user-visible judgment is yes/unknown; the judgments disagree; `.github/workflows/**` changed; `pauseOn` contains `every-merge`; no executable evidence; base is unprotected; branch protection requires an external approval; agent-call limit reached.
 
 Render recurring gate and failure text only through the tested catalog:
 
