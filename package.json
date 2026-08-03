@@ -2,6 +2,7 @@
   "name": "tagteam-plugin",
   "version": "0.5.12",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",

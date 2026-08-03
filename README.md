@@ -120,3 +120,7 @@ npm run check
 ```
 
 The implementation uses Node built-ins only.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
