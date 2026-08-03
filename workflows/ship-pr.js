@@ -1821,6 +1821,10 @@ async function main(raw) {
       finalChallenge = { ran: false, reason: "agent-call-budget", engine: challengeEngine, round: challengeRound };
       gateFailures.push("The final challenge did not run: this PR reached its call limit after the last review round.");
     } else {
+      // Set before the dispatch, not after it: a relay loss or a capacity stop
+      // returns from inside this block, and a record still saying `not-clean`
+      // would tell a person the exact opposite of what happened.
+      finalChallenge = { ran: false, reason: "no-result", engine: challengeEngine, round: challengeRound };
       const challengeParts = [
         `Challenge candidate ${candidateOid} against base ${input.baseOid} as a whole. Every configured reviewer has already cleared it.`,
         `Read ${input.pluginRoot}/prompts/final-challenge.md and ${input.pluginRoot}/prompts/claim-verification.md.`,
@@ -1863,8 +1867,8 @@ async function main(raw) {
       if (!challenge) {
         // A gate that did not run is never a gate that passed. On a candidate
         // every other check has already cleared, there is no second source of
-        // evidence to fall back on, so this stops for a person.
-        finalChallenge = { ran: false, reason: "no-result", engine: challengeEngine, round: challengeRound };
+        // evidence to fall back on, so this stops for a person. The record was
+        // already set to say so before the call went out.
         gateFailures.push("The final challenge did not run: no usable result came back from the last gate.");
       } else {
         const challengeFindings = (challenge.findings ?? []).map((finding) => ({
@@ -1968,6 +1972,9 @@ try {
     policyFingerprint: shipState.runPolicy.policyFingerprint,
     status: "ship-interrupted",
     message: error instanceof Error ? error.message : String(error),
+    // This result never went through finish, and the ship command reads the
+    // last gate's record on every result it is handed.
+    finalChallenge: { ran: false, reason: "not-reached" },
     agentCalls: relayState.dispatchedCalls,
     relayRetries: relayState.extraCalls,
     usage: {

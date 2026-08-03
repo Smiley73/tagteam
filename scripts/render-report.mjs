@@ -83,7 +83,7 @@ export function renderReport(shipDir) {
   const decision = (finding) => (finding.dimension === "final-challenge"
     ? [
       `- ${finding.pr} · ${finding.id} · [${finding.severity}] ${finding.title} (${finding.file}:${finding.line_start}-${finding.line_end})`,
-      `  - Failure path: ${finding.failure_path ?? finding.body ?? "not stated"}`,
+      `  - Failure path: ${finding.failure_path ?? "not stated"}`,
       `  - Repair: ${finding.recommendation ?? "not stated"}`
     ].join("\n")
     : `- ${finding.pr} · ${finding.id} · [${finding.severity}] ${finding.title} — ${finding.fixExplanation ?? "needs a decision"}`);

@@ -1976,8 +1976,9 @@ test("a fresh plan states its premises and stops before drafting anything", asyn
   assert.equal(result.status, "needs-premises-confirmation");
   assert.deepEqual(result.premises, PREMISES.premises);
   // Nothing was drafted, reviewed, or decomposed. Under `both` the stated list
-  // has to reach Codex as a file before it can be challenged, and that persist
-  // is the only other step this gate buys.
+  // has to reach Codex as a file before it can be challenged; this responder
+  // does not model that scribe, so the gate stops at the persist and returns
+  // the premises unchallenged. The path where it succeeds is its own test.
   assert.deepEqual(labels, ["plan:premises", "plan:premise-challenge:persist"]);
   // And the accounting a caller must persist before acting on any status is here
   // like it is on every other exit. The persist is plumbing, not reasoning: it
@@ -2045,9 +2046,10 @@ test("an unchallenged premise carries no verdict at all", async () => {
   assert.equal(result.premises.some((premise) => "challenged" in premise), false);
 });
 
-test("a claim that comes back reworded is still the same claim", async () => {
-  // Grading a model on retyping carried text verbatim is the defect this
-  // repository already removed once. Spacing and a different dash are not drift.
+test("a claim that comes back respaced or recased is still the same claim", async () => {
+  // Byte equality on model-retyped text is what this avoids: spacing, case, a
+  // different dash and a stray trailing space are not drift. A claim that came
+  // back saying something else still is, and still discards the challenge.
   const { result } = await challengeHarness(() => ({
     challenges: [
       {
@@ -2127,15 +2129,24 @@ test("under both providers the stated premises reach Codex and are challenged th
   const honestScribe = (prompt) => {
     const fenced = /<untrusted-stated-premises>\n([\s\S]*?)\n<\/untrusted-stated-premises>/.exec(prompt);
     assert.ok(fenced, "the scribe was given no payload to write");
-    const expect = /--expect "STATED_PREMISES=([^"]+)"/.exec(prompt);
-    assert.ok(expect, "the scribe was given no checksum to check");
     const file = path.join(temp, "premises-stated.json");
     fs.writeFileSync(file, fenced[1]);
-    const run = spawnSync(process.execPath, [
-      path.join(root, "scripts/verify-payload.mjs"),
-      `--payload-json`, `STATED_PREMISES=${file}`,
-      `--expect`, `STATED_PREMISES=${expect[1]}`
-    ], { encoding: "utf8" });
+    // The command the workflow emitted, run as written, with only the path it
+    // named pointed at the bytes just written. A rebuilt argv cannot notice the
+    // workflow asking for the wrong kind of comparison, which is exactly how
+    // this gate failed silently before.
+    const command = /Then run exactly: (node "[^\n]*verify-payload\.mjs"[^\n]*)/.exec(prompt);
+    assert.ok(command, `the scribe was given no verifier command: ${prompt.slice(0, 400)}`);
+    const argv = Array.from(command[1].matchAll(/"([^"]*)"|(\S+)/g), (match) => match[1] ?? match[2]).slice(1);
+    // Only two substitutions: the plugin root this fixture invents, and the
+    // path the workflow named for bytes that live in a temp file here. Every
+    // flag and every checksum is the workflow's own.
+    const pointed = argv.map((value) => {
+      if (value.endsWith("verify-payload.mjs")) return path.join(root, "scripts/verify-payload.mjs");
+      if (value.startsWith("STATED_PREMISES=") && !value.includes(":")) return `STATED_PREMISES=${file}`;
+      return value;
+    });
+    const run = spawnSync(process.execPath, pointed, { encoding: "utf8" });
     if (run.status !== 0) return { ok: false, error: run.stderr.trim() };
     return JSON.parse(run.stdout);
   };

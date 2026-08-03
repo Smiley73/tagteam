@@ -2167,10 +2167,11 @@ async function main(raw) {
         // the call that stated them; only under `both` does a Claude-stated
         // list have no file yet, and that is the one case worth a scribe.
         let statedPath = useClaude ? null : `${input.planDir}/reviews/${passId}-premises-codex.json`;
-        // Bound only where this pass wrote the bytes itself. The bridge's own
-        // artifact is already checksum-bound by the relay checkpoint that
-        // produced it, and a second token computed over a shape this workflow
-        // never wrote would refuse a file that is perfectly good.
+        // Bound only where this pass wrote the bytes itself. Where Codex stated
+        // the premises, the file is the bridge's own artifact: this workflow
+        // never wrote it and holds no token for it, and inventing one over a
+        // shape it never wrote would refuse a file that is perfectly good. The
+        // positional check on the returned rows is what catches a drift there.
         let statedExpect = null;
         if (!statedPath) {
           const target = `${input.planDir}/reviews/${passId}-premises-stated.json`;
@@ -2239,6 +2240,13 @@ async function main(raw) {
               optional: true
             }))?.result ?? null;
           } catch (error) {
+            // Only a relay that actually gave up is degraded here. Anything else
+            // — a template section that cannot be assembled, a fence file that
+            // is missing or unreadable, a checksum that does not match, a
+            // dispatch with no request identity — fails the same way on every
+            // run, and swallowing it would skip this gate forever behind one
+            // log line, which is the silence this pass exists to end.
+            if (relayState.fatal.length === fatalBefore) throw error;
             relayState.fatal.length = fatalBefore;
             premiseChallenge = { ...premiseChallenge, reason: "not-returned" };
             log(`The premises were stated but not challenged: ${String(error?.message ?? error).split("\n")[0]} They are unchanged, and a person is asked about them as they stand.`);

@@ -627,6 +627,41 @@ test("the final report discloses provider assurance and split usage", () => {
   assert.match(report, /Usage accounting: legacy-incomplete/);
 });
 
+test("the report carries a final-challenge finding's failure path, not just its title", () => {
+  // The one finding a person is asked to judge that no reviewer raised, so it
+  // arrives with no dimension charter to explain it. The row is shaped exactly
+  // as the workflow pushes it onto the ledger.
+  const shipDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-report-challenge-"));
+  fs.writeFileSync(path.join(shipDir, "ship-meta.json"), JSON.stringify({ shipId: "s1" }));
+  fs.writeFileSync(path.join(shipDir, "pr-train-state.json"), JSON.stringify({
+    prs: [{
+      id: "PR-1",
+      state: "awaiting-approval",
+      ledger: [
+        {
+          id: "TT-9f2c1a04", dimension: "final-challenge", severity: "blocking",
+          title: "The retry path never runs", file: "src/a.js", line_start: 10, line_end: 14,
+          failure_path: "A 503 returns before the retry, so the caller sees the error the contract absorbs.",
+          body: "A 503 returns before the retry, so the caller sees the error the contract absorbs.",
+          recommendation: "Move the return inside the catch.",
+          confidence: 1, engine: "codex", round: 1, occurrences: 1, status: "needs-human"
+        },
+        {
+          id: "TT-1", dimension: "reliability", severity: "major", title: "Unbounded retry",
+          status: "wont-fix", fixExplanation: "Deliberate for now."
+        }
+      ]
+    }]
+  }));
+
+  const report = renderReport(shipDir);
+  assert.match(report, /- PR-1 · TT-9f2c1a04 · \[blocking\] The retry path never runs \(src\/a\.js:10-14\)/);
+  assert.match(report, /- Failure path: A 503 returns before the retry/);
+  assert.match(report, /- Repair: Move the return inside the catch\./);
+  // Every other human-decision finding keeps the one-line form it had.
+  assert.match(report, /- PR-1 · TT-1 · \[major\] Unbounded retry — Deliberate for now\./);
+});
+
 test("merge lock serializes ships, supports a lease heartbeat, and validates ownership", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-lock-"));
   const lock = path.join(repo, ".tagteam", "locks", "merge.lock");
