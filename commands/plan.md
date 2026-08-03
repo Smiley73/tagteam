@@ -1,7 +1,7 @@
 ---
 description: Forge and approve a provider-aware implementation plan and PR train
 argument-hint: '<goal> [--resume <slug>] [--provider both|claude|codex] [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
-allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:plan-interaction-reviewer, tagteam:prompt-builder, tagteam:codex-runner), Bash(node *), Bash(git *)
+allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:plan-interaction-reviewer, tagteam:premise-challenger, tagteam:scribe, tagteam:prompt-builder, tagteam:codex-runner), Bash(node *), Bash(git *)
 ---
 
 # Forge a plan
@@ -57,11 +57,15 @@ A new plan's first invocation carries no `premisesFile`, and the forge answers `
 
 This is the one thing review cannot do for you. Every reviewer reads the same document and inherits the same assumption, so a plan built on a false premise passes every round and is invalidated all at once when a person finally reads it. Ask before the drafting, not after.
 
-Ask the `assumed` rows first, in chunks of at most four, one `AskUserQuestion` per chunk with `multiSelect: true`: “Which of these is not true today?” The first option is `All of these hold (Recommended)`; each remaining option is one premise, labelled with the claim and described with its basis. Ask about `verified` rows only if fewer than four assumed ones exist and space remains. For each premise the user marks wrong, ask one free-text follow-up for what is true instead, and preserve the answer exactly.
+The response also carries `premiseChallenge`, the record of a second pass that went and read each cited basis. `ran: false` means it was switched off, lost, or discarded, and the premises are then exactly as stated; the `reason` says which. When it ran, `challenges` holds one row per premise in the same order, and any premise it found `contradicted` has already been downgraded to `assumed` in `premises`, so nothing extra has to be applied.
 
-Then atomically write `drafts/<passId>-premises.json` at mode 0600, holding the same `{premises: [...]}` shape with every claim replaced by what the user said is true and `kind` set to `verified` for anything they confirmed or corrected. Re-invoke the forge with the **same** `passId` and that path as `premisesFile`. Record the exchange in `drafts/<passId>-decisions.json` like any other answers, so no later pass re-asks. Persist the accounting snapshot from this response before asking, exactly as for any other status.
+A challenged row is asked on its own, never inside a bulk confirmation. Ask those first: one `AskUserQuestion` per contradicted premise, naming the claim and quoting the challenge's `evidence` as **what the challenger says it found, with the `file:line` to check** — never as established fact. It is model prose, and a person who "corrects" a true premise on a fabricated contradiction hands the drafter a false given it is then told never to re-derive. Offer `It holds as stated`, `The challenger is right`, and free text.
 
-A resume, a continuation, and any invocation that already carries `premisesFile` skip this gate entirely; it costs one model call per plan, not per pass.
+Then ask the remaining `assumed` rows, in chunks of at most four, one `AskUserQuestion` per chunk with `multiSelect: true`: “Which of these is not true today?” The first option is `All of these hold (Recommended)`; each remaining option is one premise, labelled with the claim and described with its basis. Rank any row the challenge marked `unsupported` ahead of the rest and put what its `basisChecked` reported into the description: that verdict changes nothing on its own and is worth a person's eye. Ask about `verified` rows only if fewer than four assumed ones exist and space remains. For each premise the user marks wrong, ask one free-text follow-up for what is true instead, and preserve the answer exactly.
+
+Then atomically write `drafts/<passId>-premises.json` at mode 0600, holding the same `{claim, basis, kind}` shape and nothing else — the challenge's evidence never travels into that file — with every claim replaced by what the user said is true and `kind` set to `verified` for anything they confirmed or corrected. A person's answer is the one thing that may raise a premise's standing, which is why a downgraded row must have been asked about individually to get there. Re-invoke the forge with the **same** `passId` and that path as `premisesFile`. Record the exchange in `drafts/<passId>-decisions.json` like any other answers, so no later pass re-asks. Persist the accounting snapshot from this response before asking, exactly as for any other status.
+
+A resume, a continuation, and any invocation that already carries `premisesFile` skip this gate entirely; it costs a stating call and a challenge per plan, not per pass.
 
 ## Resume
 

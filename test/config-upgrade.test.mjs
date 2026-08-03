@@ -62,6 +62,36 @@ test("a configuration is only re-asked the questions it actually predates", () =
   assert.deepEqual(staleness.missing, ["policyPaths"]);
 });
 
+test("a version-3 configuration is asked only for the two adversarial passes", () => {
+  // The keys that arrived with the premise challenge and the final challenge.
+  // A repository mid-train keeps every earlier answer and is asked these two.
+  const upgraded = example();
+  upgraded.version = 3;
+  delete upgraded.planning.premiseChallenge;
+  delete upgraded.review.finalChallenge;
+
+  assert.deepEqual(validateJson(schema, upgraded), []);
+  const staleness = configStaleness(upgraded);
+  assert.equal(staleness.stale, true);
+  assert.deepEqual(staleness.missing, ["planning.premiseChallenge", "review.finalChallenge"]);
+
+  const result = runValidator(upgraded);
+  assert.equal(result.status, 3);
+  assert.match(result.stdout, /planning\.premiseChallenge, review\.finalChallenge/);
+});
+
+test("a final challenge cannot name a review tier the configuration does not define", () => {
+  const config = example();
+  config.review.finalChallenge = { enabled: true, tier: "thorough" };
+
+  // Schema-valid: the tier list is per repository, so only the semantic pass
+  // can know that this one names nothing.
+  assert.deepEqual(validateJson(schema, config), []);
+  assert.deepEqual(semanticErrors("config.schema.json", config), [
+    "review.finalChallenge names unknown tier thorough"
+  ]);
+});
+
 test("the current example configuration is not stale and exits clean", () => {
   const current = example();
   assert.equal(current.version, CONFIG_VERSION);

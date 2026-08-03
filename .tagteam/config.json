@@ -1,10 +1,11 @@
 {
-  "version": 3,
+  "version": 4,
   "policyPaths": [],
   "planning": {
     "claude": { "model": "opus", "effort": "high" },
     "codex": { "model": "gpt-5.6-sol", "effort": "high" },
     "reviewRounds": 3,
+    "premiseChallenge": true,
     "planBudget": { "targetChars": 50000, "hardCeilingChars": 65000 },
     "questionsPerRound": 4,
     "canonicalStrings": []
@@ -125,7 +126,10 @@
     }
   },
   "implementation": { "engine": "claude", "routes": [], "maxParallel": 1 },
-  "review": { "firstReviewer": "codex" },
+  "review": {
+    "firstReviewer": "codex",
+    "finalChallenge": { "enabled": true, "tier": "standard" }
+  },
   "verify": {
     "runAfter": ["implement", "fix"],
     "commands": [

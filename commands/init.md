@@ -64,6 +64,7 @@ Show the current choices and ask whether to keep or edit them. Keeping every cho
 - the three interface questions below.
 - `policyPaths` — the question below.
 - `prTrain.prSize.repoHardCapLines` and `planning.canonicalStrings` — the two questions below, asked right after it.
+- `planning.premiseChallenge` and `review.finalChallenge` — the two adversarial-pass questions below.
 
 ### The repository's own rules
 
@@ -77,6 +78,13 @@ Ask these two immediately after `policyPaths`, while the user still has those do
 
 1. `prTrain.prSize.repoHardCapLines` — “Do your standards set a maximum number of changed lines per pull request? A number here is checked by arithmetic every round; leaving it blank means the limit is only ever reviewed for.” Accept a positive whole number, or blank. On blank, omit the key entirely rather than writing a zero or a null. Do not offer tagteam's own `prTrain.prSize.guidance` as a default for it: that is tagteam's preference and this is the repository's rule, and copying one into the other is how a preference becomes a cap nobody agreed to.
 2. `planning.canonicalStrings` — “Is there wording your documents require character for character — a marker a test parses, a checkbox phrase, a transition tag? The usual failure is an ASCII stand-in for a glyph.” Collect rows of `{wrong, right, note}`: the substitution that gets written, the text the contract requires, and one line naming the document it came from. Ask for the note; a finding that cannot say which document it enforces reads as tagteam's opinion. Where the user has no note, omit the `note` key rather than writing an empty string, which is rejected outright. An empty list is valid, and on an empty answer write the key as `[]` rather than leaving it out: an absent key is what planning reads as nobody having been asked, and it is what makes it say so once per run. Say that these are checked against the plan, the task manifest, and the pull-request train alike, because the manifest and the train are what an implementer follows and what a repository's own tests parse literally.
+
+### The two adversarial passes
+
+Both are single passes that run where no loop runs, and both default to on. Ask them as what they buy and what they cost, never as flags.
+
+1. `planning.premiseChallenge` — “Before you are asked to confirm what a plan takes as given, should a second model go read the repository and try to prove those premises wrong?” Say what it buys: the premises are stated by one model that labels its own claims verified or assumed, and a premise nobody checked is the one defect review cannot find, because every reviewer reads the same plan and inherits it. Say what it costs: one extra pass per plan, never per round. Say plainly that only a real contradiction — the repository showing the opposite — puts a premise back in front of you; a citation that merely fails to prove its claim is reported without changing anything. Default yes.
+2. `review.finalChallenge` — “When every reviewer has cleared a pull request, should one more pass argue that it must not merge?” Say what it buys: every reviewer is scoped to one dimension, so nothing today asks whether the change as a whole does what its contract says, and a clean candidate is where scrutiny otherwise stops. Say what it costs: one pass per clean pull request, and a finding waits for you rather than being repaired automatically. Also ask which review tier it runs at, offering `standard` as the recommendation — it runs on the path that is going well, so the most expensive tier is rarely the right trade — and require the answer to name a tier that exists in `reviewTiers`. Default enabled at `standard`.
 
 ### Interface questions
 
@@ -100,7 +108,7 @@ User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects 
 2. Read the unanswered keys from the validator's own output. Never infer the list from this document, so that a plugin newer than this text still upgrades correctly.
 3. Ask only those questions, using the wording above, seeded from `~/.tagteam/config.json` when it answers one.
 4. State before writing that `.tagteam/config.json` is a committed file, so the new answers become a tracked change the rest of the team inherits. Get explicit confirmation.
-5. Write the merged object with `version` set to 3, preserving every existing choice byte for byte, then validate with `validate-json.mjs --repo` and require exit 0.
+5. Write the merged object with `version` set to 4, preserving every existing choice byte for byte, then validate with `validate-json.mjs --repo` and require exit 0.
 6. Do not touch `.gitignore`, do not re-run the preflight probes, and do not re-run the runtime probe. `--reconfigure` owns those. One read-only exception, because it reports rather than repairs: when `codegraph.enabled` is true, run `ensure-gitignore.mjs "<repo>" --check --codegraph`, and if `.codegraph/` comes back unignored, say that the index directory is untracked and name `--reconfigure` as the one command that fixes it. An upgraded repository that predates that rule is exactly the case this catches, and silence is what made it a trap the first time.
 
 ## Write and verify
@@ -108,7 +116,7 @@ User defaults at `~/.tagteam/config.json` may seed the interview. Merge objects 
 On confirmation:
 
 1. Create `<repo>/.tagteam/` if needed.
-2. Write `<repo>/.tagteam/config.json` as strict JSON version 3, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
+2. Write `<repo>/.tagteam/config.json` as strict JSON version 4, with `transport.mode` exactly `exec`, `ui.gateOnUserVisible` exactly true, `prTrain.prSize.enforce` exactly false, and `prTrain.pauseOn` containing `ui`.
 3. Configure the repository `.gitignore`. Never hand-edit it; run:
 
    ```bash

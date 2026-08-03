@@ -1975,13 +1975,131 @@ test("a fresh plan states its premises and stops before drafting anything", asyn
 
   assert.equal(result.status, "needs-premises-confirmation");
   assert.deepEqual(result.premises, PREMISES.premises);
-  // Nothing was drafted, reviewed, or decomposed: the pass costs one call until
-  // a person has settled what it would take as given.
-  assert.deepEqual(labels, ["plan:premises"]);
+  // Nothing was drafted, reviewed, or decomposed. Under `both` the stated list
+  // has to reach Codex as a file before it can be challenged, and that persist
+  // is the only other step this gate buys.
+  assert.deepEqual(labels, ["plan:premises", "plan:premise-challenge:persist"]);
   // And the accounting a caller must persist before acting on any status is here
-  // like it is on every other exit.
+  // like it is on every other exit. The persist is plumbing, not reasoning: it
+  // copies bytes under a checksum and exercises no judgment.
   assert.equal(result.usage.claudeReasoningCalls, 1);
   assert.equal(result.usageAccounting, "complete");
+});
+
+// The premises are stated by a model that labels its own claims, and a basis
+// only has to name a file to be labelled verified. Every test below is about the
+// one step that opens the named file, and about it being unable to make a plan
+// worse than the plan it would have had.
+const CHALLENGE_CONFIG = { ...PLAN_CONFIG, planning: { ...PLAN_CONFIG.planning, premiseChallenge: true } };
+
+function challengeHarness(respondChallenge, config = CHALLENGE_CONFIG) {
+  const base = planResponder([]);
+  return harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, premisesFile: undefined, runPolicy: normalizeRunPolicy({ provider: "claude" }), config },
+    (label, prompt, options) => {
+      if (label === "plan:premises") return PREMISES;
+      if (label === "plan:premise-challenge") return respondChallenge(prompt);
+      return base(label, prompt, options);
+    }
+  );
+}
+
+const unchallenged = (premise) => ({ claim: premise.claim, verdict: "unchallenged", basisChecked: premise.basis });
+
+test("a contradicted premise is downgraded and an unsupported one is left standing", async () => {
+  const { result } = await challengeHarness(() => ({
+    challenges: [
+      {
+        claim: PREMISES.premises[0].claim,
+        verdict: "contradicted",
+        basisChecked: "scripts/codex-run.mjs",
+        evidence: "scripts/codex-run.mjs:12 is guarded by a flag that is off in production."
+      },
+      { claim: PREMISES.premises[1].claim, verdict: "unsupported", basisChecked: "schemas/candidate.schema.json" }
+    ]
+  }));
+
+  // Contradicted: the repository showed the opposite, so the person is asked.
+  assert.equal(result.premises[0].kind, "assumed");
+  // Unsupported: thin evidence is worth reporting and is not evidence that the
+  // claim is false. It says so in the record and changes nothing.
+  assert.equal(result.premises[1].kind, "assumed");
+  assert.equal(result.premiseChallenge.ran, true);
+  assert.equal(result.premiseChallenge.engine, "claude");
+  assert.equal(result.premiseChallenge.independent, false);
+  assert.deepEqual(result.premiseChallenge.challenges.map((row) => row.verdict), ["contradicted", "unsupported"]);
+  // The premise rows keep the shape the settled file is written back in.
+  assert.deepEqual(Object.keys(result.premises[0]).sort(), ["basis", "claim", "kind"]);
+});
+
+test("an unsupported verdict never moves a verified premise", async () => {
+  const { result } = await challengeHarness(() => ({
+    challenges: [
+      { claim: PREMISES.premises[0].claim, verdict: "unsupported", basisChecked: "scripts/codex-run.mjs exists but names no release path" },
+      unchallenged(PREMISES.premises[1])
+    ]
+  }));
+
+  assert.equal(result.premises[0].kind, "verified");
+  assert.equal(result.premiseChallenge.ran, true);
+});
+
+test("a challenge whose rows do not line up with the premises is discarded whole", async () => {
+  for (const rows of [
+    // One row for two premises: applying it by position would downgrade a
+    // premise nobody judged.
+    [{ claim: PREMISES.premises[0].claim, verdict: "contradicted", basisChecked: "x", evidence: "y" }],
+    // Two rows, restated: the claim no longer identifies which premise it is about.
+    [
+      { claim: "The relay ships to production", verdict: "contradicted", basisChecked: "x", evidence: "y" },
+      unchallenged(PREMISES.premises[1])
+    ]
+  ]) {
+    const { result, logs } = await challengeHarness(() => ({ challenges: rows }));
+    assert.deepEqual(result.premises, PREMISES.premises);
+    assert.equal(result.premiseChallenge.ran, false);
+    assert.equal(result.premiseChallenge.reason, "misaligned");
+    assert.ok(logs.some((line) => line.includes("discarded")), logs.join("\n"));
+  }
+});
+
+test("the premise challenge can be switched off and then costs nothing", async () => {
+  const { result, labels } = await challengeHarness(
+    () => assert.fail("the challenge ran while it was disabled"),
+    { ...PLAN_CONFIG, planning: { ...PLAN_CONFIG.planning, premiseChallenge: false } }
+  );
+
+  assert.equal(result.status, "needs-premises-confirmation");
+  assert.deepEqual(result.premises, PREMISES.premises);
+  assert.deepEqual(labels, ["plan:premises"]);
+  assert.equal(result.premiseChallenge.ran, false);
+  assert.equal(result.premiseChallenge.reason, "disabled");
+});
+
+test("a challenge that does not come back leaves the stated premises intact", async () => {
+  // The premises have already been paid for. A lost challenge is worth less
+  // than a pass that throws them away and states them again on resume.
+  const { result } = await challengeHarness(() => null);
+
+  assert.equal(result.status, "needs-premises-confirmation");
+  assert.deepEqual(result.premises, PREMISES.premises);
+  assert.equal(result.premiseChallenge.ran, false);
+});
+
+test("a resume and a continuation never challenge premises a person already settled", async () => {
+  const base = planResponder([]);
+  for (const entry of [
+    { premisesFile: "/plans/slug/drafts/pass-1-premises.json" },
+    { premisesFile: undefined, seedPlan: { path: "/plans/slug/drafts/pass-1-round-1-input.md" }, resumeRound: 1 }
+  ]) {
+    const { labels } = await harness(
+      "workflows/plan-forge.js",
+      { ...PLAN_ARGS, config: CHALLENGE_CONFIG, ...entry },
+      base
+    );
+    assert.equal(labels.some((label) => label.includes("premise-challenge")), false, JSON.stringify(entry));
+  }
 });
 
 test("confirmed premises reach the drafter and the gate does not fire again", async () => {
