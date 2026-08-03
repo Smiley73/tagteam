@@ -25,7 +25,7 @@ function renderFinalChallenge(event) {
     `### Final challenge — round ${event.round}`,
     `- Engine: ${oneLine(event.engine)}`,
     `- Candidate: ${oneLine(event.candidateOid)}`,
-    `- Verdict: ${oneLine(challenge.ran === false ? `did not run (${challenge.reason ?? "unknown"})` : challenge.verdict)}`,
+    `- Verdict: ${oneLine(challenge.verdict)}`,
     `- Summary: ${oneLine(challenge.summary)}`
   ];
   for (const finding of challenge.findings ?? []) {

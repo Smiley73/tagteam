@@ -2228,6 +2228,62 @@ test("a lost Codex challenge keeps the premises the pass already paid for", asyn
   assert.equal(result.usageAccounting, "pending-checkpoint-reconciliation");
 });
 
+test("a lost request build for the challenge is as survivable as a lost run", async () => {
+  // Both halves of a Codex dispatch can lose a reply, and neither says anything
+  // about this repository. Only the second half raises a fatal checkpoint, so
+  // the checkpoint cannot be what decides whether the premises survive.
+  const base = planResponder([]);
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, premisesFile: undefined, runPolicy: normalizeRunPolicy({ provider: "codex" }) },
+    (label, prompt, options) => {
+      if (label === "plan:codex-premises") return PREMISES;
+      if (label.startsWith("plan:codex-premise-challenge")) return null;
+      if (label.endsWith(":request")) {
+        return {
+          ok: true,
+          promptPath: "/plans/slug/reviews/codex.prompt.md",
+          promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+          bytes: 4096
+        };
+      }
+      return base(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "needs-premises-confirmation", result.message);
+  assert.deepEqual(result.premises, PREMISES.premises);
+  assert.equal(result.premiseChallenge.ran, false);
+});
+
+test("a challenge request that cannot be assembled stops the pass rather than skipping the gate", async () => {
+  // A refused command fails identically on every run. Degrading it would skip
+  // this gate forever behind one log line, which is the silence it exists to end.
+  const base = planResponder([]);
+  const { result } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, premisesFile: undefined, runPolicy: normalizeRunPolicy({ provider: "codex" }) },
+    (label, prompt, options) => {
+      if (label === "plan:codex-premises") return PREMISES;
+      if (label === "plan:codex-premise-challenge:request") {
+        return { ok: false, error: "the template names no STATED_PREMISES section" };
+      }
+      if (label.endsWith(":request")) {
+        return {
+          ok: true,
+          promptPath: "/plans/slug/reviews/codex.prompt.md",
+          promptHash: `sha256:${createHash("sha256").update(`${label}\0${prompt}`).digest("hex")}`,
+          bytes: 4096
+        };
+      }
+      return base(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.status, "plan-interrupted");
+  assert.match(result.message, /STATED_PREMISES/);
+});
+
 test("a resume and a continuation never challenge premises a person already settled", async () => {
   const base = planResponder([]);
   for (const entry of [
@@ -2834,6 +2890,71 @@ test("a call budget with no room for the last gate says so rather than skipping 
   assert.equal(result.finalChallenge.ran, false);
   assert.equal(result.finalChallenge.reason, "agent-call-budget");
   assert.match(result.gateFailures.join("\n"), /did not run/);
+});
+
+test("a lost challenge relay says the challenge was lost, not that the candidate was never clean", async () => {
+  // The record is read by a person. A run that got all the way to a clean
+  // candidate and then lost its last gate must not report the opposite.
+  const { result } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config: { ...SHIP_CONFIG, review: { ...SHIP_CONFIG.review, firstReviewer: "claude" } } },
+    challengeShipResponder(null)
+  );
+
+  assert.equal(result.status, "relay-interrupted");
+  assert.equal(result.finalChallenge.ran, false);
+  assert.equal(result.finalChallenge.reason, "no-result");
+});
+
+test("an interrupted ship still answers for the last gate", async () => {
+  // This result never goes through finish, and the ship command reads the
+  // record on every result it is handed.
+  const { result } = await harness("workflows/ship-pr.js", { ...SHIP_ARGS }, (label, prompt, options) => {
+    if (label.startsWith("candidate:snapshot")) throw new Error("snapshot exploded");
+    return cleanShipResponder(label, prompt, options);
+  });
+
+  assert.equal(result.status, "ship-interrupted");
+  assert.equal(result.finalChallenge.reason, "not-reached");
+});
+
+test("a challenge finding survives the call limit that stops the run recording it", async () => {
+  // A retried relay spends budget without spending a counted call, so the two
+  // calls the challenge reserved no longer both fit and the scribe is the one
+  // that runs out — after the finding is on the ledger and its gate failure
+  // raised. The limit is why the run stops, not a reason the finding stopped
+  // being true.
+  // One review loop, so the round's own ten-call reserve does not stop the run
+  // before the gate this is about, and a Codex challenger, whose relay is what
+  // can retry.
+  const codexFirst = { ...SHIP_CONFIG, maxReviewLoops: 1, review: { ...SHIP_CONFIG.review, firstReviewer: "claude" } };
+  const blocking = challengeShipResponder({
+    verdict: "block", summary: "The contract is not met.", findings: [CHALLENGE_FINDING]
+  });
+  const baseline = (await harness("workflows/ship-pr.js", { ...SHIP_ARGS, config: codexFirst }, blocking)).result.agentCalls;
+
+  let dropped = false;
+  const { result } = await harness(
+    "workflows/ship-pr.js",
+    { ...SHIP_ARGS, config: { ...codexFirst, limits: { ...codexFirst.limits, agentCallsPerPr: baseline } } },
+    (label, prompt, options) => {
+      if (label === "final-challenge:codex" && !dropped) {
+        dropped = true;
+        return null;
+      }
+      return blocking(label, prompt, options);
+    }
+  );
+
+  assert.equal(dropped, true, `${result.status}: ${JSON.stringify(result.finalChallenge)}`);
+  // Both facts survive: the limit stopped the run, and the finding is still
+  // true. capacityGate concatenates rather than replacing.
+  assert.equal(result.status, "agent-budget-gate");
+  const failures = result.gateFailures.join("\n");
+  assert.match(failures, /call limit/);
+  assert.match(failures, /argues this must not merge/);
+  assert.equal(result.finalChallenge.ran, true);
+  assert.equal(result.ledger.some((finding) => finding.dimension === "final-challenge" && finding.status === "needs-human"), true);
 });
 
 test("an unknown review tier reports a gate that did not run rather than crashing the ship", async () => {

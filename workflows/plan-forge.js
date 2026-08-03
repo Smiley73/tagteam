@@ -1070,7 +1070,7 @@ async function buildPrompt({ command, label, phase: phaseName, model, effort, wh
     }
     log(`The request for the Codex ${what} was built, but the result was not handed back (attempt ${attempt} of ${RELAY_ATTEMPTS}). Building it again is free.`);
   }
-  throw new Error([
+  throw relayExhausted([
     `The request for the Codex ${what} was built, but that could not be confirmed after ${RELAY_ATTEMPTS} attempts.`,
     "Nothing was sent to the second opinion and nothing was paid for.",
     "Run the same plan command again with --resume; every finished check is reused rather than repaid.",
@@ -1480,7 +1480,18 @@ async function relayCodex({
   // parallel() turns a thrown error into null, so callers inside parallel must
   // raise relayLost themselves rather than rely on this throw.
   relayState.fatal.push(`${artifact}.relay-checkpoint.json`);
-  throw new Error(relayLost({ what, artifact, promptFile }));
+  throw relayExhausted(relayLost({ what, artifact, promptFile }));
+}
+
+// A reply that never came back, on either half of a Codex dispatch: the request
+// build or the run itself. Both are the same kind of failure — nothing about the
+// repository or this pass makes them repeat — and a step that may proceed
+// without its result has to be able to tell them from the ones that do repeat.
+// Presence of a fatal checkpoint cannot say it: only the second half raises one.
+function relayExhausted(message) {
+  const error = new Error(message);
+  error.relayExhausted = true;
+  return error;
 }
 
 function relayLost({ what, artifact, promptFile }) {
@@ -2240,13 +2251,16 @@ async function main(raw) {
               optional: true
             }))?.result ?? null;
           } catch (error) {
-            // Only a relay that actually gave up is degraded here. Anything else
-            // — a template section that cannot be assembled, a fence file that
-            // is missing or unreadable, a checksum that does not match, a
-            // dispatch with no request identity — fails the same way on every
-            // run, and swallowing it would skip this gate forever behind one
-            // log line, which is the silence this pass exists to end.
-            if (relayState.fatal.length === fatalBefore) throw error;
+            // Only a relay that gave up is degraded here, on either half of the
+            // dispatch. Anything else — a template section that cannot be
+            // assembled, a fence file that is missing or unreadable, a checksum
+            // that does not match, a dispatch with no request identity — fails
+            // the same way on every run, and swallowing it would skip this gate
+            // forever behind one log line, which is the silence this pass exists
+            // to end. The fatal checkpoint cannot make that distinction: a lost
+            // request build raises none, and it is exactly as transient as a
+            // lost run.
+            if (!error?.relayExhausted) throw error;
             relayState.fatal.length = fatalBefore;
             premiseChallenge = { ...premiseChallenge, reason: "not-returned" };
             log(`The premises were stated but not challenged: ${String(error?.message ?? error).split("\n")[0]} They are unchanged, and a person is asked about them as they stand.`);

@@ -1055,13 +1055,19 @@ async function main(raw) {
       rounds,
       tallies: tally(ledger),
       ledger,
-      gateFailures: ["Every Codex relay handoff failed. Reconcile disk evidence, then resume to reuse saved work when present."],
       candidateOid,
       relayCheckpoints: [...new Set([
         ...relayState.fatal.map((item) => item.checkpoint),
         ...relayState.confirmedDispatches.map((item) => item.checkpoint)
       ])],
-      ...extra
+      ...extra,
+      // Concatenated after `...extra` for the same reason capacityGate is: a
+      // gate failure raised before the interruption is still a fact about this
+      // candidate, and the two helpers must not differ on whether it survives.
+      gateFailures: [
+        "Every Codex relay handoff failed. Reconcile disk evidence, then resume to reuse saved work when present.",
+        ...(extra.gateFailures ?? [])
+      ]
     });
   };
   const taskResults = [];
