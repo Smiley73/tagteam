@@ -452,6 +452,32 @@ function gatingIssues(issues) {
   return (issues ?? []).filter((issue) => ["blocking", "major"].includes(issue?.severity));
 }
 
+// How close to its ceiling a plan has to be before a repair has nowhere to go.
+// Not the ceiling itself: the lint already blocks a plan over it, so by the time
+// the handoff runs every plan is under it, and the question is how far under.
+// Two percent is roughly one section of a plan at the default budget — enough
+// room to rewrite a done-criterion, not enough to add the phase a handoff
+// finding usually asks for.
+const CEILING_PRESSURE_RATIO = 0.98;
+
+// The finding a plan failing its handoff at the ceiling should get instead of a
+// fourth repair. `major` rather than `blocking`: the plan is inside its budget
+// and nothing here says it is wrong, only that the remedy being applied to it
+// has run out of room. It leads the issues fed to the repair continuation,
+// because it is the one finding among them that argues against repairing.
+function ceilingPressureIssues(chars, budget) {
+  if (!Number.isSafeInteger(chars) || chars < budget.hardCeilingChars * CEILING_PRESSURE_RATIO) return [];
+  return [{
+    severity: "major",
+    title: `The plan is ${chars} characters against a ${budget.hardCeilingChars}-character ceiling and its handoff did not clear`,
+    detail: [
+      `There are ${budget.hardCeilingChars - chars} characters of headroom, so every repair asked for here has to be paid for by compressing something else in the plan, and compression is where the next round's contradictions come from.`,
+      "Reducing scope is the move this points to, not another repair: split the feature into independent plans and forge them separately, or narrow this plan's goal and drop what falls outside it. A plan that cannot absorb a fix is evidence the feature is too big for one plan.",
+      `Repair in place only if the repair also brings the plan materially under ${budget.targetChars} characters.`
+    ].join(" ")
+  }];
+}
+
 // Some edits are only valid together: a payload-shape change and the migration
 // that reads it, a version bump and the fixtures it invalidates. Every pull
 // request lands on the base branch as exactly one squashed commit, so what
@@ -1025,7 +1051,14 @@ const planState = {
   // What the interrupted exit runs to make this pass's reviewer questions
   // durable. Held here because that exit is the top-level catch, which is
   // outside every scope the round loop's state lives in.
-  settleInterruptedQuestions: null
+  settleInterruptedQuestions: null,
+  // Every non-gating finding any lint in this pass returned. A round carries its
+  // own in `reviews[].lint`, but a pass that runs no round — a continuation, a
+  // resume from an already-cleared plan — has no `reviews` to carry anything, so
+  // a finding that reports rather than blocks reached nobody at all on exactly
+  // the entries that produce the most of them. Accumulated here and returned so
+  // the command can put them in front of a person once, at the end.
+  advisoryLintIssues: []
 };
 
 async function planAgent(prompt, options) {
@@ -1192,7 +1225,14 @@ async function runPlanLint({ command, label, phase: phaseName, model, effort, wh
       // What the pass reasons from is the relayed list; what a read-only engine
       // is handed is the file, bound to the checksum the command itself computed
       // over the bytes it wrote. Neither is a copy of the other.
-      return { issues, waivers, gating: gatingIssues(issues), reviewToken: saved?.token ?? null };
+      const gating = gatingIssues(issues);
+      // Kept here rather than left to each caller, because the callers that
+      // produce the most non-gating findings are the ones with nowhere to put
+      // them: a pass that runs no round has no `reviews` array to carry a
+      // finding that reports rather than blocks, so before this it computed
+      // them and dropped every one.
+      planState.advisoryLintIssues.push(...issues.filter((entry) => !gating.includes(entry)));
+      return { issues, waivers, gating, reviewToken: saved?.token ?? null };
     }
     if (result && result.ok === false) {
       throw new Error([
@@ -1590,6 +1630,10 @@ async function main(raw) {
   // second invocation in the same process cannot run the previous one's
   // closure, which would name that pass's files and its accumulator.
   planState.settleInterruptedQuestions = null;
+  // Same reason, and on the same terms: these are findings about this pass's
+  // plan, and a second invocation reporting the first one's would be reporting
+  // them against a document that has since been revised.
+  planState.advisoryLintIssues = [];
   const priorUsage = input.usage ?? {};
   const hasUsageSnapshot = ["claudeReasoningCalls", "haikuPlumbingCalls", "plumbingCallsByModel", "codexCalls", "relayRetries"]
     .every((key) => Object.hasOwn(priorUsage, key));
@@ -1765,6 +1809,22 @@ async function main(raw) {
     log("Note: this repository names policy documents but was never asked for config.planning.canonicalStrings, so wording those documents require character for character is only ever reviewed for, never checked. Adding {wrong, right, note} rows makes an ASCII stand-in for a glyph a rewrite before a reviewer is paid. /tagteam:init --reconfigure asks for them.");
   }
   const splitBrief = splitBriefFor(repoHardCapLines);
+  // Never on a resume: `resumeRound` restarts saved review work and applies no
+  // decisions at all — it warns about that a few lines above — so a lint told
+  // about them would report a plan against answers this pass has already said
+  // it is ignoring.
+  //
+  // The path alone, with no `--expect DECISIONS=` beside it, unlike every other
+  // file this command is given. Those bind because a mismatch means the check
+  // judged the wrong bytes; this one does not, because the file legitimately
+  // holds more than the array this pass was invoked with — commands/plan.md
+  // appends each answered chunk and the premise exchange to it as they land. A
+  // binding here would turn a superset into a thrown error on the first paid
+  // lint of the pass, which is a much worse failure than an advisory finding
+  // computed from one extra row.
+  const decisionsLintArg = input.decisionsFile && decisions.length && !resumeRound
+    ? `--decisions "${input.decisionsFile}"`
+    : "";
   // Every lint invocation is the same command with different inputs, so the bar
   // cannot differ between the draft check and the handoff check. The bar travels
   // on the command line rather than being re-read from the settings file: this
@@ -1785,6 +1845,11 @@ async function main(raw) {
     // array validated above, so a config edited mid-run cannot silently
     // change what gets linted.
     canonicalStrings.length ? `--canonical-config "${configPath}" --expect-canonical "${canonicalStringsExpect}"` : "",
+    // The decisions this pass was given, so the lint can put one naming a file
+    // beside the constraint the plan already carries about that same file. See
+    // where this is built for why it travels unbound, alone among the files
+    // named here.
+    decisionsLintArg,
     ...Object.entries(expects).filter(([, token]) => token).map(([name, token]) => `--expect "${name}=${token}"`)
   ], "plan-lint");
   const largePlanWarningChars = config.planning.largePlanWarningChars ?? 100_000;
@@ -2714,6 +2779,36 @@ async function main(raw) {
   let diverged = null;
   let lintOnlyRound = false;
   let roundsExhausted = false;
+  // Whether anything in this pass replaced the seeded count with one of its own.
+  // Not whether a round ran: a round that comes back clean leaves `gatingCount`
+  // exactly as the caller seeded it, and suppressing the no-round checks below on
+  // "a round happened" would skip a comparison that is still perfectly like with
+  // like. This flips only where `gatingCount` is actually reassigned, which is
+  // the one event that makes it a plan-review count rather than the caller's.
+  let gatingRemeasured = false;
+  // The round loop's stop rule, for the exits the round loop never reaches. A
+  // pass that runs no cross-review round — a continuation integrating decisions,
+  // a resume seeded from a plan an earlier round already cleared — leaves the one
+  // place `diverged` used to be assigned unreachable, so `priorGatingIssueCount`
+  // was threaded faithfully into the exact path that could not consume it. The
+  // only thing bounding that path was the command's prose allowance of two
+  // repairs, which a caller holding a fresh human decision may legitimately
+  // extend, and that is how a run reaches eleven passes with its findings going
+  // 8, 1, 8, 13 while every response reports no divergence.
+  //
+  // Same rule as the loop's, and the same two guards: nothing found is not a
+  // failure to reduce, and a count this pass measured for itself is a different
+  // population from the one the caller seeded. Keyed by pass because there is no
+  // round here to key it by; `/tagteam:plan` reads either shape and does the same
+  // thing with it, which is to name both counts and ask.
+  const measureAgainstPriorPass = (issues, what) => {
+    if (gatingRemeasured || gatingCount === null || issues.length === 0 || issues.length < gatingCount) return null;
+    log([
+      `This pass left ${issues.length} blocking or major ${what}${issues.length === 1 ? "" : "s"} where the previous check left ${gatingCount}, so repairing the plan is not reducing them.`,
+      "Another repair continuation is what this reports rather than what it recommends: the count is the evidence, and it says the last one did not help."
+    ].join(" "));
+    return { pass: passId, previous: gatingCount, current: issues.length };
+  };
 
   for (let round = resumeRound || 1; round <= finalRound; round += 1) {
     phase(`Cross-review ${round}`);
@@ -3005,6 +3100,7 @@ async function main(raw) {
         break;
       }
       gatingCount = unresolvedIssues.length;
+      gatingRemeasured = true;
     }
 
     // A clean round ends the pass on exactly the bytes it approved. It used to
@@ -3369,6 +3465,12 @@ async function main(raw) {
     // Set when a round did not improve on the one before it. The pass stopped
     // itself; another round of the same loop is what it declined to buy.
     divergence: diverged,
+    // Every finding a deterministic check made that was not worth stopping for.
+    // A round carries its own in `reviews[].lint`, but a pass that runs no round
+    // has no `reviews` at all, and those are exactly the passes that produce
+    // findings like a decision and an inherited constraint naming one file. They
+    // travel here so the command can put them in front of a person once.
+    advisoryIssues: dedupeIssues(planState.advisoryLintIssues),
     agentCalls: planState.dispatchedCalls,
     relayRetries: relayState.extraCalls,
     usage: {
@@ -3709,6 +3811,12 @@ async function main(raw) {
     });
     if (entryLint.gating.length) {
       log(`This pass ran no cross-review round, and the plan it would decompose has ${entryLint.gating.length} defect${entryLint.gating.length === 1 ? "" : "s"} that need no judgment, so it stopped before the manifest: ${entryLint.gating.map((issue) => issue.title).join("; ")}.`);
+      // The same measurement the handoff exit makes. This exit is the earlier of
+      // the two a no-round pass can take, and a repair continuation whose plan
+      // keeps tripping the same deterministic findings never reaches the later
+      // one — so without this, the count could climb across a dozen passes on
+      // the cheapest evidence there is that repairing is not working.
+      diverged = measureAgainstPriorPass(entryLint.gating, "defect");
       const settled = await settleQuestions(reviewQuestions, "Plan check");
       const settledUi = await settleUiDecisions("Plan check");
       return planOutcome({
@@ -4002,8 +4110,27 @@ async function main(raw) {
   // The deterministic findings come first because they are the certain ones:
   // they were decided from the manifest and the train, not argued from them, and
   // they hold whatever verdict the cross-check returned.
-  const handoffIssues = dedupeIssues([...handoffLint.gating, ...gatingIssues(decompositionReview.issues)]);
-  const handoffReady = decompositionReview.verdict === "approve" && handoffIssues.length === 0;
+  const reviewedHandoffIssues = dedupeIssues([...handoffLint.gating, ...gatingIssues(decompositionReview.issues)]);
+  const handoffReady = decompositionReview.verdict === "approve" && reviewedHandoffIssues.length === 0;
+  // A plan pinned to its ceiling has no room to absorb a repair. Every fix it is
+  // asked for has to be paid for by compressing something else, and compression
+  // is where the next round's contradictions come from — on the run that
+  // motivated this, three consecutive passes sat within forty characters of a
+  // 65,000-character ceiling while the handoff findings went 8, 1, 8, 13. The
+  // forge already holds that a plan which does not fit is evidence the feature is
+  // too big for one plan; it applied that at draft time and nowhere else, so a
+  // plan that keeps failing handoff at its ceiling was only ever offered the one
+  // remedy that had already stopped working.
+  const handoffIssues = handoffReady
+    ? reviewedHandoffIssues
+    : dedupeIssues([...ceilingPressureIssues(draft.plan_chars, planBudget), ...reviewedHandoffIssues]);
+  // Measured on the findings the cross-check and the lint actually returned, not
+  // on `handoffIssues`. The ceiling finding above is this workflow's own remark
+  // about the plan rather than a defect anyone found in it, and folding it into
+  // the counted population would move the trend by one in whichever direction
+  // the plan happened to cross the threshold — clearing a pass that reduced
+  // nothing, or reporting divergence on one that improved by a single finding.
+  if (!handoffReady) diverged = measureAgainstPriorPass(reviewedHandoffIssues, "handoff issue");
   // Three states, not two. This used to answer `needs-questions-or-approval`
   // whenever the handoff was ready, and a status naming both as alternatives is
   // what licensed approving over the questions: the caller reading it was told,
@@ -4040,7 +4167,11 @@ async function main(raw) {
     questionsPath: settled.finalQuestionsPath,
     decompositionReview,
     handoffReady,
-    handoffIssues
+    handoffIssues,
+    // The same population the divergence check above measured, and for the same
+    // reason: this number is what the next pass is bought against, so it counts
+    // what a reviewer found and not the remark this workflow added beside it.
+    gatingIssueCount: reviewedHandoffIssues.length
   });
 }
 
@@ -4080,6 +4211,10 @@ try {
     // resume re-reviews the plan — but the difference is worth reporting
     // rather than leaving a reader to assume the record is complete.
     questionsSettled,
+    // Findings a check completed and paid for before whatever stopped this pass.
+    // The resume re-lints and would find them again, but a reader deciding what
+    // to do about an interruption is the same reader they were computed for.
+    advisoryIssues: dedupeIssues(planState.advisoryLintIssues),
     agentCalls: planState.dispatchedCalls,
     relayRetries: relayState.extraCalls,
     usage: {
