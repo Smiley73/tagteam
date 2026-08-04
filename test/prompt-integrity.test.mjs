@@ -21,8 +21,14 @@ const TEMPLATE_SECTIONS = [
   "Tests", "Acceptance criteria", "PR sequence", "Open questions"
 ];
 
+// The 500 steps belong under File-by-file, the section a real plan's volume sits
+// in. Pushed after every heading instead, they land under the last one — "Open
+// questions" — and the record-share check reads the fixture as an all-record
+// plan, which is a property of the fixture and not of what these tests assert.
 function bigPlan(marker) {
-  const sections = TEMPLATE_SECTIONS.map((heading) => `## ${heading}\n\n(stated below)\n`);
+  const sections = TEMPLATE_SECTIONS
+    .filter((heading) => heading !== "Open questions")
+    .map((heading) => `## ${heading}\n\n(stated below)\n`);
   for (let index = 1; index <= 500; index += 1) {
     sections.push([
       `### Step ${index} — ${marker}`,
@@ -33,6 +39,7 @@ function bigPlan(marker) {
       ""
     ].join("\n"));
   }
+  sections.push("## Open questions\n\n(none)\n");
   return [`# Implementation plan (${marker})`, "", ...sections].join("\n");
 }
 

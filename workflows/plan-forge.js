@@ -535,6 +535,88 @@ function splitBriefFor(capLines) {
 // from one that was abandoned — the ratio did. The plan that shipped ran 24%
 // record; the three that did not ran 45-47%. A record approaching half the
 // document is a planning conversation being transcribed rather than resolved.
+// The size the plan is written to, and the size past which it is rejected before
+// a reviewer sees it. Defaults match scripts/plan-lint.mjs, which is what
+// actually enforces them; these copies exist only to tell the drafter the number
+// it is being held to.
+function resolvePlanBudget(config) {
+  const planBudget = {
+    targetChars: config.planning.planBudget?.targetChars ?? 25_000,
+    hardCeilingChars: config.planning.planBudget?.hardCeilingChars ?? 35_000
+  };
+  for (const [key, value] of Object.entries(planBudget)) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(`plan-forge config key "config.planning.planBudget.${key}" must be a positive integer`);
+    }
+  }
+  // Equal is rejected as firmly as inverted, because it silently disables the
+  // one early warning in the budget system rather than tightening it. The lint
+  // returns on the ceiling finding before it reaches the target finding, so a
+  // ceiling equal to the target makes "compress toward the target before the
+  // next round" unreachable: the only feedback left is a blocking rejection of a
+  // plan that is already too big. A repository configured this way is where this
+  // was found — two of its plans climbed to the wall and sat on it, and nothing
+  // warned on the way up. The ceiling-pressure finding degenerates the same way,
+  // telling a plan to get materially under a number the lint has already
+  // guaranteed it is under.
+  if (planBudget.hardCeilingChars <= planBudget.targetChars) {
+    throw new Error('plan-forge config key "config.planning.planBudget.hardCeilingChars" must be above targetChars, so that a plan approaching its limit is warned before it is rejected');
+  }
+  return planBudget;
+}
+
+// Under this many characters of net change, a pass did nothing to the plan that
+// a reader would find by diffing it. Not zero: a revision that genuinely
+// resolves a critique moves paragraphs, and one that rewords a sentence to
+// nowhere still moves tens of characters. The case this exists for moved 2, 3
+// and 5 characters across three consecutive passes of a real plan — the plan
+// that was eventually approved was the output of the pass before those three,
+// and roughly forty agent calls bought the difference.
+const PASS_MOVEMENT_FLOOR = 100;
+
+// What a pass did to the plan it was handed, for the passes that were handed
+// one. A fresh draft reports null rather than a movement from zero, because
+// "grew by the whole plan" is not a fact about a pass, it is the definition of
+// drafting. `settled` says the pass ended where it started; it is reported
+// rather than enforced, because a pass can legitimately settle — a resume that
+// re-runs a clean round, a continuation whose decisions confirmed what the plan
+// already said — and only a person can tell that from a loop that is not
+// converging.
+// Length is a proxy and is reported as one. An identical hash is the only
+// certainty available here — the plan is byte-for-byte what the pass was handed
+// — so it is its own field. A small delta with a different hash means the plan
+// moved a little or reworded in place; both are worth the same remark, and
+// neither is worth a claim this cannot support.
+function planMovementFor(seedReceipt, draft) {
+  if (!seedReceipt || !Number.isSafeInteger(seedReceipt.plan_chars)) return null;
+  const before = seedReceipt.plan_chars;
+  const after = draft?.plan_chars;
+  if (!Number.isSafeInteger(after)) return null;
+  const unchanged = Boolean(draft?.plan_hash) && seedReceipt.plan_hash === draft.plan_hash;
+  return {
+    beforeChars: before,
+    afterChars: after,
+    delta: after - before,
+    unchanged,
+    settled: unchanged || Math.abs(after - before) < PASS_MOVEMENT_FLOOR
+  };
+}
+
+// Said once, where a person running the pass will see it. A settled pass is not
+// an error and nothing here stops on it: what it means depends on why the pass
+// ran, which only the person who started it knows. What they could not know
+// before is that it happened at all — the run this was built from spent three
+// passes and roughly forty agent calls moving a plan by single digits, and the
+// plan that was eventually approved came out of the pass before them.
+function reportPlanMovement(movement) {
+  if (movement?.settled) {
+    log(movement.unchanged
+      ? `This pass returned the plan byte-for-byte as it received it (${movement.afterChars} characters). Nothing it did changed the document. If the previous pass already said what you wanted, the plan is done; if not, the loop is not converging and another pass will cost the same as this one.`
+      : `This pass moved the plan by ${movement.delta > 0 ? "+" : ""}${movement.delta} characters (${movement.beforeChars} to ${movement.afterChars}). That is small enough that the pass may have settled. If the previous pass already said what you wanted, the plan is done; if not, the loop is not converging and another pass will cost the same as this one.`);
+  }
+  return movement;
+}
+
 function budgetFacts(budget) {
   return [
     `The plan's target is ${budget.targetChars} characters. ${budget.hardCeilingChars} is a hard ceiling and a plan over it is rejected before review.`,
@@ -1650,6 +1732,10 @@ async function main(raw) {
     && typeof input.continuationReceiptRequired !== "boolean") {
     throw new Error('plan-forge input key "continuationReceiptRequired" must be a boolean');
   }
+  // Resolved here rather than where it is first used, which is past six early
+  // returns: a settings error is not something a pass should discover after a
+  // premises gate has already sent someone a question.
+  resolvePlanBudget(config);
   relayState.extraCalls = 0;
   relayState.fatal = [];
   relayState.receiptFiles = [];
@@ -1802,22 +1888,7 @@ async function main(raw) {
   if (!useClaude && uiEnabled && (resumeRound || continuation) && !input.uiDecisionsFile) {
     throw new Error("resumed Codex planning requires a normalized uiDecisionsFile");
   }
-  // The size the plan is written to, and the size past which it is rejected
-  // before a reviewer sees it. Defaults match scripts/plan-lint.mjs, which is
-  // what actually enforces them; these copies exist only to tell the drafter
-  // the number it is being held to.
-  const planBudget = {
-    targetChars: config.planning.planBudget?.targetChars ?? 25_000,
-    hardCeilingChars: config.planning.planBudget?.hardCeilingChars ?? 35_000
-  };
-  for (const [key, value] of Object.entries(planBudget)) {
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new Error(`plan-forge config key "config.planning.planBudget.${key}" must be a positive integer`);
-    }
-  }
-  if (planBudget.hardCeilingChars < planBudget.targetChars) {
-    throw new Error('plan-forge config key "config.planning.planBudget.hardCeilingChars" must not be below targetChars');
-  }
+  const planBudget = resolvePlanBudget(config);
   const sizeBrief = budgetBrief(planBudget);
   // The same limits in the reviewing voice. Only the two gating plan reviewers
   // get it: the revision re-read is scoped to critiques already raised and is
@@ -3454,6 +3525,9 @@ async function main(raw) {
       characterCount: draft.plan_chars,
       contentHash: draft.plan_hash
     },
+    // What this pass did to the plan it was handed. Null for a fresh draft,
+    // which started from nothing and has no movement to report.
+    planMovement: reportPlanMovement(planMovementFor(seedReceipt, draft)),
     manifest,
     prTrain,
     // Every pull request the cap check let past, with the rule cited and the

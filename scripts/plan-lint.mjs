@@ -235,12 +235,39 @@ function normalizeHeading(heading) {
     .toLocaleLowerCase();
 }
 
+// Every heading the document actually opens, in order, with the line it sits on
+// and the template section it names if any. One walk, fence-masked, so every
+// check asking "which sections does this plan have" gets the same answer.
+//
+// Fence-masked is the correction. This was a bare line scan, so a plan showing
+// `## Decisions` inside a code block — the ordinary way to specify the template
+// another document must carry — satisfied the template check without having the
+// section at all. transcriptSectionIssues already masked fences for exactly that
+// reason and carried its own walk to do it, and the record-share check below
+// needed a third. Three walks answering one question is three chances to answer
+// it differently, and the bare one was already answering it wrongly.
+function headingSpans(text) {
+  const lines = String(text ?? "").split("\n");
+  const code = codeLines(lines);
+  const spans = [];
+  lines.forEach((line, index) => {
+    if (code[index]) return;
+    const raw = /^\s{0,3}(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (!raw) return;
+    const normalized = normalizeHeading(raw[2]);
+    spans.push({
+      index,
+      level: raw[1].length,
+      normalized,
+      section: REQUIRED_SECTIONS.find((candidate) =>
+        candidate.patterns.some((pattern) => pattern.test(normalized))) ?? null
+    });
+  });
+  return spans;
+}
+
 function headingsOf(text) {
-  return String(text ?? "")
-    .split("\n")
-    .map((line) => /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)?.[1])
-    .filter(Boolean)
-    .map(normalizeHeading);
+  return headingSpans(text).map((span) => span.normalized);
 }
 
 // As much structure as this one check needs and no more: find a heading that
@@ -508,6 +535,76 @@ function historyIssues(text) {
   });
 }
 
+// The two halves of a plan, by the template's own section names. The
+// specification is what an implementation executes; the record is why the plan
+// says what it does. Both are legitimate — a plan with no record is a plan whose
+// decisions nobody can audit — but only one of them is the deliverable.
+const SPECIFICATION_SECTIONS = new Set(["Goal", "Scope", "File-by-file", "Tests", "Acceptance criteria", "PR sequence"]);
+const RECORD_SECTIONS = new Set(["Premises", "Decisions", "Open questions"]);
+
+// Where the record stops being a record and starts being the plan. A third,
+// because that is what the observed corpus separates on and it separates
+// cleanly: of four planning runs across two repositories, the one plan that was
+// approved and shipped ran 24.4% record, and the three that were abandoned or
+// re-forged ran 46.1%, 45.6% and 47.4%. Nothing lands between 25% and 45%, so
+// the exact cut inside that gap is not load-bearing.
+const RECORD_SHARE_CEILING = 1 / 3;
+
+// Below this the ratio says nothing worth acting on: a short plan can be mostly
+// premises because it has barely started, and reporting that would train a
+// drafter to pad the specification rather than shorten the record.
+const RECORD_SHARE_FLOOR_RATIO = 0.5;
+
+// Which half each byte belongs to. Fenced lines are attributed like any other —
+// a plan pays for the code block it quotes — but a heading inside a fence never
+// opens a section, because a plan that shows `## Decisions` in an example is
+// describing a heading rather than starting one. Text before the first canonical
+// heading, and text under a heading the template does not name, belongs to
+// neither half: it is counted in the plan's total by budgetIssues and left out
+// of this ratio, so the denominator is the two halves rather than the document.
+// That is deliberate. Against the whole document, parking prose under an
+// invented heading would lower the record's share without deleting a word of it.
+function planHalves(text) {
+  const lines = String(text ?? "").split("\n");
+  const halfAt = new Map();
+  for (const span of headingSpans(text)) {
+    if (!span.section) continue;
+    if (SPECIFICATION_SECTIONS.has(span.section.name)) halfAt.set(span.index, "specification");
+    else if (RECORD_SECTIONS.has(span.section.name)) halfAt.set(span.index, "record");
+  }
+  const counts = { specification: 0, record: 0 };
+  let half = null;
+  lines.forEach((line, index) => {
+    if (halfAt.has(index)) half = halfAt.get(index);
+    if (half) counts[half] += line.length + 1;
+  });
+  return counts;
+}
+
+// The counterweight the forge did not have anywhere it could act. Until this,
+// the only over-specification check in code was altitudeIssues, which needs a PR
+// train and so runs from lintHandoff — after every review round has already been
+// paid for. This one needs the document alone, so it gates a round: a plan whose
+// record has eaten it is stopped before reviewers are bought, which is the whole
+// point, because the rounds are what a bloated plan costs.
+function recordShareIssues(chars, text, budget) {
+  if (chars < budget.targetChars * RECORD_SHARE_FLOOR_RATIO) return [];
+  const { specification, record } = planHalves(text);
+  const total = specification + record;
+  if (!total) return [];
+  const share = record / total;
+  if (share <= RECORD_SHARE_CEILING) return [];
+  return [issue(
+    "major",
+    `The plan's record half is ${Math.round(share * 100)}% of it, over the ${Math.round(RECORD_SHARE_CEILING * 100)}% a record should be`,
+    [
+      `Premises, Decisions and Open questions hold ${record} characters against ${specification} for Goal, Scope, File-by-file, Tests, Acceptance criteria and PR sequence.`,
+      "The record is why the plan says what it does and it earns its place, but it is not what an implementation executes. A record this large is a planning conversation being transcribed rather than resolved: a decision that has been made is one line of outcome, one of why, and the invariant it creates — not the argument that reached it.",
+      "Compress the record. Do not pad the specification to fix this ratio, and do not split the feature: a large record means the plan settled many questions, and splitting would carry every one of them into both halves."
+    ].join(" ")
+  )];
+}
+
 // A budget is not a style preference. A plan that cannot fit is evidence the
 // feature is too big for one plan, which is a different remedy from writing more.
 function budgetIssues(chars, budget) {
@@ -517,8 +614,8 @@ function budgetIssues(chars, budget) {
       `The plan is ${chars} characters, over its ${budget.hardCeilingChars}-character ceiling`,
       [
         `Compress it to at most ${budget.targetChars} characters, or split the feature into separate plans and forge them independently.`,
-        "Those are the only two moves. A plan over the ceiling is not a plan that needs one more section; the usual cause is that it is describing more than one feature, or restating what a type signature and the verification commands already enforce.",
-        "Prose detailed enough that a weak implementation model cannot err duplicates what the repository's own gate and code review already check, except that it is not typechecked."
+        "Those are the only two moves; a plan over the ceiling is not a plan that needs one more section. Which of the two applies is not something this count can tell you: a long plan may be describing more than one feature, or restating what a type signature and the verification commands already enforce, and the record-share finding beside this one says which if either is true.",
+        "Prose detailed enough that an implementation model cannot err duplicates what the repository's own gate and code review already check, except that it is not typechecked."
       ].join(" ")
     )];
   }
@@ -760,6 +857,7 @@ export function lintPlanDocument({ text, budget = DEFAULT_PLAN_BUDGET, canonical
   const normalized = normalizeText(text);
   return [
     ...budgetIssues(normalized.length, budget),
+    ...recordShareIssues(normalized.length, normalized, budget),
     ...historyIssues(normalized),
     ...transcriptSectionIssues(normalized),
     ...sectionIssues(normalized),
@@ -1202,6 +1300,23 @@ function splitIssues(train, capLines) {
   )];
 }
 
+// A generous mean for a line of source once blank lines and short closers are
+// counted. Generous on purpose: it is an estimate of the code, and overstating
+// the code understates the plan's share of it, so the estimate errs toward not
+// firing and the policy below carries the judgment instead.
+const CODE_CHARS_PER_LINE = 40;
+
+// What "materially smaller than the code it produces" is worth as a number.
+// This check used to fire only when a plan exceeded 100% of its estimated code,
+// which made it unreachable in practice: the plan that motivated this ran 61% —
+// 63,182 characters against roughly 2,585 changed lines — and never tripped it,
+// and neither did any other plan in the observed corpus. Three quarters is the
+// cut that separates that corpus: the approved plan sits under it at 61% and the
+// in-flight plan that prompted this work sits over it at 78%. Calibrated on two
+// data points, so it is stated as a named constant rather than buried in the
+// arithmetic — a future reader with more plans should move it.
+const ALTITUDE_RATIO = 0.75;
+
 // The economic premise of the whole exercise, checked arithmetically: a detailed
 // plan is worth writing only while it costs less than the code it replaces.
 function altitudeIssues(planChars, train) {
@@ -1209,14 +1324,13 @@ function altitudeIssues(planChars, train) {
   const estimates = prs.map((pullRequest) => parseSizeEstimate(pullRequest.sizeEstimate));
   if (!estimates.length || estimates.some((estimate) => estimate === null)) return [];
   const lines = estimates.reduce((sum, estimate) => sum + estimate, 0);
-  // Forty characters is a generous mean for a line of source once blank lines
-  // and short closers are counted, so this errs toward not firing.
-  const codeChars = lines * 40;
-  if (!planChars || planChars <= codeChars) return [];
+  const codeChars = lines * CODE_CHARS_PER_LINE;
+  const allowed = codeChars * ALTITUDE_RATIO;
+  if (!planChars || planChars <= allowed) return [];
   return [issue(
     "major",
-    `The plan is longer than the code it describes: ${planChars} characters of prose for about ${lines} changed lines`,
-    "Past this point the code is being written twice, once in a language that cannot be compiled, and the second copy is strictly weaker than the first because nothing typechecks it. Cut the plan to what the implementation cannot derive from the repository, or split the feature."
+    `The plan is ${Math.round((planChars / codeChars) * 100)}% the size of the code it describes: ${planChars} characters of prose for about ${lines} changed lines`,
+    `Past this point the code is being written twice, once in a language that cannot be compiled, and the second copy is strictly weaker than the first because nothing typechecks it. A plan describing this much code has about ${Math.round(allowed)} characters to do it in. Cut the plan to what the implementation cannot derive from the repository, or split the feature.`
   )];
 }
 

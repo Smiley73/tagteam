@@ -23,11 +23,16 @@ const SECTIONS = [
   "Tests", "Acceptance criteria", "PR sequence", "Open questions"
 ];
 
+// Bulk body sits under File-by-file, where a real plan's volume is. Appended
+// after every heading instead — which is what this did — it lands under whichever
+// section came last, "Open questions", and reads to the record-share check as a
+// plan that is nothing but record. That is a fixture artifact rather than a
+// finding, and it would have masked every budget assertion below behind it.
 function plan(body = "", { headings = SECTIONS } = {}) {
   return [
     "# A plan",
-    ...headings.map((heading) => `## ${heading}\n\n(none)`),
-    body
+    ...headings.map((heading) => `## ${heading}\n\n${heading === "File-by-file" ? (body || "(none)") : "(none)"}`),
+    ...(headings.includes("File-by-file") ? [] : [body])
   ].join("\n\n");
 }
 
@@ -50,6 +55,82 @@ test("the ceiling blocks and the target only warns", () => {
   // The remedy a plan over the ceiling is given is compression or a split, never
   // another section.
   assert.match(ceiling[0].detail, /split the feature/);
+});
+
+// A plan built section by section, so a test can put weight on one half without
+// the fixture deciding where it lands.
+function halved({ specification = 0, record = 0 }) {
+  return [
+    "# A plan",
+    "## Goal\n\n(none)",
+    `## Premises\n\n${"p".repeat(record)}`,
+    "## Decisions\n\n(none)",
+    "## Scope\n\n(none)",
+    `## File-by-file\n\n${"f".repeat(specification)}`,
+    "## Tests\n\n(none)",
+    "## Acceptance criteria\n\n(none)",
+    "## PR sequence\n\n(none)",
+    "## Open questions\n\n(none)"
+  ].join("\n\n");
+}
+
+const recordShare = (issues) => issues.filter((found) => /record half/.test(found.title));
+
+test("a record half past a third of the plan is reported, and one under it is not", () => {
+  // 6,000 of 14,000 is 43%. Over the third, and the plan clears the size floor.
+  const heavy = lintPlanDocument({ text: halved({ specification: 8_000, record: 6_000 }) });
+  assert.equal(recordShare(heavy).length, 1);
+  assert.equal(recordShare(heavy)[0].severity, "major");
+  assert.match(recordShare(heavy)[0].title, /43% of it/);
+  // The remedy is compression of the record, never padding the other half and
+  // never a split: splitting carries every settled decision into both plans.
+  assert.match(recordShare(heavy)[0].detail, /Do not pad the specification/);
+  assert.match(recordShare(heavy)[0].detail, /do not split the feature/);
+
+  // 3,000 of 15,000 is 20%, the shape the plan that shipped had.
+  assert.deepEqual(recordShare(lintPlanDocument({ text: halved({ specification: 12_000, record: 3_000 }) })), []);
+});
+
+test("a plan too short for the ratio to mean anything is left alone", () => {
+  // 60% record, but only 5,000 characters against a 25,000 target: a plan this
+  // early is mostly premises because it has barely started, and reporting it
+  // would teach a drafter to pad the specification rather than cut the record.
+  const short = halved({ specification: 2_000, record: 3_000 });
+  assert.equal(short.length < DEFAULT_PLAN_BUDGET.targetChars / 2, true);
+  assert.deepEqual(recordShare(lintPlanDocument({ text: short })), []);
+});
+
+test("a template section shown inside a fence is not the section itself", () => {
+  // A plan specifying the headings another document must carry writes them in a
+  // code block. Read as real, they satisfied the template check for sections the
+  // plan did not have: this text is genuinely missing Decisions.
+  const text = [
+    "# A plan",
+    ...SECTIONS.filter((heading) => heading !== "Decisions").map((heading) => `## ${heading}\n\n(none)`),
+    "The standards require:\n\n```markdown\n## Decisions\n```"
+  ].join("\n\n");
+  const missing = lintPlanDocument({ text }).filter((found) => /template section/.test(found.title));
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].detail, /Decisions/);
+});
+
+test("a section heading inside a fence does not move the halves", () => {
+  // A plan specifying the template another document must carry writes the
+  // headings in a code block. Reading those as real would charge every byte
+  // after them to the wrong half.
+  const text = [
+    "# A plan",
+    "## Premises\n\n(none)",
+    "## Decisions\n\n(none)",
+    "## Goal\n\n(none)",
+    "## Scope\n\n(none)",
+    `## File-by-file\n\n${"f".repeat(9_000)}\n\n\`\`\`markdown\n## Decisions\n\`\`\`\n\n${"f".repeat(9_000)}`,
+    "## Tests\n\n(none)",
+    "## Acceptance criteria\n\n(none)",
+    "## PR sequence\n\n(none)",
+    "## Open questions\n\n(none)"
+  ].join("\n\n");
+  assert.deepEqual(recordShare(lintPlanDocument({ text })), []);
 });
 
 test("revision history in the plan body is a blocking finding, not a style note", () => {
@@ -1042,7 +1123,24 @@ test("a split whose parts all fit inside one pull request is flagged", () => {
 test("a plan longer than the code it describes is flagged", () => {
   const issues = lintHandoff({ manifest, train: train(), planChars: 40_000 });
   assert.equal(issues.length, 1);
-  assert.match(issues[0].title, /longer than the code it describes/);
+  assert.match(issues[0].title, /the size of the code it describes/);
+});
+
+test("altitude fires at three quarters of the code, not at all of it", () => {
+  // The train estimates 200 lines, so the code is about 8,000 characters and the
+  // plan's allowance is 6,000. The old bound was the full 8,000, which no plan in
+  // the observed corpus ever reached — the one that shipped ran 61%.
+  const under = lintHandoff({ manifest, train: train(), planChars: 5_000 });
+  assert.deepEqual(under.filter((found) => /size of the code/.test(found.title)), []);
+
+  const over = lintHandoff({ manifest, train: train(), planChars: 7_000 });
+  const altitude = over.filter((found) => /size of the code/.test(found.title));
+  assert.equal(altitude.length, 1);
+  assert.equal(altitude[0].severity, "major");
+  assert.match(altitude[0].title, /88% the size of the code/);
+  // The finding says how much room the plan actually had, so the remedy is a
+  // number rather than an instruction to write less.
+  assert.match(altitude[0].detail, /about 6000 characters to do it in/);
 });
 
 test("planLint carries the canonical strings into the handoff, not only into the plan", () => {

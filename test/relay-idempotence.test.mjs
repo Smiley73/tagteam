@@ -2777,6 +2777,43 @@ test("plan resume accepts a saved path without an inline plan copy", async () =>
   assert.equal(logs.some((message) => message.includes("does not apply decisions")), true);
 });
 
+test("a pass that returns the plan it was handed says so", async () => {
+  // Three consecutive passes of a real plan moved it 2, 3 and 5 characters. The
+  // plan that was approved came out of the pass before them, and nothing in the
+  // run said the loop had stopped converging.
+  const seed = "# Saved draft";
+  const seedPath = "/plans/slug/drafts/pass-1-integrated.md";
+  const baseResponder = planResponder([]);
+  const { result, logs } = await harness(
+    "workflows/plan-forge.js",
+    { ...PLAN_ARGS, seedPlan: { path: seedPath }, resumeRound: 2 },
+    (label, prompt, options) => {
+      if (label === "plan:verify-seed:2") {
+        return {
+          ok: true,
+          payloads: [{ name: "DRAFT_PLAN", file: seedPath, token: planToken(seed), chars: seed.length }]
+        };
+      }
+      return baseResponder(label, prompt, options);
+    }
+  );
+
+  assert.equal(result.planMovement.beforeChars, seed.length);
+  assert.equal(result.planMovement.afterChars, seed.length);
+  assert.equal(result.planMovement.delta, 0);
+  assert.equal(result.planMovement.unchanged, true);
+  assert.equal(result.planMovement.settled, true);
+  // It reaches a person rather than only the returned object, and it says what
+  // the choice is rather than treating a settled pass as an error.
+  assert.equal(logs.some((message) => message.includes("byte-for-byte")
+    && message.includes("not converging")), true);
+});
+
+test("a fresh draft reports no movement, having started from nothing", async () => {
+  const { result } = await harness("workflows/plan-forge.js", PLAN_ARGS, planResponder([]));
+  assert.equal(result.planMovement, null);
+});
+
 test("plan-forge names missing input and nested config keys", async () => {
   const run = loadWorkflow("workflows/plan-forge.js");
   const noAgent = async () => {
@@ -2793,6 +2830,31 @@ test("plan-forge names missing input and nested config keys", async () => {
       config: { planning: {}, prTrain: { prSize: { guidance: "small" } } }
     }, noAgent, noParallel, () => {}, () => {}, undefined),
     /config key "config\.planning\.claude"/
+  );
+});
+
+test("a plan budget whose ceiling equals its target is refused before model work", async () => {
+  // The lint returns on the ceiling finding before it reaches the target
+  // finding, so equal values make "compress toward the target" unreachable and
+  // the only feedback left is a blocking rejection of a plan already too big.
+  // A repository configured this way is where this was found: two of its plans
+  // climbed to the wall and sat there, and nothing warned on the way up.
+  const run = loadWorkflow("workflows/plan-forge.js");
+  const noAgent = async () => {
+    throw new Error("model work must not start");
+  };
+  const budgeted = (planBudget) => ({
+    ...PLAN_ARGS,
+    config: { ...PLAN_ARGS.config, planning: { ...PLAN_ARGS.config.planning, planBudget } }
+  });
+
+  await assert.rejects(
+    run(budgeted({ targetChars: 65_000, hardCeilingChars: 65_000 }), noAgent, async () => [], () => {}, () => {}, undefined),
+    /hardCeilingChars" must be above targetChars/
+  );
+  await assert.rejects(
+    run(budgeted({ targetChars: 65_000, hardCeilingChars: 60_000 }), noAgent, async () => [], () => {}, () => {}, undefined),
+    /hardCeilingChars" must be above targetChars/
   );
 });
 
