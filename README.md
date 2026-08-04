@@ -2,7 +2,7 @@
 
 Tagteam is a Claude Code plugin for taking substantial software changes from an idea to reviewed pull requests. It uses Claude and Codex together to produce a repository-grounded implementation plan, break it into an ordered PR train, implement it in isolated worktrees, review every candidate across both engines, run verification, and pause at explicit human gates before merging.
 
-It is for developers who want to delegate more of a multi-file change without turning the result into a black box. Tagteam makes plans detailed enough for less capable implementation models, gives each engine’s work an independent second opinion, binds evidence and approvals to exact commits, and saves durable artifacts so interrupted work can be audited and resumed safely.
+It is for developers who want to delegate more of a multi-file change without turning the result into a black box. Tagteam makes plans that carry what an implementation model cannot read out of the repository itself, gives each engine’s work an independent second opinion, binds evidence and approvals to exact commits, and saves durable artifacts so interrupted work can be audited and resumed safely.
 
 Why use it:
 

@@ -4,7 +4,9 @@ Review round {{ROUND}} of the implementation plan for the repository at {{WORKTR
 
 Challenge feasibility, scope, sequencing, tests, rollout, rollback, and unresolved decisions. Inspect the repository to check the plan's claims against what is actually there.
 
-Treat any step that would force a less capable implementation model with no conversation context to guess about files, behavior, invariants, edge cases, dependencies, or acceptance evidence as at least a major issue.
+The plan is a handoff to a capable implementation model that will read this repository but has no access to this planning conversation. Treat as at least a major issue any step that would force it to guess about a decision, an invariant that decision creates, or what evidence closes the step. It does not need to be told what the repository already states: file contents, call sites, and the verification commands are there to be read.
+
+{{BUDGET}}
 
 {{POLICY}}
 

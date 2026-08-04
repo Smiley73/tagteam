@@ -104,6 +104,22 @@ function persistPathFrom(prompt, pattern) {
 // What the workflow renders for a configuration that names no policy documents.
 const NO_POLICY_PATHS = "No repository policy documents are configured, so establish this repository's own rules from its contributing, coding-standards, or agent-instruction files if any exist, and treat what you find there as binding.";
 
+// What the workflow renders as {{BUDGET}} for a step that judges a plan rather
+// than writes one — plan-forge.js's reviewBudgetBrief. Mirrored here for the
+// same reason NO_POLICY_PATHS is: the workflow is a sandboxed script with no
+// imports, so a shared constant is not reachable from it and the copy is the
+// only way an exact-string test can name what it expects.
+const reviewBudgetBrief = ({ targetChars, hardCeilingChars }) => [
+  `The plan's target is ${targetChars} characters. ${hardCeilingChars} is a hard ceiling and a plan over it is rejected before review.`,
+  "It has two halves. Goal, Scope, File-by-file, Tests, Acceptance criteria and PR sequence are the specification — what the implementation executes. Premises, Decisions and Open questions are the record — why the plan is what it is.",
+  "The record earns its place and is not padding, but it is not the deliverable either: it belongs under a third of the plan.",
+  "Cite a symbol, never a line number, outside Premises. A line number is the one detail nothing can verify and every later edit invalidates, and by the time a plan is implemented the tree has moved under it; inside Premises it is evidence of what was true when the claim was made, which is why the premise challenger needs it there and only there.",
+  "So a plan is as reportable for saying too much as for saying too little. Report at major severity a record half running past a third of the document, a passage that re-specifies what the repository already states, and detail that a typechecker, the verification commands, or code review would catch anyway — that detail is written twice and this copy is the one nothing checks.",
+  "Weigh what you ask for against that budget. A request for more detail spends the plan's remaining headroom, and a plan pinned at its ceiling pays for every addition by compressing something else, which is where the next round's contradictions come from."
+].join(" ");
+
+const FORGE_REVIEW_BUDGET = reviewBudgetBrief({ targetChars: 200_000, hardCeilingChars: 400_000 });
+
 const APPROVE = { verdict: "approve", issues: [], open_questions: [], suggestions: [] };
 const BLOCKER = {
   severity: "blocking",
@@ -469,6 +485,7 @@ test("a 130 KB plan reaches the cross-check whole, as the exact string the workf
     .replace("{{WORKTREE}}", root)
     // No policyPaths in this configuration, so the brief is the "look for them
     // yourself" form. It is rendered as trusted prose, never fenced.
+    .replace("{{BUDGET}}", FORGE_REVIEW_BUDGET)
     .replace("{{POLICY}}", NO_POLICY_PATHS)
     .replace("{{PLAN}}", fenced("plan", normalizeText(plans.revised)))
     .replace("{{MANIFEST}}", fenced("manifest", JSON.stringify(manifest, null, 2)))
@@ -1332,6 +1349,7 @@ test("a missing resume record stops the pass even when the plan itself is whole"
     "--out", path.join(temp, "prompt.md"),
     "--var", `WORKTREE=${root}`,
     "--var", `POLICY=${NO_POLICY_PATHS}`,
+    "--var", `BUDGET=${FORGE_REVIEW_BUDGET}`,
     "--fence", `PLAN=${plan}`,
     "--fence-json", `MANIFEST=${path.join(temp, "manifest.json")}`,
     "--fence-json", `PR_TRAIN=${path.join(temp, "train.json")}`,
