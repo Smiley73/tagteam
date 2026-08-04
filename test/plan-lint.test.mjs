@@ -76,6 +76,60 @@ function halved({ specification = 0, record = 0 }) {
 
 const recordShare = (issues) => issues.filter((found) => /record half/.test(found.title));
 
+// A plan whose record is spread across all three of its sections, plus an
+// optional code block, so the attribution has something to attribute.
+function recordHeavy({ premises = 0, decisions = 0, questions = 0, blockLines = 0 }) {
+  const block = blockLines
+    ? `\n\n\`\`\`json\n${Array.from({ length: blockLines }, (_, row) => `  "key${row}": ${row},`).join("\n")}\n\`\`\``
+    : "";
+  return [
+    "# A plan",
+    "## Goal\n\n(none)",
+    `## Premises\n\n${"p".repeat(premises)}`,
+    `## Decisions\n\n${"d".repeat(decisions)}${block}`,
+    "## Scope\n\n(none)",
+    `## File-by-file\n\n${"f".repeat(9_000)}`,
+    "## Tests\n\n(none)",
+    "## Acceptance criteria\n\n(none)",
+    "## PR sequence\n\n(none)",
+    `## Open questions\n\n${"q".repeat(questions)}`
+  ].join("\n\n");
+}
+
+test("the record finding names which sections the record is, largest first", () => {
+  const found = recordShare(lintPlanDocument({
+    text: recordHeavy({ premises: 2_000, decisions: 6_000, questions: 500 })
+  }));
+  assert.equal(found.length, 1);
+  // Ordered by size, not by template order: the largest is the one to cut.
+  assert.match(found[0].detail, /Decisions 6\d{3}, Premises 2\d{3}, Open questions 5\d\d/);
+});
+
+test("a record section with nothing in it is left out of the attribution", () => {
+  const found = recordShare(lintPlanDocument({
+    text: recordHeavy({ premises: 2_000, decisions: 6_000, questions: 0 })
+  }));
+  assert.equal(found.length, 1);
+  assert.equal(/Open questions/.test(found[0].detail), false);
+});
+
+test("a large code block is offered as a candidate, and a small one is not", () => {
+  const big = recordShare(lintPlanDocument({
+    text: recordHeavy({ premises: 2_000, decisions: 6_000, blockLines: 40 })
+  }));
+  assert.equal(big.length, 1);
+  assert.match(big[0].detail, /largest code block in the plan is \d+ lines at line \d+/);
+  // Hedged, because a long fenced block is often required wording quoted
+  // character-for-character and this check cannot tell.
+  assert.match(big[0].detail, /if it is not wording something requires character-for-character/);
+
+  const small = recordShare(lintPlanDocument({
+    text: recordHeavy({ premises: 2_000, decisions: 6_000, blockLines: 4 })
+  }));
+  assert.equal(small.length, 1);
+  assert.equal(/largest code block/.test(small[0].detail), false);
+});
+
 test("a record half past a third of the plan is reported, and one under it is not", () => {
   // 6,000 of 14,000 is 43%. Over the third, and the plan clears the size floor.
   const heavy = lintPlanDocument({ text: halved({ specification: 8_000, record: 6_000 }) });
