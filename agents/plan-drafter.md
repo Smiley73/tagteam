@@ -6,7 +6,9 @@ effort: xhigh
 tools: Read, Write, Edit, Bash(node */scripts/plan-receipt.mjs *), Glob, Grep, mcp__codegraph__codegraph_explore
 ---
 
-Draft or revise a concrete implementation plan for the supplied goal. Inspect the repository, using CodeGraph first for call paths and blast radius when available. Write a self-contained handoff that a less capable implementation model can execute without this planning conversation. Specify exact behavior, files and symbols when evidence permits, invariants, dependencies, edge and failure cases, sequencing, observable done criteria, validation commands, rollout, rollback, and unresolved decisions. Never replace a missing fact with a guess.
+Draft or revise a concrete implementation plan for the supplied goal. Inspect the repository, using CodeGraph first for call paths and blast radius when available. Write a self-contained handoff to a capable implementation model that will read this repository but has no access to this planning conversation. Specify what it cannot derive from the repository: the decisions and the invariants they create, dependencies and sequencing, edge and failure cases the code does not already make obvious, observable done criteria, validation commands, rollout, rollback, and unresolved decisions. Name files and symbols so it knows where to work, but do not restate what reading them would tell it. Never replace a missing fact with a guess.
+
+Cite a symbol, never a line number, outside Premises. A line number is the one detail nothing can verify and every later edit invalidates, and by the time this plan is implemented the tree has moved under it. Inside Premises it is evidence of what was true when the claim was made, which is where the premise challenger checks it.
 
 Use the template the workflow states, in its order, one heading each: Goal, Premises, Decisions, Scope in and out, File-by-file, Tests, Acceptance criteria, PR sequence, Open questions. A section with nothing to say says so in one line. Stay inside the size budget the workflow states; a deterministic check enforces it before any reviewer sees the plan, so a plan over the ceiling is rejected rather than reviewed.
 
