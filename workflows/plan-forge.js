@@ -139,12 +139,18 @@ const premiseChallengeSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["claim", "verdict", "basisChecked"],
+        required: ["claim", "verdict", "basisChecked", "evidence"],
         properties: {
           claim: { type: "string", minLength: 1, maxLength: 300 },
           verdict: { type: "string", enum: ["contradicted", "unsupported", "unchallenged"] },
           basisChecked: { type: "string", minLength: 1, maxLength: 400 },
-          evidence: { type: "string", minLength: 1, maxLength: 600 }
+          // Optional in meaning, required in shape: a row that found nothing to
+          // quote sends null. Codex runs through `codex exec --output-schema`,
+          // whose strict mode rejects any property absent from `required` before
+          // the request is sent — so a genuinely optional key made this schema
+          // unsendable and the challenge failed with an identical 400 on every
+          // attempt, spending its retries to learn the same thing each time.
+          evidence: { type: ["string", "null"], minLength: 1, maxLength: 600 }
         }
       }
     }
@@ -186,7 +192,7 @@ const manifestSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "title", "description", "complexity", "files", "dependsOn", "doneCriteria"],
+        required: ["id", "title", "description", "complexity", "files", "dependsOn", "atomicGroup", "doneCriteria"],
         properties: {
           id: { type: "string" },
           title: { type: "string" },
@@ -194,12 +200,17 @@ const manifestSchema = {
           complexity: { type: "string", enum: ["simple", "medium", "complex"] },
           files: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
           dependsOn: { type: "array", items: { type: "string" } },
-          // Optional, and it must stay a mirror of schemas/manifest.schema.json:
-          // this copy is what the structured response is checked against, so a
-          // field the file permits but this object omits is rejected before it
-          // ever reaches disk. The parser is asked for atomicGroup, so leaving
-          // it out here would fail exactly the plans it exists to protect.
-          atomicGroup: { type: "string", minLength: 1, maxLength: 60, pattern: "^[a-z0-9][a-z0-9._-]*$" },
+          // Optional in meaning, required in shape, and it must stay a mirror of
+          // schemas/manifest.schema.json: this copy is what the structured
+          // response is checked against, so a field the file permits but this
+          // object omits is rejected before it ever reaches disk. The parser is
+          // asked for atomicGroup, so leaving it out here would fail exactly the
+          // plans it exists to protect. A task that stands alone sends null
+          // rather than omitting the key, because Codex's strict output schema
+          // rejects any property missing from `required`. Every reader tests it
+          // for truth — `if (!task?.atomicGroup) continue` — so null and absent
+          // mean the same thing downstream.
+          atomicGroup: { type: ["string", "null"], minLength: 1, maxLength: 60, pattern: "^[a-z0-9][a-z0-9._-]*$" },
           doneCriteria: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } }
         }
       }
@@ -218,7 +229,7 @@ const trainSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "title", "scope", "taskIds", "dependsOn", "userVisible", "userVisibleReason", "sizeEstimate"],
+        required: ["id", "title", "scope", "taskIds", "dependsOn", "userVisible", "userVisibleReason", "sizeEstimate", "sizeWaiver"],
         properties: {
           id: { type: "string" },
           title: { type: "string" },
@@ -232,8 +243,12 @@ const trainSchema = {
           // what the on-disk schema permits refuses the decomposer's own
           // instruction back to it: the reply is rejected, the retries are
           // paid, and the field can never reach the file it validates against.
+          // Required in shape and optional in meaning: a pull request claiming
+          // no exception sends null, because Codex's strict output schema
+          // rejects a property that `required` omits. sizeWaiverOf() returns
+          // null for both undefined and null, so the two are one case.
           sizeWaiver: {
-            type: "object",
+            type: ["object", "null"],
             additionalProperties: false,
             required: ["reason", "rule", "approvedBy"],
             properties: {
@@ -488,7 +503,7 @@ function ceilingPressureIssues(chars, budget) {
 // eventually not.
 const atomicGroupBrief = [
   "Some groups of edits are only valid together, so no merge may leave the base branch in a state the group exists to prevent: a payload-shape change with the registry bump and migration that read it, a version bump with the fixtures it invalidates.",
-  "Give every task in such a group the same atomicGroup label, in lowercase kebab-case. Leave atomicGroup unset for every task that stands alone; a label that groups more than the plan requires costs a coarser split for nothing.",
+  "Give every task in such a group the same atomicGroup label, in lowercase kebab-case. Set atomicGroup to null for every task that stands alone — null rather than omitted or empty, because the response schema requires the key and rejects an empty string; a label that groups more than the plan requires costs a coarser split for nothing.",
   "Each pull request squashes to exactly one commit on the base branch, so tasks sharing an atomicGroup must all appear in the same pull request. Splitting them into separate tasks inside that one pull request is fine and often clearer."
 ].join("\n");
 

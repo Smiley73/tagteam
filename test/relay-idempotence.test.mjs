@@ -19,6 +19,10 @@ const CLEAN_FINDINGS = {
   summary: "Clean.",
   dimension_sweep: "Checked.",
   load_bearing_claim: "Checked one caller.",
+  // Required rather than optional, because Codex's strict output schema rejects
+  // any property `required` omits. An empty array is how a review says it
+  // adopted or rejected no specialist finding.
+  specialist_decisions: [],
   findings: []
 };
 const TEST_REVIEW_DIFF_HASH = `sha256:${"d".repeat(64)}`;
@@ -304,6 +308,7 @@ process.stdin.on("end", async () => {
     summary: input.includes("REQUEST-A") ? "request-a" : "request-b",
     dimension_sweep: "checked",
     load_bearing_claim: "checked",
+    specialist_decisions: [],
     findings: []
   }));
 });
@@ -2006,7 +2011,10 @@ function challengeHarness(respondChallenge, config = CHALLENGE_CONFIG) {
   );
 }
 
-const unchallenged = (premise) => ({ claim: premise.claim, verdict: "unchallenged", basisChecked: premise.basis });
+// `evidence` is required on every row whatever the verdict, so a row that
+// quotes nothing carries null. A stub omitting it asserts against a reply the
+// schema no longer permits, which is how these fixtures drift out of contract.
+const unchallenged = (premise) => ({ claim: premise.claim, verdict: "unchallenged", basisChecked: premise.basis, evidence: null });
 
 test("a contradicted premise is downgraded and an unsupported one is left standing", async () => {
   const { result } = await challengeHarness(() => ({
@@ -2017,7 +2025,7 @@ test("a contradicted premise is downgraded and an unsupported one is left standi
         basisChecked: "scripts/codex-run.mjs",
         evidence: "scripts/codex-run.mjs:12 is guarded by a flag that is off in production."
       },
-      { claim: PREMISES.premises[1].claim, verdict: "unsupported", basisChecked: "schemas/candidate.schema.json" }
+      { claim: PREMISES.premises[1].claim, verdict: "unsupported", basisChecked: "schemas/candidate.schema.json", evidence: null }
     ]
   }));
 
@@ -2069,7 +2077,7 @@ test("a claim that comes back respaced or recased is still the same claim", asyn
 test("an unsupported verdict never moves a verified premise", async () => {
   const { result } = await challengeHarness(() => ({
     challenges: [
-      { claim: PREMISES.premises[0].claim, verdict: "unsupported", basisChecked: "scripts/codex-run.mjs exists but names no release path" },
+      { claim: PREMISES.premises[0].claim, verdict: "unsupported", basisChecked: "scripts/codex-run.mjs exists but names no release path", evidence: null },
       unchallenged(PREMISES.premises[1])
     ]
   }));
