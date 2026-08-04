@@ -100,6 +100,20 @@ test("a plan too short for the ratio to mean anything is left alone", () => {
   assert.deepEqual(recordShare(lintPlanDocument({ text: short })), []);
 });
 
+test("a template section shown inside a fence is not the section itself", () => {
+  // A plan specifying the headings another document must carry writes them in a
+  // code block. Read as real, they satisfied the template check for sections the
+  // plan did not have: this text is genuinely missing Decisions.
+  const text = [
+    "# A plan",
+    ...SECTIONS.filter((heading) => heading !== "Decisions").map((heading) => `## ${heading}\n\n(none)`),
+    "The standards require:\n\n```markdown\n## Decisions\n```"
+  ].join("\n\n");
+  const missing = lintPlanDocument({ text }).filter((found) => /template section/.test(found.title));
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].detail, /Decisions/);
+});
+
 test("a section heading inside a fence does not move the halves", () => {
   // A plan specifying the template another document must carry writes the
   // headings in a code block. Reading those as real would charge every byte

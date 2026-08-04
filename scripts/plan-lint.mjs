@@ -235,12 +235,39 @@ function normalizeHeading(heading) {
     .toLocaleLowerCase();
 }
 
+// Every heading the document actually opens, in order, with the line it sits on
+// and the template section it names if any. One walk, fence-masked, so every
+// check asking "which sections does this plan have" gets the same answer.
+//
+// Fence-masked is the correction. This was a bare line scan, so a plan showing
+// `## Decisions` inside a code block — the ordinary way to specify the template
+// another document must carry — satisfied the template check without having the
+// section at all. transcriptSectionIssues already masked fences for exactly that
+// reason and carried its own walk to do it, and the record-share check below
+// needed a third. Three walks answering one question is three chances to answer
+// it differently, and the bare one was already answering it wrongly.
+function headingSpans(text) {
+  const lines = String(text ?? "").split("\n");
+  const code = codeLines(lines);
+  const spans = [];
+  lines.forEach((line, index) => {
+    if (code[index]) return;
+    const raw = /^\s{0,3}(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (!raw) return;
+    const normalized = normalizeHeading(raw[2]);
+    spans.push({
+      index,
+      level: raw[1].length,
+      normalized,
+      section: REQUIRED_SECTIONS.find((candidate) =>
+        candidate.patterns.some((pattern) => pattern.test(normalized))) ?? null
+    });
+  });
+  return spans;
+}
+
 function headingsOf(text) {
-  return String(text ?? "")
-    .split("\n")
-    .map((line) => /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)?.[1])
-    .filter(Boolean)
-    .map(normalizeHeading);
+  return headingSpans(text).map((span) => span.normalized);
 }
 
 // As much structure as this one check needs and no more: find a heading that
@@ -539,20 +566,16 @@ const RECORD_SHARE_FLOOR_RATIO = 0.5;
 // invented heading would lower the record's share without deleting a word of it.
 function planHalves(text) {
   const lines = String(text ?? "").split("\n");
-  const fenced = codeLines(lines);
+  const halfAt = new Map();
+  for (const span of headingSpans(text)) {
+    if (!span.section) continue;
+    if (SPECIFICATION_SECTIONS.has(span.section.name)) halfAt.set(span.index, "specification");
+    else if (RECORD_SECTIONS.has(span.section.name)) halfAt.set(span.index, "record");
+  }
   const counts = { specification: 0, record: 0 };
   let half = null;
   lines.forEach((line, index) => {
-    if (!fenced[index]) {
-      const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)?.[1];
-      if (heading) {
-        const normalized = normalizeHeading(heading);
-        const section = REQUIRED_SECTIONS.find((candidate) =>
-          candidate.patterns.some((pattern) => pattern.test(normalized)));
-        if (section && SPECIFICATION_SECTIONS.has(section.name)) half = "specification";
-        else if (section && RECORD_SECTIONS.has(section.name)) half = "record";
-      }
-    }
+    if (halfAt.has(index)) half = halfAt.get(index);
     if (half) counts[half] += line.length + 1;
   });
   return counts;
@@ -591,8 +614,8 @@ function budgetIssues(chars, budget) {
       `The plan is ${chars} characters, over its ${budget.hardCeilingChars}-character ceiling`,
       [
         `Compress it to at most ${budget.targetChars} characters, or split the feature into separate plans and forge them independently.`,
-        "Those are the only two moves. A plan over the ceiling is not a plan that needs one more section; the usual cause is that it is describing more than one feature, or restating what a type signature and the verification commands already enforce.",
-        "Prose detailed enough that a weak implementation model cannot err duplicates what the repository's own gate and code review already check, except that it is not typechecked."
+        "Those are the only two moves; a plan over the ceiling is not a plan that needs one more section. Which of the two applies is not something this count can tell you: a long plan may be describing more than one feature, or restating what a type signature and the verification commands already enforce, and the record-share finding beside this one says which if either is true.",
+        "Prose detailed enough that an implementation model cannot err duplicates what the repository's own gate and code review already check, except that it is not typechecked."
       ].join(" ")
     )];
   }
