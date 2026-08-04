@@ -21,15 +21,18 @@ function parseArgs(argv) {
   return options;
 }
 
-// Every keyword any reviewer condition can key on, matched case-insensitively
-// against the added lines. Returns the hits, so the caller can evaluate
-// `when.keywords` without holding the change itself.
-function matchKeywords(configPath, addedLines) {
-  if (!configPath) return [];
-  const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
+function readConfig(configPath) {
+  if (!configPath) return null;
+  return JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
+}
+
+// Every keyword a verify condition can key on, matched case-insensitively
+// against the added lines. Resolved here so a caller can evaluate
+// `when.keywords` without ever holding the change itself.
+function matchKeywords(config, addedLines) {
   const keywords = new Set();
-  for (const setting of Object.values(config.reviewers ?? {})) {
-    for (const keyword of setting?.when?.keywords ?? []) keywords.add(String(keyword));
+  for (const entry of config?.verify ?? []) {
+    for (const keyword of entry?.when?.keywords ?? []) keywords.add(String(keyword));
   }
   const haystack = addedLines.toLocaleLowerCase();
   return [...keywords].filter((keyword) => haystack.includes(keyword.toLocaleLowerCase())).sort();
@@ -61,27 +64,6 @@ function writeImmutable(file, value) {
 
 function sha256File(file) {
   return `sha256:${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}`;
-}
-
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-// The snapshotter agent relays these fields into the workflow, which has no
-// filesystem of its own. Hashing exactly that subset lets the workflow confirm
-// the relay matches the file without the agent transcribing the bulky fields.
-const RELAYED_FIELDS = [
-  "baseOid", "candidateOid", "reviewDiffPath", "reviewDiffHash", "changedPaths",
-  "matchedKeywords", "excluded", "diffBytes", "fileCount", "treeClean"
-];
-
-function candidateMetadataHash(candidate) {
-  const relayed = Object.fromEntries(RELAYED_FIELDS.map((key) => [key, candidate[key]]));
-  return `sha256:${createHash("sha256").update(canonicalJson(relayed)).digest("hex")}`;
 }
 
 export function validateCandidateSnapshot(candidatePath, {
@@ -126,12 +108,7 @@ export function validateCandidateSnapshot(candidatePath, {
     || candidate.treeClean !== "") {
     throw new Error("candidate snapshot metadata is internally inconsistent");
   }
-  return {
-    candidatePath: resolvedCandidatePath,
-    candidateHash,
-    candidateMetadataHash: candidateMetadataHash(candidate),
-    ...candidate
-  };
+  return { candidatePath: resolvedCandidatePath, candidateHash, ...candidate };
 }
 
 export function snapshotCandidate(options) {
@@ -142,7 +119,8 @@ export function snapshotCandidate(options) {
   const candidateOid = git(worktree, ["rev-parse", options.candidate]).stdout.trim();
   const changedBuffer = git(worktree, ["diff", "--name-only", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
   const changedPaths = changedBuffer.toString("utf8").split("\0").filter(Boolean).map(normalizeRepoPath);
-  const exclusions = options["exclude-json"] ? JSON.parse(fs.readFileSync(options["exclude-json"], "utf8")) : [];
+  const config = readConfig(options.config);
+  const exclusions = config?.reviewExclude ?? [];
   const exclusionMatchers = exclusions.map((glob) => ({ glob, expression: globToRegExp(glob) }));
   const isExcluded = (file) => exclusionMatchers.some(({ expression }) => expression.test(file));
   const fullDiff = git(worktree, ["diff", "--no-ext-diff", "--binary", `${baseOid}..${candidateOid}`]).stdout;
@@ -171,7 +149,7 @@ export function snapshotCandidate(options) {
   // Reviewer selection keys off keywords in the added lines, but the workflow
   // has no filesystem and must not relay the whole change through a model
   // response. Resolve the keyword matches here and relay only the hits.
-  const matchedKeywords = matchKeywords(options.config, addedLines);
+  const matchedKeywords = matchKeywords(config, addedLines);
   const worktreeHead = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
   const worktreeStatus = git(worktree, ["status", "--porcelain"]).stdout;
   const treeClean = git(primary, ["status", "--porcelain"]).stdout;

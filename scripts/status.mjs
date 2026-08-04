@@ -1,10 +1,15 @@
 #!/usr/bin/env node
+// Inventory for /tagteam:status. Read-only, and it reports what is on disk
+// rather than what any run remembers — the same rule resume works by.
 import fs from "node:fs";
 import path from "node:path";
 
 function directories(root) {
   try {
-    return fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
   } catch {
     return [];
   }
@@ -16,24 +21,46 @@ function json(file, fallback = null) {
 
 const repo = path.resolve(process.argv[2] ?? ".");
 const tagteam = path.join(repo, ".tagteam");
-const plans = directories(path.join(tagteam, "plans")).map((id) => {
-  const root = path.join(tagteam, "plans", id);
+
+const plans = directories(path.join(tagteam, "plans")).map((slug) => {
+  const root = path.join(tagteam, "plans", slug);
+  const specsDir = path.join(root, "specs");
+  const specs = fs.existsSync(specsDir)
+    ? fs.readdirSync(specsDir).filter((entry) => entry.endsWith(".md")).sort()
+    : [];
+  const approved = json(path.join(root, "approved.json"));
   return {
-    id,
-    approved: fs.existsSync(path.join(root, "approved.json")),
+    slug,
+    stage: approved ? "approved"
+      : fs.existsSync(path.join(root, "plan.md")) ? "drafted"
+        : fs.existsSync(path.join(root, "goal.md")) ? "goal settled"
+          : "interviewing",
+    approvedAt: approved?.approvedAt ?? null,
+    specs: specs.length,
     path: root
   };
 });
-const ships = directories(path.join(tagteam, "ships")).map((id) => {
-  const root = path.join(tagteam, "ships", id);
-  const state = json(path.join(root, "pr-train-state.json"), { prs: [] });
-  const awaiting = state.prs.filter((pr) => pr.state === "awaiting-approval");
+
+const ships = directories(path.join(tagteam, "ships")).map((slug) => {
+  const root = path.join(tagteam, "ships", slug);
+  const specs = directories(root)
+    .map((spec) => json(path.join(root, spec, "state.json")))
+    .filter(Boolean);
+  const waiting = specs.filter((spec) => spec.state === "awaiting-approval");
+  const merged = specs.filter((spec) => spec.state === "merged");
+  const failed = specs.filter((spec) => spec.state === "failed");
   return {
-    id,
-    status: awaiting.length > 0 ? "waiting for you" : state.status ?? "in progress",
-    waitingOn: awaiting.map((pr) => ({ id: pr.id, number: pr.number, branch: pr.branch })),
-    report: fs.existsSync(path.join(root, "report.md")) ? path.join(root, "report.md") : null,
+    slug,
+    status: failed.length > 0 ? "stopped"
+      : waiting.length > 0 ? "waiting for you"
+        : specs.length > 0 && merged.length === specs.length ? "complete"
+          : "in progress",
+    merged: merged.length,
+    started: specs.length,
+    waitingOn: waiting.map((spec) => ({ spec: spec.spec, pr: spec.pr?.number ?? null, branch: spec.branch })),
+    stoppedOn: failed.map((spec) => ({ spec: spec.spec, branch: spec.branch })),
     path: root
   };
 });
-process.stdout.write(JSON.stringify({ plans, ships }, null, 2) + "\n");
+
+process.stdout.write(`${JSON.stringify({ plans, ships }, null, 2)}\n`);

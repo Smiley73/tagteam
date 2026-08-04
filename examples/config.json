@@ -1,160 +1,59 @@
 {
-  "version": 4,
-  "policyPaths": ["CONTRIBUTING.md", "docs/coding-standards.md"],
-  "planning": {
-    "claude": { "model": "opus", "effort": "xhigh" },
-    "codex": { "model": "gpt-5.6-sol", "effort": "high" },
-    "reviewRounds": 2,
-    "premiseChallenge": true,
-    "largePlanWarningChars": 100000,
-    "canonicalStrings": [
-      {
-        "wrong": "N/A - no user-facing change",
-        "right": "N/A — no user-facing change",
-        "note": "docs/coding-standards.md pins the em dash in this checkbox."
-      },
-      {
-        "wrong": "ENGINE_VERSION 66 -> 67",
-        "right": "ENGINE_VERSION 66 → 67",
-        "note": "CONTRIBUTING.md pins the arrow glyph; a contract test parses this exact phrasing."
-      }
-    ]
+  "version": 5,
+  "base": "main",
+  "branchPrefix": "tagteam/",
+  "conventionsPath": "CONTRIBUTING.md",
+  "models": {
+    "plan": "opus",
+    "implement": "sonnet",
+    "review": "opus",
+    "codex": "gpt-5.6-sol"
   },
-  "prTrain": {
-    "enabled": true,
-    "base": null,
-    "mode": "github-pr",
-    "prSize": { "guidance": "~400 changed lines", "enforce": false, "repoHardCapLines": 600 },
-    "branchPrefix": "tagteam/",
-    "mergeStrategy": "squash",
-    "pauseOn": ["ui"],
-    "ci": { "blockOnFailure": true, "waitTimeoutSec": 1800 }
-  },
-  "ui": {
-    "gateOnUserVisible": true,
-    "hasUserInterface": true,
-    "conventionPaths": ["docs/ui-conventions.md"],
-    "confirmDecisions": "new-surfaces"
-  },
-  "codegraph": { "enabled": true },
-  "maxReviewLoops": 3,
-  "reviewTiers": {
-    "deep": {
-      "claude": { "model": "opus", "effort": "xhigh" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "high" }
-    },
-    "standard": {
-      "claude": { "model": "opus", "effort": "medium" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "medium" }
-    },
-    "light": {
-      "claude": { "model": "opus", "effort": "low" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "low" }
-    }
+  "effort": {
+    "plan": "high",
+    "implement": "high",
+    "review": "high",
+    "codex": "high"
   },
   "reviewers": {
-    "functionality": { "enabled": true, "tier": "deep" },
-    "security": { "enabled": true, "tier": "deep", "gate": "blocking" },
-    "code-quality": { "enabled": true, "tier": "standard" },
-    "error-handling": { "enabled": true, "tier": "standard" },
-    "test-coverage": { "enabled": true, "tier": "standard" },
-    "concurrency": {
-      "enabled": true,
-      "tier": "deep",
-      "when": {
-        "globs": ["**/*.{go,rs,java,kt,swift}", "**/migrations/**", "**/*.sql", "**/schema*", "**/*repository*", "**/*dao*"],
-        "keywords": ["async", "await", "mutex", "lock", "transaction", "goroutine", "thread", "actor", "@MainActor", "upsert", "migrate"]
-      }
+    "roster": [
+      "correctness",
+      "security",
+      "error-handling",
+      "test-coverage",
+      "performance",
+      "accessibility",
+      "ux",
+      "data-integrity",
+      "conventions",
+      "docs"
+    ],
+    "default": ["correctness", "test-coverage"]
+  },
+  "verify": [
+    {
+      "command": "npm test",
+      "when": { "globs": [], "keywords": [] },
+      "timeoutSec": 900
     },
-    "reliability": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["**/*.{tf,yaml,yml}", "infrastructure/**", "**/*retry*", "**/*queue*", "**/*client*"],
-        "keywords": ["retry", "timeout", "backoff", "circuit", "fallback", "catch", "reconnect"]
-      }
-    },
-    "resiliency": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["infrastructure/**", "**/*.{tf,yaml,yml}", "**/*health*"],
-        "keywords": ["retry", "timeout", "degrade", "failover", "healthcheck", "rollback"]
-      }
-    },
-    "performance": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["**/*.sql", "**/migrations/**", "**/*query*", "**/*index*"],
-        "keywords": ["forEach", "map(", "filter(", "await", "query", "fetch", "SELECT", "JOIN", "O(n"]
-      }
-    },
-    "cost": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["**/*.tf", "infrastructure/**", "**/*prompt*", "**/*.sql"],
-        "keywords": ["forEach", "map(", "await", "query", "fetch", "model:", "max_tokens"]
-      }
-    },
-    "conventions": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["**/CODING_STANDARDS.md", "**/CLAUDE.md", "**/AGENTS.md", "**/.eslintrc*", "eslint.config.*", "**/*.{ts,tsx,js,swift,go}"]
-      }
-    },
-    "documentation": {
-      "enabled": true,
-      "tier": "light",
-      "when": {
-        "globs": ["**/*.md", "**/*.mdx", "**/docs/**", "**/*.{ts,tsx,go,swift}"],
-        "keywords": ["@param", "@returns", "///", "/**", "TODO", "README"]
-      }
-    },
-    "accessibility": {
-      "enabled": true,
-      "tier": "light",
-      "when": {
-        "globs": ["src/components/**", "apps/*/src/**", "**/*.{tsx,jsx,vue,svelte,html,css}", "**/*View.swift", "**/*Screen*"]
-      }
+    {
+      "command": "npm run lint",
+      "when": { "globs": ["**/*.ts", "**/*.tsx", "**/*.js"], "keywords": [] },
+      "timeoutSec": 300
     }
+  ],
+  "ciWaitSec": 1800,
+  "autoMerge": true,
+  "worktree": {
+    "setup": ["npm ci"],
+    "copyUntracked": [],
+    "setupTimeoutSec": 900
   },
-  "specialistPrepass": {
-    "enabled": true,
-    "claude": { "model": "opus", "effort": "medium" }
-  },
-  "complexity": {
-    "simple": {
-      "claude": { "model": "opus", "effort": "low" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "low" }
-    },
-    "medium": {
-      "claude": { "model": "opus", "effort": "medium" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "medium" }
-    },
-    "complex": {
-      "claude": { "model": "opus", "effort": "high" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "high" }
-    }
-  },
-  "implementation": { "engine": "claude", "routes": [], "maxParallel": 1 },
-  "review": {
-    "firstReviewer": "codex",
-    "finalChallenge": { "enabled": true, "tier": "standard" }
-  },
-  "verify": {
-    "runAfter": ["implement", "fix"],
-    "commands": [
-      { "when": { "globs": ["**/*"] }, "command": "npm test", "timeoutSec": 600 }
-    ]
-  },
-  "worktree": { "setupCommands": [], "copyUntracked": [], "setupTimeoutSec": 1800 },
-  "diffExclude": ["**/*.pbxproj", "**/pnpm-lock.yaml", "**/package-lock.json", "**/*.lock", "**/generated/**"],
-  "transport": { "mode": "exec", "relayModel": "sonnet", "relayEffort": "low" },
-  "limits": {
-    "agentCallsPerPr": 60,
-    "maxConcurrentCodex": 3
-  }
+  "reviewExclude": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "**/*.snap",
+    "**/__snapshots__/**"
+  ],
+  "maxConcurrentCodex": 3
 }

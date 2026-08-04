@@ -1,171 +1,221 @@
 ---
-description: Implement, review, verify, publish, and merge an approved plan as an isolated PR train
-argument-hint: '[plan-dir|plan-file] [--resume] [--dry-run] [--provider both|claude|codex] [--reviewers all|dim,dim]'
-allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:ship-pr), Agent(tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-drafter, tagteam:fixer, tagteam:ui-classifier, tagteam:final-challenger), Bash(node *), Bash(git *), Bash(gh *), Bash(codex *), Bash(codegraph *)
+description: Implement, review, and merge an approved plan one spec at a time
+argument-hint: <plan-dir> [--dry-run]
+allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer)
 ---
 
-# Ship an approved plan
+Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
+`${CLAUDE_PLUGIN_ROOT}`, `$R` is the repository root, `$D` is the plan directory,
+`$S` is `$R/.tagteam/ships/<slug>`, `$W` is the worktree.
 
-Raw arguments: `$ARGUMENTS`
+You are the orchestrator. You own every git and `gh` command. Subagents write
+code and findings; you never let a diff or a findings body into your own context.
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` completely before acting. Follow the exact Git protocol there; never substitute a similar command. Every path passed to an agent or workflow is absolute.
+## Preflight
 
-## Resolve and preflight
-
-1. Parse `--resume`, `--dry-run`, `--provider`, and `--reviewers`. Reject a missing provider or reviewer value, providers other than `both`, `claude`, or `codex`, and duplicate provider flags. A named reviewer is force-enabled even if disabled/conditional; `all` forces every dimension.
-   Reject repository/worktree/artifact paths containing control characters or shell metacharacters before forming any Bash command; say that the checkout must be moved to a conventional path. Never try to escape through an ambiguous path.
-2. Require a valid `.tagteam/config.json`. Reject any transport other than `exec`. Exit 3 does not stop a ship: settings written by an earlier plugin are missing answers, not wrong, and a train already in flight must never be wedged by a plugin upgrade. Treat the unanswered interface keys as `hasUserInterface: true`, `conventionPaths: []`, and `confirmDecisions: off`; say so once by rendering `messages.mjs configStaleShip` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, never in your own words, and continue. The user-visible merge gate is unaffected.
-3. An approved plan directory must contain a valid approval marker whose hashes still match. Do not invoke an agent for a bare plan until the run policy in the next step is normalized. A bare plan may be parsed and decomposed with the plan agents in `both` or `claude` mode, then its question batch and approval gate run before shipping. In `codex` mode, stop before model work and direct the user to `/tagteam:plan <goal> --provider codex`; shipping only accepts that approved plan directory, so a raw-plan convenience path never spends substantive Claude tokens.
-4. Require the primary checkout to be clean at ship start. For a new ship, normalize the selected provider (default `both`) with `node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/run-policy.mjs" normalize "<provider>" "<repo>/.tagteam/config.json"` before model work. On resume, run `run-policy.mjs restore "<ship-dir>/run-policy.json" "<repo>/.tagteam/config.json" --state-root "<ship-dir>"`; the saved policy is authoritative, and a supplied `--provider` that differs from it is rejected rather than silently changing providers. The restore inventories every saved JSON artifact below the ship directory itself and validates that all embedded fingerprints match. A missing policy is a hard stop whenever any saved state is policy-bound. Add `--allow-legacy` only when that complete inventory contains recognizable pre-feature recovery state and no policy fingerprint; this performs the one-time validated `both` migration at mode 0600. Show the substantive provider, plumbing model, assurance, and configured Claude/Codex runtimes before model work. In `codex` mode Claude/Haiku performs orchestration only; implementation, candidate UI classification, specialist analysis, review, and repair all route through Codex. In `claude` mode no Codex request is dispatched. Re-check only the selected provider's required CLI availability (`codex --version` for `both` or `codex`), plus `gh auth status` in GitHub mode, origin, and base protection. Snapshot the resolved base name and starting OID. Never infer that protection still exists from init.
-5. Resolve `prTrain.base` once: null means the GitHub default branch, or the current branch in local mode. Create ship ID `<slug>-<UTC timestamp>`.
-6. Copy plan artifacts and the effective config into `.tagteam/ships/<ship-id>/` with mode 0600. Persist the validated policy as `run-policy.json` at mode 0600 and carry its assurance and fingerprint on every PR state record. On resume, restore and reuse that file, including the one-time legacy migration above. Initialize `pr-train-state.json`; persist after every transition and count every model call.
-7. If not resuming, use exactly:
-
-```bash
-git -C "<primary>" fetch origin --prune
-git -C "<primary>" rev-parse "origin/<base>"
-git -C "<primary>" worktree add --detach "<worktree>" "<baseOid>"
-node "${CLAUDE_PLUGIN_ROOT}/scripts/worktree-setup.mjs" --primary "<primary>" --worktree "<worktree>" --config "<ship-config>"
-```
-
-The setup script copies only explicitly configured ignored paths, then runs setup commands, then initializes CodeGraph. Any failure occurs before model work and removes the worktree only with the non-force protocol after recording the failure.
-
-For `--dry-run`, validate manifests, dependency order, reviewer selection inputs, branch names, commands, and paths; print the execution plan; create no worktree/branch/ship, invoke no model, and assert the primary `git status --porcelain` is unchanged.
-
-## Resume reconciliation
-
-Before any mutation, rebuild review state from each `review.md` with `parse-review-artifact.mjs` and reconcile Git/GitHub facts: worktree existence, branch/head OID, origin head, PR state/head, merged commit, base OID, candidate-bound gates, and merge lock owner. Artifact/Git disagreement stops with one recovery action. Never trust conversation memory or merely replay the last step. An `awaiting-approval` state remains waiting until the user answers.
-
-Before re-invoking `ship-pr`, inspect `prs/<id>/workflow-invocation.json` when it exists. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/ship-invocation.mjs" recover "<descriptor>" "<authoritative-result>"`, where the authoritative result is exactly `prs/<id>/workflow-result.json`. A matching, reconciled result completes an invocation that crashed only after its result was durably saved; before proceeding, reconcile that authoritative result into `pr-train-state.json` and require its invocation ID, call count, usage snapshot, task state, and candidate state to be retained exactly. If recovery instead reports `status: "unresolved"`, atomically record its `conservativeAgentCalls` as that PR's call count and `usageAccounting: legacy-incomplete`, render the `agentBudget` catalog message, and stop. Never invoke a model, delete or replace the descriptor, lower that conservative count, or automatically redispatch unresolved work: any number of Claude or plumbing calls up to the saved limit may have completed without returning durable accounting. This fail-closed state requires a human to end or replace the ship rather than pretending the hard call ceiling still has capacity.
-
-Also run `git -C "<worktree>" status --porcelain` for every retained worktree. A workflow status ending in `dirty-worktree`, or any uncommitted edit that is not already reconciled to a recorded candidate, is a hard stop except for the narrow `relay-interrupted-dirty-worktree` checkpoint below: render the `fixFailed` catalog message, show the bounded diff to the human, and do not check out another candidate or begin the next PR. Resume only after the human explicitly reconciles those edits with the recorded candidate.
-
-The raw `relay-interrupted-workspace-unknown` status is never authoritative and must not be persisted. Receipt reconciliation compares the saved before/after workspace checkpoint and converts it to `relay-interrupted` when no bound byte changed, or `relay-interrupted-dirty-worktree` when work changed. If ignored paths, submodules, or missing checkpoint data prevent that determination, the unknown status remains a hard stop.
-
-`relay-interrupted-dirty-worktree` is expected only when workspace-writing Codex work finished but all relay handoffs were lost and reconciliation proved that work changed. This automatic recovery is deliberately limited to exactly one workspace-writing checkpoint; multiple concurrent lost writers require the ordinary human reconciliation stop. Validate that checkpoint with `node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-relay-checkpoint.mjs" "<checkpoint>" "<worktree>" "<artifact>"`. Continue only when the validator binds the current HEAD, porcelain state, full tracked binary diff, and every untracked file/symlink byte to the saved schema-valid artifact and request execution receipt. Do not clean, stage, or alter the worktree; re-invoke the identical workflow task/round so `codex-run.mjs` reuses that artifact, imports its receipt, and then performs the normal candidate commit. Any missing/invalid checkpoint or any byte of later worktree drift remains the ordinary hard stop.
-
-If a clean worktree was removed on a prior stop, recreate it only after reconciliation:
+1. `$D/approved.json` must exist. It does not: tell them to run `/tagteam:plan`.
+2. Validate the config. Exit 3: `/tagteam:init`, then stop.
+3. `codex --version` and `gh auth status`. Either fails: stop and say which.
+4. Reject any path argument containing control characters or shell
+   metacharacters. You build shell strings where a script would have built argv.
+5. Take the ship lock:
+   `node "$P/scripts/merge-lock.mjs" acquire "$R/.tagteam/locks/ship.lock" "<slug>"`.
+   Already held: another ship is running here; stop. Release it when you finish
+   or stop for any reason.
+6. `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"` → the ordered
+   specs with their resolved lenses. Skip every spec whose
+   `$S/<id>/state.json` says `merged`. Announce where you are starting.
+7. Worktree, once for the whole train:
 
 ```bash
-git -C "<primary>" worktree add --detach "<worktree>" "<candidateOid>"
-git -C "<worktree>" switch "<branch>"
+git -C "$R" fetch origin --prune
+BASE=$(git -C "$R" rev-parse origin/<base>)
+git -C "$R" worktree add --detach "$R/.tagteam/worktrees/<slug>" "$BASE"
+node "$P/scripts/worktree-setup.mjs" --primary "$R" --worktree "$W" --config "$R/.tagteam/config.json"
 ```
 
-Confirm the resulting head equals the recorded candidate before continuing.
+## Per spec, in order
 
-## Per-PR state machine
+### 1. Branch
 
-Process dependency-ready PRs only, with no skip-ahead:
-`pending → implementing → in-review → verifying → awaiting-approval → merged | failed`.
-
-Before a PR:
+Re-fetch, re-read `origin/<base>` — earlier specs have merged into it — then:
 
 ```bash
-git -C "<worktree>" fetch origin --prune
-git -C "<worktree>" checkout --detach "<baseOid>"
-git -C "<worktree>" switch -c "<branchPrefix><ship-id>/<pr.id>"
+git -C "$W" checkout --detach "$BASE"
+git -C "$W" switch -c "<branchPrefix><slug>/<spec-id>"
+node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <userVisible> <lens,lens>
+node "$P/scripts/gates.mjs" state "$S/<id>/state.json" implementing
 ```
 
-Immediately before every `ship-pr` invocation, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/ship-invocation.mjs" begin "<ship-dir>/prs/<id>/workflow-invocation.json" "<policy-fingerprint>" "<pr-id>" "<persisted-agent-calls>" "<agentCallsPerPr>"`. This exclusively serializes the full read/validate/publish transition, then atomically creates a mode-0600 in-flight descriptor before any model can run; concurrent begins and unresolved work are rejected. A process loss inside that transition leaves a durable `.begin` claim that recovery treats as unresolved rather than guessing no work started. After a completed invocation, the helper also requires the next starting call count, PR ID, policy fingerprint, and maximum call limit to continue the completed descriptor exactly, and carries forward the validated cumulative usage and receipt baseline; spent capacity or provider evidence cannot be reset by presenting stale state. Pass its exact `invocationId` to `Workflow({name:"tagteam:ship-pr", args:{...}})` along with the effective config, validated `runPolicy`, config path, PR, its manifest tasks, PR base OID, ship/plugin/worktree/primary paths, diff-exclude JSON path, forced reviewers, persisted call count, persisted `usage`, persisted `usageReceipts`, and persisted `usageAccounting`. A pre-feature PR with prior calls but no complete provider-usage snapshot, including `plumbingCallsByModel`, uses `legacy-incomplete`; never label its unknown historical split exact.
+### 2. Implement
 
-Write the raw return to a mode-0600 temporary result file and require its `invocationId` to match the descriptor. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output as the workflow result. Reconciliation reads the bridge's per-invocation receipt journals for every Codex-bearing result, including successful handoffs and invalid-schema attempts; relay-transcribed IDs are never authoritative accounting. A missing receipt for a confirmed bridge handoff, or a mismatched or unreadable receipt, is a hard stop. When every relay reply was lost and its request-bound unconfirmed dispatch has no matching journal, reconciliation preserves all known counters as `legacy-incomplete` instead of discarding the snapshot or claiming an exact Codex total; stale evidence from another request at the same artifact path never completes or classifies the current recovery. Never persist pending accounting as authoritative state.
+One `tagteam:implementer` at `models.implement` / `effort.implement`. Give it the
+spec **path**, the worktree path, and `conventionsPath` if set. It reads the spec
+itself; you do not.
 
-Atomically persist the reconciled result first as `prs/<id>/workflow-result.json`, including the cumulative usage fields and model-keyed plumbing counts, and then into `pr-train-state.json`. Only after both writes succeed, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/ship-invocation.mjs" complete "<descriptor>" "<ship-dir>/prs/<id>/workflow-result.json"`. Completion uses the same exclusive transition claim as begin and re-reads the descriptor while holding it, so a delayed completion cannot overwrite a successor invocation. It validates the invocation ID, policy fields, status and recovery-state containers, reconciled accounting, bounded cumulative call count, conservation against the Claude and model-keyed plumbing counts, and exact Codex receipt cardinality when accounting claims to be complete. Every successor's known provider-call delta must equal its aggregate call delta even when older history is `legacy-incomplete`; historical uncertainty may persist but never grow. Missing or contradictory dispatch evidence leaves the invocation active and fail-closed. A crash before that point is handled only by the resume recovery rule above; it never silently restores call capacity. The workflow owns implementation, candidate commits, snapshots, CodeGraph sync, UI classification, dimension selection, alternating review/fix, artifact parsing, and local verification.
-
-Persist every reconciled workflow result before branching on its status, including `relay-interrupted` and `relay-interrupted-dirty-worktree`. Their returned `agentCalls`, `usage` (including `plumbingCallsByModel`), relay retries, receipts, checkpoint paths, `taskResults`, and `taskAttempts` are authoritative interruption state and must be passed back on resume; never reconstruct or reset them from conversation memory. A resumed implementation passes those task results so validated completed tasks satisfy dependencies and are not dispatched again, and passes `taskAttempts` so an interrupted retry re-enters its exact attempt-specific request rather than replaying attempt 1.
-
-When the reconciled status is `ship-interrupted`, render `messages.mjs fixFailed` with the resume command and saved result artifact, show the result's message as supporting detail, and stop. Do not publish, check out another candidate, or retry inside the same invocation.
-
-For revalidation of an already committed candidate, also pass `existingCandidateOid`, prior `taskResults`, and `roundOffset` from the parsed append-only artifact; this skips implementation and appends new global round numbers. For a CI or human-requested repair, additionally pass structured `repairFindings` and `repairEngine`; the workflow fixes, commits a new candidate, then runs every gate. Never re-run implementation merely to revalidate a rebase or gate repair.
-
-Any new candidate OID invalidates every prior review, verification, UI, CI, and human-approval record. Never copy a gate record across OIDs.
-
-The result also carries `finalChallenge`, the last opinion on a candidate every dimension reviewer cleared. `ran: false` names why in `reason`: `not-reached` where the run stopped before the review loop ended, `not-clean` where the loop ran and never got there, `disabled` where the repository switched it off, and `agent-call-budget`, `unknown-tier`, or `no-result` where it should have run and did not — those three are gate failures, because a gate that did not run is never a gate that passed, and on a candidate every other check has already cleared there is no other evidence to fall back on. When it ran and returned findings, they are in the ledger as `needs-human` and the run is at the gates below. Show each one's `failure_path` and `recommendation` with its `file` and line range: it is the only finding a person is asked to judge that no reviewer raised, so it arrives without a dimension charter to explain it. Never repair one on your own initiative — `Send it back for changes` is how a person asks for that, and it creates a new candidate that re-arms every gate including this one.
-
-Use the CLI in `${CLAUDE_PLUGIN_ROOT}/scripts/lib/gates.mjs` for state transitions, candidate invalidation, call-capacity checks, and final gate evaluation (`transition`, `bind`, `record`, `capacity`, `evaluate`). Pass `run-policy.json` to `bind` and `evaluate`, and its fingerprint to `record`; persist the returned JSON. Do not reproduce that math in prose or model judgment.
-
-## Publish and CI
-
-When the workflow returns a merge-eligible candidate:
-
-1. Derive the PR body under `prompts/pr-body-rules.md` from the actual candidate diff and recorded evidence. Include both user-visible answers/reasons. Write it in the ship directory, never the worktree.
-   Normalize the title to at most 70 characters from `[A-Za-z0-9 ._:-]`; reject or replace every shell metacharacter before it reaches a Bash command.
-2. Publish exactly:
+### 3. Commit and snapshot
 
 ```bash
-git -C "<worktree>" push -u origin "<branch>"
-gh pr create --base "<base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
+git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "feat: <spec title>"
+OID=$(git -C "$W" rev-parse HEAD)
+node "$P/scripts/snapshot-candidate.mjs" --primary "$R" --worktree "$W" --base "$BASE" \
+  --candidate "$OID" --out-dir "$S/<id>/rounds/<n>" --config "$R/.tagteam/config.json"
+node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/rounds/<n>/changed-paths.json"
 ```
 
-3. Wait a short registration grace period, then poll only `gh pr checks <pr> --json name,state,bucket,link,completedAt`. Persist every observation to `prs/<id>/ci/<candidateOid>.json`.
-4. Classify each saved observation by running `node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/ci-state.mjs" "<observation.json>"`. Its coded precedence is: any `FAILURE`, `TIMED_OUT`, or `ACTION_REQUIRED` is failed; else any pending/queued/in-progress is running; else any success is passed; else empty/all skipped-neutral-cancelled is not-run. Pending at timeout becomes not-run. `CANCELLED` is never passed.
-5. A real failure gets one scoped fix using captured `gh run view <run-id> --log-failed`. If logs cannot be obtained, wait for a human. A CI repair creates a new candidate and re-runs the entire workflow gate set, not just CI. A second real failure waits for a human.
-6. Passed is `ci: passed`. Everything else is `ci: not-run` with its exact reason and proceeds on local verification.
-7. Update the body with `gh pr edit <pr> --body-file "<body-file>"`.
+`rev-parse HEAD` here is the one place it is correct: you are naming the commit
+you just made, before anything is bound to it. Everywhere after this, the
+reviewed commit comes from `state.json`.
 
-If CI did not run and local verification is `not-applicable`, there is no executable evidence and the PR always waits for a human.
+The snapshot writes `review.diff`, `changed-paths.json`, and `candidate.json`
+into the round directory, and those files are immutable — re-snapshotting the
+same round with different bytes is refused rather than silently overwritten, so
+use a fresh `<n>` after the fix round.
 
-## Gates
+Never skip `guard-staged.mjs`, and never split that chain. It is the only thing
+between a copied `.env` and a push.
 
-Wait for the user when any of these is true: workflow gate failures, including a final challenge that found something or did not run; local verification failure; real CI failure; either user-visible judgment is yes/unknown; the judgments disagree; `.github/workflows/**` changed; `pauseOn` contains `every-merge`; no executable evidence; base is unprotected; branch protection requires an external approval; agent-call limit reached.
+The snapshot refuses on a dirty worktree, an empty diff, or a dirty primary
+checkout. Each of those is real; report it and move to the next spec.
 
-Render recurring gate and failure text only through the tested catalog:
+### 4. Verify
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/messages.mjs" "<reviewFailed|userVisible|singleProvider|noEvidence|unprotectedBase|mergeFailed|verificationFailed|ciFailed|agentBudget|fixFailed>" --ship-id "<ship-id>" --pr "<pr>" --branch "<branch>" --sha "<short-sha>" --command "<recovery-command>" --artifact "<artifact>"
+node "$P/scripts/verify-run.mjs" --worktree "$W" --config "$R/.tagteam/config.json" \
+  --candidate "$S/<id>/rounds/<n>/candidate.json" --base "$BASE" --candidate-oid "$OID" \
+  --out-dir "$S/<id>/rounds/<n>/verify" --out "$S/<id>/rounds/<n>/verify.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" verify "$OID" "$S/<id>/rounds/<n>/verify.json"
 ```
 
-For `userVisible`, also pass `--plan-answer "<yes|no>" --ship-answer "<yes|no|unknown>"`. Use the emitted text unchanged with `node "${CLAUDE_PLUGIN_ROOT}/scripts/notify.mjs" "Tagteam needs your review" "<emitted text>"`, persist `awaiting-approval`, then ask one question:
+`not-applicable` means nothing matched. Not a pass — it is why a spec with no
+executable evidence waits for a person.
 
-- `Merge it` — record approval against the current candidate only.
-- `Send it back for changes` — ask for bounded feedback, represent it as one `human`/`major` finding, run one fix with the current fix engine, commit, then re-run all gates.
-- `Stop here` — halt the train with branch, PR, and artifacts intact; after confirming the worktree is clean, remove that worktree with the normal non-force command. Resume recreates it from the recorded branch and candidate.
+### 5. Review
 
-Do not free-write a recurring gate or failure message. The catalog guarantees four parts: what happened, consequence, one next action, and a details line with ship ID, PR, branch, short SHA, command, and artifact path.
+`gates.mjs state ... reviewing`, then dispatch **in a single message**, one per
+resolved lens plus Codex:
 
-An unprotected base is not overridable inside tagteam. For that case do not offer `Merge it`; leave the reviewed PR ready for the user to merge on GitHub (or stop), and on resume confirm the external merge before advancing. Human approval can satisfy ordinary review/evidence/UI gates, but it cannot authorize tagteam to race an unprotected base.
+- `tagteam:reviewer` at `models.review` / `effort.review` per lens, each given
+  the lens name, `$S/<id>/rounds/<n>/review.diff`, the spec path, the candidate OID, and
+  `$S/<id>/rounds/<n>/findings/<lens>.json` to write.
+- Codex via `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
+  `--fence SPEC=<spec path> --fence DIFF=$S/<id>/rounds/<n>/review.diff`, schema
+  `findings.schema.json`, out `$S/<id>/rounds/<n>/findings/codex.json`.
 
-## Merge
+The adversary does **not** run here. It runs in step 7, on the fixed diff, where
+nothing else is looking with fresh eyes.
 
-Immediately before merge, acquire the checkout-local lock:
+Then:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lock.mjs" acquire "<primary>/.tagteam/locks/merge.lock" "<ship-id>"
+node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/<n>/findings" --candidate <oid> \
+  --expect <lens,lens,codex> --out "$S/<id>/review.json"
 ```
 
-Never hold it during review, CI, rebase, or a human wait. Re-fetch; confirm `origin/<base>` still equals the candidate's reviewed base and the PR head still equals the candidate OID.
-If the short merge critical section approaches two minutes, refresh the lease with `merge-lock.mjs heartbeat <lock> <ship-id>`; otherwise status will correctly offer stale-owner recovery.
+Its stdout is your view of the review — a line per finding. Do not open the
+findings files. `incomplete` means a lens produced no usable evidence; that is
+not clean, and it never merges.
 
-If base moved, release the lock first, then:
+### 6. Fix, once
+
+Nothing open and nothing missing: skip to step 8.
+
+Otherwise `gates.mjs state ... fixing` and dispatch one `tagteam:fixer` at
+`models.implement`, given `$S/<id>/review.json`, the worktree, and
+`$S/<id>/fix-report.json` to write. Then commit and re-snapshot exactly as in
+step 3, and `gates.mjs bind` the new commit — which clears every gate, because
+they were about the old one.
+
+A missing entry in the fix report ends this spec. Say which findings it failed to
+account for.
+
+### 7. Re-check
+
+Re-run verify against the new commit. Then, in one message:
+
+- Each lens that raised a finding, re-dispatched with `prompts/recheck.md`, its
+  own findings, the new diff, and `$S/<id>/rounds/<n>/recheck/<lens>.json` to write. Codex
+  uses `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
+- `tagteam:adversary` at `models.review`, pointed at `prompts/code-adversary.md`,
+  given the spec and the new diff, writing `$S/<id>/rounds/<n>/findings/adversary.json`.
 
 ```bash
-git -C "<worktree>" fetch origin --prune
-git -C "<worktree>" rebase "origin/<base>"
+node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" --dir "$S/<id>/rounds/<n>/recheck" \
+  --candidate <newOid> --out "$S/<id>/review.json"
 ```
 
-On conflict run only `git -C "<worktree>" rebase --abort` and wait for the human. On success record the new candidate, push only with `--force-with-lease=<branch>:<lastPushedOid>`, invalidate all gates, and run the complete workflow/CI/approval set again.
+Fold the adversary's blocking and major findings in as open. There is no second
+fix round: anything still open stops this spec, and "the fixer says fixed, the
+reviewer says not" is a terminal state, not another attempt.
 
-If base is unchanged and protected:
+`gates.mjs record ... review <oid> "$S/<id>/review.json"`.
+
+### 8. Publish
 
 ```bash
-gh pr merge "<pr>" --squash --match-head-commit "<candidateOid>"
-gh pr view "<pr>" --json state,mergedAt,headRefOid,mergeCommit
-git -C "<worktree>" fetch origin --prune
-git -C "<worktree>" rev-list --parents -n1 "<mergeCommit>"
+git -C "$W" push -u origin "<branch>"
+gh pr create --base <base> --head <branch> --title "<title>" --body-file "$S/<id>/pr-body.md"
 ```
 
-Trust only the reread state: it must be MERGED at the candidate, and the merge commit's first parent must equal the reviewed base. Otherwise halt the whole train. Release the lock immediately.
-
-After confirmed merge only:
+Title: ≤70 characters of `[A-Za-z0-9 ._:-]`. Body: what the spec delivers, what
+verification ran, what the review found, and any minor findings left open. Write
+it in `$S`, never in the worktree.
 
 ```bash
-git -C "<worktree>" checkout --detach "<newBaseOid>"
-git -C "<worktree>" branch -D "<branch>"
-git -C "<primary>" push origin --delete "<branch>"
+node "$P/scripts/gates.mjs" pr "$S/<id>/state.json" <number> <url> "$OID"
+node "$P/scripts/gates.mjs" state "$S/<id>/state.json" publishing
 ```
 
-Local-branch mode uses the detached squash commit and `update-ref refs/heads/<base> <newBaseOid> <baseOid>` compare-and-swap protocol from `SKILL.md`; no CI.
+`gates.mjs pr` refuses a head that is not the current candidate, so a pull
+request opened against the pre-fix commit is caught here rather than at merge.
 
-After the train, offer the collected minor/nit tail. Accepted items become a fresh cleanup PR from the final base and traverse this entire pipeline. Never edit a merged branch.
+Then CI, if `ciWaitSec` is not 0:
 
-Finally run `render-report.mjs`, remove the worktree with `git -C "<primary>" worktree remove "<worktree>"` (never force), and report merged PRs, any deferred findings, CI/local evidence, user-visible determinations, and the absolute `report.md` path.
+```bash
+node "$P/scripts/ci-wait.mjs" --repo "$R" --pr <n> --wait-sec <ciWaitSec> --out "$S/<id>/ci.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" ci <oid> "$S/<id>/ci.json"
+```
+
+A red CI gets one repair: dispatch the fixer with the failing output, commit,
+re-snapshot, `bind`, re-verify, re-review the lenses that had findings, push.
+A second failure stops the spec.
+
+### 9. Merge or stop
+
+```bash
+node "$P/scripts/gates.mjs" evaluate "$S/<id>/state.json" "$R/.tagteam/config.json"
+```
+
+`ready`: `node "$P/scripts/merge.mjs" "$S/<id>/state.json" --repo "$R"`, then
+`gates.mjs state ... merged`, delete the branch, and say one line about what
+merged.
+
+Not ready: `gates.mjs state ... awaiting-approval`,
+`node "$P/scripts/notify.mjs" "<slug> <id> needs you" "<the reasons>"`, then show
+the reasons, the PR link, and the open findings, and ask Approve and merge /
+Leave it open and continue / Stop the train.
+
+Approved: record the human gate against the current OID and merge. Merge refused
+for any reason — a moved base, a protection rule, a failing check — stop and
+report it. Do not rebase and merge something nobody looked at.
+
+### 10. Next
+
+Re-fetch, re-read `origin/<base>`, and continue.
+
+**Stop between specs when your context is getting tight.** Say which specs
+merged, which is next, and that `/tagteam:ship <plan-dir>` can be run again — it
+reads `state.json` and resumes. Stopping early is free; running out mid-merge is
+not.
+
+## Teardown
+
+Release the ship lock. `git -C "$R" worktree remove "$W"` — never `--force`; a
+worktree that will not come out is a signal. Summarise: what merged, what waits,
+what stopped and why.
+
+## Discipline
+
+Never read `review.diff` or a findings file. Never re-derive the reviewed commit
+with `git rev-parse HEAD` — after the fix round that is a different commit, and
+`state.json` holds the right one. Never merge without `merge.mjs`.

@@ -29,7 +29,6 @@
     },
     "diffBytes": { "type": "integer", "minimum": 0 },
     "fileCount": { "type": "integer", "minimum": 0 },
-    "treeClean": { "type": "string" },
-    "createdAt": { "type": "string" }
+    "treeClean": { "type": "string" }
   }
 }

@@ -1,146 +1,49 @@
 {
-  "version": 4,
-  "policyPaths": [],
-  "planning": {
-    "claude": { "model": "opus", "effort": "high" },
-    "codex": { "model": "gpt-5.6-sol", "effort": "high" },
-    "reviewRounds": 3,
-    "premiseChallenge": true,
-    "planBudget": { "targetChars": 60000, "hardCeilingChars": 80000 },
-    "questionsPerRound": 4,
-    "canonicalStrings": []
+  "version": 5,
+  "base": "main",
+  "branchPrefix": "tagteam/",
+  "conventionsPath": null,
+  "models": {
+    "plan": "opus",
+    "implement": "sonnet",
+    "review": "opus",
+    "codex": "gpt-5.6-sol"
   },
-  "prTrain": {
-    "enabled": true,
-    "base": "main",
-    "mode": "github-pr",
-    "prSize": { "guidance": "~400 changed lines", "enforce": false },
-    "branchPrefix": "tagteam/",
-    "mergeStrategy": "squash",
-    "pauseOn": ["ui"],
-    "ci": { "blockOnFailure": true, "waitTimeoutSec": 1800 }
-  },
-  "ui": {
-    "gateOnUserVisible": true,
-    "hasUserInterface": true,
-    "conventionPaths": [
-      "scripts/lib/messages.mjs",
-      "skills/tagteam/SKILL.md",
-      "commands/plan.md"
-    ],
-    "confirmDecisions": "new-surfaces"
-  },
-  "codegraph": { "enabled": true },
-  "maxReviewLoops": 3,
-  "reviewTiers": {
-    "deep": {
-      "claude": { "model": "opus", "effort": "xhigh" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "high" }
-    },
-    "standard": {
-      "claude": { "model": "opus", "effort": "medium" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "medium" }
-    },
-    "light": {
-      "claude": { "model": "opus", "effort": "low" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "low" }
-    }
+  "effort": {
+    "plan": "high",
+    "implement": "high",
+    "review": "high",
+    "codex": "high"
   },
   "reviewers": {
-    "functionality": { "enabled": true, "tier": "deep" },
-    "security": { "enabled": true, "tier": "deep", "gate": "blocking" },
-    "code-quality": { "enabled": true, "tier": "standard" },
-    "error-handling": { "enabled": true, "tier": "standard" },
-    "test-coverage": { "enabled": true, "tier": "standard" },
-    "reliability": {
-      "enabled": true,
-      "tier": "deep",
-      "when": {
-        "globs": ["scripts/**", "workflows/**", "commands/**"],
-        "keywords": ["resume", "retry", "timeout", "backoff", "receipt", "checksum", "artifact", "passId", "continuation"]
-      }
-    },
-    "performance": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["scripts/**", "workflows/**"],
-        "keywords": ["forEach", "map(", "filter(", "await", "split(", "RegExp", "O(n"]
-      }
-    },
-    "cost": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["prompts/**", "workflows/**", "agents/**"],
-        "keywords": ["model:", "effort", "agent(", "parallel(", "pipeline(", "planAgent", "codexReasoning"]
-      }
-    },
-    "conventions": {
-      "enabled": true,
-      "tier": "standard",
-      "when": {
-        "globs": ["**/*.mjs", "**/*.js", "**/*.md"]
-      }
-    },
-    "documentation": {
-      "enabled": true,
-      "tier": "light",
-      "when": {
-        "globs": ["**/*.md", "skills/**", "commands/**", "agents/**"],
-        "keywords": ["SKILL.md", "README", "TODO"]
-      }
-    },
-    "accessibility": {
-      "enabled": true,
-      "tier": "light",
-      "when": {
-        "globs": ["scripts/lib/messages.mjs", "commands/**"]
-      }
-    },
-    "resume-artifact-safety": {
-      "enabled": true,
-      "tier": "deep",
-      "focus": "Judge whether this change keeps tagteam's durable-state contract intact. Check: checksum and receipt binding between what a step returned and what is actually on disk; Codex artifact reuse keyed on request identity, and whether a prompt-shape change correctly invalidates it; resume and continuation seeds, including which artifact outranks which and what a pass may trust after an interruption; pass-boundary state such as passId advancement, usage accounting, and policy fingerprints; and format or schema changes that would strand a plan or ship saved by an earlier version. Report as blocking anything that lets an interrupted run resume from state nothing cleared, or that silently reuses an artifact produced for a different request.",
-      "when": {
-        "globs": ["scripts/**", "workflows/**", "commands/**", "schemas/**"]
-      }
+    "roster": [
+      "correctness",
+      "security",
+      "error-handling",
+      "test-coverage",
+      "performance",
+      "accessibility",
+      "ux",
+      "data-integrity",
+      "conventions",
+      "docs"
+    ],
+    "default": ["correctness", "test-coverage"]
+  },
+  "verify": [
+    {
+      "command": "npm test",
+      "when": { "globs": [], "keywords": [] },
+      "timeoutSec": 600
     }
+  ],
+  "ciWaitSec": 1800,
+  "autoMerge": true,
+  "worktree": {
+    "setup": [],
+    "copyUntracked": [],
+    "setupTimeoutSec": 300
   },
-  "specialistPrepass": {
-    "enabled": true,
-    "claude": { "model": "opus", "effort": "medium" }
-  },
-  "complexity": {
-    "simple": {
-      "claude": { "model": "opus", "effort": "medium" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "low" }
-    },
-    "medium": {
-      "claude": { "model": "opus", "effort": "high" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "medium" }
-    },
-    "complex": {
-      "claude": { "model": "opus", "effort": "xhigh" },
-      "codex": { "model": "gpt-5.6-sol", "effort": "high" }
-    }
-  },
-  "implementation": { "engine": "claude", "routes": [], "maxParallel": 1 },
-  "review": {
-    "firstReviewer": "codex",
-    "finalChallenge": { "enabled": true, "tier": "standard" }
-  },
-  "verify": {
-    "runAfter": ["implement", "fix"],
-    "commands": [
-      { "when": { "globs": ["**/*"] }, "command": "npm run check", "timeoutSec": 600 }
-    ]
-  },
-  "worktree": { "setupCommands": [], "copyUntracked": [], "setupTimeoutSec": 1800 },
-  "diffExclude": ["**/package-lock.json", "**/*.lock"],
-  "transport": { "mode": "exec", "relayModel": "sonnet", "relayEffort": "low" },
-  "limits": {
-    "agentCallsPerPr": 60,
-    "maxConcurrentCodex": 3
-  }
+  "reviewExclude": ["package-lock.json"],
+  "maxConcurrentCodex": 3
 }

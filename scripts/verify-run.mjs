@@ -63,8 +63,12 @@ async function main() {
     return pairs;
   }, []));
   try {
-    if (!args.base || !args["candidate-oid"] || !args["candidate-hash"]) {
-      throw new Error("--base, --candidate-oid, and --candidate-hash are required");
+    // --candidate-hash is optional: it existed to catch a relay model that
+    // altered the snapshot between writing and verifying, and nothing relays
+    // now. The OID binding is what still matters — verification proves a
+    // specific commit works, not "whatever is on disk".
+    if (!args.base || !args["candidate-oid"]) {
+      throw new Error("--base and --candidate-oid are required");
     }
     const candidate = validateCandidateSnapshot(args.candidate, {
       baseOid: args.base,

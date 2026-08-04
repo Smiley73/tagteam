@@ -1,25 +1,13 @@
 ---
-description: Show all tagteam plans, active ships, completed ships, and pending approvals
-argument-hint: ''
-allowed-tools: Read, Glob, Bash(node *)
+description: Show plans, ships, and anything waiting on you
+allowed-tools: Read, Bash
 ---
 
-# Tagteam status
+Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/status.mjs" "$(git rev-parse --show-toplevel)"`
+and render it as a short table: each plan with its stage and spec count, each
+ship with how many specs have merged out of how many, and anything waiting.
 
-Run:
+For each spec waiting, give the pull request link and one line on why it stopped
+— read `state.json` for the reason rather than guessing.
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/status.mjs" "<repository-root>"
-```
-
-Render every returned plan and ship, not just the newest. Use plain English:
-
-- approved plans say they are ready to ship;
-- unapproved plans say they are drafts;
-- active ships name the current PR and what is happening;
-- waiting ships say what the user needs to review and include PR number, branch, short commit, and artifact path;
-- completed ships link to `report.md`.
-
-If a merge lock exists, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lock.mjs" status "<repo>/.tagteam/locks/merge.lock"`. Report a live owner or a stale owner; never take over or delete a stale lock from status.
-
-Do not mutate files, resume work, invoke a workflow, contact GitHub, or cross an approval gate.
+Read-only. Change nothing, merge nothing, and do not offer to.

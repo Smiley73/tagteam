@@ -10,8 +10,8 @@
   "plugins": [
     {
       "name": "tagteam",
-      "description": "Cross-engine plan, implement, review, and merge workflows for Claude Code and Codex.",
-      "version": "0.5.18",
+      "description": "Plan, implement, review, and merge substantial changes with Claude and Codex together.",
+      "version": "0.6.0",
       "author": {
         "name": "tagteam contributors"
       },

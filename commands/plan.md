@@ -1,196 +1,149 @@
 ---
-description: Forge and approve a provider-aware implementation plan and PR train
-argument-hint: '<goal> [--resume <slug>] [--provider both|claude|codex] [--model opus|fable] [--effort medium|high|xhigh|max] [--codex-effort medium|high|xhigh]'
-allowed-tools: Read, Write, Glob, Grep, AskUserQuestion, Workflow, Workflow(tagteam:plan-forge), Agent(tagteam:plan-drafter, tagteam:plan-parser, tagteam:pr-decomposer, tagteam:plan-reviewer, tagteam:plan-interaction-reviewer, tagteam:premise-challenger, tagteam:scribe, tagteam:prompt-builder, tagteam:codex-runner), Bash(node *), Bash(git *)
+description: Turn a goal into a reviewed plan and a set of implementable spec files
+argument-hint: <goal, however vague> [--resume <slug>]
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(Explore), Agent(tagteam:plan-drafter), Agent(tagteam:plan-reviewer), Agent(tagteam:adversary), Agent(tagteam:spec-writer)
 ---
 
-# Forge a plan
+Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
+`${CLAUDE_PLUGIN_ROOT}`, `$R` is the repository root, `$D` is
+`$R/.tagteam/plans/<slug>`.
 
-Raw arguments: `$ARGUMENTS`
+You are the orchestrator. You run the scripts and hold the sequence; subagents do
+the model work and write their own files.
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md`. Parse `--resume <slug>` first; with it the goal comes from the saved plan directory. Otherwise require a non-empty goal and a valid `.tagteam/config.json`. Validate it with `validate-json.mjs --repo`; exit 3 means the settings predate this plugin's interface questions, and planning is exactly where those answers matter. Render `messages.mjs configStale` with `--command "/tagteam:init --upgrade"` and `--artifact "<repo>/.tagteam/config.json"`, and stop without drafting. Never guess the missing answers. Parse `--provider` and the three optional planning overrides; reject missing values, providers other than `both`, `claude`, or `codex`, and low planning effort. Use model overrides only for this invocation.
+## Before anything
 
-Before model work on a new plan, normalize the selected provider (default `both`) with `node "${CLAUDE_PLUGIN_ROOT}/scripts/lib/run-policy.mjs" normalize "<provider>" "<repo>/.tagteam/config.json"`. Persist its exact JSON at `reviews/<passId>-run-policy.json` with mode 0600 and pass it as `runPolicy`. A single-provider policy deliberately uses Haiku for plumbing and reports `single-provider` assurance. On resume, run `run-policy.mjs restore` on the latest pass policy path with `--state-root "<plan-dir>"`; the saved policy is authoritative. Reject `--provider` on resume if it differs from that saved provider rather than silently changing the run. The restore inventories every saved JSON artifact below that root itself and validates that all embedded policy fingerprints match. A missing policy is a hard stop whenever any saved state is policy-bound. Only when the complete inventory contains recognizable pre-feature recovery state and no policy fingerprint may the pass be migrated by adding `--allow-legacy`; that atomically creates the default `both` policy at mode 0600. Never derive policy from conversation memory. Show substantive provider, plumbing model, assurance, and resulting Claude/Codex model effort before starting. In `codex` mode Claude/Haiku performs orchestration only; every substantive planning step goes through the Codex bridge. In `claude` mode no Codex request is dispatched.
-Reject repository and artifact paths containing control characters or shell metacharacters before forming Bash commands.
+1. `git -C "$R" rev-parse --show-toplevel`. Not a repository: say so and stop.
+2. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
+   `/tagteam:init` and stop. No config at all: same.
+3. `codex --version`. It fails: stop and say Codex is required.
+4. `--resume <slug>`: read `$D/goal.md` and whatever else exists, and pick up at
+   the first step below whose output is missing. Otherwise derive a slug from the
+   goal — lowercase, hyphenated, three or four words — and create `$D/work/`.
 
-Derive a short lowercase plan slug with only `[a-z0-9-]`, create `.tagteam/plans/<slug>/drafts` and `reviews`, and pass absolute paths to the workflow. Planning may write draft/review artifacts there, but no approved `plan.md`, `manifest.json`, or `pr-train.json` exists until explicit approval.
+Seven steps. There is no loop anywhere in them.
 
-Write `goal.json` before invoking the workflow, on every invocation including resumes and continuations. The forge builds each cross-engine request from files on disk and reads the goal from that one, so a missing `goal.json` stops the pass before anything is sent.
+## 1 — Orient
 
-Invoke:
+Dispatch one `Explore` subagent: how the areas this goal touches are built today,
+which modules own them, what patterns the repository already uses, and where the
+tests for them live. Ask for the conclusion, not the file contents.
 
-```text
-Workflow({
-  name: "tagteam:plan-forge",
-  args: {
-    goal,
-    worktree: <repo>,
-    pluginRoot: <absolute plugin root>,
-    planDir: <absolute plan dir>,
-    configPath: <absolute validated repo/.tagteam/config.json>,
-    passId: <"pass-1", then "pass-2", ... one per forge invocation>,
-    config: <merged config with run overrides>,
-    runPolicy: <validated run policy>,
-    premisesFile: <absolute mode-0600 drafts/<passId>-premises.json, once the human has confirmed them; omit on the first invocation of a new plan>,
-    priorGatingIssueCount: <the previous pass's gatingIssueCount, on every repair continuation>,
-    seedPlan: { path: <absolute source plan path> } for every resume or continuation; `seedPlanPath` remains accepted for recovery descriptors and older callers; never pass inline plan text,
-    decisionsFile: <absolute mode-0600 JSON path whenever decisions are passed>,
-    uiDecisionsFile: <absolute readable sidecar or normalized mode-0600 [] file on Codex resume/continuation>,
-    continuationReceiptRequired: <true only when resuming a same-pass integrated plan whose invocation descriptor says kind "continuation">,
-    agentCalls: <latest persisted cumulative planning call count, or 0 for a new plan>,
-    usage: <latest persisted usage, or zeroes for a new plan>,
-    usageReceipts: <latest persisted Codex execution receipts, or []>,
-    usageAccounting: <complete|legacy-incomplete from the latest snapshot>
-  }
-})
+Read `conventionsPath` if the config names one. Read nothing else yourself —
+what you load here you carry through the whole interview.
+
+## 2 — Interview
+
+This is the part that decides whether the rest is worth anything. The goal you
+were handed is allowed to be vague; your job is to make the outcome concrete
+without assuming any of it.
+
+Ask in batches of at most four questions via `AskUserQuestion`. Multiple choice
+wherever real options exist, with the trade-off stated in each description. Free
+text only where options would be invented. Put a sketch in `preview` for anything
+about an interface.
+
+**Product and interface decisions are always theirs.** Never decide what
+something looks like, what it is called, or how a person moves through it.
+
+For a wide set — interface choices, scope boundaries — scan then drill: one
+multi-select over chunks of three to find which ones they have opinions about,
+then a single-select on each of those. That is the difference between six
+questions and thirty.
+
+What to keep asking until you have it: what "done" means observably; the failure
+they would consider unacceptable; what is explicitly *not* in scope; every
+interface decision; and the technical choices where two reasonable answers lead
+to materially different work.
+
+**When they have no preference, decide it yourself.** Say so, choose, and record
+the reasoning and the rejected alternatives in `goal.md`. Never leave a hole and
+never ask twice.
+
+Append answers to `$D/work/answers.json` as each batch lands. Stop when nothing
+material is ambiguous, or the moment they say go.
+
+## 3 — Goal gate
+
+Write `$D/goal.md`:
+
+```markdown
+# Goal: <one line>
+
+## What done looks like
+## Not done if
+## Decisions settled
+D1. <what was decided> — <why, in one line>. Rejected: <what, and why not>.
+## Out of scope
 ```
 
-Give every forge invocation its own `passId` so a reused Codex artifact can never be a check of a plan that has since been revised. Reuse a `passId` only when resuming that same pass.
+Show them the path and the *Decisions settled* list. Say they can edit the file
+directly and that everything downstream reads it from disk. Wait for them.
 
-Before invoking the workflow, atomically persist `reviews/<passId>-invocation.json` at mode 0600. It binds `version: 1`, the policy fingerprint, pass ID, and `kind: "fresh"|"continuation"`; for a continuation it also records the absolute source `seedPlanPath`, source-pass `decisionsFile`, exact source `questionsFile`, and normalized `uiDecisionsFile`. This small descriptor is written before any model work and never contains plan text. It exists so an invocation interrupted before draft promotion can be recovered without guessing how that pass was invoked; when Codex completed, it also preserves immutable artifact reuse.
+## 4 — Draft
 
-Write the raw workflow return to a mode-0600 temporary result file. If it says `usageAccounting: "pending-checkpoint-reconciliation"`, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-usage-receipts.mjs" "<temporary-result>" "<reconciled-result>"` and use only the reconciled mode-0600 output. A missing receipt for a confirmed bridge handoff, or a mismatched or unreadable receipt, is a hard stop. When every relay reply was lost and its request-bound unconfirmed dispatch has no matching journal, reconciliation preserves all known counters as `legacy-incomplete` instead of discarding the snapshot or claiming an exact Codex total; stale evidence from another request at the same artifact path never completes or classifies the current recovery. Never persist pending accounting as authoritative state. Atomically persist every reconciled response's cumulative accounting snapshot before branching on its status. When the status is `plan-interrupted`, render `messages.mjs relayLost` when its message names a Codex result and `messages.mjs planInterrupted` otherwise, then show its message as supporting detail and stop. That response also carries `questionsSettled`: `true` means the questions this pass's reviewers raised were merged into the sidecar the resume below reads, `null` means the pass raised none, and `false` means the merge could not be confirmed, so the resume re-reviews the plan and raises them again. It is never a reason to do anything differently; it is the difference between a record that is complete and one that is not, and reporting it as complete when it is not is the thing to avoid. Resume passes the reconciled counters back unchanged.
+Dispatch `tagteam:plan-drafter` at `models.plan` / `effort.plan`. Give it `$D/goal.md`,
+the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
+count — do not read the plan.
 
-## Premises
+## 5 — Review, exactly one round
 
-A new plan's first invocation carries no `premisesFile`, and the forge answers `needs-premises-confirmation` without drafting anything: it returns `premises`, a ranked list of `{claim, basis, kind}` rows stating what a plan for this goal would take as given, with `kind` either `verified` (the basis names the file, symbol, migration, or command it was read from) or `assumed`.
+Three readers, dispatched in a single message so they run concurrently:
 
-This is the one thing review cannot do for you. Every reviewer reads the same document and inherits the same assumption, so a plan built on a false premise passes every round and is invalidated all at once when a person finally reads it. Ask before the drafting, not after.
+- `tagteam:plan-reviewer` at `models.review`, writing `$D/work/review/claude.json`
+- Codex, via `$P/prompts/codex/plan-review.md`, fencing `GOAL` and `PLAN` from
+  disk, writing `$D/work/review/codex.json`
+- `tagteam:adversary` at `models.review`, pointed at `prompts/plan-adversary.md`,
+  writing `$D/work/review/adversary.json`
 
-The response also carries `premiseChallenge`, the record of a second pass that went and read each cited basis. `ran: false` means it was switched off, lost, or discarded, and the premises are then exactly as stated; the `reason` says which. When it ran, `challenges` holds one row per premise in the same order, and any premise it found `contradicted` has already been downgraded to `assumed` in `premises`, so nothing extra has to be applied.
+Then read the three files — they are small — and pass every `blocking` and
+`major` finding to one `tagteam:plan-drafter` revision.
 
-Each row the challenge touched carries `challenged`, either `contradicted` or `unsupported`; an untouched row has no such key. Filter on that rather than deciding for yourself which row a verdict belongs to. The row's own text — `evidence` and `basisChecked` — is `challenges[i]` for the same `i`, and reading it there is safe precisely because the workflow verified that alignment before applying anything and discarded the whole challenge when it did not hold.
+**That is the whole review.** No second round, no convergence check, no lint. If
+the revision is wrong, the person will say so at approval. Only offer another
+round if they ask for one.
 
-A `contradicted` row is asked on its own, never inside a bulk confirmation — the workflow has already downgraded it to `assumed`, and one default click on a bulk option would put back the confidence the challenge removed. Ask those first: one `AskUserQuestion` per row marked `contradicted`, naming the claim and, where the row carries `evidence`, quoting it as **what the challenger says it found, with the `file:line` to check** — never as established fact. It is model prose, and a person who "corrects" a true premise on a fabricated contradiction hands the drafter a false given it is then told never to re-derive. Offer `It holds as stated`, `The challenger is right`, and free text.
+## 6 — Specs
 
-Then ask, in one bulk set, every `assumed` row carrying no `challenged` marker plus every row carrying `challenged: "unsupported"` whatever its `kind`. That set and the individual questions above are disjoint, so nothing is asked twice. What is left over is a `verified` row nothing challenged, which is the one kind that may go unasked. Chunk them at four, one `AskUserQuestion` per chunk with `multiSelect: true`: “Which of these is not true today?” The first option is `All of these hold (Recommended)`; each remaining option is one premise, labelled with the claim and described with its basis. Rank the `unsupported` rows first and put what their `basisChecked` reported into the description: that verdict changes nothing on its own, which is exactly why it has to reach a person some other way — a `verified` row whose evidence did not hold up is otherwise never asked about at all. Ask about those leftover `verified` rows only if fewer than four of the rest exist and space remains. For each premise the user marks wrong, ask one free-text follow-up for what is true instead, and preserve the answer exactly.
+Write `$D/reviewers.json`: the configured default set, plus the per-spec
+exceptions the plan proposes.
 
-Then atomically write `drafts/<passId>-premises.json` at mode 0600, holding the same `{premises: [...]}` object, each row exactly `{claim, basis, kind}` and nothing else — neither the challenge's evidence nor the `challenged` marker travels into that file, and nothing validates it downstream, so a bare array or an extra key reaches the drafter unchallenged — with every claim replaced by what the user said is true and `kind` set to `verified` for anything they confirmed or corrected. A person's answer is the one thing that may raise a premise's standing, which is why a downgraded row must have been asked about individually to get there. Re-invoke the forge with the **same** `passId` and that path as `premisesFile`. Record the exchange in `drafts/<passId>-decisions.json` like any other answers, so no later pass re-asks. Persist the accounting snapshot from this response before asking, exactly as for any other status.
+```json
+{"default": ["correctness", "test-coverage"],
+ "exceptions": {"03-recovery-ui": ["accessibility", "ux"], "07-readme": ["-test-coverage"]}}
+```
 
-A resume, a continuation, and any invocation that already carries `premisesFile` skip this gate entirely. It costs two calls per plan under `--provider claude` and four under `both` or `codex`, where stating and challenging are each a prompt build and a relay — per plan, never per pass.
+Then dispatch one `tagteam:spec-writer` per deliverable, **all in one message**,
+each at `models.plan` and each writing exactly `$D/specs/NN-slug.md`. Give each
+one the goal path, the plan path, its own row, and its lens exceptions.
 
-## Resume
+Validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It checks
+front matter, resolves lenses, and returns dependency order. Fix what it reports
+by re-dispatching the writer for that spec.
 
-`--resume <slug>` continues an interrupted plan from `.tagteam/plans/<slug>/` instead of paying for the drafting and cross-review already done. Never trust conversation memory: reconstruct state by reading that directory.
+## 7 — Approve
 
-1. If `approved.json` exists, there is nothing to resume; point at `/tagteam:ship .tagteam/plans/<slug>` and stop.
-2. Read `goal.json` for the original goal and run overrides. Write it at the start of every invocation next to the drafts. Determine the highest `pass-<n>` from the saved draft/review artifacts before resolving policy or usage. Restore `reviews/<passId>-run-policy.json` with `run-policy.mjs restore --state-root "<plan-dir>"`. If the policy is missing, stop when the script finds any policy fingerprint. Add `--allow-legacy` only when the script's complete inventory finds recognizable recovery state but no fingerprint; this performs the one-time validated `both` migration.
-3. For that selected pass, read the newest valid `reviews/pass-<n>-usage.json` at or before it, searching backward by pass number. A missing current-pass snapshot means the interrupted invocation did not get far enough to save its response; inherit the prior numeric counters instead of resetting earlier counters. If a same-pass invocation descriptor exists and its restored provider is `both` or `claude`, mark the inherited snapshot `usageAccounting: legacy-incomplete` before re-dispatch: Claude may have started before the lost response, and no durable receipt can prove whether that paid call happened. Keep that incomplete classification through every later continuation. Only a brand-new plan with no model artifacts or invocation descriptor starts from zeroes, zero calls, an empty `plumbingCallsByModel` object, an empty receipt list, and `usageAccounting: complete`. A pre-feature plan with model artifacts but no complete usage snapshot, including the model-keyed plumbing map, also uses `usageAccounting: legacy-incomplete`; import durable Codex receipt journals as they are encountered, but never describe unknowable historical Claude or plumbing-model usage as zero or exact. Within the selected pass, find the highest `drafts/<passId>-round-<r>-input.md`; that draft is the exact text round `r` reviews. Pass it as the seed with `resumeRound: <r>` even when `r` exceeds `reviewRounds`: a round input past the configured last round is a final revision that was saved and then interrupted before anything cleared it, and the workflow reviews it rather than handing an unchecked plan to the manifest. Never substitute the integrated path for it; if an integrated draft exists in the same pass, that plan was cleared and step 5 applies instead. Read its `.questions.json` sidecar, if present, for the questions outstanding at that point, and its `.ui-decisions.json` sidecar, if present, for the interface decisions declared so far. A plan interrupted before that second sidecar existed simply has none; that costs a re-declaration, never the plan.
-   If the selected pass has its policy-bound `reviews/<passId>-invocation.json` but no draft or integrated plan, resume the invocation itself instead of searching for a plan body, regardless of whether its provider is `both`, `claude`, or `codex`: reuse the same `passId`, policy, accounting snapshot, and descriptor inputs. For `kind: "fresh"`, invoke without `seedPlan` or `resumeRound`. For `kind: "continuation"`, pass `seedPlan: { path: <descriptor seedPlanPath> }`, reread only the decisions, exact question sidecar, and normalized UI file, and invoke as the same continuation without `resumeRound`, passing the question array as `openQuestions` and its absolute path as `questionsFile`. A version-1 descriptor written by the immediately preceding build may lack `questionsFile`; derive only `<seedPlanPath>.questions.json`, require a readable valid array, then atomically add that exact path to the descriptor before model work. Never infer questions from plan prose or replace unreadable state with `[]`. Do not advance the pass ID. Claude work may be re-dispatched; a matching immutable Codex artifact is reused and promoted. This covers interruption before bridge dispatch, after artifact completion, or during promotion.
-4. Re-invoke `tagteam:plan-forge` with the same arguments plus `passId` (the same pass), `seedPlan: { path: <that file's absolute path> }` (do not read or pass its contents; `seedPlanPath` is retained only for compatibility with saved recovery descriptors and older callers), `openQuestions` (that sidecar's array), `uiDecisions` (the interface sidecar's array, or `[]` when that file is absent or unreadable), `uiDecisionsFile`, persisted `agentCalls`, `usage`, `usageReceipts`, `usageAccounting`, and `resumeRound: <r>`. When the selected provider is `codex` and the interface sidecar is absent, empty, malformed, or unreadable, first atomically write `[]` to a mode-0600 `reviews/<passId>-recovered-ui-decisions.json` and pass that path as `uiDecisionsFile`; never point the workflow at the missing path. Otherwise pass the readable sidecar's absolute path. The workflow verifies and reads the plan by reference, skips drafting, restarts at round `r`, and reuses every saved Codex result whose recorded request matches. Never drop a saved question: an unanswered one is a decision the human still owes. A round input and its sidecar are published together, by the workflow, and the sidecar always holds the complete carried set at the instant the plan beside it appears — the Claude path publishes both from an undiscoverable working copy, the Codex path writes the sidecar and then the plan inside one command — so the newest round input you find is a revision that cleared its checks, with a question record that was never short. There is no round input written by a step that then failed. Plans from plugin versions before that was true are the exception, and they are still on disk: a revision then wrote the round input itself, and a pass that stopped with a message about a plan result dropping an unresolved carried question left the shortened sidecar at exactly the path this step selects. No pass can produce that message any more, so this clause applies only to older plan directories: when the interruption that ended the previous pass says that, and no `reviews/<passId>-round-<r>-revision-work.md` exists beside the round input to show it was published rather than written in place, resume from the round before it instead.
-5. `drafts/<passId>-integrated.md` is the finished plan of its pass: the last cross-review revision writes it, and so does a continuation. If it is the newest draft in the pass, resume from it with `seedPlan: { path: <integrated path> }`, its `.questions.json`, and its `.ui-decisions.json` when that file exists and parses — an absent, empty, or malformed one means no interface decisions are recoverable, which costs a re-declaration and is never a reason to stop; pass `[]` — and either `decisions` from `drafts/<passId>-decisions.json` when that file exists (a continuation), or `resumeRound: <reviewRounds + 1>` when it does not (cross-review finished; only the manifest, train, and cross-check remain). An integrated draft outranks every round input in its pass, whatever their timestamps: nothing writes it until a check cleared the plan, so its presence means cross-review is over however few rounds it took. A round every reviewer approved ends it early, so `reviewRounds + 1` is right even when no round-input file exists for the later rounds. When the same pass's validated invocation descriptor says `kind: "continuation"`, also pass `continuationReceiptRequired: true`; the workflow must reject a missing or mismatched durable continuation receipt instead of downgrading that known pass to legacy behavior. Never set this flag for a source plan from an earlier pass merely because the new invocation is a continuation. Never pass both `decisions` and `resumeRound`; the workflow warns and ignores decisions on a round resume.
-6. Continue with the normal question, cross-check, and approval flow below.
+Run `node "$P/scripts/size-report.mjs" "$D"` and show its output verbatim. It
+runs once. Never compress anything in response to it, and never run it again to
+see whether the numbers improved — a deliverable at twice its target is a
+splitting decision and that decision is theirs.
 
-Whenever any `drafts/*-premises.json` exists in the plan directory, pass the earliest one as `premisesFile` on every resumed or continued invocation. A resume with a saved round or an integrated plan skips the premises gate on its own, but a `kind: "fresh"` recovery does not, and re-asking settled premises is both a cost and a chance for the answers to drift.
+Show: the deliverable table, the sizes, the reviewer selection with its
+exceptions and the note that Codex and the adversary run on every spec, and the
+count of anything left unanswered. Say `reviewers.json` is editable, like
+`goal.md` was.
 
-A resumed pass seeds itself from these files, so pass them through byte for byte and never from memory. The workflow reads each draft, manifest, and train back off disk right after the step that wrote it, records that file's checksum as what the pass produced, and stops the pass at that point rather than sending a shortened plan to either engine.
+Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.json`
+(`{"approvedAt", "slug", "specs": [...], "goalSha256", "planSha256"}`), commit
+`goal.md`, `plan.md`, `specs/`, `reviewers.json`, `approved.json`, and tell them
+to run `/tagteam:ship <plan-dir>` **in a new session** — the interview loaded
+material shipping does not need.
 
-`--resume` starts a fresh forge invocation, which is what makes it a recovery: every artifact is read off disk again. Resuming the workflow run itself instead replays each finished step's recorded result, so a plumbing failure would repeat with identical numbers however often the underlying file is repaired. If that is what you are seeing, run this command.
+## Discipline
 
-If the workflow fails before it can return an accounting envelope, do not show the raw error. Render `messages.mjs planInterrupted` with `--artifact` set to the plan directory and `--command` set to `/tagteam:plan --resume <slug>`. Show the workflow's own message under those four lines as supporting detail.
+Do not read `plan.md` or any spec body into your own context. You do not need
+them and you will need the room.
 
-The outstanding questions are whatever `questionsPath` holds; the workflow merged them into that file and recorded its checksum. `openQuestions` is a copy of it for convenience, and `null` means the copy did not survive the relay, not that there are none. Read `questionsPath` whenever `openQuestions` is null, and never substitute `[]` for a file you could not read: stop instead, the same as anywhere else a question sidecar is unreadable. `openQuestionCount` is that copy's length, and `null` there says the same thing: count the sidecar yourself rather than reading it as none.
-
-If there are open questions, first drop every one that any `drafts/*-decisions.json` in this plan directory already answers — every pass's file, not just this pass's. A question already settled is not an open question, and re-asking it is how one decision becomes three rows that disagree. Match on meaning rather than on exact text: the sidecar deduplicates by normalized string, so the same question rephrased between rounds survives as two entries.
-
-Then ask **every** one that remains, in chunks of at most `planning.questionsPerRound`, defaulting to four, which is also the interface limit. `questionsPerRound` sizes one `AskUserQuestion` call; it is not a budget for the pass. Rank the chunks by how much work the answer changes, so the questions that move the most are answered against the least-drifted plan. One question is one decision; options describe outcomes, not flags. Preserve free-text answers exactly.
-
-Asking sixteen questions in four chunks does mean the last twelve are answered against a plan the first four have not yet revised, and that is the real cost of draining inside one pass. It is the cheaper of the two mistakes. Deferring the remainder to a later pass only reaches a person if a later pass is bought, and nothing buys one: the questions sat in the sidecar while the plan they were about went to approval. A revision that invalidates an earlier answer comes back as a new question, and the re-check below is what pays for it.
-
-Record each answer as a `{question, answer}` row whose `question` is the sidecar entry **verbatim**. The workflow matches decision rows to carried questions by normalized exact text, so a paraphrased row does not answer anything: the workflow carries that question straight back into the next sidecar, silently, and the person is asked it again next pass with their answer already on disk. Nothing fails; the answer simply never binds. The match-on-meaning rule above governs which questions are worth asking, never what gets written down.
-
-If every outstanding question is one the decisions files already answer, there is nothing to ask, and the pass is at the gate rather than short of it: say so, treat the pass as though it had returned `needs-approval`, and offer approval normally. The sidecar deduplicates by normalized text and is never rewritten by a pass that runs no drafter, so it can name questions that are settled; a gate with nothing askable behind it is not a gate, and nothing goes into `unansweredQuestions` for a question that has an answer.
-
-When the chunks are answered — and after the interface decisions below are collected into the same decisions file, so one continuation carries both — run one continuation as described under it. If it returns `needs-questions`, drain again and continue; stop when it returns `needs-approval`. This loop is only for those two statuses — `needs-plan-revision`, `needs-handoff-revision`, and `plan-interrupted` are each handled by their own rules below, and those rules win. In particular, a continuation that comes back `needs-plan-revision` with `divergence` set buys no further drain: that detector exists to stop exactly the reflex of paying for one more pass, and only an explicit answer restarts anything.
-
-Two things bound the loop, and both are stops rather than another pass:
-
-- **It stopped reducing.** If a continuation's `openQuestionCount` is greater than or equal to the count it was given, answering is generating questions at least as fast as it settles them, and the next drain has already been shown not to help. This is the question-side reading of the `priorGatingIssueCount` detector. A `null` count is not a reduction: count the sidecar at `questionsPath` and compare that, or treat the drain as having stopped reducing if you cannot read it. Name both counts, show what is still open, and ask whether to answer the new ones anyway, approve with them outstanding, or stop.
-- **Three drain continuations.** Past that, stop and report what remains rather than paying for a fourth, exactly as the handoff cross-check allows at most two repairs. A continuation that both drains answers and repairs a failed cross-check counts against both allowances.
-
-## Interface decisions
-
-`uiDecisionsToConfirm` holds the interface choices the plan made on its own that the project's policy says are worth a person's attention; `uiDecisions` holds all of them when `uiDecisionsSettled` is true. When it is false the merged record did not survive the relay and these two are the pass's own memory of it: `uiDecisionsPath` is the complete record, and a decision it names that `uiDecisions` does not is one this pass will not ask about. Nothing is lost either way — the record is written before that reply is lost — so this is a confirmation not offered rather than a decision dropped, and it is never a reason to stop. These are not questions, and they were not blocking anything: the plan already decided. Ask only whether it decided right, and ask it cheaply.
-
-Skip a decision whose `id` already has an answer in **any** `drafts/*-decisions.json` in this plan directory, not only the current pass's: each pass writes its own file, so a choice confirmed in pass 1 is only visibly settled in pass 2 if every pass's answers are read. If nothing remains, say nothing and move on to the cross-check.
-
-Ask in two steps, never one question per decision:
-
-1. **Scan.** For each chunk of at most three remaining decisions, ask one `AskUserQuestion` with `multiSelect: true`: “Which of these interface choices should be different?” The first option is `Keep all of these (Recommended)`; each remaining option is one decision, labelled with what is being decided, described with the chosen option and whether it follows an existing pattern, and carrying that option's `sketch` as its `preview`. A decision whose `precedent` is null must say so in its description: nothing in the repository voted for it.
-2. **Drill down.** For each decision the user picked, ask one single-select question whose options are the chosen option and its alternatives, each with its own `sketch` as `preview` and its `why` as the description. Put the alternatives first; the chosen one is what they just rejected.
-
-Record every outcome in `drafts/<passId>-decisions.json` as an ordinary `{question, answer}` row, including the ones kept as they are, so the continuation integrates them exactly like any other answer and no later pass asks again. Name the decision `id` in the question text so a later pass can match it.
-
-Never invent an option the workflow did not return, and never ask about a decision the policy filtered out.
-Persist each structured engine review under `reviews/` before asking; use mode 0600 and never rewrite an earlier review. The plan, manifest, and train are already saved: the workflow returns `planPath`, `questionsPath`, `manifestPath`, and `prTrainPath`, and those files are the exact bytes the cross-check judged. Copy from them rather than retyping the returned values, and read `planPath` instead of holding the plan in the conversation.
-After every reconciled workflow response, including `plan-interrupted`, atomically persist `{ "policyFingerprint": <result.policyFingerprint>, "agentCalls": <result.agentCalls>, "usage": <result.usage>, "usageReceipts": <result.usageReceipts>, "usageAccounting": <result.usageAccounting> }` at `reviews/<passId>-usage.json` with mode 0600 before branching on status, asking questions, or approval. The fingerprint makes deletion of a current run's policy fail closed instead of masquerading as a pre-feature resume. Every resume and continuation passes the four accounting values from the newest persisted snapshot into the next invocation, so counters are cumulative across the full planning run and a reused Codex artifact is not counted twice.
-
-As soon as a chunk is answered, append those `{question, answer}` rows to `drafts/<passId>-decisions.json` at mode 0600. Answers are the one thing here a human cannot cheaply reproduce, and approval may be a long way off; the approved `decisions.json` is written only at approval, from this file.
-
-Then invoke `tagteam:plan-forge` once more with the same arguments plus:
-
-- `passId`: the next pass (`pass-2`, then `pass-3` for each handoff repair);
-- `seedPlan`: `{ path: <absolute first-result planPath> }`; the workflow reads it directly, so never pass the plan body inline. `seedPlanPath` remains accepted for an older saved invocation descriptor.
-- `decisions`: `{question, answer}` rows;
-- `decisionsFile`: the absolute mode-0600 `drafts/<source-passId>-decisions.json` that was written while answering the source pass, before `passId` advances; never derive this path from the next pass ID;
-- `openQuestions`: the exact array read from the first result's `questionsPath`. The sidecar must be readable and valid; never replace missing or malformed outstanding-question state with `[]`.
-- `questionsFile`: that absolute, readable `questionsPath`, recorded in the invocation descriptor and passed unchanged to the workflow.
-- `uiDecisions`: the array at the first result's `uiDecisionsPath`, so decisions the policy never surfaced survive the pass. A null path means this repository has no interface; a path naming a file that is absent or unreadable means none were declared. Pass `[]` in both cases and continue.
-- `uiDecisionsFile`: for a Codex continuation with an interface, the readable absolute `uiDecisionsPath`; if it is absent, empty, malformed, or unreadable, atomically write `[]` to a mode-0600 `reviews/<next-passId>-recovered-ui-decisions.json` and pass that path instead. Omit it when the repository has no interface.
-- `agentCalls`, `usage`, `usageReceipts`, and `usageAccounting`: the cumulative values from the newest usage snapshot at or before the prior pass.
-- `premisesFile`: the absolute `drafts/<first-passId>-premises.json` written when the premises were confirmed, so no later pass re-asks them. Omit it only when no plan in this directory ever had one.
-- `priorGatingIssueCount`: the prior response's `gatingIssueCount`, whenever this continuation exists to reduce issues.
-
-This continuation performs one integration pass and regenerates the manifest and train; it must not repeat the cross-review rounds.
-Persist its integrated draft and decomposition cross-check as new artifacts, leaving the first invocation byte-frozen.
-
-When the status is `needs-plan-revision`, the pass stopped before the manifest, so `manifest`, `prTrain`, `manifestPath`, and `prTrainPath` are all null. Do not offer approval and do not ask for the plan to be re-reviewed. Read `divergence` and `roundsExhausted` before deciding what to do, because they mean different things:
-
-- `divergence` set to `{round, previous, current}` means a round left at least as many blocking or major issues as the one before it. The loop stopped itself. Do **not** feed the issues into another continuation: the pass has already established that revising did not reduce the count, and buying another round is the failure this detector exists to stop. Say so plainly — name the two counts — show `unresolvedIssues`, and ask whether to repair the plan anyway, narrow the goal and start a new plan, or stop. Only an explicit answer buys another pass, and that pass carries `priorGatingIssueCount: <current>`.
-- `divergence` set to `{pass, previous, current}` — keyed by pass rather than by round — means the same thing measured on a pass that ran no round at all, which is what a repair continuation is. Handle it identically: the count it was given did not come down, so stop and ask rather than buying the next repair. This shape can arrive with `needs-plan-revision` or with `needs-handoff-revision`; the response's issue list is `unresolvedIssues` in the first case and `handoffIssues` in the second.
-- `roundsExhausted` true with no `divergence` means the plan was still improving when the configured `reviewRounds` ran out. That is not a verdict. Offer `Continue for more rounds (Recommended)` or `Stop and report`, and on `Continue` run one continuation carrying `priorGatingIssueCount`.
-- Neither set means the re-read of the last revision found `unresolvedIssues` still open. Feed them into one continuation as explicit decisions to repair the plan, exactly as for a failed handoff cross-check, and count it against the same two-repair allowance. If it still fails, stop with the saved issues.
-
-Every continuation that exists to reduce issues passes `priorGatingIssueCount: <the previous response's gatingIssueCount>`, so the detector measures across the whole planning run and not just inside one pass. A repair pass is bought on the promise that it reduces that number; stop paying when it does not.
-
-The final decomposition cross-check is a handoff-quality gate. If `handoffReady` is false, do not offer approval. Feed `handoffIssues` into one continuation as explicit decisions to repair the plan and regenerate the manifest/train, then rerun the cross-check. Use that list rather than the review's own issues: it also carries the findings the workflow decided arithmetically, such as one atomic group split across two pull requests, and those hold even when the cross-check returned `approve`. Allow at most two handoff-repair continuations; if it still fails, stop with the saved issues instead of approving an underspecified plan.
-
-A `needs-handoff-revision` response may also carry `divergence` in the pass-keyed shape above. It means this pass's handoff findings did not come in below the count it was given, so the last repair did not reduce them. Stop, name both counts, show `handoffIssues`, and ask whether to repair anyway, narrow the goal and start a new plan, or stop. That answer, not the two-repair allowance, is what buys the next pass — the allowance is a ceiling on repairs nobody was asked about, and the count is the evidence that the ceiling was the wrong bound. A pass the user does buy carries `priorGatingIssueCount: <current>`.
-
-When a handoff fails on a plan within two percent of its `planBudget.hardCeilingChars`, `handoffIssues` leads with a finding saying so. It is not a defect in the plan and it is not counted in `gatingIssueCount`: it says the plan has no room left to absorb the repair the other findings ask for, and that reducing scope is the move. Show it first and put splitting the feature into independent plans in front of the user as a real option beside repairing again.
-
-`advisoryIssues` holds every deterministic finding in the pass that was not worth stopping for: a waiver that cleared the cap or excused nothing, a line that may or may not be revision history, and — on a continuation — a supplied decision and an inherited plan constraint that name the same file. Nothing gates on them and no pass acts on them. Show them once, after the plan and before the approval question, taking each at its own word. The decision-and-constraint one in particular is a pair to read together rather than a defect: the two may agree, and the check cannot tell.
-
-Present the final plan followed by a compact PR table containing ID, title, tasks, dependencies, user-visible yes/no and reason, and size estimate. Where a file list is wanted, use the computed one: it is the union of each pull request's tasks' `files`, derived from the manifest, and never a list anyone wrote. State that tagteam itself never gates on size or replans because of it. Do not say or imply that no size limit applies: if the repository's own `policyPaths` documents set one, that limit is real and the plan was drafted against it, and tagteam declining to enforce a limit is not the same as there being none.
-
-When `sizeWaivers` is non-empty, name each entry beside that pull request's row: which pull request, the rule it cites, and who approved it. A waiver is the one finding that clears the gate rather than stopping it, so a reader who is not told learns nothing happened. Say plainly that the pull request is over the repository's own cap and was let past on that named approval, and say that approving the plan adopts that exception — the approval question below is where the user accepts or rejects it, so do not ask a separate one.
-
-A single-pull-request train is the expected shape, not a degenerate one. Do not suggest splitting a train that fits.
-
-Outstanding questions are a gate, exactly like `handoffReady`. The status says which one applies: `needs-approval` means the sidecar is empty and the plan is ready to be approved; `needs-questions` means it is not, and so is what the workflow answers when the merged list did not survive the relay, because a pass that cannot say whether questions remain must not be the one that decides they do not.
-
-On `needs-approval`, ask exactly one approval question:
-
-- `Approve and save (Recommended)` — saves these exact artifacts for shipping.
-- `Revise the plan` — collect one bounded revision request, run one drafter integration plus parse/decompose/cross-check continuation, then show and ask again.
-- `Stop here` — leave drafts for inspection but write no approval marker.
-
-On `needs-questions`, first subtract every entry the decisions files already answer, exactly as when draining. If nothing is left, the gate is clear: ask the `needs-approval` question above and write `unansweredQuestions: []`. The workflow gates on the raw sidecar because it cannot read the decisions files; a settled entry it still names is not an open question.
-
-Where questions genuinely remain, do **not** offer `Approve and save`. Show them and their count, and ask:
-
-- `Answer the remaining questions (Recommended)` — re-enter the drain loop above.
-- `Approve with <N> unanswered` — the only option that may write the approval marker with questions open.
-- `Stop here` — leave drafts for inspection but write no approval marker.
-
-An unanswered question is a decision the plan made on the person's behalf without telling them which one, so overriding the gate has to be an act rather than a default. Record the override as an ordinary `{question, answer}` row in `drafts/<passId>-decisions.json` so no later pass re-asks it, and write the exact sidecar entries into `approved.json` as `unansweredQuestions`. The approval marker already carries the fingerprints and the three artifact hashes; the questions someone knowingly shipped without belong in the same immutable record, so what a plan assumed on a person's behalf has an answer on disk rather than only in whoever remembers approving it.
-
-Only explicit approval may write:
-
-- `.tagteam/plans/<slug>/plan.md`
-- `.tagteam/plans/<slug>/manifest.json`
-- `.tagteam/plans/<slug>/pr-train.json`
-- `.tagteam/plans/<slug>/decisions.json` (every pass's `drafts/*-decisions.json` rows in pass order, unchanged)
-- `.tagteam/plans/<slug>/approved.json` containing version, UTC time, config fingerprint, the validated run policy and policy fingerprint, the three artifact hashes, and `unansweredQuestions`: the exact sidecar entries left open, or `[]` when the gate was clear.
-
-Validate both JSON artifacts with their schemas after writing. Validate the PR train with `validate-json.mjs --manifest <manifest.json>` so every task appears exactly once and cross-PR task dependencies are represented. If validation fails, remove only `approved.json`, explain the exact validation error, and stop. Never start shipping automatically; end with `/tagteam:ship .tagteam/plans/<slug>`.
+Do not add a review log, a changelog, or a record of what a reviewer asked to any
+committed file. The plan states the current shape of the work; the review record
+is in `work/` for anyone who wants it.
