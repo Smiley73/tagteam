@@ -864,9 +864,16 @@ async function runVerify(input, snapshotValue, round) {
 }
 
 // The changed-path list is the same for every engine, but only Codex pays a
-// relay model to retype it into a prompt file. A Claude or Haiku step receives
-// its prompt directly, so inlining costs nothing there; the Codex branch names
+// relay model to retype it into a prompt file. A Claude step receives its
+// prompt directly, so inlining costs nothing there; the Codex branch names
 // the file the snapshot already wrote and lets the bridge fence it.
+//
+// Every policy classifies at the standard review tier of whichever engine it
+// has. The dual-provider path used to pin Haiku here through plumbingCall, on
+// the reading that a one-question verdict is plumbing. It is not: this answer
+// decides whether prTrain.pauseOn "ui" stops the train for a person, which is
+// judgment, and pinning it left the most-assured policy with the weakest judge
+// of the three while codex-only and claude-only both got a review-tier model.
 async function classifyUi(input, snapshotValue, round, runPolicy) {
   const instruction = "Independently answer whether a person using the product or developer tool would notice this actual candidate change.";
   const diffInstruction = `Read the exact candidate diff from ${snapshotValue.reviewDiffPath}.`;
@@ -875,6 +882,20 @@ async function classifyUi(input, snapshotValue, round, runPolicy) {
     fence("changed-paths", snapshotValue.changedPaths),
     diffInstruction
   ].join("\n\n");
+  // Nothing requires a repository to define a tier called `standard`, and a
+  // configuration written before reviewTiers existed names none. Resolving it
+  // defensively keeps a missing tier a reported "unknown" rather than a crash:
+  // unknown is the conservative verdict here — selectDimensions forces the
+  // accessibility reviewer on for anything that is not "no", and the round
+  // never takes the "no" shortcut — so a config gap costs coverage, not a gate.
+  const engine = runPolicy.reasoningProvider === "codex" ? "codex" : "claude";
+  const runtime = input.config.reviewTiers.standard?.[engine] ?? null;
+  if (!runtime) {
+    return {
+      verdict: "unknown",
+      reason: "Candidate UI classification names the tier standard, which this configuration does not define."
+    };
+  }
   let result;
   if (runPolicy.reasoningProvider === "codex") {
     result = await codexCall(input, {
@@ -885,26 +906,17 @@ async function classifyUi(input, snapshotValue, round, runPolicy) {
       schema: uiSchema,
       schemaFile: "ui-verdict.schema.json",
       artifact: `${input.shipDir}/prs/${input.pr.id}/rounds/${round}/codex-ui-${snapshotValue.candidateOid}.json`,
-      runtime: input.config.reviewTiers.standard.codex,
+      runtime,
       sandbox: "read-only",
       reviewDiffPath: snapshotValue.reviewDiffPath
     });
-  } else if (runPolicy.reasoningProvider === "claude") {
-    const runtime = input.config.reviewTiers.standard.claude;
+  } else {
     result = await claudeReasoningCall(prompt, {
-      label: `ui:${round}:claude`,
+      label: runPolicy.reasoningProvider === "claude" ? `ui:${round}:claude` : `ui:${round}`,
       phase: "Candidate",
       agentType: "tagteam:ui-classifier",
       model: runtime.model,
       effort: runtime.effort,
-      schema: uiSchema
-    });
-  } else {
-    result = await plumbingCall(prompt, {
-      label: `ui:${round}`,
-      phase: "Candidate",
-      agentType: "tagteam:ui-classifier",
-      model: "haiku",
       schema: uiSchema
     });
   }

@@ -3956,10 +3956,12 @@ test("saved policy controls relay execution and non-Haiku relays are not labeled
   const shipPlumbing = ship.calls.filter((call) => shipPlumbingTypes.has(call.agentType));
   assert.ok(shipPlumbing.length > shipRelays.length);
   assert.equal(shipPlumbing.every((call) => call.model === "sonnet"), true);
-  // The single remaining Haiku call is the dual-provider UI classifier's own
-  // cheap fallback (tagteam:ui-classifier), which is intentionally out of
-  // scope for transport.relayModel/relayEffort.
-  assert.equal(ship.result.usage.haikuPlumbingCalls, 1);
+  // No Haiku call survives anywhere in a ship. The dual-provider UI classifier
+  // used to be one, pinned below transport.relayModel as if its verdict were
+  // plumbing; it now runs on reviewTiers.standard.claude like the other two
+  // policies, so every remaining plumbing dispatch is the configured relay.
+  assert.equal(ship.result.usage.haikuPlumbingCalls, 0);
+  assert.equal(ship.result.usage.plumbingCallsByModel.haiku, undefined);
   assert.equal(ship.result.usage.plumbingCallsByModel.sonnet, shipPlumbing.length);
 });
 
@@ -4497,18 +4499,19 @@ test("a lost Codex review relay result does not fail the PR round", async () => 
   assert.equal(result.status, "clean");
   assert.equal(result.relayRetries, 1);
   assert.equal(result.policyFingerprint, result.runPolicy.policyFingerprint);
-  // Committer, snapshotter, verifier, and scribe now share transport.relayModel
-  // ("sonnet", from SHIP_CONFIG) with the Codex relay rather than being pinned
-  // to Haiku; only the retried Codex review's plumbing dispatch remains Haiku
-  // here (SHIP_ARGS carries no explicit run policy, so this is the plan's
-  // default-dual-provider plumbingModel resolution for the codex-runner call).
+  // Committer, snapshotter, verifier, and scribe share transport.relayModel
+  // ("sonnet", from SHIP_CONFIG) with the Codex relay, so every plumbing
+  // dispatch here is sonnet and none is Haiku. The UI classifier is the fifth
+  // reasoning call rather than the one Haiku plumbing call it used to be: a
+  // dual-provider policy now classifies on reviewTiers.standard.claude, the
+  // same tier the codex-only and claude-only policies already used.
   // The clean candidate then buys the final challenge and the scribe that
   // records it: one reasoning call on the engine that did not open review, and
   // one plumbing call, both outside the round loop.
   assert.deepEqual(result.usage, {
-    claudeReasoningCalls: 4,
-    haikuPlumbingCalls: 1,
-    plumbingCallsByModel: { haiku: 1, sonnet: 8 },
+    claudeReasoningCalls: 5,
+    haikuPlumbingCalls: 0,
+    plumbingCallsByModel: { sonnet: 8 },
     codexCalls: 0,
     relayRetries: 1
   });

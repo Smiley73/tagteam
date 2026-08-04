@@ -127,15 +127,15 @@
   },
   "complexity": {
     "simple": {
-      "claude": { "model": "haiku", "effort": "medium" },
+      "claude": { "model": "opus", "effort": "low" },
       "codex": { "model": "gpt-5.6-sol", "effort": "low" }
     },
     "medium": {
-      "claude": { "model": "sonnet", "effort": "high" },
+      "claude": { "model": "opus", "effort": "medium" },
       "codex": { "model": "gpt-5.6-sol", "effort": "medium" }
     },
     "complex": {
-      "claude": { "model": "opus", "effort": "xhigh" },
+      "claude": { "model": "opus", "effort": "high" },
       "codex": { "model": "gpt-5.6-sol", "effort": "high" }
     }
   },

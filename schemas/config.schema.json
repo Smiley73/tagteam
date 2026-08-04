@@ -238,7 +238,7 @@
       "additionalProperties": false,
       "required": ["model", "effort"],
       "properties": {
-        "model": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] },
+        "model": { "type": "string", "enum": ["sonnet", "opus", "fable"] },
         "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
       }
     },
