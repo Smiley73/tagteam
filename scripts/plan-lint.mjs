@@ -598,14 +598,173 @@ function canonicalStringIssues(text, canonicalStrings) {
   return issues;
 }
 
-export function lintPlanDocument({ text, budget = DEFAULT_PLAN_BUDGET, canonicalStrings = [] }) {
+// A path as a plan or a decision writes one: at least one slash, or a bare file
+// name with an extension this repository's plans actually name. Prose names for
+// files ("the pull-request template") are deliberately out of reach — matching
+// those would take a judgment this check does not have, and a wrong match here
+// costs the same paid round every false positive in this file costs.
+const PATH_PATTERNS = [
+  /\b[\w.@-]*(?:\/[\w.@-]+)+\.[A-Za-z0-9]{1,6}\b/g,
+  /\b[\w-]+\.(?:[cm]?[jt]sx?|json|md|ya?ml|toml|py|rb|go|rs|sh|css|html|sql)\b/g
+];
+
+// A URL's tail reads as a path to the first pattern above — `example.com/x.html`
+// out of `https://example.com/x.html` — and a plan that says not to copy wording
+// from some page is not constraining a file in this repository. Both shapes go,
+// with and without a scheme, because the two are indistinguishable from a
+// repository path once matching has started.
+const URL_PATTERNS = [
+  /\b[a-z][\w+.-]*:\/\/\S+/gi,
+  /\b(?:[\w-]+\.)+(?:com|org|net|io|dev|ai|co|gov|edu)\/\S+/gi
+];
+
+// Long enough for any real plan clause and short enough that the path scan's
+// cost stays flat. The slashed pattern is polynomial in clause length, not
+// exponential, but a plan written as one unbroken 60-kilobyte line is still an
+// input this check has no reason to spend seconds on. It bounds plan clauses
+// only: a decision row is not a clause, and the rows a repair continuation
+// carries quote a previous pass's findings in full, so capping those would go
+// blind on exactly the input this check exists for.
+const CLAUSE_SCAN_CEILING = 2_000;
+
+// The shapes a plan writes a prohibition in. Only prohibitions: an obligation
+// ("must name the template") is what most plan lines are, and a decision naming
+// a file the plan merely mentions is not worth a word.
+const PROHIBITION_MARKERS = [
+  /\bdo not\b/i,
+  /\bdon't\b/i,
+  /\bnever\b/i,
+  /\bcannot\b/i,
+  /\b(?:must|may|should|shall|can|will)\s*n[o']t\b/i,
+  /\bno changes\b/i,
+  /\bleave (?:it |them |this |that )?unchanged\b/i,
+  /\bout of scope\b/i,
+  /\bwithout (?:editing|modifying|touching|changing)\b/i
+];
+
+// `scripts/plan-lint.mjs` and `plan-lint.mjs` are one file, and the two patterns
+// above both match the first of them. Reporting it twice would say a plan
+// constrains two files where it names one, so a bare name that is the tail of a
+// path already found is dropped rather than counted beside it.
+function pathsIn(text, ceiling = null) {
+  const whole = String(text ?? "");
+  // Cutting at a fixed offset can land inside a path and leave a prefix that is
+  // itself a valid one — `src/lib.old/handler.js` cut at fifteen characters is
+  // `src/lib.old` — so the partial token at the cut goes with it.
+  const scanned = (ceiling !== null && whole.length > ceiling
+    ? whole.slice(0, ceiling).replace(/\S+$/, " ")
+    : whole);
+  const cleaned = URL_PATTERNS.reduce((text_, pattern) => text_.replace(pattern, " "), scanned);
+  const [slashed, bare] = PATH_PATTERNS.map((pattern) =>
+    [...cleaned.matchAll(pattern)].map((match) => match[0]));
+  const found = new Set(slashed);
+  for (const name of bare) {
+    if (!slashed.some((file) => file.endsWith(`/${name}`))) found.add(name);
+  }
+  return found;
+}
+
+// A plan writes `docs/policy.md` and the person answering a question about it
+// writes `policy.md`, and they mean the same file. Matching only on the exact
+// string would miss the most likely real shape of this collision, so a bare name
+// resolves to the constrained path it is the tail of — but only when exactly one
+// constrained path has that tail. Two files named `index.ts` are two files, and
+// guessing which one a decision meant is the judgment this check does not have.
+function aliasesOf(constrained) {
+  const byBasename = new Map();
+  for (const file of constrained.keys()) {
+    const basename = file.slice(file.lastIndexOf("/") + 1);
+    if (basename === file) continue;
+    byBasename.set(basename, byBasename.has(basename) ? null : file);
+  }
+  return byBasename;
+}
+
+// A prohibition binds the clause it is in, not every file named on the line it
+// happens to share. "P1: scripts/lint.mjs gains a flag. Do not edit policy.md."
+// constrains one of those two files, and a check that read the whole line would
+// report the other as constrained on every plan that writes two sentences in one
+// bullet — which is most of them.
+function clausesOf(line) {
+  return String(line ?? "").split(/(?<=[.;:!?])\s+|\s+[—–]\s+/);
+}
+
+// A repair decision can contradict a constraint the plan already carries, and
+// until this ran nothing noticed: an owner decision saying a file is corrected
+// and an inherited done-criterion saying that same file is not to be edited were
+// both applied, producing one task whose required sentence cites a string
+// another clause of the same task forbids creating.
+//
+// Co-location is what this reports, not contradiction — deciding whether two
+// sentences about one file disagree is the judgment a reviewer has and a regex
+// does not. So it stays minor: it puts the decision and the constraint in front
+// of a reader together, and never spends a round on a pair that turns out to
+// agree.
+//
+// It under-reports by design, and in one shape it cannot help: a prohibition
+// whose path lives in the neighbouring clause ("See docs/policy.md. Do not edit
+// it.") is invisible to clause scoping. That is the cost of not reporting every
+// file named anywhere on a line that prohibits anything, which is the error that
+// would actually cost rounds.
+function decisionConstraintIssues(text, decisions) {
+  const rows = (decisions ?? []).filter((row) => row && typeof row === "object");
+  if (!rows.length) return [];
+  const lines = String(text ?? "").split("\n");
+  const constrained = new Map();
+  lines.forEach((line, index) => {
+    for (const clause of clausesOf(line)) {
+      if (!PROHIBITION_MARKERS.some((marker) => marker.test(clause))) continue;
+      for (const file of pathsIn(clause, CLAUSE_SCAN_CEILING)) {
+        if (!constrained.has(file)) constrained.set(file, []);
+        const hits = constrained.get(file);
+        if (hits.length < 3) hits.push({ line: index + 1, text: clause.trim().slice(0, 160) });
+      }
+    }
+  });
+  if (!constrained.size) return [];
+  const aliases = aliasesOf(constrained);
+  const collisions = new Map();
+  for (const row of rows) {
+    const said = `${row.question ?? ""}\n${row.answer ?? ""}`;
+    for (const written of pathsIn(said)) {
+      const file = constrained.has(written) ? written : aliases.get(written);
+      if (!file) continue;
+      if (!collisions.has(file)) collisions.set(file, []);
+      const answers = collisions.get(file);
+      if (answers.length < 2) answers.push(String(row.answer ?? row.question ?? "").trim().slice(0, 160));
+    }
+  }
+  if (!collisions.size) return [];
+  // One finding, however many files collide: a plan whose decisions and
+  // constraints overlap on four paths has one thing to reconcile, not four
+  // findings competing with each other for the same reader.
+  const shown = [...collisions.entries()].slice(0, 5);
+  const overflow = collisions.size - shown.length;
+  const cited = shown.map(([file, said]) => [
+    `${file} — decision: ${said.map((answer) => JSON.stringify(answer)).join("; ")}`,
+    `plan: ${constrained.get(file).map((hit) => `line ${hit.line}: ${JSON.stringify(hit.text)}`).join("; ")}`
+  ].join("; ")).join(". ");
+  return [issue(
+    "minor",
+    `${collisions.size} file${collisions.size === 1 ? " is" : "s are"} named by a supplied decision and constrained by the plan`,
+    [
+      "A decision and a done-criterion about the same file were written at different times by different authors, and a revision that applies both without reading them together is how a task ends up requiring what another of its own clauses forbids.",
+      "This reports rather than blocks: the two may agree perfectly. Read them side by side and, where they do not, say which one governs and delete the other rather than carrying both.",
+      cited,
+      overflow ? `And ${overflow} more file${overflow === 1 ? "" : "s"}.` : ""
+    ].filter(Boolean).join(" ")
+  )];
+}
+
+export function lintPlanDocument({ text, budget = DEFAULT_PLAN_BUDGET, canonicalStrings = [], decisions = [] }) {
   const normalized = normalizeText(text);
   return [
     ...budgetIssues(normalized.length, budget),
     ...historyIssues(normalized),
     ...transcriptSectionIssues(normalized),
     ...sectionIssues(normalized),
-    ...canonicalStringIssues(normalized, canonicalStrings)
+    ...canonicalStringIssues(normalized, canonicalStrings),
+    ...decisionConstraintIssues(normalized, decisions)
   ];
 }
 
@@ -1198,7 +1357,7 @@ function writeLintReview(out, issues) {
 // settings, and a second reading is a second chance for the two to disagree
 // about what the plan was written against.
 export function planLint({
-  plan, manifest, train, out = null, expects = {},
+  plan, manifest, train, decisions = null, out = null, expects = {},
   budget = DEFAULT_PLAN_BUDGET, capLines = null, canonicalStrings = []
 }) {
   if (budget.hardCeilingChars < budget.targetChars) {
@@ -1208,6 +1367,27 @@ export function planLint({
   const issues = [];
   let derivedFiles = [];
   let waivers = [];
+
+  // Read before the plan so a decisions file that is unreadable or the wrong
+  // shape stops the lint outright rather than silently linting the plan against
+  // no decisions at all — an empty check reports clean, and clean is the one
+  // answer a check nobody can tell did not run must never give.
+  let decisionRows = [];
+  if (decisions) {
+    const file = readJsonFile(decisions, "human decisions");
+    if (!Array.isArray(file.value)) throw new Error(`--decisions must name a JSON array of {question, answer} rows: ${file.resolved}`);
+    decisionRows = file.value;
+    const canonical = canonicalJson(file.value);
+    payloads.push({
+      name: "DECISIONS",
+      file: file.resolved,
+      json: true,
+      chars: canonical.length,
+      token: expectToken(canonical),
+      expected: expects.DECISIONS ?? null,
+      matches: expects.DECISIONS ? expects.DECISIONS === expectToken(canonical) : true
+    });
+  }
 
   let planChars = 0;
   if (plan) {
@@ -1222,7 +1402,7 @@ export function planLint({
       expected: expects.PLAN ?? null,
       matches: expects.PLAN ? expects.PLAN === expectToken(normalized) : true
     });
-    issues.push(...lintPlanDocument({ text: normalized, budget, canonicalStrings }));
+    issues.push(...lintPlanDocument({ text: normalized, budget, canonicalStrings, decisions: decisionRows }));
   }
 
   if (manifest || train) {
@@ -1328,7 +1508,7 @@ function parseLintArgs(argv) {
       options.canonicalConfig = value;
     } else if (key === "--expect-canonical") {
       options.expectCanonical = value;
-    } else if (["--plan", "--manifest", "--train", "--out"].includes(key)) {
+    } else if (["--plan", "--manifest", "--train", "--decisions", "--out"].includes(key)) {
       options[key.slice(2)] = value;
     } else throw new Error(`unexpected argument: ${key}`);
   }
@@ -1343,7 +1523,7 @@ function parseLintArgs(argv) {
 async function main() {
   const options = parseLintArgs(process.argv.slice(2));
   if (!options.plan && !options.manifest) {
-    process.stderr.write("usage: plan-lint.mjs [--plan <plan.md>] [--manifest <m.json> --train <t.json>] [--budget <target>:<ceiling>] [--cap-lines <n>] [--canonical-config <config.json> --expect-canonical <token>] [--out <lint-review.json>] [--expect NAME=token]\n");
+    process.stderr.write("usage: plan-lint.mjs [--plan <plan.md>] [--manifest <m.json> --train <t.json>] [--decisions <decisions.json>] [--budget <target>:<ceiling>] [--cap-lines <n>] [--canonical-config <config.json> --expect-canonical <token>] [--out <lint-review.json>] [--expect NAME=token]\n");
     process.exitCode = 2;
     return;
   }

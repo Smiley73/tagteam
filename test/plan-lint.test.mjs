@@ -1174,3 +1174,132 @@ test("--expect-canonical refuses a config whose canonicalStrings have changed si
 
   fs.rmSync(directory, { recursive: true, force: true });
 });
+
+const CONSTRAINED_PLAN = plan([
+  "P1a: do not edit .github/pull_request_template.md while wiring the check.",
+  "P1b: the runner reads scripts/plan-lint.mjs at startup.",
+  "P2: never touch docs/policy.md in this phase."
+].join("\n"));
+
+function collisions(text, decisions) {
+  return lintPlanDocument({ text, decisions })
+    .filter((issue) => /named by a supplied decision/.test(issue.title));
+}
+
+test("a decision and a plan constraint naming the same file are reported together, once", () => {
+  const found = collisions(CONSTRAINED_PLAN, [
+    { question: "Should the template match the documents?", answer: "Yes — .github/pull_request_template.md is corrected to match them." },
+    { question: "Where does the cap live?", answer: "In docs/policy.md, restated verbatim." }
+  ]);
+
+  assert.equal(found.length, 1);
+  assert.equal(found[0].severity, "minor");
+  assert.match(found[0].title, /2 files are named by a supplied decision/);
+  assert.match(found[0].detail, /\.github\/pull_request_template\.md/);
+  assert.match(found[0].detail, /docs\/policy\.md/);
+});
+
+// A plan writes the repo-relative path and the person answering writes the file
+// name. Missing that would miss the most likely real shape of this collision.
+test("a decision naming only the file name still matches the path the plan constrains", () => {
+  assert.equal(collisions(CONSTRAINED_PLAN, [
+    { question: "Where does the cap live?", answer: "policy.md, restated verbatim." }
+  ]).length, 1);
+
+  // Two files with that name are two files, and the check does not guess.
+  assert.deepEqual(collisions(
+    plan("P1: do not edit app/index.ts.\nP2: never touch web/index.ts."),
+    [{ question: "Which?", answer: "index.ts is rewritten." }]
+  ), []);
+});
+
+test("a decision naming a file the plan only mentions, and a constraint no decision names, are both silent", () => {
+  // The prohibition binds its own clause, not the whole line.
+  assert.deepEqual(collisions(
+    plan("P1: scripts/plan-lint.mjs gains a flag. Do not edit docs/policy.md."),
+    [{ question: "Which script?", answer: "scripts/plan-lint.mjs." }]
+  ), []);
+  assert.deepEqual(collisions(plan("Do not edit docs/policy.md."), []), []);
+  assert.deepEqual(collisions(plan("Do not edit docs/policy.md."), null), []);
+  // Rows that are not rows, and fields that are not strings, are not a crash.
+  assert.deepEqual(collisions(CONSTRAINED_PLAN, [null, "policy.md", { answer: 7 }]), []);
+});
+
+// A page on the web is not a file in this repository, and the tail of a URL
+// reads as a path once the scheme is gone.
+test("a prohibition about a URL constrains no file, with or without a scheme", () => {
+  for (const url of ["https://example.com/docs/policy.md", "example.com/docs/policy.md"]) {
+    assert.deepEqual(collisions(
+      plan(`P1: do not copy wording from ${url}.`),
+      [{ question: "Source?", answer: `${url} is the source.` }]
+    ), [], url);
+    // And the basename alias must not smuggle it back in.
+    assert.deepEqual(collisions(
+      plan(`P1: do not copy wording from ${url}.`),
+      [{ question: "Source?", answer: "policy.md is rewritten." }]
+    ), [], `${url} via basename`);
+  }
+});
+
+test("--decisions binds the rows it read and refuses a file that is not an array of rows", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-decisions-"));
+  const planFile = path.join(directory, "plan.md");
+  fs.writeFileSync(planFile, plan("P1a: do not edit .github/pull_request_template.md."), { mode: 0o600 });
+  const rows = [{ question: "Fix the template?", answer: "Yes, .github/pull_request_template.md is corrected." }];
+  const decisionsFile = path.join(directory, "decisions.json");
+  fs.writeFileSync(decisionsFile, JSON.stringify(rows), { mode: 0o600 });
+
+  const parsed = JSON.parse(execFileSync("node", [
+    script, "--plan", planFile, "--decisions", decisionsFile,
+    "--expect", `DECISIONS=${expectToken(canonicalJson(rows))}`
+  ], { encoding: "utf8" }));
+  // Co-location is reported, and reporting it does not hold the plan back.
+  assert.equal(parsed.clean, true);
+  assert.equal(parsed.issues.filter((issue) => /named by a supplied decision/.test(issue.title)).length, 1);
+
+  // A decisions file whose bytes are not the ones this run holds is the same
+  // failure a moved plan is: the lint checked somebody else's answers.
+  assert.throws(() => execFileSync("node", [
+    script, "--plan", planFile, "--decisions", decisionsFile, "--expect", "DECISIONS=1:2"
+  ], { encoding: "utf8", stdio: "pipe" }), /read different bytes/);
+
+  fs.writeFileSync(decisionsFile, JSON.stringify({ question: "one", answer: "row" }), { mode: 0o600 });
+  assert.throws(() => execFileSync("node", [
+    script, "--plan", planFile, "--decisions", decisionsFile
+  ], { encoding: "utf8", stdio: "pipe" }), /JSON array of \{question, answer\} rows/);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+// A repair continuation's decisions quote the previous pass's findings in full,
+// and one of those findings runs to hundreds of characters on its own. Capping
+// what is read from a decision row would go blind on exactly the input this
+// check exists for.
+test("a path named late in a long decision row is still matched", () => {
+  const answer = `${"Repair the train as described. ".repeat(120)}Then correct docs/policy.md.`;
+  assert.ok(answer.length > 3_000);
+  assert.equal(collisions(CONSTRAINED_PLAN, [{ question: "What now?", answer }]).length, 1);
+});
+
+// A cut inside a path can leave a prefix that is itself a valid path:
+// `src/lib.old/handler.js` cut short is `src/lib.old`. Both sides would have to
+// truncate identically for that to become a finding, but the partial token goes
+// with the cut rather than being left to match something.
+test("a plan clause longer than the scan ceiling reports no path invented by the cut", () => {
+  // Positioned so the 2,000-character cut lands inside the path itself, where
+  // the surviving prefix `src/lib.old` is a valid path in its own right.
+  const file = "src/lib.old/handler.js";
+  const head = "Do not edit ";
+  // Padded to end on a word boundary, so the path is a token of its own and
+  // only the 2,000-character cut can split it.
+  const pad = 2_000 - head.length - 11;
+  const filler = `${"filler ".repeat(300).slice(0, pad - 1)} `;
+  const long = `${head}${filler}${file} and nothing else`;
+  assert.equal(long.slice(0, 2_000).endsWith("src/lib.old"), true);
+  // Neither the whole path nor the prefix the cut would have manufactured.
+  for (const named of [file, "src/lib.old"]) {
+    assert.deepEqual(collisions(plan(long), [
+      { question: "Which?", answer: `${named} is rewritten.` }
+    ]), [], named);
+  }
+});
