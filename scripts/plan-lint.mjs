@@ -564,21 +564,64 @@ const RECORD_SHARE_FLOOR_RATIO = 0.5;
 // of this ratio, so the denominator is the two halves rather than the document.
 // That is deliberate. Against the whole document, parking prose under an
 // invented heading would lower the record's share without deleting a word of it.
-function planHalves(text) {
+// Characters per template section, which is the granularity a reviser can act
+// on. The halves are a sum over this rather than a second walk: one traversal
+// answers both, so a total and its parts can never disagree.
+//
+// A canonical heading appearing twice accumulates into one entry, and text under
+// a heading the template does not name is charged to whichever section preceded
+// it — the same rule the halves already used, kept here so moving prose under a
+// sub-heading does not make it disappear from the attribution.
+function sectionCounts(text) {
   const lines = String(text ?? "").split("\n");
-  const halfAt = new Map();
+  const nameAt = new Map();
   for (const span of headingSpans(text)) {
-    if (!span.section) continue;
-    if (SPECIFICATION_SECTIONS.has(span.section.name)) halfAt.set(span.index, "specification");
-    else if (RECORD_SECTIONS.has(span.section.name)) halfAt.set(span.index, "record");
+    if (span.section) nameAt.set(span.index, span.section.name);
   }
-  const counts = { specification: 0, record: 0 };
-  let half = null;
+  const counts = new Map();
+  let current = null;
   lines.forEach((line, index) => {
-    if (halfAt.has(index)) half = halfAt.get(index);
-    if (half) counts[half] += line.length + 1;
+    if (nameAt.has(index)) current = nameAt.get(index);
+    if (current) counts.set(current, (counts.get(current) ?? 0) + line.length + 1);
   });
   return counts;
+}
+
+function planHalves(text) {
+  const counts = sectionCounts(text);
+  let specification = 0;
+  let record = 0;
+  for (const [name, chars] of counts) {
+    if (SPECIFICATION_SECTIONS.has(name)) specification += chars;
+    else if (RECORD_SECTIONS.has(name)) record += chars;
+  }
+  return { specification, record, sections: counts };
+}
+
+// A plan's largest code block, as a compression candidate rather than a defect.
+// Certain in a way near-duplicate prose is not: this is one span with one length,
+// and a reader can look at it and decide in a second. It is only ever reported
+// beside a finding that already fired — a large fenced block is often a required
+// schema or a policy string quoted character-for-character, and on a plan inside
+// its budget that is nobody's business.
+const LARGE_BLOCK_FLOOR_LINES = 15;
+
+// Below this a section holds its heading and a line saying it has nothing to
+// say, which is what the template asks for and not something to compress.
+const ATTRIBUTION_FLOOR_CHARS = 100;
+
+function largestCodeBlock(text) {
+  const lines = String(text ?? "").split("\n");
+  const code = codeLines(lines);
+  let best = null;
+  let run = 0;
+  code.forEach((isCode, index) => {
+    run = isCode ? run + 1 : 0;
+    if (run >= LARGE_BLOCK_FLOOR_LINES && (!best || run > best.lines)) {
+      best = { lines: run, startLine: index - run + 2 };
+    }
+  });
+  return best;
 }
 
 // The counterweight the forge did not have anywhere it could act. Until this,
@@ -589,19 +632,38 @@ function planHalves(text) {
 // point, because the rounds are what a bloated plan costs.
 function recordShareIssues(chars, text, budget) {
   if (chars < budget.targetChars * RECORD_SHARE_FLOOR_RATIO) return [];
-  const { specification, record } = planHalves(text);
+  const { specification, record, sections } = planHalves(text);
   const total = specification + record;
   if (!total) return [];
   const share = record / total;
   if (share <= RECORD_SHARE_CEILING) return [];
+  // Which sections the record actually is, largest first. The share alone tells
+  // a reviser that something must go and not one thing about where, which is how
+  // one run's operator ended up hand-authoring a compression brief from a
+  // section table they built themselves.
+  const breakdown = [...RECORD_SECTIONS]
+    .map((name) => [name, sections.get(name) ?? 0])
+    // A section's own heading is charged to it, so one that is present and empty
+    // still counts a few dozen characters. The template says a section with
+    // nothing to say says so in one line, and that is what this floor is: below
+    // it there is nothing to compress, and listing it is noise in a line whose
+    // whole job is to say what to cut.
+    .filter(([, count]) => count >= ATTRIBUTION_FLOOR_CHARS)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, count]) => `${name} ${count}`)
+    .join(", ");
+  const block = largestCodeBlock(text);
   return [issue(
     "major",
     `The plan's record half is ${Math.round(share * 100)}% of it, over the ${Math.round(RECORD_SHARE_CEILING * 100)}% a record should be`,
     [
-      `Premises, Decisions and Open questions hold ${record} characters against ${specification} for Goal, Scope, File-by-file, Tests, Acceptance criteria and PR sequence.`,
+      `The record holds ${record} characters — ${breakdown} — against ${specification} for Goal, Scope, File-by-file, Tests, Acceptance criteria and PR sequence.`,
       "The record is why the plan says what it does and it earns its place, but it is not what an implementation executes. A record this large is a planning conversation being transcribed rather than resolved: a decision that has been made is one line of outcome, one of why, and the invariant it creates — not the argument that reached it.",
+      block
+        ? `The largest code block in the plan is ${block.lines} lines at line ${block.startLine}; if it is not wording something requires character-for-character, it is a candidate too.`
+        : "",
       "Compress the record. Do not pad the specification to fix this ratio, and do not split the feature: a large record means the plan settled many questions, and splitting would carry every one of them into both halves."
-    ].join(" ")
+    ].filter(Boolean).join(" ")
   )];
 }
 
