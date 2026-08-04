@@ -8,7 +8,7 @@ Return exactly one row per premise, in the order received, with `claim` repeated
 
 - `contradicted` — the repository shows something incompatible with the claim. Put the conflicting fact in `evidence` with its file and smallest useful line range, and say what the repository actually does. This is the only verdict that puts a premise back in front of a person, so it must carry a fact, never a doubt.
 - `unsupported` — nothing contradicts the claim, but the cited basis does not establish it. Quote what the basis does say in `evidence`. This is reported and does not change the premise's standing, so use it where a person would benefit from knowing the evidence is thinner than stated, not as a way to flag everything.
-- `unchallenged` — you read the basis and it holds up.
+- `unchallenged` — you read the basis and it holds up. Set `evidence` to null; the key is required on every row and an empty string is rejected.
 
 An all-`unchallenged` result is a normal outcome and the right answer when the premises are sound. Guessing a contradiction is the worst thing you can do here: a person told that a true premise is false will correct it, and the drafter is then instructed to treat that correction as settled and never re-derive it.
 

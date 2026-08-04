@@ -13,6 +13,8 @@ Severity:
 
 Every finding must identify the exact file and smallest useful line range, explain observable harm, and give a bounded repair. Return the schema object only. `dimension_sweep` states what you checked. A rule from project standards outside the charter may be reported with `runtime_extension: true` and `source_rule`.
 
+Every key of a finding is required, including the ones that usually carry nothing. An ordinary charter finding sends `runtime_extension: false` and `source_rule: null`. Send `id: null` on every finding: the workflow assigns the real one, and anything you put there is discarded. Return `specialist_decisions` as `[]` unless a specialist-findings block was supplied above; when one was, return exactly one adopt-or-reject row per supplied id and invent no others.
+
 <untrusted-changed-paths>
 {{CHANGED_PATHS}}
 </untrusted-changed-paths>

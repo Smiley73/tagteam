@@ -48,6 +48,9 @@ function bigManifest(label = () => ({})) {
     version: 1,
     goal: "harden the outbound relay",
     tasks: Array.from({ length: 19 }, (_value, index) => ({
+      // Ahead of the spread so a caller labelling a group still wins; a task
+      // that stands alone carries the null the schema now requires.
+      atomicGroup: null,
       ...label(`T${index + 1}`),
       id: `T${index + 1}`,
       title: `Task ${index + 1}`,
@@ -78,7 +81,8 @@ function bigTrain() {
       dependsOn: index === 0 ? [] : [`PR-${index}`],
       userVisible: "no",
       userVisibleReason: "internal plumbing only",
-      sizeEstimate: "medium"
+      sizeEstimate: "medium",
+      sizeWaiver: null
     }))
   };
 }

@@ -104,6 +104,7 @@ fs.writeFileSync(output, count === 0 ? "{truncated" : JSON.stringify({
   summary: "Clean.",
   dimension_sweep: "Checked.",
   load_bearing_claim: "Checked.",
+  specialist_decisions: [],
   findings: []
 }));
 `);
@@ -151,6 +152,7 @@ process.stdin.on("end", () => {
     summary: "Clean.",
     dimension_sweep: "Checked.",
     load_bearing_claim: "Checked one caller.",
+    specialist_decisions: [],
     findings: []
   }));
 });
@@ -243,6 +245,7 @@ process.stdin.on("end", () => {
     summary: "Clean.",
     dimension_sweep: "Checked.",
     load_bearing_claim: "Checked one caller.",
+    specialist_decisions: [],
     findings: []
   }));
 });

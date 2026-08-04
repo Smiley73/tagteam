@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["version", "base", "prs"],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "type": "integer", "const": 1 },
     "base": { "type": ["string", "null"] },
     "prs": {
       "type": "array",
@@ -12,7 +12,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "scope", "taskIds", "dependsOn", "userVisible", "userVisibleReason", "sizeEstimate"],
+        "required": ["id", "title", "scope", "taskIds", "dependsOn", "userVisible", "userVisibleReason", "sizeEstimate", "sizeWaiver"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
           "title": { "type": "string", "minLength": 1, "maxLength": 70 },
@@ -23,7 +23,7 @@
           "userVisibleReason": { "type": "string", "minLength": 1 },
           "sizeEstimate": { "type": "string", "minLength": 1 },
           "sizeWaiver": {
-            "type": "object",
+            "type": ["object", "null"],
             "additionalProperties": false,
             "required": ["reason", "rule", "approvedBy"],
             "properties": {

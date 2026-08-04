@@ -13,7 +13,11 @@ export const meta = {
 
 const taskResultSchema = {
   type: "object", additionalProperties: false,
-  required: ["taskId", "status", "summary", "filesChanged", "criteria"],
+  // testsRun and notes carry nothing on a task that ran no tests and had nothing
+  // to add, but they are required rather than optional: Codex's strict output
+  // schema rejects any property `required` omits, so an empty array is how a
+  // task says it has none. Mirrors schemas/task-result.schema.json.
+  required: ["taskId", "status", "summary", "filesChanged", "criteria", "testsRun", "notes"],
   properties: {
     taskId: { type: "string" },
     status: { type: "string", enum: ["completed", "failed", "blocked"] },
@@ -32,18 +36,18 @@ const taskResultSchema = {
 };
 const findingItem = {
   type: "object", additionalProperties: false,
-  required: ["title", "body", "file", "line_start", "line_end", "severity", "dimension", "confidence", "recommendation"],
+  required: ["id", "title", "body", "file", "line_start", "line_end", "severity", "dimension", "confidence", "recommendation", "runtime_extension", "source_rule"],
   properties: {
-    id: { type: "string" }, title: { type: "string" }, body: { type: "string" }, file: { type: "string" },
+    id: { type: ["string", "null"] }, title: { type: "string" }, body: { type: "string" }, file: { type: "string" },
     line_start: { type: "integer" }, line_end: { type: "integer" },
     severity: { type: "string", enum: ["blocking", "major", "minor", "nit"] },
     dimension: { type: "string", minLength: 1 }, confidence: { type: "number" }, recommendation: { type: "string", minLength: 1 },
-    runtime_extension: { type: "boolean" }, source_rule: { type: "string" }
+    runtime_extension: { type: "boolean" }, source_rule: { type: ["string", "null"] }
   }
 };
 const findingsSchema = {
   type: "object", additionalProperties: false,
-  required: ["verdict", "summary", "dimension_sweep", "load_bearing_claim", "findings"],
+  required: ["verdict", "summary", "dimension_sweep", "load_bearing_claim", "specialist_decisions", "findings"],
   properties: {
     verdict: { type: "string", enum: ["clean", "needs-attention"] },
     summary: { type: "string" }, dimension_sweep: { type: "string" }, load_bearing_claim: { type: "string" },
@@ -86,7 +90,7 @@ const fixReportSchema = {
     summary: { type: "string" },
     results: {
       type: "array", items: {
-        type: "object", additionalProperties: false, required: ["id", "status", "explanation"],
+        type: "object", additionalProperties: false, required: ["id", "status", "explanation", "files"],
         properties: {
           id: { type: "string" }, status: { type: "string", enum: ["fixed", "wont-fix", "failed"] },
           explanation: { type: "string" }, files: { type: "array", items: { type: "string" } }
@@ -1150,7 +1154,7 @@ async function main(raw) {
       const runnable = unfinishedWave.filter((task) => !(task.dependsOn ?? []).some((dependency) => failedTasks.has(dependency)));
       for (const task of unfinishedWave.filter((item) => !runnable.includes(item))) {
         failedTasks.add(task.id);
-        recordTaskResult({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [] });
+        recordTaskResult({ taskId: task.id, status: "blocked", summary: "A dependency failed.", filesChanged: [], criteria: [], testsRun: [], notes: [] });
       }
       const implementationParallel = runnable.some((task) => implementationRoute(config, task, runPolicy).engine === "codex")
         ? 1
@@ -1185,7 +1189,7 @@ async function main(raw) {
           if (!result || result.status !== "completed" || (result.criteria ?? []).some((criterion) => !criterion.met)) {
             failedTasks.add(item.task.id);
           }
-          recordTaskResult(result ?? { taskId: item.task.id, status: "failed", summary: "The implementation agent did not return a valid result.", filesChanged: [], criteria: [] });
+          recordTaskResult(result ?? { taskId: item.task.id, status: "failed", summary: "The implementation agent did not return a valid result.", filesChanged: [], criteria: [], testsRun: [], notes: [] });
         }
       }
     }
