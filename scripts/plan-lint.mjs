@@ -48,7 +48,7 @@ const REQUIRED_SECTIONS = [
 // word, because a plan legitimately discusses rounding, prior art, and reviews
 // of its own subject matter.
 //
-// Every pattern here is self-evidencing: "supersedes", "previously said",
+// Every pattern here is self-evidencing: "is withdrawn", "previously said",
 // "earlier draft", "pass 3 decided", a struck-through line — each is revision
 // history wherever it appears, whatever the document is about. The transcript
 // phrase is not, and used to be in this list anyway, which was a category
@@ -74,11 +74,108 @@ const REQUIRED_SECTIONS = [
 // order to talk about the rule. Strikethrough has none: the marker is the
 // formatting, so struck-through text is the annotation itself wherever it
 // appears, and a plan showing the syntax shows it inside a code block.
+// "Superseded" is the one marker whose word names no revision act. Every other
+// named pattern binds its word to one — "is withdrawn", "round 2 decided",
+// "previously specified" — and so is revision history wherever it appears. This
+// word is not: it is ordinary vocabulary in any repository that versions
+// anything, and the plan that forced this carried "runs against superseded
+// commits stay in the record", a rule about which CI conclusion is
+// authoritative, reported as history the drafter was told to delete.
+//
+// What decides an occurrence is what is being superseded. A decision, a choice,
+// a placement, a wording, a section, a draft — or this plan itself as the thing
+// superseding — is the plan's own history. A commit, a record, a fixture, a
+// migration, a schema version is the subject matter, and does not fire at all.
+// Where neither reading can be established the occurrence is still reported,
+// one severity down, with a remedy that asks rather than instructs: see
+// historyIssues.
+// "plan" and "draft" are deliberately absent: in a repository that ships plans
+// they name a file on disk as readily as they name this document, so blocking on
+// them repeats the misfire this binding exists to remove. The plan naming itself
+// is reached by PLAN_AS_AGENT_AFTER — "superseded by this draft" — and an
+// earlier one by its own marker.
+const ARTIFACT_SUBJECT = String.raw`(?:decisions?|choices?|placements?|wordings?|sections?|approach(?:es)?|D\d+)`;
+const DOMAIN_SUBJECT = String.raw`(?:commits?|records?|runs?|fixtures?|migrations?|snapshots?|releases?|tags?|branches?|manifests?|schemas?|endpoints?|(?:schema|api|protocol|format|wire|file|model|package|library|dependency)[-\s]versions?)`;
+// Either side of the word, because English puts the subject on either: "the
+// placement is superseded" and "superseded the placement" say the same thing.
+// A few words of qualification are allowed between the noun and the word on
+// both sides — "the choice made in round 1 about retries is superseded" names
+// its subject as plainly as the bare form, and a window too narrow to reach it
+// downgrades a real annotation to the hedge. A subject further off than the
+// window reaches degrades to that hedge rather than to nothing, which is why
+// the window is a few words and not a clause. Sentence punctuation still bounds
+// the window, so a noun in a previous clause cannot be read as the subject of
+// this one. Quote and emphasis characters are skipped at
+// the join, since a plan that writes `superseded` in a code span is annotating
+// exactly as one that does not.
+const subjectBefore = (noun) => new RegExp(String.raw`\b${noun}\b(?:[-\s,]+(?!supersed)\w+){0,4}[-\s,]*(?:(?:is|are|was|were|has|have|had|being)\s+)?(?:been\s+)?(?:now\s+)?["'*_\`]*$`, "i");
+// `agent` admits the "superseded **by** X" position as well as the direct
+// object. The artifact side takes it — a plan superseded by its own next draft
+// is its history either way — and the subject-matter side must not, because in
+// "the placement is superseded by commit 1234" the commit is what supersedes,
+// not what was superseded, and reading it as the subject would drop a real
+// annotation without a finding of any kind.
+//
+// These match what follows the join rather than the join itself: supersededSubject
+// strips it once, so a line padded with whitespace costs one scan rather than one
+// per alternative per pattern.
+const OBJECT_JOIN = /^[\s"'*_`]+/;
+const subjectAfter = (noun, { agent }) => new RegExp(
+  String.raw`^${agent ? String.raw`(?:by\s+)?` : ""}(?:(?:the|a|an|this|that|these|those|its|their|our|any|each|all|some)\s+)?(?:(?!by\b)\w+[-\s]+){0,4}?${noun}\b`,
+  "i"
+);
+const ARTIFACT_BEFORE = subjectBefore(ARTIFACT_SUBJECT);
+const ARTIFACT_AFTER = subjectAfter(ARTIFACT_SUBJECT, { agent: true });
+const DOMAIN_BEFORE = subjectBefore(DOMAIN_SUBJECT);
+const DOMAIN_AFTER = subjectAfter(DOMAIN_SUBJECT, { agent: false });
+// The plan as the agent: "this decision supersedes ..." has an artifact subject
+// above, but "this supersedes ..." and "superseded by this draft / by pass 2"
+// name the current text itself, which is the same annotation without the noun.
+const PLAN_AS_AGENT_BEFORE = /(?:^|[\s(["'*_`])(?:this|that|it)\s+["'*_`]*$/i;
+const PLAN_AS_AGENT_AFTER = /^by\s+(?:this\s+(?:plan|draft|round|revision|version|pass|one)|(?:pass|round)\s+\d+)\b/i;
+// The subject-matter reading is the only verdict that suppresses a finding
+// outright, so it has to be the strictest one: where an artifact is named
+// anywhere in the same clause it gives way, even though the sentence put a
+// commit or a record closer to the word. "The commit ordering is superseded,
+// along with the decision that produced it" is history whatever sits nearest.
+// Wider than the binding, because a verdict that only costs the gate can afford
+// the ambiguous nouns the binding cannot. A clause and not the line, because a
+// decision bullet labelled "D4." puts an artifact identifier beside everything
+// else the bullet says — including the subject matter it decides about.
+const ARTIFACT_NEARBY = new RegExp(String.raw`\b(?:${ARTIFACT_SUBJECT}|plans?|drafts?|revisions?)\b`, "i");
+const clauseBefore = (before) => before.split(/[.;:!?]/).pop();
+const clauseAfter = (after) => after.split(/[.;:!?]/)[0];
+
+// "plan" — the plan's own history, and blocking. "domain" — the subject matter,
+// and not a finding. null — neither could be read off the line.
+//
+// The subject-matter reading is tried before the bare-pronoun one, because
+// "this" and "that" and "it" are also the ordinary pronouns of ordinary prose:
+// "a migration that supersedes another migration" would otherwise read as the
+// plan speaking about itself and block at the destructive remedy, which is the
+// exact misfire this binding exists to remove. A named artifact still outranks
+// both.
+function supersededSubject(line, start, end) {
+  const before = line.slice(0, start);
+  const after = line.slice(end);
+  // Nothing joins the word to what follows it — "supersedes," or the end of the
+  // line — so there is no object to read there at all.
+  const join = OBJECT_JOIN.exec(after);
+  const object = join ? after.slice(join[0].length) : "";
+  const follows = (pattern) => Boolean(join) && pattern.test(object);
+  if (ARTIFACT_BEFORE.test(before) || follows(ARTIFACT_AFTER)) return "plan";
+  if (DOMAIN_BEFORE.test(before) || follows(DOMAIN_AFTER)) {
+    return ARTIFACT_NEARBY.test(clauseBefore(before)) || ARTIFACT_NEARBY.test(clauseAfter(after)) ? null : "domain";
+  }
+  if (PLAN_AS_AGENT_BEFORE.test(before) || follows(PLAN_AS_AGENT_AFTER)) return "plan";
+  return null;
+}
+
 const HISTORY_MARKERS = [
   { label: "a withdrawn decision", named: true, pattern: /\b(?:is|are|was|were|now)\s+withdrawn\b/i },
   { label: "a numbered review round", named: true, pattern: /\bround\s+\d+\s+(?:said|placed|proposed|decided|chose|asked|added|removed|flagged|raised)\b/i },
   { label: "a numbered planning pass", named: true, pattern: /\bpass\s+\d+\s+(?:said|placed|proposed|decided|chose)\b/i },
-  { label: "a superseded decision", named: true, pattern: /\bsupersed(?:ed|es)\b/i },
+  { label: "a superseded decision", named: true, pattern: /\bsupersed(?:ed|es)\b/i, subject: supersededSubject },
   { label: "what an earlier version said", named: true, pattern: /\bpreviously\s+(?:said|placed|proposed|specified|planned|stated|required|chose)\b/i },
   { label: "a reference to an earlier draft", named: true, pattern: /\b(?:earlier|prior|previous)\s+(?:draft|revision|round|version|pass)\b/i },
   { label: "a struck-through decision", named: false, pattern: /~~[^~\n]+~~/ }
@@ -330,22 +427,30 @@ function annotationHits(line) {
         marker.pattern.lastIndex += 1;
         continue;
       }
+      // A marker whose word needs a subject reads it here. One that resolves to
+      // the plan's subject matter is not an occurrence at all; one that resolves
+      // to nothing is an occurrence the finding will hedge rather than instruct.
+      const subject = marker.subject
+        ? marker.subject(line, match.index, match.index + match[0].length)
+        : "plan";
+      if (subject === "domain") continue;
       const bare = marker.named
         && SEGMENT_OPENS.test(line.slice(0, match.index))
         && SEGMENT_CLOSES.test(line.slice(match.index + match[0].length));
-      occurrences.push({ marker, bare });
+      occurrences.push({ marker, bare, unbound: subject === null });
     }
   }
   const named = new Set(occurrences
     .filter((occurrence) => occurrence.bare)
     .map((occurrence) => occurrence.marker));
   const listed = named.size >= NAME_LIST_FLOOR;
-  const carried = new Set(occurrences
-    .filter((occurrence) => !(listed && occurrence.bare))
-    .map((occurrence) => occurrence.marker));
+  const carried = occurrences.filter((occurrence) => !(listed && occurrence.bare));
   // Declaration order, so a plan carrying several kinds of history reads its
-  // findings in the same order every round.
-  return HISTORY_MARKERS.filter((marker) => carried.has(marker));
+  // findings in the same order every round; bound before hedged, so the finding
+  // that instructs is read before the one that asks.
+  return HISTORY_MARKERS.flatMap((marker) => [false, true]
+    .filter((unbound) => carried.some((occurrence) => occurrence.marker === marker && occurrence.unbound === unbound))
+    .map((unbound) => ({ marker, unbound })));
 }
 
 // One aggregated finding per marker rather than one per line: a plan carrying
@@ -357,21 +462,50 @@ function historyIssues(text) {
   const found = new Map();
   lines.forEach((line, index) => {
     if (code[index]) return;
-    for (const marker of annotationHits(line)) {
-      if (!found.has(marker)) found.set(marker, []);
-      const hits = found.get(marker);
-      if (hits.length < 5) hits.push({ line: index + 1, text: line.trim().slice(0, 160) });
-      else hits.overflow = (hits.overflow ?? 0) + 1;
+    for (const { marker, unbound } of annotationHits(line)) {
+      const key = `${HISTORY_MARKERS.indexOf(marker)}:${unbound}`;
+      if (!found.has(key)) found.set(key, { marker, unbound, hits: [] });
+      const entry = found.get(key);
+      if (entry.hits.length < 5) entry.hits.push({ line: index + 1, text: line.trim().slice(0, 160) });
+      else entry.overflow = (entry.overflow ?? 0) + 1;
     }
   });
-  return [...found].map(([marker, hits]) => issue(
-    "blocking",
-    `The plan carries ${marker.label}`,
-    [
-      "The plan states current decisions only, and this text exists only because an earlier round said something different. Superseded text is deleted rather than annotated, because the annotation is what makes revision purely additive: every round that answers a critique by explaining what the plan used to say leaves a longer document for the next round to find contradictions in.",
-      `Delete this text rather than qualifying it. ${hits.map((hit) => `line ${hit.line}: ${JSON.stringify(hit.text)}`).join("; ")}${hits.overflow ? `; and ${hits.overflow} more line${hits.overflow === 1 ? "" : "s"}` : ""}.`
-    ].join(" ")
-  ));
+  // Declaration order rather than the order the document happens to raise them,
+  // with the bound finding ahead of the hedged one, so a plan carrying both
+  // reads the one that instructs before the one that asks — every round.
+  const ordered = [...found.values()].sort((left, right) =>
+    HISTORY_MARKERS.indexOf(left.marker) - HISTORY_MARKERS.indexOf(right.marker)
+    || Number(left.unbound) - Number(right.unbound));
+  return ordered.map(({ marker, unbound, hits, overflow }) => {
+    const cited = `${hits.map((hit) => `line ${hit.line}: ${JSON.stringify(hit.text)}`).join("; ")}${overflow ? `; and ${overflow} more line${overflow === 1 ? "" : "s"}` : ""}.`;
+    // A remedy that says "delete this" is right when the subject is read off the
+    // line and destructive when it is not: the drafter complies, because the
+    // finding blocks, and a real decision goes with it. Worse on a plan near its
+    // budget, where adding a clarifying clause is not an option either — the
+    // ceiling rejects the plan before a reviewer sees it, so a false positive
+    // there reads as delete-it-or-fail. So where the subject could not be
+    // established this reports instead of blocking, names what would make it
+    // revision history, and asks before anything is deleted.
+    if (unbound) {
+      return issue(
+        "minor",
+        `The plan may carry ${marker.label}`,
+        [
+          "This is reported rather than blocked because the line gives the check nothing to read the subject off. It is revision history if what is superseded is this plan's own — a decision, a choice, a placement, a wording, a section, an earlier draft — or if the thing superseding it is this plan, this round, or this draft; then delete the text rather than qualifying it, because the annotation is what makes revision purely additive.",
+          "It is not revision history if the superseded thing belongs to the subject matter — a commit, a record, a fixture, a migration, a schema version. Then leave the line exactly as it stands: do not add a clause explaining it, since that spends budget to answer a check rather than a reader. Confirm which of the two it is before deleting anything.",
+          cited
+        ].join(" ")
+      );
+    }
+    return issue(
+      "blocking",
+      `The plan carries ${marker.label}`,
+      [
+        "The plan states current decisions only, and this text exists only because an earlier round said something different. Superseded text is deleted rather than annotated, because the annotation is what makes revision purely additive: every round that answers a critique by explaining what the plan used to say leaves a longer document for the next round to find contradictions in.",
+        `Delete this text rather than qualifying it. ${cited}`
+      ].join(" ")
+    );
+  });
 }
 
 // A budget is not a style preference. A plan that cannot fit is evidence the

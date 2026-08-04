@@ -201,8 +201,11 @@ test("terse revision history is not mistaken for a list of names", () => {
     "~~use Redis~~, ~~use Kafka~~, ~~use Mongo~~ — Postgres wins."
   ];
   for (const line of annotations) {
+    // The gating severity specifically: a line that came back carrying only the
+    // hedged finding would clear the gate, which is not what "still blocks"
+    // means, and length alone cannot tell the two apart.
     assert.ok(
-      lintPlanDocument({ text: plan(line) }).length > 0,
+      lintPlanDocument({ text: plan(line) }).some((issue) => issue.severity === "blocking"),
       `${JSON.stringify(line)} should still block`
     );
   }
@@ -258,6 +261,139 @@ test("each marker on its own still blocks", () => {
       `${JSON.stringify(line)} should report ${label}, got ${JSON.stringify(titles(found))}`
     );
   }
+});
+
+// Verbatim from the plan that found it: a rule about which CI conclusion is
+// authoritative, in a repository whose subject matter is versioning. The word
+// was bound to nothing, so it fired on the noun the plan happened to describe.
+const SUPERSEDED_COMMITS = "- **D4.** The label removes itself, so each fix re-applies it and waits; runs against superseded commits stay in the record, and exactly one conclusion counts — the final head SHA's.";
+
+test("a superseded thing that belongs to the subject matter is not revision history", () => {
+  const clean = [
+    SUPERSEDED_COMMITS,
+    "Rows for superseded records are kept until the next compaction.",
+    "The migration is superseded when the schema version moves.",
+    "Superseded fixtures stay in the corpus so the regression can be replayed.",
+    "Requests to the superseded API version answer 410.",
+    // "this", "that" and "it" are the ordinary pronouns of ordinary prose long
+    // before they are the plan naming itself, so the subject-matter reading has
+    // to be tried before the plan-as-agent one.
+    "A migration that supersedes another migration is skipped.",
+    "When a newer run finishes, it supersedes the run recorded before."
+  ];
+  for (const line of clean) {
+    assert.deepEqual(lintPlanDocument({ text: plan(line) }), [], `${JSON.stringify(line)} should be clean`);
+  }
+});
+
+// The subject is what makes it history, on either side of the word, and the
+// plan itself counts as one — "this supersedes" says the same as "the earlier
+// decision is superseded" with the noun left out.
+test("a superseded plan artifact still blocks", () => {
+  const annotations = [
+    "That placement is superseded.",
+    "The toolbar decision supersedes the sidebar one.",
+    "D3 is superseded by this draft.",
+    "The 400ms wording is now superseded.",
+    "Superseded by pass 2.",
+    "This supersedes the earlier layout.",
+    // A qualified subject is still a subject, and the thing named after "by" is
+    // what supersedes rather than what was superseded — reading a commit there
+    // as the subject would drop a real annotation with no finding at all.
+    "The decision about retries is superseded.",
+    "The decision, superseded, was replaced.",
+    "D3's placement of the toolbar is superseded by commit 1234.",
+    "The section covering retries is superseded by the manifest."
+  ];
+  for (const line of annotations) {
+    const found = lintPlanDocument({ text: plan(line) });
+    assert.equal(found.length, 1, `${JSON.stringify(line)} should report once, got ${JSON.stringify(titles(found))}`);
+    assert.equal(found[0].severity, "blocking");
+    assert.match(found[0].title, /carries a superseded decision/);
+  }
+});
+
+// Where neither reading can be established the occurrence is still reported —
+// the word is one keystroke from every annotation — but it does not gate, and
+// the remedy asks instead of instructing. A blocking finding that says "delete
+// this text" is delete-it-or-fail on a plan near its ceiling, where the
+// clarifying clause that would answer it does not fit either.
+test("an unbound superseded is reported without blocking, and asks before deletion", () => {
+  const found = lintPlanDocument({ text: plan("The value is superseded.") });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].severity, "minor");
+  assert.match(found[0].title, /may carry a superseded decision/);
+  assert.match(found[0].detail, /Confirm which of the two it is before deleting anything/);
+  assert.doesNotMatch(found[0].detail, /^Delete this text/);
+});
+
+// The hedge is also what a subject too far off to read degrades to. Losing the
+// binding costs the gate, never the finding — which is the whole reason the
+// subject-matter reading gives way wherever an artifact is named in the same
+// clause, even when the sentence puts a commit or a record nearer the word.
+test("a subject beyond the window degrades to the hedge rather than to nothing", () => {
+  const hedged = [
+    "The choice made in round 1 about retries is superseded by the migration.",
+    "The commit ordering is superseded, along with the decision that produced it.",
+    "The decision, and the commit that carried it, is superseded.",
+    "Our choice to pin the dependency version is superseded.",
+    "D4 and the record of it are superseded.",
+    "The wording chosen for the migration note is superseded.",
+    // A repository that ships plans writes about plan files, so "plan" and
+    // "draft" are too ambiguous to block on and exactly right for refusing to
+    // go silent.
+    "Superseded plans stay in .tagteam/plans/ until the ship completes.",
+    "The draft in which the schema version appears is superseded."
+  ];
+  for (const line of hedged) {
+    const found = lintPlanDocument({ text: plan(line) });
+    assert.equal(found.length, 1, `${JSON.stringify(line)} should report once, got ${JSON.stringify(titles(found))}`);
+    assert.equal(found[0].severity, "minor", `${JSON.stringify(line)} should hedge rather than block or vanish`);
+  }
+});
+
+// The severity is the whole remedy: a hedged finding that still gated would
+// leave the drafter exactly where the false positive left them, choosing
+// between deleting a real decision and failing the ceiling.
+test("a plan whose only finding is hedged still clears the gate", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-lint-"));
+  const file = path.join(directory, "plan.md");
+  fs.writeFileSync(file, plan("The value is superseded."), { mode: 0o600 });
+
+  const result = planLint({ plan: file });
+  assert.equal(result.clean, true);
+  assert.deepEqual(result.issues.map((issue) => issue.severity), ["minor"]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+// Both readings are two findings, because they have two remedies — including on
+// one line, where each occurrence is classified on its own.
+test("a bound and an unbound occurrence are reported separately", () => {
+  for (const text of [
+    ["That placement is superseded.", "The value is superseded."].join("\n"),
+    ["The value is superseded.", "That placement is superseded."].join("\n"),
+    "The value is superseded. That placement is superseded."
+  ]) {
+    assert.deepEqual(
+      lintPlanDocument({ text: plan(text) }).map((issue) => [issue.severity, issue.title]),
+      [
+        ["blocking", "The plan carries a superseded decision"],
+        ["minor", "The plan may carry a superseded decision"]
+      ],
+      JSON.stringify(text)
+    );
+  }
+});
+
+// A clause that names an artifact is read as history for every occurrence in it,
+// so the subject-matter exemption cannot be bought by writing the two together.
+test("a domain occurrence sharing a clause with an artifact does not go quiet", () => {
+  assert.deepEqual(
+    lintPlanDocument({ text: plan("The commit is superseded but the decision is superseded too.") })
+      .map((issue) => [issue.severity, issue.title]),
+    [["blocking", "The plan carries a superseded decision"]]
+  );
 });
 
 // A marker inside a code region is an example of the pattern, never an
