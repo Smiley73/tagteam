@@ -1,7 +1,7 @@
 ---
 name: ui-classifier
 description: Independently judges whether an actual candidate diff is noticeable to a person using the product.
-model: haiku
+model: inherit
 tools: Read, Glob, Grep
 ---
 
