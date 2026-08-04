@@ -153,6 +153,16 @@ async function forgeHandoff({
     if (label.endsWith(":request") || label.endsWith("-request") || label.includes("request:")) {
       return { ok: true, promptPath: "/tmp/p.md", promptHash: `sha256:${"a".repeat(64)}`, bytes: 10 };
     }
+    // Findings from a reviewer rather than from the lint. The two are counted on
+    // separate scoreboards — a lint-gated round buys no reviewer at all, so its
+    // findings are deterministic defects and not a review count — and before
+    // this the harness could only produce the lint kind, which meant a test
+    // meaning to exercise one was quietly exercising the other.
+    const reviewRound = /^plan:(?:claude|codex)-review:(\d+)$/.exec(label)?.[1];
+    if (reviewRound) {
+      const issues = rounds?.roundReviewGating?.[Number(reviewRound) - 1] ?? [];
+      return { ...APPROVE, verdict: issues.length ? "revise" : "approve", issues };
+    }
     if (label.includes("manifest")) return MANIFEST;
     if (label.includes("decompose")) return TRAIN;
     if (label.includes("decomposition")) return { ...APPROVE, verdict };
@@ -386,14 +396,64 @@ test("a pass whose own round remeasured the count does not compare its handoff a
     planDir,
     priorGatingIssueCount: 8,
     handoffGating: gating(8),
-    // Round 1 finds two, which replaces the seeded 8 with a plan-review count;
-    // round 2 comes back clean and the pass goes on to the handoff.
-    rounds: { roundGating: [gating(2), []] }
+    // Round 1's reviewers find two, which replaces the seeded 8 with a genuine
+    // plan-review count; round 2 comes back clean and the pass goes on to the
+    // handoff. The findings have to come from a reviewer for that to be true:
+    // deterministic defects are counted on their own axis and leave the reviewed
+    // count exactly as the caller seeded it.
+    rounds: { roundGating: [[], []], roundReviewGating: [gating(2), []] }
   });
 
   assert.equal(result.status, "needs-handoff-revision");
   assert.equal(result.divergence, null);
 
+  fs.rmSync(planDir, { recursive: true, force: true });
+});
+
+// The failure this separation exists for. A gating lint finding suppresses every
+// reviewer for its round, so that round's issues are deterministic defects and
+// nothing else. Measured against a reviewed count the arithmetic breaks at once:
+// two consecutive over-budget rounds were enough to end a pass reporting
+// divergence having never paid a single reviewer.
+test("two lint-gated rounds are measured against each other, not against a reviewed count", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-handoff-lint-axis-"));
+  const { result, logs } = await forgeHandoff({
+    planDir,
+    // A reviewed count of 1 from the previous pass, against one deterministic
+    // defect in this one. These numbers are the reproduction rather than an
+    // illustration: compared as one population, 1 is not below 1, so the pass
+    // stopped at round 1 reporting divergence with no reviewer ever bought. A
+    // larger seed would let the old code pass this test by luck.
+    priorGatingIssueCount: 1,
+    handoffGating: [],
+    // One defect, repaired to none. The lint axis improved, so the pass carries
+    // on to reviewers rather than stopping on a comparison it should never have
+    // made.
+    rounds: { roundGating: [gating(1), []], roundReviewGating: [[], []] }
+  });
+
+  assert.equal(result.divergence, null);
+  assert.equal(result.status, "needs-approval");
+  fs.rmSync(planDir, { recursive: true, force: true });
+});
+
+test("a lint-gated round that does not clear its own defects stops the pass and says no reviewer ran", async () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-handoff-lint-stall-"));
+  const { result, logs } = await forgeHandoff({
+    planDir,
+    handoffGating: [],
+    rounds: { roundGating: [gating(1), gating(1)], roundReviewGating: [[], []] }
+  });
+
+  assert.equal(result.divergence?.lintOnly, true);
+  assert.equal(result.divergence?.previous, 1);
+  assert.equal(result.divergence?.current, 1);
+  // The message has to say the reviewers never ran, because "the plan is not
+  // converging" reads very differently when nothing has judged it yet.
+  assert.ok(
+    logs.some((line) => /deterministic defect/.test(line) && /No reviewer has run/.test(line)),
+    `no lint-axis divergence log: ${JSON.stringify(logs)}`
+  );
   fs.rmSync(planDir, { recursive: true, force: true });
 });
 
