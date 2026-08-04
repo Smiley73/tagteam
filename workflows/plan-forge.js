@@ -2881,11 +2881,32 @@ async function main(raw) {
   // is seeded from the previous pass when the caller supplies one, so a run that
   // repairs the same plan across a dozen passes is measured across all of them
   // rather than restarting its own scoreboard each time.
-  let gatingCount = Number.isSafeInteger(input.priorGatingIssueCount) && input.priorGatingIssueCount >= 0
+  const seededCount = Number.isSafeInteger(input.priorGatingIssueCount) && input.priorGatingIssueCount >= 0
     ? input.priorGatingIssueCount
     : null;
+  // A count the previous pass measured on deterministic defects seeds the defect
+  // scoreboard, not the reviewed one. Absent, it seeds the reviewed one as it
+  // always has, so a caller that has not been taught to pass the kind back is
+  // exactly as it was.
+  const seededKind = input.priorGatingIssueKind === "lint" ? "lint" : "review";
+  let gatingCount = seededKind === "review" ? seededCount : null;
   let diverged = null;
+  // The same rule as `gatingCount`, on the population it actually applies to. A
+  // round whose plan carries a gating lint finding buys no reviewer at all, so
+  // its `unresolvedIssues` are deterministic defects and nothing else. Measured
+  // against a count that came from reviewers — or from a previous pass — that is
+  // two different populations compared as one, and the arithmetic breaks
+  // immediately: the first such round sets the count to 1, the next one still
+  // has a defect, 1 is not below 1, and the pass exits reporting divergence
+  // having never paid a single reviewer. Two consecutive over-budget rounds were
+  // enough. The record-share finding added beside the budget one makes a
+  // lint-gated round commoner, which is what turned this from a latent shape
+  // into something worth separating now.
+  let lintRepairCount = seededKind === "lint" ? seededCount : null;
   let lintOnlyRound = false;
+  // Whether the last round that ran was decided by the lint rather than by
+  // reviewers, which is what makes its count a defect count for the next pass.
+  let lastRoundLintGated = false;
   let roundsExhausted = false;
   // Whether anything in this pass replaced the seeded count with one of its own.
   // Not whether a round ran: a round that comes back clean leaves `gatingCount`
@@ -3199,16 +3220,41 @@ async function main(raw) {
     // the run that motivated this rule stops at the sixth pass rather than the
     // thirteenth.
     if (!roundClean) {
-      if (gatingCount !== null && unresolvedIssues.length >= gatingCount) {
-        diverged = { round, previous: gatingCount, current: unresolvedIssues.length };
-        log([
-          `Plan round ${round} left ${unresolvedIssues.length} blocking or major issue${unresolvedIssues.length === 1 ? "" : "s"} where the previous check left ${gatingCount}, so this pass stopped rather than revising into a longer plan with more of them.`,
-          "Revision is additive by default and contradiction surface grows faster than the document does, so a round that does not reduce the count is evidence the loop is diverging rather than evidence it needs another round."
-        ].join(" "));
+      // Which scoreboard this round belongs on. A lint-gated round never reached
+      // a reviewer, so it is measured against the last lint-gated round and
+      // leaves the reviewed count exactly as it found it — including
+      // `gatingRemeasured`, which says the caller's seeded count has been
+      // replaced by a comparable one and is still false here.
+      //
+      // Keyed on the deterministic findings rather than on `lintOnlyRound`,
+      // which is `!builtReviewPrompt` and so conflates two different events: a
+      // round that bought no reviewer because the lint had already decided it,
+      // and a round whose review request could not be assembled. Only the first
+      // one produces a count made of defects. The second produced no count worth
+      // comparing at all, and reading it as a defect count would park a review
+      // failure on the repair scoreboard where nothing is watching for it.
+      const lintGatedRound = gatingLint.length > 0;
+      lastRoundLintGated = lintGatedRound;
+      const measured = lintGatedRound ? lintRepairCount : gatingCount;
+      if (measured !== null && unresolvedIssues.length >= measured) {
+        diverged = { round, previous: measured, current: unresolvedIssues.length, lintOnly: lintGatedRound };
+        log(lintGatedRound
+          ? [
+            `Plan round ${round} left ${unresolvedIssues.length} deterministic defect${unresolvedIssues.length === 1 ? "" : "s"} where the previous repair left ${measured}, so this pass stopped rather than compressing the plan again.`,
+            "No reviewer has run: every round so far was spent on defects decided in code. Repairing the plan is not clearing them, and another repair round would cost the same as this one."
+          ].join(" ")
+          : [
+            `Plan round ${round} left ${unresolvedIssues.length} blocking or major issue${unresolvedIssues.length === 1 ? "" : "s"} where the previous check left ${measured}, so this pass stopped rather than revising into a longer plan with more of them.`,
+            "Revision is additive by default and contradiction surface grows faster than the document does, so a round that does not reduce the count is evidence the loop is diverging rather than evidence it needs another round."
+          ].join(" "));
         break;
       }
-      gatingCount = unresolvedIssues.length;
-      gatingRemeasured = true;
+      if (lintGatedRound) {
+        lintRepairCount = unresolvedIssues.length;
+      } else {
+        gatingCount = unresolvedIssues.length;
+        gatingRemeasured = true;
+      }
     }
 
     // A clean round ends the pass on exactly the bytes it approved. It used to
@@ -3569,6 +3615,12 @@ async function main(raw) {
     // promise that it reduces this number, so the caller carries it forward and
     // stops paying when it does not.
     gatingIssueCount: rest.unresolvedIssues?.length ?? rest.handoffIssues?.length ?? 0,
+    // Which population that count came from, so the next pass seeds the same
+    // scoreboard it was measured on. A pass that ended on deterministic defects
+    // never reached a reviewer, and carrying its count forward as a reviewed one
+    // is the cross-pass form of the conflation `lintRepairCount` fixes inside a
+    // pass. Callers that do not pass it back get today's behaviour.
+    gatingIssueKind: lastRoundLintGated && rest.unresolvedIssues ? "lint" : "review",
     // Set when cross-review used every configured round without clearing the
     // plan. That is not the same as a failed plan, and the caller offers a
     // choice rather than treating the cap as a verdict.

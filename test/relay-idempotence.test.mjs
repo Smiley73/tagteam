@@ -2356,7 +2356,7 @@ test("a round that does not reduce the issue count stops the pass instead of buy
   );
 
   assert.equal(result.status, "needs-plan-revision", result.message);
-  assert.deepEqual(result.divergence, { round: 2, previous: 2, current: 3 });
+  assert.deepEqual(result.divergence, { round: 2, previous: 2, current: 3, lintOnly: false });
   assert.equal(result.unresolvedIssues.length, 3);
   // Round three was never bought, and neither was the re-read: the pass already
   // knows a revision did not reduce this count.
@@ -2378,7 +2378,7 @@ test("the count a divergence is measured against carries in from the previous pa
   // A repair pass is bought on the promise that it reduces the count. The first
   // round of this one did not, so it is the last.
   assert.equal(result.status, "needs-plan-revision", result.message);
-  assert.deepEqual(result.divergence, { round: 1, previous: 2, current: 2 });
+  assert.deepEqual(result.divergence, { round: 1, previous: 2, current: 2, lintOnly: false });
 });
 
 test("a plan the deterministic check stops never buys a reviewer", async () => {
