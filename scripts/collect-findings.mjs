@@ -110,6 +110,37 @@ function summaryLines(result) {
   return lines;
 }
 
+// One file per lens holding exactly the findings that lens must re-check, with
+// the ids already in them.
+//
+// The re-check asks a reviewer for a verdict per finding id, and the ids are
+// assigned here rather than by the reviewer — deliberately, so a model cannot
+// invent them. But the reviewer's own findings file does not contain them, so
+// telling it to "read your own findings" asked it to return identifiers it had
+// never been given. It returned titles instead, every verdict failed to bind,
+// and a review where four reviewers said "resolved" came back unverifiable.
+//
+// The reviewer now copies ids out of its input. Nothing is reconstructed, which
+// is the only version of this that holds.
+function writeOpenPerLens(dir, result) {
+  const openDir = path.join(path.resolve(dir), "..", "open");
+  fs.mkdirSync(openDir, { recursive: true, mode: 0o700 });
+  const written = [];
+  for (const lens of [...new Set(result.open.map((finding) => finding.lens))]) {
+    const file = path.join(openDir, `${lens}.json`);
+    const payload = {
+      lens,
+      candidate: result.candidate,
+      findings: result.open
+        .filter((finding) => finding.lens === lens)
+        .map(({ id, severity, file: where, line, title, detail }) => ({ id, severity, file: where, line, title, detail }))
+    };
+    fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+    written.push({ lens, file, count: payload.findings.length });
+  }
+  return written;
+}
+
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
@@ -119,7 +150,11 @@ async function main() {
     const out = path.resolve(options.out);
     fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
     fs.writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+    const perLens = writeOpenPerLens(options.dir, result);
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
+    for (const entry of perLens) {
+      process.stdout.write(`  re-check ${entry.lens} against ${entry.file} (${entry.count} finding(s))\n`);
+    }
     // Non-zero when something is open or absent, so a shell chain stops without
     // the caller having to interpret the text.
     if (result.status !== "clean") process.exitCode = 1;

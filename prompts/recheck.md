@@ -3,10 +3,16 @@
 A fixer has been given the findings you raised and has changed the code. You are
 being asked one question per finding: **is it actually resolved?**
 
-Read your own findings file, then the new diff at the path you are given, then
-the current state of the files involved. Write your verdicts to the path you are
-given, matching `schemas/recheck.schema.json`, with `candidate` set to the exact
-post-fix commit you were given.
+You are given a file holding exactly the findings you must judge, each carrying
+an `id`. **Copy those ids into your verdicts unchanged.** Do not derive them, do
+not use the title, do not invent a scheme — a verdict whose id does not match is
+counted as no verdict at all, and the finding stays open. The ids are in your
+input for exactly this reason.
+
+Then read the new diff at the path you are given and the current state of the
+files involved. Write your verdicts to the path you are given, matching
+`schemas/recheck.schema.json`, with `candidate` set to the exact post-fix commit
+you were given.
 
 ## Rules
 
