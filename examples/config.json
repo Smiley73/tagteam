@@ -1,18 +1,16 @@
 {
-  "version": 5,
+  "version": 6,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
   "models": {
-    "plan": "opus",
-    "implement": "sonnet",
-    "review": "opus",
+    "lead": "opus",
+    "worker": "sonnet",
     "codex": "gpt-5.6-sol"
   },
   "effort": {
-    "plan": "high",
-    "implement": "high",
-    "review": "high",
+    "lead": "high",
+    "worker": "high",
     "codex": "high"
   },
   "reviewers": {

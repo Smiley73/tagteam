@@ -42,11 +42,11 @@ what is on disk and continues from the first thing that is not done.
 
 ## Configuration
 
-`.tagteam/config.json`, version 5, validated by
+`.tagteam/config.json`, version 6, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:init` and stop. There is no migration: version 5
+tell the person to run `/tagteam:init` and stop. There is no migration: version 6
 is a different shape, not an extension.
 
 | Key | Meaning |
@@ -54,7 +54,7 @@ is a different shape, not an extension.
 | `base` | Branch pull requests target and each spec branches from |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
-| `models` / `effort` | Per role: `plan`, `implement`, `review`, `codex` |
+| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, `Explore`), `worker` (implementer, fixer), `codex` (every `scripts/codex.mjs` invocation). Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
 | `reviewers.roster` | Every lens a plan may assign |
 | `reviewers.default` | Lenses applied to every spec unless it drops one |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |

@@ -29,7 +29,7 @@ Seven steps. There is no loop anywhere in them.
 
 ## 1 — Orient
 
-Dispatch one `Explore` subagent: how the areas this goal touches are built today,
+Dispatch one `Explore` subagent at `models.lead` / `effort.lead`: how the areas this goal touches are built today,
 which modules own them, what patterns the repository already uses, and where the
 tests for them live. Ask for the conclusion, not the file contents.
 
@@ -107,7 +107,7 @@ Run this before **every** step from here on — draft, revise, expand, approve. 
 is one command and it is the only thing standing between "the plan was built from
 what you approved" and a claim nobody checked.
 
-Dispatch `tagteam:plan-drafter` at `models.plan` / `effort.plan`. Give it `$D/goal.md`,
+Dispatch `tagteam:plan-drafter` at `models.lead` / `effort.lead`. Give it `$D/goal.md`,
 the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
 count — do not read the plan.
 
@@ -115,14 +115,14 @@ count — do not read the plan.
 
 Three readers, dispatched in a single message so they run concurrently:
 
-- `tagteam:plan-reviewer` at `models.review`, writing `$D/work/review/claude.json`
+- `tagteam:plan-reviewer` at `models.lead` / `effort.lead`, writing `$D/work/review/claude.json`
 - Codex, via `$P/prompts/codex/plan-review.md`, fencing `GOAL` and `PLAN` from
   disk, writing `$D/work/review/codex.json`
-- `tagteam:adversary` at `models.review`, pointed at `prompts/plan-adversary.md`,
+- `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/plan-adversary.md`,
   writing `$D/work/review/adversary.json`
 
 Then read the three files — they are small — and pass every `blocking` and
-`major` finding to one `tagteam:plan-drafter` revision.
+`major` finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`.
 
 **That is the whole review.** No second round, no convergence check, no lint. If
 the revision is wrong, the person will say so at approval. Only offer another
@@ -164,14 +164,14 @@ user-visibility, and the row verbatim. It is how you dispatch without reading
 `plan.md`: the rows come out as data, the plan body stays out of your context.
 
 Dispatch one `tagteam:spec-writer` per deliverable, **all in one message**, each
-at `models.plan` and each writing exactly `$D/specs/<id>.md`. Give each one the
+at `models.lead` / `effort.lead` and each writing exactly `$D/specs/<id>.md`. Give each one the
 goal path, the plan path, its own row, and the configured default lens set so it
 knows what it is naming exceptions to.
 
 Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
 checks front matter, resolves each spec's lenses against the default set, and
 returns dependency order. Fix what it reports by re-dispatching the writer for
-that spec.
+that spec at `models.lead` / `effort.lead`.
 
 **The reviewer selection lives in the spec front matter**, because that is what
 `specs.mjs` and shipping actually read. There is no separate manifest to edit: a

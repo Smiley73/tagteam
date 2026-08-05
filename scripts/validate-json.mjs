@@ -94,11 +94,13 @@ export function validateJson(schema, value) {
   return errors;
 }
 
-// The configuration version the current plugin writes. Version 5 is a different
-// shape rather than an extension of version 4, so there is no key-by-key upgrade
-// path: an older configuration is reported stale and `/tagteam:init` writes a
-// new one. A migration for keys that no longer exist would be churn.
-export const CONFIG_VERSION = 5;
+// The configuration version the current plugin writes. Version 6 is a different
+// shape rather than an extension of version 5 — it collapses the four role keys
+// (`plan`, `implement`, `review`, `codex`) in `models` and `effort` to three
+// (`lead`, `worker`, `codex`) — so there is no key-by-key upgrade path: an older
+// configuration is reported stale and `/tagteam:init` writes a new one. A
+// migration for keys that no longer exist would be churn.
+export const CONFIG_VERSION = 6;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.
@@ -257,7 +259,7 @@ async function main() {
   }
   try {
     const repo = repoValue === undefined ? undefined : path.resolve(repoValue);
-    // Version before shape. A version-4 configuration fails the version-5 schema
+    // Version before shape. A version-5 configuration fails the version-6 schema
     // in a dozen places, and reporting that as "invalid" told the user their
     // configuration was broken when it was merely old — the exit-3 path that
     // says "run /tagteam:init" was unreachable for the only files that need it.

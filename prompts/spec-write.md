@@ -48,8 +48,9 @@ not both write it.
 
 ## Calibration
 
-The implementer is a capable model — Sonnet or better — reading this repository
-with full tool access. Write for that reader.
+The implementer is a capable model — Sonnet or better, `models.worker`'s floor;
+see `skills/tagteam/SKILL.md` for why — reading this repository with full tool
+access. Write for that reader.
 
 This is the single most important thing to get right, and the failure runs in
 one direction: specs written as if for the weakest imaginable model grow to

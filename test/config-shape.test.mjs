@@ -139,19 +139,42 @@ test("a git ref name Git itself would reject does not validate", async () => {
 
 // --- regressions from the third Codex round ---
 
-test("a version-4 configuration reports stale rather than invalid", async () => {
+test("a version-5 configuration reports stale rather than invalid", async () => {
   // Exit 3 is what tells a person to run /tagteam:init. Validating shape before
-  // version meant a real v4 file failed the v5 schema in a dozen places and
+  // version meant a real v5 file failed the v6 schema in a dozen places and
   // exited 1, so the only files that need exit 3 could never receive it.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v4-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v5-"));
   const old = path.join(dir, "config.json");
-  fs.writeFileSync(old, JSON.stringify({ version: 4, prTrain: { base: "main" }, reviewTiers: {} }));
+  fs.writeFileSync(old, JSON.stringify({
+    ...example,
+    version: 5,
+    models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
+    effort: { plan: "high", implement: "high", review: "high", codex: "high" }
+  }));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"),
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
   assert.match(result.stdout, /run \/tagteam:init/);
+});
+
+test("a version-6 configuration carrying the old four role keys is invalid", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const stale = {
+    ...example,
+    models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
+    effort: { plan: "high", implement: "high", review: "high", codex: "high" }
+  };
+  const errors = validateJson(schema, stale);
+  assert.ok(errors.length > 0, "a four-role models/effort shape must not validate against the version-6 schema");
+});
+
+test("the Claude model enum exists once, referenced from both models.lead and models.worker", () => {
+  const modelDef = schema.$defs?.claudeModel;
+  assert.ok(modelDef && Array.isArray(modelDef.enum), "schema must declare a claudeModel enum in $defs");
+  assert.equal(schema.properties.models.properties.lead.$ref, "#/$defs/claudeModel");
+  assert.equal(schema.properties.models.properties.worker.$ref, "#/$defs/claudeModel");
 });
 
 test("the deliverables table comes out as data, without reading the plan", async () => {

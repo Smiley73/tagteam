@@ -74,7 +74,7 @@ node "$P/scripts/gates.mjs" state "$S/<id>/state.json" implementing
 
 ### 2. Implement
 
-One `tagteam:implementer` at `models.implement` / `effort.implement`. Give it the
+One `tagteam:implementer` at `models.worker` / `effort.worker`. Give it the
 spec **path**, the worktree path, and `conventionsPath` if set. It reads the spec
 itself; you do not.
 
@@ -120,7 +120,7 @@ executable evidence waits for a person.
 `gates.mjs state ... reviewing`, then dispatch **in a single message**, one per
 resolved lens plus Codex:
 
-- `tagteam:reviewer` at `models.review` / `effort.review` per lens, each given
+- `tagteam:reviewer` at `models.lead` / `effort.lead` per lens, each given
   the lens name, `$S/<id>/rounds/<n>/review.diff`, the spec path, the candidate OID, and
   `$S/<id>/rounds/<n>/findings/<lens>.json` to write.
 - Codex via `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
@@ -143,7 +143,7 @@ not clean, and it never merges.
 
 ### 6. Fix, once — only if something is open or missing
 
-`gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.implement`,
+`gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` / `effort.worker`,
 given `$S/<id>/review.json`, the worktree, and `$S/<id>/fix-report.json` to
 write. Then commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set
 `OID` to the new commit, and `gates.mjs bind` it — which clears every gate,
@@ -161,10 +161,10 @@ reader that looks at the final diff without already having an opinion about it.
 
 In one message:
 
-- `tagteam:adversary` at `models.review`, pointed at `prompts/code-adversary.md`,
+- `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/code-adversary.md`,
   given the spec and `$S/<id>/rounds/<n>/review.diff`, writing
   `$S/<id>/rounds/<n>/findings/adversary.json` with `candidate` set to `$OID`.
-- Each lens that raised a finding in step 5, re-dispatched with
+- Each lens that raised a finding in step 5, re-dispatched at `models.lead` / `effort.lead` with
   `prompts/recheck.md`, its own findings, the new diff, and
   `$S/<id>/rounds/<n>/recheck/<lens>.json` to write. Codex uses
   `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`. Skip this
@@ -225,7 +225,7 @@ A red CI gets exactly one repair, and **the repair is a new candidate, so it get
 a new review round — not a shortcut back to the merge.** In full:
 
 1. `gates.mjs state ... reviewing`.
-2. Dispatch the fixer with the failing check output, then commit and re-snapshot
+2. Dispatch the fixer at `models.worker` / `effort.worker` with the failing check output, then commit and re-snapshot
    with a fresh `<n>`, set `OID`, `bind` — which clears every gate — and re-run
    verify.
 3. **Steps 5, 6 and 7 again, entirely.** The whole lens panel plus Codex against
