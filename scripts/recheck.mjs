@@ -37,17 +37,28 @@ function parseArgs(argv) {
 
 export function settle({ review, dir, candidate, schemaPath, adversary = null, adversarySchemaPath = null }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
-  const raised = review.open ?? [];
+  // Everything the adversary contributes is re-derived from its own file on
+  // every run, so none of it may be carried in from a previous one. Ship passes
+  // the same review.json as `--review` and `--out`; without this filter a retry
+  // treats the last run's adversary findings as first-review findings, hunts for
+  // recheck verdicts that were never meant to exist, and appends a second copy
+  // of every adversary finding under an id that already exists. Found by Codex
+  // review, in the case the first idempotence fix did not reach: a *gating*
+  // adversary finding, where `open` is non-empty.
+  const raised = (review.open ?? []).filter((finding) => finding.lens !== "adversary");
   const lenses = [...new Set(raised.map((finding) => finding.lens))];
   const verdicts = new Map();
   // A lens the first review never got evidence from is still missing evidence.
   // Carrying it forward is what stops an incomplete review from being laundered
   // into a clean one: with no findings raised there is nothing to re-check, and
   // "nothing to re-check" would otherwise settle as clean.
-  const unusable = (review.missing ?? []).map((gap) => ({
-    ...gap,
-    reason: `${gap.reason} (unresolved from the first review)`
-  }));
+  const CARRIED = " (unresolved from the first review)";
+  const unusable = (review.missing ?? [])
+    .filter((gap) => gap.lens !== "adversary")
+    .map((gap) => ({
+      ...gap,
+      reason: gap.reason.endsWith(CARRIED) ? gap.reason : `${gap.reason}${CARRIED}`
+    }));
 
   for (const lens of lenses) {
     const file = path.join(path.resolve(dir), `${lens}.json`);

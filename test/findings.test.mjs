@@ -490,3 +490,54 @@ test("re-running the recheck in place does not inflate the tally", async () => {
   assert.equal(JSON.parse(fs.readFileSync(inPlace, "utf8")).counts.minor, 1);
   assert.deepEqual(second.reviewCounts, { blocking: 0, major: 0, minor: 0, nit: 0 });
 });
+
+test("an in-place retry is stable when the adversary raised a blocker", async () => {
+  // The half the first idempotence fix did not reach: with a gating adversary
+  // finding, `open` is non-empty, so a retry read the last run's adversary entry
+  // as a first-review finding — hunted for a recheck verdict that was never
+  // meant to exist, went incomplete, and appended a second adversary.1.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-idem2-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "blocking", title: "the fix moved the defect" })]
+  }));
+  const inPlace = path.join(base, "review.json");
+  fs.writeFileSync(inPlace, JSON.stringify({
+    status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
+  }));
+
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", inPlace, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", inPlace
+  ], { encoding: "utf8" });
+
+  run();
+  const first = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(first.status, "open");
+  assert.deepEqual(first.open.map((entry) => entry.id), ["adversary.1"]);
+
+  run();
+  const second = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(second.status, "open", "a retry must not turn a reviewed blocker into incomplete");
+  assert.deepEqual(second.open.map((entry) => entry.id), ["adversary.1"], "and must not duplicate the id");
+  assert.equal(second.counts.blocking, 1);
+  assert.deepEqual(second.missing, []);
+});
+
+test("a carried-forward missing lens does not restate itself on every retry", () => {
+  const incomplete = {
+    status: "incomplete", candidate: OID, counts: {}, open: [],
+    missing: [{ lens: "security", file: "x", reason: "no file was written (unresolved from the first review)" }]
+  };
+  const result = settle({ review: incomplete, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, ...adversary([]) });
+  assert.equal(result.missing.length, 1);
+  assert.equal(
+    (result.missing[0].reason.match(/unresolved from the first review/g) ?? []).length, 1,
+    "the suffix must not accumulate"
+  );
+});
