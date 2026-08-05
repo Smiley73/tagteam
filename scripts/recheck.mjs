@@ -18,6 +18,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 
+const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
+
 function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -91,6 +93,7 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
   // folded in by whoever is orchestrating: an instruction to "also consider the
   // adversary's findings" is not a gate, and a missing file would pass silently.
   const fresh = [];
+  const recorded = [];
   if (adversary !== null) {
     const findingsSchema = JSON.parse(fs.readFileSync(adversarySchemaPath, "utf8"));
     let parsed;
@@ -116,17 +119,21 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
         // adversary would count as having run.
         unusable.push({ lens: "adversary", file: adversary, reason: `holds a review by "${parsed.lens}", not by the adversary` });
       } else {
-        parsed.findings
-          .filter((finding) => finding.severity === "blocking" || finding.severity === "major")
-          .forEach((finding, index) => {
-            fresh.push({
-              ...finding,
-              id: `adversary.${index + 1}`,
-              lens: "adversary",
-              resolved: false,
-              evidence: "raised by the adversary against the fixed change"
-            });
-          });
+        // Severity decides what gates, and it decides nothing else. The
+        // non-gating findings used to be filtered away here and never written
+        // anywhere, so an adversary that raised a minor and a nit reported
+        // "2 findings" into a file that recorded none of them — and the pull
+        // request body, which is written from what these scripts print, could
+        // not mention what nobody could see. Every other lens has its minors
+        // carried through by `collect-findings`; this one lost them.
+        parsed.findings.forEach((finding, index) => {
+          const entry = { ...finding, id: `adversary.${index + 1}`, lens: "adversary", resolved: false };
+          if (finding.severity === "blocking" || finding.severity === "major") {
+            fresh.push({ ...entry, evidence: "raised by the adversary against the fixed change" });
+          } else {
+            recorded.push({ ...entry, gating: false, evidence: "raised by the adversary; not gating at this severity" });
+          }
+        });
       }
     }
   }
@@ -134,15 +141,23 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
   const open = [...settled.filter((finding) => !finding.resolved), ...fresh];
   const status = unusable.length > 0 ? "incomplete" : open.length > 0 ? "open" : "clean";
   const expected = adversary === null ? lenses : [...lenses, "adversary"];
+  // The first review's tally plus whatever the adversary added. It cannot be
+  // recomputed from `findings`, because `findings` only ever held the gating
+  // half of the first round — `raised` is `review.open`. Carrying the tally and
+  // adding to it is the only version that counts each finding exactly once.
+  const counts = Object.fromEntries(SEVERITY_ORDER.map((severity) => [severity, review.counts?.[severity] ?? 0]));
+  for (const finding of [...fresh, ...recorded]) {
+    counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
+  }
   return {
     status,
     candidate,
     expected,
     present: expected.filter((lens) => !unusable.some((entry) => entry.lens === lens)).map((lens) => ({ lens, summary: "recheck" })),
     missing: unusable,
-    counts: review.counts ?? {},
+    counts,
     open,
-    findings: [...settled, ...fresh]
+    findings: [...settled, ...fresh, ...recorded]
   };
 }
 
@@ -167,7 +182,16 @@ async function main() {
     const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open`];
     for (const gap of result.missing) lines.push(`  MISSING  ${gap.lens}: ${gap.reason}`);
     for (const finding of result.findings) {
-      lines.push(`  ${finding.id.padEnd(22)} ${finding.resolved ? "resolved" : "OPEN    "}  ${finding.title}`);
+      // `recorded` is neither of the other two: not open, and not resolved by
+      // anyone — it never gated, so nobody was asked to fix it. Printing it as
+      // OPEN would stop a pull request that has nothing wrong with it, and as
+      // resolved would claim work that never happened.
+      const state = finding.gating === false ? "recorded" : finding.resolved ? "resolved" : "OPEN";
+      lines.push(`  ${finding.id.padEnd(22)} ${state.padEnd(8)} ${finding.severity.padEnd(8)} ${finding.title}`);
+    }
+    const carry = result.findings.filter((finding) => finding.gating === false);
+    if (carry.length > 0) {
+      lines.push(`  ${carry.length} adversary finding(s) recorded and not gating — name them in the pull request body`);
     }
     process.stdout.write(`${lines.join("\n")}\n`);
     if (result.status !== "clean") process.exitCode = 1;

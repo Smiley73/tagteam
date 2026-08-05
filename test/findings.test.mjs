@@ -370,3 +370,87 @@ test("a verdict keyed by title instead of id does not clear a finding", () => {
   assert.equal(result.status, "open");
   assert.equal(result.open.length, 2, "neither finding may be cleared by a title-keyed verdict");
 });
+
+// --- from the third spec of the first complete ship train ---
+
+test("the adversary's non-gating findings are recorded, not dropped", () => {
+  // The adversary raised a minor and a nit on the final candidate, review.json
+  // recorded neither, and the pull request body — written from what these
+  // scripts print — could not mention what nobody could see. Every other lens
+  // has its minors carried through by collect-findings; this one lost them.
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "correctness.1", resolved: true, evidence: "fixed" },
+      { id: "correctness.2", resolved: true, evidence: "fixed" }
+    ])
+  });
+  const result = settle({
+    review: { ...review, counts: { blocking: 0, major: 2, minor: 1, nit: 0 } },
+    dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA,
+    ...adversary([
+      finding({ severity: "minor", title: "the note reads as the plugin's version" }),
+      finding({ severity: "nit", title: "three paragraphs where the spec asked for two sentences" })
+    ])
+  });
+
+  // Recorded, and still clean: severity decides what gates, and a minor never did.
+  assert.equal(result.status, "clean");
+  assert.deepEqual(result.open, []);
+  const carried = result.findings.filter((entry) => entry.gating === false);
+  assert.deepEqual(carried.map((entry) => entry.severity), ["minor", "nit"]);
+  assert.deepEqual(carried.map((entry) => entry.id), ["adversary.1", "adversary.2"]);
+  // The first round's tally plus what the adversary added, each counted once.
+  assert.deepEqual(result.counts, { blocking: 0, major: 2, minor: 2, nit: 1 });
+});
+
+test("a gating adversary finding still gates when non-gating ones sit beside it", () => {
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "correctness.1", resolved: true, evidence: "fixed" },
+      { id: "correctness.2", resolved: true, evidence: "fixed" }
+    ])
+  });
+  const result = settle({
+    review, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA,
+    ...adversary([
+      finding({ severity: "nit", title: "wording" }),
+      finding({ severity: "blocking", title: "the fix moved the defect" }),
+      finding({ severity: "minor", title: "naming" })
+    ])
+  });
+  assert.equal(result.status, "open");
+  // Only the blocking one is open, and its id is its position in what the
+  // adversary actually wrote — ids are assigned over the whole list, so the
+  // recorded ones do not renumber the gating one out from under the summary.
+  assert.deepEqual(result.open.map((entry) => entry.id), ["adversary.2"]);
+  assert.deepEqual(result.findings.filter((entry) => entry.gating === false).map((entry) => entry.id), ["adversary.1", "adversary.3"]);
+});
+
+test("the recheck summary distinguishes recorded from open and from resolved", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "correctness.1", resolved: true, evidence: "fixed" },
+    { id: "correctness.2", resolved: true, evidence: "fixed" }
+  ])));
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "minor", title: "worth knowing about" })]
+  }));
+  const reviewPath = path.join(base, "review.json");
+  fs.writeFileSync(reviewPath, JSON.stringify(review));
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", path.join(base, "out.json")
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0, `a recorded minor must not fail the recheck: ${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /adversary\.1\s+recorded\s+minor\s+worth knowing about/);
+  assert.match(result.stdout, /1 adversary finding\(s\) recorded and not gating/);
+  assert.doesNotMatch(result.stdout, /adversary\.1\s+OPEN/);
+});
