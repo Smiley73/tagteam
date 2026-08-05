@@ -118,6 +118,12 @@ npm test
 
 Node built-ins only, no dependencies.
 
+This repository self-hosts tagteam, and Claude Code runs the installed plugin
+snapshot rather than this working tree. After changing a plugin file or
+`.tagteam/config.json`, re-install the plugin with the commands in
+[Install](#install) and restart the session before running tagteam here.
+Otherwise the old snapshot is what runs, against the new repository.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
