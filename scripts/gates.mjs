@@ -13,12 +13,16 @@ import { pathToFileURL } from "node:url";
 
 const GATES = ["review", "verify", "ci", "human"];
 
+// A clean first round goes straight from reviewing to publishing; only a round
+// that found something passes through fixing. Both routes are declared, because
+// a state machine that refuses the ordinary path is a state machine nothing can
+// use.
 const TRANSITIONS = {
   pending: ["implementing", "failed"],
-  implementing: ["reviewing", "failed"],
-  reviewing: ["fixing", "verifying", "failed"],
+  implementing: ["verifying", "reviewing", "failed"],
+  reviewing: ["fixing", "verifying", "publishing", "failed"],
   fixing: ["reviewing", "verifying", "failed"],
-  verifying: ["publishing", "reviewing", "failed"],
+  verifying: ["reviewing", "publishing", "failed"],
   publishing: ["awaiting-approval", "merged", "failed"],
   "awaiting-approval": ["publishing", "merged", "failed"],
   merged: [],

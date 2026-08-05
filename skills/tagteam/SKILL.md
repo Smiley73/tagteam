@@ -31,7 +31,8 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   work/            interview answers, drafts, review findings, Codex artifacts   ignored
 .tagteam/ships/<slug>/<spec-id>/
   state.json       the state machine, the reviewed commit, the gates        ignored
-  diff.patch  findings/  recheck/  verify.log  review.json  ci.json         ignored
+  rounds/<n>/  review.diff, findings/, recheck/, verify/, candidate.json  ignored
+  review.json  pr-body.md  ci.json                                   ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
 
@@ -149,16 +150,16 @@ a new commit appears — and the fix round always makes one.
 | `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle findings after the fix round |
-| `merge.mjs` | Merge at the reviewed commit, read from `state.json` |
+| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
-| `snapshot-candidate.mjs` | Write `diff.patch`, changed paths, candidate record |
+| `snapshot-candidate.mjs` | Write `review.diff`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
 | `specs.mjs` | Validate spec front matter, resolve lenses, return dependency order |
 | `size-report.mjs` | Report plan and spec sizes once, before approval |
 | `validate-json.mjs` | Schema validation and config checks |
-| `merge-lock.mjs` | The ship-level lock |
+| `ship-lock.mjs` | The repository-wide ship lock |
 | `ensure-gitignore.mjs` | Maintain the managed `.gitignore` block |
 | `notify.mjs` | Desktop notification when a run needs a person |
 | `status.mjs` | Inventory for `/tagteam:status` |
@@ -168,7 +169,7 @@ a new commit appears — and the fix round always makes one.
 The orchestrator's context is the scarce resource, and running out of it
 mid-train is the failure this design exists to avoid. Three rules:
 
-1. **Never read `diff.patch`, a findings file, or a spec body yourself.** Pass
+1. **Never read `review.diff`, a findings file, or a spec body yourself.** Pass
    paths. `collect-findings.mjs` exists so findings arrive as a summary.
 2. **Plan and ship in separate sessions.** The interview loads repository
    material that shipping does not need.

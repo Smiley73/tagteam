@@ -330,7 +330,11 @@ export async function runCodex(options) {
     sha256(artifact),
     { label: artifact }
   );
-  const quotaStatePath = path.join(path.resolve(options.slots), ".quota", `${options.model}-${options.effort}.json`);
+  // Hashed rather than interpolated: the model name comes from configuration as
+  // a free string, and enough `../` segments in it would resolve this path
+  // outside the slot root — where a successful run then unlinks it.
+  const quotaKey = sha256(`${options.model} ${options.effort}`).slice(0, 32);
+  const quotaStatePath = path.join(path.resolve(options.slots), ".quota", `${quotaKey}.json`);
   try {
     let amendedPrompt = prompt;
     let invalidAttempts = 0;

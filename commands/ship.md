@@ -1,6 +1,6 @@
 ---
 description: Implement, review, and merge an approved plan one spec at a time
-argument-hint: <plan-dir> [--dry-run]
+argument-hint: <plan-dir>
 allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer)
 ---
 
@@ -19,7 +19,7 @@ code and findings; you never let a diff or a findings body into your own context
 4. Reject any path argument containing control characters or shell
    metacharacters. You build shell strings where a script would have built argv.
 5. Take the ship lock:
-   `node "$P/scripts/merge-lock.mjs" acquire "$R/.tagteam/locks/ship.lock" "<slug>"`.
+   `node "$P/scripts/ship-lock.mjs" acquire "$R" "<slug>"`.
    Already held: another ship is running here; stop. Release it when you finish
    or stop for any reason.
 6. `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"` → the ordered
@@ -102,13 +102,13 @@ resolved lens plus Codex:
   `--fence SPEC=<spec path> --fence DIFF=$S/<id>/rounds/<n>/review.diff`, schema
   `findings.schema.json`, out `$S/<id>/rounds/<n>/findings/codex.json`.
 
-The adversary does **not** run here. It runs in step 7, on the fixed diff, where
-nothing else is looking with fresh eyes.
+The adversary does **not** run here. It runs in step 7, on whatever the final
+diff turns out to be, where nothing else is looking with fresh eyes.
 
 Then:
 
 ```bash
-node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/<n>/findings" --candidate <oid> \
+node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/<n>/findings" --candidate "$OID" \
   --expect <lens,lens,codex> --out "$S/<id>/review.json"
 ```
 
@@ -116,39 +116,54 @@ Its stdout is your view of the review — a line per finding. Do not open the
 findings files. `incomplete` means a lens produced no usable evidence; that is
 not clean, and it never merges.
 
-### 6. Fix, once
+### 6. Fix, once — only if something is open or missing
 
-Nothing open and nothing missing: skip to step 8.
-
-Otherwise `gates.mjs state ... fixing` and dispatch one `tagteam:fixer` at
-`models.implement`, given `$S/<id>/review.json`, the worktree, and
-`$S/<id>/fix-report.json` to write. Then commit and re-snapshot exactly as in
-step 3, and `gates.mjs bind` the new commit — which clears every gate, because
-they were about the old one.
+`gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.implement`,
+given `$S/<id>/review.json`, the worktree, and `$S/<id>/fix-report.json` to
+write. Then commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set
+`OID` to the new commit, and `gates.mjs bind` it — which clears every gate,
+because they were about the old one. Re-run verify against the new commit.
 
 A missing entry in the fix report ends this spec. Say which findings it failed to
 account for.
 
-### 7. Re-check
+Nothing open and nothing missing: skip straight to step 7 with the same `OID`.
 
-Re-run verify against the new commit. Then, in one message:
+### 7. Adversary and re-check
 
-- Each lens that raised a finding, re-dispatched with `prompts/recheck.md`, its
-  own findings, the new diff, and `$S/<id>/rounds/<n>/recheck/<lens>.json` to write. Codex
-  uses `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
+**The adversary always runs**, whether or not there was a fix. It is the only
+reader that looks at the final diff without already having an opinion about it.
+
+In one message:
+
 - `tagteam:adversary` at `models.review`, pointed at `prompts/code-adversary.md`,
-  given the spec and the new diff, writing `$S/<id>/rounds/<n>/findings/adversary.json`.
+  given the spec and `$S/<id>/rounds/<n>/review.diff`, writing
+  `$S/<id>/rounds/<n>/findings/adversary.json` with `candidate` set to `$OID`.
+- Each lens that raised a finding in step 5, re-dispatched with
+  `prompts/recheck.md`, its own findings, the new diff, and
+  `$S/<id>/rounds/<n>/recheck/<lens>.json` to write. Codex uses
+  `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`. Skip this
+  bullet entirely when step 5 was clean — there is nothing to re-check.
 
 ```bash
-node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" --dir "$S/<id>/rounds/<n>/recheck" \
-  --candidate <newOid> --out "$S/<id>/review.json"
+node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" \
+  --dir "$S/<id>/rounds/<n>/recheck" --adversary "$S/<id>/rounds/<n>/findings/adversary.json" \
+  --candidate "$OID" --out "$S/<id>/review.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/review.json"
 ```
 
-Fold the adversary's blocking and major findings in as open. There is no second
-fix round: anything still open stops this spec, and "the fixer says fixed, the
-reviewer says not" is a terminal state, not another attempt.
+`recheck.mjs` does the aggregation, including the adversary's blocking and major
+findings — do not fold anything in by hand. It carries forward any lens the first
+review never got evidence from, so an incomplete review cannot become a clean one
+by having raised no findings to re-check. A missing or wrongly-bound adversary
+file is `incomplete`, not clean.
 
-`gates.mjs record ... review <oid> "$S/<id>/review.json"`.
+**Record the review gate on both paths.** This is the only place it is recorded;
+a clean first round that skipped it would reach the merge with no review gate at
+all.
+
+There is no second fix round. Anything still open stops this spec, and "the fixer
+says fixed, the reviewer says not" is a terminal state, not another attempt.
 
 ### 8. Publish
 
@@ -173,7 +188,7 @@ Then CI, if `ciWaitSec` is not 0:
 
 ```bash
 node "$P/scripts/ci-wait.mjs" --repo "$R" --pr <n> --wait-sec <ciWaitSec> --out "$S/<id>/ci.json"
-node "$P/scripts/gates.mjs" record "$S/<id>/state.json" ci <oid> "$S/<id>/ci.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" ci "$OID" "$S/<id>/ci.json"
 ```
 
 A red CI gets one repair: dispatch the fixer with the failing output, commit,
@@ -186,7 +201,7 @@ A second failure stops the spec.
 node "$P/scripts/gates.mjs" evaluate "$S/<id>/state.json" "$R/.tagteam/config.json"
 ```
 
-`ready`: `node "$P/scripts/merge.mjs" "$S/<id>/state.json" --repo "$R"`, then
+`ready`: `node "$P/scripts/merge.mjs" "$S/<id>/state.json" --repo "$R" --config "$R/.tagteam/config.json"`, then
 `gates.mjs state ... merged`, delete the branch, and say one line about what
 merged.
 
@@ -210,7 +225,7 @@ not.
 
 ## Teardown
 
-Release the ship lock. `git -C "$R" worktree remove "$W"` — never `--force`; a
+Release the ship lock (`node "$P/scripts/ship-lock.mjs" release "$R" "<slug>"`). `git -C "$R" worktree remove "$W"` — never `--force`; a
 worktree that will not come out is a signal. Summarise: what merged, what waits,
 what stopped and why.
 

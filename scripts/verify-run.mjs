@@ -42,7 +42,7 @@ async function runCommand(command, cwd, timeoutSec, logPath) {
 
 export async function verify({ config, candidate, worktree, outDir }) {
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
-  const applicable = config.verify.commands.filter((entry) =>
+  const applicable = config.verify.filter((entry) =>
     matchWhen(entry.when, candidate.changedPaths, candidate.addedLines).matched
   );
   if (applicable.length === 0) return { status: "not-applicable", commands: [] };

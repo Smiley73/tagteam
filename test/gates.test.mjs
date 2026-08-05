@@ -109,3 +109,23 @@ test("binding refuses anything that is not a commit id", () => {
   assert.throws(() => bindCandidate(state, "HEAD", BASE), /candidate OID is required/);
   assert.throws(() => bindCandidate(state, A, ""), /base OID is required/);
 });
+
+// --- regressions from the Codex review of this rewrite ---
+
+test("a clean first round reaches publishing without passing through fixing", () => {
+  // The declared edges refused reviewing -> publishing, so the ordinary path —
+  // a review that found nothing — could not advance at all.
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: [] });
+  state = transition(state, "implementing");
+  state = transition(state, "verifying");
+  state = transition(state, "reviewing");
+  assert.equal(transition(state, "publishing").state, "publishing");
+});
+
+test("a round that found something reaches publishing through fixing", () => {
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: [] });
+  for (const next of ["implementing", "verifying", "reviewing", "fixing", "verifying", "publishing", "merged"]) {
+    state = transition(state, next);
+  }
+  assert.equal(state.state, "merged");
+});

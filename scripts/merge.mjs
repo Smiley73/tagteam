@@ -14,11 +14,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { evaluate } from "./gates.mjs";
 
-export function mergeSpec(statePath, { repo, dryRun = false } = {}) {
+export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
   const resolved = path.resolve(statePath);
   const state = JSON.parse(fs.readFileSync(resolved, "utf8"));
   const { candidateOid, branch, pr } = state;
+
+  // The gates are re-evaluated here, immediately before `gh` runs, rather than
+  // trusted from an earlier step. Evaluating and merging as two commands leaves
+  // a window: the state can change between them, and an orchestrator that skips
+  // the evaluation entirely gets a merge anyway. A candidate whose gates are all
+  // null satisfies every other check in this function.
+  const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
+  const verdict = evaluate(state, config);
+  if (!verdict.ready) {
+    const reasons = [...verdict.blockers, ...verdict.approvals].join(", ") || "the gates were never recorded";
+    throw new Error(`the gates for ${state.spec} are not satisfied (${reasons}); nothing was merged`);
+  }
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) {
     throw new Error(`${resolved} holds no reviewed candidate commit; nothing was merged`);
   }
@@ -52,16 +65,21 @@ export function mergeSpec(statePath, { repo, dryRun = false } = {}) {
 async function main() {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes("--dry-run");
-  const statePath = argv.find((entry) => !entry.startsWith("--"));
-  const repoIndex = argv.indexOf("--repo");
-  const repo = repoIndex >= 0 ? path.resolve(argv[repoIndex + 1]) : process.cwd();
+  const flagValue = (flag) => {
+    const index = argv.indexOf(flag);
+    return index >= 0 ? argv[index + 1] : undefined;
+  };
+  const repo = flagValue("--repo") ? path.resolve(flagValue("--repo")) : process.cwd();
+  const configPath = flagValue("--config") ?? path.join(repo, ".tagteam", "config.json");
+  const statePath = argv.find((entry, index) =>
+    !entry.startsWith("--") && !argv[index - 1]?.startsWith("--"));
   if (!statePath) {
-    process.stderr.write("usage: merge.mjs <state.json> [--repo <path>] [--dry-run]\n");
+    process.stderr.write("usage: merge.mjs <state.json> [--repo <path>] [--config <path>] [--dry-run]\n");
     process.exitCode = 2;
     return;
   }
   try {
-    process.stdout.write(`${JSON.stringify(mergeSpec(statePath, { repo, dryRun }))}\n`);
+    process.stdout.write(`${JSON.stringify(mergeSpec(statePath, { repo, configPath, dryRun }))}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

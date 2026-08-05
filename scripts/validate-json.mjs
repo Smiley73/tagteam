@@ -157,10 +157,26 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
     errors.push(...repositoryPathErrors("conventionsPath", value.conventionsPath, { repo, mustBeFile: true }));
   }
 
+  // These two are interpolated into shell command lines the orchestrator builds
+  // — `origin/<base>`, `gh pr create --base <base>`, `<branchPrefix><slug>/<id>`
+  // — so they are held to git-check-ref-format rules rather than merely checked
+  // for traversal. A value like `main; rm -rf /` is a valid JSON string and
+  // would otherwise validate.
   for (const [label, ref] of [["base", value.base], ["branchPrefix", value.branchPrefix]]) {
-    if (typeof ref === "string" && (ref.startsWith("/") || ref.startsWith("-") || ref.split("/").includes(".."))) {
+    if (typeof ref !== "string") continue;
+    if (ref.startsWith("/") || ref.startsWith("-") || ref.split("/").includes("..")) {
       errors.push(`${label} must be a conventional relative Git ref without traversal`);
     }
+    // git-check-ref-format: no space, no ~^:?*[\, no control characters, no
+    // "..", no "@{", no trailing ".lock". Everything a shell would act on is
+    // already excluded by that set.
+    if (/[ - ~^:?*[\]\\]/.test(ref) || ref.includes("..") || ref.includes("@{")) {
+      errors.push(`${label} is not a valid Git ref name: ${JSON.stringify(ref)}`);
+    }
+    if (/[$`"'&;|<>(){}!#]/.test(ref)) {
+      errors.push(`${label} may not contain shell metacharacters: ${JSON.stringify(ref)}`);
+    }
+    if (ref.endsWith(".lock")) errors.push(`${label} may not end in .lock`);
   }
 
   for (const configuredPath of value.worktree?.copyUntracked ?? []) {

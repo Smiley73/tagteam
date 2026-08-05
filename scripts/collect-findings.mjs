@@ -67,9 +67,16 @@ export function collect({ dir, candidate, expect, schemaPath }) {
       missing.push({ lens, file, reason: `reviewed ${parsed.candidate.slice(0, 12)}, not the candidate ${candidate.slice(0, 12)}` });
       continue;
     }
+    // The file name says which lens was expected and the content says which one
+    // answered. Without this, one reviewer's output dropped at another's path
+    // counts as both, and the lens that never ran reads as having found nothing.
+    if (parsed.lens !== lens) {
+      missing.push({ lens, file, reason: `holds a review by "${parsed.lens}", not by ${lens}` });
+      continue;
+    }
     present.push({ lens, summary: parsed.summary });
     parsed.findings.forEach((finding, index) => {
-      findings.push({ ...finding, id: findingId(parsed.lens, index), lens: parsed.lens, file: finding.file, source: file });
+      findings.push({ ...finding, id: findingId(lens, index), lens, file: finding.file, source: file });
     });
   }
 

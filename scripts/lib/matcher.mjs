@@ -59,6 +59,12 @@ export function globToRegExp(pattern) {
 
 export function matchWhen(when, changedPaths, addedLines) {
   if (!when) return { matched: true, errors: [] };
+  // No condition at all means unconditional. The schema documents empty globs
+  // and empty keywords that way, and reading it as "matches nothing" silently
+  // drops the command a project most wants to run on everything.
+  if ((when.globs ?? []).length === 0 && (when.keywords ?? []).length === 0) {
+    return { matched: true, errors: [] };
+  }
   const errors = [];
   let pathMatch = false;
   let keywordMatch = false;

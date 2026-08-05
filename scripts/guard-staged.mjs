@@ -9,7 +9,15 @@ if (!worktreeArg || !configArg) {
   process.exitCode = 2;
 } else {
   const config = JSON.parse(fs.readFileSync(configArg, "utf8"));
-  const copied = new Set(config.worktree.copyUntracked.map((item) => item.replaceAll("\\", "/").replace(/^\.\/+/, "")));
+  // Both sides are normalized the same way. A configured `secrets/` compared
+  // literally against a staged `secrets/key` matches neither `=== copy` nor
+  // `startsWith(copy + "/")`, so the trailing slash alone used to defeat this.
+  const normalize = (value) => value
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/, "");
+  const copied = new Set(config.worktree.copyUntracked.map(normalize).filter(Boolean));
   const result = spawnSync("git", ["-C", path.resolve(worktreeArg), "diff", "--cached", "--name-only", "-z"], {
     encoding: "buffer",
     shell: false
@@ -18,7 +26,7 @@ if (!worktreeArg || !configArg) {
     process.stderr.write(result.stderr.toString());
     process.exitCode = 1;
   } else {
-    const staged = result.stdout.toString("utf8").split("\0").filter(Boolean);
+    const staged = result.stdout.toString("utf8").split("\0").filter(Boolean).map(normalize);
     const leaked = staged.filter((file) => [...copied].some((copy) => file === copy || file.startsWith(`${copy}/`)));
     if (leaked.length > 0) {
       process.stderr.write(`refusing to commit copied untracked paths: ${leaked.join(", ")}\n`);
