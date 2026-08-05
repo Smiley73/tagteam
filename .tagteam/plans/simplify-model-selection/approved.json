@@ -1,0 +1,11 @@
+{
+  "approvedAt": "2026-08-05T13:55:33.734Z",
+  "slug": "simplify-model-selection",
+  "specs": [
+    "01-lead-worker-selection",
+    "02-quota-probe",
+    "03-self-host-config"
+  ],
+  "goalSha256": "63ec0af48465f59c87a66e3736022496b01329f4afb1e29a9ab5dff3305eba34",
+  "planSha256": "b59dfa23d544b7767046af6b39684d2bbf4a8e212c3c843cd443f4abb69cc90c"
+}
