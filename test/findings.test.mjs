@@ -370,3 +370,174 @@ test("a verdict keyed by title instead of id does not clear a finding", () => {
   assert.equal(result.status, "open");
   assert.equal(result.open.length, 2, "neither finding may be cleared by a title-keyed verdict");
 });
+
+// --- from the third spec of the first complete ship train ---
+
+test("the adversary's non-gating findings are recorded, not dropped", () => {
+  // The adversary raised a minor and a nit on the final candidate, review.json
+  // recorded neither, and the pull request body — written from what these
+  // scripts print — could not mention what nobody could see. Every other lens
+  // has its minors carried through by collect-findings; this one lost them.
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "correctness.1", resolved: true, evidence: "fixed" },
+      { id: "correctness.2", resolved: true, evidence: "fixed" }
+    ])
+  });
+  const result = settle({
+    review: { ...review, counts: { blocking: 0, major: 2, minor: 1, nit: 0 } },
+    dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA,
+    ...adversary([
+      finding({ severity: "minor", title: "the note reads as the plugin's version" }),
+      finding({ severity: "nit", title: "three paragraphs where the spec asked for two sentences" })
+    ])
+  });
+
+  // Recorded, and still clean: severity decides what gates, and a minor never did.
+  assert.equal(result.status, "clean");
+  assert.deepEqual(result.open, []);
+  const carried = result.findings.filter((entry) => entry.gating === false);
+  assert.deepEqual(carried.map((entry) => entry.severity), ["minor", "nit"]);
+  assert.deepEqual(carried.map((entry) => entry.id), ["adversary.1", "adversary.2"]);
+  // The first round's tally plus what the adversary added, each counted once.
+  assert.deepEqual(result.counts, { blocking: 0, major: 2, minor: 2, nit: 1 });
+});
+
+test("a gating adversary finding still gates when non-gating ones sit beside it", () => {
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "correctness.1", resolved: true, evidence: "fixed" },
+      { id: "correctness.2", resolved: true, evidence: "fixed" }
+    ])
+  });
+  const result = settle({
+    review, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA,
+    ...adversary([
+      finding({ severity: "nit", title: "wording" }),
+      finding({ severity: "blocking", title: "the fix moved the defect" }),
+      finding({ severity: "minor", title: "naming" })
+    ])
+  });
+  assert.equal(result.status, "open");
+  // Only the blocking one is open, and its id is its position in what the
+  // adversary actually wrote — ids are assigned over the whole list, so the
+  // recorded ones do not renumber the gating one out from under the summary.
+  assert.deepEqual(result.open.map((entry) => entry.id), ["adversary.2"]);
+  assert.deepEqual(result.findings.filter((entry) => entry.gating === false).map((entry) => entry.id), ["adversary.1", "adversary.3"]);
+});
+
+test("the recheck summary distinguishes recorded from open and from resolved", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "correctness.1", resolved: true, evidence: "fixed" },
+    { id: "correctness.2", resolved: true, evidence: "fixed" }
+  ])));
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "minor", title: "worth knowing about" })]
+  }));
+  const reviewPath = path.join(base, "review.json");
+  fs.writeFileSync(reviewPath, JSON.stringify(review));
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", path.join(base, "out.json")
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0, `a recorded minor must not fail the recheck: ${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /adversary\.1\s+recorded\s+minor\s+worth knowing about/);
+  assert.match(result.stdout, /1 adversary finding\(s\) recorded and not gating/);
+  assert.doesNotMatch(result.stdout, /adversary\.1\s+OPEN/);
+});
+
+test("re-running the recheck in place does not inflate the tally", async () => {
+  // Ship passes the same review.json as both --review and --out, so a run that
+  // succeeds and then dies before `gates.mjs record` gets re-run against its own
+  // output. Adding the adversary to a tally that already included it grew the
+  // file on every attempt. Found by Codex review of this change.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-idem-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "minor", title: "worth knowing" })]
+  }));
+  const inPlace = path.join(base, "review.json");
+  fs.writeFileSync(inPlace, JSON.stringify({
+    status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
+  }));
+
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", inPlace, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", inPlace
+  ], { encoding: "utf8" });
+
+  run();
+  const first = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(first.counts.minor, 1);
+  run();
+  const second = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(second.counts.minor, 1, "a second run must not count the same adversary finding twice");
+  run();
+  assert.equal(JSON.parse(fs.readFileSync(inPlace, "utf8")).counts.minor, 1);
+  assert.deepEqual(second.reviewCounts, { blocking: 0, major: 0, minor: 0, nit: 0 });
+});
+
+test("an in-place retry is stable when the adversary raised a blocker", async () => {
+  // The half the first idempotence fix did not reach: with a gating adversary
+  // finding, `open` is non-empty, so a retry read the last run's adversary entry
+  // as a first-review finding — hunted for a recheck verdict that was never
+  // meant to exist, went incomplete, and appended a second adversary.1.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-idem2-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "blocking", title: "the fix moved the defect" })]
+  }));
+  const inPlace = path.join(base, "review.json");
+  fs.writeFileSync(inPlace, JSON.stringify({
+    status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
+  }));
+
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", inPlace, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", inPlace
+  ], { encoding: "utf8" });
+
+  run();
+  const first = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(first.status, "open");
+  assert.deepEqual(first.open.map((entry) => entry.id), ["adversary.1"]);
+
+  run();
+  const second = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(second.status, "open", "a retry must not turn a reviewed blocker into incomplete");
+  assert.deepEqual(second.open.map((entry) => entry.id), ["adversary.1"], "and must not duplicate the id");
+  assert.equal(second.counts.blocking, 1);
+  assert.deepEqual(second.missing, []);
+});
+
+test("a carried-forward missing lens does not restate itself on every retry", () => {
+  const incomplete = {
+    status: "incomplete", candidate: OID, counts: {}, open: [],
+    missing: [{ lens: "security", file: "x", reason: "no file was written (unresolved from the first review)" }]
+  };
+  const result = settle({ review: incomplete, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, ...adversary([]) });
+  assert.equal(result.missing.length, 1);
+  assert.equal(
+    (result.missing[0].reason.match(/unresolved from the first review/g) ?? []).length, 1,
+    "the suffix must not accumulate"
+  );
+});

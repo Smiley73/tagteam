@@ -155,6 +155,20 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
     if (!roster.has(lens)) errors.push(`reviewers.default names ${lens}, which is not in reviewers.roster`);
   }
 
+  // `adversary` and `codex` are roles, not lenses a plan may pick. Both run on
+  // every spec regardless, both write to a fixed path, and both have their
+  // findings identified as `<name>.<n>`. Selecting one as a lens produces two
+  // readers writing the same file and two findings claiming the same id — which
+  // reaches the merge gate as a duplicate, and the pull request body as an
+  // ambiguous reference. Found by Codex review; nothing had reserved them.
+  for (const key of ["roster", "default"]) {
+    for (const reserved of ["adversary", "codex"]) {
+      if ((value.reviewers?.[key] ?? []).includes(reserved)) {
+        errors.push(`reviewers.${key} names "${reserved}", which is a role that already runs on every spec, not a lens to select`);
+      }
+    }
+  }
+
   if (value.conventionsPath) {
     errors.push(...repositoryPathErrors("conventionsPath", value.conventionsPath, { repo, mustBeFile: true }));
   }
