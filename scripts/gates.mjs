@@ -9,6 +9,7 @@
 // compaction.
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const GATES = ["review", "verify", "ci", "human"];
@@ -87,6 +88,48 @@ export function recordPr(state, { number, url, headOid }) {
     throw new Error(`the pull request head ${headOid} is not the current candidate ${state.candidateOid}`);
   }
   return { ...state, pr: { number: Number(number), url, headOid } };
+}
+
+// A merge that happened without this tool.
+//
+// The repository owner merging a pull request on GitHub is an ordinary thing to
+// do, and until now nothing could record it. `reviewing -> merged` is not an
+// edge and must not become one — an edge there would let the orchestrator reach
+// `merged` without ever publishing or recording a review. So adoption is a
+// separate door, and what makes it safe is that it does not take the caller's
+// word for anything: the facts come from GitHub, and the merged head must be the
+// commit the gates are bound to. "Somebody merged it, honest" is not an input.
+//
+// This is a record, not a judgement. The gates may well be incomplete — the case
+// that motivated it had a null review gate — so what evidence existed at the
+// moment of adoption is written into the history rather than quietly forgotten.
+// Merging unreviewed work stays the owner's call to make and the owner's call to
+// answer for; what this refuses to do is leave the file claiming a spec is still
+// under review when it is already in the base branch.
+export function adoptMerge(state, { merged, headOid, mergeCommitOid }) {
+  if (state.state === "merged") throw new Error(`${state.spec} is already recorded as merged`);
+  if (!state.pr) throw new Error(`${state.spec} has no pull request recorded, so there is nothing to adopt`);
+  if (!merged) throw new Error(`pull request #${state.pr.number} is not merged, so there is nothing to adopt`);
+  if (!/^[0-9a-f]{40,64}$/.test(headOid ?? "")) throw new Error(`the merged head OID is required, got: ${headOid}`);
+  if (headOid !== state.candidateOid) {
+    throw new Error(
+      `pull request #${state.pr.number} merged ${headOid}, which is not the candidate ${state.candidateOid} this spec's gates are bound to`
+    );
+  }
+  const evidence = Object.fromEntries(GATES.map((gate) => {
+    const recorded = state.gates?.[gate];
+    if (!recorded || recorded.candidateOid !== state.candidateOid) return [gate, null];
+    return [gate, recorded.status ?? (recorded.approved === true ? "approved" : "recorded")];
+  }));
+  return {
+    ...state,
+    state: "merged",
+    history: [...state.history, {
+      state: "merged",
+      at: new Date().toISOString(),
+      adopted: { from: state.state, mergeCommitOid: mergeCommitOid ?? null, headOid, evidence }
+    }]
+  };
 }
 
 export function recordGate(state, gate, candidateOid, value) {
@@ -176,12 +219,37 @@ const USAGE = `usage:
   gates.mjs record   <state.json> <review|verify|ci|human> <candidateOid> <value.json>
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
+  gates.mjs adopt-merge <state.json> --repo <repo>
 `;
+
+// The one place this file talks to the network, kept out of `adoptMerge` so the
+// decision stays a pure function of facts that can be handed to it in a test.
+function readMergedPr(repo, number) {
+  const view = spawnSync("gh", ["pr", "view", String(number), "--json", "state,mergedAt,mergeCommit,headRefOid"], {
+    cwd: path.resolve(repo), encoding: "utf8", shell: false
+  });
+  if (view.status !== 0) {
+    throw new Error(`could not read pull request #${number}: ${(view.stderr || view.stdout || "").trim()}`);
+  }
+  const pr = JSON.parse(view.stdout);
+  return { merged: pr.state === "MERGED", headOid: pr.headRefOid, mergeCommitOid: pr.mergeCommit?.oid ?? null };
+}
 
 async function main() {
   const [action, ...values] = process.argv.slice(2);
   if (action === "evaluate") {
     process.stdout.write(`${JSON.stringify(evaluate(readJson(values[0]), readJson(values[1])), null, 2)}\n`);
+    return;
+  }
+  if (action === "adopt-merge") {
+    const repoIndex = values.indexOf("--repo");
+    if (repoIndex < 0 || !values[repoIndex + 1]) throw new Error("adopt-merge requires --repo <repo>");
+    const state = readJson(values[0]);
+    const adopted = adoptMerge(state, readMergedPr(values[repoIndex + 1], state.pr?.number));
+    writeJson(values[0], adopted);
+    const missing = Object.entries(adopted.history.at(-1).adopted.evidence)
+      .filter(([, status]) => status === null).map(([gate]) => gate);
+    process.stdout.write(`${JSON.stringify({ ok: true, spec: adopted.spec, state: "merged", candidateOid: adopted.candidateOid, gatesWithoutEvidence: missing })}\n`);
     return;
   }
   let next;

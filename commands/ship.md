@@ -68,7 +68,24 @@ node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base
 If that reports `"existing": true` with a state other than `pending`, this spec
 was already started. **Do not create the branch and do not transition to
 `implementing`** — `switch -c` fails on a branch that exists, and every state
-after `pending` refuses that transition anyway. Instead:
+after `pending` refuses that transition anyway.
+
+**First, if it records a pull request, ask whether that pull request already
+merged**, whatever the state says:
+
+```bash
+node "$P/scripts/gates.mjs" adopt-merge "$S/<id>/state.json" --repo "$R"
+```
+
+It succeeds only if GitHub says the pull request merged *and* the commit that
+merged is the candidate this spec's gates are bound to; on anything else it
+refuses and the state is untouched, so running it costs nothing. Succeeded: this
+spec is done, skip it. A person merging a pull request themselves is ordinary,
+and nothing else can record it — `reviewing -> merged` is not a transition and
+must not become one. Without this the state file goes on saying `reviewing`
+forever and the next line re-snapshots a branch that is already in the base.
+
+Otherwise, by state:
 
 - `implementing`, `reviewing`, `fixing`, `verifying` — the work was interrupted
   mid-flight and its worktree is gone. `git -C "$W" switch "<branch>"`, then

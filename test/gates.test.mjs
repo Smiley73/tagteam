@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { initState, transition, bindCandidate, recordGate, recordPr, evaluate } from "../scripts/gates.mjs";
+import { initState, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge } from "../scripts/gates.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -182,4 +182,61 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   assert.match(again.stdout, /"existing":true/);
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).state, "awaiting-approval");
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).pr.number, 9);
+});
+
+// --- adopting a merge that happened without this tool ---
+//
+// The owner merged PR #53 on GitHub, which is an ordinary thing to do, and
+// nothing could record it: `reviewing -> merged` is not an edge and must not
+// become one. The state file went on saying `reviewing` after the branch was
+// already in main, and the next ship would have re-snapshotted it.
+
+const withPr = (state, number = 53) => recordPr({ ...state, state: "reviewing" }, {
+  number, url: `https://github.com/o/r/pull/${number}`, headOid: state.candidateOid
+});
+
+test("a merge that really happened, at the reviewed commit, is adopted", () => {
+  const adopted = adoptMerge(withPr(reviewed()), { merged: true, headOid: A, mergeCommitOid: B });
+  assert.equal(adopted.state, "merged");
+  const entry = adopted.history.at(-1);
+  assert.equal(entry.adopted.from, "reviewing");
+  assert.equal(entry.adopted.mergeCommitOid, B);
+});
+
+test("adoption refuses a pull request that merged some other commit", () => {
+  // The whole point. Without this, "reviewed A, merged B" walks straight in
+  // through the door built for out-of-band merges.
+  assert.throws(
+    () => adoptMerge(withPr(reviewed()), { merged: true, headOid: B, mergeCommitOid: B }),
+    /is not the candidate/
+  );
+});
+
+test("adoption refuses an open pull request, and one that does not exist", () => {
+  assert.throws(() => adoptMerge(withPr(reviewed()), { merged: false, headOid: A }), /is not merged/);
+  const noPr = { ...reviewed(), state: "reviewing" };
+  assert.throws(() => adoptMerge(noPr, { merged: true, headOid: A }), /no pull request recorded/);
+});
+
+test("adoption records which gates had no evidence, rather than implying they passed", () => {
+  // The case that motivated this had a null review gate: the owner merged before
+  // the re-check finished. Recording `merged` must not quietly suggest otherwise.
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: ["correctness"] });
+  state = bindCandidate(state, A, BASE, []);
+  state = recordGate(state, "verify", A, { status: "passed" });
+  const adopted = adoptMerge(withPr(state), { merged: true, headOid: A, mergeCommitOid: B });
+  assert.deepEqual(adopted.history.at(-1).adopted.evidence, {
+    review: null, verify: "passed", ci: null, human: null
+  });
+});
+
+test("adoption is not a second route to merged for a spec already there", () => {
+  const once = adoptMerge(withPr(reviewed()), { merged: true, headOid: A, mergeCommitOid: B });
+  assert.throws(() => adoptMerge(once, { merged: true, headOid: A }), /already recorded as merged/);
+});
+
+test("reviewing -> merged is still not a declared transition", () => {
+  // Adoption is a separate door precisely so this edge stays closed: an edge here
+  // would let the orchestrator reach merged without publishing or reviewing.
+  assert.throws(() => transition({ ...reviewed(), state: "reviewing", history: [] }, "merged"), /invalid state transition/);
 });
