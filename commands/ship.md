@@ -19,12 +19,18 @@ code and findings; you never let a diff or a findings body into your own context
 4. Reject any path argument containing control characters or shell
    metacharacters. You build shell strings where a script would have built argv.
 5. Take the ship lock:
-   `node "$P/scripts/ship-lock.mjs" acquire "$R" "<slug>"`. Already held: another
-   ship is running here; stop. It returns a `token` — write it to
-   `$S/lock-token` immediately, because releasing requires it and your own memory
-   of it will not survive a long train. Release with
-   `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"` when
-   you finish or stop for any reason.
+   `node "$P/scripts/ship-lock.mjs" acquire "$R" "<slug>"`. It returns a `token` —
+   write it to `$S/lock-token` immediately, because releasing requires it and your
+   own memory of it will not survive a long train. Release with
+   `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"` when you
+   finish or stop for any reason.
+
+   Already held: **say who holds it and ask.** A session that was killed rather
+   than stopped leaves the lock behind, and it does not go stale for six hours, so
+   "another ship is running" and "a dead ship left this here" look identical from
+   the outside and only a person can tell them apart. If they confirm the other
+   run is gone, `acquire ... --force` reclaims it and quarantines the old holder.
+   Never reclaim on your own judgement.
 6. `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"` → the ordered
    specs with their resolved lenses. Skip every spec whose
    `$S/<id>/state.json` says `merged`. Announce where you are starting.
@@ -36,6 +42,14 @@ BASE=$(git -C "$R" rev-parse origin/<base>)
 git -C "$R" worktree add --detach "$R/.tagteam/worktrees/<slug>" "$BASE"
 node "$P/scripts/worktree-setup.mjs" --primary "$R" --worktree "$W" --config "$R/.tagteam/config.json"
 ```
+
+`worktree add` fails on a path that already exists, and a train that stopped for
+any reason leaves one there — so on a resume this is the step that dies, before
+any spec is even looked at. If `$W` is already a worktree of this repository,
+**reuse it**: skip the `add`, run `worktree-setup.mjs` as normal, and let step 1
+switch it to whichever branch that spec needs. It is dirty or belongs to some
+other repository: say so and stop. Never `worktree remove --force` your way out —
+a worktree that will not come out is holding something.
 
 ## Per spec, in order
 

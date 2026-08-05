@@ -5,12 +5,12 @@
   "conventionsPath": null,
   "models": {
     "lead": "opus",
-    "worker": "sonnet",
+    "worker": "opus",
     "codex": "gpt-5.6-sol"
   },
   "effort": {
     "lead": "high",
-    "worker": "high",
+    "worker": "medium",
     "codex": "high"
   },
   "reviewers": {
