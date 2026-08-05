@@ -124,13 +124,23 @@ tree: `.tagteam/config.json` is read live from the repository, but the scripts
 and command files reading it belong to the snapshot, so a change to a plugin
 file — or to that file's `version`, which the snapshot's validator compares
 against its own — does not take effect here until the snapshot is refreshed.
-Installing over an already-installed version is a no-op, so refresh it
-explicitly and restart the session:
+After a version bump, update it:
+
+```bash
+claude plugin marketplace update tagteam-local
+claude plugin update tagteam@tagteam-local
+```
+
+While developing, the version usually has not changed, and at the same version
+both `update` and a second `install` report there is nothing to do. Replace the
+snapshot instead:
 
 ```bash
 claude plugin uninstall tagteam@tagteam-local
 claude plugin install tagteam@tagteam-local
 ```
+
+Restart the session either way.
 
 ## License
 
