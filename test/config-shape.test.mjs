@@ -163,18 +163,80 @@ test("a version-6 configuration carrying the old four role keys is invalid", asy
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
+    version: 6,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { plan: "high", implement: "high", review: "high", codex: "high" }
   };
   const errors = validateJson(schema, stale);
-  assert.ok(errors.length > 0, "a four-role models/effort shape must not validate against the version-6 schema");
+  assert.ok(
+    errors.some((error) => error.includes("models.plan")),
+    `expected an error naming models.plan, got: ${errors.join("; ")}`
+  );
+  assert.ok(
+    errors.some((error) => error.includes("effort.lead")),
+    `expected an error naming effort.lead (missing, since only the old keys were supplied), got: ${errors.join("; ")}`
+  );
 });
 
-test("the Claude model enum exists once, referenced from both models.lead and models.worker", () => {
+test("a version-6 configuration with one leftover old key alongside the new shape is invalid", async () => {
+  // The hybrid case: the new lead/worker/codex keys are all present and
+  // correct, but one old key is left over. Only additionalProperties: false
+  // catches this — required alone would not, since lead/worker/codex are
+  // already there.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  assert.deepEqual(validateJson(schema, example), [], "the example must stay valid before mutation");
+
+  const hybrid = {
+    ...example,
+    models: { ...example.models, implement: "sonnet" },
+    effort: { ...example.effort, review: "high" }
+  };
+  const errors = validateJson(schema, hybrid);
+  assert.ok(
+    errors.some((error) => error.includes("models.implement")),
+    `expected an error naming the leftover models.implement, got: ${errors.join("; ")}`
+  );
+  assert.ok(
+    errors.some((error) => error.includes("effort.review")),
+    `expected an error naming the leftover effort.review, got: ${errors.join("; ")}`
+  );
+});
+
+test("the Claude model enum exists once, referenced from both models.lead and models.worker", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
   const modelDef = schema.$defs?.claudeModel;
   assert.ok(modelDef && Array.isArray(modelDef.enum), "schema must declare a claudeModel enum in $defs");
   assert.equal(schema.properties.models.properties.lead.$ref, "#/$defs/claudeModel");
   assert.equal(schema.properties.models.properties.worker.$ref, "#/$defs/claudeModel");
+
+  for (const value of modelDef.enum) {
+    for (const role of ["lead", "worker"]) {
+      const candidate = { ...example, models: { ...example.models, [role]: value } };
+      const errors = validateJson(schema, candidate).filter((error) => error.includes(`models.${role}`));
+      assert.deepEqual(errors, [], `models.${role}: ${value} should validate, got: ${errors.join("; ")}`);
+    }
+  }
+
+  const belowFloor = { ...example, models: { ...example.models, worker: "haiku" } };
+  const errors = validateJson(schema, belowFloor);
+  assert.ok(
+    errors.some((error) => error.includes("models.worker")),
+    `expected models.worker: "haiku" to be refused, got: ${errors.join("; ")}`
+  );
+});
+
+test("effort.codex and effort.lead/worker keep their divergent vocabularies", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const codexMax = { ...example, effort: { ...example.effort, codex: "max" } };
+  const codexErrors = validateJson(schema, codexMax);
+  assert.ok(
+    codexErrors.some((error) => error.includes("effort.codex")),
+    `expected effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
+  );
+
+  const leadMax = { ...example, effort: { ...example.effort, lead: "max" } };
+  const leadErrors = validateJson(schema, leadMax).filter((error) => error.includes("effort.lead"));
+  assert.deepEqual(leadErrors, [], `expected effort.lead: "max" to validate, got: ${leadErrors.join("; ")}`);
 });
 
 test("the deliverables table comes out as data, without reading the plan", async () => {

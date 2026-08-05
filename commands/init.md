@@ -49,7 +49,7 @@ Batch these; do not ask one at a time.
 2. `models` and `effort` for `lead`, `worker`, `codex`. Offer the defaults —
    `lead: opus`, `worker: sonnet`, `codex: <installed model>`, all at `high` —
    and let them override. Sonnet is the floor for `worker`; see
-   `skills/tagteam/SKILL.md` for why.
+   `$P/skills/tagteam/SKILL.md` for why.
 3. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
    gets four readers. Show the full roster and let them adjust.
@@ -75,5 +75,5 @@ lenses read every spec, and whether merges happen without asking.
 
 A version-5 configuration is not upgraded — version 6 is a different shape. Say
 that the old file is being replaced, and what changed: the four role keys in
-`models` and `effort` (`plan`, `implement`, `review`, `codex`) collapse to
-three (`lead`, `worker`, `codex`).
+`models` and `effort` collapse to three — planning and review agents now share
+`lead`, implementers and fixers use `worker`, and `codex` is unchanged.
