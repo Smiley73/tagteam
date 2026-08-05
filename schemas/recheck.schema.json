@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "One reviewer's verdict on whether its own findings were resolved",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lens", "candidate", "verdicts"],
+  "properties": {
+    "lens": { "type": "string", "minLength": 1 },
+    "candidate": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$",
+      "description": "The post-fix commit these verdicts were formed against."
+    },
+    "verdicts": {
+      "type": "array",
+      "description": "One entry per finding this lens raised. A finding with no entry is unresolved: silence is never clearance.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "resolved", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "resolved": {
+            "type": "boolean",
+            "description": "True only after reading the changed code. The fixer's own report is bookkeeping and is not evidence."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What in the new diff settles it — the file and what it now does. For an unresolved finding, what is still wrong."
+          }
+        }
+      }
+    }
+  }
+}

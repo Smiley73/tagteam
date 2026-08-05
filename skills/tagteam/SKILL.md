@@ -1,352 +1,197 @@
 ---
 name: tagteam
-description: Configure, operate, resume, and troubleshoot tagteam cross-engine plan and PR-train workflows.
+description: Shared reference for tagteam — configuration, artifact layout, the Git protocol, the Codex bridge, and recovery. Read by /tagteam:plan and /tagteam:ship before they do anything.
 ---
 
-# Tagteam operator reference
+# tagteam reference
 
-Use this reference for `/tagteam:init`, `/tagteam:plan`, `/tagteam:ship`, and `/tagteam:status`. Commands own human interaction, Git, GitHub, worktrees, approvals, CI polling, and merge. Workflows own per-plan and per-PR model execution.
+Tagteam takes a vague goal to merged pull requests. `/tagteam:plan` interviews
+you until the outcome is concrete, drafts a plan, has it reviewed once by three
+independent readers, and expands it into spec files. `/tagteam:ship` implements
+those specs one at a time, reviews each with a cross-engine panel, and merges the
+ones that need no human judgement.
 
-## Quick reference
+**The orchestrator is the main agent.** It runs git, Codex, and the scripts in
+this plugin directly through Bash, and dispatches subagents only for model work.
+Subagents write their own output files; the orchestrator reads them. Nothing is
+ever moved between steps by passing it through a model.
 
-```text
-/tagteam:init
-/tagteam:plan <goal>
-/tagteam:plan --resume <slug>
-/tagteam:plan <goal> --provider both|claude|codex
-/tagteam:ship .tagteam/plans/<slug>
-/tagteam:ship .tagteam/plans/<slug> --provider both|claude|codex
-/tagteam:ship .tagteam/plans/<slug> --resume
-/tagteam:ship .tagteam/plans/<slug> --reviewers security,functionality
-/tagteam:status
+Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
+
+## Artifacts
+
 ```
+.tagteam/config.json                       committed
+.tagteam/plans/<slug>/
+  goal.md          the settled outcome — binding on everything downstream   committed
+  plan.md          the deliverables index                                   committed
+  specs/NN-slug.md one self-contained spec per deliverable                  committed
+  approved.json    when it was approved, and of what                        committed
+  work/            interview answers, drafts, review findings, Codex artifacts   ignored
+.tagteam/ships/<slug>/<spec-id>/
+  state.json       the state machine, the reviewed commit, the gates        ignored
+  rounds/<n>/  review.diff, findings/, recheck/, verify/, candidate.json  ignored
+  review.json  pr-body.md  ci.json                                   ignored
+.tagteam/worktrees/  .tagteam/locks/                                        ignored
+```
+
+Everything committed is the record a person approved. Everything ignored is
+working state, and **the working state is the resume mechanism**: there are no
+fingerprints, no reuse ledgers, and no invocation descriptors. A re-run looks at
+what is on disk and continues from the first thing that is not done.
 
 ## Configuration
 
-A complete editable example lives at `${CLAUDE_PLUGIN_ROOT}/examples/config.json`. Never copy it silently: init asks for model/effort, verification, worktree setup, ignored-file copying, exclusions, and project-specific routing.
-
-| Key | Type | Meaning |
-|---|---|---|
-| `planning` | object | User-chosen Claude/Codex planning runtimes and `reviewRounds`, the ceiling on cross-review rounds rather than a fixed count. Claude planning never uses low effort. Optional `planBudget` (`targetChars` 25000, `hardCeilingChars` 35000) sizes the plan, `questionsPerRound` sizes one question chunk rather than budgeting the pass (at most 4, the interface limit; every open question is asked, in chunks of that size), `premiseChallenge` decides whether a second pass tries to falsify the premises before a person confirms them, and `canonicalStrings` lists `{wrong, right, note}` substitutions the plan, the task manifest, and the pull-request train may never make. Init asks for it, and writes `[]` where the answer is none. An absent key is what says nobody was ever asked, and the forge says so once per run when policy documents are configured without it; an empty list is an answer and stays quiet. |
-| `prTrain.base` | string or null | Merge target. Null resolves once at ship start. |
-| `prTrain.mode` | enum | `github-pr` or `local-branch`. |
-| `prTrain.prSize` | object | tagteam's own size preference. Advisory prose only; `enforce` must be false. It says nothing about the repository's own limit — see `policyPaths`. Optional `repoHardCapLines` states that limit as a number, which is what makes it checkable rather than reviewable. |
-| `policyPaths` | array | Repo-relative paths to the documents that state this repository's own engineering rules: contributing guide, coding standards, `AGENTS.md`. Each must exist and name a file, not a directory. Every plan-forge step and every ship reviewer reads them and treats their rules as binding. |
-| `prTrain.pauseOn` | array | Must contain `ui`; may add `every-merge`. |
-| `ui.gateOnUserVisible` | true | Schema-locked safety rule. |
-| `ui.hasUserInterface` | boolean | Whether this repository ships anything a person looks at. False silences every interface question; it is a fact about the repository, so init asks it. |
-| `ui.conventionPaths` | array | Repo-relative paths to the design system, component directory, or conventions doc a new surface must follow. Each must exist. |
-| `ui.confirmDecisions` | enum | `all-surfaces`, `new-surfaces`, or `off`. How much interface taste tagteam confirms before approval. Belongs in user defaults as easily as project config. |
-| `codegraph.enabled` | boolean | Init and every ship worktree manage the index. |
-| `maxReviewLoops` | integer | Bounded review/fix cycles. |
-| `reviewTiers` | object | Per-engine runtime pairs. A dimension may override one engine inline. |
-| `reviewers` | object | Enablement, tier, optional severity gate, conditions, and custom focus. |
-| `specialistPrepass` | object | Best-effort six-lens round-one depth pass. |
-| `review.finalChallenge` | object | `enabled` and `tier` for the one pass that runs after a candidate goes clean. Its findings are never repaired automatically. |
-| `complexity` | object | Implementation/fix runtimes for simple, medium, and complex work. |
-| `implementation` | object | Default engine, regex routes, and concurrency. |
-| `verify.commands` | array | Every matching command runs, in order, with its own timeout. |
-| `worktree.setupCommands` | array | Runs after copying ignored paths and before CodeGraph init. |
-| `worktree.copyUntracked` | array | Exact ignored repo-relative paths only; no globs, traversal, or symlinks on any component. Validation runs the same check the copy runs, so a source that is missing or reached through a link is reported at setup rather than mid-ship. |
-| `diffExclude` | array | Removes content from reviewer prompts only; selection still sees every path. |
-| `transport.mode` | string | Must be `exec`. |
-| `transport.relayModel` | string | Model for every plumbing agent — one that runs a deterministic command and hands back its JSON, exercising no judgment: the Codex relay, the plan-forge prompt/verify/publish helpers, and ship's committer, snapshotter, verifier, and scribe. Seeds a dual-provider run policy's `plumbingModel`; a single-provider run (`--provider claude`/`--provider codex`) always pins plumbing to Haiku instead, since `scripts/lib/run-policy.mjs` enforces that regardless of this setting. Defaults to `sonnet` for dual-provider runs; each of these reads or writes one saved file, and a model that reliably returns a structured result is worth far more than the tokens saved. All of them share this one key rather than some being pinned and others configurable, so tightening or loosening plumbing reliability is one setting, not several — the Haiku pin on single-provider runs is the one deliberate exception, made for cross-check integrity rather than reliability. |
-| `transport.relayEffort` | string | Reasoning effort paired with `transport.relayModel` for that same set of plumbing agents, read straight off config at dispatch time (never folded into the run-policy fingerprint, so it can't break `restore` on existing saved state). Defaults to `low`, since none of them exercise judgment. Never sent on a Haiku dispatch — including when a single-provider run pins plumbing to Haiku — because some harnesses reject an `effort` value on Haiku (see `commands/init.md`'s runtime probe); it only takes effect when `transport.relayModel` resolves to something other than Haiku. Plan-forge's prompt builder carries an explicit "do not write, edit, or re-create the prompt file" instruction — it relays a prompt this run already assembled — while ship's Codex relay is told to write the exact fenced prompt it's handed, then relies on the request-identity check to catch drift; either way, a low-effort model deviating is a loud failure (a checksum, fingerprint, or request-identity mismatch, or an outright refusal) that stops the pass rather than silently corrupting state, so `low` ships as the default rather than a higher floor. |
-| `limits.agentCallsPerPr` | integer | Persisted per-PR speed bump checked before starting a review round. |
-| `limits.maxConcurrentCodex` | integer | Maximum concurrent Codex subprocesses across one ship. |
-
-User defaults at `~/.tagteam/config.json` are recursively merged into project config. Objects merge; arrays replace. Project values win. Per-dimension values win over tiers. Run flags win over both. `ui.confirmDecisions` is the one interface key worth setting there: how chatty tagteam is about taste is a trait of the person, while `ui.hasUserInterface` and `ui.conventionPaths` are facts about the repository. User defaults only seed the interview; validation reads the project file on its own, so every answer still lands there.
-
-Configuration carries a `version`. The plugin writes version 4; version 1 predates the interface questions, version 2 predates `policyPaths`, and version 3 predates the two adversarial passes, and all stay valid, so an upgraded plugin never wedges a configured repository. A stale file is only asked for the keys it actually predates. `validate-json.mjs` reports that separately from failure: exit 0 is current, exit 3 is valid but written by an earlier plugin and names the unanswered keys, exit 1 is invalid. Ship proceeds on exit 3, reading the unanswered keys as `hasUserInterface: true`, `conventionPaths: []`, `confirmDecisions: off`, and `review.finalChallenge` enabled at the `standard` tier, and says so once through `messages.mjs configStaleShip`, whose text names the interface answer rather than enumerating every unanswered key; plan stops and asks for `/tagteam:init --upgrade`, which asks only the new questions and keeps every existing choice. Because `.tagteam/config.json` is committed, an upgrade is a tracked change the whole team inherits: say so before writing it.
-
-Reviewer glob grammar is `*`, `**`, `?`, and `{a,b}` only. Paths are POSIX-normalized and repo-relative. Keywords match added lines only, case-insensitively, as substrings. A matcher error runs the reviewer and records the error.
-
-Five dimensions always run by default: functionality, security, code quality, error handling, and test coverage. Concurrency/data integrity, reliability, resiliency, performance, cost, conventions, documentation, and accessibility are conditional. A positive or unknown ship-time user-visible judgment always forces accessibility.
-
-Only open/recurring blocking and major findings drive fixes and block convergence. Minor and nit findings are offered as an optional cleanup PR after the train. A dimension’s `gate` can impose a stricter final pause.
-
-## Interface decisions
-
-A model that adds a pointless input or puts a dialog in the wrong place is not uncertain, it is confident, so nothing it is unsure about ever reaches a human through open questions. Planning therefore has a second channel: the drafter *declares* interface choices instead of asking about them.
-
-A declaration names what was decided, the surface kind, the chosen option, at least one alternative that was genuinely weighed, a short sketch of each so a person compares pictures rather than paragraphs, and the exact repository path establishing the precedent it follows — or null when nothing there votes for it. New dialogs, pages, navigation entries, required inputs, and changes to the step count of an existing flow are declared; copy, spacing, icons, and internal component structure are not.
-
-Two mechanisms then act on that channel, and they are gated differently on purpose:
-
-- The interface lens runs in every cross-review round whenever `ui.hasUserInterface` is not false, including for settings that predate these questions. It asks whether each surface needs to exist, whether it is in the right place, whether every new input earns itself, and whether it follows precedent — and returns decisions the plan made without declaring. It runs on each plan's selected substantive provider, never asks the human anything, never blocks a pass, and a round that loses it stands on its configured substantive review. Because it costs the user nothing, it is not a preference.
-- Planning and shipping default to `--provider both`. `--provider claude` omits every Codex dispatch. For planning, `--provider codex` routes drafting, review, revision, manifest generation, and PR decomposition through the Codex bridge. For shipping it routes implementation, candidate UI classification, specialist analysis, review, verification repair, and finding repair through the bridge. Haiku only performs orchestration and deterministic repository plumbing. Single-provider runs disclose reduced assurance and the saved provider is immutable on resume.
-- Confirmation is a preference, so `ui.confirmDecisions` gates it. `new-surfaces` surfaces new surfaces plus anything with no precedent; `all-surfaces` surfaces everything declared; `off` surfaces nothing. An unanswered policy behaves as `off`: an upgrade must never start interrupting people who did not ask to be interrupted.
-
-**A declaration is carried, never dropped.** A later round may refine a decision under its id and the last version wins, but no revision on either engine may return fewer ids than it was given, and a pass stops when one does. Nobody is ever asked about these, so unlike a question there is nothing downstream that notices one that stopped existing. The record beside a published plan is written by the workflow from the set that check cleared, rather than copied from the file the drafting model wrote, and every exit normalizes that record to everything the pass collected — including what the advisory lens found in a round that ended the loop, which no revision was ever given. A record the workflow cannot read is set aside under a fresh name and rewritten rather than overwritten: unreadable bytes may still be worth something to a person, and they are never worth stopping a finished plan for.
-
-The command asks in two steps and never one question per decision: one multi-select scan per three decisions, defaulting to keeping them all, then a single-select drill-down carrying each option's sketch as its preview only for the ones the user picked. Outcomes are recorded as ordinary decision rows, including the ones kept unchanged, so no later pass asks twice.
-
-None of this replaces the user-visible merge gate, which is not optional.
-
-## Premises come before the plan
-
-A new plan's first forge invocation writes no plan. It returns `needs-premises-confirmation` with a ranked list of the load-bearing facts a plan for that goal would take as given — what exists today, what has actually shipped, what data is live — each marked `verified` where its basis names the file, symbol, migration, or command it was read from, and `assumed` otherwise. `/tagteam:plan` puts to a person every premise that is assumed or that the challenge below marked, writes the settled list to `drafts/<passId>-premises.json`, and re-invokes the same pass with it; the drafter is then told those premises are settled and that a contradiction between one of them and the repository is an open question rather than something to plan around.
-
-This is the one defect review cannot find. Every reviewer reads the same document and inherits the same assumption, so a plan resting on a false premise passes every round and is invalidated all at once when a person finally reads it. One run assumed a feature's data existed in production for eight passes; the feature had never shipped. Every resume, continuation, and later pass carries the file rather than re-asking.
-
-**The labels are checked before the person is asked.** The model that states the premises also decides which of its own claims count as verified, and a `basis` only has to *name* a file to earn that label. So `planning.premiseChallenge` buys one more pass, on the engine that did not state them — under a single provider, a fresh agent or a fresh Codex process on that provider, recorded as `independent: false` — which opens each cited basis and tries to prove the claim wrong. It returns one row per premise, in order, repeating each claim so the rows can be checked against what was actually stated; a list that drifted is discarded whole rather than applied to premises it may not have judged.
-
-Only `contradicted` moves anything, and only downward: that premise becomes `assumed` and is asked about on its own, with the counter-evidence shown as the challenger's claim rather than as repository fact. `unsupported` — nothing contradicts the claim, but the cited basis does not establish it — leaves the premise's standing alone, because "that citation does not prove this" is satisfiable against almost any basis, and a verdict that costs nothing to reach would flag every row and turn a four-question gate into a long one. Both verdicts do mark the row they judged: a challenged premise carries `challenged`, so the command asks about it structurally rather than re-deriving which row was which from two lists and a position — the correlation the workflow itself refuses to trust. The marker never reaches the settled file. Nothing in the workflow raises a premise's standing; a person still can, which is what the gate is for.
-
-A lost challenge is not a lost gate: the premises were already paid for, so a failed relay returns `ran: false` with a reason and the stated list intact rather than throwing a pass that would state them again on resume.
-
-## When cross-review stops
-
-`planning.reviewRounds` is a ceiling, not a quota, and there are three ways a pass leaves the loop.
-
-**A round that leaves nothing blocking or major ends it, on the exact bytes it approved.** That plan is published to `drafts/<passId>-integrated.md` unchanged and the remaining rounds are not run. Nothing is revised afterwards: folding minor feedback into one more edit used to be the last thing a pass did, and it was the only edit in the whole pass that no check covered, applied to the largest artifact at the moment the plan was otherwise finished. Minor findings travel back to the human instead. Severity decides this and the verdict does not: a reviewer may return `revise` while listing only minor issues. The interface lens never participates in the judgment at all, because it is advisory.
-
-**A round that does not strictly improve on the one before it ends it too, and says so.** "Zero blocking or major" is satisfiable on a plan that is converging and close to unsatisfiable on one that is not: contradiction surface grows with the document, so an adversarial reviewer at three hundred kilobytes will always find something. The loop therefore counts. If a round's blocking-plus-major total is not below the last measured one, the pass stops with `divergence: {round, previous, current}` and hands the human what it has. `/tagteam:plan` does not silently buy another repair on that signal; it reports both counts and asks. The count carries across passes through `priorGatingIssueCount`, because the failure this exists to stop was thirteen passes long, not three rounds. On the run that motivated it, this halts at the sixth pass rather than the thirteenth.
-
-**The same count is measured on the passes that run no round, which is where the repairs actually happen.** A repair continuation runs no cross-review round at all, so the detector guarded the loop that already had `reviewRounds` as a ceiling and left unguarded the path whose only bound was a prose allowance of two repairs — which a caller holding a fresh human decision may legitimately extend. Both exits such a pass can take now measure: the plan check before the manifest, and the handoff cross-check after it. Each compares its own blocking-plus-major findings against the count the pass was seeded with and stops with `divergence: {pass, previous, current}` when they did not come in below it. Two guards, both borrowed from the loop: nothing found is not a failure to reduce, and a count the pass measured for itself is a different population from the caller's, so the comparison is skipped once a round has replaced it. And a plan whose handoff fails while it sits within two percent of its `planBudget.hardCeilingChars` gets one more finding, saying that every repair now has to be paid for by compressing something else and that reducing scope is the move. It leads the list and is left out of the count, because it is a remark about the plan rather than a defect anyone found in it. The forge already holds that a plan which does not fit is evidence the feature is too big for one plan; that reading applies to a plan that cannot absorb a fix, not only to one that cannot be written.
-
-**Running out of rounds is not a verdict.** A pass that used every configured round while still improving returns `roundsExhausted`, and the command offers to continue or to stop and report rather than treating the cap as a rejection.
-
-The other end is gated too. Every revision except the last is re-read by the round that follows it; the last one goes straight to the manifest. So when the final round left something blocking or major behind, one re-read asks whether that revision actually landed it, before the pass pays for a manifest, a train, and a cross-check built on a plan with a known hole. It is a regression check with one deliberate exception: it judges the critiques already raised and may add exactly one other kind of finding, a rule from the repository's own `policyPaths` documents that the revision itself breaks. That exception exists because a critique about such a rule cannot be judged resolved without knowing the rule, and because a revision that fixes one thing while breaking a rule has introduced a defect nothing later in the pass is guaranteed to catch. It does not reopen general review, and it cannot loop: these findings are fed into at most two repair continuations before the command stops with them. If any survive, the workflow returns `needs-plan-revision` with those issues and no manifest, and the plan is repaired through the same continuation that repairs a failed handoff cross-check.
-
-`drafts/<passId>-integrated.md` is what carries that guarantee across an interruption. Only a cleared plan is ever written there — the exact text a clean round approved, a re-read that confirmed the last revision, or a continuation — so its presence is the pass's clearance record and it outranks every round input in the pass whatever the timestamps say. An uncleared final revision stays a plain `drafts/<passId>-round-<r>-input.md` with `r` past `reviewRounds`, which resume reviews as an ordinary round. A run interrupted between saving that revision and clearing it therefore resumes into the check rather than past it.
-
-Every plan a model writes reaches a discoverable path the same way: it is written to a working path under `reviews/`, which resume does not look at, and published only after the checks on it pass. The Codex paths materialize from their artifact, and both Claude paths — the continuation and the round revision — publish through `stage-plan-continuation.mjs`, which writes the question sidecar first and the plan last, because the plan's name is the boundary. A round revision earns no continuation receipt, so it publishes with `--receipt none`; a receipt beside a round input would tell a resume it was a continuation. What this buys is that a step which stops the pass also stops what it caught from surviving the pass: a revision that shortened its sidecar used to leave that sidecar at exactly the path the next resume reads.
-
-The same boundary is why the Codex paths fold the carried set into `materialize-plan-artifact.mjs` itself rather than into a merge that follows it. That command *is* the publication, and it writes the plan last; a sidecar completed afterwards is a sidecar a resume can select while it is still short.
-
-## The last opinion is bought where scrutiny stops
-
-A candidate that goes clean has nothing left looking at it: the loop breaks, gates are assembled, and a person sees a pull request. Every reviewer that produced that state read the change through one dimension's charter, so nobody was ever asked whether the change, taken whole, is the change its contract claims. `review.finalChallenge` buys exactly one pass for that question, on the engine that did not write the last fix — or, where no round fixed anything, the one that did not open review. It runs on the candidate the loop cleared and on nothing else, and only on a clean one: a ship that already failed its gates has a person reading it either way.
-
-Its findings are `needs-human` and are never handed to a fixer. That is the whole shape of the thing: a fix would commit a new candidate, a new candidate invalidates every gate this one just earned, and the challenge would re-arm on its own output. Because it cannot write code, it cannot create the candidate that would restart it, so the pass is bounded by construction rather than by a counter. A person may still ask for a repair through the ordinary `Send it back for changes` path; that is a decision, and it re-arms every gate exactly as any other new candidate does.
-
-A surviving finding is a gate failure, so the run stops and offers the same three answers as every other gate. `Merge it` records approval against the current candidate only, which is what acceptance means here: `bindNewCandidate` wipes it the moment the bytes change, and the challenge runs again on whatever replaced them. Nothing carries an acceptance onto code it was never read against, and nobody is asked twice about a candidate that no longer exists.
-
-A challenge that could not run — no result, or no room left in `limits.agentCallsPerPr` — is recorded as not run and fails the gate rather than passing it. Elsewhere a check that did not run proceeds on other evidence; here there is none, because being the last thing that could still object is the entire point.
-
-## Questions are drained, not deferred
-
-Cross-review stopping does not mean the questions are done. A pass that cleared every round and produced a manifest, a train, and a passing cross-check can still be holding decisions nobody made, and those are reported separately from every verdict above.
-
-Every open question is put to a person before that plan can be approved. `planning.questionsPerRound` sizes one `AskUserQuestion` call, not the pass: sixteen questions are four chunks and one continuation, not four passes. It used to be a per-pass budget with the remainder left in the sidecar for "the next pass", which only reaches anyone if a next pass is bought — and nothing bought one, so the questions sat in the sidecar while the plan they were about went to approval.
-
-The cost of draining inside one pass is real and is the cheaper mistake: later chunks are answered against a plan the earlier answers have not yet revised. A revision that invalidates an earlier answer comes back as a new question, so the continuation is re-checked and drains again. Two stops bound it — a continuation that does not reduce the count, which is the question-side reading of the `priorGatingIssueCount` detector, and a ceiling of three drain continuations.
-
-The terminal status names which gate is open. `needs-handoff-revision` outranks the rest: a plan whose manifest and train do not hold up is not one to answer questions about yet. Then `needs-questions`, and only `needs-approval` offers `Approve and save`. A lost sidecar counts as outstanding — `openQuestionCount` is `null` when the merged list did not survive the relay, and a pass that cannot say whether questions remain is not the one that gets to decide they do not.
-
-Approving over open questions stays possible, because a question nobody can answer should not wedge a plan forever. It is an explicit option naming the count, never the default, and the exact questions are written into `approved.json` as `unansweredQuestions` — the record of what the plan assumed on someone's behalf. Nothing in a ship reads that field yet; it is written so the question of what a plan shipped without has an answer on disk rather than only in whoever remembers approving it.
-
-The other half of that guarantee is in the workflow, and it is structural rather than a check. A drafter or reviser returns only the questions it is **newly raising** this round; the carried set is the workflow's, and it folds every carried question back into the sidecar itself — subtracting only the ones a supplied human decision answers — before that file is ever published. Dropping one is impossible by construction, on both engines: the model never had the power to omit one. This replaced a check that demanded the whole set back verbatim, which failed a compliant revision for rewording a question it was carrying, and which could only ever catch a drop after the pass had paid for it.
-
-The carried set never travels as content. It reaches the merge as a path the plumbing command reads with its own filesystem access, alongside the decisions file whose rows retire part of it, and the workflow names the digest of the union it expects so the command cannot write anything else. Only the questions a plan reviewer raised are passed inline, in batches small enough that no single argument approaches the per-argument size ceiling; those reviewers cannot write a file, and a question is a sentence, so a batch of them stays small however many rounds a pass has run.
-
-The interface record is the one set that outgrew that. It is the fastest-growing artifact in a pass, and an interface decision carries an 800-character sketch per option, so no batch size makes an argument safe — a compliant pass once composed an 11,336-character argument and died at its exit path. So it never travels as content at all: this round's interface findings reach the settle as a path under `reviews/`. On the Codex path that path is the review artifact the bridge already writes; on the Claude path the lens persists the array itself, which is the one file it may write and the only reason it may write anything.
-
-The plan reviewers are read-only and the drafter that wrote the sidecar ran before them, so the questions a round's reviewers raise reach that file only by way of the revision that follows. A round that ends the loop has no such revision — a clean one and a divergent one both stop there — so the pass merges its reviewers' questions itself at every exit.
-
-## The plan is capped, and revision is subtractive
-
-`planning.planBudget` sets what a plan is written to: `targetChars` (25000 by default) and `hardCeilingChars` (35000). Over the target is a finding; over the ceiling the plan is rejected before any reviewer sees it. Two rules make that reachable.
-
-The plan states **current decisions only**. A superseded decision is deleted, not annotated — no "that relocation is withdrawn", no "round 3 placed the card", no inline revision history, and no cross-reference to a question that is now answered. Annotation is what makes revision purely additive, and an artifact that only grows raises its own contradiction surface faster than it raises its content, which is exactly why a review loop against one cannot terminate.
-
-One supersession does have to be written down, and it belongs in `goal.json`, never in the plan. When a person deliberately overrides one of the repository's own documents, a reviewer that reads both sees a plan contradicting a rule it is held to and raises it as a defect — correctly, because nothing in the plan says the override was chosen. Record it in the goal instead: the plan states current decisions, and the goal states what authority those decisions answer to. Writing it in the plan trips the history check; leaving it out of both costs a round.
-
-Naming an artifact is not carrying one. A plan may say that a document must contain a `## Review Log`, and may carry an empty section of that name where a repository's standards mandate one, without tripping the history check. What that check decides is structural: it fires only where the plan opens a section named for the artifact *and* the lines beneath it carry round numbers, dates, or verdicts — entries, not a requirement. No phrase anywhere in the plan is forbidden.
-
-And the plan follows a **fixed template**: Goal, Premises, Decisions, Scope in and out, File-by-file, Tests, Acceptance criteria, PR sequence, Open questions. A section with nothing to say says so in one line. The template is what lets a section be compressed without a reader having to work out whether it was compressed or dropped.
-
-When the budget cannot be met the drafter compresses, and if it still cannot be met it returns an open question proposing which independent plans the feature should be split into. A plan that does not fit is evidence the feature is too big for one plan, never a licence to keep writing. The same reasoning gives the sanity check the forge applies arithmetically: **a plan should be materially smaller than the code it produces**. Past that, the code is being written twice, once in a language that cannot be compiled, and the second copy is strictly weaker because nothing typechecks it. Detail dense enough that a weak implementation model cannot err duplicates what the repository's verification commands and code review already enforce.
-
-## The pull-request train is derived, not composed
-
-One pull request is the default. A split is derived from two facts and nothing else: a limit the repository's own policy documents place on changed lines, and a task that cannot start until an earlier one is merged for a reason other than convenience. `prTrain.prSize.repoHardCapLines` states the first where a repository has one. A twelve-phase train multiplies sequencing surface — per-phase dependency wiring, line estimates, atomic grouping, approval rules — and most of what a late review round then finds is about the train rather than about the feature. A train whose parts together fit inside the cap is a finding, not a style.
-
-A cap that cannot be excepted is a cap that gets switched off: the only way past `repoHardCapLines` used to be removing it, which drops the check for every plan in the repository rather than for the one pull request that earned it. A pull request may instead carry `sizeWaiver` — `{reason, rule, approvedBy}` — where splitting it would break a rule the repository documents as binding harder than the cap and the repository's owner approved that exception by name. The lint then reports the exception instead of blocking it, and the forge returns it as `sizeWaivers` — computed by the lint from the saved train, not from the reply that train arrived in — so the person approving the plan is told what was waived and by whom. The check that flags an unnecessary split ignores waivers entirely and cannot contradict this one: it fires only when every part together fits the cap, which is exactly when no single part is over it. A waiver missing any of its three fields blocks exactly as no waiver does; absent one, the cap is exactly as strict as before.
-
-Per-pull-request file lists are never written. Each one is the union of the files its tasks name, computed from the manifest wherever it is needed, because a second copy written by hand is a copy that can disagree — and the disagreement is found by a reviewer comparing two lists by eye, which is the reviewing a model is worst at and code is best at.
-
-## What the plan forge checks without asking a model
-
-`scripts/plan-lint.mjs` decides everything about a plan and its handoff that does not need judgment, and it runs **before** a reviewer is paid rather than as part of one. A round whose deterministic check fails buys no reviewer at all: those findings are certain and already stated, and a reviewer reading past them spends its round restating them. They reach the revision as the round's critiques, saved in the same shape a plan review has so a read-only engine can be handed them, and confirming the revision answered them is the same command run again rather than a model asked to agree with it. A finding here is an error, not a critique.
-
-Over the plan: the size budget, revision history a subtractive revision should have deleted, missing template sections, and the exact strings `planning.canonicalStrings` pins — an ASCII arrow where a contract requires a glyph is a rewrite, not a round.
-
-Two of those checks report rather than block: an unbound revision-history marker, and this one. When a pass is given human decisions, the lint is given the same file and puts any decision naming a repository path beside the clauses of the plan that prohibit something about that same path. A decision and an inherited done-criterion about one file are written at different times by different authors, and a revision that applies both without reading them together is how a task ends up requiring a string another of its own clauses forbids creating — which is exactly what happened. Whether two sentences about one file actually disagree is a judgment a regex does not have, so this is `minor`. Every non-gating lint finding in a pass comes back as `advisoryIssues` for the command to show once at the end; before that they had nowhere to go on a pass that runs no round, which is precisely the pass that produces this one.
-
-A pass that runs no cross-review round at all — a continuation integrating human answers, a resume seeded from a plan an earlier round already cleared — is checked once before the manifest instead. Without that, the one entry that skips the loop is the one that buys a manifest, a train, and a full cross-check before anyone learns the plan is over its ceiling.
-
-Over the manifest and the train: every task landing in exactly one pull request; task and pull-request dependency graphs that resolve, do not cycle, and are listed in an order the train can be worked in; **every task dependency that crosses a pull-request boundary declared on the later pull request**, which is the decidable form of "a phase depends on its predecessor being merged, not opened"; atomic groups kept whole; line estimates against the repository's own cap; a split whose parts all fit inside it; a file list that disagrees with the tasks it holds; a plan longer than the code it describes; and the same `planning.canonicalStrings` substitutions, reported against the task or pull-request id that carries one, or against the document itself for the prose that belongs to no id. Checking only the plan clears the artifact a person reads and ships the two an implementer follows, which is where a repository's own tests parse the wording literally.
-
-Every one of those recurred across three or more rounds of a single real planning run. A defect a model has to rediscover on every round is one it will miss on some round.
-
-Two of them are worth stating on their own terms.
-
-The first is the repository's own rules. `prTrain.prSize` is tagteam's preference and `enforce` is pinned false on purpose, because a coherent change should never be split to hit a number. That is a fact about tagteam alone, and reading it as "no size limit applies here" is the mistake it invites: a repository's own standards document may set a hard cap that tagteam has no opinion about and never overrides. `policyPaths` closes that gap. Every plan-forge step — drafter, reviewers, revision, parser, decomposer, and the decomposition cross-check — is given those paths and told the rules there bind the plan: limits on pull-request or commit size, edits required to land together, mandatory setup or verification steps, and copy that must be reproduced character for character. The drafter respecting a limit on the first pass costs nothing; a cross-check discovering it three rounds later costs three rounds.
-
-The second is atomicity. Some edits are only valid together — a payload-shape change with the registry bump and migration that read it, a version bump with the fixtures it invalidates. `mergeStrategy` is `squash`, so every pull request lands on the base branch as exactly one commit: what can leave that branch briefly invalid is splitting such a group across two pull requests, never splitting it across tasks inside one. The parser labels each such group with a shared `atomicGroup` on its manifest tasks, the decomposer is required to keep a label together, and the lint then checks it arithmetically against the manifest and the train. A violation is a blocking handoff issue whatever the cross-check concluded, and it is reported alongside that round's findings rather than short-circuiting it, so one repair pass fixes everything the round found.
-
-## Worktree and secret safety
-
-Order is fixed:
-
-1. `git worktree add --detach`
-2. copy exact ignored paths, preserving permissions
-3. run setup commands
-4. `codegraph init`
-5. implement/fix
-6. commit
-7. snapshot, primary-tree guard, `codegraph sync`
-
-Every copied path must remain inside the worktree, contain no symlink, exist at setup time, and pass `git check-ignore --no-index` at the destination. After `git add -A`, `guard-staged.mjs` refuses the commit if any copied path appears in the staged set.
-
-The primary checkout must remain clean. A non-empty primary `git status --porcelain` in any candidate snapshot fails the PR.
-
-## Candidate binding
-
-The workflow order is commit → snapshot → CodeGraph sync → user-visible classification → reviewer selection → review → verify. Candidate snapshots contain the base/candidate OIDs, full and review diff paths, all changed paths, added-line corpus, excluded-file blob summaries, diff size, file count, and primary-tree status.
-
-Review, local verification, UI classification, CI, and human approval are each stored against one candidate OID. Any commit, rebase, force-with-lease update, or base movement discards all five records and re-runs them.
-
-## CI classification
-
-Always read JSON from `gh pr checks`.
-
-1. Any `FAILURE`, `TIMED_OUT`, `ACTION_REQUIRED` → failed.
-2. Else any `PENDING`, `QUEUED`, `IN_PROGRESS` → running.
-3. Else any `SUCCESS` → passed.
-4. Else empty or all `SKIPPED`, `NEUTRAL`, `CANCELLED` → not run.
-
-Pending at the configured timeout becomes not run. Cancelled is never passing. Every observation is persisted under `prs/<id>/ci/<candidateOid>.json`. CI not run plus local verification not applicable always requires a human.
-
-## Exact Git protocol
-
-Use only these forms.
+`.tagteam/config.json`, version 5, validated by
+`node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
+
+Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
+tell the person to run `/tagteam:init` and stop. There is no migration: version 5
+is a different shape, not an extension.
+
+| Key | Meaning |
+|---|---|
+| `base` | Branch pull requests target and each spec branches from |
+| `branchPrefix` | Prefix for generated branches |
+| `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
+| `models` / `effort` | Per role: `plan`, `implement`, `review`, `codex` |
+| `reviewers.roster` | Every lens a plan may assign |
+| `reviewers.default` | Lenses applied to every spec unless it drops one |
+| `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
+| `ciWaitSec` | How long to wait for checks; 0 skips CI |
+| `autoMerge` | False makes every pull request wait |
+| `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
+| `reviewExclude[]` | Globs summarised rather than included in the review diff |
+| `maxConcurrentCodex` | Concurrent Codex calls across this repository |
+
+`examples/config.json` is a complete file.
+
+## Codex
+
+Required. If `codex --version` fails, stop and say so — there is no
+single-provider mode and no `--provider` flag.
 
 ```bash
-git -C <primary> fetch origin --prune
-git -C <primary> rev-parse origin/<base>
-git -C <primary> worktree add --detach <worktree> <baseOid>
-
-# Resume a recorded existing branch after a clean teardown
-git -C <primary> worktree add --detach <worktree> <candidateOid>
-git -C <worktree> switch <branch>
-
-git -C <worktree> fetch origin --prune
-git -C <worktree> checkout --detach <baseOid>
-git -C <worktree> switch -c <branch>
-
-git -C <worktree> add -A
-git -C <worktree> commit -m "<type>: <summary>"
-git -C <worktree> rev-parse HEAD
-
-git -C <worktree> push -u origin <branch>
-gh pr create --base <base> --head <branch> --title "<title>" --body-file <file>
-gh pr checks <pr> --json name,state,bucket,link,completedAt
-gh pr edit <pr> --body-file <file>
-
-git -C <worktree> fetch origin --prune
-git -C <worktree> rebase origin/<base>
-git -C <worktree> rebase --abort
-git -C <worktree> push --force-with-lease=<branch>:<lastPushedOid> origin <branch>
-
-gh pr merge <pr> --squash --match-head-commit <candidateOid>
-gh pr view <pr> --json state,mergedAt,headRefOid,mergeCommit
-git -C <worktree> fetch origin --prune
-git -C <worktree> rev-list --parents -n1 <mergeCommit>
-
-git -C <worktree> checkout --detach <newBaseOid>
-git -C <worktree> branch -D <branch>
-git -C <primary> push origin --delete <branch>
-git -C <primary> worktree remove <worktree>
+node "$P/scripts/codex.mjs" \
+  --template "$P/prompts/codex/review.md" \
+  --var CANDIDATE=<oid> --fence SPEC=<path> --fence DIFF=<path> \
+  --schema "$P/schemas/findings.schema.json" --out <artifact.json> \
+  --model <models.codex> --effort <effort.codex> \
+  --cd <worktree> --slots <plan-or-ship-dir> --max-concurrent <maxConcurrentCodex> [--reuse]
 ```
 
-Local mode advances the base without checking it out:
+The script composes the prompt from the template, substitutes `--var` values, and
+appends each `--fence` payload read **off disk, beside the engine**. A large
+payload therefore never passes through the orchestrator's context. It writes the
+artifact, a `.prompt.md`, a `.request.json` provenance sidecar, and a truncated
+`.events.jsonl`.
+
+Three things to know:
+
+- **Codex runs read-only and cannot write files.** Its output is the artifact the
+  script writes from `--output-schema`. Never instruct it to write one.
+- **Schemas must be strict-mode legal**: every property in `required`, every
+  `const` given a `type`. Otherwise the request returns HTTP 400 before the model
+  runs, identically on every retry.
+- **`--reuse` is safe and shallow.** It returns an existing artifact only when
+  the sidecar records this exact prompt, schema, model, and effort. Use it on
+  every resumed step; a completed review is not worth buying twice.
+
+## The Git protocol
+
+Only these forms. Anything else is a mistake, not a shortcut.
 
 ```bash
-git -C <worktree> checkout --detach <baseOid>
-git -C <worktree> merge --squash <branch>
-git -C <worktree> commit
-git -C <worktree> rev-parse HEAD
-git -C <worktree> update-ref refs/heads/<base> <newBaseOid> <baseOid>
-git -C <worktree> push origin <base>
+git -C "$R" fetch origin --prune
+git -C "$R" rev-parse origin/<base>
+git -C "$R" worktree add --detach "$R/.tagteam/worktrees/<slug>" <baseOid>
+git -C "$W" switch -c "<branchPrefix><slug>/<spec-id>"
+git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "<message>"
+git -C "$W" push -u origin "<branch>"
+git -C "$R" worktree remove "$R/.tagteam/worktrees/<slug>"
 ```
 
-Never amend, interactively rebase, bare-force push, hard-reset committed work, mutate the primary checkout, bypass protection, auto-merge, merge without exact-head matching, delete the branch inside the merge command, force-remove a worktree, or rewrite a pushed branch.
+The three-command commit runs as one chain, always.
+`guard-staged.mjs` refuses the commit when any file copied by
+`worktree.copyUntracked` has been staged — the reason a `.env.test` copied into
+a worktree does not end up in history. `git add -A` will stage it, so nothing
+except this check stands between it and a push.
 
-## Ship directory
+**Never:** amend, interactive-rebase, `push --force` without a lease,
+`reset --hard` over committed work, commit or check out in the primary checkout,
+merge without `--match-head-commit`, delete a branch inside a merge command,
+`worktree remove --force`, or `git rev-parse HEAD` to learn the reviewed commit
+(it is in `state.json`, and after a fix round HEAD is a different commit).
 
-`.tagteam/ships/<ship-id>/` is resumable state:
+## Gates
 
-- `ship-meta.json`: config snapshot, versions, resolved base/start OID;
-- plan, manifest, train, and `pr-train-state.json`;
-- `prs/<id>/review.md`: append-only human review record;
-- `prs/<id>/tasks/<task>/`: implementation results;
-- `prs/<id>/rounds/<n>/`: candidate, review diff, prompts, findings, and fixes;
-- `prs/<id>/verify/`: command results/logs;
-- `prs/<id>/ci/<candidateOid>.json`: every CI observation;
-- `report.md`: deterministic final summary.
+`node $P/scripts/gates.mjs evaluate <state.json> <config.json>` decides whether a
+pull request merges unattended. It is code because it is silent when it is wrong.
 
-## What a project commits
+A pull request stops and waits when: the spec is marked user-visible; verification
+failed, or CI failed or proved nothing; a finding is still open after the
+re-check; **a selected reviewer produced no usable evidence**; or
+`.github/workflows/**` changed.
 
-`/tagteam:init` owns the repository `.gitignore` through `scripts/ensure-gitignore.mjs`, which rewrites one managed block and leaves every other line alone. Working state is ignored: `.tagteam/ships/`, `.tagteam/worktrees/`, `.tagteam/locks/`, `.tagteam/transport.json`, `.tagteam/plans/*/drafts/`, `.tagteam/plans/*/reviews/`, and the `.codex-slots/` and `.quota/` bookkeeping directories. With `--codegraph`, which init passes when `codegraph.enabled` is true, the block also covers `.codegraph/` — the index setup itself creates. The reviewed record is committable: `.tagteam/config.json` and each approved plan's `plan.md`, `manifest.json`, `pr-train.json`, `decisions.json`, and `approved.json`.
+User-visibility is the plan's judgement, settled per spec by the person who
+approved it and raised by the spec writer if writing the spec revealed a surface
+the plan missed. There is deliberately no diff-derived signal: a reliable one
+needs per-project path conventions, and an unreliable one that reads as
+authoritative is worse than none.
 
-The script is idempotent and verifies the result with `git check-ignore`, so `/tagteam:init --reconfigure` repairs a drifted block. A pattern listed but not ignored means another rule re-includes it; that is reported and never silently accepted. Lines a person wrote are never edited, only reported: a comment that introduced rules the block absorbed comes back as `orphanedComments` for the user to decide about.
+That fourth one is the important one. An absent, unparseable, or wrongly-bound
+findings file yields an empty finding set, and an empty finding set is
+indistinguishable from a clean review. `collect-findings.mjs` reports it as
+`incomplete`, which is not `clean`.
 
-Resume parses artifacts and reconciles Git/GitHub before mutation. It never trusts conversation memory. A malformed review artifact means not converged.
+Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
+a new commit appears — and the fix round always makes one.
 
-Plan directories are resumable on the same terms. `.tagteam/plans/<slug>/` holds `goal.json`, `drafts/<passId>-premises.json` (the premises a person settled before any plan existed, carried by every later pass), `drafts/<passId>-round-<n>-input.md` (the exact draft round `n` reviews) with a `.questions.json` sidecar carrying the questions still open at that point and a `.ui-decisions.json` sidecar carrying every interface choice declared so far, written by the workflow at every path it publishes, `drafts/<passId>-integrated.md` (that pass's finished plan, written by a cleared cross-review revision or by a continuation, with the same sidecars), `drafts/<passId>-decisions.json` (answers recorded as they are given, long before approval), and the per-pass manifest, PR train, prompts, per-round deterministic findings (`reviews/<passId>-round-<n>-lint.json`), and Codex artifacts under `reviews/`. Approval copies the accumulated answers to `decisions.json` unchanged. A saved question is never dropped on resume: it is a decision the human still owes. `/tagteam:plan --resume <slug>` restarts the highest saved round of the highest pass. Each forge invocation owns a `passId`, so a reused artifact is never a check of a plan that has since been revised.
+## Scripts
 
-A pass cannot report success while that record is missing: the request that ends the pass is assembled from `drafts/<passId>-integrated.md` and refuses to build unless the draft is present, non-empty, matches the drafter's compact path/length/checksum receipt, and its `.questions.json` sidecar parses. The plan body never appears in the drafter's structured return. The `.ui-decisions.json` sidecar is deliberately not part of that hard record: a pass interrupted before it existed must still resume, and losing it costs a re-declaration rather than a plan.
+| Script | Does |
+|---|---|
+| `codex.mjs` | Compose a request, run Codex, validate against a schema |
+| `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate` |
+| `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
+| `recheck.mjs` | Settle findings after the fix round |
+| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
+| `ci-wait.mjs` | Poll checks, return one classified line |
+| `verify-run.mjs` | Run matching verify commands against a bound candidate |
+| `snapshot-candidate.mjs` | Write `review.diff`, changed paths, candidate record |
+| `worktree-setup.mjs` | Copy ignored files, run setup commands |
+| `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
+| `specs.mjs` | Validate spec front matter, resolve lenses, return dependency order |
+| `goal-gate.mjs` | Record and verify the hash of the goal a person approved |
+| `deliverables.mjs` | Extract the plan's deliverables table as data, without reading the plan |
+| `validate-json.mjs` | Schema validation and config checks |
+| `ship-lock.mjs` | The repository-wide ship lock |
+| `ensure-gitignore.mjs` | Maintain the managed `.gitignore` block |
+| `notify.mjs` | Desktop notification when a run needs a person |
+| `status.mjs` | Inventory for `/tagteam:status` |
 
-Claude continuations do not regenerate an approved plan. Deterministic plumbing copies the checksum-bound seed to an undiscoverable working path under `reviews/`; the drafter uses targeted edits for the sections affected by human decisions, returns only the working file's receipt, and deterministic plumbing publishes the verified plan and sidecars with `drafts/<passId>-integrated.md` written last. Publication also leaves a durable continuation receipt beside that integrated plan, and every later read enforces it, so a post-publication mismatch cannot become a trusted resume seed. Read-only Codex plan materialization writes the same receipt before publishing its plan, keeping the resume contract provider-independent. The workflow then reads and checksum-verifies that true final path again. An interrupted edit therefore leaves no integrated draft for resume to mistake as finished, while a large continuation emits only its changed text through the model. `planning.largePlanWarningChars` optionally changes the persisted whole-plan risk warning threshold; it defaults to 100000 characters. It remains a warning because fresh drafts, cross-review revisions, and read-only Codex planning can still be whole-plan model steps even though Claude continuations are bounded by targeted edits.
+## Context
 
-## Codex artifacts are the result
+The orchestrator's context is the scarce resource, and running out of it
+mid-train is the failure this design exists to avoid. Three rules:
 
-`codex-run.mjs` is the source of truth for a Codex step. A validated artifact on disk *is* the completed work, so the bridge reuses it and does not re-invoke Codex; only `--no-reuse` overrides that.
+1. **Never read `review.diff`, a findings file, or a spec body yourself.** Pass
+   paths. `collect-findings.mjs` exists so findings arrive as a summary.
+2. **Plan and ship in separate sessions.** The interview loads repository
+   material that shipping does not need.
+3. **Stop between specs when context is tight**, report where you got to, and
+   say the command can be run again. State is on disk; resuming is free.
 
-Reuse is bound to the request, not the path. Each artifact carries a `.request.json` sidecar fingerprinting the prompt, schema, model, effort, sandbox, and worktree that produced it, and reuse requires an exact match. So a retry of the same call is free, while a second implementation attempt at a higher tier, a cross-check of a regenerated plan, or a review of a new candidate always runs — none of them can inherit an earlier answer. An artifact with no sidecar is never trusted. The relay agent that carries the artifact back to a workflow is plumbing, and losing its reply is a lost message rather than a failed engine: workflows re-run the same idempotent command up to three times, at the cost of a file read each. A completed review, fix, or implementation is never discarded and never paid for twice. Relay re-reads count against `limits.agentCallsPerPr` like any other call.
+## Recovery
 
-## Requests are built from files, not retyped
-
-Nothing large is retyped through a model merely to move it between steps. A workflow script cannot write files, so each large payload — a plan draft, a manifest, a PR train, a candidate diff — is saved once by whichever agent produced it, and every later step refers to it by path. Claude plan drafters return only a path/length/checksum receipt; Codex's read-only runner returns one value-bearing artifact that is promoted deterministically.
-
-`compose-prompt.mjs` assembles a request from a plugin-owned template in `prompts/` plus those files. The workflow states, for each section, the exact length and checksum the file must hold; the composer checks that before writing anything and refuses on a missing, empty, or altered section. Formatting is not content: text is compared with trailing whitespace normalized, and JSON by its canonical form, so indentation and key order may differ while the content may not.
-
-Those checksums are read off the files themselves. Saving a payload and returning it are two acts, and a model doing both can slip: the file it wrote and the value it handed back are not guaranteed to be the same text. So `verify-payload.mjs` reads each payload back the moment it is written and reports what is really there, and that is the checksum the run records. The saved file wins, because it is what every later step reads. Two consequences follow. A file that is materially not the returned value — a dropped section, a paraphrase, a pointer back to the conversation — stops the pass at the write, named and immediate, instead of surfacing as an unexplained checksum failure one round later with a review already paid for. And a drift of a few characters in a model's own copy of its own text is absorbed rather than fatal: it is noise between two copies of one document. The plan text is allowed that band, and so are the manifest and PR train, which are asked for the same two acts at a hundred kilobytes and slip in the same way. What is not allowed to drift there is the part the pass decides from: the same read reports a digest over the manifest's task IDs and atomic groups and the train's pull-request IDs and task lists, and that must match exactly. So a reworded criterion is absorbed, while a dropped task, a renamed one, or a task moved between atomic groups stops the pass whatever it did to the file's length. What `compose-prompt.mjs` then enforces is that nothing has changed since that read — which is what catches a file edited behind the run's back.
-
-`codex-run.mjs` then requires the caller to declare what a finished prompt contains — `--require-fence <label>` for each expected section, `--min-prompt-bytes <n>`, or both — and exits non-zero before Codex is invoked when the prompt file is absent, empty, short, or missing a declared section. A stub never reaches a paid engine, and a review is never bought for inputs the reviewer could not see.
-
-Changing how a prompt is built changes its bytes, which changes the request fingerprint, which correctly makes artifacts produced from an earlier prompt shape ineligible for reuse.
-
-## Plain-English messages
-
-Every gate/failure message has:
-
-1. what happened;
-2. what it means;
-3. one action that unblocks it;
-4. a final details line with ship ID, PR, branch, short commit, command, and artifact path.
-
-Avoid internal terms in the first three parts. Options state outcomes: “Merge it”, “Send it back for changes”, “Stop here”.
-
-## Troubleshooting
-
-- `transport.mode: mcp`: unsupported because Codex MCP cannot enforce an output schema; use `exec`.
-- Codex returns success but no artifact: the step failed; inspect the `.events.jsonl` and prompt beside the expected artifact.
-- A Codex step's result never came back: the artifact beside the prompt is the real result; resume, and the bridge reuses it instead of re-running Codex.
-- Planning stopped mid-round: `/tagteam:plan --resume <slug>` restarts at the saved round; nothing is approved until you approve it.
-- A draft, manifest, or train was not saved as the text the run produced: the step wrote something other than what it returned. Nothing was sent and nothing was paid for. The message names the file and both sizes, or for a manifest or train both entry counts and digests; resume, and that step is redone rather than reviewed short.
-- A request could not be assembled: the file it fences changed after the run read it. Nothing was sent and nothing was paid for. The message names the file; if you edited it by hand, put it back or resume so the step is redone.
-- The same plumbing failure repeats with identical numbers after the file on disk was fixed: a run resumed at the harness level replays each finished step's recorded result rather than re-running it, so the check never re-reads the file. Re-run `/tagteam:plan --resume <slug>`. That is a fresh forge invocation, not a replay, and it reads every artifact off disk again.
-- Codex was not started because a section is missing: the prompt file beside the artifact is incomplete. Delete it and resume; it is rebuilt from the saved plan, never retyped.
-- Review parser error: do not hand-edit old rounds; inspect the first malformed header/finding ID and resume after repairing only the artifact grammar.
-- All CI checks skipped: this is `not-run`, not failure and not pass; local verification carries the gate.
-- Verification hangs: increase only that command’s `timeoutSec` after confirming the command is expected to run.
-- Worktree copy rejected: make the destination ignored, remove symlinks/traversal, and list the exact path.
-- Ships or plan drafts showing up in `git status`: run `/tagteam:init --reconfigure`; if a pattern is reported as still not ignored, remove the rule elsewhere in `.gitignore` that re-includes it.
-- Settings written by an earlier plugin: `/tagteam:init --upgrade` asks only the new questions and keeps every existing choice. Shipping continues meanwhile with interface confirmation off; planning waits.
-- Stale merge lock: `/tagteam:status` identifies the owner. Takeover requires explicit human approval after confirming the PID is dead.
-- Base moved: release the merge lock, rebase, then re-run every gate on the new candidate.
-- Unprotected base: enable pull-request protection or merge the ready PR by hand.
+- **A stopped ship**: re-run `/tagteam:ship <plan-dir>`. It skips every spec
+  whose `state.json` says merged and restarts the first that does not.
+- **A stale worktree**: `git -C "$R" worktree remove` it (never `--force`), then
+  re-run. Committed work is on its branch.
+- **Codex quota**: the bridge waits, in slices, to a four-hour ceiling, then
+  fails. Nothing else needs doing.
+- **A schema 400**: a property missing from `required` or a `const` with no
+  `type`. Fix the schema; retries cannot help.
+- **The plugin is a snapshot.** Claude Code runs a copy under
+  `~/.claude/plugins/cache/`, not this repository. Editing the repository changes
+  nothing until the plugin is updated and the session restarted.

@@ -10,9 +10,8 @@ coverage/
 .tagteam/ships/
 .tagteam/worktrees/
 .tagteam/locks/
-.tagteam/transport.json
-.tagteam/plans/*/drafts/
-.tagteam/plans/*/reviews/
+.tagteam/plans/*/work/
 .tagteam/**/.codex-slots/
+.tagteam/**/.codex-artifact-locks/
 .tagteam/**/.quota/
 # <<< tagteam managed <<<

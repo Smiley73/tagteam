@@ -42,7 +42,7 @@ async function runCommand(command, cwd, timeoutSec, logPath) {
 
 export async function verify({ config, candidate, worktree, outDir }) {
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
-  const applicable = config.verify.commands.filter((entry) =>
+  const applicable = config.verify.filter((entry) =>
     matchWhen(entry.when, candidate.changedPaths, candidate.addedLines).matched
   );
   if (applicable.length === 0) return { status: "not-applicable", commands: [] };
@@ -63,8 +63,12 @@ async function main() {
     return pairs;
   }, []));
   try {
-    if (!args.base || !args["candidate-oid"] || !args["candidate-hash"]) {
-      throw new Error("--base, --candidate-oid, and --candidate-hash are required");
+    // --candidate-hash is optional: it existed to catch a relay model that
+    // altered the snapshot between writing and verifying, and nothing relays
+    // now. The OID binding is what still matters — verification proves a
+    // specific commit works, not "whatever is on disk".
+    if (!args.base || !args["candidate-oid"]) {
+      throw new Error("--base and --candidate-oid are required");
     }
     const candidate = validateCandidateSnapshot(args.candidate, {
       baseOid: args.base,

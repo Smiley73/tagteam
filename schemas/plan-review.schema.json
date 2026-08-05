@@ -1,24 +1,46 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "One reviewer's critique of a draft plan",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "issues", "open_questions", "suggestions"],
+  "required": ["reviewer", "summary", "findings"],
   "properties": {
-    "verdict": { "type": "string", "enum": ["approve", "revise"] },
-    "issues": {
+    "reviewer": { "type": "string", "minLength": 1 },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Whether this plan, executed as written, produces what goal.md says done looks like."
+    },
+    "findings": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "title", "detail"],
+        "required": ["severity", "where", "title", "detail", "remedy"],
         "properties": {
-          "severity": { "type": "string", "enum": ["blocking", "major", "minor"] },
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "major", "minor"],
+            "description": "blocking: the plan cannot be executed, or does not deliver the goal. major: it will produce the wrong thing somewhere. minor: worth fixing while revising."
+          },
+          "where": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The deliverable number or plan section this is about."
+          },
           "title": { "type": "string", "minLength": 1 },
-          "detail": { "type": "string", "minLength": 1 }
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Grounded in the repository or in goal.md. A critique that cites neither is an opinion about software in general."
+          },
+          "remedy": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What the revision should do. Say 'say less about X' when the defect is over-specification: a plan can fail by carrying detail a competent implementer would read out of the repository."
+          }
         }
       }
-    },
-    "open_questions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-    "suggestions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+    }
   }
 }

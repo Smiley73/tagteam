@@ -19,14 +19,13 @@ export const END = "# <<< tagteam managed <<<";
 // Each entry pairs the ignore pattern with a representative path used to prove
 // to Git that the pattern really takes effect.
 export const MANAGED_ENTRIES = [
-  { pattern: ".tagteam/ships/", probe: ".tagteam/ships/ship-1/report.md" },
-  { pattern: ".tagteam/worktrees/", probe: ".tagteam/worktrees/pr-1/file.txt" },
-  { pattern: ".tagteam/locks/", probe: ".tagteam/locks/merge.lock" },
-  { pattern: ".tagteam/transport.json", probe: ".tagteam/transport.json" },
-  { pattern: ".tagteam/plans/*/drafts/", probe: ".tagteam/plans/slug/drafts/pass-1-round-1-input.md" },
-  { pattern: ".tagteam/plans/*/reviews/", probe: ".tagteam/plans/slug/reviews/pass-1-round-1-codex.json" },
-  { pattern: ".tagteam/**/.codex-slots/", probe: ".tagteam/ships/ship-1/.codex-slots/slot-0/owner.json" },
-  { pattern: ".tagteam/**/.quota/", probe: ".tagteam/ships/ship-1/.quota/gpt-high.json" }
+  { pattern: ".tagteam/ships/", probe: ".tagteam/ships/slug/01-spec/state.json" },
+  { pattern: ".tagteam/worktrees/", probe: ".tagteam/worktrees/slug/file.txt" },
+  { pattern: ".tagteam/locks/", probe: ".tagteam/locks/ship.lock" },
+  { pattern: ".tagteam/plans/*/work/", probe: ".tagteam/plans/slug/work/review/codex.json" },
+  { pattern: ".tagteam/**/.codex-slots/", probe: ".tagteam/plans/slug/.codex-slots/slot-0/owner.json" },
+  { pattern: ".tagteam/**/.codex-artifact-locks/", probe: ".tagteam/plans/slug/work/.codex-artifact-locks/a/owner.json" },
+  { pattern: ".tagteam/**/.quota/", probe: ".tagteam/plans/slug/.quota/gpt-high.json" }
 ];
 
 // `/tagteam:init` runs `codegraph init` when the user opts in, which creates
@@ -45,10 +44,9 @@ export function managedEntries({ codegraph = false } = {}) {
 // from, and the config is how a project pins its own settings.
 export const KEPT_PATHS = [
   ".tagteam/config.json",
+  ".tagteam/plans/<slug>/goal.md",
   ".tagteam/plans/<slug>/plan.md",
-  ".tagteam/plans/<slug>/manifest.json",
-  ".tagteam/plans/<slug>/pr-train.json",
-  ".tagteam/plans/<slug>/decisions.json",
+  ".tagteam/plans/<slug>/specs/",
   ".tagteam/plans/<slug>/approved.json"
 ];
 

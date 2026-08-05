@@ -1,125 +1,122 @@
 # tagteam
 
-Tagteam is a Claude Code plugin for taking substantial software changes from an idea to reviewed pull requests. It uses Claude and Codex together to produce a repository-grounded implementation plan, break it into an ordered PR train, implement it in isolated worktrees, review every candidate across both engines, run verification, and pause at explicit human gates before merging.
+A Claude Code plugin that takes a change from a vague idea to merged pull
+requests, using Claude and Codex together.
 
-It is for developers who want to delegate more of a multi-file change without turning the result into a black box. Tagteam makes plans that carry what an implementation model cannot read out of the repository itself, gives each engine’s work an independent second opinion, binds evidence and approvals to exact commits, and saves durable artifacts so interrupted work can be audited and resumed safely.
+You describe what you want, however roughly. Tagteam interviews you until the
+outcome is concrete, writes a plan, has it reviewed once by three independent
+readers, and breaks it into spec files. Then it implements those specs one at a
+time — each in its own branch, each reviewed by a cross-engine panel, each
+verified — and merges the ones that need no judgement from you. The ones that do
+stop and wait.
 
-Why use it:
-
-- Get an implementation-ready plan with concrete files, dependencies, edge cases, tests, and observable done criteria.
-- Reduce single-model blind spots through structured Claude-and-Codex review and alternating repair rounds.
-- Keep generated changes away from your primary checkout and move them through coherent, dependency-aware pull requests.
-- Retain human control over user-visible, insufficiently tested, failed, or otherwise risky changes.
+It is for changes big enough that you want them delegated and not so opaque that
+you cannot check them. Every decision you make is written to a file you can edit.
+Every merge happens at the exact commit that was reviewed.
 
 ## Install
 
-Requires Claude Code, Git, and the Codex CLI. GitHub PR mode also requires an authenticated GitHub CLI; CodeGraph is optional.
-
-Run Claude Code with the plugin directory:
-
-```bash
-claude --plugin-dir /absolute/path/to/tagteam
-```
-
-For day-to-day use, add this repository as a local Claude Code marketplace/plugin source using your installed Claude Code version’s `/plugin` menu.
-
-CLI equivalent:
+Requires Claude Code, Git, the [Codex CLI](https://github.com/openai/codex), and
+an authenticated GitHub CLI. CodeGraph is optional.
 
 ```bash
 claude plugin marketplace add /absolute/path/to/tagteam
 claude plugin install tagteam@tagteam-local
 ```
 
-### Upgrade
+Or run Claude Code with `--plugin-dir /absolute/path/to/tagteam`.
 
-Update the repository checkout, refresh the local marketplace, and update the installed plugin:
-
-```bash
-git -C /absolute/path/to/tagteam pull --ff-only
-claude plugin marketplace update tagteam-local
-claude plugin update tagteam@tagteam-local
-```
-
-Start a new Claude Code session or run `/reload-plugins` in the current session. If you use `claude --plugin-dir` instead of an installed marketplace plugin, updating the repository checkout is sufficient.
-
-This updates the plugin itself. If Tagteam later reports that a repository’s project settings are stale, run `/tagteam:init --upgrade` in that repository to add only the configuration introduced by newer plugin versions.
-
-## Configure
-
-Open Claude Code in the repository you want to ship:
+## Use
 
 ```text
 /tagteam:init
-```
-
-The interview checks Git, GitHub CLI, Codex schema output, branch protection, local verification, worktree setup, ignored-file copying, review exclusions, models, and reviewer selection. You can enable built-in review dimensions or add custom reviewers with a project-specific focus and optional file/keyword conditions. It writes `.tagteam/config.json`.
-
-Normal source changes do not require another init: every plan and ship inspects the current repository and candidate. Run `/tagteam:init --reconfigure` when build/test commands, worktree setup, copied files, review policy, models, concurrency, or branch strategy changes. Run `/tagteam:init --upgrade` when the settings themselves predate the plugin: it asks only the questions a newer version added and keeps every existing choice. Tagteam validates configuration but does not rewrite stale project-specific commands automatically.
-
-## Run
-
-```text
 /tagteam:plan Add account recovery with auditable security events
 /tagteam:ship .tagteam/plans/add-account-recovery
 /tagteam:status
 ```
 
-Planning batches unresolved decisions and requires explicit approval. Shipping works in a dedicated Git worktree, commits every reviewed candidate, runs Claude and Codex review, verifies locally, publishes a PR, and pauses for user-visible changes or other defined gates.
+Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**. The interview
+loads repository material that shipping does not need, and context is the thing
+that runs out.
 
-If one substantive provider is temporarily unavailable, planning and shipping can keep Claude Code on lightweight Haiku orchestration while routing substantive work to the available provider:
+### Planning
 
-```text
-/tagteam:plan Add account recovery with auditable security events --provider codex
-/tagteam:ship .tagteam/plans/add-account-recovery --provider codex
-```
+1. **Interview.** Questions in batches, informed by reading the repository first.
+   Multiple choice where there are real options. Product and interface decisions
+   are always yours; when you have no preference, tagteam decides and records the
+   reasoning and what it rejected.
+2. **Goal gate.** The interview writes `goal.md`. You read it, edit it if it is
+   wrong, and everything downstream binds to the file rather than to the
+   conversation.
+3. **Draft and review.** One drafter writes a plan. A Claude reviewer, a Codex
+   reviewer, and an adversary read it in parallel, once. One revision folds their
+   findings in. There is no convergence loop — if the result is wrong you say so.
+4. **Specs.** One file per deliverable, written in parallel, each self-contained
+   for the implementer that will receive it.
+5. **Approve.** Sizes reported once, reviewer selection shown as a default set
+   plus named exceptions, and one question.
 
-`--provider both` remains the default and provides independent cross-provider review. `--provider claude` and `--provider codex` use single-provider assurance, persist that choice for resume, and never silently switch providers mid-run.
+### Shipping
 
-### Command reference
+Per spec, in dependency order: branch, implement, verify, review, fix once,
+re-check, publish, merge.
 
-| Command | Options |
-|---|---|
-| `/tagteam:init` | `--reconfigure` revisits an existing project configuration and repairs the managed `.gitignore` block. `--upgrade` asks only the questions a newer plugin added, keeping every existing choice. |
-| `/tagteam:plan <goal>` | `--resume <slug>` continues an interrupted plan from its saved drafts and reviews. Per-run overrides: `--provider both\|claude\|codex`, `--model opus\|fable`, `--effort medium\|high\|xhigh\|max`, and `--codex-effort medium\|high\|xhigh`. |
-| `/tagteam:ship [plan-dir\|plan-file]` | `--resume`, `--dry-run`, `--provider both\|claude\|codex`, and `--reviewers all\|dimension,dimension`; named built-in or custom reviewers are force-enabled for that run. |
-| `/tagteam:status` | Lists plans, active/completed ships, and pending approvals. |
+The review panel is the spec's lenses plus a Codex cross-review. After the single
+fix round, each reviewer that raised a finding re-checks its own findings against
+the new code, and an adversary reads the fixed diff fresh. Anything still open
+stops the pull request.
 
-Init configures GitHub PR or local-branch mode, planning/review/implementation runtimes, review loops and dimensions, verification and worktree commands, copied ignored paths, diff exclusions, PR policy, agent/Codex concurrency limits, and how much say you want over user-facing design decisions. Optional user defaults live at `~/.tagteam/config.json`; project settings override them.
+A pull request merges unattended unless: the spec is marked user-visible,
+verification failed or CI proved nothing, a finding is still open, **a reviewer
+produced no usable evidence**, or `.github/workflows/` changed.
 
-Configuration carries a version. Settings written by an older plugin stay valid rather than breaking: shipping continues, planning asks you to run `/tagteam:init --upgrade`, which asks only the new questions.
+That fourth one matters more than it sounds: an absent or malformed findings file
+yields an empty finding set, and an empty finding set otherwise reads as a clean
+review.
 
-### Internal workflows
+## How it is built
 
-Claude Code lists Tagteam’s workflows as plugin components, but they are implementation details invoked by the commands above:
+The orchestrator is the main Claude Code agent following the command files. It
+runs git, Codex, and this plugin's scripts directly, and dispatches subagents only
+for model work. Subagents write their own outputs; the orchestrator reads them.
+Nothing large is ever moved between steps by passing it through a model.
 
-- `runtime-probe` is called by `/tagteam:init` to test local Workflow capabilities, including budget reporting and whether Haiku accepts the configured effort transport.
-- `plan-forge` powers `/tagteam:plan`: it drafts, cross-reviews, revises, and decomposes a plan into implementation tasks and a PR train.
-- `ship-pr` powers `/tagteam:ship` for one PR: it implements tasks, commits candidate snapshots, reviews and repairs them, and runs local verification.
+Decisions that are silent when wrong are code, not prose: which commit gets
+merged, whether the gates are satisfied, and how CI checks classify. Everything
+else is the command file.
 
-Normally, invoke the `/tagteam:*` commands rather than these workflows directly; the commands supply required paths, configuration, persistence, and safety gates.
+State is files on disk. There are no fingerprints, reuse ledgers, or invocation
+records — a re-run looks at what exists and continues from the first thing that
+does not.
 
-## Safety model
+## Safety
 
-- Reviewers have no write or shell tools.
-- Codex review uses `read-only`; implementation and fixes use `workspace-write`.
-- Codex runs through `codex exec --output-schema`; MCP is intentionally unsupported because its tool contract cannot enforce response schemas.
-- Every gate is bound to an exact candidate commit. A fix, rebase, or CI repair invalidates all prior gates.
-- CI blocks only when it actually runs and fails. Skipped, absent, cancelled, and timed-out checks are recorded as not run.
-- Autonomous merge requires a protected base branch and an exact-head, first-parent verification.
-- User-visible changes always wait for approval.
+- Reviewers have no write or shell tools. Codex runs `read-only` and only ever
+  reviews.
+- Codex runs through `codex exec --output-schema`. MCP is unsupported because its
+  tool contract cannot enforce a response schema.
+- Every gate binds to one commit; a new commit clears all of them, and the fix
+  round always makes one.
+- Merges use `--match-head-commit`, and refuse outright if the base branch moved
+  since the review — the reviewed diff would be going into something else. Any
+  merge failure stops and reports rather than rebasing.
+- A commit is only made through `git add -A && guard-staged && git commit`, which
+  refuses to commit a copied ignored file.
+- User-visible changes always wait.
 
 ## Reference
 
-See [skills/tagteam/SKILL.md](skills/tagteam/SKILL.md) for configuration, reviewer dimensions, artifacts, recovery, and the exact Git protocol. A complete editable config is in [examples/config.json](examples/config.json).
+[skills/tagteam/SKILL.md](skills/tagteam/SKILL.md) — configuration, artifact
+layout, the Git protocol, the Codex bridge, and recovery.
+[examples/config.json](examples/config.json) — a complete configuration.
 
 ## Development
 
 ```bash
 npm test
-npm run check
 ```
 
-The implementation uses Node built-ins only.
+Node built-ins only, no dependencies.
 
 ## License
 

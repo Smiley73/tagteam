@@ -61,17 +61,12 @@ export async function setupWorktree({ primary, worktree, config }) {
     if (ignored.status !== 0) throw new Error(`refusing to copy ${relative}: Git would not ignore it in the worktree`);
     copyPreservingMode(path.join(primary, relative), path.join(worktree, relative));
   }
-  for (const command of config.worktree.setupCommands) {
+  for (const command of config.worktree.setup) {
     const remaining = config.worktree.setupTimeoutSec * 1000 - (Date.now() - started);
     if (remaining <= 0) throw new Error("worktree setup timed out before all commands ran");
     await runSetup(command, worktree, remaining);
   }
-  if (config.codegraph.enabled) {
-    const remaining = config.worktree.setupTimeoutSec * 1000 - (Date.now() - started);
-    if (remaining <= 0) throw new Error("worktree setup timed out before CodeGraph initialization");
-    await runSetup("codegraph init", worktree, remaining);
-  }
-  return { copied: config.worktree.copyUntracked, commands: config.worktree.setupCommands.length, codegraph: config.codegraph.enabled };
+  return { copied: config.worktree.copyUntracked, commands: config.worktree.setup.length };
 }
 
 async function main() {

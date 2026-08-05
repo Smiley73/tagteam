@@ -1,23 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "What the fixer did with each finding it was given",
+  "description": "Bookkeeping, not proof. Every outcome here is re-checked by the reviewer that raised the finding.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "results"],
+  "required": ["outcomes", "notes"],
   "properties": {
-    "summary": { "type": "string", "minLength": 1 },
-    "results": {
+    "outcomes": {
       "type": "array",
+      "description": "Exactly one entry per finding supplied. A missing entry ends the pull request.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "status", "explanation", "files"],
+        "required": ["id", "outcome", "note"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
-          "status": { "type": "string", "enum": ["fixed", "wont-fix", "failed"] },
-          "explanation": { "type": "string", "minLength": 1 },
-          "files": { "type": "array", "items": { "type": "string" } }
+          "outcome": {
+            "type": "string",
+            "enum": ["fixed", "wont-fix", "failed"],
+            "description": "wont-fix means the finding is wrong or the repair is a decision for a person; failed means the repair was attempted and did not work."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What changed, or why nothing did."
+          }
         }
       }
+    },
+    "notes": {
+      "type": "string",
+      "description": "Anything the reviewer re-checking this work needs and cannot read from the diff."
     }
   }
 }
