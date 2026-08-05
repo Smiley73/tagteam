@@ -194,3 +194,59 @@ test("a deliverables table that cannot be dispatched from is refused", async () 
     /does not list/
   );
 });
+
+// --- from the first real /tagteam:plan run ---
+
+test("the goal gate proves what was approved, not merely that approval happened", async () => {
+  // The orchestrator amended goal.md after the owner approved it, to close a
+  // hole the review round had found. The marker went on asserting an approval of
+  // bytes that no longer existed, so the one artifact meant to prove the goal was
+  // settled proved nothing.
+  const { approve, verify } = await import("../scripts/goal-gate.mjs");
+  const plan = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-goal-"));
+  const goal = path.join(plan, "goal.md");
+  fs.writeFileSync(goal, "# Goal: original\n\n## What done looks like\nSomething.\n");
+
+  assert.equal(verify(plan).ok, false, "an unapproved goal does not verify");
+  assert.match(verify(plan).reason, /not been approved/);
+
+  approve(plan, { at: "2026-08-05T13:17:02Z" });
+  assert.equal(verify(plan).ok, true);
+
+  fs.appendFileSync(goal, "\nD10. A decision the reviewer's finding implied.\n");
+  const drifted = verify(plan);
+  assert.equal(drifted.ok, false, "an amended goal must not still verify");
+  assert.equal(drifted.changed, true);
+  assert.notEqual(drifted.approvedSha256, drifted.currentSha256);
+
+  // Re-approving is allowed and is the whole point: the goal may change when a
+  // reviewer finds a real hole, so long as the owner sees the change.
+  approve(plan, { at: "2026-08-05T13:40:00Z" });
+  assert.equal(verify(plan).ok, true);
+});
+
+test("a marker with no hash does not count as approval", async () => {
+  const { verify } = await import("../scripts/goal-gate.mjs");
+  const plan = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-goal-"));
+  fs.writeFileSync(path.join(plan, "goal.md"), "# Goal\n");
+  fs.mkdirSync(path.join(plan, "work"));
+  fs.writeFileSync(path.join(plan, "work", "goal-approved"), JSON.stringify({ approvedAt: "2026-08-05T13:17:02Z" }));
+  const result = verify(plan);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /records no goal hash/);
+});
+
+test("no source file carries a NUL byte", () => {
+  // scripts/codex.mjs used a raw NUL as a hash delimiter. ripgrep and GNU grep
+  // classify such a file as binary and return *no matches with no error*, so a
+  // search for a symbol in it comes back empty and looks like an answer. It
+  // fooled two subagents before anyone noticed.
+  const offenders = [];
+  for (const dir of ["scripts", "scripts/lib", "test"]) {
+    for (const name of fs.readdirSync(path.join(root, dir)).filter((entry) => entry.endsWith(".mjs"))) {
+      const file = path.join(dir, name);
+      if (fs.readFileSync(path.join(root, file)).indexOf(0) >= 0) offenders.push(file);
+    }
+  }
+  assert.deepEqual(offenders, [], `${offenders.join(", ")} would be invisible to grep and ripgrep`);
+});

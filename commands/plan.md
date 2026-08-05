@@ -84,10 +84,28 @@ D1. <what was decided> — <why, in one line>. Rejected: <what, and why not>.
 Show them the path and the *Decisions settled* list. Say they can edit the file
 directly and that everything downstream reads it from disk. Wait for them.
 
-When they say it is right, write `$D/work/goal-approved` with the timestamp. That
-file — not the existence of `goal.md` — is what a resume checks.
+When they say it is right:
+
+```bash
+node "$P/scripts/goal-gate.mjs" approve "$D" "<iso-timestamp>"
+```
+
+That records the goal's hash. Every later step verifies against it, so the marker
+proves *what* was approved rather than merely that approval happened.
+
+**You may not edit `goal.md` after this point.** Not to tidy it, not to record
+something you learned, not to close a hole a reviewer found. It is the one
+document in this cycle that is not yours.
 
 ## 4 — Draft
+
+```bash
+node "$P/scripts/goal-gate.mjs" verify "$D"
+```
+
+Run this before **every** step from here on — draft, revise, expand, approve. It
+is one command and it is the only thing standing between "the plan was built from
+what you approved" and a claim nobody checked.
 
 Dispatch `tagteam:plan-drafter` at `models.plan` / `effort.plan`. Give it `$D/goal.md`,
 the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
@@ -109,6 +127,31 @@ Then read the three files — they are small — and pass every `blocking` and
 **That is the whole review.** No second round, no convergence check, no lint. If
 the revision is wrong, the person will say so at approval. Only offer another
 round if they ask for one.
+
+### When a finding is against the goal, not the plan
+
+This happens, and it is the most valuable thing the review round produces: a
+reviewer establishes that the *outcome* is underspecified, or that a decision the
+owner settled cannot hold. A revision cannot fix that, because the goal is not
+yours to revise.
+
+**Ask.** One `AskUserQuestion` naming what the reviewer found, what it means for
+the goal, and the options. Do not decide it yourself and do not record your
+decision in `goal.md` — a hole a reviewer found is exactly the kind of thing the
+owner would have answered differently, which is why it reached them as a question
+in the first place rather than as a fact.
+
+If their answer changes the goal, they edit `goal.md` or tell you what to write.
+Then show them the changed file and run `goal-gate.mjs approve` again. The gate
+re-opens and re-closes, the marker records the new hash, and the plan is revised
+against a goal they read.
+
+If their answer does not change the goal — the reviewer was wrong, or the point
+belongs in a spec — say so in the revision brief and leave `goal.md` alone.
+
+The gate is not a freeze. It is a rule that the goal cannot change without the
+owner seeing the change, which is why `verify` compares bytes rather than
+trusting that nobody touched it.
 
 ## 6 — Specs
 
@@ -137,15 +180,21 @@ and does not.
 
 ## 7 — Approve
 
-Run `node "$P/scripts/size-report.mjs" "$D"` and show its output verbatim. It
-runs once. Never compress anything in response to it, and never run it again to
-see whether the numbers improved — a deliverable at twice its target is a
-splitting decision and that decision is theirs.
-
-Show: the deliverables with their sizes, the lenses `specs.mjs` resolved for each
-one, the note that Codex and the adversary run on every spec regardless, and the
-count of anything left unanswered. Say that the lens selection lives in each
+Show: the deliverables in dependency order, the lenses `specs.mjs` resolved for
+each one, the note that Codex and the adversary run on every spec regardless, and
+the count of anything left unanswered. Say that the lens selection lives in each
 spec's front matter and is editable there, the way `goal.md` was.
+
+**Say nothing about how large anything is.** There is no size check, and there is
+not meant to be one. Plan size is shaped where it is written — the drafting brief
+and the spec brief each state a target, and the plan reviewer may report a plan
+for saying too much. By the time a person is deciding whether to approve, a byte
+count is either noise or a nudge toward compressing something that was fine, and
+the compression ratchet is what this design exists to remove.
+
+Run `node "$P/scripts/goal-gate.mjs" verify "$D"` one last time before asking. A
+failure here means the goal drifted somewhere in steps 4–6 without the owner
+seeing it, and that has to be resolved before anything is committed.
 
 Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.json`
 (`{"approvedAt", "slug", "specs": [...], "goalSha256", "planSha256"}`), commit

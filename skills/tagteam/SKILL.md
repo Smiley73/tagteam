@@ -162,8 +162,8 @@ a new commit appears — and the fix round always makes one.
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
 | `specs.mjs` | Validate spec front matter, resolve lenses, return dependency order |
+| `goal-gate.mjs` | Record and verify the hash of the goal a person approved |
 | `deliverables.mjs` | Extract the plan's deliverables table as data, without reading the plan |
-| `size-report.mjs` | Report plan and spec sizes once, before approval |
 | `validate-json.mjs` | Schema validation and config checks |
 | `ship-lock.mjs` | The repository-wide ship lock |
 | `ensure-gitignore.mjs` | Maintain the managed `.gitignore` block |
