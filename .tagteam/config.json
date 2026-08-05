@@ -1,18 +1,16 @@
 {
-  "version": 5,
+  "version": 6,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": null,
   "models": {
-    "plan": "opus",
-    "implement": "sonnet",
-    "review": "opus",
+    "lead": "opus",
+    "worker": "opus",
     "codex": "gpt-5.6-sol"
   },
   "effort": {
-    "plan": "high",
-    "implement": "high",
-    "review": "high",
+    "lead": "high",
+    "worker": "medium",
     "codex": "high"
   },
   "reviewers": {
@@ -37,7 +35,7 @@
       "timeoutSec": 600
     }
   ],
-  "ciWaitSec": 1800,
+  "ciWaitSec": 0,
   "autoMerge": true,
   "worktree": {
     "setup": [],

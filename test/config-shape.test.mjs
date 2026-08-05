@@ -321,6 +321,29 @@ test("a marker with no hash does not count as approval", async () => {
   assert.match(result.reason, /records no goal hash/);
 });
 
+test("this repository's own configuration is valid against the current schema", async () => {
+  // The schema went to version 6 and `.tagteam/config.json` stayed at 5. Every
+  // test passed, because the only config any of them read was the example — and
+  // the next `/tagteam:ship` exited 3 at preflight on the repository that had
+  // just shipped the change. tagteam configures itself with tagteam, so its own
+  // file is a consumer like any other, and a schema bump has to carry it.
+  const { validateJson, semanticErrors } = await import("../scripts/validate-json.mjs");
+  const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
+  assert.deepEqual(validateJson(schema, own), [], "run /tagteam:init, or update .tagteam/config.json by hand");
+  assert.deepEqual(semanticErrors("config.schema.json", own, {}), []);
+  assert.equal(own.version, schema.properties.version.const);
+});
+
+test("a repository with no workflows waits zero seconds for CI", () => {
+  // `ciWaitSec` non-zero with no `.github/workflows` makes every pull request
+  // stop for a person on `continuous-integration-inconclusive` — a gate firing on
+  // the absence of a system the repository never had. This one has no workflows.
+  const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
+  const hasWorkflows = fs.existsSync(path.join(root, ".github", "workflows"))
+    && fs.readdirSync(path.join(root, ".github", "workflows")).some((entry) => /\.ya?ml$/.test(entry));
+  if (!hasWorkflows) assert.equal(own.ciWaitSec, 0, "no workflows here, so there is nothing to wait for");
+});
+
 test("no source file carries a NUL byte", () => {
   // scripts/codex.mjs used a raw NUL as a hash delimiter. ripgrep and GNU grep
   // classify such a file as binary and return *no matches with no error*, so a
