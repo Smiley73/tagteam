@@ -258,3 +258,53 @@ test("an adversary file written by some other lens does not count as the adversa
   assert.equal(result.status, "incomplete");
   assert.match(result.missing[0].reason, /not by the adversary/);
 });
+
+// --- from the first real /tagteam:ship run ---
+
+test("the open findings are written per lens, with their ids", async () => {
+  // Four reviewers returned "resolved: true" and every verdict failed to bind,
+  // because the ids are assigned by collect-findings and appear nowhere the
+  // reviewer was told to read. It returned titles, and a review of fixes that
+  // were genuinely made came back unverifiable.
+  const { spawnSync } = await import("node:child_process");
+  const target = dir({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" }), finding({ severity: "nit", title: "b" })]),
+    "codex.json": lensFile("codex", [finding({ severity: "major", title: "c" })])
+  });
+  const out = path.join(target, "..", `review-${path.basename(target)}.json`);
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", target, "--candidate", OID, "--expect", "correctness,codex", "--out", out
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 1, "open findings exit non-zero");
+
+  const openDir = path.join(target, "..", "open");
+  for (const lens of ["correctness", "codex"]) {
+    const file = path.join(openDir, `${lens}.json`);
+    assert.ok(fs.existsSync(file), `${lens} should have an open-findings file`);
+    const payload = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(payload.lens, lens);
+    assert.equal(payload.candidate, OID);
+    // Only the gating ones, and every one carries the id the recheck will match.
+    assert.ok(payload.findings.length > 0);
+    for (const entry of payload.findings) {
+      assert.match(entry.id, new RegExp(`^${lens}\\.\\d+$`));
+      assert.ok(["blocking", "major"].includes(entry.severity), "a nit must not reach the re-check");
+    }
+  }
+  // And the path is named in stdout, so the orchestrator does not have to guess.
+  assert.match(result.stdout, /re-check correctness against .*open\/correctness\.json/);
+});
+
+test("a verdict keyed by title instead of id does not clear a finding", () => {
+  // The observed failure, pinned: the reviewer echoed the title. Nothing binds,
+  // and the finding stays open rather than being cleared by a near-match.
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "loses the first write", resolved: true, evidence: "fixed it" }
+    ])
+  });
+  const result = settle({ review, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, ...adversary([]) });
+  assert.equal(result.status, "open");
+  assert.equal(result.open.length, 2, "neither finding may be cleared by a title-keyed verdict");
+});

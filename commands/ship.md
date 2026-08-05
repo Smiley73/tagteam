@@ -164,11 +164,21 @@ In one message:
 - `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/code-adversary.md`,
   given the spec and `$S/<id>/rounds/<n>/review.diff`, writing
   `$S/<id>/rounds/<n>/findings/adversary.json` with `candidate` set to `$OID`.
-- Each lens that raised a finding in step 5, re-dispatched at `models.lead` / `effort.lead` with
-  `prompts/recheck.md`, its own findings, the new diff, and
-  `$S/<id>/rounds/<n>/recheck/<lens>.json` to write. Codex uses
-  `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`. Skip this
-  bullet entirely when step 5 was clean — there is nothing to re-check.
+- Each lens named by `collect-findings.mjs` as having open findings, and **only**
+  those. It writes `$S/<id>/rounds/<n>/open/<lens>.json` per lens — the findings
+  that lens must judge, **with their ids** — and names each file in its output.
+  Hand the reviewer *that path*, plus the new diff, plus
+  `$S/<id>/rounds/<n>/recheck/<lens>.json` to write, under `prompts/recheck.md`,
+  at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
+  schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
+  other Codex call. Skip this bullet entirely when step 5 was clean — there is
+  nothing to re-check.
+
+  **Hand it the open file, never the raw findings file.** The ids are assigned by
+  `collect-findings.mjs` and appear only in what it writes; a reviewer pointed at
+  its own round-1 output has no way to know them, returns titles instead, and
+  every verdict fails to bind. That reads as "no verdict was returned" and holds
+  the pull request on findings that were actually fixed.
 
 ```bash
 node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" \
