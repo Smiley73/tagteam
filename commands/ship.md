@@ -305,6 +305,26 @@ node "$P/scripts/gates.mjs" evaluate "$S/<id>/state.json" "$R/.tagteam/config.js
 `gates.mjs state ... merged`, delete the branch, and say one line about what
 merged.
 
+**Merge it. Do not ask first.** Merging a pull request is normally the kind of
+outward-facing, hard-to-reverse act you would confirm — so this says plainly that
+the confirmation already happened: the owner set `autoMerge: true` in their own
+configuration and invoked this command, and `ready` from `gates.mjs evaluate` is
+the condition they attached to it. That is the authorization, given in advance,
+for this pull request and every other one this train reaches. `merge.mjs`
+re-evaluates every gate immediately before `gh` runs, so the verdict cannot go
+stale between deciding and doing.
+
+Stopping to ask anyway is not the safe choice, it is a broken train: the owner
+walks away from an unattended run and comes back to a queue of pull requests each
+waiting for a keystroke, which is the entire failure this command exists to
+remove. If a person should decide, `evaluate` says so — that is what the gates
+are, and there are five of them. A `ready` verdict is the tool telling you no
+person is needed.
+
+This authorizes exactly one thing: `merge.mjs`, on a `ready` verdict, for a spec
+of this plan. It is not licence to merge anything else, to merge by hand when
+`merge.mjs` refuses, or to loosen a gate that fired.
+
 Not ready: `gates.mjs state ... awaiting-approval`,
 `node "$P/scripts/notify.mjs" "<slug> <id> needs you" "<the reasons>"`, then show
 the reasons, the PR link, and the open findings, and ask Approve and merge /
