@@ -184,9 +184,20 @@ test("the quota probe shows the hashed basename codex.mjs writes, and the patter
   const dir = repo();
   ensureGitignore(dir);
   const key = createHash("sha256").update(`some-other-model\u0000low`).digest("hex").slice(0, 32);
-  const quotaFile = `.tagteam/plans/slug/.quota/${key}.json`;
-  const result = spawnSync("git", ["-C", dir, "check-ignore", "--no-index", "--", quotaFile], { encoding: "utf8" });
-  assert.equal(result.stdout.trim(), quotaFile, "a real quota filename must be ignored");
+  // A real quota filename, plus two basenames no derivation produces: the
+  // pattern matches the directory, so what sits beneath it must not matter.
+  // Narrowing it to `.quota/*.json`, or to a hex glob, fails the last two.
+  const quotaPaths = [
+    `.tagteam/plans/slug/.quota/${key}.json`,
+    ".tagteam/plans/slug/.quota/leftover",
+    ".tagteam/plans/slug/.quota/notes.txt"
+  ];
+  const result = spawnSync("git", ["-C", dir, "check-ignore", "--no-index", "--", ...quotaPaths], { encoding: "utf8" });
+  assert.deepEqual(
+    result.stdout.trim().split("\n"),
+    quotaPaths,
+    "everything under a .quota directory must be ignored, whatever its basename"
+  );
 });
 
 test("rendering keeps every user line, ends with exactly one newline, and needs no file to exist", () => {
