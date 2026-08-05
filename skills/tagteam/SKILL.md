@@ -128,6 +128,23 @@ merge without `--match-head-commit`, delete a branch inside a merge command,
 `node $P/scripts/gates.mjs evaluate <state.json> <config.json>` decides whether a
 pull request merges unattended. It is code because it is silent when it is wrong.
 
+**A `ready` verdict is the owner's authorization to merge, and you act on it
+without asking.** Merging is outward-facing and hard to reverse, so the instinct
+to confirm is right in general and wrong here: the owner already confirmed, by
+setting `autoMerge` and running the command, and `ready` is the condition they
+attached. Asking again turns an unattended run into a queue of pull requests
+waiting on a keystroke. When a person really should decide, `evaluate` returns
+`needsHuman` and names why — that is what the gates below are for.
+
+**It authorizes `merge.mjs`, and nothing else.** Not `gh pr merge` run directly,
+not another pull request, not a retry around a refusal, not relaxing a gate that
+fired. The distinction is not bookkeeping: `merge.mjs` re-fetches, compares
+`origin/<base>` against the base OID the review was bound to, and re-reads the
+live pull request's target and head before it merges. A hand-rolled `gh pr merge`
+with the right `--match-head-commit` still skips all three, and merges a result
+nobody reviewed whenever the base moved or the pull request was retargeted
+underneath it.
+
 A pull request stops and waits when: the spec is marked user-visible; verification
 failed, or CI failed or proved nothing; a finding is still open after the
 re-check; **a selected reviewer produced no usable evidence**; or

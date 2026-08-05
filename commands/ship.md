@@ -68,7 +68,24 @@ node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base
 If that reports `"existing": true` with a state other than `pending`, this spec
 was already started. **Do not create the branch and do not transition to
 `implementing`** — `switch -c` fails on a branch that exists, and every state
-after `pending` refuses that transition anyway. Instead:
+after `pending` refuses that transition anyway.
+
+**First, if it records a pull request, ask whether that pull request already
+merged**, whatever the state says:
+
+```bash
+node "$P/scripts/gates.mjs" adopt-merge "$S/<id>/state.json" --repo "$R"
+```
+
+It succeeds only if GitHub says the pull request merged *and* the commit that
+merged is the candidate this spec's gates are bound to; on anything else it
+refuses and the state is untouched, so running it costs nothing. Succeeded: this
+spec is done, skip it. A person merging a pull request themselves is ordinary,
+and nothing else can record it — `reviewing -> merged` is not a transition and
+must not become one. Without this the state file goes on saying `reviewing`
+forever and the next line re-snapshots a branch that is already in the base.
+
+Otherwise, by state:
 
 - `implementing`, `reviewing`, `fixing`, `verifying` — the work was interrupted
   mid-flight and its worktree is gone. `git -C "$W" switch "<branch>"`, then
@@ -287,6 +304,26 @@ node "$P/scripts/gates.mjs" evaluate "$S/<id>/state.json" "$R/.tagteam/config.js
 `ready`: `node "$P/scripts/merge.mjs" "$S/<id>/state.json" --repo "$R" --config "$R/.tagteam/config.json"`, then
 `gates.mjs state ... merged`, delete the branch, and say one line about what
 merged.
+
+**Merge it. Do not ask first.** Merging a pull request is normally the kind of
+outward-facing, hard-to-reverse act you would confirm — so this says plainly that
+the confirmation already happened: the owner set `autoMerge: true` in their own
+configuration and invoked this command, and `ready` from `gates.mjs evaluate` is
+the condition they attached to it. That is the authorization, given in advance,
+for this pull request and every other one this train reaches. `merge.mjs`
+re-evaluates every gate immediately before `gh` runs, so the verdict cannot go
+stale between deciding and doing.
+
+Stopping to ask anyway is not the safe choice, it is a broken train: the owner
+walks away from an unattended run and comes back to a queue of pull requests each
+waiting for a keystroke, which is the entire failure this command exists to
+remove. If a person should decide, `evaluate` says so — that is what the gates
+are, and there are five of them. A `ready` verdict is the tool telling you no
+person is needed.
+
+This authorizes exactly one thing: `merge.mjs`, on a `ready` verdict, for a spec
+of this plan. It is not licence to merge anything else, to merge by hand when
+`merge.mjs` refuses, or to loosen a gate that fired.
 
 Not ready: `gates.mjs state ... awaiting-approval`,
 `node "$P/scripts/notify.mjs" "<slug> <id> needs you" "<the reasons>"`, then show
