@@ -141,18 +141,32 @@ Its stdout is your view of the review — a line per finding. Do not open the
 findings files. `incomplete` means a lens produced no usable evidence; that is
 not clean, and it never merges.
 
-### 6. Fix, once — only if something is open or missing
+### 6. Fix, once — only if something is open
 
-`gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` / `effort.worker`,
-given `$S/<id>/review.json`, the worktree, and `$S/<id>/fix-report.json` to
-write. Then commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set
-`OID` to the new commit, and `gates.mjs bind` it — which clears every gate,
-because they were about the old one. Re-run verify against the new commit.
+`gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` /
+`effort.worker`, given `$S/<id>/rounds/<n>/to-fix.json`, the worktree, and
+`$S/<id>/fix-report.json` to write. Then commit and re-snapshot exactly as in
+step 3 with a fresh `<n>`, set `OID` to the new commit, and `gates.mjs bind` it —
+which clears every gate, because they were about the old one. Re-run verify
+against the new commit.
+
+**Hand it `to-fix.json`, never `review.json`.** `review.json` holds every finding
+at every severity, and a fixer given all of them repairs all of them — a round
+with two blocking findings and five nits comes back with seven changes, five of
+which nothing gated on and every reviewer is about to re-read. `to-fix.json` holds
+the blocking and major findings and nothing else. Minor and nit are reported in
+the pull request body, not repaired.
 
 A missing entry in the fix report ends this spec. Say which findings it failed to
 account for.
 
-Nothing open and nothing missing: skip straight to step 7 with the same `OID`.
+Nothing open: skip straight to step 7 with the same `OID`.
+
+**A missing lens is not something a fixer can repair.** `incomplete` with nothing
+open means a reviewer produced no usable evidence, so re-dispatch exactly those
+lenses against the same candidate — no new commit, nothing to re-bind — and re-run
+`collect-findings.mjs`. Once. Still missing after that, carry it to step 9 and let
+a person decide; `review-incomplete` blocks the merge either way.
 
 ### 7. Adversary and re-check
 

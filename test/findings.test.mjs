@@ -38,6 +38,20 @@ function dir(files) {
   return target;
 }
 
+// The real layout. `collect-findings.mjs` writes `open/` and `to-fix.json` as
+// siblings of the findings directory, so a test that runs it needs a round to
+// own them — otherwise every such test writes the same two paths into the shared
+// temp root and reads whichever ran last.
+function round(files) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-round-"));
+  const findings = path.join(base, "findings");
+  fs.mkdirSync(findings);
+  for (const [name, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(findings, name), typeof body === "string" ? body : JSON.stringify(body));
+  }
+  return { base, findings, out: path.join(base, "review.json") };
+}
+
 const lensFile = (lens, findings, candidate = OID) => ({ lens, candidate, summary: "looked", findings });
 
 test("a clean review is every expected lens present with nothing gating", () => {
@@ -267,18 +281,17 @@ test("the open findings are written per lens, with their ids", async () => {
   // reviewer was told to read. It returned titles, and a review of fixes that
   // were genuinely made came back unverifiable.
   const { spawnSync } = await import("node:child_process");
-  const target = dir({
+  const { base, findings, out } = round({
     "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" }), finding({ severity: "nit", title: "b" })]),
     "codex.json": lensFile("codex", [finding({ severity: "major", title: "c" })])
   });
-  const out = path.join(target, "..", `review-${path.basename(target)}.json`);
   const result = spawnSync("node", [
     path.join(root, "scripts", "collect-findings.mjs"),
-    "--dir", target, "--candidate", OID, "--expect", "correctness,codex", "--out", out
+    "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--out", out
   ], { encoding: "utf8" });
   assert.equal(result.status, 1, "open findings exit non-zero");
 
-  const openDir = path.join(target, "..", "open");
+  const openDir = path.join(base, "open");
   for (const lens of ["correctness", "codex"]) {
     const file = path.join(openDir, `${lens}.json`);
     assert.ok(fs.existsSync(file), `${lens} should have an open-findings file`);
@@ -294,6 +307,55 @@ test("the open findings are written per lens, with their ids", async () => {
   }
   // And the path is named in stdout, so the orchestrator does not have to guess.
   assert.match(result.stdout, /re-check correctness against .*open\/correctness\.json/);
+});
+
+test("the fixer's brief holds the gating findings only, across every lens", async () => {
+  // The fixer used to be handed the collector's own output, which carries every
+  // severity. On the first real run a round with two open findings came back with
+  // seven repairs — five of them changes nothing gated on, made to a diff the
+  // reviewers were about to re-read. Severity has to decide what gets touched.
+  const { spawnSync } = await import("node:child_process");
+  const { base, findings, out } = round({
+    "correctness.json": lensFile("correctness", [
+      finding({ severity: "blocking", title: "a" }),
+      finding({ severity: "minor", title: "b" }),
+      finding({ severity: "nit", title: "c" })
+    ]),
+    "codex.json": lensFile("codex", [finding({ severity: "major", title: "d", fix: "guard the read" })])
+  });
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--out", out
+  ], { encoding: "utf8" });
+
+  const toFix = JSON.parse(fs.readFileSync(path.join(base, "to-fix.json"), "utf8"));
+  assert.equal(toFix.candidate, OID);
+  assert.deepEqual(toFix.findings.map((entry) => entry.id), ["correctness.1", "codex.1"]);
+  for (const entry of toFix.findings) {
+    assert.ok(["blocking", "major"].includes(entry.severity), "a minor or nit must never reach the fixer");
+    assert.ok(entry.lens, "the fixer sees one file, so each finding has to say which lens raised it");
+  }
+  // `fix` rides along: it is the reviewer's own suggestion and the fixer is the
+  // only reader that can act on it.
+  assert.equal(toFix.findings[1].fix, "guard the read");
+  assert.match(result.stdout, /fix .*to-fix\.json \(2 finding\(s\)\)/);
+});
+
+test("a clean round still writes the fixer's brief, empty", async () => {
+  // Absent would send the orchestrator back to review.json, which holds more than
+  // the fixer may touch. An empty list is the correct brief for nothing open.
+  const { spawnSync } = await import("node:child_process");
+  const { base, findings, out } = round({
+    "correctness.json": lensFile("correctness", [finding({ severity: "nit", title: "naming" })])
+  });
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness", "--out", out
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0);
+  const toFix = JSON.parse(fs.readFileSync(path.join(base, "to-fix.json"), "utf8"));
+  assert.deepEqual(toFix.findings, []);
+  assert.doesNotMatch(result.stdout, /to-fix/, "an empty brief is not worth a line");
 });
 
 test("a verdict keyed by title instead of id does not clear a finding", () => {

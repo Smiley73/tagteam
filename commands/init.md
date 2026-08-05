@@ -40,6 +40,11 @@ train.
   `AGENTS.md`, or `docs/` equivalents.
 - **reviewExclude** — lock files, snapshots, and generated directories present in
   the tree.
+- **ciWaitSec** — `0` unless `.github/workflows/` holds at least one workflow.
+  There is no CI to wait for in a repository that has none, and a non-zero value
+  there makes every single pull request stop for a person on
+  `continuous-integration-inconclusive` — a gate firing on the absence of a system
+  the repository never had. Only propose a wait when there are workflows.
 
 ## Then ask
 
@@ -53,7 +58,8 @@ Batch these; do not ask one at a time.
 3. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
    gets four readers. Show the full roster and let them adjust.
-4. `autoMerge`, and `ciWaitSec` if the repository has workflows.
+4. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
+   workflows, no question — it is 0.
 5. Any ignored file a build needs copied into a worktree
    (`worktree.copyUntracked`) — most repositories have none.
 

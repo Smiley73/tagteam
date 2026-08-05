@@ -110,22 +110,30 @@ function summaryLines(result) {
   return lines;
 }
 
-// One file per lens holding exactly the findings that lens must re-check, with
-// the ids already in them.
+// Two views of the same open set, each written for one reader.
 //
-// The re-check asks a reviewer for a verdict per finding id, and the ids are
-// assigned here rather than by the reviewer — deliberately, so a model cannot
-// invent them. But the reviewer's own findings file does not contain them, so
-// telling it to "read your own findings" asked it to return identifiers it had
-// never been given. It returned titles instead, every verdict failed to bind,
-// and a review where four reviewers said "resolved" came back unverifiable.
+// `open/<lens>.json` is one file per lens holding exactly the findings that lens
+// must re-check, with the ids already in them. The re-check asks a reviewer for a
+// verdict per finding id, and the ids are assigned here rather than by the
+// reviewer — deliberately, so a model cannot invent them. But the reviewer's own
+// findings file does not contain them, so telling it to "read your own findings"
+// asked it to return identifiers it had never been given. It returned titles
+// instead, every verdict failed to bind, and a review where four reviewers said
+// "resolved" came back unverifiable. The reviewer now copies ids out of its
+// input. Nothing is reconstructed, which is the only version of this that holds.
 //
-// The reviewer now copies ids out of its input. Nothing is reconstructed, which
-// is the only version of this that holds.
-function writeOpenPerLens(dir, result) {
-  const openDir = path.join(path.resolve(dir), "..", "open");
+// `to-fix.json` is the fixer's whole scope, across every lens. The fixer used to
+// be handed the collector's own output, which carries every finding at every
+// severity — so a round with two open findings and five nits got seven repairs,
+// and five of them were changes nothing gated on, made to a diff four reviewers
+// were about to re-read. Severity decides what merges; it has to decide what gets
+// touched, or it decides nothing. Minor and nit are recorded and reported, never
+// repaired unasked.
+function writeOpenFiles(dir, result) {
+  const roundDir = path.join(path.resolve(dir), "..");
+  const openDir = path.join(roundDir, "open");
   fs.mkdirSync(openDir, { recursive: true, mode: 0o700 });
-  const written = [];
+  const perLens = [];
   for (const lens of [...new Set(result.open.map((finding) => finding.lens))]) {
     const file = path.join(openDir, `${lens}.json`);
     const payload = {
@@ -136,9 +144,21 @@ function writeOpenPerLens(dir, result) {
         .map(({ id, severity, file: where, line, title, detail }) => ({ id, severity, file: where, line, title, detail }))
     };
     fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-    written.push({ lens, file, count: payload.findings.length });
+    perLens.push({ lens, file, count: payload.findings.length });
   }
-  return written;
+
+  // Written on every run, including a clean one. An absent file would send the
+  // orchestrator back to a source that has more in it than the fixer may touch,
+  // and an empty list is the correct brief for a round with nothing open.
+  const toFixPath = path.join(roundDir, "to-fix.json");
+  const toFix = {
+    candidate: result.candidate,
+    findings: result.open.map(({ id, lens, severity, file: where, line, title, detail, fix }) =>
+      ({ id, lens, severity, file: where, line, title, detail, fix }))
+  };
+  fs.writeFileSync(toFixPath, `${JSON.stringify(toFix, null, 2)}\n`, { mode: 0o600 });
+
+  return { perLens, toFix: { file: toFixPath, count: toFix.findings.length } };
 }
 
 async function main() {
@@ -150,8 +170,11 @@ async function main() {
     const out = path.resolve(options.out);
     fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
     fs.writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
-    const perLens = writeOpenPerLens(options.dir, result);
+    const { perLens, toFix } = writeOpenFiles(options.dir, result);
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
+    if (toFix.count > 0) {
+      process.stdout.write(`  fix ${toFix.file} (${toFix.count} finding(s)) — the fixer's whole scope\n`);
+    }
     for (const entry of perLens) {
       process.stdout.write(`  re-check ${entry.lens} against ${entry.file} (${entry.count} finding(s))\n`);
     }
