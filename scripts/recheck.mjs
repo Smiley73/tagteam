@@ -145,7 +145,17 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
   // recomputed from `findings`, because `findings` only ever held the gating
   // half of the first round — `raised` is `review.open`. Carrying the tally and
   // adding to it is the only version that counts each finding exactly once.
-  const counts = Object.fromEntries(SEVERITY_ORDER.map((severity) => [severity, review.counts?.[severity] ?? 0]));
+  //
+  // `reviewCounts` is what makes that survive a second run. Ship passes the same
+  // review.json as both --review and --out, so a run that succeeds and then dies
+  // before `gates.mjs record` is re-run against its own output — and adding the
+  // adversary to a tally that already includes it silently inflates the file
+  // every time. The first review's tally is therefore kept separately and never
+  // accumulated, so the base is the same on every run. Found by Codex review.
+  const reviewCounts = Object.fromEntries(
+    SEVERITY_ORDER.map((severity) => [severity, review.reviewCounts?.[severity] ?? review.counts?.[severity] ?? 0])
+  );
+  const counts = { ...reviewCounts };
   for (const finding of [...fresh, ...recorded]) {
     counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
   }
@@ -155,6 +165,7 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
     expected,
     present: expected.filter((lens) => !unusable.some((entry) => entry.lens === lens)).map((lens) => ({ lens, summary: "recheck" })),
     missing: unusable,
+    reviewCounts,
     counts,
     open,
     findings: [...settled, ...fresh, ...recorded]

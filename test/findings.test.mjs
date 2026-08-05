@@ -454,3 +454,39 @@ test("the recheck summary distinguishes recorded from open and from resolved", a
   assert.match(result.stdout, /1 adversary finding\(s\) recorded and not gating/);
   assert.doesNotMatch(result.stdout, /adversary\.1\s+OPEN/);
 });
+
+test("re-running the recheck in place does not inflate the tally", async () => {
+  // Ship passes the same review.json as both --review and --out, so a run that
+  // succeeds and then dies before `gates.mjs record` gets re-run against its own
+  // output. Adding the adversary to a tally that already included it grew the
+  // file on every attempt. Found by Codex review of this change.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-idem-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "minor", title: "worth knowing" })]
+  }));
+  const inPlace = path.join(base, "review.json");
+  fs.writeFileSync(inPlace, JSON.stringify({
+    status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
+  }));
+
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", inPlace, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", inPlace
+  ], { encoding: "utf8" });
+
+  run();
+  const first = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(first.counts.minor, 1);
+  run();
+  const second = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  assert.equal(second.counts.minor, 1, "a second run must not count the same adversary finding twice");
+  run();
+  assert.equal(JSON.parse(fs.readFileSync(inPlace, "utf8")).counts.minor, 1);
+  assert.deepEqual(second.reviewCounts, { blocking: 0, major: 0, minor: 0, nit: 0 });
+});
