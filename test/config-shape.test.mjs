@@ -136,3 +136,61 @@ test("a git ref name Git itself would reject does not validate", async () => {
     assert.ok(refErrors({ base: bad }).length > 0, `base ${JSON.stringify(bad)} should be refused`);
   }
 });
+
+// --- regressions from the third Codex round ---
+
+test("a version-4 configuration reports stale rather than invalid", async () => {
+  // Exit 3 is what tells a person to run /tagteam:init. Validating shape before
+  // version meant a real v4 file failed the v5 schema in a dozen places and
+  // exited 1, so the only files that need exit 3 could never receive it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v4-"));
+  const old = path.join(dir, "config.json");
+  fs.writeFileSync(old, JSON.stringify({ version: 4, prTrain: { base: "main" }, reviewTiers: {} }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "schemas", "config.schema.json"), old
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /run \/tagteam:init/);
+});
+
+test("the deliverables table comes out as data, without reading the plan", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-"));
+  const plan = path.join(dir, "plan.md");
+  fs.writeFileSync(plan, [
+    "# Account recovery", "",
+    "Prose the orchestrator never reads.", "",
+    "## Deliverables", "",
+    "| # | spec | delivers | depends on | user-visible |",
+    "|---|------|----------|------------|--------------|",
+    "| 1 | 01-token-schema | the token table | — | no |",
+    "| 2 | 02-recovery-api | the endpoint | 01-token-schema | no |",
+    "| 3 | 03-recovery-ui | the entry point | 02-recovery-api | yes |", "",
+    "## Order", "", "Because the API needs the schema.", ""
+  ].join("\n"));
+
+  const deliverables = readDeliverables(plan);
+  assert.equal(deliverables.length, 3);
+  assert.deepEqual(deliverables.map((entry) => entry.id), ["01-token-schema", "02-recovery-api", "03-recovery-ui"]);
+  assert.deepEqual(deliverables[1].dependsOn, ["01-token-schema"]);
+  assert.equal(deliverables[0].userVisible, false);
+  assert.equal(deliverables[2].userVisible, true);
+});
+
+test("a deliverables table that cannot be dispatched from is refused", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const write = (body) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-"));
+    const plan = path.join(dir, "plan.md");
+    fs.writeFileSync(plan, body);
+    return plan;
+  };
+  assert.throws(() => readDeliverables(write("# x\n\n## Order\n\nnothing\n")), /no "## Deliverables" section/);
+  assert.throws(() => readDeliverables(write("## Deliverables\n\nprose, no table\n")), /holds no table/);
+  assert.throws(() => readDeliverables(write("## Deliverables\n\n| spec |\n|---|\n| not-a-slug |\n")), /not an NN-slug/);
+  assert.throws(
+    () => readDeliverables(write("## Deliverables\n\n| spec | depends on |\n|---|---|\n| 01-a | 09-ghost |\n")),
+    /does not list/
+  );
+});

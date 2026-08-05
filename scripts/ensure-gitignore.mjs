@@ -47,7 +47,6 @@ export const KEPT_PATHS = [
   ".tagteam/plans/<slug>/goal.md",
   ".tagteam/plans/<slug>/plan.md",
   ".tagteam/plans/<slug>/specs/",
-  ".tagteam/plans/<slug>/reviewers.json",
   ".tagteam/plans/<slug>/approved.json"
 ];
 

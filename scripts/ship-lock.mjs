@@ -105,17 +105,38 @@ function heartbeat(repo, shipId) {
   return { ok: true };
 }
 
+// Quarantine first, then check what was quarantined, then delete. Reading the
+// owner and deleting the directory as two steps leaves a window: another run can
+// reclaim and publish a new generation between them, and the delete then removes
+// a lock that is live. Renaming is atomic, so whatever this ends up holding is a
+// single generation nobody else can still be using — and if it turns out not to
+// be ours, it goes straight back.
 function release(repo, token) {
   const lockPath = lockPathFor(repo);
-  const owner = readOwner(lockPath);
-  if (!owner) return { released: true, wasHeld: false };
-  if (owner.token && owner.token !== token) {
+  if (!fs.existsSync(lockPath)) return { released: true, wasHeld: false };
+  const claimed = `${lockPath}.releasing-${randomUUID()}`;
+  try {
+    fs.renameSync(lockPath, claimed);
+  } catch (error) {
+    if (error.code === "ENOENT") return { released: true, wasHeld: false };
+    throw error;
+  }
+  const owner = readOwner(claimed);
+  if (owner?.token && owner.token !== token) {
+    try {
+      fs.renameSync(claimed, lockPath);
+    } catch (error) {
+      // Someone published a new generation while we held this one aside. Theirs
+      // is the live lock; ours is a dead generation and is dropped.
+      if (!["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
+      fs.rmSync(claimed, { recursive: true, force: true });
+    }
     return {
       released: false,
       reason: `the ship lock was taken over by ${owner.shipId ?? "another run"} and is no longer yours to release`
     };
   }
-  fs.rmSync(lockPath, { recursive: true, force: true });
+  fs.rmSync(claimed, { recursive: true, force: true });
   return { released: true, wasHeld: true };
 }
 

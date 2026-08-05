@@ -257,22 +257,25 @@ async function main() {
   }
   try {
     const repo = repoValue === undefined ? undefined : path.resolve(repoValue);
+    // Version before shape. A version-4 configuration fails the version-5 schema
+    // in a dozen places, and reporting that as "invalid" told the user their
+    // configuration was broken when it was merely old — the exit-3 path that
+    // says "run /tagteam:init" was unreachable for the only files that need it.
+    if (path.basename(argv[0]) === "config.schema.json") {
+      let document = null;
+      try { document = JSON.parse(fs.readFileSync(path.resolve(argv[1]), "utf8")); } catch {}
+      const staleness = configStaleness(document ?? {});
+      if (document && staleness.stale) {
+        process.stdout.write(`stale: configuration version ${staleness.version} predates ${CONFIG_VERSION}; run /tagteam:init\n`);
+        process.exitCode = 3;
+        return;
+      }
+    }
     const result = loadAndValidate(path.resolve(argv[0]), path.resolve(argv[1]), { repo });
     if (result.errors.length > 0) {
       process.stderr.write(`${result.errors.map((error) => `- ${error}`).join("\n")}\n`);
       process.exitCode = 1;
       return;
-    }
-    // Exit 3 is "valid JSON, but not this plugin's configuration shape":
-    // distinct from invalid (1) and from a usage error (2), so a caller can tell
-    // a configuration that needs rewriting from one that is broken.
-    if (path.basename(argv[0]) === "config.schema.json") {
-      const staleness = configStaleness(result.document);
-      if (staleness.stale) {
-        process.stdout.write(`stale: configuration version ${staleness.version} predates ${CONFIG_VERSION}; run /tagteam:init\n`);
-        process.exitCode = 3;
-        return;
-      }
     }
     process.stdout.write("valid\n");
   } catch (error) {

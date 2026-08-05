@@ -48,18 +48,44 @@ export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) 
   // or a push from outside — means the result is a combination nobody looked at.
   // Stopping is the whole policy here: there is no automatic rebase, because a
   // rebase produces a new commit and every gate was bound to the old one.
-  if (state.base) {
-    const current = spawnSync("git", ["-C", repo, "rev-parse", `origin/${state.base}`], { encoding: "utf8", shell: false });
-    const baseOid = current.stdout?.trim();
-    if (current.status !== 0 || !baseOid) {
-      throw new Error(`could not read origin/${state.base}: ${(current.stderr || "").trim()}`);
-    }
-    if (baseOid !== state.baseOid) {
-      throw new Error(
-        `origin/${state.base} moved from ${state.baseOid.slice(0, 12)} to ${baseOid.slice(0, 12)} since this candidate was reviewed;`
-        + " rebase and re-review, or merge it yourself. Nothing was merged."
-      );
-    }
+  if (!state.base) throw new Error(`${resolved} records no base branch; nothing was merged`);
+
+  // Fetched first, because the local remote-tracking ref is a memory of the last
+  // fetch: without this the comparison passes on a base that has already moved
+  // on GitHub, which is the exact case it exists to catch.
+  const fetched = spawnSync("git", ["-C", repo, "fetch", "origin", "--prune"], { encoding: "utf8", shell: false });
+  if (fetched.status !== 0) throw new Error(`could not fetch origin: ${(fetched.stderr || "").trim()}`);
+
+  const current = spawnSync("git", ["-C", repo, "rev-parse", `origin/${state.base}`], { encoding: "utf8", shell: false });
+  const baseOid = current.stdout?.trim();
+  if (current.status !== 0 || !baseOid) {
+    throw new Error(`could not read origin/${state.base}: ${(current.stderr || "").trim()}`);
+  }
+  if (baseOid !== state.baseOid) {
+    throw new Error(
+      `origin/${state.base} moved from ${state.baseOid.slice(0, 12)} to ${baseOid.slice(0, 12)} since this candidate was reviewed;`
+      + " rebase and re-review, or merge it yourself. Nothing was merged."
+    );
+  }
+
+  // And the pull request has to be aimed where the review assumed. A branch with
+  // the reviewed head can target something else entirely, and GitHub will merge
+  // it there.
+  const view = spawnSync("gh", ["pr", "view", String(pr.number), "--json", "baseRefName,headRefOid,state"], {
+    cwd: repo, encoding: "utf8", shell: false
+  });
+  if (view.status !== 0) throw new Error(`could not read PR #${pr.number}: ${(view.stderr || view.stdout || "").trim()}`);
+  let live;
+  try {
+    live = JSON.parse(view.stdout);
+  } catch {
+    throw new Error(`could not parse PR #${pr.number} metadata; nothing was merged`);
+  }
+  if (live.baseRefName !== state.base) {
+    throw new Error(`PR #${pr.number} targets ${live.baseRefName}, not the reviewed base ${state.base}; nothing was merged`);
+  }
+  if (live.headRefOid !== candidateOid) {
+    throw new Error(`PR #${pr.number} now heads at ${live.headRefOid?.slice(0, 12)}, not the reviewed ${candidateOid.slice(0, 12)}; nothing was merged`);
   }
 
   const argv = [

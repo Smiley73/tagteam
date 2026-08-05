@@ -13,18 +13,22 @@ import { pathToFileURL } from "node:url";
 
 const GATES = ["review", "verify", "ci", "human"];
 
-// A clean first round goes straight from reviewing to publishing; only a round
-// that found something passes through fixing. Both routes are declared, because
-// a state machine that refuses the ordinary path is a state machine nothing can
-// use.
+// Everything reaches `publishing` through `verifying`, and nothing reaches it
+// any other way. A clean review and a fixed one converge there, which is what
+// makes "the adversary ran and the review gate was recorded" true on both
+// routes — an edge straight from `reviewing` would let a clean first round skip
+// both.
+//
+// `publishing -> reviewing` is the CI repair: a red check produces a new
+// candidate, and a new candidate has to be reviewed like any other.
 const TRANSITIONS = {
   pending: ["implementing", "failed"],
   implementing: ["verifying", "reviewing", "failed"],
-  reviewing: ["fixing", "verifying", "publishing", "failed"],
+  reviewing: ["fixing", "verifying", "failed"],
   fixing: ["reviewing", "verifying", "failed"],
   verifying: ["reviewing", "publishing", "failed"],
-  publishing: ["awaiting-approval", "merged", "failed"],
-  "awaiting-approval": ["publishing", "merged", "failed"],
+  publishing: ["awaiting-approval", "reviewing", "merged", "failed"],
+  "awaiting-approval": ["publishing", "reviewing", "merged", "failed"],
   merged: [],
   failed: ["pending"]
 };

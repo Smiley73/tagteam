@@ -26,7 +26,6 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   goal.md          the settled outcome — binding on everything downstream   committed
   plan.md          the deliverables index                                   committed
   specs/NN-slug.md one self-contained spec per deliverable                  committed
-  reviewers.json   default lens set plus per-spec exceptions                committed
   approved.json    when it was approved, and of what                        committed
   work/            interview answers, drafts, review findings, Codex artifacts   ignored
 .tagteam/ships/<slug>/<spec-id>/
@@ -163,6 +162,7 @@ a new commit appears — and the fix round always makes one.
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
 | `specs.mjs` | Validate spec front matter, resolve lenses, return dependency order |
+| `deliverables.mjs` | Extract the plan's deliverables table as data, without reading the plan |
 | `size-report.mjs` | Report plan and spec sizes once, before approval |
 | `validate-json.mjs` | Schema validation and config checks |
 | `ship-lock.mjs` | The repository-wide ship lock |

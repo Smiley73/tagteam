@@ -113,21 +113,20 @@ test("binding refuses anything that is not a commit id", () => {
 
 // --- regressions from the Codex review of this rewrite ---
 
-test("a clean first round reaches publishing without passing through fixing", () => {
-  // The declared edges refused reviewing -> publishing, so the ordinary path —
-  // a review that found nothing — could not advance at all.
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: [] });
-  state = transition(state, "implementing");
-  state = transition(state, "verifying");
-  state = transition(state, "reviewing");
-  assert.equal(transition(state, "publishing").state, "publishing");
-});
-
 test("a round that found something reaches publishing through fixing", () => {
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: [] });
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
   for (const next of ["implementing", "verifying", "reviewing", "fixing", "verifying", "publishing", "merged"]) {
     state = transition(state, next);
   }
+  assert.equal(state.state, "merged");
+});
+
+test("a red CI sends the spec back for a full review round", () => {
+  // The repair makes a new candidate, and a new candidate is reviewed like any
+  // other — publishing -> reviewing is the edge that says so.
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  for (const next of ["implementing", "verifying", "reviewing", "verifying", "publishing"]) state = transition(state, next);
+  for (const next of ["reviewing", "fixing", "verifying", "publishing", "merged"]) state = transition(state, next);
   assert.equal(state.state, "merged");
 });
 
@@ -140,6 +139,10 @@ test("both review outcomes converge on verifying before publishing", () => {
   const start = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
   const walk = (steps) => steps.reduce((state, next) => transition(state, next), start);
   assert.equal(walk(["implementing", "verifying", "reviewing", "verifying", "publishing"]).state, "publishing");
+  // And nothing reaches publishing any other way: an edge straight from
+  // reviewing would let a clean first round skip the adversary and the review
+  // gate that step 7 records.
+  assert.throws(() => walk(["implementing", "verifying", "reviewing", "publishing"]), /invalid state transition/);
   assert.equal(walk(["implementing", "verifying", "reviewing", "fixing", "verifying", "publishing"]).state, "publishing");
 });
 

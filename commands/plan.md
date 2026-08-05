@@ -17,9 +17,13 @@ the model work and write their own files.
 2. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
    `/tagteam:init` and stop. No config at all: same.
 3. `codex --version`. It fails: stop and say Codex is required.
-4. `--resume <slug>`: read `$D/goal.md` and whatever else exists, and pick up at
-   the first step below whose output is missing. Otherwise derive a slug from the
-   goal — lowercase, hyphenated, three or four words — and create `$D/work/`.
+4. `--resume <slug>`: pick up at the first step below whose output is missing.
+   **`$D/goal.md` existing is not enough to skip step 3** — a session that
+   stopped while you were waiting for the owner to read it leaves exactly that
+   file behind, and drafting from an unapproved goal makes decisions binding that
+   nobody agreed to. Step 3 writes `$D/work/goal-approved` when they say so, and
+   only that file lets you skip it. Otherwise derive a slug from the goal —
+   lowercase, hyphenated, three or four words — and create `$D/work/`.
 
 Seven steps. There is no loop anywhere in them.
 
@@ -80,6 +84,9 @@ D1. <what was decided> — <why, in one line>. Rejected: <what, and why not>.
 Show them the path and the *Decisions settled* list. Say they can edit the file
 directly and that everything downstream reads it from disk. Wait for them.
 
+When they say it is right, write `$D/work/goal-approved` with the timestamp. That
+file — not the existence of `goal.md` — is what a resume checks.
+
 ## 4 — Draft
 
 Dispatch `tagteam:plan-drafter` at `models.plan` / `effort.plan`. Give it `$D/goal.md`,
@@ -105,21 +112,28 @@ round if they ask for one.
 
 ## 6 — Specs
 
-Write `$D/reviewers.json`: the configured default set, plus the per-spec
-exceptions the plan proposes.
-
-```json
-{"default": ["correctness", "test-coverage"],
- "exceptions": {"03-recovery-ui": ["accessibility", "ux"], "07-readme": ["-test-coverage"]}}
+```bash
+node "$P/scripts/deliverables.mjs" "$D/plan.md"
 ```
 
-Then dispatch one `tagteam:spec-writer` per deliverable, **all in one message**,
-each at `models.plan` and each writing exactly `$D/specs/NN-slug.md`. Give each
-one the goal path, the plan path, its own row, and its lens exceptions.
+That returns one object per deliverable — id, what it delivers, dependencies,
+user-visibility, and the row verbatim. It is how you dispatch without reading
+`plan.md`: the rows come out as data, the plan body stays out of your context.
 
-Validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It checks
-front matter, resolves lenses, and returns dependency order. Fix what it reports
-by re-dispatching the writer for that spec.
+Dispatch one `tagteam:spec-writer` per deliverable, **all in one message**, each
+at `models.plan` and each writing exactly `$D/specs/<id>.md`. Give each one the
+goal path, the plan path, its own row, and the configured default lens set so it
+knows what it is naming exceptions to.
+
+Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
+checks front matter, resolves each spec's lenses against the default set, and
+returns dependency order. Fix what it reports by re-dispatching the writer for
+that spec.
+
+**The reviewer selection lives in the spec front matter**, because that is what
+`specs.mjs` and shipping actually read. There is no separate manifest to edit: a
+second copy of this that nothing consumed would be a control that appears to work
+and does not.
 
 ## 7 — Approve
 
@@ -128,16 +142,16 @@ runs once. Never compress anything in response to it, and never run it again to
 see whether the numbers improved — a deliverable at twice its target is a
 splitting decision and that decision is theirs.
 
-Show: the deliverable table, the sizes, the reviewer selection with its
-exceptions and the note that Codex and the adversary run on every spec, and the
-count of anything left unanswered. Say `reviewers.json` is editable, like
-`goal.md` was.
+Show: the deliverables with their sizes, the lenses `specs.mjs` resolved for each
+one, the note that Codex and the adversary run on every spec regardless, and the
+count of anything left unanswered. Say that the lens selection lives in each
+spec's front matter and is editable there, the way `goal.md` was.
 
 Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.json`
 (`{"approvedAt", "slug", "specs": [...], "goalSha256", "planSha256"}`), commit
-`goal.md`, `plan.md`, `specs/`, `reviewers.json`, `approved.json`, and tell them
-to run `/tagteam:ship <plan-dir>` **in a new session** — the interview loaded
-material shipping does not need.
+`goal.md`, `plan.md`, `specs/`, `approved.json`, and tell them to run
+`/tagteam:ship <plan-dir>` **in a new session** — the interview loaded material
+shipping does not need.
 
 ## Discipline
 

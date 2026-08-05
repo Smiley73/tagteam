@@ -43,19 +43,34 @@ node "$P/scripts/worktree-setup.mjs" --primary "$R" --worktree "$W" --config "$R
 
 Re-fetch, re-read `origin/<base>` — earlier specs have merged into it — then:
 
+**Read the state before touching git.** `init` never overwrites — it reports what
+is already there — but the branch commands after it are not idempotent, and a
+resumed ship reaches this step for specs that are already part-way through.
+
+```bash
+node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base> <userVisible> <lens,lens>
+```
+
+If that reports `"existing": true` with a state other than `pending`, this spec
+was already started. **Do not create the branch and do not transition to
+`implementing`** — `switch -c` fails on a branch that exists, and every state
+after `pending` refuses that transition anyway. Instead:
+
+- `implementing`, `reviewing`, `fixing`, `verifying` — the work was interrupted
+  mid-flight and its worktree is gone. `git -C "$W" switch "<branch>"`, then
+  restart from step 3 (commit and snapshot) against whatever is committed there.
+- `publishing`, `awaiting-approval` — a pull request exists. Go to step 9 and
+  evaluate; do not re-implement anything.
+- `failed` — say what failed and ask before doing anything.
+- `merged` — skip it entirely; you should not have reached this step.
+
+Only for a genuinely new or `pending` spec:
+
 ```bash
 git -C "$W" checkout --detach "$BASE"
 git -C "$W" switch -c "<branchPrefix><slug>/<spec-id>"
-node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base> <userVisible> <lens,lens>
 node "$P/scripts/gates.mjs" state "$S/<id>/state.json" implementing
 ```
-
-`init` never overwrites an existing state file — it reports what is already there
-instead. A resumed ship reaches this step for a spec that may be mid-flight with
-a pull request open, and resetting it to `pending` would discard the gates and
-the reviewed commit. If it reports an existing state that is not `pending`, do
-not re-implement: pick up from whatever that state says, or say plainly that you
-cannot and stop.
 
 ### 2. Implement
 
@@ -206,14 +221,22 @@ node "$P/scripts/ci-wait.mjs" --repo "$R" --pr <n> --wait-sec <ciWaitSec> --out 
 node "$P/scripts/gates.mjs" record "$S/<id>/state.json" ci "$OID" "$S/<id>/ci.json"
 ```
 
-A red CI gets exactly one repair, and the repair is a new candidate, so it is not
-a shortcut back to the merge: `gates.mjs state ... reviewing`, dispatch the fixer
-with the failing output, then commit, re-snapshot with a fresh `<n>`, set `OID`,
-`bind`, re-verify — and **run step 7 again in full**, adversary included, so the
-review gate is recorded against the new commit. `bind` cleared it along with
-everything else, and a repair that only re-ran the lenses which happened to have
-findings would leave a clean-reviewed spec with no review gate at all. Then push
-with `--force-with-lease` and re-record the pull request head.
+A red CI gets exactly one repair, and **the repair is a new candidate, so it gets
+a new review round — not a shortcut back to the merge.** In full:
+
+1. `gates.mjs state ... reviewing`.
+2. Dispatch the fixer with the failing check output, then commit and re-snapshot
+   with a fresh `<n>`, set `OID`, `bind` — which clears every gate — and re-run
+   verify.
+3. **Steps 5, 6 and 7 again, entirely.** The whole lens panel plus Codex against
+   the new commit, then a fix round if that finds anything, then the adversary
+   and the re-check. Not just the lenses that had findings last time: `bind`
+   cleared the review gate, `review.json` from the old candidate has nothing
+   left in `open` to re-check, and re-running only the re-check would hand this
+   commit a clean review gate that no lens ever looked at.
+4. `verifying -> publishing`, `git -C "$W" push --force-with-lease`, then
+   `gates.mjs pr` with the new head and `ci-wait.mjs` again, recording the new CI
+   gate before you evaluate.
 
 A second CI failure stops the spec.
 
@@ -247,7 +270,7 @@ not.
 
 ## Teardown
 
-Release the ship lock (`node "$P/scripts/ship-lock.mjs" release "$R" "<slug>"`). `git -C "$R" worktree remove "$W"` — never `--force`; a
+Release the ship lock: `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"`. `git -C "$R" worktree remove "$W"` — never `--force`; a
 worktree that will not come out is a signal. Summarise: what merged, what waits,
 what stopped and why.
 
