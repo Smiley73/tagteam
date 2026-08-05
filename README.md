@@ -121,26 +121,27 @@ Node built-ins only, no dependencies.
 This repository self-hosts tagteam. Unless you start Claude Code with
 `--plugin-dir`, it runs the installed plugin snapshot rather than this working
 tree: `.tagteam/config.json` is read live from the repository, but the scripts
-and command files reading it belong to the snapshot, so a change to a plugin
-file — or to that file's `version`, which the snapshot's validator compares
-against its own — does not take effect here until the snapshot is refreshed.
-After a version bump, update it:
+and command files reading it belong to the snapshot. A change to a plugin file
+does nothing here until the snapshot is refreshed; a change to that file's
+`version` does worse, because the snapshot's validator compares it against its
+own and exits 3, stopping `/tagteam:plan` and `/tagteam:ship` with an
+instruction to run the old snapshot's `/tagteam:init` — which would rewrite the
+config back.
+
+Which refresh applies depends on which version moved. If the package version in
+`.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` was raised,
+update in place:
 
 ```bash
 claude plugin marketplace update tagteam-local
 claude plugin update tagteam@tagteam-local
 ```
 
-While developing, the version usually has not changed, and at the same version
-both `update` and a second `install` report there is nothing to do. Replace the
-snapshot instead:
-
-```bash
-claude plugin uninstall tagteam@tagteam-local
-claude plugin install tagteam@tagteam-local
-```
-
-Restart the session either way.
+For every other change — including a `.tagteam/config.json` version bump at an
+unchanged package version, the usual case while developing — `update` reports
+there is nothing to do. Run `claude plugin uninstall tagteam@tagteam-local` and
+install again with the [Install](#install) command. Restart the session either
+way.
 
 ## License
 
