@@ -118,11 +118,19 @@ npm test
 
 Node built-ins only, no dependencies.
 
-This repository self-hosts tagteam, and Claude Code runs the installed plugin
-snapshot rather than this working tree. After changing a plugin file or
-`.tagteam/config.json`, re-install the plugin with the commands in
-[Install](#install) and restart the session before running tagteam here.
-Otherwise the old snapshot is what runs, against the new repository.
+This repository self-hosts tagteam. Unless you start Claude Code with
+`--plugin-dir`, it runs the installed plugin snapshot rather than this working
+tree: `.tagteam/config.json` is read live from the repository, but the scripts
+and command files reading it belong to the snapshot, so a change to a plugin
+file — or to that file's `version`, which the snapshot's validator compares
+against its own — does not take effect here until the snapshot is refreshed.
+Installing over an already-installed version is a no-op, so refresh it
+explicitly and restart the session:
+
+```bash
+claude plugin uninstall tagteam@tagteam-local
+claude plugin install tagteam@tagteam-local
+```
 
 ## License
 
