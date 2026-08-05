@@ -139,19 +139,104 @@ test("a git ref name Git itself would reject does not validate", async () => {
 
 // --- regressions from the third Codex round ---
 
-test("a version-4 configuration reports stale rather than invalid", async () => {
+test("a version-5 configuration reports stale rather than invalid", async () => {
   // Exit 3 is what tells a person to run /tagteam:init. Validating shape before
-  // version meant a real v4 file failed the v5 schema in a dozen places and
+  // version meant a real v5 file failed the v6 schema in a dozen places and
   // exited 1, so the only files that need exit 3 could never receive it.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v4-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v5-"));
   const old = path.join(dir, "config.json");
-  fs.writeFileSync(old, JSON.stringify({ version: 4, prTrain: { base: "main" }, reviewTiers: {} }));
+  fs.writeFileSync(old, JSON.stringify({
+    ...example,
+    version: 5,
+    models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
+    effort: { plan: "high", implement: "high", review: "high", codex: "high" }
+  }));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"),
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
   assert.match(result.stdout, /run \/tagteam:init/);
+});
+
+test("a version-6 configuration carrying the old four role keys is invalid", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const stale = {
+    ...example,
+    version: 6,
+    models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
+    effort: { plan: "high", implement: "high", review: "high", codex: "high" }
+  };
+  const errors = validateJson(schema, stale);
+  assert.ok(
+    errors.some((error) => error.includes("models.plan")),
+    `expected an error naming models.plan, got: ${errors.join("; ")}`
+  );
+  assert.ok(
+    errors.some((error) => error.includes("effort.lead")),
+    `expected an error naming effort.lead (missing, since only the old keys were supplied), got: ${errors.join("; ")}`
+  );
+});
+
+test("a version-6 configuration with one leftover old key alongside the new shape is invalid", async () => {
+  // The hybrid case: the new lead/worker/codex keys are all present and
+  // correct, but one old key is left over. Only additionalProperties: false
+  // catches this — required alone would not, since lead/worker/codex are
+  // already there.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  assert.deepEqual(validateJson(schema, example), [], "the example must stay valid before mutation");
+
+  const hybrid = {
+    ...example,
+    models: { ...example.models, implement: "sonnet" },
+    effort: { ...example.effort, review: "high" }
+  };
+  const errors = validateJson(schema, hybrid);
+  assert.ok(
+    errors.some((error) => error.includes("models.implement")),
+    `expected an error naming the leftover models.implement, got: ${errors.join("; ")}`
+  );
+  assert.ok(
+    errors.some((error) => error.includes("effort.review")),
+    `expected an error naming the leftover effort.review, got: ${errors.join("; ")}`
+  );
+});
+
+test("the Claude model enum exists once, referenced from both models.lead and models.worker", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const modelDef = schema.$defs?.claudeModel;
+  assert.ok(modelDef && Array.isArray(modelDef.enum), "schema must declare a claudeModel enum in $defs");
+  assert.equal(schema.properties.models.properties.lead.$ref, "#/$defs/claudeModel");
+  assert.equal(schema.properties.models.properties.worker.$ref, "#/$defs/claudeModel");
+
+  for (const value of modelDef.enum) {
+    for (const role of ["lead", "worker"]) {
+      const candidate = { ...example, models: { ...example.models, [role]: value } };
+      const errors = validateJson(schema, candidate).filter((error) => error.includes(`models.${role}`));
+      assert.deepEqual(errors, [], `models.${role}: ${value} should validate, got: ${errors.join("; ")}`);
+    }
+  }
+
+  const belowFloor = { ...example, models: { ...example.models, worker: "haiku" } };
+  const errors = validateJson(schema, belowFloor);
+  assert.ok(
+    errors.some((error) => error.includes("models.worker")),
+    `expected models.worker: "haiku" to be refused, got: ${errors.join("; ")}`
+  );
+});
+
+test("effort.codex and effort.lead/worker keep their divergent vocabularies", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const codexMax = { ...example, effort: { ...example.effort, codex: "max" } };
+  const codexErrors = validateJson(schema, codexMax);
+  assert.ok(
+    codexErrors.some((error) => error.includes("effort.codex")),
+    `expected effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
+  );
+
+  const leadMax = { ...example, effort: { ...example.effort, lead: "max" } };
+  const leadErrors = validateJson(schema, leadMax).filter((error) => error.includes("effort.lead"));
+  assert.deepEqual(leadErrors, [], `expected effort.lead: "max" to validate, got: ${leadErrors.join("; ")}`);
 });
 
 test("the deliverables table comes out as data, without reading the plan", async () => {

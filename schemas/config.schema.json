@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 5",
+  "title": "tagteam project configuration, version 6",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,7 +9,7 @@
     "maxConcurrentCodex"
   ],
   "properties": {
-    "version": { "const": 5, "type": "integer" },
+    "version": { "const": 6, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -27,26 +27,20 @@
     "models": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["plan", "implement", "review", "codex"],
+      "required": ["lead", "worker", "codex"],
       "properties": {
-        "plan": { "type": "string", "enum": ["opus", "fable", "sonnet"] },
-        "implement": {
-          "type": "string",
-          "enum": ["opus", "fable", "sonnet"],
-          "description": "Sonnet is the floor. Specs are written for a model of at least this capability, so lowering it below Sonnet would require them to say much more."
-        },
-        "review": { "type": "string", "enum": ["opus", "fable", "sonnet"] },
+        "lead": { "$ref": "#/$defs/claudeModel" },
+        "worker": { "$ref": "#/$defs/claudeModel" },
         "codex": { "type": "string", "minLength": 1 }
       }
     },
     "effort": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["plan", "implement", "review", "codex"],
+      "required": ["lead", "worker", "codex"],
       "properties": {
-        "plan": { "$ref": "#/$defs/claudeEffort" },
-        "implement": { "$ref": "#/$defs/claudeEffort" },
-        "review": { "$ref": "#/$defs/claudeEffort" },
+        "lead": { "$ref": "#/$defs/claudeEffort" },
+        "worker": { "$ref": "#/$defs/claudeEffort" },
         "codex": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] }
       }
     },
@@ -134,6 +128,7 @@
     }
   },
   "$defs": {
+    "claudeModel": { "type": "string", "enum": ["opus", "fable", "sonnet"] },
     "claudeEffort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
   }
 }

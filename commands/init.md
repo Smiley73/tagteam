@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 5. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 6. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -46,11 +46,10 @@ train.
 Batch these; do not ask one at a time.
 
 1. Confirm the inferred verify commands and setup commands. Show them.
-2. `models` and `effort` for `plan`, `implement`, `review`, `codex`. Offer the
-   defaults — opus/high for plan and review, sonnet/high for implement, the
-   installed Codex model at high — and let them override.
-   **Sonnet is the floor for `implement`.** Specs are written for a model of at
-   least that capability; below it they would have to say far more.
+2. `models` and `effort` for `lead`, `worker`, `codex`. Offer the defaults —
+   `lead: opus`, `worker: sonnet`, `codex: <installed model>`, all at `high` —
+   and let them override. Sonnet is the floor for `worker`; see
+   `$P/skills/tagteam/SKILL.md` for why.
 3. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
    gets four readers. Show the full roster and let them adjust.
@@ -74,6 +73,7 @@ lenses read every spec, and whether merges happen without asking.
 
 `--reconfigure` re-runs the whole interview with the current values as defaults.
 
-A version-4 configuration is not upgraded — version 5 is a different shape. Say
-that the old file is being replaced, and what changed: no more provider policy,
-reviewer tiers, complexity routing, or call limits.
+A version-5 configuration is not upgraded — version 6 is a different shape. Say
+that the old file is being replaced, and what changed: the four role keys in
+`models` and `effort` collapse to three — planning and review agents now share
+`lead`, implementers and fixers use `worker`, and `codex` is unchanged.
