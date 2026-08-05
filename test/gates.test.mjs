@@ -191,12 +191,16 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
 // become one. The state file went on saying `reviewing` after the branch was
 // already in main, and the next ship would have re-snapshotted it.
 
-const withPr = (state, number = 53) => recordPr({ ...state, state: "reviewing" }, {
+const withPr = (state, number = 53) => recordPr({ ...state, state: "reviewing", base: "main" }, {
   number, url: `https://github.com/o/r/pull/${number}`, headOid: state.candidateOid
 });
 
+// What GitHub reported. Every field is a fact adoption must check, so the
+// default is the passing case and each test names the one it breaks.
+const asMerged = (overrides = {}) => ({ merged: true, headOid: A, baseRefName: "main", mergeCommitOid: B, ...overrides });
+
 test("a merge that really happened, at the reviewed commit, is adopted", () => {
-  const adopted = adoptMerge(withPr(reviewed()), { merged: true, headOid: A, mergeCommitOid: B });
+  const adopted = adoptMerge(withPr(reviewed()), asMerged());
   assert.equal(adopted.state, "merged");
   const entry = adopted.history.at(-1);
   assert.equal(entry.adopted.from, "reviewing");
@@ -207,15 +211,15 @@ test("adoption refuses a pull request that merged some other commit", () => {
   // The whole point. Without this, "reviewed A, merged B" walks straight in
   // through the door built for out-of-band merges.
   assert.throws(
-    () => adoptMerge(withPr(reviewed()), { merged: true, headOid: B, mergeCommitOid: B }),
+    () => adoptMerge(withPr(reviewed()), asMerged({ headOid: B })),
     /is not the candidate/
   );
 });
 
 test("adoption refuses an open pull request, and one that does not exist", () => {
-  assert.throws(() => adoptMerge(withPr(reviewed()), { merged: false, headOid: A }), /is not merged/);
+  assert.throws(() => adoptMerge(withPr(reviewed()), asMerged({ merged: false })), /is not merged/);
   const noPr = { ...reviewed(), state: "reviewing" };
-  assert.throws(() => adoptMerge(noPr, { merged: true, headOid: A }), /no pull request recorded/);
+  assert.throws(() => adoptMerge(noPr, asMerged()), /no pull request recorded/);
 });
 
 test("adoption records which gates had no evidence, rather than implying they passed", () => {
@@ -224,19 +228,31 @@ test("adoption records which gates had no evidence, rather than implying they pa
   let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: ["correctness"] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "verify", A, { status: "passed" });
-  const adopted = adoptMerge(withPr(state), { merged: true, headOid: A, mergeCommitOid: B });
+  const adopted = adoptMerge(withPr(state), asMerged());
   assert.deepEqual(adopted.history.at(-1).adopted.evidence, {
     review: null, verify: "passed", ci: null, human: null
   });
 });
 
 test("adoption is not a second route to merged for a spec already there", () => {
-  const once = adoptMerge(withPr(reviewed()), { merged: true, headOid: A, mergeCommitOid: B });
-  assert.throws(() => adoptMerge(once, { merged: true, headOid: A }), /already recorded as merged/);
+  const once = adoptMerge(withPr(reviewed()), asMerged());
+  assert.throws(() => adoptMerge(once, asMerged()), /already recorded as merged/);
 });
 
 test("reviewing -> merged is still not a declared transition", () => {
   // Adoption is a separate door precisely so this edge stays closed: an edge here
   // would let the orchestrator reach merged without publishing or reviewing.
   assert.throws(() => transition({ ...reviewed(), state: "reviewing", history: [] }, "merged"), /invalid state transition/);
+});
+
+test("adoption refuses a pull request that merged into some other branch", () => {
+  // Merged is not the same as merged *here*. A pull request can be retargeted, so
+  // the right commit can land in a branch this train is not building on — and
+  // adopting that skips the spec forever while the base never receives it.
+  // Found by Codex review: the normal path in merge.mjs refuses this, and a door
+  // that skipped the check would just be the way around it.
+  assert.throws(
+    () => adoptMerge(withPr(reviewed()), asMerged({ baseRefName: "release" })),
+    /merged into release, not into main/
+  );
 });

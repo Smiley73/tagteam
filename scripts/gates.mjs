@@ -106,7 +106,7 @@ export function recordPr(state, { number, url, headOid }) {
 // Merging unreviewed work stays the owner's call to make and the owner's call to
 // answer for; what this refuses to do is leave the file claiming a spec is still
 // under review when it is already in the base branch.
-export function adoptMerge(state, { merged, headOid, mergeCommitOid }) {
+export function adoptMerge(state, { merged, headOid, baseRefName, mergeCommitOid }) {
   if (state.state === "merged") throw new Error(`${state.spec} is already recorded as merged`);
   if (!state.pr) throw new Error(`${state.spec} has no pull request recorded, so there is nothing to adopt`);
   if (!merged) throw new Error(`pull request #${state.pr.number} is not merged, so there is nothing to adopt`);
@@ -114,6 +114,16 @@ export function adoptMerge(state, { merged, headOid, mergeCommitOid }) {
   if (headOid !== state.candidateOid) {
     throw new Error(
       `pull request #${state.pr.number} merged ${headOid}, which is not the candidate ${state.candidateOid} this spec's gates are bound to`
+    );
+  }
+  // Merged is not the same as merged *here*. A pull request can be retargeted at
+  // any time, so the right commit can land in a branch this train is not
+  // building on — and adopting that would skip the spec forever while the base
+  // never received it. `merge.mjs` refuses the same mismatch on the normal path;
+  // a door that skipped the check would simply be the way around it.
+  if (baseRefName !== state.base) {
+    throw new Error(
+      `pull request #${state.pr.number} merged into ${baseRefName}, not into ${state.base}, so this spec is not in the base branch`
     );
   }
   const evidence = Object.fromEntries(GATES.map((gate) => {
@@ -225,14 +235,19 @@ const USAGE = `usage:
 // The one place this file talks to the network, kept out of `adoptMerge` so the
 // decision stays a pure function of facts that can be handed to it in a test.
 function readMergedPr(repo, number) {
-  const view = spawnSync("gh", ["pr", "view", String(number), "--json", "state,mergedAt,mergeCommit,headRefOid"], {
+  const view = spawnSync("gh", ["pr", "view", String(number), "--json", "state,mergedAt,mergeCommit,headRefOid,baseRefName"], {
     cwd: path.resolve(repo), encoding: "utf8", shell: false
   });
   if (view.status !== 0) {
     throw new Error(`could not read pull request #${number}: ${(view.stderr || view.stdout || "").trim()}`);
   }
   const pr = JSON.parse(view.stdout);
-  return { merged: pr.state === "MERGED", headOid: pr.headRefOid, mergeCommitOid: pr.mergeCommit?.oid ?? null };
+  return {
+    merged: pr.state === "MERGED",
+    headOid: pr.headRefOid,
+    baseRefName: pr.baseRefName,
+    mergeCommitOid: pr.mergeCommit?.oid ?? null
+  };
 }
 
 async function main() {
