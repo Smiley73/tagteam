@@ -358,3 +358,22 @@ test("no source file carries a NUL byte", () => {
   }
   assert.deepEqual(offenders, [], `${offenders.join(", ")} would be invisible to grep and ripgrep`);
 });
+
+test("adversary and codex are roles, not lenses a configuration may select", async () => {
+  // Both run on every spec regardless, both write to a fixed path, and both
+  // identify their findings as `<name>.<n>`. Selecting one as a lens gives two
+  // readers the same output file and two findings the same id — a duplicate that
+  // reaches the merge gate and an ambiguous reference in the pull request body.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  for (const reserved of ["adversary", "codex"]) {
+    const inRoster = { ...example, reviewers: { roster: [...example.reviewers.roster, reserved], default: example.reviewers.default } };
+    assert.ok(
+      semanticErrors("config.schema.json", inRoster, {}).some((error) => error.includes(reserved)),
+      `reviewers.roster containing "${reserved}" should be refused`
+    );
+    const inDefault = { ...example, reviewers: { roster: [...example.reviewers.roster, reserved], default: [...example.reviewers.default, reserved] } };
+    const errors = semanticErrors("config.schema.json", inDefault, {});
+    assert.ok(errors.filter((error) => error.includes(reserved)).length >= 2, `reviewers.default containing "${reserved}" should be refused too`);
+  }
+  assert.deepEqual(semanticErrors("config.schema.json", example, {}), [], "the example must stay valid");
+});
