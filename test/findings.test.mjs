@@ -240,3 +240,21 @@ test("a missing or wrongly-bound adversary file is incomplete, not clean", () =>
   assert.equal(stale.status, "incomplete");
   assert.match(stale.missing[0].reason, /not the fixed candidate/);
 });
+
+test("an adversary file written by some other lens does not count as the adversary", () => {
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "correctness.1", resolved: true, evidence: "fixed" },
+      { id: "correctness.2", resolved: true, evidence: "fixed" }
+    ])
+  });
+  const impostor = dir({
+    "adversary.json": { lens: "codex", candidate: NEW_OID, summary: "not the adversary", findings: [] }
+  });
+  const result = settle({
+    review, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA,
+    adversary: path.join(impostor, "adversary.json"), adversarySchemaPath: FINDINGS_SCHEMA
+  });
+  assert.equal(result.status, "incomplete");
+  assert.match(result.missing[0].reason, /not by the adversary/);
+});

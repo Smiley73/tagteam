@@ -110,6 +110,11 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
         unusable.push({ lens: "adversary", file: adversary, reason: `does not match the findings schema: ${errors.slice(0, 3).join("; ")}` });
       } else if (parsed.candidate !== candidate) {
         unusable.push({ lens: "adversary", file: adversary, reason: `read ${parsed.candidate.slice(0, 12)}, not the fixed candidate ${candidate.slice(0, 12)}` });
+      } else if (parsed.lens !== "adversary") {
+        // Same rule as every other lens: a file dropped at this path by some
+        // other reader would otherwise stand in for the adversary, and the
+        // adversary would count as having run.
+        unusable.push({ lens: "adversary", file: adversary, reason: `holds a review by "${parsed.lens}", not by the adversary` });
       } else {
         parsed.findings
           .filter((finding) => finding.severity === "blocking" || finding.severity === "major")

@@ -50,15 +50,20 @@ function publish(lockPath, record) {
   }
 }
 
+// Each acquisition gets a token, and releasing requires it. The ship id alone is
+// not enough: a run that crashed, was reclaimed six hours later by a second run
+// of the same plan, and then came back would match on ship id and delete the
+// lock the live run is holding.
 const record = (shipId) => {
   const now = new Date().toISOString();
-  return { shipId: shipId ?? null, pid: process.pid, at: now, heartbeatAt: now };
+  return { shipId: shipId ?? null, token: randomUUID(), pid: process.pid, at: now, heartbeatAt: now };
 };
 
 function acquire(repo, shipId, { force = false } = {}) {
   const lockPath = lockPathFor(repo);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  if (publish(lockPath, record(shipId))) return { acquired: true, shipId: shipId ?? null };
+  const mine = record(shipId);
+  if (publish(lockPath, mine)) return { acquired: true, shipId: shipId ?? null, token: mine.token };
 
   const owner = readOwner(lockPath);
   const age = ageMs(owner);
@@ -78,8 +83,9 @@ function acquire(repo, shipId, { force = false } = {}) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  if (publish(lockPath, record(shipId))) {
-    return { acquired: true, shipId: shipId ?? null, reclaimedFrom: owner, quarantined };
+  const reclaimed = record(shipId);
+  if (publish(lockPath, reclaimed)) {
+    return { acquired: true, shipId: shipId ?? null, token: reclaimed.token, reclaimedFrom: owner, quarantined };
   }
   return { acquired: false, stale, owner: readOwner(lockPath), reason: "another run took the lock first" };
 }
@@ -99,12 +105,15 @@ function heartbeat(repo, shipId) {
   return { ok: true };
 }
 
-function release(repo, shipId) {
+function release(repo, token) {
   const lockPath = lockPathFor(repo);
   const owner = readOwner(lockPath);
   if (!owner) return { released: true, wasHeld: false };
-  if (shipId && owner.shipId && owner.shipId !== shipId) {
-    return { released: false, reason: `the ship lock belongs to ${owner.shipId}, not ${shipId}` };
+  if (owner.token && owner.token !== token) {
+    return {
+      released: false,
+      reason: `the ship lock was taken over by ${owner.shipId ?? "another run"} and is no longer yours to release`
+    };
   }
   fs.rmSync(lockPath, { recursive: true, force: true });
   return { released: true, wasHeld: true };
@@ -113,17 +122,22 @@ function release(repo, shipId) {
 async function main() {
   const argv = process.argv.slice(2);
   const force = argv.includes("--force");
-  const [action, repo, shipId] = argv.filter((entry) => !entry.startsWith("--"));
+  const [action, repo, third] = argv.filter((entry) => !entry.startsWith("--"));
   if (!action || !repo) {
-    process.stderr.write("usage: ship-lock.mjs <acquire|heartbeat|release|status> <repo> [ship-id] [--force]\n");
+    process.stderr.write(
+      "usage: ship-lock.mjs acquire <repo> <ship-id> [--force]\n"
+      + "       ship-lock.mjs heartbeat <repo> <ship-id>\n"
+      + "       ship-lock.mjs release <repo> <token>\n"
+      + "       ship-lock.mjs status <repo>\n"
+    );
     process.exitCode = 2;
     return;
   }
   try {
     let result;
-    if (action === "acquire") result = acquire(repo, shipId, { force });
-    else if (action === "heartbeat") result = heartbeat(repo, shipId);
-    else if (action === "release") result = release(repo, shipId);
+    if (action === "acquire") result = acquire(repo, third, { force });
+    else if (action === "heartbeat") result = heartbeat(repo, third);
+    else if (action === "release") result = release(repo, third);
     else if (action === "status") {
       const owner = readOwner(lockPathFor(repo));
       result = owner ? { held: true, owner, staleAfterMinutes: STALE_AFTER_MS / 60_000 } : { held: false };

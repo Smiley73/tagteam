@@ -5,6 +5,7 @@
 // pre-fix head. Each of them looks exactly like success from the outside.
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { initState, transition, bindCandidate, recordGate, recordPr, evaluate } from "../scripts/gates.mjs";
 
 const A = "a".repeat(40);
@@ -128,4 +129,54 @@ test("a round that found something reaches publishing through fixing", () => {
     state = transition(state, next);
   }
   assert.equal(state.state, "merged");
+});
+
+// --- regressions from the second Codex round ---
+
+test("both review outcomes converge on verifying before publishing", () => {
+  // The clean path sits at `reviewing` and the fixed path at `fixing`; only
+  // `verifying` is reachable from both, and publishing from either directly is
+  // not declared. The fixed path used to be stranded.
+  const start = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  const walk = (steps) => steps.reduce((state, next) => transition(state, next), start);
+  assert.equal(walk(["implementing", "verifying", "reviewing", "verifying", "publishing"]).state, "publishing");
+  assert.equal(walk(["implementing", "verifying", "reviewing", "fixing", "verifying", "publishing"]).state, "publishing");
+});
+
+test("a repository that waits for CI must have CI evidence recorded", () => {
+  const withCi = { autoMerge: true, ciWaitSec: 1800 };
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  state = bindCandidate(state, A, BASE, []);
+  state = recordGate(state, "review", A, { status: "clean" });
+  state = recordGate(state, "verify", A, { status: "passed" });
+  assert.ok(evaluate(state, withCi).blockers.includes("continuous-integration-not-recorded"));
+
+  // Cancelled and skipped both arrive as not-run: nothing was proven, so a
+  // person decides rather than a green check beside it deciding for them.
+  const inconclusive = recordGate(state, "ci", A, { status: "not-run" });
+  const verdict = evaluate(inconclusive, withCi);
+  assert.ok(verdict.approvals.includes("continuous-integration-inconclusive"));
+  assert.equal(verdict.ready, false);
+
+  assert.equal(evaluate(recordGate(state, "ci", A, { status: "passed" }), withCi).ready, true);
+  // A repository with CI switched off is unaffected.
+  assert.equal(evaluate(state, { autoMerge: true, ciWaitSec: 0 }).ready, true);
+});
+
+test("init reports an existing state instead of resetting a spec mid-flight", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const fsm = await import("node:fs");
+  const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
+  const file = path.join(dir, "state.json");
+  const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
+  const init = () => spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "false", "correctness"], { encoding: "utf8" });
+
+  init();
+  const advanced = { ...JSON.parse(fsm.readFileSync(file, "utf8")), state: "awaiting-approval", pr: { number: 9 } };
+  fsm.writeFileSync(file, JSON.stringify(advanced));
+  const again = init();
+  assert.match(again.stdout, /"existing":true/);
+  assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).state, "awaiting-approval");
+  assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).pr.number, 9);
 });

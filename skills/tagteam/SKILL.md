@@ -129,10 +129,16 @@ merge without `--match-head-commit`, delete a branch inside a merge command,
 `node $P/scripts/gates.mjs evaluate <state.json> <config.json>` decides whether a
 pull request merges unattended. It is code because it is silent when it is wrong.
 
-A pull request stops and waits when: the spec is user-visible or the diff touches
-a user-facing surface; verification or CI failed; a finding is still open after
-the re-check; **a selected reviewer produced no usable evidence**; or
+A pull request stops and waits when: the spec is marked user-visible; verification
+failed, or CI failed or proved nothing; a finding is still open after the
+re-check; **a selected reviewer produced no usable evidence**; or
 `.github/workflows/**` changed.
+
+User-visibility is the plan's judgement, settled per spec by the person who
+approved it and raised by the spec writer if writing the spec revealed a surface
+the plan missed. There is deliberately no diff-derived signal: a reliable one
+needs per-project path conventions, and an unreliable one that reads as
+authoritative is worse than none.
 
 That fourth one is the important one. An absent, unparseable, or wrongly-bound
 findings file yields an empty finding set, and an empty finding set is

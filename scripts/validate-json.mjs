@@ -170,7 +170,13 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
     // git-check-ref-format: no space, no ~^:?*[\, no control characters, no
     // "..", no "@{", no trailing ".lock". Everything a shell would act on is
     // already excluded by that set.
-    if (/[ - ~^:?*[\]\\]/.test(ref) || ref.includes("..") || ref.includes("@{")) {
+    // A branch prefix legitimately ends in "/", so it is checked as the ref it
+    // will become rather than as one itself.
+    const name = label === "branchPrefix" ? ref.replace(/\/$/, "") : ref;
+    if (/[\u0000- ~^:?*[\]\\]/.test(name)
+      || name.includes("..") || name.includes("@{") || name.includes("//")
+      || name === "@" || name.endsWith(".") || name.endsWith("/")
+      || name.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock") || part === "")) {
       errors.push(`${label} is not a valid Git ref name: ${JSON.stringify(ref)}`);
     }
     if (/[$`"'&;|<>(){}!#]/.test(ref)) {

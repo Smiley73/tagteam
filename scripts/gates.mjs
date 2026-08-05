@@ -29,11 +29,12 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-export function initState({ spec, slug, branch, userVisible, reviewers }) {
+export function initState({ spec, slug, branch, base, userVisible, reviewers }) {
   return {
     spec,
     slug,
     branch,
+    base,
     planUserVisible: Boolean(userVisible),
     reviewers,
     state: "pending",
@@ -114,11 +115,21 @@ export function evaluate(state, config) {
   if (!verify) blockers.push("verification-not-recorded");
   else if (verify.status === "failed") blockers.push("verification-failed");
   if (ci?.status === "failed") blockers.push("continuous-integration-failed");
+  // A repository that waits for checks must actually have them looked at. An
+  // unrecorded CI gate means the step was skipped, which is the same class of
+  // hole as an unrecorded review — and `not-run` covers a cancelled check, which
+  // proves nothing and so cannot be carried by a green one beside it.
+  else if (config?.ciWaitSec > 0) {
+    if (!ci) blockers.push("continuous-integration-not-recorded");
+    else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
+  }
 
-  // (a) User-visible. The plan's judgement and the diff's own surfaces are both
-  // sufficient; neither has to convince the other.
-  const touchesUserSurface = Boolean(verify?.userVisible) || Boolean(review?.userVisible);
-  if (state.planUserVisible || touchesUserSurface) approvals.push("user-visible");
+  // (a) User-visible. This is the plan's judgement, made per spec and approved by
+  // a person, and raised by the spec writer if writing the spec revealed a
+  // surface the plan missed. There is deliberately no diff-derived signal: a
+  // reliable one needs per-project path conventions, and an unreliable one
+  // reading as authoritative is worse than none.
+  if (state.planUserVisible) approvals.push("user-visible");
 
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
@@ -155,7 +166,7 @@ function writeJson(file, value) {
 }
 
 const USAGE = `usage:
-  gates.mjs init     <state.json> <spec-id> <slug> <branch> <user-visible:true|false> <lens,lens,...>
+  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> [--force]
   gates.mjs state    <state.json> <next-state>
   gates.mjs bind     <state.json> <candidateOid> <baseOid> [changed-paths.json]
   gates.mjs record   <state.json> <review|verify|ci|human> <candidateOid> <value.json>
@@ -171,12 +182,21 @@ async function main() {
   }
   let next;
   if (action === "init") {
+    // Refuses to overwrite. A resumed ship re-runs this step, and a spec that was
+    // mid-flight — a pull request open, waiting for a person — would otherwise
+    // have its state and its recorded gates reset to pending.
+    if (fs.existsSync(path.resolve(values[0])) && !process.argv.includes("--force")) {
+      const existing = readJson(values[0]);
+      process.stdout.write(`${JSON.stringify({ ok: true, existing: true, spec: existing.spec, state: existing.state, candidateOid: existing.candidateOid })}\n`);
+      return;
+    }
     next = initState({
       spec: values[1],
       slug: values[2],
       branch: values[3],
-      userVisible: values[4] === "true",
-      reviewers: (values[5] ?? "").split(",").filter(Boolean)
+      base: values[4],
+      userVisible: values[5] === "true",
+      reviewers: (values[6] ?? "").split(",").filter(Boolean)
     });
   } else if (action === "state") {
     next = transition(readJson(values[0]), values[1]);

@@ -103,3 +103,36 @@ test("a copied directory cannot be committed by adding a trailing slash", () => 
   assert.equal(guard.status, 1, "the trailing slash must not defeat the guard");
   assert.match(guard.stderr, /refusing to commit/);
 });
+
+// --- regressions from the second Codex round ---
+
+test("the ship lock cannot be released by a holder it was taken from", async () => {
+  const { acquire, release } = await import("../scripts/ship-lock.mjs");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-lock-"));
+  fs.mkdirSync(path.join(repo, ".tagteam"), { recursive: true });
+
+  const first = acquire(repo, "the-plan");
+  assert.equal(first.acquired, true);
+  assert.ok(first.token);
+  // A second run of the same plan takes it over after the stale window.
+  const second = acquire(repo, "the-plan", { force: true });
+  assert.equal(second.acquired, true);
+  assert.notEqual(second.token, first.token);
+
+  // The run it was taken from must not be able to delete the live lock — the
+  // ship id alone matches, which is why the token exists.
+  assert.equal(release(repo, first.token).released, false);
+  assert.equal(release(repo, second.token).released, true);
+});
+
+test("a git ref name Git itself would reject does not validate", async () => {
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const refErrors = (overrides) => semanticErrors("config.schema.json", { ...example, ...overrides }, {})
+    .filter((error) => /base|branchPrefix/.test(error));
+
+  assert.deepEqual(refErrors({}), [], "the example must stay valid");
+  assert.deepEqual(refErrors({ branchPrefix: "tagteam" }), [], "a prefix without a trailing slash is fine");
+  for (const bad of ["feature/.hidden", "a//b", "x.lock", "main.", "@", "a..b", "ref@{0}", "with space"]) {
+    assert.ok(refErrors({ base: bad }).length > 0, `base ${JSON.stringify(bad)} should be refused`);
+  }
+});

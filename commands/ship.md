@@ -19,9 +19,12 @@ code and findings; you never let a diff or a findings body into your own context
 4. Reject any path argument containing control characters or shell
    metacharacters. You build shell strings where a script would have built argv.
 5. Take the ship lock:
-   `node "$P/scripts/ship-lock.mjs" acquire "$R" "<slug>"`.
-   Already held: another ship is running here; stop. Release it when you finish
-   or stop for any reason.
+   `node "$P/scripts/ship-lock.mjs" acquire "$R" "<slug>"`. Already held: another
+   ship is running here; stop. It returns a `token` — write it to
+   `$S/lock-token` immediately, because releasing requires it and your own memory
+   of it will not survive a long train. Release with
+   `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"` when
+   you finish or stop for any reason.
 6. `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"` → the ordered
    specs with their resolved lenses. Skip every spec whose
    `$S/<id>/state.json` says `merged`. Announce where you are starting.
@@ -43,9 +46,16 @@ Re-fetch, re-read `origin/<base>` — earlier specs have merged into it — then
 ```bash
 git -C "$W" checkout --detach "$BASE"
 git -C "$W" switch -c "<branchPrefix><slug>/<spec-id>"
-node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <userVisible> <lens,lens>
+node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base> <userVisible> <lens,lens>
 node "$P/scripts/gates.mjs" state "$S/<id>/state.json" implementing
 ```
+
+`init` never overwrites an existing state file — it reports what is already there
+instead. A resumed ship reaches this step for a spec that may be mid-flight with
+a pull request open, and resetting it to `pending` would discard the gates and
+the reviewed commit. If it reports an existing state that is not `pending`, do
+not re-implement: pick up from whatever that state says, or say plainly that you
+cannot and stop.
 
 ### 2. Implement
 
@@ -150,7 +160,12 @@ node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" \
   --dir "$S/<id>/rounds/<n>/recheck" --adversary "$S/<id>/rounds/<n>/findings/adversary.json" \
   --candidate "$OID" --out "$S/<id>/review.json"
 node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/review.json"
+node "$P/scripts/gates.mjs" state "$S/<id>/state.json" verifying
 ```
+
+That last transition is what both paths converge on. A clean round is at
+`reviewing` and a fixed one is at `fixing`, and only `verifying` is reachable
+from both — publishing from either directly is not a declared edge.
 
 `recheck.mjs` does the aggregation, including the adversary's blocking and major
 findings — do not fold anything in by hand. It carries forward any lens the first
@@ -191,9 +206,16 @@ node "$P/scripts/ci-wait.mjs" --repo "$R" --pr <n> --wait-sec <ciWaitSec> --out 
 node "$P/scripts/gates.mjs" record "$S/<id>/state.json" ci "$OID" "$S/<id>/ci.json"
 ```
 
-A red CI gets one repair: dispatch the fixer with the failing output, commit,
-re-snapshot, `bind`, re-verify, re-review the lenses that had findings, push.
-A second failure stops the spec.
+A red CI gets exactly one repair, and the repair is a new candidate, so it is not
+a shortcut back to the merge: `gates.mjs state ... reviewing`, dispatch the fixer
+with the failing output, then commit, re-snapshot with a fresh `<n>`, set `OID`,
+`bind`, re-verify — and **run step 7 again in full**, adversary included, so the
+review gate is recorded against the new commit. `bind` cleared it along with
+everything else, and a repair that only re-ran the lenses which happened to have
+findings would leave a clean-reviewed spec with no review gate at all. Then push
+with `--force-with-lease` and re-record the pull request head.
+
+A second CI failure stops the spec.
 
 ### 9. Merge or stop
 

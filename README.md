@@ -66,11 +66,13 @@ fix round, each reviewer that raised a finding re-checks its own findings agains
 the new code, and an adversary reads the fixed diff fresh. Anything still open
 stops the pull request.
 
-A pull request merges unattended unless: the change is user-visible, verification
-or CI failed, a finding is still open, **a reviewer produced no usable evidence**,
-or `.github/workflows/` changed. That fourth one matters more than it sounds: an
-absent or malformed findings file yields an empty finding set, and an empty
-finding set otherwise reads as a clean review.
+A pull request merges unattended unless: the spec is marked user-visible,
+verification failed or CI proved nothing, a finding is still open, **a reviewer
+produced no usable evidence**, or `.github/workflows/` changed.
+
+That fourth one matters more than it sounds: an absent or malformed findings file
+yields an empty finding set, and an empty finding set otherwise reads as a clean
+review.
 
 ## How it is built
 
@@ -95,8 +97,9 @@ does not.
   tool contract cannot enforce a response schema.
 - Every gate binds to one commit; a new commit clears all of them, and the fix
   round always makes one.
-- Merges use `--match-head-commit`, so the commit that merges is the commit that
-  was reviewed. Any merge failure stops and reports rather than rebasing.
+- Merges use `--match-head-commit`, and refuse outright if the base branch moved
+  since the review — the reviewed diff would be going into something else. Any
+  merge failure stops and reports rather than rebasing.
 - A commit is only made through `git add -A && guard-staged && git commit`, which
   refuses to commit a copied ignored file.
 - User-visible changes always wait.

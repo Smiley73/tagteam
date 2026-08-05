@@ -43,6 +43,25 @@ export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) 
     );
   }
 
+  // --match-head-commit pins what is merged; it says nothing about what it is
+  // merged *into*. A base that moved since the review — an earlier spec landing,
+  // or a push from outside — means the result is a combination nobody looked at.
+  // Stopping is the whole policy here: there is no automatic rebase, because a
+  // rebase produces a new commit and every gate was bound to the old one.
+  if (state.base) {
+    const current = spawnSync("git", ["-C", repo, "rev-parse", `origin/${state.base}`], { encoding: "utf8", shell: false });
+    const baseOid = current.stdout?.trim();
+    if (current.status !== 0 || !baseOid) {
+      throw new Error(`could not read origin/${state.base}: ${(current.stderr || "").trim()}`);
+    }
+    if (baseOid !== state.baseOid) {
+      throw new Error(
+        `origin/${state.base} moved from ${state.baseOid.slice(0, 12)} to ${baseOid.slice(0, 12)} since this candidate was reviewed;`
+        + " rebase and re-review, or merge it yourself. Nothing was merged."
+      );
+    }
+  }
+
   const argv = [
     "pr", "merge", String(pr.number),
     "--squash",
