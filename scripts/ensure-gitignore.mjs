@@ -25,7 +25,10 @@ export const MANAGED_ENTRIES = [
   { pattern: ".tagteam/plans/*/work/", probe: ".tagteam/plans/slug/work/review/codex.json" },
   { pattern: ".tagteam/**/.codex-slots/", probe: ".tagteam/plans/slug/.codex-slots/slot-0/owner.json" },
   { pattern: ".tagteam/**/.codex-artifact-locks/", probe: ".tagteam/plans/slug/work/.codex-artifact-locks/a/owner.json" },
-  { pattern: ".tagteam/**/.quota/", probe: ".tagteam/plans/slug/.quota/gpt-high.json" }
+  // A stand-in basename, not a real digest: `scripts/codex.mjs` names its quota
+  // state file after sha256 of the model and effort, truncated to its first 32
+  // characters, so any real name is 32 lowercase hex characters plus `.json`.
+  { pattern: ".tagteam/**/.quota/", probe: ".tagteam/plans/slug/.quota/0123456789abcdef0123456789abcdef.json" }
 ];
 
 // `/tagteam:init` runs `codegraph init` when the user opts in, which creates

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   BEGIN, CODEGRAPH_ENTRY, END, MANAGED_ENTRIES, ensureGitignore, renderGitignore
 } from "../scripts/ensure-gitignore.mjs";
@@ -164,6 +165,39 @@ test("a comment that introduces both absorbed and surviving rules is left unrepo
   ].join("\n"));
   assert.deepEqual(rendered.removedDuplicates, [".tagteam/locks/"]);
   assert.deepEqual(rendered.orphanedComments, []);
+});
+
+// The probe is the only place in the repository that shows what a quota file
+// looks like, and it named a scheme that stopped existing when the quota key
+// became a hash. Both halves matter: the probe must keep the shape the code
+// writes, and the pattern must stay directory-wide so a quota file with an
+// unexpected basename can never go untracked and unignored.
+//
+// `scripts/codex.mjs` is the source of truth for the derivation below; this
+// test duplicates it, so a change to how the key is built leaves this green.
+test("the quota probe shows the hashed basename codex.mjs writes, and the pattern is not filename-aware", () => {
+  const entry = MANAGED_ENTRIES.find((candidate) => candidate.pattern === ".tagteam/**/.quota/");
+  assert.ok(entry, "the .quota pattern must still be managed");
+  assert.equal(path.basename(path.dirname(entry.probe)), ".quota");
+  assert.match(path.basename(entry.probe), /^[0-9a-f]{32}\.json$/);
+
+  const dir = repo();
+  ensureGitignore(dir);
+  const key = createHash("sha256").update(`some-other-model\u0000low`).digest("hex").slice(0, 32);
+  // A real quota filename, plus two basenames no derivation produces: the
+  // pattern matches the directory, so what sits beneath it must not matter.
+  // Narrowing it to `.quota/*.json`, or to a hex glob, fails the last two.
+  const quotaPaths = [
+    `.tagteam/plans/slug/.quota/${key}.json`,
+    ".tagteam/plans/slug/.quota/leftover",
+    ".tagteam/plans/slug/.quota/notes.txt"
+  ];
+  const result = spawnSync("git", ["-C", dir, "check-ignore", "--no-index", "--", ...quotaPaths], { encoding: "utf8" });
+  assert.deepEqual(
+    result.stdout.trim().split("\n"),
+    quotaPaths,
+    "everything under a .quota directory must be ignored, whatever its basename"
+  );
 });
 
 test("rendering keeps every user line, ends with exactly one newline, and needs no file to exist", () => {

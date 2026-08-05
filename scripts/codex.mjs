@@ -323,7 +323,11 @@ export async function runCodex(options) {
     }
   }
 
-  const slot = await acquireSlot(path.resolve(options.slots), options.maxConcurrent);
+  const slotsRoot = path.resolve(options.slots);
+  // Slot bookkeeping goes under `.codex-slots/` so the managed .gitignore
+  // pattern `.tagteam/**/.codex-slots/` covers it: the --slots root is a plan or
+  // ship directory, where a bare `slot-N` would be untracked and unignored.
+  const slot = await acquireSlot(path.join(slotsRoot, ".codex-slots"), options.maxConcurrent);
   // Two calls must never write one artifact path concurrently.
   const artifactLock = await acquireLock(
     path.join(path.dirname(artifact), ".codex-artifact-locks"),
@@ -334,7 +338,7 @@ export async function runCodex(options) {
   // a free string, and enough `../` segments in it would resolve this path
   // outside the slot root — where a successful run then unlinks it.
   const quotaKey = sha256(`${options.model}\u0000${options.effort}`).slice(0, 32);
-  const quotaStatePath = path.join(path.resolve(options.slots), ".quota", `${quotaKey}.json`);
+  const quotaStatePath = path.join(slotsRoot, ".quota", `${quotaKey}.json`);
   try {
     let amendedPrompt = prompt;
     let invalidAttempts = 0;
