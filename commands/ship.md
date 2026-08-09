@@ -132,7 +132,10 @@ Never skip `guard-staged.mjs`, and never split that chain. It is the only thing
 between a copied `.env` and a push.
 
 The snapshot refuses on a dirty worktree, an empty diff, or a dirty primary
-checkout. Each of those is real; report it and move to the next spec.
+checkout. Each of those is real; report it and move to the next spec. Changes
+under `.tagteam/` do not count toward a dirty primary checkout — a plan running
+beside this ship writes its committable artifacts there, and that is not the
+tree moving under the review.
 
 ### 4. Verify
 
