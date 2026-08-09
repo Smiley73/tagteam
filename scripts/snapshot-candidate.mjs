@@ -38,6 +38,50 @@ function matchKeywords(config, addedLines) {
   return [...keywords].filter((keyword) => haystack.includes(keyword.toLocaleLowerCase())).sort();
 }
 
+// `git status --porcelain -z` emits two status characters, a space, then the
+// path, NUL-terminated. A rename or copy appends the source path as a second
+// NUL-terminated field, destination first. `-z` is what makes this parseable at
+// all: the newline form quotes and backslash-escapes any path that is not plain
+// ASCII, so a filename with a space or a quote in it cannot be split back out.
+export function parsePorcelain(output) {
+  const fields = String(output).split("\0");
+  const entries = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    if (fields[index] === "") continue;
+    const status = fields[index].slice(0, 2);
+    const paths = [fields[index].slice(3)];
+    if (status.includes("R") || status.includes("C")) {
+      index += 1;
+      if (index < fields.length && fields[index] !== "") paths.push(fields[index]);
+    }
+    entries.push({ status, paths });
+  }
+  return entries;
+}
+
+const TAGTEAM_STATE = ".tagteam/";
+
+// What the primary-checkout gate below is actually asserting is that no code
+// moved under the review while it ran. A plan artifact is not that.
+//
+// `/tagteam:plan` writes goal.md, plan.md, specs/ and approved.json into the
+// primary checkout on purpose — they are the committable record a ship runs
+// from, so unlike ships/, worktrees/ and locks/ they cannot be gitignored — and
+// until someone commits them they sit there untracked. That made every ship
+// abort the moment a plan ran beside it, which is the whole point of running
+// them in parallel.
+//
+// Entries wholly inside `.tagteam/` are dropped. A rename that crosses the
+// boundary in either direction keeps both of its paths and stays: moving a file
+// out of `.tagteam/` into the tree, or the reverse, is a real change to the
+// working tree and the gate should still catch it.
+export function primaryStatus(output) {
+  return parsePorcelain(output)
+    .filter((entry) => !entry.paths.every((file) => normalizeRepoPath(file).startsWith(TAGTEAM_STATE)))
+    .map((entry) => `${entry.status} ${entry.paths.join(" <- ")}`)
+    .join("\n");
+}
+
 function blobAt(cwd, oid, file) {
   const result = git(cwd, ["rev-parse", `${oid}:${file}`], { allowFailure: true });
   return result.status === 0 ? result.stdout.trim() : null;
@@ -152,7 +196,7 @@ export function snapshotCandidate(options) {
   const matchedKeywords = matchKeywords(config, addedLines);
   const worktreeHead = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
   const worktreeStatus = git(worktree, ["status", "--porcelain"]).stdout;
-  const treeClean = git(primary, ["status", "--porcelain"]).stdout;
+  const treeClean = primaryStatus(git(primary, ["status", "--porcelain", "-z"]).stdout);
   if (worktreeHead !== candidateOid) {
     throw new Error(`shipping worktree HEAD ${worktreeHead} does not match candidate ${candidateOid}`);
   }
@@ -160,7 +204,9 @@ export function snapshotCandidate(options) {
     throw new Error(`shipping worktree changed after the candidate commit:\n${worktreeStatus}`);
   }
   if (baseOid === candidateOid || fullDiff.length === 0) throw new Error("candidate snapshot is empty; implementation was not committed");
-  if (treeClean !== "") throw new Error(`the primary checkout changed during the ship:\n${treeClean}`);
+  if (treeClean !== "") {
+    throw new Error(`the primary checkout changed during the ship (tagteam's own state under .tagteam/ is not counted):\n${treeClean}`);
+  }
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const reviewDiffPath = path.join(outDir, "review.diff");
   writeImmutable(reviewDiffPath, reviewDiff);
