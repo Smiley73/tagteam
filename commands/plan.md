@@ -199,9 +199,10 @@ each one, the note that Codex and the adversary run on every spec regardless, an
 the count of anything left unanswered. Say that the lens selection lives in each
 spec's front matter and is editable there, the way `goal.md` was.
 
-Give each lens as what it reads for rather than only as its name — "a reader
-checking that the failure paths behave" lands where `error-handling` does not,
-and this is the only screen where the choice is still theirs to change.
+Give each lens as what it reads for *and* by name — "a reader checking that the
+failure paths behave (`error-handling`)". The description is what makes the
+choice decidable here; the name is what they will search the front matter for
+when they change it later, so dropping either one costs them something.
 
 **Say nothing about how large anything is.** There is no size check, and there is
 not meant to be one. Plan size is shaped where it is written — the drafting brief

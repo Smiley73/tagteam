@@ -171,7 +171,7 @@ a new commit appears — and the fix round always makes one.
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
-| `recheck.mjs` | Settle findings after the fix round |
+| `recheck.mjs` | Settle findings after the fix round; `--print <review.json>` re-renders a settled one |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
@@ -208,15 +208,20 @@ fixer. None of them is a reason to answer one way rather than the other.
   with the diff, a findings file, or `state.json` beside it is not a question
   yet. A pull request link is for afterwards, not for understanding what you
   asked.
-- **Drop the vocabulary of the run**: finding ids, lens names, severities, gate
-  and state names, schema fields, commit oids. "Nothing in this change has a test
-  that runs it" rather than `verify: not-applicable`.
+- **Drop the vocabulary of the run**: finding ids, severities, gate and state
+  names, schema fields, commit oids. "Nothing in this change has a test that runs
+  it" rather than `verify: not-applicable`.
 - **Offer actions, not verdicts.** "Merge it anyway" and "Send it back" are
   choices a person can make; "Override" and "Reject" ask them to translate first.
   Each description says what happens next if they pick it.
 
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts.
+A lens name is one of these: it is a value they set in `reviewers.default` and
+edit in a spec's front matter, so say what the lens reads for *and* name it
+wherever they might go looking for it afterwards. Naming a thing they will have
+to find again is being useful; naming a thing only this run knows about is not.
+
 This is a rule about your internal coordinates, not a licence to be vague: a
 question that says "some of the error paths" where it could have said "what
 happens when the payment provider times out" is the same failure in the other
@@ -228,7 +233,10 @@ The orchestrator's context is the scarce resource, and running out of it
 mid-train is the failure this design exists to avoid. Three rules:
 
 1. **Never read `review.diff`, a findings file, or a spec body yourself.** Pass
-   paths. `collect-findings.mjs` exists so findings arrive as a summary.
+   paths. `collect-findings.mjs` exists so findings arrive as a summary, and
+   `recheck.mjs --print` gives that summary back to a session that resumed after
+   the one which produced it ended — that is the way to describe an open finding
+   to a person, not opening the file it came from.
 2. **Plan and ship in separate sessions.** The interview loads repository
    material that shipping does not need.
 3. **Stop between specs when context is tight**, report where you got to, and

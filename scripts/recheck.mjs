@@ -29,6 +29,9 @@ function parseArgs(argv) {
     if (value === undefined) throw new Error(`${key} requires a value`);
     options[key.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
   }
+  // `--print` re-renders a settled review and settles nothing, so none of the
+  // inputs settling needs are required with it.
+  if (options.print) return options;
   for (const required of ["review", "dir", "candidate", "out", "adversary"]) {
     if (!options[required]) throw new Error(`--${required} is required`);
   }
@@ -183,9 +186,60 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
   };
 }
 
+// Every string on a summary line was written by a model, and the summary is a
+// table someone reads to decide what to do. A `detail` carrying a newline can
+// draw rows in that table which no reviewer raised, and `detail` is bounded by
+// nothing but `minLength: 1`. One line, clipped: the file it came from still
+// holds the whole thing, and the orchestrator's context is the scarce resource.
+const oneLine = (text, limit = 240) => {
+  const flat = String(text).replace(/\s+/g, " ").trim();
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+};
+
+export function summaryLines(result) {
+  const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open`];
+  for (const gap of result.missing) lines.push(`  MISSING  ${gap.lens}: ${oneLine(gap.reason)}`);
+  for (const finding of result.findings) {
+    // `recorded` is neither of the other two: not open, and not resolved by
+    // anyone — it never gated, so nobody was asked to fix it. Printing it as
+    // OPEN would stop a pull request that has nothing wrong with it, and as
+    // resolved would claim work that never happened.
+    const state = finding.gating === false ? "recorded" : finding.resolved ? "resolved" : "OPEN";
+    lines.push(`  ${finding.id.padEnd(22)} ${state.padEnd(8)} ${finding.severity.padEnd(8)} ${oneLine(finding.title)}`);
+    // Only for the ones still open, and only because of who reads them next.
+    // A finding that survives the re-check stops the pull request and sends a
+    // person a question, and the orchestrator never opens a findings file — so
+    // without this line the most it can tell them is a title and a path, and a
+    // path is not a reason to keep a change out of the base branch. `detail` is
+    // the behaviour that goes wrong, which is the only part they can decide
+    // about. Resolved and recorded findings do not get one: nobody is being
+    // asked about those, and this file's whole point is staying small.
+    if (state === "OPEN" && finding.detail) lines.push(`    ${oneLine(finding.detail)}`);
+  }
+  const carry = result.findings.filter((finding) => finding.gating === false);
+  if (carry.length > 0) {
+    lines.push(`  ${carry.length} adversary finding(s) recorded and not gating — name them in the pull request body`);
+  }
+  return lines;
+}
+
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
+    // Re-render a review that was already settled, in a session that did not
+    // settle it. A ship resuming at a spec that already has a pull request goes
+    // straight to the merge decision, where it has to tell a person what is
+    // still open — and the summary from the run that produced it is in a context
+    // that ended. Nothing is recomputed and nothing is written; without this the
+    // only source is a findings file, which the orchestrator may not open.
+    if (options.print) {
+      const settled = JSON.parse(fs.readFileSync(path.resolve(options.print), "utf8"));
+      process.stdout.write(`${summaryLines(settled).join("\n")}\n`);
+      // Exit 0 even when findings are open: printing is what was asked for and
+      // it succeeded. The verdict belongs to `gates.mjs evaluate`, which is what
+      // the merge decision actually reads.
+      return;
+    }
     const here = path.dirname(new URL(import.meta.url).pathname);
     const schemaPath = options.schema ?? path.resolve(here, "..", "schemas", "recheck.schema.json");
     const review = JSON.parse(fs.readFileSync(path.resolve(options.review), "utf8"));
@@ -201,30 +255,7 @@ async function main() {
     fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
     fs.writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
 
-    const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open`];
-    for (const gap of result.missing) lines.push(`  MISSING  ${gap.lens}: ${gap.reason}`);
-    for (const finding of result.findings) {
-      // `recorded` is neither of the other two: not open, and not resolved by
-      // anyone — it never gated, so nobody was asked to fix it. Printing it as
-      // OPEN would stop a pull request that has nothing wrong with it, and as
-      // resolved would claim work that never happened.
-      const state = finding.gating === false ? "recorded" : finding.resolved ? "resolved" : "OPEN";
-      lines.push(`  ${finding.id.padEnd(22)} ${state.padEnd(8)} ${finding.severity.padEnd(8)} ${finding.title}`);
-      // Only for the ones still open, and only because of who reads them next.
-      // A finding that survives the re-check stops the pull request and sends a
-      // person a question, and the orchestrator never opens a findings file — so
-      // without this line the most it can tell them is a title and a path, and a
-      // path is not a reason to keep a change out of the base branch. `detail` is
-      // the behaviour that goes wrong, which is the only part they can decide
-      // about. Resolved and recorded findings do not get one: nobody is being
-      // asked about those, and this file's whole point is staying small.
-      if (state === "OPEN" && finding.detail) lines.push(`${" ".repeat(4)}${finding.detail}`);
-    }
-    const carry = result.findings.filter((finding) => finding.gating === false);
-    if (carry.length > 0) {
-      lines.push(`  ${carry.length} adversary finding(s) recorded and not gating — name them in the pull request body`);
-    }
-    process.stdout.write(`${lines.join("\n")}\n`);
+    process.stdout.write(`${summaryLines(result).join("\n")}\n`);
     if (result.status !== "clean") process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
