@@ -47,6 +47,17 @@ wherever real options exist, with the trade-off stated in each description. Free
 text only where options would be invented. Put a sketch in `preview` for anything
 about an interface.
 
+**Ask in the product's words, not the repository's.** The exploration told you
+which modules own this and what they do today; that is how you know what is worth
+asking, and it is almost never what the question should say. "If someone mistypes
+their address, should they be able to start over straight away or wait out the
+cooldown?" is answerable on the spot. "Should `requestRecovery` clear
+`attemptsRemaining` when `emailVerified` is false?" is the same decision written
+as a diff — they have to reconstruct what it means for a person using the thing
+before they can have an opinion, and the answer is worse for it. Symbols, paths
+and line numbers belong in your own notes and in `goal.md`'s reasoning, not in
+what you put on the screen. See *Asking* in the skill.
+
 **Product and interface decisions are always theirs.** Never decide what
 something looks like, what it is called, or how a person moves through it.
 
@@ -136,8 +147,11 @@ owner settled cannot hold. A revision cannot fix that, because the goal is not
 yours to revise.
 
 **Ask.** One `AskUserQuestion` naming what the reviewer found, what it means for
-the goal, and the options. Do not decide it yourself and do not record your
-decision in `goal.md` — a hole a reviewer found is exactly the kind of thing the
+the goal, and the options — put as the hole it is, in your own words: what the
+outcome does not settle, and what turns on settling it either way. Which of the
+three readers raised it, at what severity, against which deliverable number is
+how it reached you, and none of it helps them answer. Do not decide it yourself
+and do not record your decision in `goal.md` — a hole a reviewer found is exactly the kind of thing the
 owner would have answered differently, which is why it reached them as a question
 in the first place rather than as a fact.
 
@@ -184,6 +198,11 @@ Show: the deliverables in dependency order, the lenses `specs.mjs` resolved for
 each one, the note that Codex and the adversary run on every spec regardless, and
 the count of anything left unanswered. Say that the lens selection lives in each
 spec's front matter and is editable there, the way `goal.md` was.
+
+Give each lens as what it reads for *and* by name — "a reader checking that the
+failure paths behave (`error-handling`)". The description is what makes the
+choice decidable here; the name is what they will search the front matter for
+when they change it later, so dropping either one costs them something.
 
 **Say nothing about how large anything is.** There is no size check, and there is
 not meant to be one. Plan size is shaped where it is written — the drafting brief

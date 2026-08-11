@@ -42,9 +42,11 @@ that runs out.
 ### Planning
 
 1. **Interview.** Questions in batches, informed by reading the repository first.
-   Multiple choice where there are real options. Product and interface decisions
-   are always yours; when you have no preference, tagteam decides and records the
-   reasoning and what it rejected.
+   Multiple choice where there are real options. Questions are about the outcome
+   and asked in plain language — the symbols, paths and line numbers behind them
+   stay in the notes, so answering never means opening a file. Product and
+   interface decisions are always yours; when you have no preference, tagteam
+   decides and records the reasoning and what it rejected.
 2. **Goal gate.** The interview writes `goal.md`. You read it, edit it if it is
    wrong, and everything downstream binds to the file rather than to the
    conversation.
