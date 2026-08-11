@@ -48,7 +48,10 @@ train.
 
 ## Then ask
 
-Batch these; do not ask one at a time.
+Batch these; do not ask one at a time. Ask what each setting *does*, never what
+it is called — "how long should a pull request wait for its checks before this
+stops to ask you?" rather than `ciWaitSec`. The key names are in the file you
+show at the end, which is where they are useful. See *Asking* in the skill.
 
 1. Confirm the inferred verify commands and setup commands. Show them.
 2. `models` and `effort` for `lead`, `worker`, `codex`. Offer the defaults —

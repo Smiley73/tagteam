@@ -25,7 +25,8 @@ code and findings; you never let a diff or a findings body into your own context
    `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"` when you
    finish or stop for any reason.
 
-   Already held: **say who holds it and ask.** A session that was killed rather
+   Already held: **say who holds it and ask** — which plan holds it and since
+   when, not the contents of the lock file. A session that was killed rather
    than stopped leaves the lock behind, and it does not go stale for six hours, so
    "another ship is running" and "a dead ship left this here" look identical from
    the outside and only a person can tell them apart. If they confirm the other
@@ -92,7 +93,8 @@ Otherwise, by state:
   restart from step 3 (commit and snapshot) against whatever is committed there.
 - `publishing`, `awaiting-approval` — a pull request exists. Go to step 9 and
   evaluate; do not re-implement anything.
-- `failed` — say what failed and ask before doing anything.
+- `failed` — say what this spec was delivering and what stopped it, in a
+  sentence a person can act on, and ask before doing anything.
 - `merged` — skip it entirely; you should not have reached this step.
 
 Only for a genuinely new or `pending` spec:
@@ -333,6 +335,17 @@ Not ready: `gates.mjs state ... awaiting-approval`,
 the reasons, the PR link, and the open findings, and ask Approve and merge /
 Leave it open and continue / Stop the train.
 
+**Say all of it in plain English**: what this spec set out to deliver, why it
+stopped, and one sentence per open finding on what goes wrong and for whom. You
+have that sentence — `recheck.mjs` prints each open finding's detail under its
+title for exactly this. What you must not pass on is the shape it arrived in:
+`correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
+and the person deciding whether this merges is not going to open the file. They
+are deciding whether the behaviour is acceptable, so describe the behaviour. The
+same goes for the gate that fired — "nothing in this change has a test that runs
+it, so nothing was proved by running one" rather than
+`verification-not-applicable`. See *Asking* in the skill.
+
 Approved: record the human gate against the current OID and merge. Merge refused
 for any reason — a moved base, a protection rule, a failing check — stop and
 report it. Do not rebase and merge something nobody looked at.
@@ -356,4 +369,6 @@ what stopped and why.
 
 Never read `review.diff` or a findings file. Never re-derive the reviewed commit
 with `git rev-parse HEAD` — after the fix round that is a different commit, and
-`state.json` holds the right one. Never merge without `merge.mjs`.
+`state.json` holds the right one. Never merge without `merge.mjs`. Never put a
+finding id, a commit oid, a gate name, or a file-and-line coordinate into a
+question or into the text around one.

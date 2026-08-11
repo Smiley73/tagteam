@@ -453,6 +453,44 @@ test("the recheck summary distinguishes recorded from open and from resolved", a
   assert.match(result.stdout, /adversary\.1\s+recorded\s+minor\s+worth knowing about/);
   assert.match(result.stdout, /1 adversary finding\(s\) recorded and not gating/);
   assert.doesNotMatch(result.stdout, /adversary\.1\s+OPEN/);
+  // A recorded finding stops nothing and nobody is asked about it, so it does
+  // not get the extra line the open ones get.
+  assert.doesNotMatch(result.stdout, /two concurrent callers/);
+});
+
+test("a still-open finding prints what goes wrong, not only its title", async () => {
+  // The orchestrator never opens a findings file, and an open finding is exactly
+  // the thing it has to describe to a person deciding whether to merge anyway. A
+  // title and a path do not say what the person would be accepting.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-open-detail-"));
+  const verdicts = path.join(base, "recheck");
+  fs.mkdirSync(verdicts);
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "correctness.1", resolved: true, evidence: "fixed" },
+    { id: "correctness.2", resolved: false, evidence: "still there" }
+  ])));
+  const adv = path.join(base, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  const reviewPath = path.join(base, "review.json");
+  fs.writeFileSync(reviewPath, JSON.stringify({
+    ...review,
+    // The real thing carries the whole finding forward, detail included; the
+    // shared fixture above is trimmed to what the other cases need.
+    open: review.open.map((entry) => ({ ...finding({ title: entry.title, severity: entry.severity }), ...entry }))
+  }));
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", path.join(base, "out.json")
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 1, "an open finding is not clean");
+  assert.match(result.stdout, /correctness\.2\s+OPEN/);
+  assert.match(result.stdout, /\n\s+two concurrent callers between the read and the write\n/);
+  // The resolved one is settled; its detail would be noise.
+  assert.equal(result.stdout.match(/two concurrent callers/g).length, 1);
 });
 
 test("re-running the recheck in place does not inflate the tally", async () => {

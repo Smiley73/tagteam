@@ -210,6 +210,15 @@ async function main() {
       // resolved would claim work that never happened.
       const state = finding.gating === false ? "recorded" : finding.resolved ? "resolved" : "OPEN";
       lines.push(`  ${finding.id.padEnd(22)} ${state.padEnd(8)} ${finding.severity.padEnd(8)} ${finding.title}`);
+      // Only for the ones still open, and only because of who reads them next.
+      // A finding that survives the re-check stops the pull request and sends a
+      // person a question, and the orchestrator never opens a findings file — so
+      // without this line the most it can tell them is a title and a path, and a
+      // path is not a reason to keep a change out of the base branch. `detail` is
+      // the behaviour that goes wrong, which is the only part they can decide
+      // about. Resolved and recorded findings do not get one: nobody is being
+      // asked about those, and this file's whole point is staying small.
+      if (state === "OPEN" && finding.detail) lines.push(`${" ".repeat(4)}${finding.detail}`);
     }
     const carry = result.findings.filter((finding) => finding.gating === false);
     if (carry.length > 0) {

@@ -187,6 +187,41 @@ a new commit appears — and the fix round always makes one.
 | `notify.mjs` | Desktop notification when a run needs a person |
 | `status.mjs` | Inventory for `/tagteam:status` |
 
+## Asking
+
+Every question a person is asked comes out of a command file, and those
+questions are most of what anyone ever sees of a run. Write each one the way you
+would say it to a colleague who knows this codebase well and has not read a line
+of this run's bookkeeping.
+
+Assume a strong technical background, and notice how little of it helps here.
+They know what a race condition is; they do not know that `correctness.2` is the
+id you gave one, that `9f2c1ab` is the commit you would merge, or what line 214
+of a file they have not opened says. Those are coordinates for dispatching a
+fixer. None of them is a reason to answer one way rather than the other.
+
+- **Say what happens, not where it lives.** "Someone can ask for a second
+  recovery email before the first expires, so one address can be flooded" is the
+  finding. `src/auth/recovery.ts:214 — unbounded resend` is its address, and
+  looking an address up is work you have already done for them.
+- **Never make them open something to answer.** A question that only makes sense
+  with the diff, a findings file, or `state.json` beside it is not a question
+  yet. A pull request link is for afterwards, not for understanding what you
+  asked.
+- **Drop the vocabulary of the run**: finding ids, lens names, severities, gate
+  and state names, schema fields, commit oids. "Nothing in this change has a test
+  that runs it" rather than `verify: not-applicable`.
+- **Offer actions, not verdicts.** "Merge it anyway" and "Send it back" are
+  choices a person can make; "Override" and "Reject" ask them to translate first.
+  Each description says what happens next if they pick it.
+
+Names they own are theirs and belong in the question — a file they wrote, a
+command they configured, a branch, the product's own words for its own parts.
+This is a rule about your internal coordinates, not a licence to be vague: a
+question that says "some of the error paths" where it could have said "what
+happens when the payment provider times out" is the same failure in the other
+direction.
+
 ## Context
 
 The orchestrator's context is the scarce resource, and running out of it

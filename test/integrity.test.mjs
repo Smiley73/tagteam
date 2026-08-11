@@ -115,6 +115,18 @@ test("every flag a command passes is one its script accepts", () => {
   assert.deepEqual(failures, [], failures.join("\n"));
 });
 
+// The rule about how questions are worded lives in one place and is pointed at
+// from every command that asks one. A pointer to a section that has been renamed
+// away sends the orchestrator looking and finding nothing, which is how a rule
+// stops applying without anyone deciding that it should.
+test("every command that asks a person something points at the Asking rule", () => {
+  assert.match(skill, /^## Asking$/m, "SKILL.md no longer has an Asking section");
+  for (const { file, text } of commands) {
+    if (!text.includes("AskUserQuestion")) continue;
+    assert.match(text, /\*Asking\* in the skill/, `commands/${file} asks questions but never points at the Asking rule`);
+  }
+});
+
 test("the ship command never re-derives the reviewed commit from HEAD", () => {
   const ship = read("commands", "ship.md");
   const bash = [...ship.matchAll(/```bash\n([\s\S]*?)```/g)].map(([, body]) => body).join("\n");
