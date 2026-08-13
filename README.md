@@ -14,6 +14,18 @@ It is for changes big enough that you want them delegated and not so opaque that
 you cannot check them. Every decision you make is written to a file you can edit.
 Every merge happens at the exact commit that was reviewed.
 
+```mermaid
+---
+title: From a rough idea to merged pull requests
+---
+flowchart LR
+    idea(["A rough idea"]) --> plan["/tagteam:plan<br>interview · draft · review · specs"]
+    plan --> artifacts[("Approved plan<br>goal.md · plan.md · specs/")]
+    artifacts --> ship["/tagteam:ship<br>implement · review · verify · merge"]
+    ship --> merged(["Merged pull requests"])
+    ship --> waiting(["Pull requests that wait for you"])
+```
+
 ## Install
 
 Requires Claude Code, Git, the [Codex CLI](https://github.com/openai/codex), and
@@ -41,6 +53,41 @@ that runs out.
 
 ### Planning
 
+```mermaid
+---
+title: The plan cycle
+---
+flowchart TD
+    orient["Orient — an Explore agent reads the repository first"]
+    interview["Interview — batched questions until nothing material is ambiguous"]
+    goal["Goal gate — you read goal.md, edit it if it is wrong, approve it"]
+    draft["Draft — one plan-drafter writes plan.md"]
+    claude["Claude reviewer"]
+    codex["Codex reviewer"]
+    adversary["Adversary"]
+    revise["One revision — the blocking and major findings folded in"]
+    specs["Specs — one spec-writer per deliverable, in parallel"]
+    approve["Approve — one question: Approve / Adjust / Stop"]
+
+    orient --> interview
+    interview --> goal
+    goal --> draft
+    subgraph review["One review round — no convergence loop"]
+        claude
+        codex
+        adversary
+    end
+    draft --> claude
+    draft --> codex
+    draft --> adversary
+    claude --> revise
+    codex --> revise
+    adversary --> revise
+    revise -. "a finding against the goal itself:<br>you answer, goal.md changes,<br>the gate re-opens and re-closes" .-> goal
+    revise --> specs
+    specs --> approve
+```
+
 1. **Interview.** Questions in batches, informed by reading the repository first.
    Multiple choice where there are real options. Questions are about the outcome
    and asked in plain language — the symbols, paths and line numbers behind them
@@ -63,6 +110,51 @@ that runs out.
 Per spec, in dependency order: branch, implement, verify, review, fix once,
 re-check, publish, merge.
 
+```mermaid
+---
+title: The ship cycle, per spec
+---
+flowchart TD
+    branch["Branch — from the base, in a dedicated worktree"]
+    implement["Implement — one implementer, given only the spec"]
+    snapshot["Commit + snapshot — the candidate commit every gate binds to"]
+    verify["Verify — executable evidence, recorded as a gate"]
+    lenses["One reviewer per lens"]
+    codexr["Codex cross-review"]
+    open{"Anything open?"}
+    fixer["Fix, once — a fixer gets the blocking and major findings, nothing else"]
+    rebind["New commit — re-snapshot, re-verify; every gate clears"]
+    adv["Adversary — reads the final diff fresh"]
+    recheck["Re-check — each reviewer that raised a finding judges its own against the new code"]
+    publish["Publish — push, open the pull request, wait for CI"]
+    outcome["Merge, or stop and wait — the gates decide, below"]
+
+    branch --> implement
+    implement --> snapshot
+    snapshot --> verify
+    subgraph panel["Review panel, in parallel"]
+        lenses
+        codexr
+    end
+    verify --> lenses
+    verify --> codexr
+    lenses --> open
+    codexr --> open
+    open -->|"yes"| fixer
+    fixer --> rebind
+    subgraph final["Fresh eyes on the final diff"]
+        adv
+        recheck
+    end
+    open -->|"no"| adv
+    rebind --> adv
+    rebind --> recheck
+    adv --> publish
+    recheck --> publish
+    publish -. "CI red — one repair, then the new<br>candidate runs the whole cycle again" .-> snapshot
+    publish --> outcome
+```
+
 The review panel is the spec's lenses plus a Codex cross-review. After the single
 fix round, each reviewer that raised a finding re-checks its own findings against
 the new code, and an adversary reads the fixed diff fresh. Anything still open
@@ -75,6 +167,23 @@ produced no usable evidence**, or `.github/workflows/` changed.
 That fourth one matters more than it sounds: an absent or malformed findings file
 yields an empty finding set, and an empty finding set otherwise reads as a clean
 review.
+
+```mermaid
+---
+title: Merge or stop
+---
+flowchart TD
+    evaluate{"gates.mjs evaluate — code, not judgement"}
+    merge["Merged unattended, at exactly the reviewed commit"]
+    wait["Stops and waits — approve and merge, leave it open, or stop the train"]
+
+    evaluate -->|"every gate satisfied"| merge
+    evaluate -->|"the spec is user-visible"| wait
+    evaluate -->|"verification failed or proved nothing"| wait
+    evaluate -->|"a finding is still open"| wait
+    evaluate -->|"a reviewer produced no usable evidence"| wait
+    evaluate -->|".github/workflows/ changed"| wait
+```
 
 ## How it is built
 
@@ -119,6 +228,9 @@ npm test
 ```
 
 Node built-ins only, no dependencies.
+
+The diagrams in this file are Mermaid source. GitHub renders them, and changing
+one is a text edit here, with no image files to regenerate.
 
 This repository self-hosts tagteam. Unless you start Claude Code with
 `--plugin-dir`, it runs the installed plugin snapshot rather than this working
