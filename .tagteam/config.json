@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": null,
@@ -43,5 +43,10 @@
     "setupTimeoutSec": 300
   },
   "reviewExclude": ["package-lock.json"],
-  "maxConcurrentCodex": 3
+  "maxConcurrentCodex": 3,
+  "limits": {
+    "fixRounds": 1,
+    "ciRepairs": 1,
+    "planReviewRounds": 1
+  }
 }

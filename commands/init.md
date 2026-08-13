@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 6. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 7. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -67,7 +67,8 @@ show at the end, which is where they are useful. See *Asking* in the skill.
    (`worktree.copyUntracked`) — most repositories have none.
 
 Everything else takes its default: `branchPrefix` `tagteam/`,
-`maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
+`maxConcurrentCodex` 3, `setupTimeoutSec` 900, `limits` at `fixRounds` 1,
+`ciRepairs` 1 and `planReviewRounds` 1, the full roster from
 `examples/config.json`.
 
 ## Write
@@ -78,11 +79,18 @@ node "$P/scripts/ensure-gitignore.mjs" --repo "$R" [--codegraph]
 ```
 
 Then show the file and say what it means: which commands prove a candidate, which
-lenses read every spec, and whether merges happen without asking.
+lenses read every spec, and whether merges happen without asking. The validator
+prints a `note:` line giving the worst-case cost the limits commit this
+repository to; show that line as it came out rather than restating the
+arithmetic, so what the person reads is what the code computes.
 
-`--reconfigure` re-runs the whole interview with the current values as defaults.
+`--reconfigure` re-runs the whole interview with the current values as defaults,
+and carries the existing `limits` forward unchanged. A repository that raised a
+limit deliberately must not have it quietly reset to 1 by a reconfigure that was
+about something else.
 
-A version-5 configuration is not upgraded — version 6 is a different shape. Say
-that the old file is being replaced, and what changed: the four role keys in
-`models` and `effort` collapse to three — planning and review agents now share
-`lead`, implementers and fixers use `worker`, and `codex` is unchanged.
+An older configuration is not upgraded — each version is a different shape, not
+an extension, and there is no migration. Say that the old file is being replaced,
+and what version 7 adds: a required `limits` object bounding fix rounds per spec,
+CI repairs per pull request, and plan review rounds per goal approval, all at 1,
+which is what the previous version did without saying so.
