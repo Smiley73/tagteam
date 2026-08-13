@@ -451,6 +451,11 @@ test("the note reports the worst-case panel count as a product", async () => {
   assert.match(note(1, 1), /\b4\b/);
   assert.match(note(2, 1), /\b6\b/);
   assert.match(note(3, 3), /\b16\b/);
+  // No ceiling in the schema means a limit can exceed what a double counts to.
+  // In floating point 1 + 9007199254740992 rounds back to itself and the note
+  // understates the product by two; 1e308 overflows to Infinity outright.
+  assert.match(note(9007199254740992, 1), /\b18014398509481986\b/);
+  assert.doesNotMatch(note(1e308, 1), /Infinity/);
 });
 
 test("limitNotices is safe on a document that has not passed shape validation", async () => {
@@ -469,6 +474,47 @@ test("the cost notices never become validation errors", async () => {
   const { semanticErrors } = await import("../scripts/validate-json.mjs");
   const expensive = { ...example, limits: { fixRounds: 9, ciRepairs: 9, planReviewRounds: 9 } };
   assert.deepEqual(semanticErrors("config.schema.json", expensive, {}), []);
+});
+
+test("validating the shipped configuration prints the cost note on stderr", () => {
+  // limitNotices returning the right strings is not the outcome; the outcome is
+  // that running the validator shows them. Deleting the stderr write in
+  // semanticErrors, or sending it to stdout, leaves every other test in this
+  // file green — and commands/init.md tells the model to show "the validator's
+  // own line" rather than restate the arithmetic, so the line has to exist.
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", root,
+    path.join(root, "schemas", "config.schema.json"),
+    path.join(root, ".tagteam", "config.json")
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /valid/);
+  const note = result.stderr.split("\n").find((line) => line.startsWith("note:"));
+  assert.ok(note, `expected a note: line on stderr, got: ${JSON.stringify(result.stderr)}`);
+  assert.match(note, /\b4\b/);
+});
+
+test("validating expensive limits prints a warning line per limit and still exits 0", () => {
+  // The warnings are advice, not errors: the exit code must stay 0 or a
+  // repository that deliberately raised its limits could not run a preflight.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-limits-"));
+  const configPath = path.join(dir, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    ...example,
+    limits: { fixRounds: 9, ciRepairs: 9, planReviewRounds: 9 }
+  }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "schemas", "config.schema.json"), configPath
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /valid/);
+  const warnings = result.stderr.split("\n").filter((line) => line.startsWith("warning:"));
+  assert.equal(warnings.length, 3, `expected three warnings, got: ${JSON.stringify(result.stderr)}`);
+  for (const key of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
+    assert.ok(warnings.some((line) => line.includes(key)), `expected a warning naming ${key}`);
+  }
+  assert.match(result.stderr, /^note:.*\b100\b/m);
 });
 
 test("a retired key and a declared key cannot be the same key", () => {

@@ -129,10 +129,18 @@ export function limitNotices(config) {
   const notices = named
     .filter(([, value]) => value > 5)
     .map(([label, value]) => `warning: ${label} is ${value}; above 5 a spec can run for a long time before it stops for a person`);
-  const panels = (1 + fixRounds) * (1 + ciRepairs);
+  // Bigint, because the schema has no ceiling on purpose: at `fixRounds` near
+  // Number.MAX_SAFE_INTEGER the sum rounds back to itself and the product is off
+  // by two, and at 1e308 it overflows to Infinity. A note that is only correct
+  // for small numbers is worse than none, since the large numbers are exactly
+  // the ones nobody can work out unaided. Every value here has already been
+  // checked with Number.isInteger, so BigInt() cannot throw.
+  const perCandidate = 1n + BigInt(fixRounds);
+  const cycles = 1n + BigInt(ciRepairs);
+  const panels = perCandidate * cycles;
   notices.push(
     `note: these limits allow at most ${panels} full review panels per spec `
-    + `(${1 + fixRounds} per candidate × ${1 + ciRepairs} candidate cycles) `
+    + `(${perCandidate} per candidate × ${cycles} candidate cycles) `
     + `and at most ${planReviewRounds} plan review round${planReviewRounds === 1 ? "" : "s"} per goal approval`
   );
   return notices;
