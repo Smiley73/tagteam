@@ -42,12 +42,13 @@ what is on disk and continues from the first thing that is not done.
 
 ## Configuration
 
-`.tagteam/config.json`, version 6, validated by
+`.tagteam/config.json`, version 7, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:init` and stop. There is no migration: version 6
-is a different shape, not an extension.
+tell the person to run `/tagteam:init` and stop. There is no migration: version 7
+requires keys an older file does not carry, and no key has a fallback in a
+script, so an older configuration is incomplete rather than upgradable.
 
 | Key | Meaning |
 |---|---|
@@ -63,6 +64,7 @@ is a different shape, not an extension.
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository |
+| `limits` | `fixRounds` (fix rounds per spec), `ciRepairs` (repairs of a red pull request), `planReviewRounds` (plan review rounds per goal approval). Each at least 1; all 1 is today's behaviour |
 
 `examples/config.json` is a complete file.
 

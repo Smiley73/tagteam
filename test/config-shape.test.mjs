@@ -31,6 +31,10 @@ const CONSUMED = [
   ["scripts/gates.mjs", ["autoMerge"]]
 ];
 
+// Keys older config shapes had and the current one does not. A key that comes
+// back — `limits` did — has to leave this list, or the guard below fails.
+const RETIRED = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "policyPaths"];
+
 const resolve = (object, dotted) => dotted.split(".").reduce((node, key) => node?.[key], object);
 
 test("every config key a script reads exists in the example and in the schema", () => {
@@ -44,11 +48,10 @@ test("every config key a script reads exists in the example and in the schema", 
 });
 
 test("no script still dereferences a key the schema removed", () => {
-  const gone = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "limits", "policyPaths"];
   const failures = [];
   for (const file of fs.readdirSync(path.join(root, "scripts")).filter((entry) => entry.endsWith(".mjs"))) {
     const source = fs.readFileSync(path.join(root, "scripts", file), "utf8");
-    for (const key of gone) {
+    for (const key of RETIRED) {
       const pattern = new RegExp(`config(?:uration)?[\\w.]*\\.${key.replace(".", "\\.")}\\b`);
       if (pattern.test(source)) failures.push(`${file} still reads config.${key}`);
     }
@@ -159,11 +162,11 @@ test("a version-5 configuration reports stale rather than invalid", async () => 
   assert.match(result.stdout, /run \/tagteam:init/);
 });
 
-test("a version-6 configuration carrying the old four role keys is invalid", async () => {
+test("a version-7 configuration carrying the old four role keys is invalid", async () => {
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 6,
+    version: 7,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { plan: "high", implement: "high", review: "high", codex: "high" }
   };
@@ -178,7 +181,7 @@ test("a version-6 configuration carrying the old four role keys is invalid", asy
   );
 });
 
-test("a version-6 configuration with one leftover old key alongside the new shape is invalid", async () => {
+test("a version-7 configuration with one leftover old key alongside the new shape is invalid", async () => {
   // The hybrid case: the new lead/worker/codex keys are all present and
   // correct, but one old key is left over. Only additionalProperties: false
   // catches this — required alone would not, since lead/worker/codex are
@@ -376,4 +379,130 @@ test("adversary and codex are roles, not lenses a configuration may select", asy
     assert.ok(errors.filter((error) => error.includes(reserved)).length >= 2, `reviewers.default containing "${reserved}" should be refused too`);
   }
   assert.deepEqual(semanticErrors("config.schema.json", example, {}), [], "the example must stay valid");
+});
+
+// --- version 7: the limits object ---
+
+test("a version-6 configuration reports stale rather than invalid", () => {
+  // The upgrade path every existing user takes. A v6 file is complete for v6 and
+  // merely missing `limits`, so "invalid" would read as a broken file; exit 3 is
+  // what routes the person to /tagteam:init instead.
+  const { limits, ...withoutLimits } = example;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v6-"));
+  const old = path.join(dir, "config.json");
+  fs.writeFileSync(old, JSON.stringify({ ...withoutLimits, version: 6 }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "schemas", "config.schema.json"), old
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /run \/tagteam:init/);
+});
+
+test("a version-7 configuration without limits is invalid", async () => {
+  // Catches `limits` being declared as a property but left off the root
+  // `required` list, which would make it optional and therefore invisible.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const { limits, ...withoutLimits } = example;
+  const errors = validateJson(schema, withoutLimits);
+  assert.ok(
+    errors.some((error) => error.includes("limits")),
+    `expected an error naming limits, got: ${errors.join("; ")}`
+  );
+});
+
+test("a limit below 1, a fractional limit, and an unknown limit key are all refused", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const errorsFor = (limits) => validateJson(schema, { ...example, limits }).filter((error) => error.includes("limits"));
+  for (const key of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
+    assert.ok(errorsFor({ ...example.limits, [key]: 0 }).length > 0, `limits.${key}: 0 should be refused`);
+    assert.ok(errorsFor({ ...example.limits, [key]: -1 }).length > 0, `limits.${key}: -1 should be refused`);
+    assert.ok(errorsFor({ ...example.limits, [key]: 1.5 }).length > 0, `limits.${key}: 1.5 should be refused`);
+    assert.ok(errorsFor({ ...example.limits, [key]: "2" }).length > 0, `limits.${key}: "2" should be refused`);
+  }
+  assert.ok(errorsFor({ ...example.limits, fixRound: 2 }).length > 0, "a misspelled limit must not pass silently");
+});
+
+test("a large limit validates and is warned about rather than refused", async () => {
+  // The ceiling is advice: someone who wants fifty fix rounds may have them, and
+  // hears about the cost. A schema maximum would make that a support question.
+  const { validateJson, limitNotices } = await import("../scripts/validate-json.mjs");
+  const generous = { ...example, limits: { ...example.limits, fixRounds: 50 } };
+  assert.deepEqual(validateJson(schema, generous), []);
+  assert.ok(limitNotices(generous).some((line) => line.startsWith("warning:") && line.includes("fixRounds")));
+});
+
+test("limitNotices warns above 5 and not at 5, once per offending limit", async () => {
+  const { limitNotices } = await import("../scripts/validate-json.mjs");
+  const warnings = (limits) => limitNotices({ ...example, limits }).filter((line) => line.startsWith("warning:"));
+  assert.equal(warnings({ fixRounds: 8, ciRepairs: 9, planReviewRounds: 7 }).length, 3);
+  assert.deepEqual(warnings({ fixRounds: 5, ciRepairs: 5, planReviewRounds: 5 }), []);
+});
+
+test("the note reports the worst-case panel count as a product", async () => {
+  // The arithmetic is the part a person will trust, so pin the number rather
+  // than the sentence. A CI repair restarts the cycle with a fresh fix budget,
+  // which is why fix rounds multiply by repairs instead of adding to them.
+  const { limitNotices } = await import("../scripts/validate-json.mjs");
+  const note = (fixRounds, ciRepairs) => limitNotices({
+    ...example,
+    limits: { fixRounds, ciRepairs, planReviewRounds: 1 }
+  }).find((line) => line.startsWith("note:"));
+  assert.match(note(1, 1), /\b4\b/);
+  assert.match(note(2, 1), /\b6\b/);
+  assert.match(note(3, 3), /\b16\b/);
+});
+
+test("limitNotices is safe on a document that has not passed shape validation", async () => {
+  // semanticErrors runs on those too, and the schema error is the better message
+  // there — a throw here would replace it with a stack trace.
+  const { limitNotices } = await import("../scripts/validate-json.mjs");
+  for (const candidate of [{}, { limits: null }, { limits: 3 }, { limits: [] }, { limits: { fixRounds: 1.5, ciRepairs: 1, planReviewRounds: 1 } }, { limits: { fixRounds: 1 } }]) {
+    assert.deepEqual(limitNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notices`);
+  }
+  assert.deepEqual(limitNotices(undefined), []);
+});
+
+test("the cost notices never become validation errors", async () => {
+  // They go to stderr and stay off the error list; a repository that chose
+  // expensive limits still validates.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const expensive = { ...example, limits: { fixRounds: 9, ciRepairs: 9, planReviewRounds: 9 } };
+  assert.deepEqual(semanticErrors("config.schema.json", expensive, {}), []);
+});
+
+test("a retired key and a declared key cannot be the same key", () => {
+  // `limits` was retired from an older shape and is live again. Leaving it on the
+  // retired list makes the next deliverable fail a test it did not break, with a
+  // message claiming the schema removed a key it defines.
+  const declared = new Set(Object.keys(schema.properties));
+  const both = RETIRED.filter((key) => declared.has(key));
+  assert.deepEqual(both, [], `${both.join(", ")} is both retired and declared`);
+});
+
+test("the shipped configurations state today's behaviour", () => {
+  // Raising a shipped limit would change the cost of every repository that
+  // copies this file, silently and at once.
+  const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
+  for (const [label, config] of [["examples/config.json", example], [".tagteam/config.json", own]]) {
+    assert.deepEqual(config.limits, { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 }, label);
+  }
+});
+
+test("the schema declares no default anywhere", () => {
+  // The whole refuse-don't-migrate decision rests on this: a default makes a
+  // missing key invisible, and the file stops being the whole configuration.
+  const defaults = [];
+  // `reviewers.default` is a property *name*, not the keyword; only the map a
+  // `properties` or `$defs` holds may legitimately contain one.
+  const walk = (node, pointer, isNameMap) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach((item, index) => walk(item, `${pointer}/${index}`, false));
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "default" && !isNameMap) defaults.push(pointer || "/");
+      walk(value, `${pointer}/${key}`, key === "properties" || key === "$defs");
+    }
+  };
+  walk(schema, "", false);
+  assert.deepEqual(defaults, [], `a default at ${defaults.join(", ")} would make a missing key invisible`);
 });

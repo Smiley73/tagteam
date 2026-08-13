@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 6",
+  "title": "tagteam project configuration, version 7",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "autoMerge", "worktree", "reviewExclude",
-    "maxConcurrentCodex"
+    "maxConcurrentCodex", "limits"
   ],
   "properties": {
-    "version": { "const": 6, "type": "integer" },
+    "version": { "const": 7, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -125,6 +125,28 @@
       "minimum": 1,
       "maximum": 16,
       "description": "How many Codex calls may run at once across this repository."
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixRounds", "ciRepairs", "planReviewRounds"],
+      "properties": {
+        "fixRounds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many rounds of fixes a candidate may take before the spec stops for a person. Each round is followed by a full review panel."
+        },
+        "ciRepairs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many times a red pull request may be repaired. Each repair produces a new candidate that runs the whole review cycle again with a fresh fix budget."
+        },
+        "planReviewRounds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many rounds of plan review — three readers plus one revision — a goal approval may take."
+        }
+      }
     }
   },
   "$defs": {

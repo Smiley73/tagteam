@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
@@ -53,5 +53,10 @@
     "**/*.snap",
     "**/__snapshots__/**"
   ],
-  "maxConcurrentCodex": 3
+  "maxConcurrentCodex": 3,
+  "limits": {
+    "fixRounds": 1,
+    "ciRepairs": 1,
+    "planReviewRounds": 1
+  }
 }

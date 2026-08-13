@@ -94,19 +94,48 @@ export function validateJson(schema, value) {
   return errors;
 }
 
-// The configuration version the current plugin writes. Version 6 is a different
-// shape rather than an extension of version 5 — it collapses the four role keys
-// (`plan`, `implement`, `review`, `codex`) in `models` and `effort` to three
-// (`lead`, `worker`, `codex`) — so there is no key-by-key upgrade path: an older
-// configuration is reported stale and `/tagteam:init` writes a new one. A
-// migration for keys that no longer exist would be churn.
-export const CONFIG_VERSION = 6;
+// The configuration version the current plugin writes. Version 7 adds a required
+// `limits` object, and no key in this project has a fallback in a script: the
+// file is the whole configuration, so a missing key is a hard error rather than a
+// silently-assumed value. That makes an older configuration incomplete rather
+// than upgradable — there is nothing to read the old file for — so it is reported
+// stale and `/tagteam:init` writes a new one.
+export const CONFIG_VERSION = 7;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.
 export function configStaleness(value) {
   const version = value?.version;
   return { stale: version !== CONFIG_VERSION, version };
+}
+
+// What the configured limits commit the repository to, as lines of text. The
+// numbers validate — there is no ceiling in the schema — but nobody works out
+// from `fixRounds: 3, ciRepairs: 3` that they have bought sixteen review panels
+// per spec, so the arithmetic is done here and said out loud. A CI repair
+// produces a new candidate that runs the whole review cycle with a fresh fix
+// budget, which is why the panel count is a product rather than a sum.
+//
+// Pure and total: it returns nothing rather than throwing on a document whose
+// shape has not validated, because `semanticErrors` runs on those too and the
+// schema error is the better message there.
+export function limitNotices(config) {
+  const limits = config?.limits;
+  if (limits === null || typeof limits !== "object" || Array.isArray(limits)) return [];
+  const { fixRounds, ciRepairs, planReviewRounds } = limits;
+  const named = [["fixRounds", fixRounds], ["ciRepairs", ciRepairs], ["planReviewRounds", planReviewRounds]];
+  if (!named.every(([, value]) => Number.isInteger(value) && value >= 1)) return [];
+
+  const notices = named
+    .filter(([, value]) => value > 5)
+    .map(([label, value]) => `warning: ${label} is ${value}; above 5 a spec can run for a long time before it stops for a person`);
+  const panels = (1 + fixRounds) * (1 + ciRepairs);
+  notices.push(
+    `note: these limits allow at most ${panels} full review panels per spec `
+    + `(${1 + fixRounds} per candidate × ${1 + ciRepairs} candidate cycles) `
+    + `and at most ${planReviewRounds} plan review round${planReviewRounds === 1 ? "" : "s"} per goal approval`
+  );
+  return notices;
 }
 
 // A path named in configuration is read by a model, rendered into a prompt, or
@@ -236,6 +265,12 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
       }
     }
   }
+
+  // Cost, not correctness: a limit above the advisory ceiling is allowed, and the
+  // note is emitted for every configuration that has limits at all, including
+  // all-1. These lines never join the error list.
+  for (const notice of limitNotices(value)) process.stderr.write(`${notice}\n`);
+
   return errors;
 }
 
@@ -273,10 +308,11 @@ async function main() {
   }
   try {
     const repo = repoValue === undefined ? undefined : path.resolve(repoValue);
-    // Version before shape. A version-5 configuration fails the version-6 schema
-    // in a dozen places, and reporting that as "invalid" told the user their
-    // configuration was broken when it was merely old — the exit-3 path that
-    // says "run /tagteam:init" was unreachable for the only files that need it.
+    // Version before shape. A version-6 configuration fails the version-7 schema
+    // on a key it could not have carried, and reporting that as "invalid" told
+    // the user their configuration was broken when it was merely old — the
+    // exit-3 path that says "run /tagteam:init" was unreachable for the only
+    // files that need it.
     if (path.basename(argv[0]) === "config.schema.json") {
       let document = null;
       try { document = JSON.parse(fs.readFileSync(path.resolve(argv[1]), "utf8")); } catch {}
