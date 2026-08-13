@@ -669,3 +669,57 @@ test("a carried-forward missing lens does not restate itself on every retry", ()
     "the suffix must not accumulate"
   );
 });
+
+// A round the snapshot has claimed. Inside one, every file tagteam writes is
+// written once — so the collector, which has to re-derive its outputs when a
+// missing lens is re-dispatched into the same round, is the interesting caller.
+function markedRound(files) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-marked-"));
+  const target = path.join(base, "rounds", "1");
+  const findings = path.join(target, "findings");
+  fs.mkdirSync(findings, { recursive: true });
+  fs.writeFileSync(path.join(target, "round.json"), JSON.stringify({ owner: OID, attempts: 1 }));
+  for (const [name, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(findings, name), typeof body === "string" ? body : JSON.stringify(body), { mode: 0o600 });
+  }
+  // Ship writes review.json above the round, where it is rewritten every run.
+  return { round: target, findings, out: path.join(base, "review.json") };
+}
+
+test("re-deriving inside a claimed round replaces the collector's own outputs, and only those", async () => {
+  // The hazard this is about reaches a reviewer. `open/<lens>.json` is written
+  // only for lenses that still have something open, so a survivor from an
+  // earlier derivation is handed to the re-check as current — a test that only
+  // checked `to-fix.json` would never see it.
+  const { spawnSync } = await import("node:child_process");
+  const { round, findings, out } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })]),
+    "codex.json": lensFile("codex", [finding({ severity: "major", title: "b" })], NEW_OID)
+  });
+  fs.mkdirSync(path.join(round, "open"));
+  fs.writeFileSync(path.join(round, "open", "security.json"), "{\"from\": \"an earlier derivation\"}");
+  fs.writeFileSync(path.join(round, "to-fix.json"), "{\"from\": \"an earlier derivation\"}");
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--out", out
+  ], { encoding: "utf8" });
+
+  const first = run();
+  assert.equal(first.status, 1, `collect-findings failed: ${first.stderr}`);
+  assert.ok(fs.existsSync(path.join(round, "open", "correctness.json")));
+  assert.equal(fs.existsSync(path.join(round, "open", "security.json")), false, "a stale open file survived");
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(round, "to-fix.json"), "utf8")).findings.map((entry) => entry.id),
+    ["correctness.1"]
+  );
+  // Evidence this review counted is sealed; the lens it could not use is left
+  // writable, because that is the path a re-dispatch into this round takes.
+  assert.equal(fs.statSync(path.join(findings, "correctness.json")).mode & 0o777, 0o400);
+  assert.ok(fs.statSync(path.join(findings, "codex.json")).mode & 0o200, "a rejected lens must stay writable");
+
+  fs.writeFileSync(path.join(findings, "codex.json"), JSON.stringify(lensFile("codex", [])), { mode: 0o600 });
+  const second = run();
+  assert.equal(second.status, 1, `the re-run refused its own derived outputs: ${second.stderr}`);
+  assert.match(second.stdout, /2\/2 lenses/);
+  assert.equal(fs.statSync(path.join(findings, "codex.json")).mode & 0o777, 0o400);
+});

@@ -91,6 +91,8 @@ Otherwise, by state:
 - `implementing`, `reviewing`, `fixing`, `verifying` — the work was interrupted
   mid-flight and its worktree is gone. `git -C "$W" switch "<branch>"`, then
   restart from step 3 (commit and snapshot) against whatever is committed there.
+  Keep the same `<n>`: restarting lands on the commit that already owns that
+  round, so the snapshot re-enters and rebuilds it rather than needing a new one.
 - `publishing`, `awaiting-approval` — a pull request exists. Go to step 9 and
   evaluate; do not re-implement anything.
 - `failed` — say what this spec was delivering and what stopped it, in a
@@ -125,10 +127,21 @@ node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/ro
 you just made, before anything is bound to it. Everywhere after this, the
 reviewed commit comes from `state.json`.
 
-The snapshot writes `review.diff`, `changed-paths.json`, and `candidate.json`
-into the round directory, and those files are immutable — re-snapshotting the
-same round with different bytes is refused rather than silently overwritten, so
-use a fresh `<n>` after the fix round.
+The round directory is a record. The snapshot writes `review.diff`,
+`changed-paths.json` and `candidate.json` into it, marks it with the commit that
+owns it, and from then on every file tagteam writes beneath it — the verify
+results and logs, `to-fix.json`, `open/<lens>.json` — is written once: a
+different-bytes rewrite is refused, naming the path, rather than silently
+overwriting. Re-running this step against the *same* commit **re-enters** the
+round: it is emptied back to its marker and rebuilt, which is what a resumed
+ship does and it costs no new `<n>`. Re-running it against a *different* commit
+is refused naming both commits, so use a fresh `<n>` after the fix round.
+
+The one exception is Codex's own output — the artifact, its `.prompt.md`,
+`.request.json` and `.events.jsonl`. One invocation writes those as a set that
+only means anything together, and re-dispatching a Codex lens that produced no
+usable evidence into the same round (step 5) has to replace all of them, so they
+are written plainly and are not covered by the round's write-once rule.
 
 Never skip `guard-staged.mjs`, and never split that chain. It is the only thing
 between a copied `.env` and a push.

@@ -30,7 +30,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   work/            interview answers, drafts, review findings, Codex artifacts   ignored
 .tagteam/ships/<slug>/<spec-id>/
   state.json       the state machine, the reviewed commit, the gates        ignored
-  rounds/<n>/  review.diff, findings/, recheck/, verify/, candidate.json  ignored
+  rounds/<n>/  round.json (the commit that owns this round, and how many times
+               it has been entered), review.diff, findings/, recheck/,
+               verify/, candidate.json                                    ignored
   review.json  pr-body.md  ci.json                                   ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
@@ -39,6 +41,15 @@ Everything committed is the record a person approved. Everything ignored is
 working state, and **the working state is the resume mechanism**: there are no
 fingerprints, no reuse ledgers, and no invocation descriptors. A re-run looks at
 what is on disk and continues from the first thing that is not done.
+
+A round is a record: once `round.json` names the commit that owns it, every file
+tagteam writes beneath it is written once, and re-snapshotting that same commit
+re-enters the round — empties it back to the marker and rebuilds it — while a
+different commit is refused. Codex's own output is the exception. Its artifact
+and the `.prompt.md`, `.request.json` and `.events.jsonl` beside it are one set
+written together, and a Codex lens that produced nothing usable is re-dispatched
+into the same round, so those files are replaced in place and the write-once
+rule does not cover them.
 
 ## Configuration
 
