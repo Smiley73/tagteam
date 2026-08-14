@@ -23,8 +23,27 @@ function directories(root) {
   }
 }
 
+// The same tolerance for a directory read that only wants names: a path that is
+// a file rather than a directory, or one nothing may read, is absence here. Not
+// `existsSync` plus an unguarded read — that pair reports a mode-000 directory
+// as present and then throws on it.
+function files(root, suffix) {
+  try {
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => !entry.isDirectory() && entry.name.endsWith(suffix))
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 function json(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+}
+
+function exists(file) {
+  try { return fs.existsSync(file); } catch { return false; }
 }
 
 // A configured limit, or null when there is none to read. **Never a default.**
@@ -35,12 +54,30 @@ function json(file, fallback = null) {
 const limitOf = (limits, key) =>
   (Number.isInteger(limits?.[key]) && limits[key] >= 1 ? limits[key] : null);
 
-// What the enforcing path would still allow. `spent` comes from whatever the run
-// itself counts — the state file's counter on the ship side, the rounds recorded
-// against the current goal approval on the plan side — and a budget already at
-// or past its limit has nothing left rather than a negative number.
-const remaining = (limit, spent) =>
-  (limit === null || spent === null ? null : Math.max(0, limit - spent));
+// What the enforcing path would still allow, and — when that could not be worked
+// out — *why*, because the two reasons need different words and different
+// repairs from the person reading them. A bare `null` would send someone whose
+// configuration is perfectly good off to edit their configuration.
+//
+// The reasons, in the order the run itself hits them:
+//
+// - `settings` — the limit is not in `.tagteam/config.json`, so nothing here
+//   knows how many rounds there are. **Never a default**; see `limitOf`.
+// - `counter` / `rounds` — the limit reads fine and what has been spent does
+//   not: a `state.json` counter that is not a number of rounds, or a review
+//   rounds root that could not be listed. No budget can be enforced against
+//   either, and the configuration is not the file to go and look at.
+//
+// `spent` comes from whatever the run itself counts — the state file's counter
+// on the ship side, the rounds recorded against the current goal approval on the
+// plan side — and a budget already at or past its limit has nothing left rather
+// than a negative number. The `…Unknown` key is present only when the remainder
+// is null, so its absence is the ordinary case.
+function budget(key, limit, spent, spentReason) {
+  if (limit === null) return { [`${key}Remaining`]: null, [`${key}Unknown`]: "settings" };
+  if (spent === null) return { [`${key}Remaining`]: null, [`${key}Unknown`]: spentReason };
+  return { [`${key}Remaining`]: Math.max(0, limit - spent) };
+}
 
 // A budget counter out of `state.json`. Absent is zero, exactly as `gates.mjs`
 // reads it. Anything that is not a whole number of rounds is *unknown* here
@@ -52,6 +89,15 @@ function counterOf(state, counter) {
   if (value === undefined) return 0;
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
+
+// The states from which the fix budget a continuation gets is the *whole* limit,
+// not the limit minus what the last cycle spent. `gates.mjs` has no edge from
+// `awaiting-approval` or `publishing` to `fixing` at all: the only route back to
+// fixing is `-> reviewing`, the CI-repair edge, and that edge resets the fix
+// counter to zero. So for one of these specs the number the run will enforce is
+// the limit, and the setting that actually bounds it is `limits.ciRepairs` —
+// reporting `limit - used` here would tell someone to raise the wrong one.
+const FIX_BUDGET_RESTARTS = new Set(["awaiting-approval", "publishing"]);
 
 // The rounds a plan has spent under its *current* goal approval. The numbering
 // climbs across the whole review root, but the budget is counted per approval —
@@ -85,26 +131,25 @@ export function inventory(repoRoot) {
 
   const plans = directories(path.join(tagteam, "plans")).map((slug) => {
     const root = path.join(tagteam, "plans", slug);
-    const specsDir = path.join(root, "specs");
-    const specs = fs.existsSync(specsDir)
-      ? fs.readdirSync(specsDir).filter((entry) => entry.endsWith(".md")).sort()
-      : [];
+    const specs = files(path.join(root, "specs"), ".md");
     const approved = json(path.join(root, "approved.json"));
-    const inFlight = !approved
-      && (fs.existsSync(path.join(root, "plan.md")) || fs.existsSync(path.join(root, "goal.md")));
+    const inFlight = !approved && (exists(path.join(root, "plan.md")) || exists(path.join(root, "goal.md")));
     return {
       slug,
       stage: approved ? "approved"
-        : fs.existsSync(path.join(root, "plan.md")) ? "drafted"
-          : fs.existsSync(path.join(root, "goal.md")) ? "goal settled"
+        : exists(path.join(root, "plan.md")) ? "drafted"
+          : exists(path.join(root, "goal.md")) ? "goal settled"
             : "interviewing",
       approvedAt: approved?.approvedAt ?? null,
       specs: specs.length,
-      // Absent for a plan that is not in flight: an approved plan reviews
-      // nothing further, so it has no budget rather than an unknown one.
-      reviewRoundsRemaining: inFlight
-        ? remaining(limitOf(limits, "planReviewRounds"), planRoundsSpent(root))
-        : null,
+      // The key itself is absent for a plan that is not in flight: an approved
+      // plan reviews nothing further, so it has no budget at all. Emitting null
+      // there would collide with the null that means the remainder is unknown,
+      // and every finished plan in a healthy repository would be reported as a
+      // plan whose bookkeeping could not be read.
+      ...(inFlight
+        ? budget("reviewRounds", limitOf(limits, "planReviewRounds"), planRoundsSpent(root), "rounds")
+        : {}),
       path: root
     };
   });
@@ -129,7 +174,8 @@ export function inventory(repoRoot) {
       stoppedOn: failed.map((spec) => ({ spec: spec.spec, branch: spec.branch })),
       // One entry per spec that could still spend something. A merged or failed
       // spec has no budget, so it has no entry — and a spec waiting for a person
-      // does have one, because sending it back is what spends the rest of it.
+      // does have one, because sending it back spends a CI repair and hands it a
+      // fresh fix budget.
       //
       // The counters, not the round directories: the counters are what
       // `gates.mjs` refuses on, and a fixer that was dispatched and made no
@@ -137,12 +183,22 @@ export function inventory(repoRoot) {
       // next run declines to give.
       budgets: specs
         .filter((spec) => spec.state !== "merged" && spec.state !== "failed")
-        .map((spec) => ({
-          spec: spec.spec,
-          state: spec.state,
-          fixRoundsRemaining: remaining(limitOf(limits, "fixRounds"), counterOf(spec, "fixRoundsUsed")),
-          ciRepairsRemaining: remaining(limitOf(limits, "ciRepairs"), counterOf(spec, "ciRepairsUsed"))
-        })),
+        .map((spec) => {
+          const used = counterOf(spec, "fixRoundsUsed");
+          const restarts = FIX_BUDGET_RESTARTS.has(spec.state);
+          return {
+            spec: spec.spec,
+            state: spec.state,
+            // A spec that is waiting or publishing gets its fix budget back
+            // before it can fix again, so what it has left is the whole limit —
+            // see `FIX_BUDGET_RESTARTS`. A counter that is not a number of
+            // rounds still reports unknown, because that is what the next run
+            // refuses on whatever the state.
+            ...budget("fixRounds", limitOf(limits, "fixRounds"), used === null || !restarts ? used : 0, "counter"),
+            ...(restarts ? { fixBudgetRestarts: true } : {}),
+            ...budget("ciRepairs", limitOf(limits, "ciRepairs"), counterOf(spec, "ciRepairsUsed"), "counter")
+          };
+        }),
       path: root
     };
   });

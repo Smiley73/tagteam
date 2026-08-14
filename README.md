@@ -128,6 +128,7 @@ flowchart TD
     codexr["Codex cross-review"]
     open{"Anything blocking or major open?"}
     fixer["Fix — a fixer gets the blocking and major findings, nothing else"]
+    route{"Which review does the fixed commit get?"}
     adv["Adversary — reads the final diff fresh"]
     recheck["Re-check — each reviewer that raised a finding judges its own against the new code"]
     settle{"Still open after the re-check?"}
@@ -137,7 +138,7 @@ flowchart TD
     branch --> implement
     implement --> snapshot
     snapshot --> verify
-    subgraph panel["Review panel, in parallel — every lens plus Codex, every round"]
+    subgraph panel["Review panel, in parallel — every lens plus Codex, on every<br>candidate no lens has read"]
         lenses
         codexr
     end
@@ -145,17 +146,21 @@ flowchart TD
     verify --> codexr
     lenses --> open
     codexr --> open
-    open -->|"yes"| fixer
-    fixer -->|"a new commit — re-snapshot, re-verify, the whole<br>panel again; every gate clears. A spec gets<br>limits.fixRounds rounds of this"| snapshot
+    open -->|"yes — the first fix round of this cycle"| fixer
+    fixer -->|"a new commit — re-snapshot, re-verify;<br>every gate clears. A spec gets<br>limits.fixRounds rounds of this"| route
     subgraph final["Fresh eyes on the final diff"]
         adv
         recheck
     end
+    route -->|"after the first fix of a cycle: no second panel — the<br>lenses that raised the findings re-judge them below"| adv
+    route -->|"after the first fix of a cycle"| recheck
+    route -->|"after a second or later fix round, or a CI repair:<br>the whole panel again, against a diff no lens has read"| lenses
+    route -->|"after a second or later fix round, or a CI repair"| codexr
     open -->|"no"| adv
     open -->|"no"| recheck
     adv --> settle
     recheck --> settle
-    settle -->|"yes — another fix round"| fixer
+    settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
     settle -->|"nothing open, or the fix rounds<br>this repository allows are spent"| publish
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
     publish --> outcome

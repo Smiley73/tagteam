@@ -77,11 +77,35 @@ test("a spec that has spent its whole budget reports nothing left, never a negat
   // Past the limit as well as at it: a hand-edited state file or a limit lowered
   // between runs both land here, and "-1 rounds left" is not a thing to show.
   ship(repo, "01-a", { state: "reviewing", fixRoundsUsed: 3, ciRepairsUsed: 0 });
-  ship(repo, "02-b", { state: "awaiting-approval", fixRoundsUsed: 5, ciRepairsUsed: 4 });
+  ship(repo, "02-b", { state: "fixing", fixRoundsUsed: 5, ciRepairsUsed: 4 });
   const result = inventory(repo);
   assert.equal(budgetFor(result, "01-a").fixRoundsRemaining, 0);
   assert.equal(budgetFor(result, "02-b").fixRoundsRemaining, 0);
   assert.equal(budgetFor(result, "02-b").ciRepairsRemaining, 0);
+});
+
+// `gates.mjs` has no edge from `awaiting-approval` (or `publishing`) to
+// `fixing`. The only route back to fixing is the CI-repair edge into
+// `reviewing`, which resets the fix counter — so a spec that spent every fix
+// round and stopped for a person is not one finding away from stopping again,
+// and telling someone to raise `limits.fixRounds` would be sending them to the
+// wrong setting. What bounds it is `limits.ciRepairs`.
+test("a spec waiting for a person reports the fix budget a continuation actually gets", () => {
+  const repo = repository();
+  ship(repo, "01-a", { state: "awaiting-approval", fixRoundsUsed: 3, ciRepairsUsed: 1 });
+  ship(repo, "02-b", { state: "publishing", fixRoundsUsed: 3, ciRepairsUsed: 0 });
+  const result = inventory(repo);
+  for (const id of ["01-a", "02-b"]) {
+    assert.equal(budgetFor(result, id).fixRoundsRemaining, LIMITS.fixRounds, `${id} reported a spent fix budget`);
+    assert.equal(budgetFor(result, id).fixBudgetRestarts, true, `${id} did not say the fix budget restarts`);
+  }
+  assert.equal(budgetFor(result, "01-a").ciRepairsRemaining, 1);
+  // A spec that can still reach `fixing` directly is unchanged: the remainder is
+  // the remainder, and nothing says it restarts.
+  ship(repo, "03-c", { state: "reviewing", fixRoundsUsed: 1, ciRepairsUsed: 0 });
+  const direct = budgetFor(inventory(repo), "03-c");
+  assert.equal(direct.fixRoundsRemaining, 2);
+  assert.equal("fixBudgetRestarts" in direct, false);
 });
 
 // The assertion this file exists for. A `?? 1` anywhere in the budget reporting
@@ -101,6 +125,11 @@ test("a configuration with no readable limits reports unknown, not a default", (
     assert.equal(budgetFor(result, "01-a").fixRoundsRemaining, null, `${JSON.stringify(config)} produced a fix budget`);
     assert.equal(budgetFor(result, "01-a").ciRepairsRemaining, null, `${JSON.stringify(config)} produced a repair budget`);
     assert.equal(result.plans[0].reviewRoundsRemaining, null, `${JSON.stringify(config)} produced a review budget`);
+    // And the reason is the one the command file turns into "could not be read
+    // from `.tagteam/config.json`" — the only case where that sentence is true.
+    assert.equal(budgetFor(result, "01-a").fixRoundsUnknown, "settings");
+    assert.equal(budgetFor(result, "01-a").ciRepairsUnknown, "settings");
+    assert.equal(result.plans[0].reviewRoundsUnknown, "settings");
   }
 });
 
@@ -133,13 +162,75 @@ test("a plan whose goal was re-approved has its whole review budget back", async
   assert.equal(inventory(repo).plans[0].reviewRoundsRemaining, 1);
 });
 
-test("an approved plan has no review budget left to spend", () => {
+// The distinction the command file's `null` rule rests on: a plan with no budget
+// at all and a plan whose budget could not be worked out must not look the same,
+// or every finished plan in a healthy repository is rendered as one whose
+// configuration is unreadable.
+test("an approved plan has no review budget, and that is not the same as an unknown one", () => {
   const repo = repository();
   const dir = plan(repo, "p");
   write(path.join(dir, "approved.json"), { approvedAt: "2026-01-03T00:00:00Z", slug: "p", specs: [] });
   const [reported] = inventory(repo).plans;
   assert.equal(reported.stage, "approved");
-  assert.equal(reported.reviewRoundsRemaining, null);
+  assert.equal("reviewRoundsRemaining" in reported, false, "an approved plan carries a budget key");
+  assert.equal("reviewRoundsUnknown" in reported, false);
+
+  // A plan that has not reached a goal yet is the same: no budget in flight.
+  const bare = repository();
+  fs.mkdirSync(path.join(bare, ".tagteam", "plans", "q"), { recursive: true });
+  const [interviewing] = inventory(bare).plans;
+  assert.equal(interviewing.stage, "interviewing");
+  assert.equal("reviewRoundsRemaining" in interviewing, false);
+
+  // Against which: an in-flight plan whose limit cannot be read does carry the
+  // key, as null, and says the settings are the reason.
+  const unreadable = repository(null);
+  plan(unreadable, "p");
+  const [unknown] = inventory(unreadable).plans;
+  assert.equal(unknown.reviewRoundsRemaining, null);
+  assert.equal(unknown.reviewRoundsUnknown, "settings");
+});
+
+// Three different nulls used to be one. Each one sends a person to a different
+// file, and the middle one sends them to a file that is fine.
+test("an unknown remainder says which bookkeeping was unreadable", () => {
+  const repo = repository();
+  ship(repo, "01-a", { state: "reviewing", fixRoundsUsed: "1", ciRepairsUsed: -1 });
+  const dir = plan(repo, "p");
+  // A review rounds root that is a file, not a directory: `listRounds` throws on
+  // it and how many rounds this plan has had is not knowable — but the
+  // configuration was read perfectly well.
+  fs.writeFileSync(path.join(dir, "work", "review"), "not a rounds root\n");
+
+  const result = inventory(repo);
+  assert.equal(budgetFor(result, "01-a").fixRoundsUnknown, "counter");
+  assert.equal(budgetFor(result, "01-a").ciRepairsUnknown, "counter");
+  assert.equal(result.plans[0].reviewRoundsRemaining, null);
+  assert.equal(result.plans[0].reviewRoundsUnknown, "rounds");
+});
+
+// `existsSync` says yes to a path nothing may read and to a file where a
+// directory belongs; the read after it is what throws. Status has one job it may
+// never fail at.
+test("an unreadable specs path is an absence, not a throw", () => {
+  const repo = repository();
+  const dir = plan(repo, "p");
+  fs.writeFileSync(path.join(dir, "specs"), "a file where a directory belongs\n");
+  assert.equal(inventory(repo).plans[0].specs, 0);
+
+  // Mode bits mean nothing to root, so the unreadable half only runs where they
+  // do.
+  if (process.getuid?.() === 0) return;
+  const other = repository();
+  const blocked = path.join(plan(other, "q"), "specs");
+  fs.mkdirSync(blocked);
+  fs.writeFileSync(path.join(blocked, "01-a.md"), "# spec\n");
+  fs.chmodSync(blocked, 0o000);
+  try {
+    assert.equal(inventory(other).plans[0].specs, 0);
+  } finally {
+    fs.chmodSync(blocked, 0o755);
+  }
 });
 
 test("status never throws — not on a missing .tagteam, not on a truncated state file", () => {

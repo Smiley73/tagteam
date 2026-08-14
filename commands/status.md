@@ -27,13 +27,32 @@ under its ship, and every plan still being written has `reviewRoundsRemaining`:
 Naming the setting after the clause is useful — it is a value they set in their
 own config and may want to raise, so "…(`limits.fixRounds`)" earns its place —
 but the sentence has to make sense without it, and the number on its own is not a
-sentence. A spec that has merged or stopped has no entry and nothing to say.
+sentence. A spec that has merged or stopped has no entry and nothing to say, and
+so does a plan that is approved or still being interviewed: **a missing key is no
+budget, not an unknown one.** Say nothing about a budget that is not there.
 
-**A remaining budget of `null` means the settings could not be read**, not that
-the budget is zero and not that it is unlimited. Say that plainly — "how many
-rounds are left could not be read from `.tagteam/config.json`" — and do not guess
-a number. There is no default anywhere in this plugin for a person to fall back
-on, and a configuration too old to carry these settings is refused by the
-commands that would spend them.
+A budget entry carrying `fixBudgetRestarts` is a spec that is waiting for a
+person or publishing, and its fix rounds are the number a continuation would
+start with rather than a remainder — sending it back spends one of the CI
+repairs and hands it that whole fix budget again. So the thing that bounds it is
+`limits.ciRepairs`: "sending this one back costs one of the two repair attempts
+it has left, and it starts its three fix rounds over".
+
+**A remaining budget of `null` means the number is not known** — not that the
+budget is zero and not that it is unlimited. Do not guess one; there is no
+default anywhere in this plugin for a person to fall back on. The `…Unknown` key
+beside it says why, and the two reasons send someone to different files, so say
+the one you were given:
+
+- `"settings"` — "how many rounds are left could not be read from
+  `.tagteam/config.json`". A configuration too old to carry these settings is
+  refused by the commands that would spend them.
+- `"counter"` — the settings are fine and this spec's own bookkeeping is not:
+  "this spec's record of rounds spent in `state.json` is not a number of rounds,
+  so no budget can be enforced against it — the next run will stop and ask for it
+  to be fixed by hand". Do not send them to the configuration for this one.
+- `"rounds"` — "how many review rounds this plan has already had could not be
+  read from its own `work/review` directory". Again, not a configuration
+  problem.
 
 Read-only. Change nothing, merge nothing, and do not offer to.

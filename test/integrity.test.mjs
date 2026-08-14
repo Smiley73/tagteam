@@ -371,6 +371,26 @@ test("both cycle diagrams name the settings that bound their loops", () => {
   }
 });
 
+// A diagram claims an order, not just a set of names. This one used to send
+// every fixed commit back through the whole panel, which is what `commands/ship.md`
+// refuses to do for the first fix of a cycle — the common case for every
+// repository that left `limits.fixRounds` at one. A reader who believes the
+// picture expects a full lens-plus-Codex re-review that never runs.
+test("the ship diagram draws the two routes a fixed commit actually takes", () => {
+  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
+  assert.ok(ship, "the README no longer has a ship cycle diagram");
+  assert.match(ship, /no second panel/, "the diagram does not draw the first fix skipping the panel");
+  assert.match(ship, /second or later fix round, or a CI repair/,
+    "the diagram does not draw the route that re-enters the whole panel");
+  for (const claim of ["the whole<br>panel again; every gate clears", "every lens plus Codex, every round"]) {
+    assert.ok(!ship.includes(claim), `the ship diagram still says "${claim}", which commands/ship.md does not do`);
+  }
+  // And what ship.md sends the first fix to instead: the adversary and the
+  // re-check, not the lenses.
+  assert.match(ship, /route -->\|"after the first fix of a cycle[^|]*\| adv/);
+  assert.match(ship, /route -->\|"after the first fix of a cycle"\| recheck/);
+});
+
 // Every one of these sentences told a reader the cycle happens exactly once.
 // They are the claims the configured limits replaced, and one left behind is
 // documentation contradicting the code a person is about to run.
