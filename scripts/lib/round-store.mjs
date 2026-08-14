@@ -40,9 +40,20 @@ import { randomUUID } from "node:crypto";
 
 export const ROUND_MARKER = "round.json";
 
+// The reader of this message is usually an autonomous agent that acts on what a
+// tool prints, so the recovery has to carry its price with it. Re-entry is the
+// only way to rebuild a round, and it empties the round first — safe at the
+// snapshot step, where the round holds nothing yet, and destructive at any later
+// one, where it deletes evidence a model wrote and cannot be asked for again.
 const refuse = (file, reason) =>
-  new Error(`the round already records ${reason}: ${file} — a round record is written once; `
-    + "re-enter the round (re-run the snapshot against the same commit) to rebuild it");
+  new Error(`the round already records ${reason}: ${file} — a round record is written once. `
+    + "Re-entering the round (re-running the snapshot against the same commit) rebuilds it, but empties it "
+    + "first: every findings, recheck and verify file in it is deleted. That is only safe before the review "
+    + "has run; later, work out why this path is being written twice instead");
+
+const unreadableMarker = (markerPath) =>
+  new Error(`the round marker at ${markerPath} is unreadable; a round with an unknown owner is neither `
+    + "re-entered nor written into — move it aside or use a fresh round directory");
 
 /** The parsed marker of `roundDir`, or null when it is absent or unparseable. */
 export function readRoundMarker(roundDir) {
@@ -54,25 +65,49 @@ export function readRoundMarker(roundDir) {
   }
 }
 
-/**
- * The round directory `file` lives in, or null when it lives outside every
- * round. The walk stops at the first ancestor holding a marker file — first
- * marker wins, so a nested round is never claimed by an outer one — and that
- * ancestor is the round only if its marker parses and names a non-empty owner.
- * An unreadable marker therefore reads as "no round" here; `enterRound` is where
- * it is refused, which is the place that can say something useful about it.
- */
-export function roundRootFor(file) {
+// The walk every caller here shares: up from the file's directory to the
+// filesystem root, stopping at the first ancestor holding a marker file — first
+// marker wins, so a nested round is never claimed by an outer one. `owned` says
+// whether that marker parses and names a non-empty owner, which is the
+// difference between "no round above this path" and "a round is here and it is
+// damaged". Null means no marker anywhere above.
+function nearestMarkedAncestor(file) {
   let directory = path.dirname(path.resolve(file));
   while (true) {
     if (fs.existsSync(path.join(directory, ROUND_MARKER))) {
       const marker = readRoundMarker(directory);
-      return typeof marker?.owner === "string" && marker.owner !== "" ? directory : null;
+      return { dir: directory, owned: typeof marker?.owner === "string" && marker.owner !== "" };
     }
     const parent = path.dirname(directory);
     if (parent === directory) return null;
     directory = parent;
   }
+}
+
+/**
+ * The round directory `file` lives in, or null when it lives outside every
+ * round — where "outside" includes a round whose marker is unreadable, because
+ * this is only a question about where a path sits. The writers ask
+ * `roundRootForWrite` instead, which refuses a damaged marker rather than
+ * writing as if the round were not there.
+ */
+export function roundRootFor(file) {
+  const nearest = nearestMarkedAncestor(file);
+  return nearest?.owned ? nearest.dir : null;
+}
+
+/**
+ * The round a write to `file` lands in. A damaged marker — truncated, empty, or
+ * missing its `owner` — throws here rather than reading as "no round": treating
+ * it as no round would turn the write-once guarantee off for every path in that
+ * round, silently, which is the fail-open direction for an integrity guard.
+ * `enterRound` already refuses the same marker.
+ */
+function roundRootForWrite(file) {
+  const nearest = nearestMarkedAncestor(file);
+  if (nearest === null) return null;
+  if (!nearest.owned) throw unreadableMarker(path.join(nearest.dir, ROUND_MARKER));
+  return nearest.dir;
 }
 
 function writeMarker(roundDir, marker) {
@@ -112,10 +147,7 @@ export function enterRound(roundDir, { owner } = {}) {
 
   if (fs.existsSync(markerPath)) {
     const marker = readRoundMarker(dir);
-    if (typeof marker?.owner !== "string" || marker.owner === "") {
-      throw new Error(`the round marker at ${markerPath} is unreadable; a round with an unknown owner is not `
-        + "re-entered — move it aside or use a fresh round directory");
-    }
+    if (typeof marker?.owner !== "string" || marker.owner === "") throw unreadableMarker(markerPath);
     if (marker.owner !== owner) {
       throw new Error(`the round at ${dir} already belongs to ${marker.owner}, not to ${owner}; `
         + "nothing was removed — use a fresh round directory for the new commit");
@@ -155,8 +187,9 @@ export function enterRound(roundDir, { owner } = {}) {
 export function writeRoundFile(file, value) {
   const target = path.resolve(file);
   const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const inRound = roundRootForWrite(target) !== null;
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  if (roundRootFor(target) === null) {
+  if (!inRound) {
     fs.writeFileSync(target, bytes, { mode: 0o600 });
     return target;
   }
@@ -183,8 +216,8 @@ export function writeRoundFile(file, value) {
  */
 export function createRoundStream(file) {
   const target = path.resolve(file);
+  const inRound = roundRootForWrite(target) !== null;
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  const inRound = roundRootFor(target) !== null;
   let descriptor;
   try {
     descriptor = fs.openSync(target, inRound ? "wx" : "w", 0o600);

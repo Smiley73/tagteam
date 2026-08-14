@@ -106,6 +106,25 @@ test("an unreadable marker is refused rather than treated as a fresh round", () 
   assert.equal(fs.readFileSync(planted, "utf8"), "evidence");
 });
 
+test("a damaged marker refuses writes rather than turning the guard off", () => {
+  // The fail-open direction. A round.json that is truncated or has lost its
+  // owner used to read as "no round" to the writers, so every path in that round
+  // went back to a plain overwriting write — verify logs re-truncated,
+  // `to-fix.json` and `open/<lens>.json` replaced, and nothing printed.
+  const dir = temp("damaged");
+  fs.writeFileSync(path.join(dir, ROUND_MARKER), "{");
+  const file = plant(dir, "open/correctness.json", "current evidence");
+  const log = plant(dir, "verify/1.log", "an earlier log\n");
+
+  assert.throws(() => writeRoundFile(file, "overwritten"), /unreadable/);
+  assert.throws(() => createRoundStream(log), /unreadable/);
+  assert.equal(fs.readFileSync(file, "utf8"), "current evidence");
+  assert.equal(fs.readFileSync(log, "utf8"), "an earlier log\n");
+  // A path that never had a record there is refused too: the round is damaged,
+  // not partly usable.
+  assert.throws(() => writeRoundFile(path.join(dir, "to-fix.json"), "derived"), /unreadable/);
+});
+
 test("a marker-less round is adopted only when its candidate.json names the owner", () => {
   // A ship already part-way through on disk when this landed must not die at the
   // first upgraded snapshot; someone else's directory must not be emptied.

@@ -717,9 +717,76 @@ test("re-deriving inside a claimed round replaces the collector's own outputs, a
   assert.equal(fs.statSync(path.join(findings, "correctness.json")).mode & 0o777, 0o400);
   assert.ok(fs.statSync(path.join(findings, "codex.json")).mode & 0o200, "a rejected lens must stay writable");
 
-  fs.writeFileSync(path.join(findings, "codex.json"), JSON.stringify(lensFile("codex", [])), { mode: 0o600 });
+  // The re-dispatch this exists for: the lens that had no usable evidence
+  // produces some, bound to the right commit, and it gates. The second
+  // derivation must therefore differ from the first — with byte-identical output
+  // the write-once guard passes either way and this proves nothing.
+  fs.writeFileSync(
+    path.join(findings, "codex.json"),
+    JSON.stringify(lensFile("codex", [finding({ severity: "major", title: "c" })])),
+    { mode: 0o600 }
+  );
   const second = run();
   assert.equal(second.status, 1, `the re-run refused its own derived outputs: ${second.stderr}`);
   assert.match(second.stdout, /2\/2 lenses/);
+  // Different bytes at both derived paths, written where the first derivation
+  // already wrote: this is what the clearing before re-deriving buys.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(round, "open", "codex.json"), "utf8")).findings.map((entry) => entry.id),
+    ["codex.1"]
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(round, "to-fix.json"), "utf8")).findings.map((entry) => entry.id),
+    ["correctness.1", "codex.1"]
+  );
   assert.equal(fs.statSync(path.join(findings, "codex.json")).mode & 0o777, 0o400);
+});
+
+test("the recheck seals the verdicts it consumed and leaves the ones it rejected writable", async () => {
+  // Verdict files arrive through the Write tool, so the round cannot refuse a
+  // second write as it happens; sealing what was consumed is the protection one
+  // step later. The rejected lens must stay writable, because re-dispatching it
+  // into this same round is the documented recovery — and a seal that reached it
+  // would make that recovery impossible.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-seal-"));
+  const roundDir = path.join(base, "rounds", "1");
+  const verdicts = path.join(roundDir, "recheck");
+  fs.mkdirSync(verdicts, { recursive: true });
+  fs.writeFileSync(path.join(roundDir, "round.json"), JSON.stringify({ owner: NEW_OID, attempts: 1 }));
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "correctness.1", resolved: true, evidence: "fixed" }
+  ])), { mode: 0o600 });
+  // Judged the wrong commit, so it settles nothing and is not `present`.
+  fs.writeFileSync(path.join(verdicts, "security.json"), JSON.stringify(verdictFile("security", [
+    { id: "security.1", resolved: true, evidence: "fixed" }
+  ], OID)), { mode: 0o600 });
+  const adv = path.join(roundDir, "findings", "adversary.json");
+  fs.mkdirSync(path.dirname(adv), { recursive: true });
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }), { mode: 0o600 });
+  const reviewPath = path.join(base, "review.json");
+  fs.writeFileSync(reviewPath, JSON.stringify({
+    ...review,
+    open: [
+      { id: "correctness.1", lens: "correctness", title: "a", severity: "blocking" },
+      { id: "security.1", lens: "security", title: "b", severity: "major" }
+    ]
+  }));
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", path.join(base, "out.json")
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 1, `a lens bound to the wrong commit is not clean: ${result.stdout}${result.stderr}`);
+  assert.equal(fs.statSync(path.join(verdicts, "correctness.json")).mode & 0o777, 0o400);
+  // The adversary's evidence is consumed from `--adversary`, not from `--dir`,
+  // so sealing the lens name under `--dir` would seal a path that does not exist
+  // and leave the real record writable.
+  assert.equal(fs.statSync(adv).mode & 0o777, 0o400);
+  assert.ok(fs.statSync(path.join(verdicts, "security.json")).mode & 0o200, "a rejected verdict must stay writable");
+  // The settled review is durable before any of that sealing runs, so a chmod
+  // that fails on some filesystem cannot throw away a review that was computed.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(base, "out.json"), "utf8")).status, "incomplete");
 });
