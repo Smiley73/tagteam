@@ -32,17 +32,23 @@ so does a plan that is approved or still being interviewed: **a missing key is n
 budget, not an unknown one.** Say nothing about a budget that is not there.
 
 A budget entry carrying `fixBudgetRestarts` is a spec that is waiting for a
-person or publishing, and its fix rounds are the number a continuation would
-start with rather than a remainder — sending it back spends one of the CI
-repairs and hands it that whole fix budget again. So the thing that bounds it is
-`limits.ciRepairs`: "sending this one back costs one of the two repair attempts
-it has left, and it starts its three fix rounds over".
+person or publishing and still has repair attempts left, so its fix rounds are
+the number a continuation would start with rather than a remainder — sending it
+back spends one of the CI repairs and hands it that whole fix budget again. So
+the thing that bounds it is `limits.ciRepairs`: "sending this one back costs one
+of the two repair attempts it has left, and it starts its three fix rounds over".
+
+A waiting or publishing spec **without** that key has no restart to promise: its
+repair attempts are gone or unknown, so the fix rounds beside it are what is
+actually reachable, which is none. Say that it is finished rather than that it
+has a budget: "no repair attempts left, so this one cannot go back for more work
+— merge it or stop it".
 
 **A remaining budget of `null` means the number is not known** — not that the
 budget is zero and not that it is unlimited. Do not guess one; there is no
 default anywhere in this plugin for a person to fall back on. The `…Unknown` key
-beside it says why, and the two reasons send someone to different files, so say
-the one you were given:
+beside it says why, and each reason sends someone to a different file, so say the
+one you were given:
 
 - `"settings"` — "how many rounds are left could not be read from
   `.tagteam/config.json`". A configuration too old to carry these settings is

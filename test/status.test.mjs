@@ -108,6 +108,47 @@ test("a spec waiting for a person reports the fix budget a continuation actually
   assert.equal("fixBudgetRestarts" in direct, false);
 });
 
+// The restart is a claim about an edge, and an edge that is refused grants
+// nothing. A spec waiting for a person with its repairs spent cannot re-enter
+// `reviewing` at all — `gates.mjs` exits 4 on that transition — so no further fix
+// round is reachable, and reporting the whole limit would print the largest fix
+// number in the output for the one spec that can never spend it. Same when the
+// repair budget is unknowable: an unknown remainder cannot be turned into a full
+// budget.
+test("a waiting spec whose repairs are gone reports no fix rounds, not a fresh budget", () => {
+  const repo = repository();
+  ship(repo, "01-a", { state: "awaiting-approval", fixRoundsUsed: 3, ciRepairsUsed: 2 });
+  ship(repo, "02-b", { state: "publishing", fixRoundsUsed: 0, ciRepairsUsed: 5 });
+  const result = inventory(repo);
+  for (const id of ["01-a", "02-b"]) {
+    const budget = budgetFor(result, id);
+    assert.equal(budget.fixRoundsRemaining, 0, `${id} promised a fix round nothing will grant`);
+    assert.equal(budget.ciRepairsRemaining, 0);
+    assert.equal("fixBudgetRestarts" in budget, false, `${id} claimed a restart it cannot reach`);
+  }
+});
+
+test("a waiting spec whose repair budget is unknown reports its fix budget unknown, for the same reason", () => {
+  // The repair counter is not a number of rounds: `gates.mjs` throws on it before
+  // it would take the edge, so what a continuation would get is unknowable rather
+  // than the limit — and the reason is this spec's own bookkeeping, not the
+  // configuration.
+  const counters = repository();
+  ship(counters, "01-a", { state: "awaiting-approval", fixRoundsUsed: 1, ciRepairsUsed: "2" });
+  const counter = budgetFor(inventory(counters), "01-a");
+  assert.equal(counter.fixRoundsRemaining, null);
+  assert.equal(counter.fixRoundsUnknown, "counter");
+  assert.equal("fixBudgetRestarts" in counter, false);
+
+  // And when it is the settings that could not be read, the fix budget says
+  // `settings` too rather than the limit it does not know.
+  const settings = repository(null);
+  ship(settings, "01-a", { state: "awaiting-approval", fixRoundsUsed: 1, ciRepairsUsed: 0 });
+  const unknown = budgetFor(inventory(settings), "01-a");
+  assert.equal(unknown.fixRoundsRemaining, null);
+  assert.equal(unknown.fixRoundsUnknown, "settings");
+});
+
 // The assertion this file exists for. A `?? 1` anywhere in the budget reporting
 // would put a default for a limit into code — the one thing this whole change
 // forbids — and it would tell someone whose configuration is version 6, and is

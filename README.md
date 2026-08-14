@@ -138,7 +138,7 @@ flowchart TD
     branch --> implement
     implement --> snapshot
     snapshot --> verify
-    subgraph panel["Review panel, in parallel — every lens plus Codex, on every<br>candidate no lens has read"]
+    subgraph panel["Review panel, in parallel — every lens plus Codex,<br>on every round this step runs"]
         lenses
         codexr
     end
@@ -146,7 +146,7 @@ flowchart TD
     verify --> codexr
     lenses --> open
     codexr --> open
-    open -->|"yes — the first fix round of this cycle"| fixer
+    open -->|"yes, and this is the cycle's first panel —<br>its brief starts the first fix round"| fixer
     fixer -->|"a new commit — re-snapshot, re-verify;<br>every gate clears. A spec gets<br>limits.fixRounds rounds of this"| route
     subgraph final["Fresh eyes on the final diff"]
         adv
@@ -156,8 +156,8 @@ flowchart TD
     route -->|"after the first fix of a cycle"| recheck
     route -->|"after a second or later fix round, or a CI repair:<br>the whole panel again, against a diff no lens has read"| lenses
     route -->|"after a second or later fix round, or a CI repair"| codexr
-    open -->|"no"| adv
-    open -->|"no"| recheck
+    open -->|"no — or this panel is a re-run, whose own findings<br>nothing fixes until the re-check below settles them"| adv
+    open -->|"no, or this panel is a re-run"| recheck
     adv --> settle
     recheck --> settle
     settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer

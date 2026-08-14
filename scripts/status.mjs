@@ -90,14 +90,42 @@ function counterOf(state, counter) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-// The states from which the fix budget a continuation gets is the *whole* limit,
-// not the limit minus what the last cycle spent. `gates.mjs` has no edge from
+// The states from which a continuation's fix budget comes out of the CI-repair
+// edge rather than out of what the last cycle spent. `gates.mjs` has no edge from
 // `awaiting-approval` or `publishing` to `fixing` at all: the only route back to
 // fixing is `-> reviewing`, the CI-repair edge, and that edge resets the fix
-// counter to zero. So for one of these specs the number the run will enforce is
-// the limit, and the setting that actually bounds it is `limits.ciRepairs` —
-// reporting `limit - used` here would tell someone to raise the wrong one.
+// counter to zero. So for one of these specs the setting that actually bounds the
+// fix budget is `limits.ciRepairs` — reporting `limit - used` here would tell
+// someone to raise the wrong one.
+//
+// The restart is only worth reporting if the edge that grants it can still be
+// taken: a spec that has spent its repairs is refused that transition, so it gets
+// no further fix rounds at all and its remainder is 0 rather than the limit. See
+// `fixBudget`.
 const FIX_BUDGET_RESTARTS = new Set(["awaiting-approval", "publishing"]);
+
+// What a spec's fix budget really is, given what the repair budget beside it
+// allows. Away from the restarting states this is the plain remainder. In them it
+// is whatever the CI-repair edge would hand over:
+//
+// - repairs left — the edge can be taken and resets the counter, so the whole
+//   limit, and `fixBudgetRestarts` says the number is a fresh budget rather than
+//   a remainder.
+// - none left — the edge is refused, no fix round will ever be granted again, so
+//   `0`. Reporting the limit here would promise the largest number in the output
+//   to the one spec that can no longer spend it.
+// - unknown — nothing can be said about what the edge would grant either, so the
+//   remainder is unknown for the same reason the repair budget is.
+function fixBudget(limits, spec, ciRemaining, ciUnknown) {
+  const limit = limitOf(limits, "fixRounds");
+  const used = counterOf(spec, "fixRoundsUsed");
+  if (!FIX_BUDGET_RESTARTS.has(spec.state)) return budget("fixRounds", limit, used, "counter");
+  if (ciRemaining === null) return { fixRoundsRemaining: null, fixRoundsUnknown: ciUnknown };
+  if (ciRemaining === 0) return { fixRoundsRemaining: 0 };
+  const restarted = budget("fixRounds", limit, used === null ? null : 0, "counter");
+  // The flag is a claim about a number, so it goes only where there is one.
+  return restarted.fixRoundsRemaining === null ? restarted : { ...restarted, fixBudgetRestarts: true };
+}
 
 // The rounds a plan has spent under its *current* goal approval. The numbering
 // climbs across the whole review root, but the budget is counted per approval —
@@ -184,19 +212,17 @@ export function inventory(repoRoot) {
       budgets: specs
         .filter((spec) => spec.state !== "merged" && spec.state !== "failed")
         .map((spec) => {
-          const used = counterOf(spec, "fixRoundsUsed");
-          const restarts = FIX_BUDGET_RESTARTS.has(spec.state);
+          // The repair budget first: on a spec that is waiting or publishing it
+          // is what decides the fix budget beside it, because the fix rounds a
+          // continuation gets are the ones the repair edge hands over. A counter
+          // that is not a number of rounds still reports unknown, because that
+          // is what the next run refuses on whatever the state.
+          const repairs = budget("ciRepairs", limitOf(limits, "ciRepairs"), counterOf(spec, "ciRepairsUsed"), "counter");
           return {
             spec: spec.spec,
             state: spec.state,
-            // A spec that is waiting or publishing gets its fix budget back
-            // before it can fix again, so what it has left is the whole limit —
-            // see `FIX_BUDGET_RESTARTS`. A counter that is not a number of
-            // rounds still reports unknown, because that is what the next run
-            // refuses on whatever the state.
-            ...budget("fixRounds", limitOf(limits, "fixRounds"), used === null || !restarts ? used : 0, "counter"),
-            ...(restarts ? { fixBudgetRestarts: true } : {}),
-            ...budget("ciRepairs", limitOf(limits, "ciRepairs"), counterOf(spec, "ciRepairsUsed"), "counter")
+            ...fixBudget(limits, spec, repairs.ciRepairsRemaining, repairs.ciRepairsUnknown),
+            ...repairs
           };
         }),
       path: root

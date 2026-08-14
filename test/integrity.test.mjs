@@ -391,6 +391,51 @@ test("the ship diagram draws the two routes a fixed commit actually takes", () =
   assert.match(ship, /route -->\|"after the first fix of a cycle"\| recheck/);
 });
 
+// The panel is drawn once and entered three ways — first candidate, second or
+// later fix round, CI repair — so both the label on the box and the edge out of
+// it are claims about every entry. A label saying the panel reads every candidate
+// no lens has read contradicts the `route` edge four lines below it, which sends
+// the first fix past the panel; a single 'first fix round' exit sends a reader
+// leaving a re-run panel straight to a fixer, when ship.md settles that panel's
+// findings through the re-check first and fixes them out of `still-open.json`.
+test("the ship diagram's panel says what it reads and where a re-run panel goes", () => {
+  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
+  assert.ok(ship, "the README no longer has a ship cycle diagram");
+  const shipMd = commands.find((entry) => entry.file === "ship.md")?.text ?? "";
+  assert.match(shipMd, /on every round this step runs/, "commands/ship.md no longer says when the panel runs");
+  assert.match(ship, /subgraph panel\[[^\]]*on every round this step runs/,
+    "the panel subgraph does not say what commands/ship.md says it reads");
+  assert.ok(!ship.includes("candidate no lens has read"),
+    "the panel subgraph still claims it reads every unread candidate, which the first fix of a cycle skips");
+  assert.match(ship, /open -->\|"yes, and this is the cycle's first panel[^|]*\| fixer/,
+    "the panel's exit to a fixer is not limited to the panel that has one");
+  for (const target of ["adv", "recheck"]) {
+    assert.match(ship, new RegExp(`open -->\\|"no[^|]*re-run[^|]*\\| ${target}`),
+      `a re-run panel is not drawn reaching ${target} before a fixer`);
+  }
+});
+
+// A reason renders as a sentence sending someone to a particular file, and
+// `rounds` and `counter` must never send anyone to `.tagteam/config.json`. So an
+// undocumented reason is a mis-diagnosis waiting to happen — and so is a count in
+// the prose that disagrees with the list under it, since a model that reads the
+// count rather than the list renders the wrong sentence.
+test("commands/status.md documents every reason a budget can be unknown", () => {
+  const statusMd = commands.find((entry) => entry.file === "status.md")?.text ?? "";
+  const inventory = read("scripts", "status.mjs");
+  const documented = [...statusMd.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
+  assert.deepEqual([...documented].sort(), ["counter", "rounds", "settings"]);
+  for (const reason of documented) {
+    assert.ok(inventory.includes(`"${reason}"`), `commands/status.md renders "${reason}", which status.mjs never emits`);
+  }
+  const words = { one: 1, two: 2, three: 3, four: 4 };
+  const [, counted] = /the (one|two|three|four) reasons/.exec(statusMd) ?? [];
+  if (counted) {
+    assert.equal(words[counted], documented.length,
+      `commands/status.md says there are ${counted} reasons and then lists ${documented.length}`);
+  }
+});
+
 // Every one of these sentences told a reader the cycle happens exactly once.
 // They are the claims the configured limits replaced, and one left behind is
 // documentation contradicting the code a person is about to run.
