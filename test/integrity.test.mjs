@@ -249,6 +249,24 @@ test("step 7 dispatches the adversary a re-check of the findings it carried", ()
     "step 7's watcher no longer waits for the adversary's re-check the way it waits for Codex's");
 });
 
+// The dispatch above only works if the agent it dispatches is defined to read
+// the brief it is handed. `agents/adversary.md` enumerates the briefs it may be
+// pointed at; without the re-check clause the agent's own definition tells it to
+// treat a re-check as judging a diff, and it writes a findings-shaped file that
+// `recheck.mjs` rejects against `recheck.schema.json` — the carried adversary
+// finding stays open with no verdict, which is the deadlock step 7 exists to
+// close, reintroduced one file over. `agents/reviewer.md` carries the same
+// clause for the same reason.
+test("every agent dispatched to a re-check is defined to read the re-check brief", () => {
+  for (const name of ["adversary", "reviewer"]) {
+    const agent = read("agents", `${name}.md`);
+    assert.match(agent, /prompts\/recheck\.md/,
+      `agents/${name}.md no longer names prompts/recheck.md, but step 7 dispatches it under that brief`);
+  }
+  assert.match(read("agents", "adversary.md"), /recheck\.schema\.json/,
+    "agents/adversary.md no longer names the schema its re-check output must match");
+});
+
 // From the second fix round on, step 5 runs in full and step 7 follows in the
 // same round. Handing each lens the findings it raised minutes earlier, against
 // the same diff with no commit in between, asks `prompts/recheck.md`'s question —
