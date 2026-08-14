@@ -20,6 +20,9 @@ import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } f
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 const GATING = new Set(["blocking", "major"]);
+// The one name this deriver writes a review under. An `--out` inside the round
+// has to be this file; see `writeDerived`.
+const DERIVED_REVIEW = "review.json";
 
 function parseArgs(argv) {
   const options = { expect: [] };
@@ -250,8 +253,8 @@ export function writeOpenViews(dir, { candidate, open, list, perLens }) {
 // against a write-once round — and it is also what fixes the stale-`open/`
 // hazard, since `open/<lens>.json` is written only for lenses that still have
 // something open, and a survivor from an earlier pass would otherwise be handed
-// to a reviewer as current. `--out` is cleared only when it lands in this same
-// round; pointed anywhere outside one, it is the plain write it always was.
+// to a reviewer as current. `--out` is the caller's string rather than a literal
+// this deriver owns, so it gets its own rule below.
 //
 // The marker is checked before the clearing, not by the first write after it. A
 // round whose `round.json` is damaged is neither re-entered nor written into, and
@@ -276,8 +279,23 @@ function writeDerived(dir, out, result) {
     throw new Error(`the round at ${round} belongs to ${owner}, not to ${result.candidate}; nothing was removed `
       + "— derive into the round that records this candidate, or re-run with the candidate that round belongs to");
   }
+  // `--out` is the only path cleared here that the caller names, and everything
+  // else — `to-fix.json`, `open/` — is a literal this deriver owns. So it is
+  // cleared when it is this round's review record and refused when it is
+  // anything else inside the round: an `--out` pointed at `review.diff` or
+  // `candidate.json` used to delete a sealed record and exit 0, and nothing left
+  // on disk can re-derive either of those. Outside a round it is the plain write
+  // it always was.
   const outPath = path.resolve(out);
-  if (round !== null && roundRootForWrite(outPath) === round) fs.rmSync(outPath, { force: true });
+  const derivedOut = path.join(roundDir, DERIVED_REVIEW);
+  if (round !== null && roundRootForWrite(outPath) === round) {
+    if (outPath !== derivedOut) {
+      throw new Error(`--out ${out} is inside the round at ${round} but is not the review this run derives `
+        + `(${derivedOut}); nothing was removed — every other record in a round is written once, and the `
+        + "deriver only replaces what it derived");
+    }
+    fs.rmSync(outPath, { force: true });
+  }
   fs.rmSync(path.join(roundDir, "to-fix.json"), { force: true });
   fs.rmSync(path.join(roundDir, "open"), { recursive: true, force: true });
 

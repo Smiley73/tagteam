@@ -26,6 +26,9 @@ import { findingId, parseRound, roundDirectoryFor, writeOpenViews } from "./coll
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
+// The one name this deriver writes a settled review under. An `--out` inside the
+// round has to be this file; see `clearDerived`.
+const DERIVED_RECHECK = "recheck.json";
 
 function parseArgs(argv) {
   const options = {};
@@ -131,10 +134,22 @@ function clearDerived(roundDir, out, candidate) {
     throw new Error(`the round at ${round} belongs to ${owner}, not to ${candidate}; nothing was removed `
       + "— settle into the round that records this candidate, or re-run with the candidate that round belongs to");
   }
-  // `--out` only when it lands in this same round; pointed anywhere outside one,
-  // it is the plain write it always was.
+  // `--out` is the one path here the caller names; the rest are literals this
+  // deriver owns. So it is cleared when it is this round's settled review and
+  // refused when it is anything else inside the round: an `--out` pointed at the
+  // round's `review.diff` or `candidate.json` used to delete a sealed record and
+  // exit 0, and nothing left on disk can re-derive either. Pointed anywhere
+  // outside a round it is the plain write it always was.
   const outPath = path.resolve(out);
-  if (round !== null && roundRootForWrite(outPath) === round) fs.rmSync(outPath, { force: true });
+  const derivedOut = path.join(target, DERIVED_RECHECK);
+  if (round !== null && roundRootForWrite(outPath) === round) {
+    if (outPath !== derivedOut) {
+      throw new Error(`--out ${out} is inside the round at ${round} but is not the settled review this run `
+        + `derives (${derivedOut}); nothing was removed — every other record in a round is written once, and `
+        + "the deriver only replaces what it derived");
+    }
+    fs.rmSync(outPath, { force: true });
+  }
   fs.rmSync(path.join(target, "still-open.json"), { force: true });
   fs.rmSync(path.join(target, "still-open"), { recursive: true, force: true });
 }
@@ -329,13 +344,25 @@ const oneLine = (text, limit = 240) => {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 };
 
+// Which role failed, in two path segments: `recheck/adversary.json` is the
+// adversary judging its own carried findings, `findings/adversary.json` is the
+// adversary reading the fixed diff. Without it both failures render the same
+// line — same lens, same "no file was written" — and the orchestrator, whose
+// only view is this summary because it may not open a findings file, cannot tell
+// which of the two to re-dispatch. The whole path would say it too, but it is
+// long, absolute and mostly the same on every row.
+const role = (file) => (file ? path.join(path.basename(path.dirname(file)), path.basename(file)) : null);
+
 export function summaryLines(result) {
   // What was inherited belongs on the first line: a round settling findings it
   // did not raise is doing different work from one settling its own, and the id
   // in each row says which round that was.
   const inherited = result.carriedIn > 0 ? `, ${result.carriedIn} carried in from an earlier round` : "";
   const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open${inherited}`];
-  for (const gap of result.missing) lines.push(`  MISSING  ${gap.lens}: ${oneLine(gap.reason)}`);
+  for (const gap of result.missing) {
+    const where = role(gap.file);
+    lines.push(`  MISSING  ${gap.lens}${where ? ` (${where})` : ""}: ${oneLine(gap.reason)}`);
+  }
   for (const finding of result.findings) {
     // `recorded` is neither of the other two: not open, and not resolved by
     // anyone — it never gated, so nobody was asked to fix it. Printing it as
@@ -430,15 +457,22 @@ async function main() {
     // file, and the same chmod fails the same way on every retry.
     writeRoundFile(options.out, `${JSON.stringify(result, null, 2)}\n`);
     // Every verdict file this settled is now part of the record, so it is sealed
-    // the way `collect-findings` seals the findings it consumed. A lens whose
-    // file was missing or unusable is not in `present` and stays writable, which
-    // is what a re-dispatch into the same round needs. The adversary is sealed on
-    // its own path: it is consumed from `--adversary`, not from `--dir`, and in a
-    // round that also re-checks carried adversary findings both files are records.
-    for (const { lens } of result.present) {
-      sealRoundRecord(path.join(path.resolve(options.dir), `${lens}.json`));
-    }
-    if (!result.missing.some((gap) => gap.file === options.adversary)) sealRoundRecord(options.adversary);
+    // the way `collect-findings` seals the findings it consumed. A file that was
+    // missing or unusable is left writable, which is what a re-dispatch into the
+    // same round needs.
+    //
+    // Decided per file, not per lens. The adversary is two readers here — a
+    // verdict under `--dir` and the fresh pass at `--adversary` — and `present`
+    // is keyed by lens name, so a failed fresh pass dropped "adversary" out of it
+    // and left the re-check verdict this settlement did consume unsealed, alone
+    // among the round's consumed records. A `missing` entry names the exact file
+    // that failed, so that is what the two roles are told apart by.
+    const failed = new Set(result.missing.filter((gap) => gap.file).map((gap) => path.resolve(gap.file)));
+    const seal = (file) => {
+      if (!failed.has(path.resolve(file))) sealRoundRecord(file);
+    };
+    for (const lens of result.expected) seal(path.join(path.resolve(options.dir), `${lens}.json`));
+    seal(options.adversary);
 
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
     if (list.count > 0) {

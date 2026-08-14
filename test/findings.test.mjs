@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { collect, findingId, parseRound, roundDirectoryFor } from "../scripts/collect-findings.mjs";
-import { settle, resolveCarry } from "../scripts/recheck.mjs";
+import { settle, resolveCarry, summaryLines } from "../scripts/recheck.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const FINDINGS_SCHEMA = path.join(root, "schemas", "findings.schema.json");
@@ -1314,4 +1314,153 @@ test("the adversary's two roles in one round fail separately", () => {
   assert.deepEqual(result.open.map((entry) => entry.id).sort(), ["1.adversary.1", "1.correctness.1", "1.correctness.2", "2.adversary.1"]);
   const gap = result.missing.find((entry) => entry.lens === "adversary");
   assert.equal(gap.file, path.join(target, "adversary.json"), "the failure names the role that failed");
+});
+
+test("the adversary's two roles fail in words the orchestrator can tell apart", () => {
+  // The `file` on the `missing` entry is the distinguisher, and the orchestrator
+  // never sees it: stdout and `--print` are its only view, because it may not
+  // open a findings file. Both roles produce the same lens and the same "no file
+  // was written", so a summary that renders only those two prints byte-identical
+  // lines for a re-check that never ran and a fresh pass that never ran — two
+  // different re-dispatches, and no way to choose between them.
+  const carried = [carriedFinding("1.adversary.1", "adversary")];
+  const settledReview = { ...review, open: [] };
+
+  // The re-check role fails: no verdict file under `--dir`, fresh pass fine.
+  const first = recheckRound(2);
+  fs.writeFileSync(first.adv, JSON.stringify({
+    lens: "adversary", candidate: NEW_OID, summary: "read it",
+    findings: [finding({ severity: "blocking", title: "the fix moved the defect" })]
+  }));
+  const noVerdict = settle({
+    review: settledReview, dir: first.verdicts, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, carried,
+    adversary: first.adv, adversarySchemaPath: FINDINGS_SCHEMA
+  });
+  // The fresh-pass role fails: the verdict is there and says the carried finding
+  // is still open, and the adversary never read the fixed diff.
+  const second = recheckRound(2);
+  fs.writeFileSync(path.join(second.verdicts, "adversary.json"), JSON.stringify(verdictFile("adversary", [
+    { id: "1.adversary.1", resolved: false, evidence: "still there" }
+  ])));
+  const noPass = settle({
+    review: settledReview, dir: second.verdicts, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, carried,
+    adversary: second.adv, adversarySchemaPath: FINDINGS_SCHEMA
+  });
+
+  const missingLine = (result) => summaryLines(result).find((line) => line.includes("MISSING"));
+  assert.equal(noVerdict.status, "incomplete");
+  assert.equal(noPass.status, "incomplete");
+  assert.notEqual(
+    missingLine(noVerdict),
+    missingLine(noPass),
+    "both roles of the adversary print the same line, so neither can be re-dispatched"
+  );
+  assert.match(missingLine(noVerdict), /adversary\.json/);
+  assert.match(missingLine(noPass), /findings\/adversary\.json/);
+});
+
+test("an --out inside the round that is not the derived review is refused, not deleted", async () => {
+  // `--out` is the caller's string, and `<n>` is substituted by hand in ship.md.
+  // Both derivers used to remove whatever it named as long as it landed in the
+  // round, so an `--out` naming the sealed `review.diff` or `candidate.json`
+  // destroyed a record nothing on disk can re-derive — and exited 0. The round's
+  // own escape hatch, re-entry, empties the round, so the loss is final.
+  const { spawnSync } = await import("node:child_process");
+  const sealed = (file, body) => {
+    fs.writeFileSync(file, body, { mode: 0o600 });
+    fs.chmodSync(file, 0o400);
+  };
+
+  const { dir: roundDir, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-out-guard-");
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "1.correctness.1", resolved: true, evidence: "fixed" },
+    { id: "1.correctness.2", resolved: true, evidence: "fixed" }
+  ])), { mode: 0o600 });
+  const diff = path.join(roundDir, "review.diff");
+  sealed(diff, "the diff the whole round was reviewed against\n");
+
+  const settledElsewhere = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", diff
+  ], { encoding: "utf8" });
+  assert.equal(settledElsewhere.status, 2, `--out at a record the re-check does not derive must refuse: ${settledElsewhere.stdout}`);
+  assert.match(settledElsewhere.stderr, /recheck\.json/);
+  assert.equal(
+    fs.readFileSync(diff, "utf8"),
+    "the diff the whole round was reviewed against\n",
+    "the re-check deleted a sealed record --out happened to name"
+  );
+  assert.equal(fs.existsSync(out), false, "the refused run settled anyway");
+  // And the name it does derive still works, so the guard did not cost the
+  // re-derivation it exists next to.
+  const settledHere = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out
+  ], { encoding: "utf8" });
+  assert.equal(settledHere.status, 0, `the re-check refused its own output: ${settledHere.stderr}`);
+
+  // The collector, same guard: `--out` here is `review.json`, and the round's
+  // candidate snapshot is one keystroke away from it.
+  const { round: collectRound, findings, out: reviewOut } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })])
+  });
+  const candidate = path.join(collectRound, "candidate.json");
+  sealed(candidate, "{\"candidateOid\": \"the commit this round records\"}");
+
+  const collected = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness", "--round", "1", "--out", candidate
+  ], { encoding: "utf8" });
+  assert.equal(collected.status, 2, `--out at a record the collector does not derive must refuse: ${collected.stdout}`);
+  assert.match(collected.stderr, /review\.json/);
+  assert.equal(
+    fs.readFileSync(candidate, "utf8"),
+    "{\"candidateOid\": \"the commit this round records\"}",
+    "the collector deleted the candidate snapshot --out happened to name"
+  );
+  assert.equal(fs.existsSync(path.join(collectRound, "to-fix.json")), false, "the refused run derived anyway");
+  const derived = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness", "--round", "1", "--out", reviewOut
+  ], { encoding: "utf8" });
+  assert.equal(derived.status, 1, `the collector refused its own output: ${derived.stderr}`);
+  assert.ok(fs.existsSync(path.join(collectRound, "to-fix.json")));
+});
+
+test("a failed fresh adversary pass still seals the verdict the same round consumed", async () => {
+  // Sealing was keyed by lens, and the adversary is two readers in this round: a
+  // fresh pass that never ran dropped "adversary" out of `present` and left the
+  // re-check verdict this settlement did consume writable — the one consumed
+  // record in the round that a rewrite would not fail loudly on.
+  const { spawnSync } = await import("node:child_process");
+  const { base, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-adv-seal-");
+  const previous = path.join(base, "rounds", "1", "still-open.json");
+  fs.mkdirSync(path.dirname(previous), { recursive: true });
+  fs.writeFileSync(previous, JSON.stringify({
+    candidate: OID,
+    findings: [carriedFinding("1.adversary.1", "adversary")]
+  }));
+  fs.writeFileSync(path.join(verdicts, "adversary.json"), JSON.stringify(verdictFile("adversary", [
+    { id: "1.adversary.1", resolved: true, evidence: "the defect it named is gone" }
+  ])), { mode: 0o600 });
+  fs.writeFileSync(reviewPath, JSON.stringify({ status: "clean", candidate: OID, counts: {}, open: [], missing: [] }));
+  // The fresh pass never wrote its file, which is what leaves the round incomplete.
+  assert.equal(fs.existsSync(adv), false);
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out, "--carry", previous
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 1, `a missing fresh adversary pass is not clean: ${result.stdout}${result.stderr}`);
+  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).status, "incomplete");
+  assert.equal(
+    fs.statSync(path.join(verdicts, "adversary.json")).mode & 0o777, 0o400,
+    "the consumed re-check verdict was left writable because the other role failed"
+  );
 });
