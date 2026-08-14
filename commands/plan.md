@@ -166,18 +166,28 @@ is the round for every path below, the ones you write into a subagent's brief
 included. Never substitute a number of your own and never count rounds in your
 head: two rounds that agree on a number means the second round's readers write
 over the first round's findings, and the allocator exists so that cannot happen.
-Lost `$ROUND`? Run the command again — an open round comes back unchanged and
-costs nothing.
+Lost `$ROUND`? Read it back out of `$D/work/plan-round.json`, which the
+allocation above already wrote. **Do not run the allocator again to remind
+yourself.** Part-way through a round it re-enters the round you are in and
+empties the directory, so readers that have already reported lose their
+findings and the watcher below waits for files nothing will write again.
+Re-allocating is safe only before any reader has written — and if it has come to
+that, the resume path is running step 5 again from the top, not the command
+above on its own.
 
 **Announce the round before you dispatch anything**, in one plain line: which
 round this is, and how many this goal approval gets. "Review round 2 of 3, three
 readers on the plan."
 
 **Exit 4 means the budget is spent**, and it was refused before anything was
-created. Say what is still open — the `blocking` and `major` findings the last
-round raised that its revision did not close — and that `planReviewRounds` in
-`.tagteam/config.json` is what stopped the rounds, rather than the plan being
-finished. Then **go on to step 6**. A spent review budget does not end the run:
+created. Say only what is known here: the last round raised `blocking` or
+`major` findings, a revision addressed them, and no further round was available
+to check the result — and that `planReviewRounds` in `.tagteam/config.json` is
+what stopped the rounds, rather than the plan being finished. **Do not present
+that round's findings as still open.** Nothing has read the revised plan, so
+which of them the revision closed is not something you or anything on disk
+knows, and a list of problems the plan may no longer have is worse than no list.
+Then **go on to step 6**. A spent review budget does not end the run:
 they approve at step 7 either way, and that is where they get to say the plan is
 not ready.
 
@@ -225,14 +235,20 @@ middle of changing.
 ### Close the round out
 
 Write `$D/work/review/$ROUND/outcome.json` yourself — `{"round", "closedAt",
-"blockingOrMajor": <count>, "revised": true|false}` — and then start the next
-round at *Open the round*.
+"blockingOrMajor": <count>, "revised": true|false}`. What follows it is the
+count, not a judgement:
 
-That file is what makes the round finished, and writing it is not optional.
-Until it is there the allocator treats the round as interrupted: the next
-allocation hands back the same number, empties the directory and re-runs the
-readers, which is exactly what a resumed session needs and exactly wrong for a
-round that is over. Write it once the revision has returned, never before it.
+- **`blockingOrMajor` is 0**: write the file now, with `"revised": false` —
+  no revision ran on this path — and **go to step 6**. Do not open another
+  round; there is nothing left for one to do, whatever the budget still allows.
+- **Otherwise**: write the file once the revision has returned, never before it,
+  with `"revised": true`, and start the next round at *Open the round*.
+
+That file is what makes the round finished, and writing it is not optional in
+either branch. Until it is there the allocator treats the round as interrupted:
+the next allocation hands back the same number, empties the directory and
+re-runs the readers, which is exactly what a resumed session needs and exactly
+wrong for a round that is over.
 
 ### When a finding is against the goal, not the plan
 

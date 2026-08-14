@@ -133,6 +133,52 @@ test("an unfinished round is re-entered and cleared, a finished one never is", a
   assert.equal(fs.readFileSync(path.join(resumed.dir, "claude.json"), "utf8"), "the second attempt's findings");
 });
 
+test("a re-approval mid-round takes a new number and leaves the open round intact", async () => {
+  // The goal-level finding path: a reviewer's question changes the goal, the
+  // owner re-approves, and the round those findings were made under is still
+  // open. Only the candidate changing with the hash keeps the next allocation
+  // from re-entering that round and emptying it — an implementation that keyed
+  // the candidate on something stable across approvals (the plan slug, say)
+  // passes every other test here and silently deletes three readers' findings.
+  const dir = plan();
+  const open = await allocate(dir, 1);
+  findings(open, "claude.json", "made against the goal that was approved then");
+  findings(open, "codex.json", "and so was this");
+
+  fs.writeFileSync(path.join(dir, "goal.md"), "# Goal: ship a different thing\n");
+  approve(dir, { at: "2026-01-01T01:00:00Z" });
+
+  const next = await allocate(dir, 1);
+  assert.equal(next.round, 2, "the re-approval takes the next number");
+  assert.equal(next.reentered, false, "the open round of the previous approval was re-entered and cleared");
+  assert.notEqual(next.scope, open.scope);
+  assert.deepEqual(names(reviewRoot(dir)), ["1", "2"]);
+  assert.equal(fs.readFileSync(path.join(open.dir, "claude.json"), "utf8"), "made against the goal that was approved then");
+  assert.equal(fs.readFileSync(path.join(open.dir, "codex.json"), "utf8"), "and so was this");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(open.dir, "round.json"), "utf8")).scope, open.scope);
+
+  // Two things keep that open round intact, and the identity plan.md passes
+  // happens to hold both: the candidate changes with the hash, and re-entry is
+  // restricted to the scope being allocated. The second one is the load-bearing
+  // half — an identity that stayed the same across approvals is a reading the
+  // module's own docstring invites ("the last unfinished round of this
+  // candidate") — so pin it on a candidate that deliberately does not change.
+  const stable = { root: reviewRoot(dir), candidate: "the-plan-slug" };
+  const held = await allocateRound(stable.root, {
+    candidate: stable.candidate, scope: "approval:1", limit: 1, limitName: LIMIT_NAME, exempt: 0, completeWhen: OUTCOME
+  });
+  findings(held, "adversary.json", "still open under the approval it was made against");
+  const after = await allocateRound(stable.root, {
+    candidate: stable.candidate, scope: "approval:2", limit: 1, limitName: LIMIT_NAME, exempt: 0, completeWhen: OUTCOME
+  });
+  assert.notEqual(after.round, held.round, "an unfinished round of an earlier approval was re-entered");
+  assert.equal(after.reentered, false);
+  assert.equal(
+    fs.readFileSync(path.join(held.dir, "adversary.json"), "utf8"),
+    "still open under the approval it was made against"
+  );
+});
+
 test("the scope is the approved goal's hash, not the marker's bytes", async () => {
   // Re-approving an unchanged goal is what a resumed session redoing step 3
   // does, and it must not hand the review a fresh budget. An implementation that
