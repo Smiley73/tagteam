@@ -750,6 +750,40 @@ test("re-deriving inside a claimed round replaces the collector's own outputs, a
   assert.equal(fs.statSync(path.join(findings, "codex.json")).mode & 0o777, 0o400);
 });
 
+test("a damaged round marker stops the collector before it clears the previous derivation", async () => {
+  // The refusal has to come before the deletion. The collector clears
+  // `to-fix.json` and `open/` immediately before re-deriving them, so a marker
+  // check that only happens on the way in to the first write arrives one deletion
+  // too late: the round with an unknown owner is refused, as it should be, but
+  // its previous records are already gone and cannot be re-derived.
+  const { spawnSync } = await import("node:child_process");
+  const { round, findings, out } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })])
+  });
+  fs.writeFileSync(path.join(round, "round.json"), "{\"owner\":");
+  fs.mkdirSync(path.join(round, "open"));
+  fs.writeFileSync(path.join(round, "open", "correctness.json"), "{\"from\": \"the previous derivation\"}");
+  fs.writeFileSync(path.join(round, "to-fix.json"), "{\"from\": \"the previous derivation\"}");
+
+  const run = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(run.status, 2, `a damaged marker must refuse: ${run.stdout}`);
+  assert.match(run.stderr, /round marker/);
+  assert.equal(
+    fs.readFileSync(path.join(round, "to-fix.json"), "utf8"),
+    "{\"from\": \"the previous derivation\"}",
+    "the refused run deleted to-fix.json"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(round, "open", "correctness.json"), "utf8"),
+    "{\"from\": \"the previous derivation\"}",
+    "the refused run deleted an open/<lens>.json"
+  );
+});
+
 test("the recheck seals the verdicts it consumed and leaves the ones it rejected writable", async () => {
   // Verdict files arrive through the Write tool, so the round cannot refuse a
   // second write as it happens; sealing what was consumed is the protection one

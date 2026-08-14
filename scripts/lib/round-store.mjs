@@ -102,8 +102,12 @@ export function roundRootFor(file) {
  * it as no round would turn the write-once guarantee off for every path in that
  * round, silently, which is the fail-open direction for an integrity guard.
  * `enterRound` already refuses the same marker.
+ *
+ * Exported because the deriver that clears its own outputs before rewriting them
+ * has to ask this question *before* it removes anything: finding out at the first
+ * `writeRoundFile` is one deletion too late.
  */
-function roundRootForWrite(file) {
+export function roundRootForWrite(file) {
   const nearest = nearestMarkedAncestor(file);
   if (nearest === null) return null;
   if (!nearest.owned) throw unreadableMarker(path.join(nearest.dir, ROUND_MARKER));

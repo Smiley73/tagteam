@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
+import { roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 const GATING = new Set(["blocking", "major"]);
@@ -139,9 +139,16 @@ function summaryLines(result) {
 // stale-`open/` hazard, since `open/<lens>.json` is written only for lenses that
 // still have something open, and a survivor from an earlier pass would otherwise
 // be handed to a reviewer as current.
+//
+// The marker is checked before the clearing, not by the first write after it. A
+// round whose `round.json` is damaged is neither re-entered nor written into, and
+// a guard that only fires on the way in to `writeRoundFile` would already have
+// deleted the previous `to-fix.json` and `open/` by then — the round would lose
+// records to a refusal that was supposed to leave it exactly as it was.
 function writeOpenFiles(dir, result) {
   const roundDir = path.join(path.resolve(dir), "..");
   const openDir = path.join(roundDir, "open");
+  roundRootForWrite(path.join(roundDir, "to-fix.json"));
   fs.rmSync(path.join(roundDir, "to-fix.json"), { force: true });
   fs.rmSync(openDir, { recursive: true, force: true });
   fs.mkdirSync(openDir, { recursive: true, mode: 0o700 });
