@@ -33,6 +33,10 @@ Dispatch one `Explore` subagent at `models.lead` / `effort.lead`: how the areas 
 which modules own them, what patterns the repository already uses, and where the
 tests for them live. Ask for the conclusion, not the file contents.
 
+Dispatch it with `run_in_background: false` so the call blocks until it reports.
+It writes no file to watch for, and its conclusion is what tells you which
+questions are worth asking.
+
 Read `conventionsPath` if the config names one. Read nothing else yourself —
 what you load here you carry through the whole interview.
 
@@ -120,7 +124,9 @@ what you approved" and a claim nobody checked.
 
 Dispatch `tagteam:plan-drafter` at `models.lead` / `effort.lead`. Give it `$D/goal.md`,
 the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
-count — do not read the plan.
+count — do not read the plan. `run_in_background: false`, so the call blocks: the
+three readers in step 5 are pointed at `$D/plan.md` on disk, and a reviewer
+handed a file that is not written yet reviews nothing.
 
 ## 5 — Review, exactly one round
 
@@ -132,8 +138,27 @@ Three readers, dispatched in a single message so they run concurrently:
 - `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/plan-adversary.md`,
   writing `$D/work/review/adversary.json`
 
+Run the Codex call with `run_in_background` — it outlives what the Bash tool will
+hold in the foreground — and read its result when it returns, because a failed
+Codex call writes no artifact for anything to wait on.
+
+**All three must have reported before you read anything.** Dispatch returns
+immediately; the files do not exist yet. Wait with one background watcher over
+the three paths, per *Dispatching and waiting* in the skill:
+
+```bash
+until [ -f "$D/work/review/claude.json" ] && [ -f "$D/work/review/codex.json" ] && [ -f "$D/work/review/adversary.json" ]; do sleep 5; done
+```
+
+One watcher, one notification. Not repeated directory listings, and never a
+command run only to pass the time.
+
 Then read the three files — they are small — and pass every `blocking` and
 `major` finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`.
+That one blocks too — `run_in_background: false`. It rewrites a `plan.md` that
+already exists, so there is nothing a watcher could wait for, and
+`deliverables.mjs` in step 6 would happily return the rows the revision is in the
+middle of changing.
 
 **That is the whole review.** No second round, no convergence check, no lint. If
 the revision is wrong, the person will say so at approval. Only offer another
@@ -182,10 +207,26 @@ at `models.lead` / `effort.lead` and each writing exactly `$D/specs/<id>.md`. Gi
 goal path, the plan path, its own row, and the configured default lens set so it
 knows what it is naming exceptions to.
 
+**Then wait for every writer**, with one background watcher over the spec paths
+you assigned — one `-f` per deliverable, however many there are:
+
+```bash
+until [ -f "$D/specs/<id>.md" ] && [ -f "$D/specs/<id>.md" ]; do sleep 5; done
+```
+
+This one has no backstop, which is why it matters more than it looks.
+`specs.mjs` reads the directory rather than the deliverables list, so a spec
+whose writer has not finished yet is not an error — it is simply absent from a
+shorter `order`, reported as `ok`. Step 7 then shows a deliverable list with one
+quietly missing, and `approved.json` records it that way.
+
 Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
 checks front matter, resolves each spec's lenses against the default set, and
 returns dependency order. Fix what it reports by re-dispatching the writer for
-that spec at `models.lead` / `effort.lead`.
+that spec at `models.lead` / `effort.lead` — **with `run_in_background: false`,
+not behind a watcher.** A spec it rejected is a spec that exists, so `[ -f ]` on
+the path the writer is rewriting returns having waited for nothing, and
+`specs.mjs` re-runs against the file that already failed.
 
 **The reviewer selection lives in the spec front matter**, because that is what
 `specs.mjs` and shipping actually read. There is no separate manifest to edit: a
@@ -225,6 +266,11 @@ shipping does not need.
 
 Do not read `plan.md` or any spec body into your own context. You do not need
 them and you will need the room.
+
+Do not run a script over files the agents you dispatched have not written yet.
+Dispatch returns before they do, and none of these scripts wait: one background
+watcher over the paths of a fan-out, a blocking dispatch for everything else,
+never repeated checks and never a command run to pass the time.
 
 Do not add a review log, a changelog, or a record of what a reviewer asked to any
 committed file. The plan states the current shape of the work; the review record
