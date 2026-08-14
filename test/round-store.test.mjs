@@ -156,42 +156,6 @@ test("sealing is a reinforcement, so a missing file is not an error", () => {
   assert.equal(fs.statSync(file).mode & 0o777, 0o400);
 });
 
-// The assertion that catches the file someone adds next year. A named subset
-// would pass a hand-written per-file test; only enumeration covers the tree.
-test("every regular file a real pass leaves in a round refuses different bytes", () => {
-  const dir = roundAt();
-  const files = [
-    "review.diff",
-    "changed-paths.json",
-    "candidate.json",
-    "verify.json",
-    "verify/1.log",
-    "to-fix.json",
-    "open/correctness.json",
-    "findings/correctness.json",
-    "findings/codex.json",
-    "findings/codex.json.prompt.md",
-    "findings/codex.json.request.json",
-    "findings/codex.json.events.jsonl",
-    "recheck/correctness.json"
-  ];
-  for (const relative of files) plant(dir, relative, `${relative}\n`);
-
-  const walk = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(directory, entry.name);
-    return entry.isDirectory() ? walk(full) : [full];
-  });
-  const records = walk(dir).filter((file) => path.basename(file) !== ROUND_MARKER);
-  assert.equal(records.length, files.length);
-  for (const file of records) {
-    // Codex writes its own artifact and sidecars without the guard — one
-    // invocation produces a set that has to be replaced together, and a
-    // re-dispatched lens does replace it. The guard still refuses anyone who
-    // routes a write at those paths through it, which is what this asserts.
-    assert.throws(() => writeRoundFile(file, "different\n"), (error) => error.message.includes(file), file);
-  }
-});
-
 // --- snapshot-candidate against a real repository -------------------------
 
 function repo() {
@@ -237,6 +201,14 @@ test("re-snapshotting the same commit re-enters the round and rebuilds it", () =
   // as current evidence.
   assert.equal(fs.existsSync(stale), false);
   assert.ok(fs.existsSync(path.join(outDir, "candidate.json")));
+  // The mode is the only thing on disk that distinguishes a record the snapshot
+  // wrote through the round store from one it wrote with a plain
+  // `fs.writeFileSync`: `enterRound` empties the round immediately before these
+  // three writes, so the refusal branch is unreachable from here and a bare
+  // write would behave identically at every other assertion in this file.
+  for (const name of ["review.diff", "changed-paths.json", "candidate.json"]) {
+    assert.equal(fs.statSync(path.join(outDir, name)).mode & 0o777, 0o400, `${name} is not a sealed record`);
+  }
 });
 
 test("a new commit into an existing round is refused, naming both commits", () => {
@@ -287,4 +259,85 @@ test("an existing verify log stops the run before the command executes", () => {
   assert.match(result.stderr, /1\.log/);
   // The throw is not the point — a command that already ran cannot be un-run.
   assert.equal(fs.existsSync(sentinel), false, "the verify command executed before the log path was claimed");
+});
+
+// --- the blanket assertion, over a round the real scripts built -------------
+
+// Everything below runs the actual producers, because a hand-planted file list
+// observes nothing: `enterRound` empties the round immediately before the
+// snapshot's three writes and `writeOpenFiles` removes its own outputs
+// immediately before rewriting them, so inside those flows a bare
+// `fs.writeFileSync` behaves exactly like the guarded write. The mode is what
+// separates them, and only a round a script actually filled carries it.
+function realPass() {
+  const source = repo();
+  const rounds = temp("rounds");
+  const outDir = path.join(rounds, "1");
+  const snapshotResult = snapshot(source, outDir);
+
+  const config = path.join(temp("config"), "config.json");
+  fs.writeFileSync(config, JSON.stringify({ verify: [{ command: "true", timeoutSec: 30, when: {} }] }));
+  const verified = spawnSync("node", [
+    path.join(root, "scripts", "verify-run.mjs"),
+    "--worktree", source.dir, "--config", config,
+    "--candidate", snapshotResult.candidatePath,
+    "--base", source.base, "--candidate-oid", source.candidate,
+    "--out-dir", path.join(outDir, "verify"), "--out", path.join(outDir, "verify.json")
+  ], { encoding: "utf8" });
+  assert.equal(verified.status, 0, `verify-run failed: ${verified.stderr}`);
+
+  // A reviewer's findings file arrives through the Write tool; the collector
+  // consumes it and derives `to-fix.json` and `open/<lens>.json` from it.
+  const findings = path.join(outDir, "findings");
+  fs.mkdirSync(findings, { recursive: true });
+  fs.writeFileSync(path.join(findings, "correctness.json"), JSON.stringify({
+    lens: "correctness",
+    candidate: source.candidate,
+    summary: "looked",
+    findings: [{
+      severity: "blocking", file: "a.txt", line: 1,
+      title: "loses the first write", detail: "two concurrent callers", fix: null
+    }]
+  }), { mode: 0o600 });
+  const collected = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", source.candidate, "--expect", "correctness",
+    // review.json lives above the round, where it is rewritten every run.
+    "--out", path.join(rounds, "review.json")
+  ], { encoding: "utf8" });
+  assert.equal(collected.status, 1, `collect-findings failed: ${collected.stderr}`);
+
+  return outDir;
+}
+
+// The assertion that catches the file someone adds next year. A named subset
+// would pass a hand-written per-file test; only enumeration covers the tree, and
+// only a tree the real callers produced says anything about those callers.
+test("every regular file a real pass leaves in a round is a sealed, write-once record", () => {
+  const outDir = realPass();
+  const walk = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(directory, entry.name);
+    return entry.isDirectory() ? walk(full) : [full];
+  });
+  const records = walk(outDir).filter((file) => path.basename(file) !== ROUND_MARKER);
+
+  // The enumeration is only worth anything if the pass actually left these
+  // behind: a producer that silently stopped writing would otherwise make the
+  // loop below vacuous.
+  const expected = [
+    "review.diff", "changed-paths.json", "candidate.json",
+    "verify.json", path.join("verify", "1.log"),
+    "to-fix.json", path.join("open", "correctness.json"),
+    path.join("findings", "correctness.json")
+  ].map((relative) => path.join(outDir, relative));
+  for (const file of expected) assert.ok(records.includes(file), `a real pass wrote no ${file}`);
+
+  const logs = path.join(outDir, "verify");
+  for (const file of records) {
+    assert.throws(() => writeRoundFile(file, "different\n"), (error) => error.message.includes(file), file);
+    // A verify log is filled incrementally, so its guard is the exclusive open
+    // rather than the mode — the test above owns that one.
+    if (path.dirname(file) === logs) continue;
+    assert.equal(fs.statSync(file).mode & 0o777, 0o400, `${file} was written past the round store`);
+  }
 });

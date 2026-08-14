@@ -712,6 +712,12 @@ test("re-deriving inside a claimed round replaces the collector's own outputs, a
     JSON.parse(fs.readFileSync(path.join(round, "to-fix.json"), "utf8")).findings.map((entry) => entry.id),
     ["correctness.1"]
   );
+  // The derived files are records too, and the mode is the only trace of that
+  // on disk: this run removes `to-fix.json` and `open/` immediately before
+  // rewriting them, so a plain overwriting write would pass every other
+  // assertion here.
+  assert.equal(fs.statSync(path.join(round, "to-fix.json")).mode & 0o777, 0o400);
+  assert.equal(fs.statSync(path.join(round, "open", "correctness.json")).mode & 0o777, 0o400);
   // Evidence this review counted is sealed; the lens it could not use is left
   // writable, because that is the path a re-dispatch into this round takes.
   assert.equal(fs.statSync(path.join(findings, "correctness.json")).mode & 0o777, 0o400);
@@ -739,6 +745,8 @@ test("re-deriving inside a claimed round replaces the collector's own outputs, a
     JSON.parse(fs.readFileSync(path.join(round, "to-fix.json"), "utf8")).findings.map((entry) => entry.id),
     ["correctness.1", "codex.1"]
   );
+  assert.equal(fs.statSync(path.join(round, "to-fix.json")).mode & 0o777, 0o400);
+  assert.equal(fs.statSync(path.join(round, "open", "codex.json")).mode & 0o777, 0o400);
   assert.equal(fs.statSync(path.join(findings, "codex.json")).mode & 0o777, 0o400);
 });
 
