@@ -15,6 +15,7 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 const commandFiles = fs.readdirSync(path.join(root, "commands"));
 const commands = commandFiles.map((file) => ({ file, text: read("commands", file) }));
 const skill = read("skills", "tagteam", "SKILL.md");
+const readme = read("README.md");
 const everything = [...commands.map((entry) => entry.text), skill].join("\n");
 
 const agentNames = fs.readdirSync(path.join(root, "agents")).map((file) => file.replace(/\.md$/, ""));
@@ -353,6 +354,105 @@ test("no plan review brief claims there is exactly one revision", () => {
   for (const file of ["prompts/plan-review.md", "prompts/codex/plan-review.md"]) {
     const text = read(...file.split("/")).replace(/\s+/g, " ");
     assert.doesNotMatch(text, /exactly one (revision|round)/i, `${file} still promises exactly one revision`);
+  }
+});
+
+// The diagrams are the first thing anyone reads about how these cycles run, and
+// a drawn loop with no setting on it is a loop nobody can find the ceiling for.
+// Asserted inside the Mermaid blocks specifically: a limit named only in the
+// prose beside a diagram that still draws a straight line is the mismatch this
+// catches.
+test("both cycle diagrams name the settings that bound their loops", () => {
+  const diagrams = [...readme.matchAll(/```mermaid\n([\s\S]*?)```/g)].map(([, body]) => body);
+  assert.ok(diagrams.length >= 2, "the README no longer has cycle diagrams");
+  const drawn = diagrams.join("\n");
+  for (const limit of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
+    assert.ok(drawn.includes(limit), `no cycle diagram names ${limit}, so its loop is drawn without its ceiling`);
+  }
+});
+
+// A diagram claims an order, not just a set of names. This one used to send
+// every fixed commit back through the whole panel, which is what `commands/ship.md`
+// refuses to do for the first fix of a cycle — the common case for every
+// repository that left `limits.fixRounds` at one. A reader who believes the
+// picture expects a full lens-plus-Codex re-review that never runs.
+test("the ship diagram draws the two routes a fixed commit actually takes", () => {
+  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
+  assert.ok(ship, "the README no longer has a ship cycle diagram");
+  assert.match(ship, /no second panel/, "the diagram does not draw the first fix skipping the panel");
+  assert.match(ship, /second or later fix round, or a CI repair/,
+    "the diagram does not draw the route that re-enters the whole panel");
+  for (const claim of ["the whole<br>panel again; every gate clears", "every lens plus Codex, every round"]) {
+    assert.ok(!ship.includes(claim), `the ship diagram still says "${claim}", which commands/ship.md does not do`);
+  }
+  // And what ship.md sends the first fix to instead: the adversary and the
+  // re-check, not the lenses.
+  assert.match(ship, /route -->\|"after the first fix of a cycle[^|]*\| adv/);
+  assert.match(ship, /route -->\|"after the first fix of a cycle"\| recheck/);
+});
+
+// The panel is drawn once and entered three ways — first candidate, second or
+// later fix round, CI repair — so both the label on the box and the edge out of
+// it are claims about every entry. A label saying the panel reads every candidate
+// no lens has read contradicts the `route` edge four lines below it, which sends
+// the first fix past the panel; a single 'first fix round' exit sends a reader
+// leaving a re-run panel straight to a fixer, when ship.md settles that panel's
+// findings through the re-check first and fixes them out of `still-open.json`.
+test("the ship diagram's panel says what it reads and where a re-run panel goes", () => {
+  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
+  assert.ok(ship, "the README no longer has a ship cycle diagram");
+  const shipMd = commands.find((entry) => entry.file === "ship.md")?.text ?? "";
+  assert.match(shipMd, /on every round this step runs/, "commands/ship.md no longer says when the panel runs");
+  assert.match(ship, /subgraph panel\[[^\]]*on every round this step runs/,
+    "the panel subgraph does not say what commands/ship.md says it reads");
+  assert.ok(!ship.includes("candidate no lens has read"),
+    "the panel subgraph still claims it reads every unread candidate, which the first fix of a cycle skips");
+  assert.match(ship, /open -->\|"yes, and this is the cycle's first panel[^|]*\| fixer/,
+    "the panel's exit to a fixer is not limited to the panel that has one");
+  for (const target of ["adv", "recheck"]) {
+    assert.match(ship, new RegExp(`open -->\\|"no[^|]*re-run[^|]*\\| ${target}`),
+      `a re-run panel is not drawn reaching ${target} before a fixer`);
+  }
+});
+
+// A reason renders as a sentence sending someone to a particular file, and
+// `rounds` and `counter` must never send anyone to `.tagteam/config.json`. So an
+// undocumented reason is a mis-diagnosis waiting to happen — and so is a count in
+// the prose that disagrees with the list under it, since a model that reads the
+// count rather than the list renders the wrong sentence.
+test("commands/status.md documents every reason a budget can be unknown", () => {
+  const statusMd = commands.find((entry) => entry.file === "status.md")?.text ?? "";
+  const inventory = read("scripts", "status.mjs");
+  const documented = [...statusMd.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
+  assert.deepEqual([...documented].sort(), ["counter", "rounds", "settings"]);
+  for (const reason of documented) {
+    assert.ok(inventory.includes(`"${reason}"`), `commands/status.md renders "${reason}", which status.mjs never emits`);
+  }
+  const words = { one: 1, two: 2, three: 3, four: 4 };
+  const [, counted] = /the (one|two|three|four) reasons/.exec(statusMd) ?? [];
+  if (counted) {
+    assert.equal(words[counted], documented.length,
+      `commands/status.md says there are ${counted} reasons and then lists ${documented.length}`);
+  }
+});
+
+// Every one of these sentences told a reader the cycle happens exactly once.
+// They are the claims the configured limits replaced, and one left behind is
+// documentation contradicting the code a person is about to run.
+test("nothing a person reads still says these cycles happen once", () => {
+  for (const [file, text] of [["README.md", readme], ["skills/tagteam/SKILL.md", skill]]) {
+    const flat = text.replace(/\s+/g, " ");
+    for (const claim of [
+      "reviewed once by three independent readers",
+      "no convergence loop",
+      "fix once",
+      "After the single fix round",
+      "the fix round always makes one",
+      "One review round — no convergence loop",
+      "one repair"
+    ]) {
+      assert.ok(!flat.includes(claim), `${file} still says "${claim}"`);
+    }
   }
 });
 

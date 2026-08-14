@@ -4,8 +4,8 @@ A Claude Code plugin that takes a change from a vague idea to merged pull
 requests, using Claude and Codex together.
 
 You describe what you want, however roughly. Tagteam interviews you until the
-outcome is concrete, writes a plan, has it reviewed once by three independent
-readers, and breaks it into spec files. Then it implements those specs one at a
+outcome is concrete, writes a plan, has it reviewed by three independent readers
+for as many rounds as you allow, and breaks it into spec files. Then it implements those specs one at a
 time — each in its own branch, each reviewed by a cross-engine panel, each
 verified — and merges the ones that need no judgement from you. The ones that do
 stop and wait.
@@ -65,14 +65,14 @@ flowchart TD
     claude["Claude reviewer"]
     codex["Codex reviewer"]
     adversary["Adversary"]
-    revise["One revision — the blocking and major findings folded in"]
+    revise["Revise — the blocking and major findings folded in"]
     specs["Specs — one spec-writer per deliverable, in parallel"]
     approve["Approve — one question: Approve / Adjust / Stop"]
 
     orient --> interview
     interview --> goal
     goal --> draft
-    subgraph review["One review round — no convergence loop"]
+    subgraph review["A review round — three readers, then a revision"]
         claude
         codex
         adversary
@@ -83,8 +83,9 @@ flowchart TD
     claude --> revise
     codex --> revise
     adversary --> revise
-    revise -. "a finding against the goal itself:<br>you answer, goal.md changes,<br>the gate re-opens and re-closes" .-> goal
-    revise --> specs
+    revise -->|"something blocking or major:<br>the revised plan goes back to all three,<br>up to limits.planReviewRounds rounds"| review
+    revise -. "a finding against the goal itself: you answer,<br>goal.md changes, the gate re-opens and re-closes —<br>and a re-approved goal starts the review budget over" .-> goal
+    revise -->|"a round that raises nothing blocking<br>or major, or the rounds this repository<br>allows are spent"| specs
     specs --> approve
 ```
 
@@ -98,8 +99,11 @@ flowchart TD
    wrong, and everything downstream binds to the file rather than to the
    conversation.
 3. **Draft and review.** One drafter writes a plan. A Claude reviewer, a Codex
-   reviewer, and an adversary read it in parallel, once. One revision folds their
-   findings in. There is no convergence loop — if the result is wrong you say so.
+   reviewer, and an adversary read it in parallel; a revision folds their
+   blocking and major findings in, and the revised plan goes back to all three
+   for another round. `limits.planReviewRounds` is how many rounds one approved
+   goal gets — a round that raises nothing blocking or major ends it earlier, and
+   re-approving a changed goal starts the count again.
 4. **Specs.** One file per deliverable, written in parallel, each self-contained
    for the implementer that will receive it.
 5. **Approve.** Sizes reported once, reviewer selection shown as a default set
@@ -107,8 +111,9 @@ flowchart TD
 
 ### Shipping
 
-Per spec, in dependency order: branch, implement, verify, review, fix once,
-re-check, publish, merge.
+Per spec, in dependency order: branch, implement, verify, review, fix, re-check,
+publish, merge — with the fix and the review repeating for as many rounds as you
+allow.
 
 ```mermaid
 ---
@@ -121,18 +126,19 @@ flowchart TD
     verify["Verify — executable evidence, recorded as a gate"]
     lenses["One reviewer per lens"]
     codexr["Codex cross-review"]
-    open{"Anything open?"}
-    fixer["Fix, once — a fixer gets the blocking and major findings, nothing else"]
-    rebind["New commit — re-snapshot, re-verify; every gate clears"]
+    open{"Anything blocking or major open?"}
+    fixer["Fix — a fixer gets the blocking and major findings, nothing else"]
+    route{"Which review does the fixed commit get?"}
     adv["Adversary — reads the final diff fresh"]
     recheck["Re-check — each reviewer that raised a finding judges its own against the new code"]
+    settle{"Still open after the re-check?"}
     publish["Publish — push, open the pull request, wait for CI"]
     outcome["Merge, or stop and wait — the gates decide, below"]
 
     branch --> implement
     implement --> snapshot
     snapshot --> verify
-    subgraph panel["Review panel, in parallel"]
+    subgraph panel["Review panel, in parallel — every lens plus Codex,<br>on every round this step runs"]
         lenses
         codexr
     end
@@ -140,25 +146,31 @@ flowchart TD
     verify --> codexr
     lenses --> open
     codexr --> open
-    open -->|"yes"| fixer
-    fixer --> rebind
+    open -->|"yes, and this is the cycle's first panel —<br>its brief starts the first fix round"| fixer
+    fixer -->|"a new commit — re-snapshot, re-verify;<br>every gate clears. A spec gets<br>limits.fixRounds rounds of this"| route
     subgraph final["Fresh eyes on the final diff"]
         adv
         recheck
     end
-    open -->|"no"| adv
-    rebind --> adv
-    rebind --> recheck
-    adv --> publish
-    recheck --> publish
-    publish -. "CI red — one repair, then the new<br>candidate runs the whole cycle again" .-> snapshot
+    route -->|"after the first fix of a cycle: no second panel — the<br>lenses that raised the findings re-judge them below"| adv
+    route -->|"after the first fix of a cycle"| recheck
+    route -->|"after a second or later fix round, or a CI repair:<br>the whole panel again, against a diff no lens has read"| lenses
+    route -->|"after a second or later fix round, or a CI repair"| codexr
+    open -->|"no — or this panel is a re-run, whose own findings<br>nothing fixes until the re-check below settles them"| adv
+    open -->|"no, or this panel is a re-run"| recheck
+    adv --> settle
+    recheck --> settle
+    settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
+    settle -->|"nothing open, or the fix rounds<br>this repository allows are spent"| publish
+    publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
     publish --> outcome
 ```
 
-The review panel is the spec's lenses plus a Codex cross-review. After the single
-fix round, each reviewer that raised a finding re-checks its own findings against
-the new code, and an adversary reads the fixed diff fresh. Anything still open
-stops the pull request.
+The review panel is the spec's lenses plus a Codex cross-review. After a fix
+round, each reviewer that raised a finding re-checks its own findings against the
+new code, and an adversary reads the fixed diff fresh. Anything still open starts
+another round, for as many rounds as `limits.fixRounds` allows; when they run out
+the pull request stops with the findings on it and says so.
 
 A pull request merges unattended unless: the spec is marked user-visible,
 verification failed or CI proved nothing, a finding is still open, **a reviewer
@@ -206,8 +218,8 @@ does not.
   reviews.
 - Codex runs through `codex exec --output-schema`. MCP is unsupported because its
   tool contract cannot enforce a response schema.
-- Every gate binds to one commit; a new commit clears all of them, and the fix
-  round always makes one.
+- Every gate binds to one commit; a new commit clears all of them, and every fix
+  round makes one.
 - Merges use `--match-head-commit`, and refuse outright if the base branch moved
   since the review — the reviewed diff would be going into something else. Any
   merge failure stops and reports rather than rebasing.

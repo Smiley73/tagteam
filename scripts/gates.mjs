@@ -201,8 +201,8 @@ export function reconcileBudgets(state, rounds) {
   return { state: next, changed, scope: repairScope(next[REPAIR_COUNTER]) };
 }
 
-// Every gate is evidence about one commit. A new commit -- and the fix round
-// always makes one -- means the evidence is about something that is no longer
+// Every gate is evidence about one commit. A new commit -- and every fix round
+// makes one -- means the evidence is about something that is no longer
 // being merged, so all of it is cleared. This is what stops "reviewed A, merged
 // B", and it is the reason the reviewed OID is never re-derived from HEAD.
 //

@@ -6,8 +6,9 @@ description: Shared reference for tagteam — configuration, artifact layout, th
 # tagteam reference
 
 Tagteam takes a vague goal to merged pull requests. `/tagteam:plan` interviews
-you until the outcome is concrete, drafts a plan, has it reviewed once by three
-independent readers, and expands it into spec files. `/tagteam:ship` implements
+you until the outcome is concrete, drafts a plan, has it reviewed by three
+independent readers for as many rounds as `limits.planReviewRounds` allows, and
+expands it into spec files. `/tagteam:ship` implements
 those specs one at a time, reviews each with a cross-engine panel, and merges the
 ones that need no human judgement.
 
@@ -27,7 +28,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   plan.md          the deliverables index                                   committed
   specs/NN-slug.md one self-contained spec per deliverable                  committed
   approved.json    when it was approved, and of what                        committed
-  work/            interview answers, drafts, review findings, Codex artifacts   ignored
+  work/            interview answers, drafts, Codex artifacts, goal-approved  ignored
+  work/review/<n>/ one review round — round.json, the three readers' findings,
+                   and outcome.json once the round is closed out             ignored
 .tagteam/ships/<slug>/<spec-id>/
   state.json       the state machine, the reviewed commit, the gates        ignored
   rounds/<n>/  round.json (the commit that owns this round, and how many times
@@ -201,7 +204,7 @@ except this check stands between it and a push.
 `reset --hard` over committed work, commit or check out in the primary checkout,
 merge without `--match-head-commit`, delete a branch inside a merge command,
 `worktree remove --force`, or `git rev-parse HEAD` to learn the reviewed commit
-(it is in `state.json`, and after a fix round HEAD is a different commit).
+(it is in `state.json`, and after every fix round HEAD is a different commit).
 
 ## Gates
 
@@ -242,7 +245,7 @@ indistinguishable from a clean review. `collect-findings.mjs` reports it as
 `incomplete`, which is not `clean`.
 
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
-a new commit appears — and the fix round always makes one.
+a new commit appears — and every fix round makes one.
 
 ## Scripts
 
