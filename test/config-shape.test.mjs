@@ -28,7 +28,7 @@ const CONSUMED = [
   ["scripts/guard-staged.mjs", ["worktree.copyUntracked"]],
   ["scripts/snapshot-candidate.mjs", ["reviewExclude", "verify"]],
   ["scripts/specs.mjs", ["reviewers.roster", "reviewers.default"]],
-  ["scripts/gates.mjs", ["autoMerge"]]
+  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs"]]
 ];
 
 // Keys older config shapes had and the current one does not. A key that comes
