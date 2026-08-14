@@ -32,7 +32,19 @@ const EXEMPT_ROUNDS_PER_SCOPE = 1;
 // any round on disk records.
 export const repairScope = (repairs) => `repair:${repairs}`;
 
-const counterOf = (state, counter) => (Number.isInteger(state?.[counter]) ? state[counter] : 0);
+// Absent is zero — a state file written before the counters existed has neither,
+// and reconciliation fixes it. Anything else present has to be a whole number of
+// rounds: `-1` or `"1"` read generously would be budget nobody spent, which is
+// the one direction a malformed or hand-edited state file must not be read in.
+function counterOf(state, counter) {
+  const value = state?.[counter];
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${state?.spec ?? "this spec"} has ${counter} set to ${JSON.stringify(value)}, which is not a `
+      + "number of rounds — no budget can be enforced against it, so fix the state file by hand before continuing");
+  }
+  return value;
+}
 
 // Everything reaches `publishing` through `verifying`, and nothing reaches it
 // any other way. A clean review and a fixed one converge there, which is what
@@ -416,7 +428,7 @@ async function main() {
     // the rounds on disk contradict is exactly the disagreement this exists to
     // prevent.
     writeJson(stateFile, reconciled);
-    const round = allocateRound(roundsRoot, {
+    const round = await allocateRound(roundsRoot, {
       candidate,
       scope,
       limit: limits.fixRounds,

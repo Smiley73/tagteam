@@ -28,8 +28,15 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { ROUND_MARKER, readRoundMarker } from "./round-store.mjs";
+import { acquireLock } from "./locks.mjs";
 
 const NUMBERED = /^[1-9][0-9]*$/;
+
+// One allocator at a time per rounds root. Scanning, deciding and claiming are
+// one decision, and two processes that each scanned an empty root would both
+// find nothing spent and both allocate against a limit of one — a budget of one
+// that let two rounds through. The name is not a number, so no scan sees it.
+const ALLOCATION_LOCK = ".allocating.lock";
 
 /**
  * A budget that is spent. Carries exit code 4 so every caller's CLI reports the
@@ -125,31 +132,23 @@ const allocation = (round, dir, reentered, scope, spent, limit, limitName) => ({
   remaining: Math.max(0, limit - spent)
 });
 
-/**
- * The round directory to work in, or a `RoundBudgetExhausted` when the budget is
- * spent.
- *
- * `candidate` is opaque and is not validated as a commit id: the plan side has
- * no commits and passes a goal-approval identity. A round whose record names
- * this candidate is **re-entered** — the same round comes back, marked, having
- * spent nothing. That is the resume case, and it is why an interrupted attempt
- * picked up again does not pay a second time for a round it already paid for.
- *
- * A refusal leaves the filesystem exactly as it was: no directory is created for
- * a round that was never allowed.
- */
-export function allocateRound(root, { candidate, scope, limit, limitName, exempt } = {}) {
-  requireText("candidate", candidate);
-  requireText("scope", scope);
-  requireText("limitName", limitName);
-  requireCount(limitName, limit, 1);
-  requireCount("exempt", exempt, 0);
-
-  const resolved = path.resolve(root);
-  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+// The whole decision — scan, re-entry lookup, budget check, numbered claim —
+// made once against the state of the root right now. Returns null when another
+// writer took the number out from under the claim, which means every fact this
+// decision rested on is out of date and the decision is made again rather than
+// carried forward with a bigger number.
+function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
   const rounds = listRounds(resolved);
 
-  const already = rounds.find((entry) => entry.candidate === candidate);
+  // Re-entry is restricted to the scope being allocated. A candidate that owns a
+  // round in an earlier scope — the commit a CI repair starts from is still the
+  // one the previous cycle published — gets a new round in the current scope,
+  // which is what a new repair cycle means. Re-entering the old one would hand
+  // it back to the round store to clear, destroying that cycle's evidence at
+  // paths the pull request body already names. A round with no scope of its own
+  // predates this module and is re-enterable from anywhere.
+  const already = rounds.find((entry) =>
+    entry.candidate === candidate && (entry.scope === null || entry.scope === scope));
   if (already) {
     // Reported against the scope the round is actually in, which is what the
     // budget it was taken from was counted over.
@@ -173,21 +172,57 @@ export function allocateRound(root, { candidate, scope, limit, limitName, exempt
   // meet one is a hand-made or half-deleted round, and skipping it is right.
   const record = `${JSON.stringify({ owner: candidate, scope }, null, 2)}\n`;
   let number = rounds.reduce((highest, entry) => Math.max(highest, entry.round), 0) + 1;
-  while (true) {
-    while (fs.existsSync(path.join(resolved, String(number)))) number += 1;
-    const pending = path.join(resolved, `.pending-${process.pid}-${randomUUID()}`);
-    fs.mkdirSync(pending, { mode: 0o700 });
-    fs.writeFileSync(path.join(pending, ROUND_MARKER), record, { mode: 0o600 });
-    try {
-      fs.renameSync(pending, path.join(resolved, String(number)));
-    } catch (error) {
-      try { fs.rmSync(pending, { recursive: true, force: true }); } catch {}
-      if (!["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
-      number += 1;
-      continue;
+  while (fs.existsSync(path.join(resolved, String(number)))) number += 1;
+  const pending = path.join(resolved, `.pending-${process.pid}-${randomUUID()}`);
+  fs.mkdirSync(pending, { mode: 0o700 });
+  fs.writeFileSync(path.join(pending, ROUND_MARKER), record, { mode: 0o600 });
+  try {
+    fs.renameSync(pending, path.join(resolved, String(number)));
+  } catch (error) {
+    try { fs.rmSync(pending, { recursive: true, force: true }); } catch {}
+    if (!["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
+    return null;
+  }
+  const dir = path.join(resolved, String(number));
+  return allocation(number, dir, false, scope, spentIn([...rounds, { scope }], scope, exempt), limit, limitName);
+}
+
+/**
+ * The round directory to work in, or a `RoundBudgetExhausted` when the budget is
+ * spent.
+ *
+ * `candidate` is opaque and is not validated as a commit id: the plan side has
+ * no commits and passes a goal-approval identity. A round whose record names
+ * this candidate is **re-entered** — the same round comes back, marked, having
+ * spent nothing. That is the resume case, and it is why an interrupted attempt
+ * picked up again does not pay a second time for a round it already paid for.
+ *
+ * The decision is serialized per rounds root by an advisory lock, because a
+ * budget checked concurrently is not a budget: two processes that both read an
+ * empty root would both find nothing spent and both allocate, and a limit of one
+ * would have let two rounds through. It is `async` for that reason, and for that
+ * reason only.
+ *
+ * A refusal leaves the filesystem exactly as it was: no directory is created for
+ * a round that was never allowed.
+ */
+export async function allocateRound(root, { candidate, scope, limit, limitName, exempt } = {}) {
+  requireText("candidate", candidate);
+  requireText("scope", scope);
+  requireText("limitName", limitName);
+  requireCount(limitName, limit, 1);
+  requireCount("exempt", exempt, 0);
+
+  const resolved = path.resolve(root);
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const lock = await acquireLock(resolved, ALLOCATION_LOCK, { label: `round allocation in ${resolved}` });
+  try {
+    while (true) {
+      const allocated = decideRound(resolved, { candidate, scope, limit, limitName, exempt });
+      if (allocated) return allocated;
     }
-    const dir = path.join(resolved, String(number));
-    return allocation(number, dir, false, scope, spentIn([...rounds, { scope }], scope, exempt), limit, limitName);
+  } finally {
+    lock.release();
   }
 }
 
@@ -213,7 +248,7 @@ function parseArgs(argv) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     const { root, ...options } = parseArgs(process.argv.slice(2));
-    process.stdout.write(`${JSON.stringify(allocateRound(root, options), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(await allocateRound(root, options), null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     if (error.exitCode === 2) process.stderr.write(USAGE);

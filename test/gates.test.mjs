@@ -386,6 +386,61 @@ test("a state file with no counters at all reconciles instead of throwing", () =
   assert.equal(reconcileBudgets(older, [{ round: 1, scope: null }, { round: 2, scope: null }]).state.fixRoundsUsed, 1);
 });
 
+test("a counter that is present but not a round count is refused, not read as unspent", () => {
+  // `-1` or `"1"` in a state file — hand-edited, or written by something that
+  // went wrong — must not read as zero: that is a budget nobody spent, handed
+  // back on every one of these edges. Only an absent counter is zero.
+  for (const broken of [-1, "1", 1.5, null, Number.MAX_SAFE_INTEGER + 2]) {
+    assert.throws(
+      () => step(at("reviewing", { fixRoundsUsed: broken }), "fixing"),
+      /fixRoundsUsed/,
+      `fixRoundsUsed ${JSON.stringify(broken)} should be refused`
+    );
+    assert.throws(
+      () => step(at("publishing", { ciRepairsUsed: broken }), "reviewing"),
+      /ciRepairsUsed/,
+      `ciRepairsUsed ${JSON.stringify(broken)} should be refused`
+    );
+    assert.throws(() => reconcileBudgets(at("reviewing", { fixRoundsUsed: broken }), []), /fixRoundsUsed/);
+  }
+});
+
+test("gates.mjs state takes the budgeted edge through the CLI with the configured limits", async () => {
+  // The interface the ship loop drives. In-process `transition()` tests say
+  // nothing about where `main()` reads the config from: one place off and every
+  // `state` call takes a budgeted edge with no limits and refuses every fix
+  // round, and a spent budget has to leave the process as exit 4 rather than 1.
+  const { spawnSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const fsm = await import("node:fs");
+  const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-state-"));
+  const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
+  const stateFile = path.join(dir, "state.json");
+  const configFile = path.join(dir, "config.json");
+  fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 } }));
+  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness"], { encoding: "utf8" });
+
+  const to = (next) => spawnSync("node", [script, "state", stateFile, next, configFile], { encoding: "utf8" });
+  const read = () => JSON.parse(fsm.readFileSync(stateFile, "utf8"));
+  for (const next of ["implementing", "reviewing"]) assert.equal(to(next).status, 0);
+
+  const fixing = to("fixing");
+  assert.equal(fixing.status, 0, fixing.stderr);
+  assert.equal(read().fixRoundsUsed, 1, "the counter has to land in the file the next call reads");
+
+  assert.equal(to("reviewing").status, 0);
+  const refused = to("fixing");
+  assert.equal(refused.status, 4, `expected exit 4, got ${refused.status}: ${refused.stderr}`);
+  assert.match(refused.stderr, /limits\.fixRounds/);
+  assert.equal(read().state, "reviewing", "a refused edge changes nothing");
+
+  // And without the configuration the same edge is a loud usage error rather
+  // than an unbudgeted one.
+  const unbudgeted = spawnSync("node", [script, "state", stateFile, "fixing"], { encoding: "utf8" });
+  assert.notEqual(unbudgeted.status, 0);
+  assert.match(unbudgeted.stderr, /limits\.fixRounds/);
+});
+
 test("gates.mjs round reconciles, allocates and writes the state file in one call", async () => {
   const { spawnSync } = await import("node:child_process");
   const os = await import("node:os");
