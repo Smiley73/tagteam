@@ -39,7 +39,8 @@ What to look for:
 Ground every finding in the goal or in a file you read. A critique citing
 neither is an opinion about software in general, and it costs a revision round.
 
-There is exactly one revision. A finding ranked too low will not be raised again.
+How many review rounds this plan gets is this repository's configuration, and it
+may well be one. A finding ranked too low may never be raised again.
 Severity: blocking means this does not produce the goal as written; major means
 it produces the wrong thing somewhere specific; minor means worth fixing while
 revising anyway.

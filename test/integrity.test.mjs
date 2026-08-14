@@ -91,7 +91,13 @@ test("every script a command runs exists", () => {
 // The expensive failure this whole file exists for: a command passing a flag the
 // script does not accept. It surfaces as a dead step in the middle of a train.
 test("every flag a command passes is one its script accepts", () => {
-  const invocations = [...everything.matchAll(/scripts\/([a-z0-9-]+\.mjs)((?:[^\n`]|\\\n)*)/g)];
+  // Nested paths included: `scripts/lib/rounds.mjs` is run from a command like
+  // any other script, and a pattern that stopped at the first directory checked
+  // none of the flags it is passed. The line continuation is tried before the
+  // ordinary character for the same reason — greedy alternation that consumes the
+  // backslash first has nothing left to fail on, so it stops at the end of the
+  // first line and every flag on a wrapped invocation goes unchecked.
+  const invocations = [...everything.matchAll(/scripts\/((?:[a-z0-9-]+\/)*[a-z0-9-]+\.mjs)((?:\\\n|[^\n`])*)/g)];
   assert.ok(invocations.length > 10, "no script invocations were found to check");
   const sources = new Map();
   const failures = [];
@@ -290,6 +296,38 @@ test("no round path in the ship command is a number the orchestrator picks", () 
   const ship = read("commands", "ship.md");
   assert.ok(!ship.includes("rounds/<n>"), "ship.md still substitutes <n> into a round path by hand");
   assert.match(ship, /ROUND=\$\(node/, "ship.md never takes the round from the allocator");
+});
+
+// The plan review is a bounded loop now, and the bound is a refusal from the
+// allocator. A command file that counts rounds in its own head is a limit
+// nothing enforces — and every sentence promising exactly one round is one the
+// orchestrator will obey instead of the budget it was given.
+test("the plan command takes its review rounds from the allocator, not from prose", () => {
+  const plan = read("commands", "plan.md");
+  assert.match(plan, /planReviewRounds/, "plan.md never names the limit its review loop is bounded by");
+  assert.match(plan, /scripts\/lib\/rounds\.mjs/, "plan.md no longer allocates its review round");
+  assert.match(plan, /ROUND=\$\(node/, "plan.md never takes the round number from the allocator");
+  assert.ok(!plan.includes("review/<n>"), "plan.md substitutes <n> into a review path by hand");
+
+  // Flattened: a sentence someone re-wrapped is the same claim.
+  const flat = plan.replace(/\s+/g, " ");
+  for (const claim of [
+    "Review, exactly one round",
+    "There is no loop anywhere in them",
+    "That is the whole review",
+    "No second round"
+  ]) {
+    assert.ok(!flat.includes(claim), `plan.md still says "${claim}"`);
+  }
+});
+
+// The same false certainty, one file over: a reader told it has exactly one
+// revision is being calibrated against a number the repository did not choose.
+test("no plan review brief claims there is exactly one revision", () => {
+  for (const file of ["prompts/plan-review.md", "prompts/codex/plan-review.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.doesNotMatch(text, /exactly one (revision|round)/i, `${file} still promises exactly one revision`);
+  }
 });
 
 test("the commit chain always runs guard-staged between add and commit", () => {

@@ -23,11 +23,19 @@
 // **Numbering is global to the root.** A scope changes what counts against a
 // budget, never what a round is called: numbers climb across the whole root, are
 // never reused and never renumbered, so a path printed once stays true.
+//
+// **What counts as the same attempt differs by caller.** The ship knows an
+// attempt by the commit it is reviewing, so a candidate that owns a round
+// re-enters it. The plan side has no commits — every review round of one goal
+// approval is run for the same identity — so it says instead which record means
+// "this round is over" (`completeWhen`), and the round that is re-entered is the
+// last one that never got it. Both are the same rule read against different
+// evidence: pay once for work already paid for, and never twice.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { ROUND_MARKER, readRoundMarker } from "./round-store.mjs";
+import { ROUND_MARKER, enterRound, readRoundMarker } from "./round-store.mjs";
 import { acquireLock } from "./locks.mjs";
 
 const NUMBERED = /^[1-9][0-9]*$/;
@@ -78,6 +86,51 @@ function requireText(name, value) {
 function requireCount(name, value, minimum) {
   if (!Number.isInteger(value) || value < minimum) {
     throw usage(`${name} must be an integer of at least ${minimum}, got: ${JSON.stringify(value ?? null)}`);
+  }
+}
+
+/**
+ * An identity read out of a field of a JSON file, for a caller whose identity is
+ * already recorded somewhere on disk.
+ *
+ * The plan side's scope is the hash inside `work/goal-approved`, and it is read
+ * here rather than passed as a literal because the alternative is an
+ * orchestrator copying a 64-character hash from one command's output into the
+ * next one's arguments. A hash mis-copied that way does not fail: it silently
+ * names a scope nothing else is in, so the budget restarts and nobody sees it.
+ */
+export function identityFromFile(name, file, field) {
+  requireText(`${name}File`, file);
+  requireText(`${name}Field`, field);
+  const resolved = path.resolve(file);
+  let record;
+  try {
+    record = JSON.parse(fs.readFileSync(resolved, "utf8"));
+  } catch (error) {
+    throw usage(`the ${name} could not be read from ${resolved}: ${error.message}`);
+  }
+  const value = record?.[field];
+  if (typeof value !== "string" || value === "") {
+    throw usage(`${resolved} has no non-empty ${field} to use as the ${name}`);
+  }
+  return value;
+}
+
+// Either the value or where to read it from, never both: a caller that passed
+// both would have two answers to one question and no way to know which one the
+// budget was counted over.
+function resolveIdentity(name, direct, file, field) {
+  if (file === undefined && field === undefined) return direct;
+  if (direct !== undefined) throw usage(`pass either ${name} or ${name}File, not both`);
+  return identityFromFile(name, file, field);
+}
+
+// A completion record names a file directly inside the round, so that asking
+// "is this round over?" is one `existsSync` and never a walk out of the round.
+function requireRecordName(name, value) {
+  requireText(name, value);
+  if (value !== path.basename(value) || value === "." || value === "..") {
+    throw usage(`${name} must be the name of a record inside the round, got: ${JSON.stringify(value)}`);
   }
 }
 
@@ -137,7 +190,7 @@ const allocation = (round, dir, reentered, scope, spent, limit, limitName) => ({
 // writer took the number out from under the claim, which means every fact this
 // decision rested on is out of date and the decision is made again rather than
 // carried forward with a bigger number.
-function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
+function decideRound(resolved, { candidate, scope, limit, limitName, exempt, completeWhen }) {
   const rounds = listRounds(resolved);
 
   // Re-entry is restricted to the scope being allocated. A candidate that owns a
@@ -147,9 +200,24 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
   // it back to the round store to clear, destroying that cycle's evidence at
   // paths the pull request body already names. A round with no scope of its own
   // predates this module and is re-enterable from anywhere.
-  const already = rounds.find((entry) =>
+  const owned = rounds.filter((entry) =>
     entry.candidate === candidate && (entry.scope === null || entry.scope === scope));
+  // With a completion record named, the candidate alone does not identify one
+  // round: every plan review round of a goal approval is run for the same
+  // identity. A round that recorded its outcome is finished and is never
+  // re-entered — re-entering it would clear a finished round's findings and hand
+  // the next round its number — so what comes back is the last one that did not,
+  // which is the round an interrupted session was in the middle of.
+  const already = completeWhen === undefined
+    ? owned[0]
+    : owned.filter((entry) => !fs.existsSync(path.join(entry.dir, completeWhen))).at(-1);
   if (already) {
+    // Emptied back to its marker, because a re-entered round is re-run from the
+    // start and its half-written outputs would otherwise be refused by the round
+    // store's write-once guard. Only for the callers that named a completion
+    // record: the ship clears its round at the snapshot step instead, and
+    // clearing here as well would delete the snapshot it is about to re-enter.
+    if (completeWhen !== undefined) enterRound(already.dir, { owner: candidate });
     // Reported against the scope the round is actually in, which is what the
     // budget it was taken from was counted over.
     const at = already.scope ?? scope;
@@ -197,6 +265,13 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
  * spent nothing. That is the resume case, and it is why an interrupted attempt
  * picked up again does not pay a second time for a round it already paid for.
  *
+ * `candidate` and `scope` may each be given as a value or read out of a JSON
+ * file's field (`candidateFile` / `candidateField`, `scopeFile` / `scopeField`).
+ * `completeWhen` names the record whose presence means a round is over; with it,
+ * re-entry finds the last unfinished round of this candidate and empties it
+ * rather than returning the first round the candidate owns. Without it — the
+ * ship side — nothing about re-entry changes.
+ *
  * The decision is serialized per rounds root by an advisory lock, because a
  * budget checked concurrently is not a budget: two processes that both read an
  * empty root would both find nothing spent and both allocate, and a limit of one
@@ -206,19 +281,23 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
  * A refusal leaves the filesystem exactly as it was: no directory is created for
  * a round that was never allowed.
  */
-export async function allocateRound(root, { candidate, scope, limit, limitName, exempt } = {}) {
+export async function allocateRound(root, options = {}) {
+  const { limit, limitName, exempt, completeWhen } = options;
+  const candidate = resolveIdentity("candidate", options.candidate, options.candidateFile, options.candidateField);
+  const scope = resolveIdentity("scope", options.scope, options.scopeFile, options.scopeField);
   requireText("candidate", candidate);
   requireText("scope", scope);
   requireText("limitName", limitName);
   requireCount(limitName, limit, 1);
   requireCount("exempt", exempt, 0);
+  if (completeWhen !== undefined) requireRecordName("completeWhen", completeWhen);
 
   const resolved = path.resolve(root);
   fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
   const lock = await acquireLock(resolved, ALLOCATION_LOCK, { label: `round allocation in ${resolved}` });
   try {
     while (true) {
-      const allocated = decideRound(resolved, { candidate, scope, limit, limitName, exempt });
+      const allocated = decideRound(resolved, { candidate, scope, limit, limitName, exempt, completeWhen });
       if (allocated) return allocated;
     }
   } finally {
@@ -228,6 +307,12 @@ export async function allocateRound(root, { candidate, scope, limit, limitName, 
 
 const USAGE = `usage:
   rounds.mjs <rounds-root> --candidate <id> --scope <name> --limit <n> --limit-name <limits.fixRounds> --exempt <n>
+
+  --candidate and --scope may each be read out of a JSON file instead:
+    --candidate-file <path> --candidate-field <key>
+    --scope-file <path> --scope-field <key>
+  --complete-when <record.json> makes re-entry find the last round that never
+  recorded that file, instead of the first round this candidate owns.
 `;
 
 function parseArgs(argv) {

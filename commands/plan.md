@@ -15,7 +15,10 @@ the model work and write their own files.
 
 1. `git -C "$R" rev-parse --show-toplevel`. Not a repository: say so and stop.
 2. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
-   `/tagteam:init` and stop. No config at all: same.
+   `/tagteam:init` and stop. No config at all: same. Carry `limits.planReviewRounds`
+   from it with the other settings you take from here — it is how many review
+   rounds step 5 may run against one goal approval, and you pass it to the
+   allocator rather than counting rounds yourself.
 3. `codex --version`. It fails: stop and say Codex is required.
 4. `--resume <slug>`: pick up at the first step below whose output is missing.
    **`$D/goal.md` existing is not enough to skip step 3** — a session that
@@ -25,7 +28,13 @@ the model work and write their own files.
    only that file lets you skip it. Otherwise derive a slug from the goal —
    lowercase, hyphenated, three or four words — and create `$D/work/`.
 
-Seven steps. There is no loop anywhere in them.
+   A resumed session that stopped inside step 5 does not start a review round: the
+   allocator hands back the round that never recorded its outcome, empties it, and
+   spends nothing. So resuming there means running step 5 again from the top, not
+   working out how far the interrupted round got.
+
+Seven steps. Exactly one of them loops — step 5's review, bounded by
+`limits.planReviewRounds` and stopped by the allocator, not by you.
 
 ## 1 — Orient
 
@@ -128,15 +137,59 @@ count — do not read the plan. `run_in_background: false`, so the call blocks: 
 three readers in step 5 are pointed at `$D/plan.md` on disk, and a reviewer
 handed a file that is not written yet reviews nothing.
 
-## 5 — Review, exactly one round
+## 5 — Review, in rounds
+
+One round is three readers and one revision. How many rounds a goal approval gets
+is `limits.planReviewRounds`, which you carried from the config: at 1 — every
+repository that has not raised it — this is one round and then step 6.
+
+### Open the round
+
+```bash
+node "$P/scripts/goal-gate.mjs" verify "$D"
+node "$P/scripts/lib/rounds.mjs" "$D/work/review" \
+  --candidate-file "$D/work/goal-approved" --candidate-field goalSha256 \
+  --scope-file "$D/work/goal-approved" --scope-field goalSha256 \
+  --limit <limits.planReviewRounds> --limit-name limits.planReviewRounds \
+  --exempt 0 --complete-when outcome.json > "$D/work/plan-round.json" && cat "$D/work/plan-round.json"
+ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$D/work/plan-round.json")
+```
+
+Only `--limit` is substituted — the number from the config. The allocator reads
+both identities out of `$D/work/goal-approved` itself, which `verify` has just
+proved current; **do not copy the hash out of anything into this command.** A
+hash that arrives one character wrong names a budget nothing else is counted in,
+so the rounds silently start over and nothing on screen says they did.
+
+**The round number is the allocator's to give**, once per round, here. `$ROUND`
+is the round for every path below, the ones you write into a subagent's brief
+included. Never substitute a number of your own and never count rounds in your
+head: two rounds that agree on a number means the second round's readers write
+over the first round's findings, and the allocator exists so that cannot happen.
+Lost `$ROUND`? Run the command again — an open round comes back unchanged and
+costs nothing.
+
+**Announce the round before you dispatch anything**, in one plain line: which
+round this is, and how many this goal approval gets. "Review round 2 of 3, three
+readers on the plan."
+
+**Exit 4 means the budget is spent**, and it was refused before anything was
+created. Say what is still open — the `blocking` and `major` findings the last
+round raised that its revision did not close — and that `planReviewRounds` in
+`.tagteam/config.json` is what stopped the rounds, rather than the plan being
+finished. Then **go on to step 6**. A spent review budget does not end the run:
+they approve at step 7 either way, and that is where they get to say the plan is
+not ready.
+
+### Run the round
 
 Three readers, dispatched in a single message so they run concurrently:
 
-- `tagteam:plan-reviewer` at `models.lead` / `effort.lead`, writing `$D/work/review/claude.json`
+- `tagteam:plan-reviewer` at `models.lead` / `effort.lead`, writing `$D/work/review/$ROUND/claude.json`
 - Codex, via `$P/prompts/codex/plan-review.md`, fencing `GOAL` and `PLAN` from
-  disk, writing `$D/work/review/codex.json`
+  disk, writing `$D/work/review/$ROUND/codex.json`
 - `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/plan-adversary.md`,
-  writing `$D/work/review/adversary.json`
+  writing `$D/work/review/$ROUND/adversary.json`
 
 Run the Codex call with `run_in_background` — it outlives what the Bash tool will
 hold in the foreground — and read its result when it returns, because a failed
@@ -147,22 +200,39 @@ immediately; the files do not exist yet. Wait with one background watcher over
 the three paths, per *Dispatching and waiting* in the skill:
 
 ```bash
-until [ -f "$D/work/review/claude.json" ] && [ -f "$D/work/review/codex.json" ] && [ -f "$D/work/review/adversary.json" ]; do sleep 5; done
+until [ -f "$D/work/review/$ROUND/claude.json" ] && [ -f "$D/work/review/$ROUND/codex.json" ] && [ -f "$D/work/review/$ROUND/adversary.json" ]; do sleep 5; done
 ```
 
 One watcher, one notification. Not repeated directory listings, and never a
 command run only to pass the time.
 
-Then read the three files — they are small — and pass every `blocking` and
-`major` finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`.
+Then read the three files — they are small.
+
+**Nothing ranked `blocking` or `major`: the review is done.** Close the round out
+and go to step 6. That is the whole stopping condition. Do not diff this round
+against the last one, do not judge whether the rounds are converging, and do not
+run another round because one feels warranted — the ceiling is the repository's
+and the floor is this rule.
+
+Otherwise, a finding against the *goal* rather than the plan goes through the
+section below first, inside this round. Then pass every `blocking` and `major`
+finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`.
 That one blocks too — `run_in_background: false`. It rewrites a `plan.md` that
 already exists, so there is nothing a watcher could wait for, and
 `deliverables.mjs` in step 6 would happily return the rows the revision is in the
 middle of changing.
 
-**That is the whole review.** No second round, no convergence check, no lint. If
-the revision is wrong, the person will say so at approval. Only offer another
-round if they ask for one.
+### Close the round out
+
+Write `$D/work/review/$ROUND/outcome.json` yourself — `{"round", "closedAt",
+"blockingOrMajor": <count>, "revised": true|false}` — and then start the next
+round at *Open the round*.
+
+That file is what makes the round finished, and writing it is not optional.
+Until it is there the allocator treats the round as interrupted: the next
+allocation hands back the same number, empties the directory and re-runs the
+readers, which is exactly what a resumed session needs and exactly wrong for a
+round that is over. Write it once the revision has returned, never before it.
 
 ### When a finding is against the goal, not the plan
 
@@ -184,6 +254,14 @@ If their answer changes the goal, they edit `goal.md` or tell you what to write.
 Then show them the changed file and run `goal-gate.mjs approve` again. The gate
 re-opens and re-closes, the marker records the new hash, and the plan is revised
 against a goal they read.
+
+**Finish the round you are in.** Their answer goes into this round's revision
+brief with the rest of the `blocking` and `major` findings, and then this round
+is closed out normally. Do not abandon the round's directory, do not re-run its
+readers under the new approval, and do not renumber anything: the findings on
+disk were made against the goal that was approved at the time, which is what a
+record is for. The next allocation reads the new hash out of the marker, so the
+next round starts a fresh budget and takes the next number.
 
 If their answer does not change the goal — the reviewer was wrong, or the point
 belongs in a spec — say so in the revision brief and leave `goal.md` alone.
