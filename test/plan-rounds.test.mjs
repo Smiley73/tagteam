@@ -304,6 +304,29 @@ test("plan.md's own allocation block hands a refusal on as exit 4, not as a pars
   assert.deepEqual(names(path.join(dir, "work")).filter((name) => name.startsWith("plan-round")), ["plan-round.json"]);
 });
 
+test("plan.md's own allocation block refuses to open a round against an unapproved goal", async () => {
+  // The goal-level finding path: a reviewer's question changes goal.md and the
+  // owner has not re-approved it yet. The gate is the block's first line, so a
+  // block that runs it and carries on regardless — no `|| exit`, no `set -e` —
+  // spends a round of the *old* approval's budget on readers reviewing against a
+  // goal nobody approved, and reports success while doing it.
+  const dir = plan();
+  fs.writeFileSync(path.join(dir, "goal.md"), "# Goal: ship a different thing\n");
+
+  const opened = openTheRound(dir, 1);
+  assert.notEqual(opened.status, 0, `the block opened a round against a changed goal: ${opened.stdout}`);
+  assert.match(opened.stdout, /"ok":false/);
+  assert.equal(fs.existsSync(reviewRoot(dir)), false, "a round was allocated after the gate refused");
+  assert.equal(fs.existsSync(path.join(dir, "work", "plan-round.json")), false);
+
+  // Re-approved, the same block opens round 1 against the goal that is now on
+  // disk — the refusal above is a stop, not a dead end.
+  approve(dir, { at: "2026-01-01T01:00:00Z" });
+  const after = openTheRound(dir, 1);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "work", "plan-round.json"), "utf8")).round, 1);
+});
+
 test("a plan directory with the old flat review files gets round 1 beside them", async () => {
   // The migration, which is that there is none: the allocator only ever looks at
   // numbered subdirectories, so a plan directory from before this change is

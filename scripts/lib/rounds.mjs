@@ -94,9 +94,10 @@ export class RoundReentryExhausted extends Error {
   constructor({ round, dir, limitName, entries, completeWhen }) {
     super(`round ${round} has been entered ${entries} time(s) and never recorded ${completeWhen}: ${dir} — a round `
       + "re-entered again and again without ever being closed out is a loop rather than a resume, and every "
-      + `re-entry empties it, so nothing further will be attempted under ${limitName}. Whatever the round produced `
-      + `is gone; write that round's ${completeWhen} so the next allocation is a new round, or finish what is left `
-      + "by hand");
+      + `re-entry empties it, so nothing further will be attempted under ${limitName}. Earlier attempts' output was `
+      + "cleared by those re-entries; what is in the directory now is whatever the last attempt wrote before it "
+      + `stopped, which may be partial. Read it, then write that round's ${completeWhen} so the next allocation is a `
+      + "new round, or finish what is left by hand");
     this.name = "RoundReentryExhausted";
     this.exitCode = 4;
     this.round = round;

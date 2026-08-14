@@ -146,7 +146,7 @@ repository that has not raised it — this is one round and then step 6.
 ### Open the round
 
 ```bash
-node "$P/scripts/goal-gate.mjs" verify "$D"
+node "$P/scripts/goal-gate.mjs" verify "$D" || exit $?
 node "$P/scripts/lib/rounds.mjs" "$D/work/review" \
   --candidate-file "$D/work/goal-approved" --candidate-field goalSha256 \
   --scope-file "$D/work/goal-approved" --scope-field goalSha256 \
@@ -160,7 +160,11 @@ ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$
 
 Only `--limit` is substituted — the number from the config. The allocator reads
 both identities out of `$D/work/goal-approved` itself, which `verify` has just
-proved current; **do not copy the hash out of anything into this command.** A
+proved current — the `|| exit $?` is what makes that true, since without it a
+goal edited and never re-approved fails the gate on stdout and the block
+allocates a round against the stale approval anyway. Exit 1 here is that
+refusal: get the goal re-approved at step 3 and open the round again.
+**Do not copy the hash out of anything into this command.** A
 hash that arrives one character wrong names a budget nothing else is counted in,
 so the rounds silently start over and nothing on screen says they did.
 
@@ -197,16 +201,20 @@ the review is past a budget it has in fact just started over.
 
 **Exit 4 means no further round is available**, and it was refused before
 anything was created. Ordinarily that is the budget, and stderr names it. Say
-only what is known here: the last round raised `blocking` or `major` findings, a
-revision addressed them, and no further round was available to check the
-result — and that `planReviewRounds` in `.tagteam/config.json` is
-what stopped the rounds, rather than the plan being finished. The other exit 4
-is a round that was entered several times and never closed out, which stderr
-says plainly and which means a round's findings were cleared by the re-entries;
-report that as it is rather than as a spent budget. **Do not present
-that round's findings as still open.** Nothing has read the revised plan, so
-which of them the revision closed is not something you or anything on disk
-knows, and a list of problems the plan may no longer have is worse than no list.
+only what is known here: no further review round was available under
+`planReviewRounds` in `.tagteam/config.json`, so the rounds stopped there rather
+than because the plan was finished. **Do not say what the last round found**
+unless you have just read its `outcome.json`: the refusal is what a resumed
+session gets after a clean round too, and telling them their review was cut off
+mid-argument when it in fact passed is worse than saying nothing about it. The
+other exit 4 is a round that was entered several times and never closed out,
+which stderr says plainly; what is left in that round's directory is whatever
+its last attempt wrote before it stopped, and it may be partial. Report that as
+it is rather than as a spent budget. **Do not present a round's findings as
+still open** once a revision has run against them. Nothing has read the revised
+plan, so which of them the revision closed is not something you or anything on
+disk knows, and a list of problems the plan may no longer have is worse than no
+list.
 Then **go on to step 6**. A spent review budget does not end the run:
 they approve at step 7 either way, and that is where they get to say the plan is
 not ready.
