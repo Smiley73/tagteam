@@ -139,6 +139,63 @@ export function resolveCarry(roundDir, round, carry) {
   return resolved;
 }
 
+/**
+ * The collection this run settles, read from `reviewFile` and checked the way
+ * every other hand-substituted round path here is checked.
+ *
+ * `ship.md` puts two different round numbers on one command line — `--review
+ * rounds/<r>/review.json --round <n>` — with a paragraph of prose explaining how
+ * to pick `<r>`, and `<r>` is typed by hand. `--dir`, `--adversary` and
+ * `--carry` are all checked against the round they must sit in for exactly that
+ * reason; without the same check here a wrong `<r>` settles a different round's
+ * collection and drops the real one. It fails *open*: id qualification turns a
+ * mis-bound verdict into a non-match, but a finding that never entered the
+ * settlement is in no `still-open.json` either, so no later round can carry it
+ * and the review gate goes on record clean.
+ *
+ * Three rules, and the third is the one that catches a plausible mistake rather
+ * than a typo. The file must be a `review.json` in a round directory under the
+ * same rounds root as `--dir`; the collection must say it is the round its
+ * directory names — a review moved or copied into another round's directory is
+ * refused rather than settled at whatever number the path implies; and no round
+ * between that one and `--round` may hold a collection of its own, because a
+ * newer collection is the one being answered for and skipping it settles a
+ * review that a later panel has already superseded.
+ */
+export function resolveReview(roundDir, round, reviewFile) {
+  const rounds = path.dirname(path.resolve(roundDir));
+  const resolved = path.resolve(reviewFile);
+  const from = path.dirname(resolved);
+  const named = path.basename(from);
+  if (path.basename(resolved) !== "review.json" || path.dirname(from) !== rounds
+    || !/^[1-9][0-9]*$/.test(named) || Number(named) > round) {
+    throw new Error(`--review ${reviewFile} is not the review.json of round ${round} or of an earlier round `
+      + `under ${rounds}; the collection a re-check settles is the one whose panel raised these findings, and `
+      + "settling some other round's collection drops this round's findings without recording them anywhere");
+  }
+  const collected = Number(named);
+  let review;
+  try {
+    review = JSON.parse(fs.readFileSync(resolved, "utf8"));
+  } catch (error) {
+    throw new Error(`the collection at ${reviewFile} is unreadable (${error.message}); nothing was settled`);
+  }
+  if (review?.round !== collected) {
+    throw new Error(`--review ${reviewFile} records round ${JSON.stringify(review?.round ?? null)}, not round `
+      + `${collected}, which is the round its own directory names; a collection settled at the wrong round `
+      + "answers for findings nobody raised there");
+  }
+  for (let between = collected + 1; between <= round; between += 1) {
+    const newer = path.join(rounds, String(between), "review.json");
+    if (fs.existsSync(newer)) {
+      throw new Error(`round ${between} collected a review of its own (${newer}) after round ${collected}: `
+        + "settle the most recent collection, not the one before it — the findings the newer panel raised would "
+        + "otherwise never be settled and never be carried");
+    }
+  }
+  return { review, collected };
+}
+
 // The re-check is a deriver too, and the deriver is the one caller allowed to
 // replace what it derived. `recheck.json`, `still-open.json` and `still-open/`
 // are all computed from the verdict files under `--dir` and the adversary's
@@ -186,7 +243,8 @@ function clearDerived(roundDir, out, candidate) {
 }
 
 export function settle({
-  review, dir, candidate, schemaPath, round, carried = [], adversary = null, adversarySchemaPath = null
+  review, dir, candidate, schemaPath, round, reviewRound = round, carried = [],
+  adversary = null, adversarySchemaPath = null
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   // Everything the adversary contributes is re-derived from its own file on
@@ -257,12 +315,19 @@ export function settle({
     }
   }
 
+  // A finding that got no verdict keeps whatever a reviewer last said about it.
+  // The carried record exists to tell the next fixer what is still wrong, and
+  // that sentence is written nowhere else — so replacing an inherited
+  // `evidence` with the generic no-verdict text, in exactly the round where the
+  // re-check failed to land, throws away the only description of the defect and
+  // hands the next round a finding with a title and a path. The generic text is
+  // the last resort, for a finding that never carried an evidence of its own.
   const settled = outstanding.map((finding) => {
     const verdict = verdicts.get(finding.id);
     return {
       ...finding,
       resolved: verdict?.resolved === true,
-      evidence: verdict?.evidence ?? "no verdict was returned for this finding"
+      evidence: verdict?.evidence ?? finding.evidence ?? "no verdict was returned for this finding"
     };
   });
 
@@ -357,6 +422,12 @@ export function settle({
   return {
     status,
     round,
+    // Which collection this settlement answers for. `<r>` and `<n>` are two
+    // different round numbers on the same command line, and without recording
+    // the one that was read, a settled review says nothing about the panel it
+    // came from — nobody reading `recheck.json` afterwards can tell which
+    // round's findings it claims to have settled.
+    reviewRound,
     candidate,
     expected,
     carriedIn: carried.length,
@@ -393,7 +464,15 @@ export function summaryLines(result) {
   // did not raise is doing different work from one settling its own, and the id
   // in each row says which round that was.
   const inherited = result.carriedIn > 0 ? `, ${result.carriedIn} carried in from an earlier round` : "";
-  const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open${inherited}`];
+  // Only when the two differ, which is the case a person has to check: a fix
+  // opened a new round, so the panel that raised these findings is the round
+  // before this one. Printing it on every line would say nothing.
+  const answering = result.reviewRound && result.reviewRound !== result.round
+    ? `, settling round ${result.reviewRound}'s review`
+    : "";
+  const lines = [
+    `recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open${answering}${inherited}`
+  ];
   for (const gap of result.missing) {
     const where = role(gap.file);
     lines.push(`  MISSING  ${gap.lens}${where ? ` (${where})` : ""}: ${oneLine(gap.reason)}`);
@@ -450,13 +529,16 @@ async function main() {
     const roundDir = roundDirectoryFor(options.dir, round);
     roundDirectoryFor(path.dirname(path.resolve(options.adversary)), round, "--adversary");
     const carry = resolveCarry(roundDir, round, options.carry);
-    const review = JSON.parse(fs.readFileSync(path.resolve(options.review), "utf8"));
+    // Checked before anything is settled, for the same reason the paths above
+    // are: the collection is the input that decides which findings exist at all.
+    const { review, collected } = resolveReview(roundDir, round, options.review);
     const result = settle({
       review,
       dir: options.dir,
       candidate: options.candidate,
       schemaPath,
       round,
+      reviewRound: collected,
       carried: carry === null ? [] : carriedFindings(carry),
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")

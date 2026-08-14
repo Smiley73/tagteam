@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { collect, findingId, parseRound, roundDirectoryFor } from "../scripts/collect-findings.mjs";
-import { settle, resolveCarry, summaryLines } from "../scripts/recheck.mjs";
+import { settle, resolveCarry, resolveReview, summaryLines } from "../scripts/recheck.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const FINDINGS_SCHEMA = path.join(root, "schemas", "findings.schema.json");
@@ -149,6 +149,15 @@ const review = {
 };
 
 const verdictFile = (lens, verdicts, candidate = NEW_OID) => ({ lens, candidate, verdicts });
+
+// Every CLI case writes its collection through this, because `recheck.mjs`
+// checks `--review` the way it checks its other round paths: the file is the
+// `review.json` of a round directory under the same rounds root as `--dir`, and
+// the collection says it is the round its directory names. Writing it here
+// keeps the number in the file and the number in the path from drifting in a
+// fixture, which would fail every case for a reason none of them is about.
+const writeReview = (file, body = review) =>
+  fs.writeFileSync(file, JSON.stringify({ ...body, round: Number(path.basename(path.dirname(file))) }));
 
 // The adversary is a required input to settle(), so every case supplies one.
 function adversary(findings, candidate = NEW_OID) {
@@ -445,7 +454,7 @@ test("a gating adversary finding still gates when non-gating ones sit beside it"
 
 test("the recheck summary distinguishes recorded from open and from resolved", async () => {
   const { spawnSync } = await import("node:child_process");
-  const { base, verdicts, adv, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-")));
+  const { verdicts, adv, review: reviewPath, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-")));
   fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
     { id: "1.correctness.1", resolved: true, evidence: "fixed" },
     { id: "1.correctness.2", resolved: true, evidence: "fixed" }
@@ -454,8 +463,7 @@ test("the recheck summary distinguishes recorded from open and from resolved", a
     lens: "adversary", candidate: NEW_OID, summary: "read it",
     findings: [finding({ severity: "minor", title: "worth knowing about" })]
   }));
-  const reviewPath = path.join(base, "review.json");
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
 
   const result = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -477,25 +485,24 @@ test("a still-open finding prints what goes wrong, not only its title", async ()
   // the thing it has to describe to a person deciding whether to merge anyway. A
   // title and a path do not say what the person would be accepting.
   const { spawnSync } = await import("node:child_process");
-  const { base, verdicts, adv, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-open-detail-")));
+  const { verdicts, adv, review: reviewPath, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-open-detail-")));
   fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
     { id: "1.correctness.1", resolved: true, evidence: "fixed" },
     { id: "1.correctness.2", resolved: false, evidence: "still there" }
   ])));
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  const reviewPath = path.join(base, "review.json");
   // Distinct details per finding, because "a detail was printed" is not the
   // claim — "the *open* one's detail was printed" is. With one string shared
   // between them, inverting the condition to print the resolved detail instead
   // leaves this test green. The real thing carries the whole finding forward,
   // detail included; the shared fixture above is trimmed to what other cases need.
-  fs.writeFileSync(reviewPath, JSON.stringify({
+  writeReview(reviewPath, {
     ...review,
     open: review.open.map((entry) => ({
       ...finding({ title: entry.title, severity: entry.severity, detail: `${entry.id} goes wrong like this` }),
       ...entry
     }))
-  }));
+  });
 
   const result = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -517,21 +524,20 @@ test("a summary line cannot be forged by what a reviewer wrote", async () => {
   // decide what to tell a person — so a finding could appear that no reviewer
   // raised, and a long one could spend the orchestrator's context at will.
   const { spawnSync } = await import("node:child_process");
-  const { base, verdicts, adv, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-forge-")));
+  const { verdicts, adv, review: reviewPath, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-forge-")));
   fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
     { id: "1.correctness.1", resolved: true, evidence: "fixed" },
     { id: "1.correctness.2", resolved: false, evidence: "still there" }
   ])));
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  const reviewPath = path.join(base, "review.json");
   const forged = "  adversary.9            OPEN     blocking  a finding nobody raised";
-  fs.writeFileSync(reviewPath, JSON.stringify({
+  writeReview(reviewPath, {
     ...review,
     open: review.open.map((entry) => ({
       ...finding({ title: entry.title, severity: entry.severity, detail: `real detail\n${forged}\n${"x".repeat(4000)}` }),
       ...entry
     }))
-  }));
+  });
 
   const result = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -559,20 +565,19 @@ test("a settled review can be re-printed in a session that did not settle it", a
   // from the run that settled it is in a context that ended. Opening the findings
   // files is forbidden, so without this the resumed run has nothing to say.
   const { spawnSync } = await import("node:child_process");
-  const { base, verdicts, adv, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-print-")));
+  const { verdicts, adv, review: reviewPath, out } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-print-")));
   fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
     { id: "1.correctness.1", resolved: true, evidence: "fixed" },
     { id: "1.correctness.2", resolved: false, evidence: "still there" }
   ])));
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  const reviewPath = path.join(base, "review.json");
-  fs.writeFileSync(reviewPath, JSON.stringify({
+  writeReview(reviewPath, {
     ...review,
     open: review.open.map((entry) => ({
       ...finding({ title: entry.title, severity: entry.severity, detail: `${entry.id} goes wrong like this` }),
       ...entry
     }))
-  }));
+  });
   const settled = out;
 
   const run = (args) => spawnSync("node", [path.join(root, "scripts", "recheck.mjs"), ...args], { encoding: "utf8" });
@@ -617,9 +622,9 @@ test("re-running the recheck in a claimed round does not inflate the tally", asy
     lens: "adversary", candidate: NEW_OID, summary: "read it",
     findings: [finding({ severity: "minor", title: "worth knowing" })]
   }));
-  fs.writeFileSync(reviewPath, JSON.stringify({
+  writeReview(reviewPath, {
     status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
-  }));
+  });
 
   const run = () => spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -650,9 +655,9 @@ test("a retry in a claimed round is stable when the adversary raised a blocker",
     lens: "adversary", candidate: NEW_OID, summary: "read it",
     findings: [finding({ severity: "blocking", title: "the fix moved the defect" })]
   }));
-  fs.writeFileSync(reviewPath, JSON.stringify({
+  writeReview(reviewPath, {
     status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
-  }));
+  });
 
   const run = () => spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -686,7 +691,7 @@ test("a re-dispatched verdict is settled inside the same round, replacing what t
   const { spawnSync } = await import("node:child_process");
   const { dir: roundDir, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-recheck-retry-");
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
   // Judged the wrong commit, so it settles nothing and stays writable.
   fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
     { id: "1.correctness.1", resolved: true, evidence: "fixed" },
@@ -745,7 +750,7 @@ test("a round belonging to another commit is refused before the re-check clears 
   const { spawnSync } = await import("node:child_process");
   const { dir: roundDir, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-recheck-owner-");
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
   fs.writeFileSync(out, "{\"from\": \"the settled round\"}");
   fs.mkdirSync(path.join(roundDir, "still-open"));
   fs.writeFileSync(path.join(roundDir, "still-open", "correctness.json"), "{\"from\": \"the settled round\"}");
@@ -941,7 +946,7 @@ test("the recheck seals the verdicts it consumed and leaves the ones it rejected
   // into this same round is the documented recovery — and a seal that reached it
   // would make that recovery impossible.
   const { spawnSync } = await import("node:child_process");
-  const { base, dir: roundDir, verdicts, adv, out } = recheckRound(
+  const { dir: roundDir, verdicts, adv, review: reviewPath, out } = recheckRound(
     2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-seal-"))
   );
   fs.writeFileSync(path.join(roundDir, "round.json"), JSON.stringify({ owner: NEW_OID, attempts: 1 }));
@@ -953,14 +958,13 @@ test("the recheck seals the verdicts it consumed and leaves the ones it rejected
     { id: "1.security.1", resolved: true, evidence: "fixed" }
   ], OID)), { mode: 0o600 });
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }), { mode: 0o600 });
-  const reviewPath = path.join(base, "review.json");
-  fs.writeFileSync(reviewPath, JSON.stringify({
+  writeReview(reviewPath, {
     ...review,
     open: [
       { id: "1.correctness.1", lens: "correctness", title: "a", severity: "blocking" },
       { id: "1.security.1", lens: "security", title: "b", severity: "major" }
     ]
-  }));
+  });
 
   const result = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -1082,7 +1086,7 @@ test("a --round that disagrees with the directory it was pointed at is refused",
   assert.equal(fs.existsSync(path.join(roundDir, "to-fix.json")), false, "the refused run derived anyway");
 
   const { verdicts, adv, review: reviewPath, out: settledOut } = recheckRound(2);
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
   const rechecked = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -1091,6 +1095,118 @@ test("a --round that disagrees with the directory it was pointed at is refused",
   ], { encoding: "utf8" });
   assert.equal(rechecked.status, 2, `a mislabelled round must refuse: ${rechecked.stdout}`);
   assert.match(rechecked.stderr, /not in round 1/);
+});
+
+test("an adversary file from another round is refused, with --dir correct", async () => {
+  // The adversary's round is checked separately from `--dir`, because its file
+  // is where this round's fresh ids are minted and it does not have to sit in
+  // the round whose panel findings the same re-check settles. The case above
+  // never reaches that check — `--dir` throws first and its message satisfies
+  // the same assertion — so without this one the whole check could be deleted
+  // and the suite would still pass, and an adversary file lifted from another
+  // round would be minted at this round's number with nothing refusing.
+  const { spawnSync } = await import("node:child_process");
+  const { base, verdicts, review: reviewPath, out } = recheckRound(2);
+  writeReview(reviewPath);
+  const elsewhere = path.join(base, "rounds", "3", "findings");
+  fs.mkdirSync(elsewhere, { recursive: true });
+  const adv = path.join(elsewhere, "adversary.json");
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+
+  const rechecked = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(rechecked.status, 2, `an adversary file from round 3 must refuse: ${rechecked.stdout}`);
+  assert.match(rechecked.stderr, /^--adversary /, `the refusal must name --adversary, not --dir: ${rechecked.stderr}`);
+  assert.match(rechecked.stderr, /round "3", not in round 2/);
+  assert.equal(fs.existsSync(out), false, "the refused run settled anyway");
+});
+
+test("the collection --review names is checked against the round it sits in", async () => {
+  // `ship.md` puts two round numbers on one command line — `--review
+  // rounds/<r>/review.json --round <n>` — and `<r>` is typed by hand from a
+  // paragraph of prose. Every sibling path is checked against the round it must
+  // sit in; unchecked, a wrong `<r>` settles some other round's collection and
+  // this round's findings enter no settlement, no `still-open.json` and no later
+  // carry, while a clean review gate is recorded over them.
+  const { spawnSync } = await import("node:child_process");
+  const { base, dir: roundDir, verdicts, adv, review: reviewPath, out } = recheckRound(3);
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  writeReview(reviewPath, { status: "open", candidate: OID, counts: {}, open: [
+    { id: "3.correctness.1", lens: "correctness", title: "a", severity: "blocking" }
+  ] });
+  // A clean earlier panel, the plausible thing to reach for.
+  const earlier = path.join(base, "rounds", "1", "review.json");
+  fs.mkdirSync(path.dirname(earlier), { recursive: true });
+  writeReview(earlier, { status: "clean", candidate: OID, counts: {}, open: [], missing: [] });
+
+  const run = (review) => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", review, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "3", "--out", out
+  ], { encoding: "utf8" });
+
+  // Round 3 collected a review of its own, so round 1's is not the one being
+  // answered for — and settling it would drop 3.correctness.1 with no record.
+  const skipped = run(earlier);
+  assert.equal(skipped.status, 2, `an older collection must refuse: ${skipped.stdout}`);
+  assert.match(skipped.stderr, /round 3 collected a review of its own/);
+  assert.equal(fs.existsSync(out), false, "the refused run settled anyway");
+  assert.equal(fs.existsSync(path.join(roundDir, "still-open.json")), false);
+
+  // A review outside the rounds root, and one whose own round contradicts the
+  // directory it was found in — both refused before anything is settled.
+  const outside = path.join(base, "review.json");
+  writeReview(outside, { status: "clean", candidate: OID, counts: {}, open: [], missing: [] });
+  assert.throws(() => resolveReview(roundDir, 3, outside), /not the review\.json of round 3/);
+  const mislabelled = path.join(base, "rounds", "2", "review.json");
+  fs.mkdirSync(path.dirname(mislabelled), { recursive: true });
+  fs.writeFileSync(mislabelled, JSON.stringify({ status: "clean", candidate: OID, counts: {}, open: [], round: 1 }));
+  assert.throws(() => resolveReview(roundDir, 3, mislabelled), /records round 1, not round 2/);
+  assert.throws(() => resolveReview(roundDir, 2, reviewPath), /not the review\.json of round 2/);
+
+  // The right one settles, and says which collection it answered for.
+  fs.rmSync(mislabelled);
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "3.correctness.1", resolved: true, evidence: "the read is guarded now" }
+  ])));
+  const settled = run(reviewPath);
+  assert.equal(settled.status, 0, `the round's own collection settles: ${settled.stderr}`);
+  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).reviewRound, 3);
+});
+
+test("a collection from the round before the fix is settled, and named on the settlement", async () => {
+  // The ordinary two-round shape: the panel ran in round 2, the fix made a new
+  // commit and opened round 3, and the re-check settles round 2's collection at
+  // round 3. That is what the path check has to keep allowing, and the round it
+  // answered for has to survive into `recheck.json` — `<r>` appears nowhere else
+  // once the command line is gone.
+  const { spawnSync } = await import("node:child_process");
+  const { base, verdicts, adv, out } = recheckRound(3);
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "2.correctness.1", resolved: false, evidence: "the guard is still on the wrong side of the read" }
+  ])));
+  const collected = path.join(base, "rounds", "2", "review.json");
+  fs.mkdirSync(path.dirname(collected), { recursive: true });
+  writeReview(collected, { status: "open", candidate: OID, counts: {}, open: [
+    { id: "2.correctness.1", lens: "correctness", title: "a", severity: "blocking" }
+  ] });
+
+  const settled = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", collected, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "3", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(settled.status, 1, `an unresolved finding is open: ${settled.stderr}`);
+  const result = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(result.round, 3);
+  assert.equal(result.reviewRound, 2);
+  assert.match(settled.stdout, /settling round 2's review/);
 });
 
 test("a verdict naming a different round resolves nothing", () => {
@@ -1152,11 +1268,11 @@ test("carried findings are settled by this round's verdicts, the adversary's inc
     result.open.map((entry) => entry.id).sort(),
     ["1.correctness.9", "1.security.1", "2.correctness.9"]
   );
-  assert.match(
-    result.findings.find((entry) => entry.id === "1.correctness.9").evidence,
-    /no verdict was returned/,
-    "security cleared a finding correctness raised"
-  );
+  const poached = result.findings.find((entry) => entry.id === "1.correctness.9");
+  assert.equal(poached.resolved, false, "security cleared a finding correctness raised");
+  // And the verdict that was ignored took nothing with it: the sentence the
+  // reviewer that raised it wrote is what the next fixer is handed.
+  assert.match(poached.evidence, /the reviewer said this is still wrong/);
 });
 
 test("settling the same inputs twice is deep-equal, and a finding in both the review and the carry is settled once", () => {
@@ -1206,7 +1322,7 @@ test("what a round leaves open is written as a cross-lens list and one file per 
     lens: "adversary", candidate: NEW_OID, summary: "read it",
     findings: [finding({ severity: "blocking", title: "the fix moved the defect" })]
   }));
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
 
   const result = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -1231,6 +1347,41 @@ test("what a round leaves open is written as a cross-lens list and one file per 
   assert.match(result.stdout, /still open .*still-open\.json \(2 finding\(s\)\)/);
 });
 
+test("a carried finding nobody judged keeps the evidence it came in with", async () => {
+  // The re-check for a carried lens did not land — the file is missing, which is
+  // the case the round is `incomplete` for. The finding stays open, and what it
+  // must not lose on the way through is the sentence the reviewer that raised it
+  // wrote: the carried record is the whole reason the next fixer knows what is
+  // still wrong, and overwriting it with "no verdict was returned" hands the next
+  // round a title and a path in exactly the round where the re-check failed.
+  const { spawnSync } = await import("node:child_process");
+  const { base, dir: roundDir, verdicts, adv, review: reviewPath, out } = recheckRound(2);
+  const previous = path.join(base, "rounds", "1", "still-open.json");
+  fs.mkdirSync(path.dirname(previous), { recursive: true });
+  fs.writeFileSync(previous, JSON.stringify({
+    candidate: OID,
+    findings: [carriedFinding("1.correctness.2", "correctness", {
+      evidence: "the guard is still on the wrong side of the read"
+    })]
+  }));
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  writeReview(reviewPath, { status: "clean", candidate: OID, counts: {}, open: [], missing: [] });
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out, "--carry", previous
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 1, `a carried finding nobody judged is open: ${result.stderr}`);
+  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).status, "incomplete");
+  const stillOpen = JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8"));
+  assert.deepEqual(stillOpen.findings.map((entry) => entry.id), ["1.correctness.2"]);
+  assert.match(stillOpen.findings[0].evidence, /still on the wrong side of the read/);
+  const perLens = JSON.parse(fs.readFileSync(path.join(roundDir, "still-open", "correctness.json"), "utf8"));
+  assert.match(perLens.findings[0].evidence, /still on the wrong side of the read/);
+});
+
 test("a clean round still records that it left nothing open", async () => {
   // Same reason `to-fix.json` is written empty: an absent file is not a record
   // of nothing, and the round that reads it cannot tell the two apart.
@@ -1241,7 +1392,7 @@ test("a clean round still records that it left nothing open", async () => {
     { id: "1.correctness.2", resolved: true, evidence: "fixed" }
   ])));
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
 
   const result = spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
@@ -1266,7 +1417,7 @@ test("a round whose predecessor left findings open refuses to run without them",
     findings: [carriedFinding("1.correctness.2", "correctness")]
   }));
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  fs.writeFileSync(reviewPath, JSON.stringify({ status: "clean", candidate: OID, counts: {}, open: [], missing: [] }));
+  writeReview(reviewPath, { status: "clean", candidate: OID, counts: {}, open: [], missing: [] });
   const run = (extra) => spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
     "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
@@ -1313,7 +1464,7 @@ test("the guard looks past the rounds that recorded nothing, not only at the rou
   // anything left open.
   fs.mkdirSync(path.join(base, "rounds", "3", "findings"), { recursive: true });
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  fs.writeFileSync(reviewPath, JSON.stringify({ status: "clean", candidate: OID, counts: {}, open: [], missing: [] }));
+  writeReview(reviewPath, { status: "clean", candidate: OID, counts: {}, open: [], missing: [] });
   const run = (extra) => spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
     "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
@@ -1425,7 +1576,7 @@ test("an --out inside the round that is not the derived review is refused, not d
 
   const { dir: roundDir, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-out-guard-");
   fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
-  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  writeReview(reviewPath);
   fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
     { id: "1.correctness.1", resolved: true, evidence: "fixed" },
     { id: "1.correctness.2", resolved: true, evidence: "fixed" }
@@ -1499,7 +1650,7 @@ test("a failed fresh adversary pass still seals the verdict the same round consu
   fs.writeFileSync(path.join(verdicts, "adversary.json"), JSON.stringify(verdictFile("adversary", [
     { id: "1.adversary.1", resolved: true, evidence: "the defect it named is gone" }
   ])), { mode: 0o600 });
-  fs.writeFileSync(reviewPath, JSON.stringify({ status: "clean", candidate: OID, counts: {}, open: [], missing: [] }));
+  writeReview(reviewPath, { status: "clean", candidate: OID, counts: {}, open: [], missing: [] });
   // The fresh pass never wrote its file, which is what leaves the round incomplete.
   assert.equal(fs.existsSync(adv), false);
 

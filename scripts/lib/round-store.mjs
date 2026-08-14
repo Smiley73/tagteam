@@ -29,6 +29,19 @@
 // per-file write-once rule cannot express "replace this set together", so
 // guarding the bridge makes that recovery either impossible or destructive.
 //
+// **So is the fixer's own report.** `rounds/<n>/fix-report.json` is written by
+// the fixer through its Write tool, like a reviewer's `findings/<lens>.json`,
+// and agent-written files can only be protected one step later, by the script
+// that consumes them (see `sealRoundRecord`). Nothing consumes the fix report:
+// it is bookkeeping a person reads, and `recheck.mjs` deliberately does not
+// look at it, because the fixer says what was attempted and the reviewer says
+// what is true. With no consumer there is nothing to seal it, so it stays
+// replaceable — a re-dispatched fixer overwrites it, which is what a
+// re-dispatch needs. What must not be inferred from that is that the *settled*
+// records share the exemption: `recheck.json`, `still-open.json` and
+// `still-open/` are derived by a script, go through `writeRoundFile`, and a
+// later round cannot overwrite them.
+//
 // Transient coordination state (`.codex-artifact-locks/`, `.codex-slots/`,
 // `.quota/`, `*.tmp` attempt files) is not a record and is not routed through
 // the guard either. There is deliberately no filename exclusion list here: the
