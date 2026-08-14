@@ -54,7 +54,7 @@ test("the same bytes twice is fine; different bytes at a round path is refused",
 });
 
 test("the same helper outside any round overwrites", () => {
-  // Plan-side Codex output and the spec-level review.json live above every
+  // Plan-side Codex output and the working files beside it live above every
   // round and are rewritten on every run. A guard that reached them would stop
   // the second run of a plan.
   const file = path.join(temp("loose"), "review.json");
@@ -324,8 +324,9 @@ function realPass() {
   const collected = spawnSync("node", [
     path.join(root, "scripts", "collect-findings.mjs"),
     "--dir", findings, "--candidate", source.candidate, "--expect", "correctness",
-    // review.json lives above the round, where it is rewritten every run.
-    "--out", path.join(rounds, "review.json")
+    // A round holds its own review, so `review.json` is a record of this round
+    // like everything else the collector derives.
+    "--round", "1", "--out", path.join(outDir, "review.json")
   ], { encoding: "utf8" });
   assert.equal(collected.status, 1, `collect-findings failed: ${collected.stderr}`);
 
@@ -349,7 +350,7 @@ test("every regular file a real pass leaves in a round is a sealed, write-once r
   const expected = [
     "review.diff", "changed-paths.json", "candidate.json",
     "verify.json", path.join("verify", "1.log"),
-    "to-fix.json", path.join("open", "correctness.json"),
+    "review.json", "to-fix.json", path.join("open", "correctness.json"),
     path.join("findings", "correctness.json")
   ].map((relative) => path.join(outDir, relative));
   for (const file of expected) assert.ok(records.includes(file), `a real pass wrote no ${file}`);
@@ -374,7 +375,7 @@ test("re-entering a round a real pass filled empties it, read-only records and a
   const records = [
     "review.diff", "changed-paths.json", "candidate.json",
     "verify.json", path.join("verify", "1.log"),
-    "to-fix.json", path.join("open", "correctness.json"), path.join("findings", "correctness.json")
+    "review.json", "to-fix.json", path.join("open", "correctness.json"), path.join("findings", "correctness.json")
   ].map((relative) => path.join(outDir, relative));
   // A verify log is filled incrementally and stays 0o600; everything else the
   // pass left is read-only, which is the tree re-entry has to be able to remove.

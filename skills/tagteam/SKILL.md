@@ -32,8 +32,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   state.json       the state machine, the reviewed commit, the gates        ignored
   rounds/<n>/  round.json (the commit that owns this round, and how many times
                it has been entered), review.diff, findings/, recheck/,
-               verify/, candidate.json                                    ignored
-  review.json  pr-body.md  ci.json                                   ignored
+               verify/, candidate.json, review.json, recheck.json,
+               still-open.json, still-open/<lens>.json                    ignored
+  pr-body.md  ci.json                                                ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
 
@@ -41,6 +42,12 @@ Everything committed is the record a person approved. Everything ignored is
 working state, and **the working state is the resume mechanism**: there are no
 fingerprints, no reuse ledgers, and no invocation descriptors. A re-run looks at
 what is on disk and continues from the first thing that is not done.
+
+Each round holds its own review: `review.json` is what the lens panel found,
+`recheck.json` is what survived the re-check and is the review gate, and
+`still-open.json` is what the round left open. Finding ids are qualified by the
+round that raised them — `2.correctness.1` — so nothing one round settled can be
+overwritten or cleared by another.
 
 A round is a record: once `round.json` names the commit that owns it, every file
 tagteam writes beneath it is written once, and re-snapshotting that same commit
@@ -184,7 +191,7 @@ a new commit appears — and the fix round always makes one.
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
-| `recheck.mjs` | Settle findings after the fix round; `--print <review.json>` re-renders a settled one |
+| `recheck.mjs` | Settle a round's findings, and any carried in with `--carry`, into `recheck.json` and `still-open.json`; `--print <recheck.json>` re-renders a settled one |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
@@ -208,7 +215,7 @@ would say it to a colleague who knows this codebase well and has not read a line
 of this run's bookkeeping.
 
 Assume a strong technical background, and notice how little of it helps here.
-They know what a race condition is; they do not know that `correctness.2` is the
+They know what a race condition is; they do not know that `1.correctness.2` is the
 id you gave one, that `9f2c1ab` is the commit you would merge, or what line 214
 of a file they have not opened says. Those are coordinates for dispatching a
 fixer. None of them is a reason to answer one way rather than the other.

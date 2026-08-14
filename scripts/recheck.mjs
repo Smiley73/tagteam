@@ -13,10 +13,16 @@
 //
 // The fixer's own report is deliberately not consulted. It is bookkeeping: it
 // says what was attempted, and the reviewer says what is true.
+//
+// A round can also inherit. `--carry` is the previous round's `still-open.json`,
+// settled by id exactly like the findings this round's own review raised, and
+// what survives is written back out as this round's `still-open.json` for the
+// next one. Nothing here loops; this is what makes a loop survivable.
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
+import { findingId, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
@@ -33,13 +39,75 @@ function parseArgs(argv) {
   // `--print` re-renders a settled review and settles nothing, so none of the
   // inputs settling needs are required with it.
   if (options.print) return options;
-  for (const required of ["review", "dir", "candidate", "out", "adversary"]) {
+  for (const required of ["review", "dir", "candidate", "out", "adversary", "round"]) {
     if (!options[required]) throw new Error(`--${required} is required`);
   }
   return options;
 }
 
-export function settle({ review, dir, candidate, schemaPath, adversary = null, adversarySchemaPath = null }) {
+/**
+ * The findings a carried record hands this round, from the file at `file`.
+ *
+ * Anything unreadable throws rather than settling as nothing carried: this file
+ * is the only route the previous round's unresolved findings have into this one,
+ * and a round that quietly starts from an empty carry has dropped exactly the
+ * work the next round existed to finish.
+ */
+function carriedFindings(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new Error(`the carried record at ${file} is unreadable (${error.message}); nothing was settled`);
+  }
+  if (!Array.isArray(parsed?.findings)) {
+    throw new Error(`the carried record at ${file} holds no findings list; nothing was settled`);
+  }
+  for (const entry of parsed.findings) {
+    if (typeof entry?.id !== "string" || typeof entry?.lens !== "string") {
+      throw new Error(`the carried record at ${file} holds an entry with no id or no lens, which no lens `
+        + "can be asked to judge; nothing was settled");
+    }
+  }
+  return parsed.findings;
+}
+
+/**
+ * The carried record this round settles, or null when it inherits nothing.
+ *
+ * Two rules. `--carry` must name a round strictly below this one under the same
+ * rounds root, because an id says which round raised it and a record from
+ * somewhere else names rounds that are not in this history. And when the
+ * previous round left findings open, `--carry` is *required* and must be that
+ * round's own `still-open.json` — this is the one failure with no other
+ * detector: a round that silently starts fresh looks exactly like a round that
+ * inherited nothing, and the findings the previous round could not close
+ * disappear into a merge.
+ */
+export function resolveCarry(roundDir, round, carry) {
+  const rounds = path.dirname(path.resolve(roundDir));
+  const resolved = carry ? path.resolve(carry) : null;
+  if (resolved !== null) {
+    const from = path.dirname(resolved);
+    const named = path.basename(from);
+    if (path.dirname(from) !== rounds || !/^[1-9][0-9]*$/.test(named) || Number(named) >= round) {
+      throw new Error(`--carry ${carry} is not a record of a round below ${round} under ${rounds}; `
+        + "a carried finding's id names the round that raised it, and only this history's rounds are settled here");
+    }
+  }
+  const previous = path.join(rounds, String(round - 1), "still-open.json");
+  const outstanding = round > 1 && fs.existsSync(previous) ? carriedFindings(previous).length : 0;
+  if (outstanding > 0 && resolved !== previous) {
+    throw new Error(`round ${round - 1} left ${outstanding} finding(s) open: pass --carry ${previous}. `
+      + "A round that starts without the previous round's open findings drops them silently, and finishing "
+      + "them is why this round exists");
+  }
+  return resolved;
+}
+
+export function settle({
+  review, dir, candidate, schemaPath, round, carried = [], adversary = null, adversarySchemaPath = null
+}) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   // Everything the adversary contributes is re-derived from its own file on
   // every run, so none of it may be carried in from a previous one. Ship passes
@@ -50,13 +118,26 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
   // review, in the case the first idempotence fix did not reach: a *gating*
   // adversary finding, where `open` is non-empty.
   const raised = (review.open ?? []).filter((finding) => finding.lens !== "adversary");
-  const lenses = [...new Set(raised.map((finding) => finding.lens))];
+  // The previous round's unresolved findings reach this round through the
+  // carried record and nowhere else. That separation is what lets an adversary
+  // finding be re-checked at all: the filter above drops every adversary entry
+  // because they are re-derived from the adversary's own file on every run, and
+  // a carried entry is not re-derived from anything.
+  //
+  // Merged by id, the carried copy authoritative. A round that re-runs the whole
+  // panel can raise a finding that is also carried, and settling it twice would
+  // ask two verdicts about one defect and print it twice.
+  const byId = new Map();
+  for (const finding of raised) byId.set(finding.id, finding);
+  for (const finding of carried) byId.set(finding.id, { ...finding, carried: true });
+  const outstanding = [...byId.values()];
+  const lenses = [...new Set(outstanding.map((finding) => finding.lens))];
   const verdicts = new Map();
-  // A lens the first review never got evidence from is still missing evidence.
+  // A lens an earlier review never got evidence from is still missing evidence.
   // Carrying it forward is what stops an incomplete review from being laundered
   // into a clean one: with no findings raised there is nothing to re-check, and
   // "nothing to re-check" would otherwise settle as clean.
-  const CARRIED = " (unresolved from the first review)";
+  const CARRIED = " (unresolved from an earlier review)";
   const unusable = (review.missing ?? [])
     .filter((gap) => gap.lens !== "adversary")
     .map((gap) => ({
@@ -87,14 +168,15 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
       continue;
     }
     // A lens may only clear findings it raised. Otherwise one reviewer can
-    // resolve another's work by returning its ids.
-    const ownIds = new Set(raised.filter((finding) => finding.lens === lens).map((finding) => finding.id));
+    // resolve another's work by returning its ids. Carried findings are no
+    // different: the round in the id says who raised it, not who may clear it.
+    const ownIds = new Set(outstanding.filter((finding) => finding.lens === lens).map((finding) => finding.id));
     for (const verdict of parsed.verdicts) {
       if (ownIds.has(verdict.id)) verdicts.set(verdict.id, verdict);
     }
   }
 
-  const settled = raised.map((finding) => {
+  const settled = outstanding.map((finding) => {
     const verdict = verdicts.get(finding.id);
     return {
       ...finding,
@@ -142,7 +224,9 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
         // not mention what nobody could see. Every other lens has its minors
         // carried through by `collect-findings`; this one lost them.
         parsed.findings.forEach((finding, index) => {
-          const entry = { ...finding, id: `adversary.${index + 1}`, lens: "adversary", resolved: false };
+          // Minted at the round the adversary's file sits in, through the one
+          // minter, so a verdict from another round binds to nothing here.
+          const entry = { ...finding, id: findingId(round, "adversary", index), lens: "adversary", resolved: false };
           if (finding.severity === "blocking" || finding.severity === "major") {
             fresh.push({ ...entry, evidence: "raised by the adversary against the fixed change" });
           } else {
@@ -155,7 +239,14 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
 
   const open = [...settled.filter((finding) => !finding.resolved), ...fresh];
   const status = unusable.length > 0 ? "incomplete" : open.length > 0 ? "open" : "clean";
-  const expected = adversary === null ? lenses : [...lenses, "adversary"];
+  // The adversary is two readers in a round that carries its earlier findings: it
+  // judges those from `--dir`, and it reads the new diff into `--adversary`.
+  // `expected` is keyed by lens name, so it must name the adversary once —
+  // duplicated, it would report a lens that ran twice as two lenses, and
+  // `present` would say it was there once and absent once. A failure in either
+  // role stays distinguishable by the `file` on its `missing` entry, and either
+  // one leaves the round incomplete.
+  const expected = [...new Set(adversary === null ? lenses : [...lenses, "adversary"])];
   // The first review's tally plus whatever the adversary added. It cannot be
   // recomputed from `findings`, because `findings` only ever held the gating
   // half of the first round — `raised` is `review.open`. Carrying the tally and
@@ -170,14 +261,21 @@ export function settle({ review, dir, candidate, schemaPath, adversary = null, a
   const reviewCounts = Object.fromEntries(
     SEVERITY_ORDER.map((severity) => [severity, review.reviewCounts?.[severity] ?? review.counts?.[severity] ?? 0])
   );
+  // Carried findings are in neither tally. They were counted by the round that
+  // raised them, and a round that counted its inheritance again would report a
+  // total that grows with every round while the defects stay the same. What a
+  // settled round counts is its own: its own panel's tally plus its own
+  // adversary's findings.
   const counts = { ...reviewCounts };
   for (const finding of [...fresh, ...recorded]) {
     counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
   }
   return {
     status,
+    round,
     candidate,
     expected,
+    carriedIn: carried.length,
     present: expected.filter((lens) => !unusable.some((entry) => entry.lens === lens)).map((lens) => ({ lens, summary: "recheck" })),
     missing: unusable,
     reviewCounts,
@@ -198,7 +296,11 @@ const oneLine = (text, limit = 240) => {
 };
 
 export function summaryLines(result) {
-  const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open`];
+  // What was inherited belongs on the first line: a round settling findings it
+  // did not raise is doing different work from one settling its own, and the id
+  // in each row says which round that was.
+  const inherited = result.carriedIn > 0 ? `, ${result.carriedIn} carried in from an earlier round` : "";
+  const lines = [`recheck: ${result.status} — ${result.open.length} of ${result.findings.length} still open${inherited}`];
   for (const gap of result.missing) lines.push(`  MISSING  ${gap.lens}: ${oneLine(gap.reason)}`);
   for (const finding of result.findings) {
     // `recorded` is neither of the other two: not open, and not resolved by
@@ -243,12 +345,23 @@ async function main() {
     }
     const here = path.dirname(new URL(import.meta.url).pathname);
     const schemaPath = options.schema ?? path.resolve(here, "..", "schemas", "recheck.schema.json");
+    const round = parseRound(options.round);
+    // Both directories are checked against `--round`, because both mint or match
+    // ids at it: the verdicts under `--dir` clear findings this round settles,
+    // and the adversary's file is where this round's fresh ids come from. The
+    // adversary's round is not necessarily the round whose panel findings this
+    // same re-check is settling, so it is checked on its own path.
+    const roundDir = roundDirectoryFor(options.dir, round);
+    roundDirectoryFor(path.dirname(path.resolve(options.adversary)), round, "--adversary");
+    const carry = resolveCarry(roundDir, round, options.carry);
     const review = JSON.parse(fs.readFileSync(path.resolve(options.review), "utf8"));
     const result = settle({
       review,
       dir: options.dir,
       candidate: options.candidate,
       schemaPath,
+      round,
+      carried: carry === null ? [] : carriedFindings(carry),
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")
     });
@@ -257,18 +370,38 @@ async function main() {
     // tolerate (a read-only mount, a filesystem that will not do it at all) must
     // not be able to throw away a review that was already computed — there is no
     // review gate without this file, and the same chmod fails the same way on
-    // every retry. `--out` is ship's `review.json`, which lives above the round
-    // and is rewritten as before.
+    // every retry. `--out` is this round's settled review, written once: the
+    // collection it was derived from stays where it is, so a re-run reads a
+    // pristine input and produces the same bytes.
     writeRoundFile(options.out, `${JSON.stringify(result, null, 2)}\n`);
+    // What this round leaves for the next one, in the two shapes those readers
+    // already consume — a fixer's cross-lens brief and one file per lens of what
+    // that lens must judge. Written on every run, including a clean one, for the
+    // same reason `to-fix.json` is: an absent file is not a record of nothing.
+    const { perLens, list } = writeOpenViews(roundDir, {
+      candidate: options.candidate,
+      open: result.open,
+      list: "still-open.json",
+      perLens: "still-open"
+    });
     // Every verdict file this settled is now part of the record, so it is sealed
     // the way `collect-findings` seals the findings it consumed. A lens whose
     // file was missing or unusable is not in `present` and stays writable, which
-    // is what a re-dispatch into the same round needs.
+    // is what a re-dispatch into the same round needs. The adversary is sealed on
+    // its own path: it is consumed from `--adversary`, not from `--dir`, and in a
+    // round that also re-checks carried adversary findings both files are records.
     for (const { lens } of result.present) {
-      sealRoundRecord(lens === "adversary" ? options.adversary : path.join(path.resolve(options.dir), `${lens}.json`));
+      sealRoundRecord(path.join(path.resolve(options.dir), `${lens}.json`));
     }
+    if (!result.missing.some((gap) => gap.file === options.adversary)) sealRoundRecord(options.adversary);
 
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
+    if (list.count > 0) {
+      process.stdout.write(`  still open ${list.file} (${list.count} finding(s)) — carry this into the next round\n`);
+    }
+    for (const entry of perLens) {
+      process.stdout.write(`  ${entry.lens} re-checks ${entry.file} next round (${entry.count} finding(s))\n`);
+    }
     if (result.status !== "clean") process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

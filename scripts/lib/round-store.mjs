@@ -18,9 +18,8 @@
 // The marker, rather than parsing `<n>` out of the path: round numbering is
 // still prose, and the plan side will grow rounds with no commits in them. A
 // marker makes "am I inside a round?" answerable from any path, so the same
-// helpers serve callers that also run outside a round (`collect-findings.mjs`
-// writing `review.json` up in the spec directory) without those callers
-// branching.
+// helpers serve callers that also run outside a round (the plan side, which has
+// no round directories at all) without those callers branching.
 //
 // **Codex artifacts are outside this guarantee.** `scripts/codex.mjs` writes its
 // artifact, `.prompt.md`, `.request.json` and `.events.jsonl` with plain writes
@@ -209,8 +208,8 @@ export function enterRound(roundDir, { owner } = {}) {
 /**
  * Write `value` to `file`. Inside a round the write is once-only: link a temp
  * file into place, and on collision compare bytes — identical passes, different
- * is refused. Outside a round this is today's plain write, so the plan side and
- * the spec-level `review.json` are unaffected.
+ * is refused. Outside a round this is today's plain write, so the plan side is
+ * unaffected.
  */
 export function writeRoundFile(file, value) {
   const target = path.resolve(file);

@@ -138,7 +138,8 @@ reviewed commit comes from `state.json`.
 The round directory is a record. The snapshot writes `review.diff`,
 `changed-paths.json` and `candidate.json` into it, marks it with the commit that
 owns it, and from then on every file tagteam writes beneath it — the verify
-results and logs, `to-fix.json`, `open/<lens>.json` — is written once: a
+results and logs, `review.json` and `recheck.json`, `to-fix.json`,
+`open/<lens>.json`, `still-open.json` — is written once: a
 different-bytes rewrite is refused, naming the path, rather than silently
 overwriting. Re-running this step against the *same* commit **re-enters** the
 round: it is emptied back to its marker and rebuilt, which is what a ship
@@ -192,8 +193,12 @@ Then:
 
 ```bash
 node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/<n>/findings" --candidate "$OID" \
-  --expect <lens,lens,codex> --out "$S/<id>/review.json"
+  --expect <lens,lens,codex> --round <n> --out "$S/<id>/rounds/<n>/review.json"
 ```
+
+`--round` is the same `<n>` as the directory, and the script refuses if it is
+not: every finding id it mints starts with it, so `<n>.correctness.1` names the
+round that raised it and can never be cleared by a verdict from another one.
 
 Its stdout is your view of the review — a line per finding. Do not open the
 findings files. `incomplete` means a lens produced no usable evidence; that is
@@ -203,7 +208,7 @@ not clean, and it never merges.
 
 `gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` /
 `effort.worker`, given `$S/<id>/rounds/<n>/to-fix.json`, the worktree, and
-`$S/<id>/fix-report.json` to write. Then commit and re-snapshot exactly as in
+`$S/<id>/rounds/<n>/fix-report.json` to write. Then commit and re-snapshot exactly as in
 step 3 with a fresh `<n>`, set `OID` to the new commit, and `gates.mjs bind` it —
 which clears every gate, because they were about the old one. Re-run verify
 against the new commit.
@@ -253,12 +258,31 @@ In one message:
   the pull request on findings that were actually fixed.
 
 ```bash
-node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" \
+node "$P/scripts/recheck.mjs" --review "$S/<id>/rounds/<r>/review.json" --round <n> \
   --dir "$S/<id>/rounds/<n>/recheck" --adversary "$S/<id>/rounds/<n>/findings/adversary.json" \
-  --candidate "$OID" --out "$S/<id>/review.json"
-node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/review.json"
+  --candidate "$OID" --out "$S/<id>/rounds/<n>/recheck.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/rounds/<n>/recheck.json"
 node "$P/scripts/gates.mjs" state "$S/<id>/state.json" verifying
 ```
+
+`<r>` is the round whose lens panel raised these findings, which is `<n>` when
+nothing was fixed and the round before the fix when something was — the fix made
+a new commit and a new round, and the findings it is being judged against were
+collected in the old one. `--round <n>` is this round either way: it is where the
+verdicts and the adversary's fresh pass live, and where the settlement is written.
+
+The collection and the settlement are two files in the round: the re-check reads
+`review.json` and writes `recheck.json`, and `recheck.json` is the review gate.
+It also writes `$S/<id>/rounds/<n>/still-open.json` and
+`still-open/<lens>.json` — what this round did not close, as a cross-lens list
+and one file per lens. Nothing reads them yet; they are the record of what a
+round left behind, so a later one could be handed it. Whatever is in them here
+is what stops this pull request.
+
+If it refuses because an earlier round left findings open, it names that round's
+`still-open.json`: pass it as `--carry <that path>` and those findings are
+settled here too, by the same per-lens verdict files. Refusing is the point —
+a round that starts without them drops them silently.
 
 That last transition is what both paths converge on. A clean round is at
 `reviewing` and a fixed one is at `fixing`, and only `verifying` is reachable
@@ -364,14 +388,14 @@ this. If you reached this step on a resume and never ran it in this session,
 that summary is in a context that has ended — get it back with
 
 ```bash
-node "$P/scripts/recheck.mjs" --print "$S/<id>/review.json"
+node "$P/scripts/recheck.mjs" --print "$S/<id>/rounds/<n>/recheck.json"
 ```
 
 which re-renders what the earlier run printed and settles nothing. That is the
 supported way; opening a findings file is still not.
 
 What you must not pass on is the shape it arrived in.
-`correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
+`1.correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
 and the person deciding whether this merges is not going to open the file. They
 are deciding whether the behaviour is acceptable, so describe the behaviour. The
 same goes for the gate that fired — "nothing in this change has a test that runs
