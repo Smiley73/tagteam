@@ -79,6 +79,66 @@ script, so an older configuration is incomplete rather than upgradable.
 
 `examples/config.json` is a complete file.
 
+## Dispatching and waiting
+
+**A dispatched subagent does not block by default.** The Agent tool returns the
+moment it is dispatched, which is what makes "in a single message" mean
+concurrency. It also means you reach the next step of a command file while none
+of the work exists yet — and that step is almost always a script reading the
+files those agents were told to write. None of the scripts wait.
+`collect-findings.mjs` over a directory that is still filling reports
+`incomplete`, which is not clean and never merges; `specs.mjs` over one does not
+complain at all — it lists the specs that happen to be there and returns `ok`.
+
+**Everything you dispatched must have reported before you run the script that
+reads its output.** How you wait depends on whether the file it writes is new.
+
+**One agent, or an agent overwriting a file that is already on disk** — dispatch
+it with `run_in_background: false`. The tool call itself blocks until the agent
+reports, which is the whole wait. This is the only form that works for a
+re-dispatch: a reviewer re-run because its findings file was unreadable, or a
+spec writer re-run because `specs.mjs` rejected what it wrote, is overwriting a
+path that already exists, and a watcher on that path returns immediately having
+waited for nothing.
+
+**A fan-out writing new files** — dispatch them in one message, then wait with
+one background watcher over the paths you told them to write:
+
+```bash
+until [ -f "<path>" ] && [ -f "<path>" ]; do sleep 5; done
+```
+
+One `-f` test per output you actually commissioned — as many as there are,
+rather than the two an example shows, and none for an agent you did not
+dispatch. Run it with `run_in_background` and the largest `timeout` the Bash
+tool accepts (600000). It costs one tool call and one notification.
+
+**The notification is not the proof — the files are.** That watcher notifies
+when it exits, and it also exits when its timeout runs out, identically and with
+nothing written. So look at the paths when it returns. Missing and the work is
+still running: re-arm the same watcher. Missing and everything has reported:
+something wrote nothing.
+
+**Do not poll and do not fill.** Repeated `ls`, a second watcher running beside
+the first, and `echo` calls emitted only to burn a turn are all the same
+mistake: they put dozens of lines into the transcript a person is reading and
+not one of them makes the work finish sooner.
+
+**A Codex call in a fan-out is a Bash call, not an agent**, and it has to run
+with `run_in_background`: `codex.mjs` allows itself 900 seconds and waits out a
+quota in slices to a four-hour ceiling, while the Bash tool kills a foreground
+command at 600. Its artifact belongs in the watcher — the script renames it into
+place atomically, so its presence means a whole file — but **read the background
+call's result as well**. A schema 400, an unavailable model, a timeout, or
+exhausted quota each end with no artifact and the reason only in that result.
+Waiting on a file Codex has already failed to write is a stall with no end.
+
+The watcher tells you the outputs exist, not that the agents were right; the
+aggregation script is still what judges them. When something has reported
+without writing, stop waiting: kill the watcher rather than leaving it running,
+run the script, and say which agent produced no file — `incomplete` is the
+honest verdict, and it is the one you would have reached anyway.
+
 ## Codex
 
 Required. If `codex --version` fails, stop and say so — there is no
