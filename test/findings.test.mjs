@@ -784,6 +784,40 @@ test("a damaged round marker stops the collector before it clears the previous d
   );
 });
 
+test("a round belonging to another commit is refused before the collector clears anything", async () => {
+  // The collector is the only caller that removes records from a round, and
+  // `<n>` is substituted by hand in ship.md: running step 5 with the new `$OID`
+  // against the previous round's findings directory is one keystroke away. It
+  // used to delete that round's `to-fix.json` and whole `open/` tree, then write
+  // a brief naming a commit the round's marker does not record — and nothing
+  // left on disk could re-derive what it removed.
+  const { spawnSync } = await import("node:child_process");
+  const { round, findings, out } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })])
+  });
+  fs.mkdirSync(path.join(round, "open"));
+  fs.writeFileSync(path.join(round, "open", "correctness.json"), "{\"from\": \"the first review\"}");
+  fs.writeFileSync(path.join(round, "to-fix.json"), "{\"from\": \"the first review\"}");
+
+  const run = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", NEW_OID, "--expect", "correctness", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(run.status, 2, `a round owned by another commit must refuse: ${run.stdout}`);
+  assert.match(run.stderr, new RegExp(`${OID}[\\s\\S]*${NEW_OID}`));
+  assert.equal(
+    fs.readFileSync(path.join(round, "to-fix.json"), "utf8"),
+    "{\"from\": \"the first review\"}",
+    "the refused run deleted to-fix.json"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(round, "open", "correctness.json"), "utf8"),
+    "{\"from\": \"the first review\"}",
+    "the refused run deleted an open/<lens>.json"
+  );
+});
+
 test("the recheck seals the verdicts it consumed and leaves the ones it rejected writable", async () => {
   // Verdict files arrive through the Write tool, so the round cannot refuse a
   // second write as it happens; sealing what was consumed is the protection one

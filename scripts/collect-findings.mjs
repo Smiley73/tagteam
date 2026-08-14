@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
+import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 const GATING = new Set(["blocking", "major"]);
@@ -145,10 +145,25 @@ function summaryLines(result) {
 // a guard that only fires on the way in to `writeRoundFile` would already have
 // deleted the previous `to-fix.json` and `open/` by then — the round would lose
 // records to a refusal that was supposed to leave it exactly as it was.
+//
+// Which commit the round belongs to is checked here too, and for the same
+// reason. This is the only place in tagteam that removes records from a round —
+// the snapshot's `enterRound` empties one only after establishing that the round
+// is the candidate's — and `<n>` is substituted by hand in `ship.md`, so pointing
+// a run at the previous round's findings directory with the new `$OID` is a
+// keystroke away. Without this it deletes the first review's `to-fix.json` and
+// `open/`, finds every findings file bound to the old commit and therefore
+// missing, and writes a brief naming the new commit into a round whose marker
+// names the old one. Nothing left on disk can re-derive what it removed.
 function writeOpenFiles(dir, result) {
   const roundDir = path.join(path.resolve(dir), "..");
   const openDir = path.join(roundDir, "open");
-  roundRootForWrite(path.join(roundDir, "to-fix.json"));
+  const round = roundRootForWrite(path.join(roundDir, "to-fix.json"));
+  const owner = round === null ? null : readRoundMarker(round)?.owner;
+  if (owner !== null && owner !== result.candidate) {
+    throw new Error(`the round at ${round} belongs to ${owner}, not to ${result.candidate}; nothing was removed `
+      + "— derive into the round that records this candidate, or re-run with the candidate that round belongs to");
+  }
   fs.rmSync(path.join(roundDir, "to-fix.json"), { force: true });
   fs.rmSync(openDir, { recursive: true, force: true });
   fs.mkdirSync(openDir, { recursive: true, mode: 0o700 });

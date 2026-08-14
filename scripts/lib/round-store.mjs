@@ -117,8 +117,32 @@ export function roundRootForWrite(file) {
 function writeMarker(roundDir, marker) {
   const file = path.join(roundDir, ROUND_MARKER);
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, file);
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+// Only the names `writeMarker` itself produces: `round.json.<pid>.<uuid>.tmp`.
+const MARKER_TEMPORARY = new RegExp(
+  `^${ROUND_MARKER.replaceAll(".", "\\.")}\\.\\d+\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.tmp$`
+);
+
+// A process killed between `writeMarker`'s write and its rename leaves that temp
+// file behind. Without this the next `enterRound` sees a directory holding a file
+// and no marker, takes the adoption branch, finds no `candidate.json` and refuses
+// — and refuses every retry after that too, so the round is wedged until someone
+// deletes it by hand. The temp is this module's own, it is never a record, and
+// the only way to see one here is that the write it belonged to did not finish.
+function discardMarkerTemporaries(dir, entries) {
+  return entries.filter((entry) => {
+    if (!MARKER_TEMPORARY.test(entry)) return true;
+    try { fs.rmSync(path.join(dir, entry), { force: true }); } catch {}
+    return false;
+  });
 }
 
 function clearRound(roundDir) {
@@ -159,7 +183,7 @@ export function enterRound(roundDir, { owner } = {}) {
     return reenter(dir, marker);
   }
 
-  const existing = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  const existing = discardMarkerTemporaries(dir, fs.existsSync(dir) ? fs.readdirSync(dir) : []);
   if (existing.length > 0) {
     // A round an older version left behind, or one this ship is already part-way
     // through on disk. `candidate.json` names the commit it was built for, so a

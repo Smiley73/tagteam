@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   ROUND_MARKER,
   createRoundStream,
@@ -139,6 +140,27 @@ test("a marker-less round is adopted only when its candidate.json names the owne
   plant(theirs, "candidate.json", JSON.stringify({ candidateOid: OTHER_OID }));
   assert.throws(() => enterRound(theirs, { owner: OID }), (error) => error.message.includes(theirs));
   assert.ok(fs.existsSync(path.join(theirs, "candidate.json")));
+});
+
+test("a marker write interrupted before its rename does not wedge the round for good", () => {
+  // The first marker is written to `round.json.<pid>.<uuid>.tmp` and renamed
+  // into place. A process killed in that window used to leave a directory
+  // holding one file and no marker, which reads as someone else's round: the
+  // adoption branch finds no candidate.json and refuses, and refuses every
+  // retry after it, so the snapshot can never resume there.
+  const dir = temp("wedged");
+  const stranded = plant(dir, `${ROUND_MARKER}.${process.pid}.${randomUUID()}.tmp`, "{\"owner\":\"a\"}");
+  const entered = enterRound(dir, { owner: OID });
+  assert.equal(entered.reentered, false);
+  assert.equal(readRoundMarker(dir).owner, OID);
+  assert.equal(fs.existsSync(stranded), false, "the stranded marker temp survived");
+
+  // Only this module's own marker temporaries. Anything else in there is
+  // someone's file, and a directory holding one is still not adoptable.
+  const theirs = temp("wedged-other");
+  plant(theirs, "notes.tmp", "not ours");
+  assert.throws(() => enterRound(theirs, { owner: OID }), (error) => error.message.includes(theirs));
+  assert.ok(fs.existsSync(path.join(theirs, "notes.tmp")));
 });
 
 test("a stream inside a round refuses an existing path, synchronously", () => {
@@ -307,14 +329,14 @@ function realPass() {
   ], { encoding: "utf8" });
   assert.equal(collected.status, 1, `collect-findings failed: ${collected.stderr}`);
 
-  return outDir;
+  return { source, outDir };
 }
 
 // The assertion that catches the file someone adds next year. A named subset
 // would pass a hand-written per-file test; only enumeration covers the tree, and
 // only a tree the real callers produced says anything about those callers.
 test("every regular file a real pass leaves in a round is a sealed, write-once record", () => {
-  const outDir = realPass();
+  const { outDir } = realPass();
   const walk = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(directory, entry.name);
     return entry.isDirectory() ? walk(full) : [full];
@@ -339,5 +361,45 @@ test("every regular file a real pass leaves in a round is a sealed, write-once r
     // rather than the mode — the test above owns that one.
     if (path.dirname(file) === logs) continue;
     assert.equal(fs.statSync(file).mode & 0o777, 0o400, `${file} was written past the round store`);
+  }
+});
+
+// Re-entry is the deliverable's headline guarantee, and the shape it has to
+// survive is the one above: every record 0o400, sealed by the writer or by its
+// consumer. The other re-entry tests build their rounds out of writable files by
+// hand, so `clearRound` is never once asked to remove the read-only tree that is
+// the only thing it will ever meet after the review step has run.
+test("re-entering a round a real pass filled empties it, read-only records and all", () => {
+  const { source, outDir } = realPass();
+  const records = [
+    "review.diff", "changed-paths.json", "candidate.json",
+    "verify.json", path.join("verify", "1.log"),
+    "to-fix.json", path.join("open", "correctness.json"), path.join("findings", "correctness.json")
+  ].map((relative) => path.join(outDir, relative));
+  // A verify log is filled incrementally and stays 0o600; everything else the
+  // pass left is read-only, which is the tree re-entry has to be able to remove.
+  const logs = path.join(outDir, "verify");
+  for (const file of records) {
+    if (path.dirname(file) === logs) continue;
+    assert.equal(fs.statSync(file).mode & 0o777, 0o400, `${file} is not sealed`);
+  }
+
+  const second = snapshot(source, outDir);
+  assert.equal(second.reentered, true);
+  assert.equal(second.candidateOid, source.candidate);
+
+  // Everything the review produced is gone — this is what makes the resume path
+  // legal against a write-once round, and what makes it expensive.
+  const rewritten = new Set(["review.diff", "changed-paths.json", "candidate.json"]);
+  for (const file of records.filter((entry) => !rewritten.has(path.basename(entry)))) {
+    assert.equal(fs.existsSync(file), false, `${file} survived re-entry`);
+  }
+  const marker = readRoundMarker(outDir);
+  assert.equal(marker.owner, source.candidate);
+  assert.equal(marker.attempts, 2);
+  for (const name of rewritten) {
+    const file = path.join(outDir, name);
+    assert.ok(fs.existsSync(file), `the re-entered round has no ${name}`);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o400, `${name} is not a sealed record`);
   }
 });

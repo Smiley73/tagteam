@@ -91,8 +91,16 @@ Otherwise, by state:
 - `implementing`, `reviewing`, `fixing`, `verifying` — the work was interrupted
   mid-flight and its worktree is gone. `git -C "$W" switch "<branch>"`, then
   restart from step 3 (commit and snapshot) against whatever is committed there.
-  Keep the same `<n>`: restarting lands on the commit that already owns that
-  round, so the snapshot re-enters and rebuilds it rather than needing a new one.
+  Pick `<n>` by who owns the round, not by which state it stopped in: read
+  `owner` out of `$S/<id>/rounds/<n>/round.json` for the highest `<n>` on disk,
+  and if the commit step 3 leaves at the tip of the branch is that owner, re-use
+  that `<n>` — the snapshot re-enters and rebuilds the round rather than needing
+  a new one. If they differ, that round belongs to an earlier commit and the next
+  unused `<n>` is the right one. `implementing`, `reviewing` and `verifying`
+  normally land back on the owner; a `fixing` (or CI-repair) restart usually does
+  not, because the fix commit exists and the round that was to hold it never got
+  snapshotted, which is exactly the fresh-`<n>` case. Either way the snapshot
+  refuses rather than guessing, naming both commits.
 - `publishing`, `awaiting-approval` — a pull request exists. Go to step 9 and
   evaluate; do not re-implement anything.
 - `failed` — say what this spec was delivering and what stopped it, in a
@@ -133,8 +141,9 @@ owns it, and from then on every file tagteam writes beneath it — the verify
 results and logs, `to-fix.json`, `open/<lens>.json` — is written once: a
 different-bytes rewrite is refused, naming the path, rather than silently
 overwriting. Re-running this step against the *same* commit **re-enters** the
-round: it is emptied back to its marker and rebuilt, which is what a resumed
-ship does and it costs no new `<n>`. Re-running it against a *different* commit
+round: it is emptied back to its marker and rebuilt, which is what a ship
+resumed on the round's own commit does and it costs no new `<n>`. Re-running it
+against a *different* commit
 is refused naming both commits, so use a fresh `<n>` after the fix round.
 
 The one exception is Codex's own output — the artifact, its `.prompt.md`,
