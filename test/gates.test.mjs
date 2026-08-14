@@ -7,7 +7,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import {
-  initState, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope
+  initState, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope,
+  budgetTaken
 } from "../scripts/gates.mjs";
 
 const A = "a".repeat(40);
@@ -328,6 +329,40 @@ test("both routes back into review from a published candidate are CI repairs", (
   }
 });
 
+test("the CI repair runs end to end without taking the review edge twice", () => {
+  // The sequence commands/ship.md step 8 prescribes, as states: the repair edge
+  // into reviewing, the panel it runs there (no transition of its own), a fix
+  // round, the re-check's convergence on verifying, and publishing again. A step
+  // 8 that entered step 5 at its own `state ... reviewing` would die here on the
+  // second edge — after the repair was already spent — and the new candidate
+  // would never reach its panel.
+  const repaired = step(at("publishing"), "reviewing", { fixRounds: 1, ciRepairs: 2 });
+  assert.equal(repaired.ciRepairsUsed, 1);
+  assert.throws(() => step(repaired, "reviewing", { fixRounds: 1, ciRepairs: 2 }), /reviewing -> reviewing/);
+  const fixed = step(repaired, "fixing");
+  const verified = step(fixed, "verifying");
+  assert.equal(step(verified, "publishing").state, "publishing");
+});
+
+test("a budgeted edge reports which round or repair it just bought", () => {
+  // The ordinal the ship loop announces before it dispatches anything. It comes
+  // from the counter the edge moved, not from the rounds on disk: a fixer that
+  // was dispatched and died before committing spent a round disk cannot see.
+  const limits = { fixRounds: 3, ciRepairs: 2 };
+  const before = at("reviewing", { fixRoundsUsed: 1 });
+  assert.deepEqual(budgetTaken(before, step(before, "fixing", limits), { limits }), {
+    counter: "fixRoundsUsed", limitName: "limits.fixRounds", limit: 3, ordinal: 2
+  });
+
+  const published = at("publishing", { ciRepairsUsed: 1 });
+  assert.deepEqual(budgetTaken(published, step(published, "reviewing", limits), { limits }), {
+    counter: "ciRepairsUsed", limitName: "limits.ciRepairs", limit: 2, ordinal: 2
+  });
+
+  // An edge that spends nothing has nothing to announce.
+  assert.equal(budgetTaken(at("verifying"), step(at("verifying"), "reviewing"), { limits }), null);
+});
+
 test("a spec that spent its whole fix budget can still fix again after a CI repair", () => {
   let state = at("publishing", { fixRoundsUsed: 1 });
   assert.throws(() => step({ ...state, state: "reviewing" }, "fixing"), /limits\.fixRounds/);
@@ -427,6 +462,11 @@ test("gates.mjs state takes the budgeted edge through the CLI with the configure
   const fixing = to("fixing");
   assert.equal(fixing.status, 0, fixing.stderr);
   assert.equal(read().fixRoundsUsed, 1, "the counter has to land in the file the next call reads");
+  // The announcement step 6 owes a person before it dispatches anything is built
+  // from these two numbers, so they have to be on stdout where it can read them.
+  assert.deepEqual(JSON.parse(fixing.stdout).budget, {
+    counter: "fixRoundsUsed", limitName: "limits.fixRounds", limit: 1, ordinal: 1
+  });
 
   assert.equal(to("reviewing").status, 0);
   const refused = to("fixing");

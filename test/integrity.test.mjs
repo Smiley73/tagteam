@@ -189,6 +189,43 @@ test("a CI repair still re-runs the whole panel, and still says why", () => {
   assert.match(ship, /a clean review gate that no lens ever looked at/);
 });
 
+// Step 6, flattened, for the two orderings below. The step ends where step 7
+// begins, so a rule that drifted into the next step is not counted as still in
+// this one.
+function stepSix() {
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  const start = ship.indexOf("### 6.");
+  const end = ship.indexOf("### 7.");
+  assert.ok(start > -1 && end > start, "ship.md no longer has a step 6 ending at step 7");
+  return ship.slice(start, end);
+}
+
+// The budget has to be consumed before anything is dispatched: a fixer that runs
+// first leaves a commit on the branch no round covers and a branch ahead of the
+// reviewed candidate, and an exhausted budget discovered at snapshot time cannot
+// take it back. Nothing else in the repository catches a step 6 reordered so the
+// transition happens at commit time.
+test("step 6 takes the budgeted edge before it dispatches the fixer", () => {
+  const step = stepSix();
+  const budget = step.indexOf('gates.mjs" state "$S/<id>/state.json" fixing');
+  const fixer = step.indexOf("tagteam:fixer");
+  assert.ok(budget > -1, "step 6 no longer takes the fixing edge at all");
+  assert.ok(fixer > -1, "step 6 no longer dispatches a fixer");
+  assert.ok(budget < fixer, "step 6 dispatches the fixer before it consumes the fix budget");
+});
+
+// Running out of fix rounds is what "there is no second fix round" meant: the
+// spec still publishes and step 9 tells a person why it is waiting. Routed to
+// `failed` instead, a bounded loop that reached its bound reads as a broken one,
+// and the pull request nobody opened cannot be looked at.
+test("step 6 says a spent budget publishes rather than fails", () => {
+  const step = stepSix();
+  assert.match(step, /A budget stop is not a failure and never goes to `failed`/);
+  assert.match(step, /still publishes, still opens a pull request/);
+  assert.match(step, /gates\.mjs state \.\.\. verifying`, then step 8/,
+    "step 6's refusal path no longer converges on verifying before step 8");
+});
+
 // A round number substituted by hand is prose counting, and it is exactly what
 // made a second round overwrite the first.
 test("no round path in the ship command is a number the orchestrator picks", () => {

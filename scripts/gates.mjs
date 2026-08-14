@@ -109,6 +109,27 @@ const budgetedEdge = (from, next) => {
   return null;
 };
 
+/**
+ * What a budgeted edge just spent, read back off the state it produced.
+ *
+ * The ship loop has to announce which fix round or which CI repair is starting
+ * before it dispatches anything, and the only authoritative source for that
+ * ordinal is the counter this edge moved: the rounds on disk lag it whenever a
+ * fixer was dispatched and produced no commit. `ordinal` is the post-transition
+ * counter, so the round this edge just bought is the `ordinal`th of `limit`.
+ * Returns null for every edge that spends nothing.
+ */
+export function budgetTaken(before, after, { limits } = {}) {
+  const edge = budgetedEdge(before.state, after.state);
+  if (!edge) return null;
+  return {
+    counter: edge.counter,
+    limitName: edge.limitName,
+    limit: limits?.[edge.limitKey] ?? null,
+    ordinal: counterOf(after, edge.counter)
+  };
+}
+
 export function transition(state, next, { limits } = {}) {
   if (!TRANSITIONS[state.state]?.includes(next)) {
     throw new Error(`invalid state transition: ${state.state} -> ${next}`);
@@ -358,7 +379,8 @@ const USAGE = `usage:
 
   \`state\` needs the configuration for the budgeted edges — entering fixing, and
   entering reviewing from publishing or awaiting-approval — and refuses them
-  without it.
+  without it. On one of those edges it prints a \`budget\` object: which round or
+  repair this is (\`ordinal\`), out of how many (\`limit\`).
 `;
 
 // The limits, or a refusal. A configuration without them is a version-6 file:
@@ -439,6 +461,7 @@ async function main() {
     return;
   }
   let next;
+  let budget = null;
   if (action === "init") {
     // Refuses to overwrite. A resumed ship re-runs this step, and a spec that was
     // mid-flight — a pull request open, waiting for a person — would otherwise
@@ -457,7 +480,12 @@ async function main() {
       reviewers: (values[6] ?? "").split(",").filter(Boolean)
     });
   } else if (action === "state") {
-    next = transition(readJson(values[0]), values[1], { limits: values[2] ? readLimits(values[2]) : undefined });
+    const before = readJson(values[0]);
+    const limits = values[2] ? readLimits(values[2]) : undefined;
+    next = transition(before, values[1], { limits });
+    // Printed rather than left in the file, because the announcement the ship
+    // loop owes a person is due before the next command runs.
+    budget = budgetTaken(before, next, { limits });
   } else if (action === "bind") {
     const changed = values[3] ? readJson(values[3]) : null;
     next = bindCandidate(readJson(values[0]), values[1], values[2], Array.isArray(changed) ? changed : changed?.changedPaths ?? null);
@@ -471,7 +499,9 @@ async function main() {
     return;
   }
   writeJson(values[0], next);
-  process.stdout.write(`${JSON.stringify({ ok: true, spec: next.spec, state: next.state, candidateOid: next.candidateOid })}\n`);
+  process.stdout.write(`${JSON.stringify({
+    ok: true, spec: next.spec, state: next.state, candidateOid: next.candidateOid, ...(budget ? { budget } : {})
+  })}\n`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

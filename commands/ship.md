@@ -128,7 +128,8 @@ worktree the implementer is still writing commits half a change.
 ```bash
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "feat: <spec title>"
 OID=$(git -C "$W" rev-parse HEAD)
-ROUND=$(node "$P/scripts/gates.mjs" round "$S/<id>/state.json" "$S/<id>/rounds" "$OID" "$R/.tagteam/config.json" | node -pe 'JSON.parse(fs.readFileSync(0, "utf8")).round')
+node "$P/scripts/gates.mjs" round "$S/<id>/state.json" "$S/<id>/rounds" "$OID" "$R/.tagteam/config.json" > "$S/<id>/round.json" && cat "$S/<id>/round.json"
+ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$S/<id>/round.json")
 node "$P/scripts/snapshot-candidate.mjs" --primary "$R" --worktree "$W" --base "$BASE" \
   --candidate "$OID" --out-dir "$S/<id>/rounds/$ROUND" --config "$R/.tagteam/config.json"
 node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/rounds/$ROUND/changed-paths.json"
@@ -147,10 +148,17 @@ every step until the next commit, the paths you write into a subagent's brief
 included. Never substitute a number of your own, and do not call the allocator
 again part-way through a round to remind yourself: if the value is lost, step 1's
 resume path restarts from step 3 against the committed work, which re-enters the
-round properly. Its full output also says how much of this cycle's fix budget is
-spent and what the limit is — those are the numbers step 6 announces a round
-with. It refuses when the budget is gone, naming the limit; step 6 is where that
-refusal is meant to land, before a fixer has changed anything.
+round properly.
+
+**The allocator writes its own file and you read the round back out of it**, so
+its whole record — the round, the scope, and how much of this cycle's fix budget
+the rounds on disk account for — is in front of you and its exit status is the
+one the shell reports. Piping it into something that prints only the number would
+throw both away: a spent budget exits 4 there, and that 4 has to reach you. The
+numbers step 6 announces a fix round with are not these: they come from step 6's
+own budget call, which is the authority on how much has been spent. This
+allocator refuses too when the budget is gone, naming the limit; step 6 is where
+that refusal is meant to land, before a fixer has changed anything.
 
 The round directory is a record. The snapshot writes `review.diff`,
 `changed-paths.json` and `candidate.json` into it, marks it with the commit that
@@ -201,7 +209,9 @@ executable evidence waits for a person.
 ### 5. Review
 
 `gates.mjs state ... reviewing`, then dispatch **in a single message**, one per
-resolved lens plus Codex:
+resolved lens plus Codex. (A CI repair reaches this step already in `reviewing` —
+its own edge in step 8 was that transition — so it starts at the dispatch and
+skips this line; taking it twice is refused.)
 
 - `tagteam:reviewer` at `models.lead` / `effort.lead` per lens, each given
   the lens name, `$S/<id>/rounds/$ROUND/review.diff`, the spec path, the candidate OID, and
@@ -267,9 +277,10 @@ node "$P/scripts/gates.mjs" state "$S/<id>/state.json" fixing "$R/.tagteam/confi
 ```
 
 This is the command that decides whether there is another fix round, and it is
-the only thing that decides it. It succeeds and the round is yours; it exits 4
-and this repository's fix budget for this cycle is spent, naming the limit that
-ran out.
+the only thing that decides it. It succeeds and the round is yours — and it
+prints a `budget` object saying which round it just bought (`ordinal`) out of how
+many this repository allows (`limit`). It exits 4 and this repository's fix
+budget for this cycle is spent, naming the limit that ran out.
 
 **Refused: dispatch nothing and commit nothing.** The state stayed at
 `reviewing`, and a budget stop still publishes — so put it back where both paths
@@ -291,15 +302,46 @@ the branch that no round covers and a branch ahead of the reviewed candidate.
 **Then announce the round, in one line, before dispatching.** Which round this
 is and how many this repository allows, in plain English — "the second of the
 three fix rounds this repository allows", not a setting name and a number. Both
-numbers were printed for you: `gates.mjs round` reported this cycle's `spent` and
-`limit` when it named the round you are in, and the round you are about to start
-is the next one after `spent`.
+numbers were just printed for you by the command above: `budget.ordinal` is which
+fix round of this cycle you are starting and `budget.limit` is how many there
+are. Read them off that output and say them as words; do not count rounds
+yourself and do not go looking for the numbers anywhere else. The counter behind
+`ordinal` is what a resumed attempt is bound by too — a fixer that was dispatched
+and died before it committed spent its round, and this is the only number that
+knows it.
 
-Then one `tagteam:fixer` at `models.worker` / `effort.worker`, given the round's
-to-fix record (below), the worktree, and `$S/<id>/fix-report-$ROUND.json` to
-write. Dispatch it with `run_in_background: false`: until it reports it is still
-editing the worktree you are about to commit. When it returns, record its report
-into the round:
+**Hand it the round's open record, never `review.json`.** Which record that is,
+and what runs after the new commit is verified, both follow from how you reached
+this step. `$ROUND` in these two paths — and in the fix report below, up to the
+re-snapshot that changes it — is still the round you are dispatching out of, the
+one the panel or the last re-check wrote into:
+
+- **From step 5 — the first fix of this cycle.** The record is
+  `$S/<id>/rounds/$ROUND/to-fix.json`, the panel's own brief. After the commit and
+  verify, go straight to **step 7**: no second panel. `review.json` still carries
+  the panel's findings and the lenses that raised them re-judge them against the
+  new diff, so a lens did look at this commit — and a repository that raised no
+  limit does not suddenly pay for an extra full panel.
+- **From step 7 — a second or later fix round.** The record is
+  `$S/<id>/rounds/$ROUND/still-open.json`, what that round's re-check settled and
+  could not close, in the words of the reviewer that judged it. After the commit
+  and verify, **step 5 in full** — every resolved lens plus Codex, against a diff
+  no lens has read — and then step 7, whose re-check is what clears the ids this
+  round carried out. The round the re-snapshot then opens has no `to-fix.json` of
+  its own: its panel has not run yet.
+
+`review.json` is not either of them, in any round. It holds every finding at
+every severity, and a fixer given all of them repairs all of them — a round with
+two blocking findings and five nits comes back with seven changes, five of which
+nothing gated on and every reviewer is about to re-read. The two records above
+hold the blocking and major findings and nothing else. Minor and nit are reported
+in the pull request body, not repaired.
+
+Then one `tagteam:fixer` at `models.worker` / `effort.worker`, given the record
+named above, the worktree, and `$S/<id>/fix-report-$ROUND.json` to write.
+Dispatch it with `run_in_background: false`: until it reports it is still editing
+the worktree you are about to commit. When it returns, record its report into the
+round:
 
 ```bash
 node "$P/scripts/record-fix-report.mjs" --report "$S/<id>/fix-report-$ROUND.json" \
@@ -318,32 +360,9 @@ file.
 Then commit and re-snapshot exactly as in step 3, which takes the next round from
 the allocator into `$ROUND`, sets `OID` to the new commit, and `gates.mjs bind`s
 it — which clears every gate, because they were about the old one. Re-run verify
-against the new commit.
-
-**Hand it the round's open record, never `review.json`.** Which record that is,
-and what runs after the new commit is verified, both follow from how you reached
-this step:
-
-- **From step 5 — the first fix of this cycle.** The record is
-  `$S/<id>/rounds/$ROUND/to-fix.json`, the panel's own brief. After the commit and
-  verify, go straight to **step 7**: no second panel. `review.json` still carries
-  the panel's findings and the lenses that raised them re-judge them against the
-  new diff, so a lens did look at this commit — and a repository that raised no
-  limit does not suddenly pay for an extra full panel.
-- **From step 7 — a second or later fix round.** The record is
-  `$S/<id>/rounds/$ROUND/still-open.json`, what that round's re-check settled and
-  could not close, in the words of the reviewer that judged it. The round you are
-  about to open has no `to-fix.json`: its panel has not run. After the commit and
-  verify, **step 5 in full** — every resolved lens plus Codex, against a diff no
-  lens has read — and then step 7, whose re-check is what clears the ids this
-  round carried out.
-
-`review.json` is not either of them, in any round. It holds every finding at
-every severity, and a fixer given all of them repairs all of them — a round with
-two blocking findings and five nits comes back with seven changes, five of which
-nothing gated on and every reviewer is about to re-read. The two records above
-hold the blocking and major findings and nothing else. Minor and nit are reported
-in the pull request body, not repaired.
+against the new commit. **`$ROUND` is the new round from here on**: every path
+after this line, in this step and in the ones it sends you to, is that round's,
+and the round the fixer was dispatched out of is the one before it.
 
 A missing entry in the fix report ends this spec. Say which findings it failed to
 account for.
@@ -545,18 +564,25 @@ full:
 
    Taking that edge is what spends a repair, and it exits 4 when this repository
    allows no more of them: **refused, dispatch nothing and go to step 9**, which
-   says what is failing and that the repairs are used up. Allowed, announce it in
-   one line before anything is dispatched — which repair this is and how many
-   this repository allows, in plain English, the way step 6 announces a fix
-   round; `limits.ciRepairs` in `.tagteam/config.json` is the number. A repair
-   also starts a fresh fix budget, so the review cycle below gets its fix rounds
-   over again.
+   says what is failing and that the repairs are used up. Allowed, it prints the
+   same `budget` object step 6 reads — `ordinal` is which repair this is,
+   `limit` how many this repository allows — and those are the two numbers to
+   announce in one line before anything is dispatched, in plain English, the way
+   step 6 announces a fix round: "the second of the two CI repairs this
+   repository allows". Read them off that output; nothing here asks you to
+   remember how many repairs this session has had. A repair also starts a fresh
+   fix budget, so the review cycle below gets its fix rounds over again.
 2. Dispatch the fixer at `models.worker` / `effort.worker` with the failing check
    output, blocking as in step 6, then commit and re-snapshot as in step 3, which
    allocates the round into `$ROUND`, set `OID`, `bind` — which clears every gate
    — and re-run verify.
 3. **Steps 5, 6 and 7 again, entirely**, including the fix rounds that cycle
-   allows. The whole lens panel plus Codex against the new commit, then a fix
+   allows — with one command left out: **step 5's opening
+   `gates.mjs state ... reviewing` is the edge point 1 already took.** Do not run
+   it a second time. `reviewing -> reviewing` is not a declared transition, so it
+   would stop the repair before its panel, and the repair it spent would be gone.
+   Start step 5 at its dispatch: the whole lens panel plus Codex against the new
+   commit, then a fix
    round if that finds anything — and another after that for as long as step 6
    allows one — then the adversary and the re-check. Not just the lenses that had
    findings last time: `bind` cleared the review gate, `review.json` from the old
