@@ -29,18 +29,15 @@
 // per-file write-once rule cannot express "replace this set together", so
 // guarding the bridge makes that recovery either impossible or destructive.
 //
-// **So is the fixer's own report.** `rounds/<n>/fix-report.json` is written by
-// the fixer through its Write tool, like a reviewer's `findings/<lens>.json`,
-// and agent-written files can only be protected one step later, by the script
-// that consumes them (see `sealRoundRecord`). Nothing consumes the fix report:
-// it is bookkeeping a person reads, and `recheck.mjs` deliberately does not
-// look at it, because the fixer says what was attempted and the reviewer says
-// what is true. With no consumer there is nothing to seal it, so it stays
-// replaceable — a re-dispatched fixer overwrites it, which is what a
-// re-dispatch needs. What must not be inferred from that is that the *settled*
-// records share the exemption: `recheck.json`, `still-open.json` and
-// `still-open/` are derived by a script, go through `writeRoundFile`, and a
-// later round cannot overwrite them.
+// Nothing else is exempt, and the fixer's report is the case that shows what
+// that costs. It is written by an agent's Write tool, like a reviewer's
+// `findings/<lens>.json`, and no script can intercept such a write — so the
+// fixer writes it *outside* every round and `record-fix-report.mjs` records the
+// round's copy through `writeRoundFile`. A report cannot be protected where it
+// lands, so it is recorded somewhere it can be. The alternative, leaving it
+// where the fixer put it because nothing reads it, means a re-dispatched fixer
+// overwrites the round's only account of what the previous one claimed, and
+// nothing on disk says the earlier attempt happened.
 //
 // Transient coordination state (`.codex-artifact-locks/`, `.codex-slots/`,
 // `.quota/`, `*.tmp` attempt files) is not a record and is not routed through

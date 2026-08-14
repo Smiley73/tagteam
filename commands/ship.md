@@ -151,17 +151,18 @@ resumed on the round's own commit does and it costs no new `<n>`. Re-running it
 against a *different* commit
 is refused naming both commits, so use a fresh `<n>` after the fix round.
 
-Two things in a round are outside that rule. Codex's own output — the artifact,
+One thing in a round is outside that rule: Codex's own output — the artifact,
 its `.prompt.md`, `.request.json` and `.events.jsonl` — because one invocation
 writes those as a set that only means anything together, and re-dispatching a
 Codex lens that produced no usable evidence into the same round (step 5) has to
-replace all of them. And the files an agent writes with its own Write tool,
-which no script can intercept: a reviewer's `findings/<lens>.json` and
-`recheck/<lens>.json` are sealed read-only by the script that consumes them, but
-`fix-report.json` (step 6) has no consumer — nothing reads it, by design — so it
-stays replaceable, and a re-dispatched fixer overwrites it. Everything a script
-derives, `review.json`, `recheck.json`, `still-open.json` and `still-open/`
-included, is written once.
+replace all of them. Everything else is a record. The files an agent writes with
+its own Write tool cannot be intercepted at write time, so they are protected one
+step later: a reviewer's `findings/<lens>.json` and `recheck/<lens>.json` are
+sealed read-only by the script that consumes them, and the fixer writes its
+report *outside* the round, where `record-fix-report.mjs` validates it and writes
+the round's copy through the same guard (step 6). Everything a script derives,
+`review.json`, `recheck.json`, `still-open.json` and `still-open/` included, is
+written once.
 
 Never skip `guard-staged.mjs`, and never split that chain. It is the only thing
 between a copied `.env` and a push.
@@ -236,12 +237,27 @@ not clean, and it never merges.
 
 `gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` /
 `effort.worker`, given `$S/<id>/rounds/<n>/to-fix.json`, the worktree, and
-`$S/<id>/rounds/<n>/fix-report.json` to write. Dispatch it with
+`$S/<id>/fix-report-<n>.json` to write. Dispatch it with
 `run_in_background: false`: until it reports it is still editing the worktree you
-are about to commit. Then commit and re-snapshot exactly as in step 3 with a
-fresh `<n>`, set `OID` to the new commit, and `gates.mjs bind` it — which clears
-every gate, because they were about the old one. Re-run verify against the new
-commit.
+are about to commit. When it returns, record its report into the round:
+
+```bash
+node "$P/scripts/record-fix-report.mjs" --report "$S/<id>/fix-report-<n>.json" \
+  --out "$S/<id>/rounds/<n>/fix-report.json"
+```
+
+**The fixer's own path is outside the round on purpose.** A file an agent writes
+with its Write tool cannot be refused at write time, so a re-dispatched fixer
+would silently replace the round's account of what the first one claimed. This
+step validates the report against `fix-report.schema.json` and writes the round's
+copy through the write-once guard: an identical re-record passes, a different one
+is refused naming the file, and the fixer's scratch copy is left where it is so a
+person can compare them. Its stdout is your view of the report — do not open the
+file.
+
+Then commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set `OID` to
+the new commit, and `gates.mjs bind` it — which clears every gate, because they
+were about the old one. Re-run verify against the new commit.
 
 **Hand it `to-fix.json`, never `review.json`.** `review.json` holds every finding
 at every severity, and a fixer given all of them repairs all of them — a round

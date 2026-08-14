@@ -178,6 +178,73 @@ test("sealing is a reinforcement, so a missing file is not an error", () => {
   assert.equal(fs.statSync(file).mode & 0o777, 0o400);
 });
 
+// --- the fixer's report, recorded into the round ---------------------------
+
+// The fixer writes its report with its own Write tool, which no script can
+// intercept, so the report only becomes a record when `record-fix-report.mjs`
+// puts it in the round. Delete that step, or route it past `writeRoundFile`, and
+// a re-dispatched fixer silently replaces the round's only account of what the
+// previous one claimed — these three tests are what stands between that and the
+// tree. They run the real script, because the guarantee is the script's.
+const record = (report, out) => spawnSync("node", [
+  path.join(root, "scripts", "record-fix-report.mjs"), "--report", report, "--out", out
+], { encoding: "utf8" });
+
+const reportAt = (dir, note) => {
+  const file = path.join(dir, "fix-report-1.json");
+  fs.writeFileSync(file, `${JSON.stringify({
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note }],
+    notes: ""
+  }, null, 2)}\n`);
+  return file;
+};
+
+test("a fix report is recorded once: a re-dispatched fixer cannot replace it", () => {
+  const dir = roundAt();
+  const scratch = temp("fix");
+  const out = path.join(dir, "fix-report.json");
+
+  const first = record(reportAt(scratch, "took the lock before the read"), out);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /1 fixed/);
+  assert.equal(fs.statSync(out).mode & 0o777, 0o400, "the recorded report is not a sealed record");
+
+  // Re-recording the same report is how a resumed run behaves, and it passes.
+  assert.equal(record(reportAt(scratch, "took the lock before the read"), out).status, 0);
+
+  const second = record(reportAt(scratch, "could not reproduce it"), out);
+  assert.equal(second.status, 2, "a second fixer's report replaced the round's record");
+  assert.match(second.stderr, new RegExp(out.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const kept = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(kept.outcomes[0].note, "took the lock before the read");
+});
+
+test("a report the fixer dropped inside the round is refused, not recorded", () => {
+  // The whole mechanism rests on the fixer writing outside every round. A report
+  // already in the round arrived past the guard, and copying it to a second path
+  // inside the same round would launder that.
+  const dir = roundAt();
+  const stray = reportAt(dir, "wrote straight into the round");
+  const result = record(stray, path.join(dir, "fix-report.json"));
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /inside a round/);
+  assert.equal(fs.existsSync(path.join(dir, "fix-report.json")), false);
+});
+
+test("an invalid report is refused before the round holds it", () => {
+  // A report recorded into a round can never be replaced with a corrected one, so
+  // the schema check has to come first: refusing leaves the round clean and the
+  // fixer re-dispatchable.
+  const dir = roundAt();
+  const scratch = temp("fix-bad");
+  const file = path.join(scratch, "fix-report-1.json");
+  fs.writeFileSync(file, JSON.stringify({ outcomes: [{ id: "1.correctness.1", outcome: "maybe", note: "x" }], notes: "" }));
+  const result = record(file, path.join(dir, "fix-report.json"));
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /fix-report schema/);
+  assert.equal(fs.existsSync(path.join(dir, "fix-report.json")), false);
+});
+
 // --- snapshot-candidate against a real repository -------------------------
 
 function repo() {
