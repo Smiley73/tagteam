@@ -189,16 +189,19 @@ test("a CI repair still re-runs the whole panel, and still says why", () => {
   assert.match(ship, /a clean review gate that no lens ever looked at/);
 });
 
-// Step 6, flattened, for the two orderings below. The step ends where step 7
-// begins, so a rule that drifted into the next step is not counted as still in
-// this one.
-function stepSix() {
+// One step of ship.md, flattened, for the orderings below. A step ends where the
+// next one begins, so a rule that drifted into another step is not counted as
+// still in this one.
+function shipStep(heading, next) {
   const ship = read("commands", "ship.md").replace(/\s+/g, " ");
-  const start = ship.indexOf("### 6.");
-  const end = ship.indexOf("### 7.");
-  assert.ok(start > -1 && end > start, "ship.md no longer has a step 6 ending at step 7");
+  const start = ship.indexOf(heading);
+  const end = ship.indexOf(next);
+  assert.ok(start > -1 && end > start, `ship.md no longer has a ${heading} ending at ${next}`);
   return ship.slice(start, end);
 }
+
+const stepSix = () => shipStep("### 6.", "### 7.");
+const stepSeven = () => shipStep("### 7.", "### 8.");
 
 // The budget has to be consumed before anything is dispatched: a fixer that runs
 // first leaves a commit on the branch no round covers and a branch ahead of the
@@ -224,6 +227,43 @@ test("step 6 says a spent budget publishes rather than fails", () => {
   assert.match(step, /still publishes, still opens a pull request/);
   assert.match(step, /gates\.mjs state \.\.\. verifying`, then step 8/,
     "step 6's refusal path no longer converges on verifying before step 8");
+});
+
+// The adversary is the reader most likely to raise the finding that starts a
+// second round, and it is dispatched here as a fresh pass and nothing else —
+// while `recheck.mjs` requires a verdict file from it for any adversary finding
+// an earlier round left open. Step 7 says "lens" everywhere, which is a word the
+// adversary is never called by, so a round that inherits one dispatches nobody
+// for it: the finding stays open with no verdict in this round and in every
+// round after it, the loop spends its whole fix budget re-fixing a defect that
+// can never be settled, and the review gate is `incomplete` at the end of it.
+test("step 7 dispatches the adversary a re-check of the findings it carried", () => {
+  const step = stepSeven();
+  assert.match(step, /The adversary is one of the lenses this bullet covers/,
+    "step 7 no longer says the adversary is one of the readers its carried bullet covers");
+  assert.match(step, /still-open\/adversary\.json` as\s?its input/,
+    "step 7 no longer names the carried adversary record as an input to a re-check");
+  assert.match(step, /rounds\/\$ROUND\/recheck\/adversary\.json`/,
+    "step 7 no longer names the file the adversary's re-check writes");
+  assert.match(step, /`recheck\/adversary\.json` when the adversary is/,
+    "step 7's watcher no longer waits for the adversary's re-check the way it waits for Codex's");
+});
+
+// From the second fix round on, step 5 runs in full and step 7 follows in the
+// same round. Handing each lens the findings it raised minutes earlier, against
+// the same diff with no commit in between, asks `prompts/recheck.md`'s question —
+// "a fixer has changed the code, is it resolved?" — about a finding no fixer has
+// seen, and a `resolved` there clears a blocking finding that nothing repaired.
+test("step 7 re-checks only what an earlier round left open", () => {
+  const step = stepSeven();
+  assert.match(step, /\*\*only when a fixer ran between the raising and now\*\*/,
+    "step 7's re-check bullet no longer requires a fixer between the raising and the verdict");
+  assert.match(step, /\*\*Skip this bullet whenever step 5 ran in this round\*\*/,
+    "step 7 no longer skips the re-check of findings this round's own panel raised");
+  // And the step before it no longer promises the re-check that must not happen.
+  const five = shipStep("### 5.", "### 6.");
+  assert.match(five, /What this panel raises is not re-checked in this round/,
+    "step 5 still tells the reader its own findings are re-checked in this round");
 });
 
 // A round number substituted by hand is prose counting, and it is exactly what

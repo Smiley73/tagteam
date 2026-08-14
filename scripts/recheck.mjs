@@ -283,7 +283,20 @@ export function settle({
   for (const finding of raised) byId.set(finding.id, finding);
   for (const finding of carried) byId.set(finding.id, { ...finding, carried: true });
   const outstanding = [...byId.values()];
-  const lenses = [...new Set(outstanding.map((finding) => finding.lens))];
+  // A re-check asks one question: a fixer was given this finding and changed the
+  // code, is it resolved? That question has an answer only for a finding raised
+  // before the round being settled. A finding raised *at* this round came from
+  // this round's own panel, against this round's own diff, with no commit and no
+  // fixer since — so nobody is asked about it, no lens owes a verdict file for
+  // it, and no verdict clears it. Left in, it made every round after the second
+  // ask each lens about findings it had raised minutes earlier under a prompt
+  // asserting they had been fixed, where a `resolved` closes a blocking finding
+  // nothing repaired; taken out but still expected, the lens with nothing to
+  // re-check would be recorded as a lens that produced no evidence. It stays
+  // outstanding, and this round's `still-open.json` hands it to the next fixer.
+  const asked = (finding) => findingRound(finding.id) !== round;
+  const judged = outstanding.filter(asked);
+  const lenses = [...new Set(judged.map((finding) => finding.lens))];
   const verdicts = new Map();
   // A lens an earlier review never got evidence from is still missing evidence.
   // Carrying it forward is what stops an incomplete review from being laundered
@@ -322,7 +335,7 @@ export function settle({
     // A lens may only clear findings it raised. Otherwise one reviewer can
     // resolve another's work by returning its ids. Carried findings are no
     // different: the round in the id says who raised it, not who may clear it.
-    const ownIds = new Set(outstanding.filter((finding) => finding.lens === lens).map((finding) => finding.id));
+    const ownIds = new Set(judged.filter((finding) => finding.lens === lens).map((finding) => finding.id));
     for (const verdict of parsed.verdicts) {
       if (ownIds.has(verdict.id)) verdicts.set(verdict.id, verdict);
     }
@@ -336,6 +349,11 @@ export function settle({
   // hands the next round a finding with a title and a path. The generic text is
   // the last resort, for a finding that never carried an evidence of its own.
   const settled = outstanding.map((finding) => {
+    // Nobody was asked, so "no verdict was returned" would read as a reviewer
+    // that failed to answer, in the record the next fixer is handed.
+    if (!asked(finding)) {
+      return { ...finding, resolved: false, evidence: finding.evidence ?? "raised by this round's own panel; no fixer has seen it yet" };
+    }
     const verdict = verdicts.get(finding.id);
     return {
       ...finding,

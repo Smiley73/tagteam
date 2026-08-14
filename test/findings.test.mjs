@@ -1168,14 +1168,15 @@ test("the collection --review names is checked against the round it sits in", as
   assert.throws(() => resolveReview(roundDir, 3, mislabelled), /records round 1, not round 2/);
   assert.throws(() => resolveReview(roundDir, 2, reviewPath), /not the review\.json of round 2/);
 
-  // The right one settles, and says which collection it answered for.
+  // The right one settles, and says which collection it answered for. Its own
+  // finding stays open — nobody has been asked about a finding this round raised
+  // — so the run is not clean, and that is the next round's work.
   fs.rmSync(mislabelled);
-  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
-    { id: "3.correctness.1", resolved: true, evidence: "the read is guarded now" }
-  ])));
   const settled = run(reviewPath);
-  assert.equal(settled.status, 0, `the round's own collection settles: ${settled.stderr}`);
-  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).reviewRound, 3);
+  assert.equal(settled.status, 1, `the round's own collection settles: ${settled.stderr}`);
+  const record = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(record.reviewRound, 3);
+  assert.deepEqual(record.open.map((entry) => entry.id), ["3.correctness.1"]);
 });
 
 test("a collection from the round before the fix is settled, and named on the settlement", async () => {
@@ -1322,6 +1323,57 @@ test("a carry is the outstanding set for its own round and every round below it"
   // never settled by anybody, so it is still this round's to answer for.
   const newer = settleAt([...review.open, { id: "3.security.1", lens: "security", title: "c", severity: "blocking" }]);
   assert.deepEqual(newer.open.map((entry) => entry.id), ["3.security.1"]);
+});
+
+test("a round's own panel findings are outstanding, and no verdict of its own clears them", () => {
+  // From the second fix round on, the whole panel re-runs and the re-check
+  // follows in the same round: what that panel raised was read off this round's
+  // diff minutes earlier, with no commit and no fixer in between. Asked about it
+  // anyway — under a prompt whose first sentence is that a fixer has changed the
+  // code — a lens can answer `resolved` about work nobody did, and a blocking
+  // finding leaves the loop with the defect still in the diff. Not asked but
+  // still expected, the lens is recorded as one that produced no evidence and
+  // every panel round settles `incomplete`.
+  const own = [
+    { id: "3.correctness.1", lens: "correctness", title: "a", severity: "blocking" },
+    { id: "3.security.1", lens: "security", title: "b", severity: "major" }
+  ];
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "3.correctness.1", resolved: true, evidence: "on reflection I do not think this is a problem" }
+    ])
+  });
+  const result = settle({
+    review: { ...review, open: own }, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 3,
+    ...adversary([])
+  });
+
+  assert.equal(result.status, "open");
+  assert.deepEqual(result.open.map((entry) => entry.id), ["3.correctness.1", "3.security.1"]);
+  // Neither lens owes this round a verdict file, so the one that wrote none is
+  // not a gap in the review — only the adversary's fresh pass is expected here.
+  assert.deepEqual(result.expected, ["adversary"]);
+  assert.deepEqual(result.missing, []);
+  // And the one that wrote a verdict anyway cleared nothing with it.
+  const unrepaired = result.findings.find((entry) => entry.id === "3.correctness.1");
+  assert.equal(unrepaired.resolved, false, "a lens resolved a finding it raised in this same round");
+  assert.match(unrepaired.evidence, /no fixer has seen it yet/);
+
+  // What is carried from an earlier round is the opposite case, in the same
+  // round: a fixer did run, so that verdict is asked for and binds.
+  const both = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "3.correctness.1", resolved: true, evidence: "on reflection I do not think this is a problem" },
+      { id: "2.correctness.1", resolved: true, evidence: "the fixer guarded the read" }
+    ])
+  });
+  const carried = settle({
+    review: { ...review, open: own }, dir: both, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 3,
+    carried: [carriedFinding("2.correctness.1", "correctness")], carriedRound: 2,
+    ...adversary([])
+  });
+  assert.deepEqual(carried.expected, ["correctness", "adversary"]);
+  assert.deepEqual(carried.open.map((entry) => entry.id), ["3.correctness.1", "3.security.1"]);
 });
 
 test("a round counts its own findings, never the ones it inherited", () => {

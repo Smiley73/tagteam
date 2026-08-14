@@ -223,8 +223,14 @@ skips this line; taking it twice is refused.)
 **Every resolved lens, plus Codex, on every round this step runs.** A second or
 third fix round reaches this step against a commit no lens has read, and the
 panel that reads it is the whole panel — not the lenses that happened to have
-findings last round. Those lenses are re-checked in step 7, which is a different
-question asked of a different input.
+findings last round.
+
+**What this panel raises is not re-checked in this round.** No fixer has seen it:
+the diff these lenses just read is the one step 7 would hand them back minutes
+later, and there is nothing between the two readings for a verdict to be about.
+Step 7 re-checks what an *earlier* round left open; this round's own findings go
+into its still-open record and to the next fixer, which is what starts the next
+round.
 
 The adversary does **not** run here. It runs in step 7, on whatever the final
 diff turns out to be, where nothing else is looking with fresh eyes.
@@ -396,8 +402,10 @@ In one message:
   given the spec and `$S/<id>/rounds/$ROUND/review.diff`, writing
   `$S/<id>/rounds/$ROUND/findings/adversary.json` with `candidate` set to `$OID`.
 - Each lens named by `collect-findings.mjs` as having open findings, and **only**
-  those. It writes `$S/<id>/rounds/<r>/open/<lens>.json` per lens — the findings
-  that lens must judge, **with their ids** — and names each file in its output.
+  those — and **only when a fixer ran between the raising and now**, which is the
+  round-after-a-fix case where step 5 did not run again in this round. It writes
+  `$S/<id>/rounds/<r>/open/<lens>.json` per lens — the findings that lens must
+  judge, **with their ids** — and names each file in its output.
   `<r>`, defined under the commands below, is the round whose panel raised them:
   the collector writes `open/` as a sibling of the findings directory it read, so
   when step 6 fixed something and the panel has not re-run in the round it opened,
@@ -407,6 +415,19 @@ In one message:
   at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
   schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
   other Codex call.
+
+  **Skip this bullet whenever step 5 ran in this round** — a second or later fix
+  round, or a round whose step 6 was refused for want of budget. `<r>` is
+  `$ROUND` there, the panel read `rounds/$ROUND/review.diff` minutes ago, and
+  that is the same diff you would hand back with no commit and no fixer in
+  between. `prompts/recheck.md` opens by telling the reviewer that a fixer has
+  been given its findings and has changed the code, which would be false, and a
+  `resolved` verdict extracted that way clears a blocking finding nobody
+  repaired. Nothing is lost by not asking: `recheck.mjs` settles a finding raised
+  in the round it is settling as outstanding with no verdict sought — it accepts
+  none for it from anyone — and writes it into this round's `still-open.json` for
+  the next fixer and `still-open/<lens>.json` for the round after that. That is
+  the bullet below, one round later.
 - Each lens with a file in the `still-open/` of the most recent earlier round
   that wrote one, when that round left findings open — only a re-check writes
   `still-open/`, so that round is not always the round before this one; the round
@@ -416,8 +437,20 @@ In one message:
   as its output, merged into the bullet above for a lens that appears in both.
   Those ids are settled by the `--carry` below and stay open without a verdict,
   so a round that inherits work and dispatches nobody for it can never settle.
-  Skip both of these bullets entirely when step 5 was clean and no earlier round
-  left anything open — there is nothing to re-check.
+  Skip both of these bullets entirely when there is nothing to re-check: no
+  earlier round left anything open, and this round's findings are its own.
+
+  **The adversary is one of the lenses this bullet covers.** A round whose
+  carried `still-open/` holds `adversary.json` dispatches `tagteam:adversary`
+  **twice, in this same message**: the fresh pass in the first bullet, pointed at
+  `prompts/code-adversary.md` and writing `findings/adversary.json`, and a
+  re-check, pointed at `prompts/recheck.md` with `still-open/adversary.json` as
+  its input and `$S/<id>/rounds/$ROUND/recheck/adversary.json` as its output. Two
+  dispatches of one agent, different prompts, different files. The fresh pass
+  does not settle the adversary's earlier findings — it does not read them, and
+  its ids are this round's — so a round that dispatches only the fresh pass
+  leaves every carried adversary id open with no verdict, and it stays open
+  through every round after it. `recheck.mjs` asks for that verdict file by name.
 
   **Hand it the open file, never the raw findings file.** The ids are assigned by
   `collect-findings.mjs` and appear only in what it writes; a reviewer pointed at
@@ -438,16 +471,18 @@ until [ -f "$RD/findings/adversary.json" ] && [ -f "$RD/recheck/<lens>.json" ]; 
 ```
 
 **Watch only for what you dispatched, and watch for all of it.** One `-f` test
-per lens you dispatched a re-check to, whether it came from the open findings of
-step 5 or from an earlier round's `still-open/` — `recheck/codex.json` included
-when Codex is one of them. Every re-check writes into the same
-`rounds/$ROUND/recheck/` directory, so a lens that appears in both bullets is one
-file and one test. The adversary file is the whole watcher only when both
-bullets were skipped: step 5 was clean *and* no earlier round left anything
-open. A test for a file nobody was told to write never comes true; a carried
-lens left out of the watcher is worse, because `recheck.mjs` then runs before its
-verdict lands and settles every inherited finding as "no verdict was returned",
-which is a round that stops the pull request on findings nobody was asked about.
+per lens you dispatched a re-check to, whether it came from an earlier round's
+panel or from an earlier round's `still-open/` — `recheck/codex.json` included
+when Codex is one of them, and `recheck/adversary.json` when the adversary is —
+a second test alongside `findings/adversary.json`, not a substitute for it. Every
+re-check writes into the same `rounds/$ROUND/recheck/` directory, so a lens that
+appears in both bullets is one file and one test. The adversary's fresh pass is
+the whole watcher only when both bullets were skipped: nothing carried, and no
+earlier round's findings to judge. A test for a file nobody was told to write
+never comes true; a carried lens left out of the watcher is worse, because
+`recheck.mjs` then runs before its verdict lands and settles every inherited
+finding as "no verdict was returned", which is a round that stops the pull
+request on findings nobody was asked about.
 
 An adversary file that is not there yet reads as `incomplete`, exactly as a
 missing one does, and a re-check that has not landed leaves a finding the fixer
@@ -469,6 +504,12 @@ made a new commit and a new round, and the findings it is being judged against
 were collected in the old one. `--round "$ROUND"` is this round either way: it is
 where the verdicts and the adversary's fresh pass live, and where the settlement
 is written.
+
+Passing `<r>` as `$ROUND` is how this round's own panel findings get recorded, not
+how they get judged: `recheck.mjs` reads the round out of each id, and a finding
+raised at `$ROUND` is settled as open with nobody asked about it — no lens is
+expected to have written a verdict file for it, and a verdict returned for it
+anyway binds to nothing.
 
 `<r>` is checked like every other round path here: it must be the `review.json`
 of a round at or below `$ROUND` under the same rounds root, that collection must
