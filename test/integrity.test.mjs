@@ -138,6 +138,65 @@ test("the ship command never re-derives the reviewed commit from HEAD", () => {
   assert.match(ship, /Never re-derive the reviewed commit/);
 });
 
+// How many fix rounds a change gets is this repository's configuration. A model
+// told there is exactly one rations its findings against a number nobody chose
+// for it — and a fixer told the diff was reviewed once is wrong from the second
+// round on.
+test("no brief describing a fix round claims there is only one", () => {
+  // Flattened, here and below: these are sentences, and a sentence the author
+  // re-wrapped is the same claim.
+  const singular = /\b(the|one|a single) fix round\b/i;
+  for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agents/fixer.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.doesNotMatch(text, singular, `${file} still tells a model there is exactly one fix round`);
+  }
+});
+
+// Each of these sentences said the loop was one iteration long. The orchestrator
+// follows this file literally, so any one of them left behind stops a spec that
+// still has budget — and contradicts the command that actually decides.
+test("the ship command no longer asserts a single fix round or a single CI repair", () => {
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  for (const claim of [
+    "There is no second fix round",
+    "Fix, once",
+    "exactly one repair",
+    "A second CI failure stops the spec"
+  ]) {
+    assert.ok(!ship.includes(claim), `ship.md still says "${claim}"`);
+  }
+});
+
+// Both limits are named where the loops they bound are described, so the person
+// told a spec ran out of rounds can find the thing to raise.
+test("the ship command names both limits its loops are bounded by", () => {
+  const ship = read("commands", "ship.md");
+  assert.match(ship, /fixRounds/);
+  assert.match(ship, /ciRepairs/);
+});
+
+// The invariant most likely to be optimised away by a later edit: after a CI
+// repair, `bind` has cleared the review gate and the old candidate's findings
+// are gone from `open`, so a re-check alone would decide nothing and the recorded
+// review gate would be one no lens produced.
+test("a CI repair still re-runs the whole panel, and still says why", () => {
+  // Matched against the prose with its line wrapping flattened: a sentence that
+  // survived a re-wrap is the sentence, and a test that fails on one is a test
+  // people learn to edit rather than read.
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  assert.match(ship, /\*\*Steps 5, 6 and 7 again, entirely\*\*/);
+  assert.match(ship, /whole lens panel plus Codex/);
+  assert.match(ship, /a clean review gate that no lens ever looked at/);
+});
+
+// A round number substituted by hand is prose counting, and it is exactly what
+// made a second round overwrite the first.
+test("no round path in the ship command is a number the orchestrator picks", () => {
+  const ship = read("commands", "ship.md");
+  assert.ok(!ship.includes("rounds/<n>"), "ship.md still substitutes <n> into a round path by hand");
+  assert.match(ship, /ROUND=\$\(node/, "ship.md never takes the round from the allocator");
+});
+
 test("the commit chain always runs guard-staged between add and commit", () => {
   const ship = read("commands", "ship.md");
   for (const [, chain] of ship.matchAll(/(git -C "\$W" add -A[^\n]*)/g)) {

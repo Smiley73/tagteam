@@ -63,6 +63,21 @@ function parseArgs(argv) {
 export const findingId = (round, lens, index) => `${round}.${lens}.${index + 1}`;
 
 /**
+ * The round an id was minted at, or null for an id that carries none.
+ *
+ * The inverse of `findingId`, and here rather than beside its one caller for the
+ * same reason the minter is: a second reader of this string somewhere else
+ * drifts from the format, and a round read wrong is a finding attributed to a
+ * panel that never raised it. Null rather than a guess for an unqualified id —
+ * anything written before ids carried a round — because every caller treats "no
+ * round" as "decide nothing from this".
+ */
+export const findingRound = (id) => {
+  const named = /^([1-9][0-9]*)\./.exec(String(id ?? ""))?.[1];
+  return named === undefined ? null : Number(named);
+};
+
+/**
  * `--round` as an integer: a bare decimal of at least 1. `<n>` is substituted by
  * hand in `ship.md`, and a `01` or a `2/` would mint ids that no later round can
  * match against and no reader can tell apart from the right ones.

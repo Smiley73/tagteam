@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { findingId, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
+import { findingId, findingRound, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
@@ -243,7 +243,7 @@ function clearDerived(roundDir, out, candidate) {
 }
 
 export function settle({
-  review, dir, candidate, schemaPath, round, reviewRound = round, carried = [],
+  review, dir, candidate, schemaPath, round, reviewRound = round, carried = [], carriedRound = null,
   adversary = null, adversarySchemaPath = null
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
@@ -256,7 +256,20 @@ export function settle({
   // of every adversary finding under an id that already exists. Found by Codex
   // review, in the case the first idempotence fix did not reach: a *gating*
   // adversary finding, where `open` is non-empty.
-  const raised = (review.open ?? []).filter((finding) => finding.lens !== "adversary");
+  //
+  // A carry supersedes the collection for every round it speaks for, which is
+  // its own round and every round below it. `resolveReview` requires the most
+  // recent collection to be the one settled, and that collection is not
+  // re-collected between rounds: a second fix round handed `review.open` again
+  // would re-raise findings an earlier re-check already resolved, find no
+  // verdict for them — nobody was asked, they are closed — and record them open
+  // as "no verdict was returned", for ever. The carried record is the settled
+  // account of those rounds: what is not in it is not outstanding. An id with no
+  // round in it decides nothing and is kept, because keeping it leaves it open.
+  const superseded = (finding) => carriedRound !== null
+    && findingRound(finding.id) !== null && findingRound(finding.id) <= carriedRound;
+  const raised = (review.open ?? [])
+    .filter((finding) => finding.lens !== "adversary" && !superseded(finding));
   // An earlier round's unresolved findings reach this round through the
   // carried record and nowhere else. That separation is what lets an adversary
   // finding be re-checked at all: the filter above drops every adversary entry
@@ -540,6 +553,11 @@ async function main() {
       round,
       reviewRound: collected,
       carried: carry === null ? [] : carriedFindings(carry),
+      // The round that wrote the carry, which `resolveCarry` has already
+      // established is a numbered round below this one. It is what makes the
+      // carried record authoritative for its own round and everything below it;
+      // see `settle`.
+      carriedRound: carry === null ? null : Number(path.basename(path.dirname(carry))),
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")
     });

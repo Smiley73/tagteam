@@ -25,7 +25,8 @@ Outcomes:
 Do not report `fixed` for something you did not change. Your report is
 bookkeeping: the reviewer that raised the finding re-reads the code afterwards
 and states what is actually true. A false `fixed` does not get the pull request
-merged; it gets it stopped one step later, having spent the fix round.
+merged; it gets it stopped one step later, having spent a round of a budget this
+change may have no more of.
 
 ## Repairs
 
@@ -36,8 +37,8 @@ value is used in four.
 When a finding names a missing test, write a test that fails against the old
 behaviour. A test that passes either way documents nothing.
 
-Match the surrounding code. This diff has already been reviewed once for
-conventions.
+Match the surrounding code. This diff has already been reviewed for conventions,
+and will be again.
 
 ## Boundaries
 

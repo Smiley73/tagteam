@@ -1294,6 +1294,36 @@ test("settling the same inputs twice is deep-equal, and a finding in both the re
   assert.equal(ids.filter((id) => id === "1.correctness.1").length, 1);
 });
 
+test("a carry is the outstanding set for its own round and every round below it", () => {
+  // The loop's own defect if it is not. A later round settles the most recent
+  // collection, and that collection is `review.open` exactly as the panel raised
+  // it — including the findings an earlier re-check already resolved. Raised
+  // again here, nobody is asked about them because nobody carried them, no
+  // verdict comes back, and they settle as "no verdict was returned" and are
+  // carried into every round after this one: a cycle that can never go clean.
+  const target = dir({
+    "correctness.json": verdictFile("correctness", [
+      { id: "1.correctness.2", resolved: true, evidence: "the second read is guarded now" }
+    ])
+  });
+  const settleAt = (open) => settle({
+    review: { ...review, open }, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 3,
+    carried: [carriedFinding("1.correctness.2", "correctness")], carriedRound: 2,
+    ...adversary([])
+  });
+
+  // Round 2 resolved `1.correctness.1` and recorded only the other one. This
+  // round settles what round 2 left, and nothing it closed.
+  const result = settleAt(review.open);
+  assert.deepEqual(result.findings.map((entry) => entry.id), ["1.correctness.2"]);
+  assert.equal(result.status, "clean");
+
+  // And only for the rounds the carry speaks for: a finding raised above it was
+  // never settled by anybody, so it is still this round's to answer for.
+  const newer = settleAt([...review.open, { id: "3.security.1", lens: "security", title: "c", severity: "blocking" }]);
+  assert.deepEqual(newer.open.map((entry) => entry.id), ["3.security.1"]);
+});
+
 test("a round counts its own findings, never the ones it inherited", () => {
   // The tally a settled round reports describes that round: its own panel's
   // findings plus its own adversary's. Counting the inheritance again inflates
@@ -1483,6 +1513,43 @@ test("the guard looks past the rounds that recorded nothing, not only at the rou
   const carried = run(["--carry", recorded]);
   assert.equal(carried.status, 0, `an inherited finding the reviewer cleared closes: ${carried.stderr}`);
   assert.match(carried.stdout, /1 carried in from an earlier round/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8")).findings, []);
+});
+
+test("a third round settles what the second left, not what the first collected", async () => {
+  // The same rule through the CLI, where the carry's round is read off the path
+  // the caller passed. Round 1 collected two findings, round 2's re-check closed
+  // one and recorded the other, and round 3 settles round 1's collection again
+  // because no newer panel has run. The finding round 2 closed must not come
+  // back — nobody is asked about it here, and a finding nobody was asked about
+  // settles as open and is carried for ever.
+  const { spawnSync } = await import("node:child_process");
+  const { base, dir: roundDir, verdicts, adv, out } = recheckRound(3);
+  const collection = path.join(base, "rounds", "1", "review.json");
+  fs.mkdirSync(path.dirname(collection), { recursive: true });
+  writeReview(collection);
+  const previous = path.join(base, "rounds", "2", "still-open.json");
+  fs.mkdirSync(path.dirname(previous), { recursive: true });
+  fs.writeFileSync(previous, JSON.stringify({
+    candidate: OID,
+    findings: [carriedFinding("1.correctness.2", "correctness")]
+  }));
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "1.correctness.2", resolved: true, evidence: "the second read is guarded now" }
+  ])));
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", collection, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "3", "--out", out, "--carry", previous
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0, `the round the fixer emptied is clean: ${result.stdout}${result.stderr}`);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(out, "utf8")).findings.map((entry) => entry.id),
+    ["1.correctness.2"]
+  );
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8")).findings, []);
 });
 
