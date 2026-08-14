@@ -15,6 +15,7 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 const commandFiles = fs.readdirSync(path.join(root, "commands"));
 const commands = commandFiles.map((file) => ({ file, text: read("commands", file) }));
 const skill = read("skills", "tagteam", "SKILL.md");
+const readme = read("README.md");
 const everything = [...commands.map((entry) => entry.text), skill].join("\n");
 
 const agentNames = fs.readdirSync(path.join(root, "agents")).map((file) => file.replace(/\.md$/, ""));
@@ -353,6 +354,40 @@ test("no plan review brief claims there is exactly one revision", () => {
   for (const file of ["prompts/plan-review.md", "prompts/codex/plan-review.md"]) {
     const text = read(...file.split("/")).replace(/\s+/g, " ");
     assert.doesNotMatch(text, /exactly one (revision|round)/i, `${file} still promises exactly one revision`);
+  }
+});
+
+// The diagrams are the first thing anyone reads about how these cycles run, and
+// a drawn loop with no setting on it is a loop nobody can find the ceiling for.
+// Asserted inside the Mermaid blocks specifically: a limit named only in the
+// prose beside a diagram that still draws a straight line is the mismatch this
+// catches.
+test("both cycle diagrams name the settings that bound their loops", () => {
+  const diagrams = [...readme.matchAll(/```mermaid\n([\s\S]*?)```/g)].map(([, body]) => body);
+  assert.ok(diagrams.length >= 2, "the README no longer has cycle diagrams");
+  const drawn = diagrams.join("\n");
+  for (const limit of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
+    assert.ok(drawn.includes(limit), `no cycle diagram names ${limit}, so its loop is drawn without its ceiling`);
+  }
+});
+
+// Every one of these sentences told a reader the cycle happens exactly once.
+// They are the claims the configured limits replaced, and one left behind is
+// documentation contradicting the code a person is about to run.
+test("nothing a person reads still says these cycles happen once", () => {
+  for (const [file, text] of [["README.md", readme], ["skills/tagteam/SKILL.md", skill]]) {
+    const flat = text.replace(/\s+/g, " ");
+    for (const claim of [
+      "reviewed once by three independent readers",
+      "no convergence loop",
+      "fix once",
+      "After the single fix round",
+      "the fix round always makes one",
+      "One review round — no convergence loop",
+      "one repair"
+    ]) {
+      assert.ok(!flat.includes(claim), `${file} still says "${claim}"`);
+    }
   }
 });
 

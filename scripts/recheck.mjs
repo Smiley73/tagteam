@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Settles a review after one fix round.
+// Settles a review round after a fix.
 //
 // Each reviewer that raised a finding is re-dispatched with its own findings and
 // the new diff, and answers resolved / not resolved per finding. This reads

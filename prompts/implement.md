@@ -11,7 +11,8 @@ density, its idiom. Code that reads as if it were already there is the goal.
 
 Implement what the spec says, including its tests. Not the improvements you
 notice on the way: an unrelated change costs a reviewer's attention, and the
-reviewers looking at your diff have one fix round between them and a merge.
+reviewers looking at your diff have a bounded number of fix rounds between them
+and a merge.
 
 `## Out of scope` names work that belongs to a neighbouring spec. Leave it alone
 even when it is one line and you are already in the file.
