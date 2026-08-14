@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { matchWhen } from "./lib/matcher.mjs";
 import { validateCandidateSnapshot } from "./snapshot-candidate.mjs";
+import { createRoundStream, writeRoundFile } from "./lib/round-store.mjs";
 
 function killGroup(child, signal) {
   try {
@@ -15,7 +16,9 @@ function killGroup(child, signal) {
 }
 
 async function runCommand(command, cwd, timeoutSec, logPath) {
-  const output = fs.createWriteStream(logPath, { flags: "w", mode: 0o600 });
+  // Opened before the child starts, so a log path a round already records stops
+  // the run rather than being discovered after the command has had its effect.
+  const output = createRoundStream(logPath);
   const child = spawn("/bin/sh", ["-lc", command], {
     cwd,
     shell: false,
@@ -81,7 +84,7 @@ async function main() {
       worktree: path.resolve(args.worktree),
       outDir: path.resolve(args["out-dir"])
     });
-    if (args.out) fs.writeFileSync(args.out, JSON.stringify(result, null, 2) + "\n", { mode: 0o600 });
+    if (args.out) writeRoundFile(args.out, JSON.stringify(result, null, 2) + "\n");
     process.stdout.write(JSON.stringify(result) + "\n");
     if (result.status === "failed") process.exitCode = 1;
   } catch (error) {

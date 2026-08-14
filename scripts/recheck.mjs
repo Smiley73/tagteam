@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
+import { sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 
@@ -251,9 +252,21 @@ async function main() {
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")
     });
-    const out = path.resolve(options.out);
-    fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+    // The settled review is written first, and sealing comes after. Sealing is a
+    // reinforcement; a chmod that fails for a reason `sealRoundRecord` does not
+    // tolerate (a read-only mount, a filesystem that will not do it at all) must
+    // not be able to throw away a review that was already computed — there is no
+    // review gate without this file, and the same chmod fails the same way on
+    // every retry. `--out` is ship's `review.json`, which lives above the round
+    // and is rewritten as before.
+    writeRoundFile(options.out, `${JSON.stringify(result, null, 2)}\n`);
+    // Every verdict file this settled is now part of the record, so it is sealed
+    // the way `collect-findings` seals the findings it consumed. A lens whose
+    // file was missing or unusable is not in `present` and stays writable, which
+    // is what a re-dispatch into the same round needs.
+    for (const { lens } of result.present) {
+      sealRoundRecord(lens === "adversary" ? options.adversary : path.join(path.resolve(options.dir), `${lens}.json`));
+    }
 
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
     if (result.status !== "clean") process.exitCode = 1;

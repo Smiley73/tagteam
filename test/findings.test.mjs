@@ -669,3 +669,200 @@ test("a carried-forward missing lens does not restate itself on every retry", ()
     "the suffix must not accumulate"
   );
 });
+
+// A round the snapshot has claimed. Inside one, every file tagteam writes is
+// written once — so the collector, which has to re-derive its outputs when a
+// missing lens is re-dispatched into the same round, is the interesting caller.
+function markedRound(files) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-marked-"));
+  const target = path.join(base, "rounds", "1");
+  const findings = path.join(target, "findings");
+  fs.mkdirSync(findings, { recursive: true });
+  fs.writeFileSync(path.join(target, "round.json"), JSON.stringify({ owner: OID, attempts: 1 }));
+  for (const [name, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(findings, name), typeof body === "string" ? body : JSON.stringify(body), { mode: 0o600 });
+  }
+  // Ship writes review.json above the round, where it is rewritten every run.
+  return { round: target, findings, out: path.join(base, "review.json") };
+}
+
+test("re-deriving inside a claimed round replaces the collector's own outputs, and only those", async () => {
+  // The hazard this is about reaches a reviewer. `open/<lens>.json` is written
+  // only for lenses that still have something open, so a survivor from an
+  // earlier derivation is handed to the re-check as current — a test that only
+  // checked `to-fix.json` would never see it.
+  const { spawnSync } = await import("node:child_process");
+  const { round, findings, out } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })]),
+    "codex.json": lensFile("codex", [finding({ severity: "major", title: "b" })], NEW_OID)
+  });
+  fs.mkdirSync(path.join(round, "open"));
+  fs.writeFileSync(path.join(round, "open", "security.json"), "{\"from\": \"an earlier derivation\"}");
+  fs.writeFileSync(path.join(round, "to-fix.json"), "{\"from\": \"an earlier derivation\"}");
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--out", out
+  ], { encoding: "utf8" });
+
+  const first = run();
+  assert.equal(first.status, 1, `collect-findings failed: ${first.stderr}`);
+  assert.ok(fs.existsSync(path.join(round, "open", "correctness.json")));
+  assert.equal(fs.existsSync(path.join(round, "open", "security.json")), false, "a stale open file survived");
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(round, "to-fix.json"), "utf8")).findings.map((entry) => entry.id),
+    ["correctness.1"]
+  );
+  // The derived files are records too, and the mode is the only trace of that
+  // on disk: this run removes `to-fix.json` and `open/` immediately before
+  // rewriting them, so a plain overwriting write would pass every other
+  // assertion here.
+  assert.equal(fs.statSync(path.join(round, "to-fix.json")).mode & 0o777, 0o400);
+  assert.equal(fs.statSync(path.join(round, "open", "correctness.json")).mode & 0o777, 0o400);
+  // Evidence this review counted is sealed; the lens it could not use is left
+  // writable, because that is the path a re-dispatch into this round takes.
+  assert.equal(fs.statSync(path.join(findings, "correctness.json")).mode & 0o777, 0o400);
+  assert.ok(fs.statSync(path.join(findings, "codex.json")).mode & 0o200, "a rejected lens must stay writable");
+
+  // The re-dispatch this exists for: the lens that had no usable evidence
+  // produces some, bound to the right commit, and it gates. The second
+  // derivation must therefore differ from the first — with byte-identical output
+  // the write-once guard passes either way and this proves nothing.
+  fs.writeFileSync(
+    path.join(findings, "codex.json"),
+    JSON.stringify(lensFile("codex", [finding({ severity: "major", title: "c" })])),
+    { mode: 0o600 }
+  );
+  const second = run();
+  assert.equal(second.status, 1, `the re-run refused its own derived outputs: ${second.stderr}`);
+  assert.match(second.stdout, /2\/2 lenses/);
+  // Different bytes at both derived paths, written where the first derivation
+  // already wrote: this is what the clearing before re-deriving buys.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(round, "open", "codex.json"), "utf8")).findings.map((entry) => entry.id),
+    ["codex.1"]
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(round, "to-fix.json"), "utf8")).findings.map((entry) => entry.id),
+    ["correctness.1", "codex.1"]
+  );
+  assert.equal(fs.statSync(path.join(round, "to-fix.json")).mode & 0o777, 0o400);
+  assert.equal(fs.statSync(path.join(round, "open", "codex.json")).mode & 0o777, 0o400);
+  assert.equal(fs.statSync(path.join(findings, "codex.json")).mode & 0o777, 0o400);
+});
+
+test("a damaged round marker stops the collector before it clears the previous derivation", async () => {
+  // The refusal has to come before the deletion. The collector clears
+  // `to-fix.json` and `open/` immediately before re-deriving them, so a marker
+  // check that only happens on the way in to the first write arrives one deletion
+  // too late: the round with an unknown owner is refused, as it should be, but
+  // its previous records are already gone and cannot be re-derived.
+  const { spawnSync } = await import("node:child_process");
+  const { round, findings, out } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })])
+  });
+  fs.writeFileSync(path.join(round, "round.json"), "{\"owner\":");
+  fs.mkdirSync(path.join(round, "open"));
+  fs.writeFileSync(path.join(round, "open", "correctness.json"), "{\"from\": \"the previous derivation\"}");
+  fs.writeFileSync(path.join(round, "to-fix.json"), "{\"from\": \"the previous derivation\"}");
+
+  const run = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(run.status, 2, `a damaged marker must refuse: ${run.stdout}`);
+  assert.match(run.stderr, /round marker/);
+  assert.equal(
+    fs.readFileSync(path.join(round, "to-fix.json"), "utf8"),
+    "{\"from\": \"the previous derivation\"}",
+    "the refused run deleted to-fix.json"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(round, "open", "correctness.json"), "utf8"),
+    "{\"from\": \"the previous derivation\"}",
+    "the refused run deleted an open/<lens>.json"
+  );
+});
+
+test("a round belonging to another commit is refused before the collector clears anything", async () => {
+  // The collector is the only caller that removes records from a round, and
+  // `<n>` is substituted by hand in ship.md: running step 5 with the new `$OID`
+  // against the previous round's findings directory is one keystroke away. It
+  // used to delete that round's `to-fix.json` and whole `open/` tree, then write
+  // a brief naming a commit the round's marker does not record — and nothing
+  // left on disk could re-derive what it removed.
+  const { spawnSync } = await import("node:child_process");
+  const { round, findings, out } = markedRound({
+    "correctness.json": lensFile("correctness", [finding({ severity: "blocking", title: "a" })])
+  });
+  fs.mkdirSync(path.join(round, "open"));
+  fs.writeFileSync(path.join(round, "open", "correctness.json"), "{\"from\": \"the first review\"}");
+  fs.writeFileSync(path.join(round, "to-fix.json"), "{\"from\": \"the first review\"}");
+
+  const run = spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", NEW_OID, "--expect", "correctness", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(run.status, 2, `a round owned by another commit must refuse: ${run.stdout}`);
+  assert.match(run.stderr, new RegExp(`${OID}[\\s\\S]*${NEW_OID}`));
+  assert.equal(
+    fs.readFileSync(path.join(round, "to-fix.json"), "utf8"),
+    "{\"from\": \"the first review\"}",
+    "the refused run deleted to-fix.json"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(round, "open", "correctness.json"), "utf8"),
+    "{\"from\": \"the first review\"}",
+    "the refused run deleted an open/<lens>.json"
+  );
+});
+
+test("the recheck seals the verdicts it consumed and leaves the ones it rejected writable", async () => {
+  // Verdict files arrive through the Write tool, so the round cannot refuse a
+  // second write as it happens; sealing what was consumed is the protection one
+  // step later. The rejected lens must stay writable, because re-dispatching it
+  // into this same round is the documented recovery — and a seal that reached it
+  // would make that recovery impossible.
+  const { spawnSync } = await import("node:child_process");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-recheck-seal-"));
+  const roundDir = path.join(base, "rounds", "1");
+  const verdicts = path.join(roundDir, "recheck");
+  fs.mkdirSync(verdicts, { recursive: true });
+  fs.writeFileSync(path.join(roundDir, "round.json"), JSON.stringify({ owner: NEW_OID, attempts: 1 }));
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "correctness.1", resolved: true, evidence: "fixed" }
+  ])), { mode: 0o600 });
+  // Judged the wrong commit, so it settles nothing and is not `present`.
+  fs.writeFileSync(path.join(verdicts, "security.json"), JSON.stringify(verdictFile("security", [
+    { id: "security.1", resolved: true, evidence: "fixed" }
+  ], OID)), { mode: 0o600 });
+  const adv = path.join(roundDir, "findings", "adversary.json");
+  fs.mkdirSync(path.dirname(adv), { recursive: true });
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }), { mode: 0o600 });
+  const reviewPath = path.join(base, "review.json");
+  fs.writeFileSync(reviewPath, JSON.stringify({
+    ...review,
+    open: [
+      { id: "correctness.1", lens: "correctness", title: "a", severity: "blocking" },
+      { id: "security.1", lens: "security", title: "b", severity: "major" }
+    ]
+  }));
+
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--out", path.join(base, "out.json")
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 1, `a lens bound to the wrong commit is not clean: ${result.stdout}${result.stderr}`);
+  assert.equal(fs.statSync(path.join(verdicts, "correctness.json")).mode & 0o777, 0o400);
+  // The adversary's evidence is consumed from `--adversary`, not from `--dir`,
+  // so sealing the lens name under `--dir` would seal a path that does not exist
+  // and leave the real record writable.
+  assert.equal(fs.statSync(adv).mode & 0o777, 0o400);
+  assert.ok(fs.statSync(path.join(verdicts, "security.json")).mode & 0o200, "a rejected verdict must stay writable");
+  // The settled review is durable before any of that sealing runs, so a chmod
+  // that fails on some filesystem cannot throw away a review that was computed.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(base, "out.json"), "utf8")).status, "incomplete");
+});

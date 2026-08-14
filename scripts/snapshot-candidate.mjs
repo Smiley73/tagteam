@@ -3,8 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { globToRegExp, normalizeRepoPath } from "./lib/matcher.mjs";
+import { enterRound, writeRoundFile } from "./lib/round-store.mjs";
 
 function git(cwd, args, { allowFailure = false, encoding = "utf8" } = {}) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding, shell: false, maxBuffer: 128 * 1024 * 1024 });
@@ -85,25 +86,6 @@ export function primaryStatus(output) {
 function blobAt(cwd, oid, file) {
   const result = git(cwd, ["rev-parse", `${oid}:${file}`], { allowFailure: true });
   return result.status === 0 ? result.stdout.trim() : null;
-}
-
-function writeImmutable(file, value) {
-  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, bytes, { mode: 0o600 });
-  try {
-    try {
-      fs.linkSync(temporary, file);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (!fs.readFileSync(file).equals(bytes)) {
-        throw new Error(`immutable candidate snapshot already exists with different bytes: ${file}`);
-      }
-    }
-    fs.chmodSync(file, 0o600);
-  } finally {
-    try { fs.unlinkSync(temporary); } catch {}
-  }
 }
 
 function sha256File(file) {
@@ -207,16 +189,19 @@ export function snapshotCandidate(options) {
   if (treeClean !== "") {
     throw new Error(`the primary checkout changed during the ship (tagteam's own state under .tagteam/ is not counted):\n${treeClean}`);
   }
-  fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+  // Every refusal above happens before the round is entered, and deliberately:
+  // entering claims the round for this commit and empties it, so a snapshot that
+  // is going to refuse must never have touched one.
+  const round = enterRound(outDir, { owner: candidateOid });
   const reviewDiffPath = path.join(outDir, "review.diff");
-  writeImmutable(reviewDiffPath, reviewDiff);
+  writeRoundFile(reviewDiffPath, reviewDiff);
   // The same list candidate.json carries, alone in a file the bridge can fence
   // directly. candidate.json cannot serve that purpose: it also holds
   // addedLines, so fencing it would put the whole change into the prompt a
   // second time. Every reviewer needs the paths and none of them should be paid
   // for through a relay model retyping them.
   const changedPathsPath = path.join(outDir, "changed-paths.json");
-  writeImmutable(changedPathsPath, JSON.stringify(changedPaths, null, 2) + "\n");
+  writeRoundFile(changedPathsPath, JSON.stringify(changedPaths, null, 2) + "\n");
   const reviewDiffHash = `sha256:${createHash("sha256").update(reviewDiff).digest("hex")}`;
   const candidate = {
     baseOid,
@@ -232,8 +217,11 @@ export function snapshotCandidate(options) {
     treeClean
   };
   const candidatePath = path.join(outDir, "candidate.json");
-  writeImmutable(candidatePath, JSON.stringify(candidate, null, 2) + "\n");
-  return validateCandidateSnapshot(candidatePath, { baseOid, candidateOid });
+  writeRoundFile(candidatePath, JSON.stringify(candidate, null, 2) + "\n");
+  // `reentered` says the round already belonged to this commit and was rebuilt
+  // rather than started. A resumed ship lands here and should say so instead of
+  // looking like it spent a round it never did.
+  return { ...validateCandidateSnapshot(candidatePath, { baseOid, candidateOid }), reentered: round.reentered };
 }
 
 async function main() {
