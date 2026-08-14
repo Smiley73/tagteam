@@ -30,7 +30,9 @@
 // approval is run for the same identity — so it says instead which record means
 // "this round is over" (`completeWhen`), and the round that is re-entered is the
 // last one that never got it. Both are the same rule read against different
-// evidence: pay once for work already paid for, and never twice.
+// evidence: pay once for work already paid for, and never twice. Because that
+// second reading lets one identity re-enter for ever at no cost, the number of
+// entries a round may take is bounded too — see `MAX_ROUND_ENTRIES`.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -39,6 +41,24 @@ import { ROUND_MARKER, enterRound, readRoundMarker } from "./round-store.mjs";
 import { acquireLock } from "./locks.mjs";
 
 const NUMBERED = /^[1-9][0-9]*$/;
+
+// How many times one round may be entered — the first entry plus the re-entries
+// after it — before allocation refuses.
+//
+// Re-entry costs no budget, by design: a session killed mid-round must not pay
+// twice for work it already paid for. But a caller whose candidate does not
+// change between rounds (the plan side, where every round of one goal approval
+// is run for the same goal hash) re-enters the *same* round every time it skips
+// the completion record, so the spend never moves and the budget check below is
+// never reached. That is a loop with no stop in it, and each pass empties the
+// round. So the number of entries is itself bounded: a round that has been
+// re-entered this often and still never recorded its completion record is not
+// being resumed, and the refusal is the same exit 4 a spent budget gives.
+//
+// Three is a resume allowance, not a budget. Interruptions are rare and an
+// orchestrator that lost its way re-allocating once or twice inside a round is
+// ordinary; a fourth entry to a round nothing ever closed out is the failure.
+const MAX_ROUND_ENTRIES = 3;
 
 // One allocator at a time per rounds root. Scanning, deciding and claiming are
 // one decision, and two processes that each scanned an empty root would both
@@ -62,6 +82,28 @@ export class RoundBudgetExhausted extends Error {
     this.limitName = limitName;
     this.limit = limit;
     this.spent = spent;
+  }
+}
+
+/**
+ * A round entered `MAX_ROUND_ENTRIES` times that never recorded its completion
+ * record. Exit code 4, like a spent budget, because it stops the same loop for
+ * the same reason and the caller has one branch for "you may go no further".
+ */
+export class RoundReentryExhausted extends Error {
+  constructor({ round, dir, limitName, entries, completeWhen }) {
+    super(`round ${round} has been entered ${entries} time(s) and never recorded ${completeWhen}: ${dir} — a round `
+      + "re-entered again and again without ever being closed out is a loop rather than a resume, and every "
+      + `re-entry empties it, so nothing further will be attempted under ${limitName}. Whatever the round produced `
+      + `is gone; write that round's ${completeWhen} so the next allocation is a new round, or finish what is left `
+      + "by hand");
+    this.name = "RoundReentryExhausted";
+    this.exitCode = 4;
+    this.round = round;
+    this.dir = dir;
+    this.limitName = limitName;
+    this.entries = entries;
+    this.completeWhen = completeWhen;
   }
 }
 
@@ -212,6 +254,20 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt, com
     ? owned[0]
     : owned.filter((entry) => !fs.existsSync(path.join(entry.dir, completeWhen))).at(-1);
   if (already) {
+    // The budget check below is never reached on this branch, so the one thing
+    // that bounds a caller looping through re-entry is the entry count in the
+    // round's own marker. Read and refused *before* `enterRound`, so the round
+    // the refusal names is left exactly as the last attempt left it rather than
+    // emptied on the way out.
+    if (completeWhen !== undefined) {
+      const marker = readRoundMarker(already.dir);
+      const entries = Number.isInteger(marker?.attempts) ? marker.attempts : 1;
+      if (entries >= MAX_ROUND_ENTRIES) {
+        throw new RoundReentryExhausted({
+          round: already.round, dir: already.dir, limitName, entries, completeWhen
+        });
+      }
+    }
     // Emptied back to its marker, because a re-entered round is re-run from the
     // start and its half-written outputs would otherwise be refused by the round
     // store's write-once guard. Only for the callers that named a completion
@@ -269,8 +325,10 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt, com
  * file's field (`candidateFile` / `candidateField`, `scopeFile` / `scopeField`).
  * `completeWhen` names the record whose presence means a round is over; with it,
  * re-entry finds the last unfinished round of this candidate and empties it
- * rather than returning the first round the candidate owns. Without it — the
- * ship side — nothing about re-entry changes.
+ * rather than returning the first round the candidate owns, and a round entered
+ * `MAX_ROUND_ENTRIES` times without ever recording it is refused with a
+ * `RoundReentryExhausted` — the stop for a caller whose identity is the same in
+ * every round. Without it — the ship side — nothing about re-entry changes.
  *
  * The decision is serialized per rounds root by an advisory lock, because a
  * budget checked concurrently is not a budget: two processes that both read an

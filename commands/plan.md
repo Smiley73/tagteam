@@ -151,7 +151,10 @@ node "$P/scripts/lib/rounds.mjs" "$D/work/review" \
   --candidate-file "$D/work/goal-approved" --candidate-field goalSha256 \
   --scope-file "$D/work/goal-approved" --scope-field goalSha256 \
   --limit <limits.planReviewRounds> --limit-name limits.planReviewRounds \
-  --exempt 0 --complete-when outcome.json > "$D/work/plan-round.json" && cat "$D/work/plan-round.json"
+  --exempt 0 --complete-when outcome.json > "$D/work/plan-round.next.json" \
+  || { status=$?; rm -f "$D/work/plan-round.next.json"; exit $status; }
+mv "$D/work/plan-round.next.json" "$D/work/plan-round.json"
+cat "$D/work/plan-round.json"
 ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$D/work/plan-round.json")
 ```
 
@@ -160,6 +163,14 @@ both identities out of `$D/work/goal-approved` itself, which `verify` has just
 proved current; **do not copy the hash out of anything into this command.** A
 hash that arrives one character wrong names a budget nothing else is counted in,
 so the rounds silently start over and nothing on screen says they did.
+
+The allocation lands on a temporary path and is moved into place only once it
+has succeeded, so the block exits with the allocator's own status and a refusal
+leaves the last round's record where it was. Redirecting straight onto
+`plan-round.json` truncates it before the allocator runs, so a refusal would
+leave an empty file, the read below would die parsing it, and what reached you
+would be a Node stack trace and exit 1 rather than the exit 4 the paragraph
+below is about.
 
 **The round number is the allocator's to give**, once per round, here. `$ROUND`
 is the round for every path below, the ones you write into a subagent's brief
@@ -175,15 +186,24 @@ Re-allocating is safe only before any reader has written — and if it has come 
 that, the resume path is running step 5 again from the top, not the command
 above on its own.
 
-**Announce the round before you dispatch anything**, in one plain line: which
-round this is, and how many this goal approval gets. "Review round 2 of 3, three
-readers on the plan."
+**Announce the round before you dispatch anything**, in one plain line: where
+this round sits in the budget, and where its findings are being written. Both
+come out of `$D/work/plan-round.json` — the budget position is `spent` of
+`limit`, the directory is `round`. "Review round 2 of 2 for this goal approval,
+three readers on the plan, writing to review/3/." Do not pair `$ROUND` with the
+limit: the number is global to the plan directory and the budget is counted per
+goal approval, so after a re-approval that reads "round 3 of 2" and tells them
+the review is past a budget it has in fact just started over.
 
-**Exit 4 means the budget is spent**, and it was refused before anything was
-created. Say only what is known here: the last round raised `blocking` or
-`major` findings, a revision addressed them, and no further round was available
-to check the result — and that `planReviewRounds` in `.tagteam/config.json` is
-what stopped the rounds, rather than the plan being finished. **Do not present
+**Exit 4 means no further round is available**, and it was refused before
+anything was created. Ordinarily that is the budget, and stderr names it. Say
+only what is known here: the last round raised `blocking` or `major` findings, a
+revision addressed them, and no further round was available to check the
+result — and that `planReviewRounds` in `.tagteam/config.json` is
+what stopped the rounds, rather than the plan being finished. The other exit 4
+is a round that was entered several times and never closed out, which stderr
+says plainly and which means a round's findings were cleared by the re-entries;
+report that as it is rather than as a spent budget. **Do not present
 that round's findings as still open.** Nothing has read the revised plan, so
 which of them the revision closed is not something you or anything on disk
 knows, and a list of problems the plan may no longer have is worse than no list.
@@ -248,7 +268,10 @@ That file is what makes the round finished, and writing it is not optional in
 either branch. Until it is there the allocator treats the round as interrupted:
 the next allocation hands back the same number, empties the directory and
 re-runs the readers, which is exactly what a resumed session needs and exactly
-wrong for a round that is over.
+wrong for a round that is over. It is also not something that can go on: once a
+round has been entered three times without this file, the next allocation
+refuses with exit 4, because a round re-entered and re-entered is a loop that
+spends no budget and loses its findings every pass.
 
 ### When a finding is against the goal, not the plan
 

@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { approve } from "../scripts/goal-gate.mjs";
-import { RoundBudgetExhausted, allocateRound } from "../scripts/lib/rounds.mjs";
+import { RoundBudgetExhausted, RoundReentryExhausted, allocateRound } from "../scripts/lib/rounds.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SCRIPT = path.join(root, "scripts", "lib", "rounds.mjs");
@@ -133,6 +133,63 @@ test("an unfinished round is re-entered and cleared, a finished one never is", a
   assert.equal(fs.readFileSync(path.join(resumed.dir, "claude.json"), "utf8"), "the second attempt's findings");
 });
 
+test("a round re-entered again and again is refused, so a skipped outcome record cannot loop forever", async () => {
+  // The plan side's candidate is the goal hash, the same value in every round of
+  // one approval, so re-entry is what an orchestrator that loops back to *Open
+  // the round* without writing outcome.json gets — the same number, at a spend
+  // that never moves, with the directory emptied each pass. Without an entry cap
+  // the budget check is never reached at all and the one hard stop the loop has
+  // is a file the model writes for itself.
+  const dir = plan();
+  const first = await allocate(dir, 1);
+  findings(first, "claude.json", "round one, first attempt");
+
+  const second = await allocate(dir, 1);
+  assert.equal(second.round, first.round, "a resume takes the round it was interrupted in");
+  const third = await allocate(dir, 1);
+  assert.equal(third.round, first.round);
+  findings(third, "claude.json", "round one, third attempt");
+
+  await assert.rejects(() => allocate(dir, 1), (error) => {
+    assert.ok(error instanceof RoundReentryExhausted, `refused with ${error.name}, not a re-entry refusal`);
+    assert.equal(error.exitCode, 4, "the refusal has to reach the orchestrator as the exit code it keys on");
+    assert.match(error.message, /outcome\.json/);
+    assert.match(error.message, /planReviewRounds/);
+    return true;
+  });
+  // Refused before anything was touched: no fourth number, and the round the
+  // refusal names is left as the last attempt left it rather than emptied.
+  assert.deepEqual(names(reviewRoot(dir)), ["1"]);
+  assert.equal(fs.readFileSync(path.join(third.dir, "claude.json"), "utf8"), "round one, third attempt");
+
+  // And from the command line, which is where plan.md meets it.
+  const refused = spawnSync("node", [
+    SCRIPT, reviewRoot(dir),
+    "--candidate-file", marker(dir), "--candidate-field", "goalSha256",
+    "--scope-file", marker(dir), "--scope-field", "goalSha256",
+    "--limit", "1", "--limit-name", LIMIT_NAME, "--exempt", "0", "--complete-when", OUTCOME
+  ], { encoding: "utf8" });
+  assert.equal(refused.status, 4, refused.stderr);
+});
+
+test("the ship side's re-entry is not capped by the plan side's entry limit", async () => {
+  // The cap belongs to callers that name a completion record, because only there
+  // is one identity re-enterable without end. A ship round is owned by a fresh
+  // commit oid, so re-entry there is the documented snapshot-step resume and must
+  // keep working however many times a run is interrupted.
+  const shipRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ship-rounds-"));
+  const ship = () => allocateRound(shipRoot, {
+    candidate: "0".repeat(40), scope: "spec-01", limit: 1, limitName: "limits.fixRounds", exempt: 1
+  });
+  const first = await ship();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const again = await ship();
+    assert.equal(again.round, first.round);
+    assert.equal(again.reentered, true);
+  }
+  assert.deepEqual(names(shipRoot), ["1"]);
+});
+
 test("a re-approval mid-round takes a new number and leaves the open round intact", async () => {
   // The goal-level finding path: a reviewer's question changes the goal, the
   // owner re-approves, and the round those findings were made under is still
@@ -205,6 +262,46 @@ test("asking for a round twice with nothing changed does not make two", async ()
   const again = await allocate(dir, 3);
   assert.equal(again.dir, first.dir);
   assert.deepEqual(names(reviewRoot(dir)), ["1"]);
+});
+
+// The block in `commands/plan.md` *Open the round*, run as written with the one
+// substitution it documents. Not a paraphrase: the defect this pins was in how
+// the commands are wired together, not in anything either command does alone.
+function openTheRound(dir, limit) {
+  const plan = fs.readFileSync(path.join(root, "commands", "plan.md"), "utf8");
+  const block = plan.match(/### Open the round\n+```bash\n([\s\S]*?)```/)?.[1];
+  assert.ok(block, "commands/plan.md has no *Open the round* bash block to run");
+  return spawnSync("bash", ["-c", block.replace("<limits.planReviewRounds>", String(limit))], {
+    encoding: "utf8",
+    env: { ...process.env, P: root, D: dir }
+  });
+}
+
+test("plan.md's own allocation block hands a refusal on as exit 4, not as a parse error", async () => {
+  // The routine path at planReviewRounds=1: round 1 raised something blocking, a
+  // revision ran, and the next allocation is refused. plan.md tells the
+  // orchestrator to key on exit 4 — so a block that redirects onto
+  // plan-round.json before the allocator runs, truncating it and then reading it
+  // back, delivers a Node stack trace and exit 1 instead, on the ordinary path in
+  // every repository that has not raised the limit.
+  const dir = plan();
+  const opened = openTheRound(dir, 1);
+  assert.equal(opened.status, 0, opened.stderr);
+  const allocated = JSON.parse(fs.readFileSync(path.join(dir, "work", "plan-round.json"), "utf8"));
+  assert.equal(allocated.round, 1);
+  close({ dir: path.join(reviewRoot(dir), "1"), round: 1 });
+
+  const refused = openTheRound(dir, 1);
+  assert.equal(refused.status, 4, `exit ${refused.status}: ${refused.stderr}`);
+  assert.doesNotMatch(refused.stderr, /SyntaxError/, "the refusal reached the orchestrator as a crash");
+  assert.match(refused.stderr, /planReviewRounds/);
+  // And the record of the round in progress is still readable, rather than the
+  // empty file a truncating redirect leaves behind.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(dir, "work", "plan-round.json"), "utf8")),
+    allocated
+  );
+  assert.deepEqual(names(path.join(dir, "work")).filter((name) => name.startsWith("plan-round")), ["plan-round.json"]);
 });
 
 test("a plan directory with the old flat review files gets round 1 beside them", async () => {
