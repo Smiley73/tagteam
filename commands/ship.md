@@ -121,6 +121,10 @@ One `tagteam:implementer` at `models.worker` / `effort.worker`. Give it the
 spec **path**, the worktree path, and `conventionsPath` if set. It reads the spec
 itself; you do not.
 
+Dispatch it with `run_in_background: false` so the call blocks until it reports.
+It writes code into `$W` and no artifact you could watch for, and committing a
+worktree the implementer is still writing commits half a change.
+
 ### 3. Commit and snapshot
 
 ```bash
@@ -188,6 +192,24 @@ resolved lens plus Codex:
 The adversary does **not** run here. It runs in step 7, on whatever the final
 diff turns out to be, where nothing else is looking with fresh eyes.
 
+Run the Codex call with `run_in_background` — it outlives what the Bash tool
+will hold in the foreground — and read its result when it returns, because a
+failed Codex call writes no artifact at all.
+
+Then **wait for all of them** — see *Dispatching and waiting* in the skill. One
+background watcher, one `-f` per file you commissioned, the Codex artifact
+included:
+
+```bash
+F="$S/<id>/rounds/<n>/findings"
+until [ -f "$F/<lens>.json" ] && [ -f "$F/codex.json" ]; do sleep 5; done
+```
+
+One test per resolved lens, however many that is. `collect-findings.mjs` over a
+directory that is still filling reports `incomplete` for every lens that has not
+landed, and `incomplete` blocks the merge. Do not poll it repeatedly and do not
+emit filler commands while you wait.
+
 Then:
 
 ```bash
@@ -203,10 +225,11 @@ not clean, and it never merges.
 
 `gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` /
 `effort.worker`, given `$S/<id>/rounds/<n>/to-fix.json`, the worktree, and
-`$S/<id>/fix-report.json` to write. Then commit and re-snapshot exactly as in
-step 3 with a fresh `<n>`, set `OID` to the new commit, and `gates.mjs bind` it —
-which clears every gate, because they were about the old one. Re-run verify
-against the new commit.
+`$S/<id>/fix-report.json` to write. Dispatch it with `run_in_background: false`:
+until it reports it is still editing the worktree you are about to commit. Then
+commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set `OID` to the
+new commit, and `gates.mjs bind` it — which clears every gate, because they were
+about the old one. Re-run verify against the new commit.
 
 **Hand it `to-fix.json`, never `review.json`.** `review.json` holds every finding
 at every severity, and a fixer given all of them repairs all of them — a round
@@ -222,9 +245,16 @@ Nothing open: skip straight to step 7 with the same `OID`.
 
 **A missing lens is not something a fixer can repair.** `incomplete` with nothing
 open means a reviewer produced no usable evidence, so re-dispatch exactly those
-lenses against the same candidate — no new commit, nothing to re-bind — and re-run
-`collect-findings.mjs`. Once. Still missing after that, carry it to step 9 and let
-a person decide; `review-incomplete` blocks the merge either way.
+lenses against the same candidate — no new commit, nothing to re-bind — and
+re-run `collect-findings.mjs`. Once.
+
+**Dispatch that re-run with `run_in_background: false`, not behind a watcher.**
+A lens counts as missing when its file is unreadable, fails the schema, or names
+the wrong candidate as readily as when it is absent, so the path it is about to
+rewrite is usually already there and `[ -f ]` returns having waited for nothing.
+
+Still missing after that, carry it to step 9 and let a person decide;
+`review-incomplete` blocks the merge either way.
 
 ### 7. Adversary and re-check
 
@@ -251,6 +281,28 @@ In one message:
   its own round-1 output has no way to know them, returns titles instead, and
   every verdict fails to bind. That reads as "no verdict was returned" and holds
   the pull request on findings that were actually fixed.
+
+The Codex re-check is a Bash call: `run_in_background`, and read its result, like
+the Codex review in step 5.
+
+**Then wait for every one of them before `recheck.mjs`** — the adversary file
+and each re-check file — with one background watcher, as in step 5 and
+*Dispatching and waiting* in the skill:
+
+```bash
+RD="$S/<id>/rounds/<n>"
+until [ -f "$RD/findings/adversary.json" ] && [ -f "$RD/recheck/<lens>.json" ]; do sleep 5; done
+```
+
+**Watch only for what you dispatched.** One test per lens you actually
+re-checked, plus `recheck/codex.json` only if Codex had open findings — and on a
+clean round, where the second bullet is skipped entirely, the adversary file is
+the whole watcher. A test for a file nobody was told to write never comes true.
+
+An adversary file that is not there yet reads as `incomplete`, exactly as a
+missing one does, and a re-check that has not landed leaves a finding the fixer
+repaired recorded as still open — and the review gate goes on record that way two
+lines later.
 
 ```bash
 node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" \
@@ -307,7 +359,8 @@ A red CI gets exactly one repair, and **the repair is a new candidate, so it get
 a new review round — not a shortcut back to the merge.** In full:
 
 1. `gates.mjs state ... reviewing`.
-2. Dispatch the fixer at `models.worker` / `effort.worker` with the failing check output, then commit and re-snapshot
+2. Dispatch the fixer at `models.worker` / `effort.worker` with the failing check
+   output, blocking as in step 6, then commit and re-snapshot
    with a fresh `<n>`, set `OID`, `bind` — which clears every gate — and re-run
    verify.
 3. **Steps 5, 6 and 7 again, entirely.** The whole lens panel plus Codex against
@@ -403,4 +456,5 @@ Never read `review.diff` or a findings file. Never re-derive the reviewed commit
 with `git rev-parse HEAD` — after the fix round that is a different commit, and
 `state.json` holds the right one. Never merge without `merge.mjs`. Never put a
 finding id, a commit oid, a gate name, or a file-and-line coordinate into a
-question or into the text around one.
+question or into the text around one. Never run one of these scripts over output
+that has not all arrived, and never mark time with filler commands while it does.
