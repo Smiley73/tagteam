@@ -242,14 +242,25 @@ In one message:
   given the spec and `$S/<id>/rounds/<n>/review.diff`, writing
   `$S/<id>/rounds/<n>/findings/adversary.json` with `candidate` set to `$OID`.
 - Each lens named by `collect-findings.mjs` as having open findings, and **only**
-  those. It writes `$S/<id>/rounds/<n>/open/<lens>.json` per lens — the findings
+  those. It writes `$S/<id>/rounds/<r>/open/<lens>.json` per lens — the findings
   that lens must judge, **with their ids** — and names each file in its output.
+  `<r>`, defined under the commands below, is the round whose panel raised them:
+  the collector writes `open/` as a sibling of the findings directory it read, so
+  when step 6 fixed something and opened a fresh round these files are in the
+  round before this one, and `rounds/<n>/open/` does not exist at all.
   Hand the reviewer *that path*, plus the new diff, plus
   `$S/<id>/rounds/<n>/recheck/<lens>.json` to write, under `prompts/recheck.md`,
   at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
   schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
-  other Codex call. Skip this bullet entirely when step 5 was clean — there is
-  nothing to re-check.
+  other Codex call.
+- Each lens with a file in `$S/<id>/rounds/<n-1>/still-open/`, when the previous
+  round left findings open — the same re-check dispatch, with
+  `still-open/<lens>.json` as its input and `$S/<id>/rounds/<n>/recheck/<lens>.json`
+  as its output, merged into the bullet above for a lens that appears in both.
+  Those ids are settled by the `--carry` below and stay open without a verdict,
+  so a round that inherits work and dispatches nobody for it can never settle.
+  Skip both of these bullets entirely when step 5 was clean and no previous round
+  left anything open — there is nothing to re-check.
 
   **Hand it the open file, never the raw findings file.** The ids are assigned by
   `collect-findings.mjs` and appear only in what it writes; a reviewer pointed at
@@ -339,7 +350,11 @@ a new review round — not a shortcut back to the merge.** In full:
    and the re-check. Not just the lenses that had findings last time: `bind`
    cleared the review gate, `review.json` from the old candidate has nothing
    left in `open` to re-check, and re-running only the re-check would hand this
-   commit a clean review gate that no lens ever looked at.
+   commit a clean review gate that no lens ever looked at. Step 7 applies whole,
+   including its carry: if the round before this one left findings open, its
+   `still-open/<lens>.json` files are dispatched for verdicts alongside this
+   round's own and `--carry` names its `still-open.json`. Without both halves the
+   re-check refuses, or settles `incomplete` on ids nobody was asked about.
 4. `verifying -> publishing`, `git -C "$W" push --force-with-lease`, then
    `gates.mjs pr` with the new head and `ci-wait.mjs` again, recording the new CI
    gate before you evaluate.

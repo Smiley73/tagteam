@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { collect, findingId, roundDirectoryFor } from "../scripts/collect-findings.mjs";
+import { collect, findingId, parseRound, roundDirectoryFor } from "../scripts/collect-findings.mjs";
 import { settle, resolveCarry } from "../scripts/recheck.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -595,72 +595,181 @@ test("a settled review can be re-printed in a session that did not settle it", a
   assert.match(reprint.stdout, /1\.correctness\.2 goes wrong like this/);
 });
 
-test("re-running the recheck in place does not inflate the tally", async () => {
-  // Ship passes the same review.json as both --review and --out, so a run that
-  // succeeds and then dies before `gates.mjs record` gets re-run against its own
-  // output. Adding the adversary to a tally that already included it grew the
-  // file on every attempt. Found by Codex review of this change.
+// A re-check round the snapshot has claimed, which is what production runs in:
+// `--review` and `--out` are two files inside a marked round, so every write the
+// re-check makes is write-once and a retry has to be able to replace what the
+// previous attempt derived. A fixture without the marker takes `writeRoundFile`'s
+// plain-write branch and proves nothing about that.
+function markedRecheckRound(prefix, { candidate = NEW_OID, number = 2 } = {}) {
+  const built = recheckRound(number, fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  fs.writeFileSync(path.join(built.dir, "round.json"), JSON.stringify({ owner: candidate, attempts: 1 }));
+  return built;
+}
+
+test("re-running the recheck in a claimed round does not inflate the tally", async () => {
+  // A run that succeeds and then dies before `gates.mjs record` gets re-run in
+  // the same round. Adding the adversary to a tally that already included it grew
+  // the file on every attempt — found by Codex review — and `reviewCounts` is
+  // what keeps the base the same on every run.
   const { spawnSync } = await import("node:child_process");
-  const { base, verdicts, adv } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-idem-")));
+  const { verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-idem-");
   fs.writeFileSync(adv, JSON.stringify({
     lens: "adversary", candidate: NEW_OID, summary: "read it",
     findings: [finding({ severity: "minor", title: "worth knowing" })]
   }));
-  const inPlace = path.join(base, "review.json");
-  fs.writeFileSync(inPlace, JSON.stringify({
+  fs.writeFileSync(reviewPath, JSON.stringify({
     status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
   }));
 
   const run = () => spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
-    "--review", inPlace, "--dir", verdicts, "--adversary", adv,
-    "--candidate", NEW_OID, "--round", "2", "--out", inPlace
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out
   ], { encoding: "utf8" });
 
   run();
-  const first = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  const first = JSON.parse(fs.readFileSync(out, "utf8"));
   assert.equal(first.counts.minor, 1);
-  run();
-  const second = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  const again = run();
+  assert.equal(again.status, 0, `a retry inside the round must settle again: ${again.stderr}`);
+  const second = JSON.parse(fs.readFileSync(out, "utf8"));
   assert.equal(second.counts.minor, 1, "a second run must not count the same adversary finding twice");
   run();
-  assert.equal(JSON.parse(fs.readFileSync(inPlace, "utf8")).counts.minor, 1);
+  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).counts.minor, 1);
   assert.deepEqual(second.reviewCounts, { blocking: 0, major: 0, minor: 0, nit: 0 });
 });
 
-test("an in-place retry is stable when the adversary raised a blocker", async () => {
+test("a retry in a claimed round is stable when the adversary raised a blocker", async () => {
   // The half the first idempotence fix did not reach: with a gating adversary
   // finding, `open` is non-empty, so a retry read the last run's adversary entry
   // as a first-review finding — hunted for a recheck verdict that was never
   // meant to exist, went incomplete, and appended a second adversary.1.
   const { spawnSync } = await import("node:child_process");
-  const { base, verdicts, adv } = recheckRound(2, fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-idem2-")));
+  const { verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-idem2-");
   fs.writeFileSync(adv, JSON.stringify({
     lens: "adversary", candidate: NEW_OID, summary: "read it",
     findings: [finding({ severity: "blocking", title: "the fix moved the defect" })]
   }));
-  const inPlace = path.join(base, "review.json");
-  fs.writeFileSync(inPlace, JSON.stringify({
+  fs.writeFileSync(reviewPath, JSON.stringify({
     status: "clean", candidate: OID, counts: { blocking: 0, major: 0, minor: 0, nit: 0 }, open: [], missing: []
   }));
 
   const run = () => spawnSync("node", [
     path.join(root, "scripts", "recheck.mjs"),
-    "--review", inPlace, "--dir", verdicts, "--adversary", adv,
-    "--candidate", NEW_OID, "--round", "2", "--out", inPlace
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out
   ], { encoding: "utf8" });
 
   run();
-  const first = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  const first = JSON.parse(fs.readFileSync(out, "utf8"));
   assert.equal(first.status, "open");
   assert.deepEqual(first.open.map((entry) => entry.id), ["2.adversary.1"]);
 
-  run();
-  const second = JSON.parse(fs.readFileSync(inPlace, "utf8"));
+  const again = run();
+  assert.equal(again.status, 1, `a retry inside the round must settle again: ${again.stderr}`);
+  const second = JSON.parse(fs.readFileSync(out, "utf8"));
   assert.equal(second.status, "open", "a retry must not turn a reviewed blocker into incomplete");
   assert.deepEqual(second.open.map((entry) => entry.id), ["2.adversary.1"], "and must not duplicate the id");
   assert.equal(second.counts.blocking, 1);
   assert.deepEqual(second.missing, []);
+});
+
+test("a re-dispatched verdict is settled inside the same round, replacing what the first run derived", async () => {
+  // The recovery the whole design points at: a lens whose verdict file was
+  // unusable is deliberately left writable so it can be re-dispatched into this
+  // same round. That re-dispatch makes the settlement different, and every file
+  // the re-check derives — `recheck.json`, `still-open.json`, `still-open/` — is
+  // write-once inside a marked round. Without the deriver clearing its own
+  // outputs first, the second run died refusing its own `recheck.json`, the round
+  // stayed `incomplete` forever, and the only escape on offer was re-entering the
+  // round, which deletes the diff, the findings and the verdicts.
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-recheck-retry-");
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  // Judged the wrong commit, so it settles nothing and stays writable.
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "1.correctness.1", resolved: true, evidence: "fixed" },
+    { id: "1.correctness.2", resolved: true, evidence: "fixed" }
+  ], OID)), { mode: 0o600 });
+
+  const run = () => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "2", "--out", out
+  ], { encoding: "utf8" });
+
+  const first = run();
+  assert.equal(first.status, 1, `an unusable verdict file is not clean: ${first.stdout}${first.stderr}`);
+  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).status, "incomplete");
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8")).findings.map((entry) => entry.id),
+    ["1.correctness.1", "1.correctness.2"]
+  );
+  assert.ok(fs.existsSync(path.join(roundDir, "still-open", "correctness.json")));
+  assert.ok(fs.statSync(path.join(verdicts, "correctness.json")).mode & 0o200, "a rejected verdict must stay writable");
+
+  // The re-dispatch: the same lens writes a verdict bound to the right commit,
+  // clearing both findings. The settlement is therefore different at every
+  // derived path, which is the only version of this test that proves anything —
+  // byte-identical output passes the write-once guard either way.
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "1.correctness.1", resolved: true, evidence: "the conditional update landed" },
+    { id: "1.correctness.2", resolved: true, evidence: "the second read is guarded now" }
+  ])), { mode: 0o600 });
+
+  const second = run();
+  assert.equal(second.status, 0, `the re-run refused its own derived outputs: ${second.stderr}`);
+  const settled = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(settled.status, "clean", "the corrected settlement was not written");
+  assert.deepEqual(settled.open, []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8")).findings, []);
+  // The stale per-lens file goes with it: `still-open/<lens>.json` is written
+  // only for a lens that still has something open, so a survivor from the earlier
+  // derivation would be handed to the next round as current.
+  assert.deepEqual(fs.readdirSync(path.join(roundDir, "still-open")), []);
+  // Derived files are records: cleared and rewritten, not overwritten in place.
+  assert.equal(fs.statSync(out).mode & 0o777, 0o400);
+  assert.equal(fs.statSync(path.join(roundDir, "still-open.json")).mode & 0o777, 0o400);
+  // Nothing outside this run's own derivation was touched: the round still holds
+  // the verdicts and the adversary's pass, which nothing on disk could re-derive.
+  assert.ok(fs.existsSync(adv));
+  assert.ok(fs.existsSync(path.join(verdicts, "correctness.json")));
+});
+
+test("a round belonging to another commit is refused before the re-check clears anything", async () => {
+  // The same keystroke the collector guards against — `<n>` is substituted by
+  // hand in ship.md — pointed at the re-check. Clearing before the owner is
+  // checked would delete a settled round's `recheck.json` and `still-open/`, and
+  // then refuse; nothing left on disk could re-derive them.
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, verdicts, adv, review: reviewPath, out } = markedRecheckRound("tagteam-recheck-owner-");
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  fs.writeFileSync(reviewPath, JSON.stringify(review));
+  fs.writeFileSync(out, "{\"from\": \"the settled round\"}");
+  fs.mkdirSync(path.join(roundDir, "still-open"));
+  fs.writeFileSync(path.join(roundDir, "still-open", "correctness.json"), "{\"from\": \"the settled round\"}");
+  fs.writeFileSync(path.join(roundDir, "still-open.json"), "{\"from\": \"the settled round\"}");
+
+  const run = spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", OID, "--round", "2", "--out", out
+  ], { encoding: "utf8" });
+
+  assert.equal(run.status, 2, `a round owned by another commit must refuse: ${run.stdout}`);
+  assert.match(run.stderr, new RegExp(`${NEW_OID}[\\s\\S]*${OID}`));
+  assert.equal(fs.readFileSync(out, "utf8"), "{\"from\": \"the settled round\"}", "the refused run deleted recheck.json");
+  assert.equal(
+    fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8"),
+    "{\"from\": \"the settled round\"}",
+    "the refused run deleted still-open.json"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(roundDir, "still-open", "correctness.json"), "utf8"),
+    "{\"from\": \"the settled round\"}",
+    "the refused run deleted a still-open/<lens>.json"
+  );
 });
 
 test("a carried-forward missing lens does not restate itself on every retry", () => {
@@ -933,6 +1042,24 @@ test("collecting a round twice mints the same ids, and a re-dispatched lens renu
     "a lens arriving late renumbered another lens's findings"
   );
   assert.deepEqual(again.findings.filter((entry) => entry.lens === "codex").map((entry) => entry.id), ["2.codex.1"]);
+});
+
+test("--round is a bare decimal of at least 1, and nothing else", () => {
+  // The format is not cosmetic: `--round 01` against a directory literally named
+  // `01` passes the directory check and mints `01.correctness.1`, an id no later
+  // round's verdicts bind to and no reader can tell from `1.correctness.1`. `0`
+  // names a round that does not exist, and the previous-round lookup would go
+  // hunting for `rounds/-1`. Nothing else in the suite exercises the rule, so
+  // loosening the pattern to `[0-9]+` used to break no test at all.
+  for (const value of ["01", "0", "", " 1", "1.0", "2/", "+1", "-1", "1e2", undefined, null]) {
+    assert.throws(
+      () => parseRound(value),
+      /--round must be a whole number of at least 1/,
+      `parseRound accepted ${JSON.stringify(value)}`
+    );
+  }
+  assert.equal(parseRound("1"), 1);
+  assert.equal(parseRound("12"), 12);
 });
 
 test("a --round that disagrees with the directory it was pointed at is refused", async () => {

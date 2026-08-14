@@ -23,7 +23,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { findingId, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
-import { sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
+import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 
@@ -103,6 +103,40 @@ export function resolveCarry(roundDir, round, carry) {
       + "them is why this round exists");
   }
   return resolved;
+}
+
+// The re-check is a deriver too, and the deriver is the one caller allowed to
+// replace what it derived. `recheck.json`, `still-open.json` and `still-open/`
+// are all computed from the verdict files under `--dir` and the adversary's
+// file, and a lens whose verdict was missing, unparseable or bound to the wrong
+// commit is left writable precisely so it can be re-dispatched into this same
+// round. That re-dispatch makes the settlement different, so without clearing
+// first the write-once round refuses the corrected result and the only escape on
+// offer — re-entering the round — deletes the diff, the findings and the
+// verdicts, none of which can be re-derived. Same clearing as
+// `collect-findings.mjs`'s `writeDerived`, for the same reason, and it also
+// removes the stale `still-open/<lens>.json` of a lens that no longer has
+// anything open.
+//
+// The marker and the owner are checked before anything is removed, exactly as
+// the collector checks them: a round whose `round.json` is damaged is neither
+// re-entered nor written into, and a round belonging to another commit — `<n>`
+// is substituted by hand in `ship.md` — must be refused with its records intact,
+// not after a refusal that already deleted them.
+function clearDerived(roundDir, out, candidate) {
+  const target = path.resolve(roundDir);
+  const round = roundRootForWrite(path.join(target, "still-open.json"));
+  const owner = round === null ? null : readRoundMarker(round)?.owner;
+  if (owner !== null && owner !== candidate) {
+    throw new Error(`the round at ${round} belongs to ${owner}, not to ${candidate}; nothing was removed `
+      + "— settle into the round that records this candidate, or re-run with the candidate that round belongs to");
+  }
+  // `--out` only when it lands in this same round; pointed anywhere outside one,
+  // it is the plain write it always was.
+  const outPath = path.resolve(out);
+  if (round !== null && roundRootForWrite(outPath) === round) fs.rmSync(outPath, { force: true });
+  fs.rmSync(path.join(target, "still-open.json"), { force: true });
+  fs.rmSync(path.join(target, "still-open"), { recursive: true, force: true });
 }
 
 export function settle({
@@ -365,25 +399,36 @@ async function main() {
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")
     });
-    // The settled review is written first, and sealing comes after. Sealing is a
-    // reinforcement; a chmod that fails for a reason `sealRoundRecord` does not
-    // tolerate (a read-only mount, a filesystem that will not do it at all) must
-    // not be able to throw away a review that was already computed — there is no
-    // review gate without this file, and the same chmod fails the same way on
-    // every retry. `--out` is this round's settled review, written once: the
-    // collection it was derived from stays where it is, so a re-run reads a
-    // pristine input and produces the same bytes.
-    writeRoundFile(options.out, `${JSON.stringify(result, null, 2)}\n`);
+    // Everything below is this run's own derivation, so the previous one is
+    // cleared first — see `clearDerived`. Nothing is removed until the round's
+    // marker and owner have been checked.
+    clearDerived(roundDir, options.out, options.candidate);
     // What this round leaves for the next one, in the two shapes those readers
     // already consume — a fixer's cross-lens brief and one file per lens of what
     // that lens must judge. Written on every run, including a clean one, for the
     // same reason `to-fix.json` is: an absent file is not a record of nothing.
+    //
+    // Written *before* the settled review, and that order is load-bearing. These
+    // are two writes with nothing binding them, and the next round decides
+    // whether it inherited anything from `rounds/<n-1>/still-open.json`. A run
+    // that dies between them must therefore not be able to leave `recheck.json`
+    // holding open findings with no `still-open.json` beside it: that state reads
+    // as a settled review that left nothing behind, `gates.mjs record` runs
+    // against it on the resume, and every finding this round could not close
+    // disappears. The other order is safe — a `still-open.json` with no settled
+    // review beside it stops the next round until this one is finished.
     const { perLens, list } = writeOpenViews(roundDir, {
       candidate: options.candidate,
       open: result.open,
       list: "still-open.json",
       perLens: "still-open"
     });
+    // Sealing comes after both. Sealing is a reinforcement; a chmod that fails
+    // for a reason `sealRoundRecord` does not tolerate (a read-only mount, a
+    // filesystem that will not do it at all) must not be able to throw away a
+    // review that was already computed — there is no review gate without this
+    // file, and the same chmod fails the same way on every retry.
+    writeRoundFile(options.out, `${JSON.stringify(result, null, 2)}\n`);
     // Every verdict file this settled is now part of the record, so it is sealed
     // the way `collect-findings` seals the findings it consumed. A lens whose
     // file was missing or unusable is not in `present` and stays writable, which
