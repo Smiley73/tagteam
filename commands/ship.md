@@ -142,7 +142,8 @@ reviewed commit comes from `state.json`.
 The round directory is a record. The snapshot writes `review.diff`,
 `changed-paths.json` and `candidate.json` into it, marks it with the commit that
 owns it, and from then on every file tagteam writes beneath it — the verify
-results and logs, `to-fix.json`, `open/<lens>.json` — is written once: a
+results and logs, `review.json` and `recheck.json`, `to-fix.json`,
+`open/<lens>.json`, `still-open.json` — is written once: a
 different-bytes rewrite is refused, naming the path, rather than silently
 overwriting. Re-running this step against the *same* commit **re-enters** the
 round: it is emptied back to its marker and rebuilt, which is what a ship
@@ -150,11 +151,18 @@ resumed on the round's own commit does and it costs no new `<n>`. Re-running it
 against a *different* commit
 is refused naming both commits, so use a fresh `<n>` after the fix round.
 
-The one exception is Codex's own output — the artifact, its `.prompt.md`,
-`.request.json` and `.events.jsonl`. One invocation writes those as a set that
-only means anything together, and re-dispatching a Codex lens that produced no
-usable evidence into the same round (step 5) has to replace all of them, so they
-are written plainly and are not covered by the round's write-once rule.
+One thing in a round is outside that rule: Codex's own output — the artifact,
+its `.prompt.md`, `.request.json` and `.events.jsonl` — because one invocation
+writes those as a set that only means anything together, and re-dispatching a
+Codex lens that produced no usable evidence into the same round (step 5) has to
+replace all of them. Everything else is a record. The files an agent writes with
+its own Write tool cannot be intercepted at write time, so they are protected one
+step later: a reviewer's `findings/<lens>.json` and `recheck/<lens>.json` are
+sealed read-only by the script that consumes them, and the fixer writes its
+report *outside* the round, where `record-fix-report.mjs` validates it and writes
+the round's copy through the same guard (step 6). Everything a script derives,
+`review.json`, `recheck.json`, `still-open.json` and `still-open/` included, is
+written once.
 
 Never skip `guard-staged.mjs`, and never split that chain. It is the only thing
 between a copied `.env` and a push.
@@ -214,8 +222,12 @@ Then:
 
 ```bash
 node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/<n>/findings" --candidate "$OID" \
-  --expect <lens,lens,codex> --out "$S/<id>/review.json"
+  --expect <lens,lens,codex> --round <n> --out "$S/<id>/rounds/<n>/review.json"
 ```
+
+`--round` is the same `<n>` as the directory, and the script refuses if it is
+not: every finding id it mints starts with it, so `<n>.correctness.1` names the
+round that raised it and can never be cleared by a verdict from another one.
 
 Its stdout is your view of the review — a line per finding. Do not open the
 findings files. `incomplete` means a lens produced no usable evidence; that is
@@ -225,11 +237,27 @@ not clean, and it never merges.
 
 `gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` /
 `effort.worker`, given `$S/<id>/rounds/<n>/to-fix.json`, the worktree, and
-`$S/<id>/fix-report.json` to write. Dispatch it with `run_in_background: false`:
-until it reports it is still editing the worktree you are about to commit. Then
-commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set `OID` to the
-new commit, and `gates.mjs bind` it — which clears every gate, because they were
-about the old one. Re-run verify against the new commit.
+`$S/<id>/fix-report-<n>.json` to write. Dispatch it with
+`run_in_background: false`: until it reports it is still editing the worktree you
+are about to commit. When it returns, record its report into the round:
+
+```bash
+node "$P/scripts/record-fix-report.mjs" --report "$S/<id>/fix-report-<n>.json" \
+  --out "$S/<id>/rounds/<n>/fix-report.json"
+```
+
+**The fixer's own path is outside the round on purpose.** A file an agent writes
+with its Write tool cannot be refused at write time, so a re-dispatched fixer
+would silently replace the round's account of what the first one claimed. This
+step validates the report against `fix-report.schema.json` and writes the round's
+copy through the write-once guard: an identical re-record passes, a different one
+is refused naming the file, and the fixer's scratch copy is left where it is so a
+person can compare them. Its stdout is your view of the report — do not open the
+file.
+
+Then commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set `OID` to
+the new commit, and `gates.mjs bind` it — which clears every gate, because they
+were about the old one. Re-run verify against the new commit.
 
 **Hand it `to-fix.json`, never `review.json`.** `review.json` holds every finding
 at every severity, and a fixer given all of them repairs all of them — a round
@@ -267,14 +295,27 @@ In one message:
   given the spec and `$S/<id>/rounds/<n>/review.diff`, writing
   `$S/<id>/rounds/<n>/findings/adversary.json` with `candidate` set to `$OID`.
 - Each lens named by `collect-findings.mjs` as having open findings, and **only**
-  those. It writes `$S/<id>/rounds/<n>/open/<lens>.json` per lens — the findings
+  those. It writes `$S/<id>/rounds/<r>/open/<lens>.json` per lens — the findings
   that lens must judge, **with their ids** — and names each file in its output.
+  `<r>`, defined under the commands below, is the round whose panel raised them:
+  the collector writes `open/` as a sibling of the findings directory it read, so
+  when step 6 fixed something and opened a fresh round these files are in the
+  round before this one, and `rounds/<n>/open/` does not exist at all.
   Hand the reviewer *that path*, plus the new diff, plus
   `$S/<id>/rounds/<n>/recheck/<lens>.json` to write, under `prompts/recheck.md`,
   at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
   schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
-  other Codex call. Skip this bullet entirely when step 5 was clean — there is
-  nothing to re-check.
+  other Codex call.
+- Each lens with a file in the `still-open/` of the most recent earlier round
+  that wrote one, when that round left findings open — only a re-check writes
+  `still-open/`, so that round is not always `<n-1>`; the round before this one
+  is usually the panel or fix round, which writes none. The same re-check dispatch, with
+  `still-open/<lens>.json` as its input and `$S/<id>/rounds/<n>/recheck/<lens>.json`
+  as its output, merged into the bullet above for a lens that appears in both.
+  Those ids are settled by the `--carry` below and stay open without a verdict,
+  so a round that inherits work and dispatches nobody for it can never settle.
+  Skip both of these bullets entirely when step 5 was clean and no earlier round
+  left anything open — there is nothing to re-check.
 
   **Hand it the open file, never the raw findings file.** The ids are assigned by
   `collect-findings.mjs` and appear only in what it writes; a reviewer pointed at
@@ -294,10 +335,17 @@ RD="$S/<id>/rounds/<n>"
 until [ -f "$RD/findings/adversary.json" ] && [ -f "$RD/recheck/<lens>.json" ]; do sleep 5; done
 ```
 
-**Watch only for what you dispatched.** One test per lens you actually
-re-checked, plus `recheck/codex.json` only if Codex had open findings — and on a
-clean round, where the second bullet is skipped entirely, the adversary file is
-the whole watcher. A test for a file nobody was told to write never comes true.
+**Watch only for what you dispatched, and watch for all of it.** One `-f` test
+per lens you dispatched a re-check to, whether it came from the open findings of
+step 5 or from an earlier round's `still-open/` — `recheck/codex.json` included
+when Codex is one of them. Every re-check writes into the same
+`rounds/<n>/recheck/` directory, so a lens that appears in both bullets is one
+file and one test. The adversary file is the whole watcher only when both
+bullets were skipped: step 5 was clean *and* no earlier round left anything
+open. A test for a file nobody was told to write never comes true; a carried
+lens left out of the watcher is worse, because `recheck.mjs` then runs before its
+verdict lands and settles every inherited finding as "no verdict was returned",
+which is a round that stops the pull request on findings nobody was asked about.
 
 An adversary file that is not there yet reads as `incomplete`, exactly as a
 missing one does, and a re-check that has not landed leaves a finding the fixer
@@ -305,12 +353,42 @@ repaired recorded as still open — and the review gate goes on record that way 
 lines later.
 
 ```bash
-node "$P/scripts/recheck.mjs" --review "$S/<id>/review.json" \
+node "$P/scripts/recheck.mjs" --review "$S/<id>/rounds/<r>/review.json" --round <n> \
   --dir "$S/<id>/rounds/<n>/recheck" --adversary "$S/<id>/rounds/<n>/findings/adversary.json" \
-  --candidate "$OID" --out "$S/<id>/review.json"
-node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/review.json"
+  --candidate "$OID" --out "$S/<id>/rounds/<n>/recheck.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/rounds/<n>/recheck.json"
 node "$P/scripts/gates.mjs" state "$S/<id>/state.json" verifying
 ```
+
+`<r>` is the round whose lens panel raised these findings, which is `<n>` when
+nothing was fixed and the round before the fix when something was — the fix made
+a new commit and a new round, and the findings it is being judged against were
+collected in the old one. `--round <n>` is this round either way: it is where the
+verdicts and the adversary's fresh pass live, and where the settlement is written.
+
+`<r>` is checked like every other round path here: it must be the `review.json`
+of a round at or below `<n>` under the same rounds root, that collection must say
+it is that round, and no round between it and `<n>` may hold a collection of its
+own. Reaching back past a newer panel is refused rather than settled, because
+the findings the newer panel raised would otherwise be settled by nobody and
+carried by nobody. `recheck.json` records the round it answered for.
+
+The collection and the settlement are two files in the round: the re-check reads
+`review.json` and writes `recheck.json`, and `recheck.json` is the review gate.
+It also writes `$S/<id>/rounds/<n>/still-open.json` and
+`still-open/<lens>.json` — what this round did not close, as a cross-lens list
+and one file per lens. Nothing reads them yet; they are the record of what a
+round left behind, so a later one could be handed it. Whatever is in them here
+is what stops this pull request.
+
+If it refuses because an earlier round left findings open, it names that round's
+`still-open.json`: pass it as `--carry <that path>` and those findings are
+settled here too, by the same per-lens verdict files. The round it names is the
+most recent one below `<n>` that recorded what it left open, which is rarely
+`<n-1>` — a fix round and a panel round write no `still-open.json`, so the
+findings a re-check two or three rounds back could not close are still the ones
+being asked for. Refusing is the point — a round that starts without them drops
+them silently.
 
 That last transition is what both paths converge on. A clean round is at
 `reviewing` and a fixed one is at `fixing`, and only `verifying` is reachable
@@ -368,7 +446,12 @@ a new review round — not a shortcut back to the merge.** In full:
    and the re-check. Not just the lenses that had findings last time: `bind`
    cleared the review gate, `review.json` from the old candidate has nothing
    left in `open` to re-check, and re-running only the re-check would hand this
-   commit a clean review gate that no lens ever looked at.
+   commit a clean review gate that no lens ever looked at. Step 7 applies whole,
+   including its carry: if the most recent earlier round that recorded one left
+   findings open — the re-check before this repair, not necessarily `<n-1>` — its
+   `still-open/<lens>.json` files are dispatched for verdicts alongside this
+   round's own and `--carry` names its `still-open.json`. Without both halves the
+   re-check refuses, or settles `incomplete` on ids nobody was asked about.
 4. `verifying -> publishing`, `git -C "$W" push --force-with-lease`, then
    `gates.mjs pr` with the new head and `ci-wait.mjs` again, recording the new CI
    gate before you evaluate.
@@ -417,14 +500,14 @@ this. If you reached this step on a resume and never ran it in this session,
 that summary is in a context that has ended — get it back with
 
 ```bash
-node "$P/scripts/recheck.mjs" --print "$S/<id>/review.json"
+node "$P/scripts/recheck.mjs" --print "$S/<id>/rounds/<n>/recheck.json"
 ```
 
 which re-renders what the earlier run printed and settles nothing. That is the
 supported way; opening a findings file is still not.
 
 What you must not pass on is the shape it arrived in.
-`correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
+`1.correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
 and the person deciding whether this merges is not going to open the file. They
 are deciding whether the behaviour is acceptable, so describe the behaviour. The
 same goes for the gate that fired — "nothing in this change has a test that runs

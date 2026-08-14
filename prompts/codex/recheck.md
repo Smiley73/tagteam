@@ -13,7 +13,9 @@ The findings you raised, each carrying an `id`:
 
 **Copy those ids into your verdicts unchanged.** Do not derive them from the
 title and do not invent a scheme: a verdict whose id does not match one above is
-counted as no verdict at all, and that finding stays open.
+counted as no verdict at all, and that finding stays open. An id looks like
+`2.codex.1`, and the leading number is part of it — it says which review round
+raised the finding, and shortening it to `codex.1` binds the verdict to nothing.
 
 The change as it now stands:
 

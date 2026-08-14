@@ -54,7 +54,7 @@ test("the same bytes twice is fine; different bytes at a round path is refused",
 });
 
 test("the same helper outside any round overwrites", () => {
-  // Plan-side Codex output and the spec-level review.json live above every
+  // Plan-side Codex output and the working files beside it live above every
   // round and are rewritten on every run. A guard that reached them would stop
   // the second run of a plan.
   const file = path.join(temp("loose"), "review.json");
@@ -176,6 +176,73 @@ test("sealing is a reinforcement, so a missing file is not an error", () => {
   const file = plant(dir, "findings/correctness.json", "evidence");
   assert.equal(sealRoundRecord(file), true);
   assert.equal(fs.statSync(file).mode & 0o777, 0o400);
+});
+
+// --- the fixer's report, recorded into the round ---------------------------
+
+// The fixer writes its report with its own Write tool, which no script can
+// intercept, so the report only becomes a record when `record-fix-report.mjs`
+// puts it in the round. Delete that step, or route it past `writeRoundFile`, and
+// a re-dispatched fixer silently replaces the round's only account of what the
+// previous one claimed — these three tests are what stands between that and the
+// tree. They run the real script, because the guarantee is the script's.
+const record = (report, out) => spawnSync("node", [
+  path.join(root, "scripts", "record-fix-report.mjs"), "--report", report, "--out", out
+], { encoding: "utf8" });
+
+const reportAt = (dir, note) => {
+  const file = path.join(dir, "fix-report-1.json");
+  fs.writeFileSync(file, `${JSON.stringify({
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note }],
+    notes: ""
+  }, null, 2)}\n`);
+  return file;
+};
+
+test("a fix report is recorded once: a re-dispatched fixer cannot replace it", () => {
+  const dir = roundAt();
+  const scratch = temp("fix");
+  const out = path.join(dir, "fix-report.json");
+
+  const first = record(reportAt(scratch, "took the lock before the read"), out);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /1 fixed/);
+  assert.equal(fs.statSync(out).mode & 0o777, 0o400, "the recorded report is not a sealed record");
+
+  // Re-recording the same report is how a resumed run behaves, and it passes.
+  assert.equal(record(reportAt(scratch, "took the lock before the read"), out).status, 0);
+
+  const second = record(reportAt(scratch, "could not reproduce it"), out);
+  assert.equal(second.status, 2, "a second fixer's report replaced the round's record");
+  assert.match(second.stderr, new RegExp(out.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const kept = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(kept.outcomes[0].note, "took the lock before the read");
+});
+
+test("a report the fixer dropped inside the round is refused, not recorded", () => {
+  // The whole mechanism rests on the fixer writing outside every round. A report
+  // already in the round arrived past the guard, and copying it to a second path
+  // inside the same round would launder that.
+  const dir = roundAt();
+  const stray = reportAt(dir, "wrote straight into the round");
+  const result = record(stray, path.join(dir, "fix-report.json"));
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /inside a round/);
+  assert.equal(fs.existsSync(path.join(dir, "fix-report.json")), false);
+});
+
+test("an invalid report is refused before the round holds it", () => {
+  // A report recorded into a round can never be replaced with a corrected one, so
+  // the schema check has to come first: refusing leaves the round clean and the
+  // fixer re-dispatchable.
+  const dir = roundAt();
+  const scratch = temp("fix-bad");
+  const file = path.join(scratch, "fix-report-1.json");
+  fs.writeFileSync(file, JSON.stringify({ outcomes: [{ id: "1.correctness.1", outcome: "maybe", note: "x" }], notes: "" }));
+  const result = record(file, path.join(dir, "fix-report.json"));
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /fix-report schema/);
+  assert.equal(fs.existsSync(path.join(dir, "fix-report.json")), false);
 });
 
 // --- snapshot-candidate against a real repository -------------------------
@@ -324,8 +391,9 @@ function realPass() {
   const collected = spawnSync("node", [
     path.join(root, "scripts", "collect-findings.mjs"),
     "--dir", findings, "--candidate", source.candidate, "--expect", "correctness",
-    // review.json lives above the round, where it is rewritten every run.
-    "--out", path.join(rounds, "review.json")
+    // A round holds its own review, so `review.json` is a record of this round
+    // like everything else the collector derives.
+    "--round", "1", "--out", path.join(outDir, "review.json")
   ], { encoding: "utf8" });
   assert.equal(collected.status, 1, `collect-findings failed: ${collected.stderr}`);
 
@@ -349,7 +417,7 @@ test("every regular file a real pass leaves in a round is a sealed, write-once r
   const expected = [
     "review.diff", "changed-paths.json", "candidate.json",
     "verify.json", path.join("verify", "1.log"),
-    "to-fix.json", path.join("open", "correctness.json"),
+    "review.json", "to-fix.json", path.join("open", "correctness.json"),
     path.join("findings", "correctness.json")
   ].map((relative) => path.join(outDir, relative));
   for (const file of expected) assert.ok(records.includes(file), `a real pass wrote no ${file}`);
@@ -374,7 +442,7 @@ test("re-entering a round a real pass filled empties it, read-only records and a
   const records = [
     "review.diff", "changed-paths.json", "candidate.json",
     "verify.json", path.join("verify", "1.log"),
-    "to-fix.json", path.join("open", "correctness.json"), path.join("findings", "correctness.json")
+    "review.json", "to-fix.json", path.join("open", "correctness.json"), path.join("findings", "correctness.json")
   ].map((relative) => path.join(outDir, relative));
   // A verify log is filled incrementally and stays 0o600; everything else the
   // pass left is read-only, which is the tree re-entry has to be able to remove.

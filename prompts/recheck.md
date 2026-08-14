@@ -9,6 +9,11 @@ not use the title, do not invent a scheme — a verdict whose id does not match 
 counted as no verdict at all, and the finding stays open. The ids are in your
 input for exactly this reason.
 
+An id looks like `2.correctness.1`, and the leading number is part of it: it
+says which review round raised the finding. Tidying it to `correctness.1`
+returns a verdict that binds to nothing, and the finding you judged resolved
+stays open.
+
 Then read the new diff at the path you are given and the current state of the
 files involved. Write your verdicts to the path you are given, matching
 `schemas/recheck.schema.json`, with `candidate` set to the exact post-fix commit
