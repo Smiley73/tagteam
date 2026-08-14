@@ -14,7 +14,7 @@
 // The fixer's own report is deliberately not consulted. It is bookkeeping: it
 // says what was attempted, and the reviewer says what is true.
 //
-// A round can also inherit. `--carry` is the previous round's `still-open.json`,
+// A round can also inherit. `--carry` is an earlier round's `still-open.json`,
 // settled by id exactly like the findings this round's own review raised, and
 // what survives is written back out as this round's `still-open.json` for the
 // next one. Nothing here loops; this is what makes a loop survivable.
@@ -52,7 +52,7 @@ function parseArgs(argv) {
  * The findings a carried record hands this round, from the file at `file`.
  *
  * Anything unreadable throws rather than settling as nothing carried: this file
- * is the only route the previous round's unresolved findings have into this one,
+ * is the only route an earlier round's unresolved findings have into this one,
  * and a round that quietly starts from an empty carry has dropped exactly the
  * work the next round existed to finish.
  */
@@ -76,16 +76,47 @@ function carriedFindings(file) {
 }
 
 /**
+ * The most recent round below `round` that recorded what it left open, as the
+ * path of its `still-open.json`, or null when no earlier round wrote one.
+ *
+ * Deliberately *not* a `<round - 1>` lookup, and the next reader will want to
+ * make it one. `still-open.json` is written only by a re-check, and in
+ * `ship.md`'s own sequence the round immediately before a re-check round is the
+ * panel or fix round, which writes nothing of the kind. So the adjacent-round
+ * version of this lookup finds no file in the common case and the guard below
+ * passes silently — which is precisely the case it exists to catch: round 2
+ * re-checks and leaves a finding open, a new commit opens round 3 for a full
+ * panel, the re-check runs in round 4, and round 2's finding is gone with a
+ * clean review gate recorded over it.
+ */
+function lastRecorded(rounds, round) {
+  let names;
+  try {
+    names = fs.readdirSync(rounds);
+  } catch {
+    return null;
+  }
+  const earlier = names
+    .filter((name) => /^[1-9][0-9]*$/.test(name) && Number(name) < round)
+    .sort((a, b) => Number(b) - Number(a));
+  for (const name of earlier) {
+    const file = path.join(rounds, name, "still-open.json");
+    if (fs.existsSync(file)) return file;
+  }
+  return null;
+}
+
+/**
  * The carried record this round settles, or null when it inherits nothing.
  *
  * Two rules. `--carry` must name a round strictly below this one under the same
  * rounds root, because an id says which round raised it and a record from
- * somewhere else names rounds that are not in this history. And when the
- * previous round left findings open, `--carry` is *required* and must be that
- * round's own `still-open.json` — this is the one failure with no other
- * detector: a round that silently starts fresh looks exactly like a round that
- * inherited nothing, and the findings the previous round could not close
- * disappear into a merge.
+ * somewhere else names rounds that are not in this history. And when the most
+ * recent earlier round that recorded one left findings open, `--carry` is
+ * *required* and must be that round's own `still-open.json` — this is the one
+ * failure with no other detector: a round that silently starts fresh looks
+ * exactly like a round that inherited nothing, and the findings that round could
+ * not close disappear into a merge.
  */
 export function resolveCarry(roundDir, round, carry) {
   const rounds = path.dirname(path.resolve(roundDir));
@@ -98,12 +129,12 @@ export function resolveCarry(roundDir, round, carry) {
         + "a carried finding's id names the round that raised it, and only this history's rounds are settled here");
     }
   }
-  const previous = path.join(rounds, String(round - 1), "still-open.json");
-  const outstanding = round > 1 && fs.existsSync(previous) ? carriedFindings(previous).length : 0;
+  const previous = lastRecorded(rounds, round);
+  const outstanding = previous === null ? 0 : carriedFindings(previous).length;
   if (outstanding > 0 && resolved !== previous) {
-    throw new Error(`round ${round - 1} left ${outstanding} finding(s) open: pass --carry ${previous}. `
-      + "A round that starts without the previous round's open findings drops them silently, and finishing "
-      + "them is why this round exists");
+    throw new Error(`round ${path.basename(path.dirname(previous))} left ${outstanding} finding(s) open: `
+      + `pass --carry ${previous}. A round that starts without an earlier round's open findings drops them `
+      + "silently, and finishing them is why this round exists");
   }
   return resolved;
 }
@@ -159,15 +190,16 @@ export function settle({
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   // Everything the adversary contributes is re-derived from its own file on
-  // every run, so none of it may be carried in from a previous one. Ship passes
-  // the same review.json as `--review` and `--out`; without this filter a retry
-  // treats the last run's adversary findings as first-review findings, hunts for
-  // recheck verdicts that were never meant to exist, and appends a second copy
+  // every run, so none of it may be carried in from a previous one. Any
+  // `--review` holding a previous settlement's `open` — this deriver's own
+  // output re-fed, or a round re-checked twice — would without this filter
+  // treat the last run's adversary findings as first-review findings, hunt for
+  // recheck verdicts that were never meant to exist, and append a second copy
   // of every adversary finding under an id that already exists. Found by Codex
   // review, in the case the first idempotence fix did not reach: a *gating*
   // adversary finding, where `open` is non-empty.
   const raised = (review.open ?? []).filter((finding) => finding.lens !== "adversary");
-  // The previous round's unresolved findings reach this round through the
+  // An earlier round's unresolved findings reach this round through the
   // carried record and nowhere else. That separation is what lets an adversary
   // finding be re-checked at all: the filter above drops every adversary entry
   // because they are re-derived from the adversary's own file on every run, and
@@ -301,12 +333,15 @@ export function settle({
   // half of the first round — `raised` is `review.open`. Carrying the tally and
   // adding to it is the only version that counts each finding exactly once.
   //
-  // `reviewCounts` is what makes that survive a second run. Ship passes the same
-  // review.json as both --review and --out, so a run that succeeds and then dies
-  // before `gates.mjs record` is re-run against its own output — and adding the
-  // adversary to a tally that already includes it silently inflates the file
-  // every time. The first review's tally is therefore kept separately and never
-  // accumulated, so the base is the same on every run. Found by Codex review.
+  // `reviewCounts` is what makes that survive a second run. A settlement fed
+  // back in as `--review` — its own output, or a re-run over a review that
+  // already carries a tally the adversary contributed to — would otherwise add
+  // the adversary to a tally that already includes it and silently inflate the
+  // numbers every time. The first review's tally is therefore kept separately
+  // and never accumulated, so the base is the same on every run. Found by Codex
+  // review, back when ship passed the same review.json as `--review` and
+  // `--out`; those are two files in the round now, and the property still has to
+  // hold for anything that re-feeds a settlement.
   const reviewCounts = Object.fromEntries(
     SEVERITY_ORDER.map((severity) => [severity, review.reviewCounts?.[severity] ?? review.counts?.[severity] ?? 0])
   );
@@ -436,8 +471,9 @@ async function main() {
     // same reason `to-fix.json` is: an absent file is not a record of nothing.
     //
     // Written *before* the settled review, and that order is load-bearing. These
-    // are two writes with nothing binding them, and the next round decides
-    // whether it inherited anything from `rounds/<n-1>/still-open.json`. A run
+    // are two writes with nothing binding them, and a later round decides
+    // whether it inherited anything from the newest `still-open.json` below it.
+    // A run
     // that dies between them must therefore not be able to leave `recheck.json`
     // holding open findings with no `still-open.json` beside it: that state reads
     // as a settled review that left nothing behind, `gates.mjs record` runs

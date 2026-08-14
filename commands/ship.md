@@ -253,13 +253,15 @@ In one message:
   at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
   schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
   other Codex call.
-- Each lens with a file in `$S/<id>/rounds/<n-1>/still-open/`, when the previous
-  round left findings open — the same re-check dispatch, with
+- Each lens with a file in the `still-open/` of the most recent earlier round
+  that wrote one, when that round left findings open — only a re-check writes
+  `still-open/`, so that round is not always `<n-1>`; the round before this one
+  is usually the panel or fix round, which writes none. The same re-check dispatch, with
   `still-open/<lens>.json` as its input and `$S/<id>/rounds/<n>/recheck/<lens>.json`
   as its output, merged into the bullet above for a lens that appears in both.
   Those ids are settled by the `--carry` below and stay open without a verdict,
   so a round that inherits work and dispatches nobody for it can never settle.
-  Skip both of these bullets entirely when step 5 was clean and no previous round
+  Skip both of these bullets entirely when step 5 was clean and no earlier round
   left anything open — there is nothing to re-check.
 
   **Hand it the open file, never the raw findings file.** The ids are assigned by
@@ -292,8 +294,12 @@ is what stops this pull request.
 
 If it refuses because an earlier round left findings open, it names that round's
 `still-open.json`: pass it as `--carry <that path>` and those findings are
-settled here too, by the same per-lens verdict files. Refusing is the point —
-a round that starts without them drops them silently.
+settled here too, by the same per-lens verdict files. The round it names is the
+most recent one below `<n>` that recorded what it left open, which is rarely
+`<n-1>` — a fix round and a panel round write no `still-open.json`, so the
+findings a re-check two or three rounds back could not close are still the ones
+being asked for. Refusing is the point — a round that starts without them drops
+them silently.
 
 That last transition is what both paths converge on. A clean round is at
 `reviewing` and a fixed one is at `fixing`, and only `verifying` is reachable
@@ -351,7 +357,8 @@ a new review round — not a shortcut back to the merge.** In full:
    cleared the review gate, `review.json` from the old candidate has nothing
    left in `open` to re-check, and re-running only the re-check would hand this
    commit a clean review gate that no lens ever looked at. Step 7 applies whole,
-   including its carry: if the round before this one left findings open, its
+   including its carry: if the most recent earlier round that recorded one left
+   findings open — the re-check before this repair, not necessarily `<n-1>` — its
    `still-open/<lens>.json` files are dispatched for verdicts alongside this
    round's own and `--carry` names its `still-open.json`. Without both halves the
    re-check refuses, or settles `incomplete` on ids nobody was asked about.

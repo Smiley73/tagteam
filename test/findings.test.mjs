@@ -1294,6 +1294,58 @@ test("a round whose predecessor left findings open refuses to run without them",
   );
 });
 
+test("the guard looks past the rounds that recorded nothing, not only at the round before", async () => {
+  // The sequence ship.md actually produces. Round 2 re-checks and leaves a
+  // blocking finding in its `still-open.json`; a new commit opens round 3 for a
+  // full panel, which writes no `still-open.json` at all; the re-check runs in
+  // round 4. A guard that only reads `rounds/3/still-open.json` finds no file,
+  // asks for no `--carry`, and records a clean review gate over a blocking
+  // finding nobody ever answered — with no other detector anywhere.
+  const { spawnSync } = await import("node:child_process");
+  const { base, verdicts, adv, review: reviewPath, out, dir: roundDir } = recheckRound(4);
+  const recorded = path.join(base, "rounds", "2", "still-open.json");
+  fs.mkdirSync(path.dirname(recorded), { recursive: true });
+  fs.writeFileSync(recorded, JSON.stringify({
+    candidate: OID,
+    findings: [carriedFinding("2.correctness.1", "correctness")]
+  }));
+  // Round 3 ran — a panel round, so it has a findings directory and no record of
+  // anything left open.
+  fs.mkdirSync(path.join(base, "rounds", "3", "findings"), { recursive: true });
+  fs.writeFileSync(adv, JSON.stringify({ lens: "adversary", candidate: NEW_OID, summary: "read it", findings: [] }));
+  fs.writeFileSync(reviewPath, JSON.stringify({ status: "clean", candidate: OID, counts: {}, open: [], missing: [] }));
+  const run = (extra) => spawnSync("node", [
+    path.join(root, "scripts", "recheck.mjs"),
+    "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+    "--candidate", NEW_OID, "--round", "4", "--out", out, ...extra
+  ], { encoding: "utf8" });
+
+  const dropped = run([]);
+  assert.equal(dropped.status, 2, `round 2's open finding was dropped: ${dropped.stdout}`);
+  assert.match(dropped.stderr, new RegExp(recorded.replaceAll(".", "\\.")), "the refusal names the round that recorded it");
+  assert.equal(fs.existsSync(out), false, "the refused run settled anyway");
+
+  // Handed round 2's record, round 4 settles it and writes what survived.
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "2.correctness.1", resolved: true, evidence: "the read is guarded now" }
+  ])));
+  const carried = run(["--carry", recorded]);
+  assert.equal(carried.status, 0, `an inherited finding the reviewer cleared closes: ${carried.stderr}`);
+  assert.match(carried.stdout, /1 carried in from an earlier round/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8")).findings, []);
+});
+
+test("an earlier record that is empty asks for nothing", () => {
+  // The other half of the same lookup: the newest `still-open.json` below this
+  // round is the one that decides, and a round that closed everything must not
+  // make every later round pass a `--carry` holding nothing.
+  const { base, dir: roundDir } = recheckRound(3);
+  const empty = path.join(base, "rounds", "2", "still-open.json");
+  fs.mkdirSync(path.dirname(empty), { recursive: true });
+  fs.writeFileSync(empty, JSON.stringify({ candidate: OID, findings: [] }));
+  assert.equal(resolveCarry(roundDir, 3, undefined), null);
+});
+
 test("the adversary's two roles in one round fail separately", () => {
   // In a round that both re-checks carried adversary findings and runs a fresh
   // adversary pass, the adversary is two readers. `expected` is keyed by lens
