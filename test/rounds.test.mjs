@@ -51,6 +51,27 @@ test("the same candidate re-enters its round and spends nothing", async () => {
   assert.deepEqual(names(rounds), ["1"]);
 });
 
+test("re-entry without a completion record leaves the round's contents alone", async () => {
+  // The ship side never names a completion record, and that absence is the only
+  // thing keeping `enterRound` — which empties a round back to its marker — out
+  // of the resume path. The ship clears its round at the snapshot step instead,
+  // so clearing here as well would delete the candidate snapshot, the review
+  // diff and the findings of the round being resumed, at paths the pull request
+  // body already names. Every other re-entry test re-enters an empty round, so
+  // dropping the guard would leave the suite green and the evidence gone.
+  const rounds = temp();
+  const first = await allocateRound(rounds, { candidate: "a", scope: "s", limit: 2, limitName: "limits.fixRounds", exempt: 0 });
+  fs.writeFileSync(path.join(first.dir, "review.diff"), "the round's evidence");
+  fs.mkdirSync(path.join(first.dir, "findings"));
+  fs.writeFileSync(path.join(first.dir, "findings", "codex.json"), "[]");
+
+  const again = await allocateRound(rounds, { candidate: "a", scope: "s", limit: 2, limitName: "limits.fixRounds", exempt: 0 });
+  assert.equal(again.dir, first.dir);
+  assert.equal(again.reentered, true);
+  assert.equal(fs.readFileSync(path.join(first.dir, "review.diff"), "utf8"), "the round's evidence");
+  assert.equal(fs.readFileSync(path.join(first.dir, "findings", "codex.json"), "utf8"), "[]");
+});
+
 test("a spent budget is refused, and refusing creates nothing", async () => {
   const rounds = temp();
   const allocate = (candidate) =>

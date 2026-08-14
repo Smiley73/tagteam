@@ -49,5 +49,6 @@ opinion about software in general, and it costs a revision round.
 
 Severity means what it says. `blocking`: executed as written, this does not
 produce the goal. `major`: it produces the wrong thing somewhere specific.
-`minor`: worth fixing while revising anyway. There is exactly one revision — a
-finding you rank too low will not be raised again.
+`minor`: worth fixing while revising anyway. How many review rounds this plan
+gets is this repository's configuration, and it may well be one — so a finding
+you rank too low may never be raised again.
