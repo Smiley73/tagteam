@@ -9,7 +9,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/prompts/fix.md` and follow it.
 
 Fix only the findings you are given, and nothing you notice along the way — the
 reviewers that raised these will re-read this diff, and unrelated changes are
-what turn a clean re-check into a second round. Work only beneath the worktree
+what turn a clean re-check into another round. Work only beneath the worktree
 path you are given. Never commit, push, or switch branches.
 
 Write your fix report to the path you are given, matching

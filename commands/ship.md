@@ -91,16 +91,14 @@ Otherwise, by state:
 - `implementing`, `reviewing`, `fixing`, `verifying` — the work was interrupted
   mid-flight and its worktree is gone. `git -C "$W" switch "<branch>"`, then
   restart from step 3 (commit and snapshot) against whatever is committed there.
-  Pick `<n>` by who owns the round, not by which state it stopped in: read
-  `owner` out of `$S/<id>/rounds/<n>/round.json` for the highest `<n>` on disk,
-  and if the commit step 3 leaves at the tip of the branch is that owner, re-use
-  that `<n>` — the snapshot re-enters and rebuilds the round rather than needing
-  a new one. If they differ, that round belongs to an earlier commit and the next
-  unused `<n>` is the right one. `implementing`, `reviewing` and `verifying`
-  normally land back on the owner; a `fixing` (or CI-repair) restart usually does
-  not, because the fix commit exists and the round that was to hold it never got
-  snapshotted, which is exactly the fresh-`<n>` case. Either way the snapshot
-  refuses rather than guessing, naming both commits.
+  Which round that lands in is the allocator's decision and not yours: a commit
+  that already owns a round re-enters it and spends no budget, and a commit no
+  round records gets the next number. `implementing`, `reviewing` and `verifying`
+  normally land back on the round's own commit; a `fixing` (or CI-repair) restart
+  usually does not, because the fix commit exists and the round that was to hold
+  it never got snapshotted — which is exactly what a fresh round is for. Either
+  way nothing is guessed: the snapshot refuses a round that belongs to another
+  commit, naming both.
 - `publishing`, `awaiting-approval` — a pull request exists. Go to step 9 and
   evaluate; do not re-implement anything.
 - `failed` — say what this spec was delivering and what stopped it, in a
@@ -130,14 +128,37 @@ worktree the implementer is still writing commits half a change.
 ```bash
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "feat: <spec title>"
 OID=$(git -C "$W" rev-parse HEAD)
+node "$P/scripts/gates.mjs" round "$S/<id>/state.json" "$S/<id>/rounds" "$OID" "$R/.tagteam/config.json" > "$S/<id>/round.json" && cat "$S/<id>/round.json"
+ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$S/<id>/round.json")
 node "$P/scripts/snapshot-candidate.mjs" --primary "$R" --worktree "$W" --base "$BASE" \
-  --candidate "$OID" --out-dir "$S/<id>/rounds/<n>" --config "$R/.tagteam/config.json"
-node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/rounds/<n>/changed-paths.json"
+  --candidate "$OID" --out-dir "$S/<id>/rounds/$ROUND" --config "$R/.tagteam/config.json"
+node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/rounds/$ROUND/changed-paths.json"
 ```
 
 `rev-parse HEAD` here is the one place it is correct: you are naming the commit
 you just made, before anything is bound to it. Everywhere after this, the
 reviewed commit comes from `state.json`.
+
+**The round number is `gates.mjs round`'s to give, once per candidate, here.** It
+reconciles what this attempt has spent against the rounds already on disk, hands
+back the next number, and refuses to reuse one: a commit that already owns a
+round re-enters that round, and any other commit gets a number no round has ever
+held. `$ROUND` is then the round for everything that follows — every path in
+every step until the next commit, the paths you write into a subagent's brief
+included. Never substitute a number of your own, and do not call the allocator
+again part-way through a round to remind yourself: if the value is lost, step 1's
+resume path restarts from step 3 against the committed work, which re-enters the
+round properly.
+
+**The allocator writes its own file and you read the round back out of it**, so
+its whole record — the round, the scope, and how much of this cycle's fix budget
+the rounds on disk account for — is in front of you and its exit status is the
+one the shell reports. Piping it into something that prints only the number would
+throw both away: a spent budget exits 4 there, and that 4 has to reach you. The
+numbers step 6 announces a fix round with are not these: they come from step 6's
+own budget call, which is the authority on how much has been spent. This
+allocator refuses too when the budget is gone, naming the limit; step 6 is where
+that refusal is meant to land, before a fixer has changed anything.
 
 The round directory is a record. The snapshot writes `review.diff`,
 `changed-paths.json` and `candidate.json` into it, marks it with the commit that
@@ -147,9 +168,9 @@ results and logs, `review.json` and `recheck.json`, `to-fix.json`,
 different-bytes rewrite is refused, naming the path, rather than silently
 overwriting. Re-running this step against the *same* commit **re-enters** the
 round: it is emptied back to its marker and rebuilt, which is what a ship
-resumed on the round's own commit does and it costs no new `<n>`. Re-running it
-against a *different* commit
-is refused naming both commits, so use a fresh `<n>` after the fix round.
+resumed on the round's own commit does and it costs no new round. Re-running it
+against a *different* commit is refused naming both commits — which is why the
+allocator, and not you, decides that a fix's commit belongs in the next round.
 
 One thing in a round is outside that rule: Codex's own output — the artifact,
 its `.prompt.md`, `.request.json` and `.events.jsonl` — because one invocation
@@ -177,9 +198,9 @@ tree moving under the review.
 
 ```bash
 node "$P/scripts/verify-run.mjs" --worktree "$W" --config "$R/.tagteam/config.json" \
-  --candidate "$S/<id>/rounds/<n>/candidate.json" --base "$BASE" --candidate-oid "$OID" \
-  --out-dir "$S/<id>/rounds/<n>/verify" --out "$S/<id>/rounds/<n>/verify.json"
-node "$P/scripts/gates.mjs" record "$S/<id>/state.json" verify "$OID" "$S/<id>/rounds/<n>/verify.json"
+  --candidate "$S/<id>/rounds/$ROUND/candidate.json" --base "$BASE" --candidate-oid "$OID" \
+  --out-dir "$S/<id>/rounds/$ROUND/verify" --out "$S/<id>/rounds/$ROUND/verify.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" verify "$OID" "$S/<id>/rounds/$ROUND/verify.json"
 ```
 
 `not-applicable` means nothing matched. Not a pass — it is why a spec with no
@@ -188,14 +209,28 @@ executable evidence waits for a person.
 ### 5. Review
 
 `gates.mjs state ... reviewing`, then dispatch **in a single message**, one per
-resolved lens plus Codex:
+resolved lens plus Codex. (A CI repair reaches this step already in `reviewing` —
+its own edge in step 8 was that transition — so it starts at the dispatch and
+skips this line; taking it twice is refused.)
 
 - `tagteam:reviewer` at `models.lead` / `effort.lead` per lens, each given
-  the lens name, `$S/<id>/rounds/<n>/review.diff`, the spec path, the candidate OID, and
-  `$S/<id>/rounds/<n>/findings/<lens>.json` to write.
+  the lens name, `$S/<id>/rounds/$ROUND/review.diff`, the spec path, the candidate OID, and
+  `$S/<id>/rounds/$ROUND/findings/<lens>.json` to write.
 - Codex via `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
-  `--fence SPEC=<spec path> --fence DIFF=$S/<id>/rounds/<n>/review.diff`, schema
-  `findings.schema.json`, out `$S/<id>/rounds/<n>/findings/codex.json`.
+  `--fence SPEC=<spec path> --fence DIFF=$S/<id>/rounds/$ROUND/review.diff`, schema
+  `findings.schema.json`, out `$S/<id>/rounds/$ROUND/findings/codex.json`.
+
+**Every resolved lens, plus Codex, on every round this step runs.** A second or
+third fix round reaches this step against a commit no lens has read, and the
+panel that reads it is the whole panel — not the lenses that happened to have
+findings last round.
+
+**What this panel raises is not re-checked in this round.** No fixer has seen it:
+the diff these lenses just read is the one step 7 would hand them back minutes
+later, and there is nothing between the two readings for a verdict to be about.
+Step 7 re-checks what an *earlier* round left open; this round's own findings go
+into its still-open record and to the next fixer, which is what starts the next
+round.
 
 The adversary does **not** run here. It runs in step 7, on whatever the final
 diff turns out to be, where nothing else is looking with fresh eyes.
@@ -209,7 +244,7 @@ background watcher, one `-f` per file you commissioned, the Codex artifact
 included:
 
 ```bash
-F="$S/<id>/rounds/<n>/findings"
+F="$S/<id>/rounds/$ROUND/findings"
 until [ -f "$F/<lens>.json" ] && [ -f "$F/codex.json" ]; do sleep 5; done
 ```
 
@@ -221,29 +256,102 @@ emit filler commands while you wait.
 Then:
 
 ```bash
-node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/<n>/findings" --candidate "$OID" \
-  --expect <lens,lens,codex> --round <n> --out "$S/<id>/rounds/<n>/review.json"
+node "$P/scripts/collect-findings.mjs" --dir "$S/<id>/rounds/$ROUND/findings" --candidate "$OID" \
+  --expect <lens,lens,codex> --round "$ROUND" --out "$S/<id>/rounds/$ROUND/review.json"
 ```
 
-`--round` is the same `<n>` as the directory, and the script refuses if it is
-not: every finding id it mints starts with it, so `<n>.correctness.1` names the
+`--round` is the same round as the directory, and the script refuses if it is
+not: every finding id it mints starts with it, so `2.correctness.1` names the
 round that raised it and can never be cleared by a verdict from another one.
 
 Its stdout is your view of the review — a line per finding. Do not open the
 findings files. `incomplete` means a lens produced no usable evidence; that is
 not clean, and it never merges.
 
-### 6. Fix, once — only if something is open
+### 6. Fix — only if something is open
 
-`gates.mjs state ... fixing`, then one `tagteam:fixer` at `models.worker` /
-`effort.worker`, given `$S/<id>/rounds/<n>/to-fix.json`, the worktree, and
-`$S/<id>/fix-report-<n>.json` to write. Dispatch it with
-`run_in_background: false`: until it reports it is still editing the worktree you
-are about to commit. When it returns, record its report into the round:
+Only when a blocking or major finding is open — something a fixer can act on.
+Nothing open: do not take the transition below, and go to step 7. The
+missing-lens case at the end of this step is the same, and is handled there: it
+is not a fix round and it spends nothing.
+
+**The budget goes first, before anything is dispatched and before any commit
+exists:**
 
 ```bash
-node "$P/scripts/record-fix-report.mjs" --report "$S/<id>/fix-report-<n>.json" \
-  --out "$S/<id>/rounds/<n>/fix-report.json"
+node "$P/scripts/gates.mjs" state "$S/<id>/state.json" fixing "$R/.tagteam/config.json"
+```
+
+This is the command that decides whether there is another fix round, and it is
+the only thing that decides it. It succeeds and the round is yours — and it
+prints a `budget` object saying which round it just bought (`ordinal`) out of how
+many this repository allows (`limit`). It exits 4 and this repository's fix
+budget for this cycle is spent, naming the limit that ran out.
+
+**Refused: dispatch nothing and commit nothing.** The state stayed at
+`reviewing`, and a budget stop still publishes — so put it back where both paths
+converge before you leave this step:
+
+- You arrived from step 5 and this candidate has no review gate yet: go to step
+  7. The adversary still runs, the re-check still settles what the panel raised,
+  and it ends at `verifying` as it always does.
+- You arrived from step 7 and its gate is already recorded against this commit:
+  `gates.mjs state ... verifying`, then step 8.
+
+Either way the spec still publishes, still opens a pull request, and step 9 tells
+a person in plain English what is still open and that no fix round was left to
+spend. A budget stop is not a failure and never goes to `failed`.
+
+Take it in this order for a reason: a fixer dispatched first leaves a commit on
+the branch that no round covers and a branch ahead of the reviewed candidate.
+
+**Then announce the round, in one line, before dispatching.** Which round this
+is and how many this repository allows, in plain English — "the second of the
+three fix rounds this repository allows", not a setting name and a number. Both
+numbers were just printed for you by the command above: `budget.ordinal` is which
+fix round of this cycle you are starting and `budget.limit` is how many there
+are. Read them off that output and say them as words; do not count rounds
+yourself and do not go looking for the numbers anywhere else. The counter behind
+`ordinal` is what a resumed attempt is bound by too — a fixer that was dispatched
+and died before it committed spent its round, and this is the only number that
+knows it.
+
+**Hand it the round's open record, never `review.json`.** Which record that is,
+and what runs after the new commit is verified, both follow from how you reached
+this step. `$ROUND` in these two paths — and in the fix report below, up to the
+re-snapshot that changes it — is still the round you are dispatching out of, the
+one the panel or the last re-check wrote into:
+
+- **From step 5 — the first fix of this cycle.** The record is
+  `$S/<id>/rounds/$ROUND/to-fix.json`, the panel's own brief. After the commit and
+  verify, go straight to **step 7**: no second panel. `review.json` still carries
+  the panel's findings and the lenses that raised them re-judge them against the
+  new diff, so a lens did look at this commit — and a repository that raised no
+  limit does not suddenly pay for an extra full panel.
+- **From step 7 — a second or later fix round.** The record is
+  `$S/<id>/rounds/$ROUND/still-open.json`, what that round's re-check settled and
+  could not close, in the words of the reviewer that judged it. After the commit
+  and verify, **step 5 in full** — every resolved lens plus Codex, against a diff
+  no lens has read — and then step 7, whose re-check is what clears the ids this
+  round carried out. The round the re-snapshot then opens has no `to-fix.json` of
+  its own: its panel has not run yet.
+
+`review.json` is not either of them, in any round. It holds every finding at
+every severity, and a fixer given all of them repairs all of them — a round with
+two blocking findings and five nits comes back with seven changes, five of which
+nothing gated on and every reviewer is about to re-read. The two records above
+hold the blocking and major findings and nothing else. Minor and nit are reported
+in the pull request body, not repaired.
+
+Then one `tagteam:fixer` at `models.worker` / `effort.worker`, given the record
+named above, the worktree, and `$S/<id>/fix-report-$ROUND.json` to write.
+Dispatch it with `run_in_background: false`: until it reports it is still editing
+the worktree you are about to commit. When it returns, record its report into the
+round:
+
+```bash
+node "$P/scripts/record-fix-report.mjs" --report "$S/<id>/fix-report-$ROUND.json" \
+  --out "$S/<id>/rounds/$ROUND/fix-report.json"
 ```
 
 **The fixer's own path is outside the round on purpose.** A file an agent writes
@@ -255,16 +363,12 @@ is refused naming the file, and the fixer's scratch copy is left where it is so 
 person can compare them. Its stdout is your view of the report — do not open the
 file.
 
-Then commit and re-snapshot exactly as in step 3 with a fresh `<n>`, set `OID` to
-the new commit, and `gates.mjs bind` it — which clears every gate, because they
-were about the old one. Re-run verify against the new commit.
-
-**Hand it `to-fix.json`, never `review.json`.** `review.json` holds every finding
-at every severity, and a fixer given all of them repairs all of them — a round
-with two blocking findings and five nits comes back with seven changes, five of
-which nothing gated on and every reviewer is about to re-read. `to-fix.json` holds
-the blocking and major findings and nothing else. Minor and nit are reported in
-the pull request body, not repaired.
+Then commit and re-snapshot exactly as in step 3, which takes the next round from
+the allocator into `$ROUND`, sets `OID` to the new commit, and `gates.mjs bind`s
+it — which clears every gate, because they were about the old one. Re-run verify
+against the new commit. **`$ROUND` is the new round from here on**: every path
+after this line, in this step and in the ones it sends you to, is that round's,
+and the round the fixer was dispatched out of is the one before it.
 
 A missing entry in the fix report ends this spec. Say which findings it failed to
 account for.
@@ -274,7 +378,10 @@ Nothing open: skip straight to step 7 with the same `OID`.
 **A missing lens is not something a fixer can repair.** `incomplete` with nothing
 open means a reviewer produced no usable evidence, so re-dispatch exactly those
 lenses against the same candidate — no new commit, nothing to re-bind — and
-re-run `collect-findings.mjs`. Once.
+re-run `collect-findings.mjs`. **Exactly once, and that once is fixed by
+decision.** It is not iterating on the work and no budget covers it: nothing was
+committed, no round was allocated, and no fix round was spent — you never took
+the transition above for it.
 
 **Dispatch that re-run with `run_in_background: false`, not behind a watcher.**
 A lens counts as missing when its file is unreadable, fails the schema, or names
@@ -292,30 +399,58 @@ reader that looks at the final diff without already having an opinion about it.
 In one message:
 
 - `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/code-adversary.md`,
-  given the spec and `$S/<id>/rounds/<n>/review.diff`, writing
-  `$S/<id>/rounds/<n>/findings/adversary.json` with `candidate` set to `$OID`.
+  given the spec and `$S/<id>/rounds/$ROUND/review.diff`, writing
+  `$S/<id>/rounds/$ROUND/findings/adversary.json` with `candidate` set to `$OID`.
 - Each lens named by `collect-findings.mjs` as having open findings, and **only**
-  those. It writes `$S/<id>/rounds/<r>/open/<lens>.json` per lens — the findings
-  that lens must judge, **with their ids** — and names each file in its output.
+  those — and **only when a fixer ran between the raising and now**, which is the
+  round-after-a-fix case where step 5 did not run again in this round. It writes
+  `$S/<id>/rounds/<r>/open/<lens>.json` per lens — the findings that lens must
+  judge, **with their ids** — and names each file in its output.
   `<r>`, defined under the commands below, is the round whose panel raised them:
   the collector writes `open/` as a sibling of the findings directory it read, so
-  when step 6 fixed something and opened a fresh round these files are in the
-  round before this one, and `rounds/<n>/open/` does not exist at all.
-  Hand the reviewer *that path*, plus the new diff, plus
-  `$S/<id>/rounds/<n>/recheck/<lens>.json` to write, under `prompts/recheck.md`,
+  when step 6 fixed something and the panel has not re-run in the round it opened,
+  these files are in the round before this one and `rounds/$ROUND/open/` does not
+  exist at all. Hand the reviewer *that path*, plus the new diff, plus
+  `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write, under `prompts/recheck.md`,
   at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
   schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
   other Codex call.
+
+  **Skip this bullet whenever step 5 ran in this round** — a second or later fix
+  round, or a round whose step 6 was refused for want of budget. `<r>` is
+  `$ROUND` there, the panel read `rounds/$ROUND/review.diff` minutes ago, and
+  that is the same diff you would hand back with no commit and no fixer in
+  between. `prompts/recheck.md` opens by telling the reviewer that a fixer has
+  been given its findings and has changed the code, which would be false, and a
+  `resolved` verdict extracted that way clears a blocking finding nobody
+  repaired. Nothing is lost by not asking: `recheck.mjs` settles a finding raised
+  in the round it is settling as outstanding with no verdict sought — it accepts
+  none for it from anyone — and writes it into this round's `still-open.json` for
+  the next fixer and `still-open/<lens>.json` for the round after that. That is
+  the bullet below, one round later.
 - Each lens with a file in the `still-open/` of the most recent earlier round
   that wrote one, when that round left findings open — only a re-check writes
-  `still-open/`, so that round is not always `<n-1>`; the round before this one
-  is usually the panel or fix round, which writes none. The same re-check dispatch, with
-  `still-open/<lens>.json` as its input and `$S/<id>/rounds/<n>/recheck/<lens>.json`
+  `still-open/`, so that round is not always the round before this one; the round
+  before this one is usually the panel or fix round, which writes none. The same
+  re-check dispatch, with `still-open/<lens>.json` as its input and
+  `$S/<id>/rounds/$ROUND/recheck/<lens>.json`
   as its output, merged into the bullet above for a lens that appears in both.
   Those ids are settled by the `--carry` below and stay open without a verdict,
   so a round that inherits work and dispatches nobody for it can never settle.
-  Skip both of these bullets entirely when step 5 was clean and no earlier round
-  left anything open — there is nothing to re-check.
+  Skip both of these bullets entirely when there is nothing to re-check: no
+  earlier round left anything open, and this round's findings are its own.
+
+  **The adversary is one of the lenses this bullet covers.** A round whose
+  carried `still-open/` holds `adversary.json` dispatches `tagteam:adversary`
+  **twice, in this same message**: the fresh pass in the first bullet, pointed at
+  `prompts/code-adversary.md` and writing `findings/adversary.json`, and a
+  re-check, pointed at `prompts/recheck.md` with `still-open/adversary.json` as
+  its input and `$S/<id>/rounds/$ROUND/recheck/adversary.json` as its output. Two
+  dispatches of one agent, different prompts, different files. The fresh pass
+  does not settle the adversary's earlier findings — it does not read them, and
+  its ids are this round's — so a round that dispatches only the fresh pass
+  leaves every carried adversary id open with no verdict, and it stays open
+  through every round after it. `recheck.mjs` asks for that verdict file by name.
 
   **Hand it the open file, never the raw findings file.** The ids are assigned by
   `collect-findings.mjs` and appear only in what it writes; a reviewer pointed at
@@ -331,21 +466,23 @@ and each re-check file — with one background watcher, as in step 5 and
 *Dispatching and waiting* in the skill:
 
 ```bash
-RD="$S/<id>/rounds/<n>"
+RD="$S/<id>/rounds/$ROUND"
 until [ -f "$RD/findings/adversary.json" ] && [ -f "$RD/recheck/<lens>.json" ]; do sleep 5; done
 ```
 
 **Watch only for what you dispatched, and watch for all of it.** One `-f` test
-per lens you dispatched a re-check to, whether it came from the open findings of
-step 5 or from an earlier round's `still-open/` — `recheck/codex.json` included
-when Codex is one of them. Every re-check writes into the same
-`rounds/<n>/recheck/` directory, so a lens that appears in both bullets is one
-file and one test. The adversary file is the whole watcher only when both
-bullets were skipped: step 5 was clean *and* no earlier round left anything
-open. A test for a file nobody was told to write never comes true; a carried
-lens left out of the watcher is worse, because `recheck.mjs` then runs before its
-verdict lands and settles every inherited finding as "no verdict was returned",
-which is a round that stops the pull request on findings nobody was asked about.
+per lens you dispatched a re-check to, whether it came from an earlier round's
+panel or from an earlier round's `still-open/` — `recheck/codex.json` included
+when Codex is one of them, and `recheck/adversary.json` when the adversary is —
+a second test alongside `findings/adversary.json`, not a substitute for it. Every
+re-check writes into the same `rounds/$ROUND/recheck/` directory, so a lens that
+appears in both bullets is one file and one test. The adversary's fresh pass is
+the whole watcher only when both bullets were skipped: nothing carried, and no
+earlier round's findings to judge. A test for a file nobody was told to write
+never comes true; a carried lens left out of the watcher is worse, because
+`recheck.mjs` then runs before its verdict lands and settles every inherited
+finding as "no verdict was returned", which is a round that stops the pull
+request on findings nobody was asked about.
 
 An adversary file that is not there yet reads as `incomplete`, exactly as a
 missing one does, and a re-check that has not landed leaves a finding the fixer
@@ -353,39 +490,47 @@ repaired recorded as still open — and the review gate goes on record that way 
 lines later.
 
 ```bash
-node "$P/scripts/recheck.mjs" --review "$S/<id>/rounds/<r>/review.json" --round <n> \
-  --dir "$S/<id>/rounds/<n>/recheck" --adversary "$S/<id>/rounds/<n>/findings/adversary.json" \
-  --candidate "$OID" --out "$S/<id>/rounds/<n>/recheck.json"
-node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/rounds/<n>/recheck.json"
+node "$P/scripts/recheck.mjs" --review "$S/<id>/rounds/<r>/review.json" --round "$ROUND" \
+  --dir "$S/<id>/rounds/$ROUND/recheck" --adversary "$S/<id>/rounds/$ROUND/findings/adversary.json" \
+  --candidate "$OID" --out "$S/<id>/rounds/$ROUND/recheck.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" review "$OID" "$S/<id>/rounds/$ROUND/recheck.json"
 node "$P/scripts/gates.mjs" state "$S/<id>/state.json" verifying
 ```
 
-`<r>` is the round whose lens panel raised these findings, which is `<n>` when
-nothing was fixed and the round before the fix when something was — the fix made
-a new commit and a new round, and the findings it is being judged against were
-collected in the old one. `--round <n>` is this round either way: it is where the
-verdicts and the adversary's fresh pass live, and where the settlement is written.
+`<r>` is the round whose lens panel raised these findings, which is `$ROUND`
+whenever step 5 ran in this round — no fix since, or a fix round that re-ran the
+whole panel — and the round before the fix when the panel did not re-run: the fix
+made a new commit and a new round, and the findings it is being judged against
+were collected in the old one. `--round "$ROUND"` is this round either way: it is
+where the verdicts and the adversary's fresh pass live, and where the settlement
+is written.
+
+Passing `<r>` as `$ROUND` is how this round's own panel findings get recorded, not
+how they get judged: `recheck.mjs` reads the round out of each id, and a finding
+raised at `$ROUND` is settled as open with nobody asked about it — no lens is
+expected to have written a verdict file for it, and a verdict returned for it
+anyway binds to nothing.
 
 `<r>` is checked like every other round path here: it must be the `review.json`
-of a round at or below `<n>` under the same rounds root, that collection must say
-it is that round, and no round between it and `<n>` may hold a collection of its
+of a round at or below `$ROUND` under the same rounds root, that collection must
+say it is that round, and no round between it and `$ROUND` may hold a collection of its
 own. Reaching back past a newer panel is refused rather than settled, because
 the findings the newer panel raised would otherwise be settled by nobody and
 carried by nobody. `recheck.json` records the round it answered for.
 
 The collection and the settlement are two files in the round: the re-check reads
 `review.json` and writes `recheck.json`, and `recheck.json` is the review gate.
-It also writes `$S/<id>/rounds/<n>/still-open.json` and
+It also writes `$S/<id>/rounds/$ROUND/still-open.json` and
 `still-open/<lens>.json` — what this round did not close, as a cross-lens list
-and one file per lens. Nothing reads them yet; they are the record of what a
-round left behind, so a later one could be handed it. Whatever is in them here
-is what stops this pull request.
+and one file per lens. The cross-lens list is what step 6 hands the next fixer if
+this round starts another one, and the per-lens files are what the round after
+that re-checks. Whatever is in them here is what stops this pull request.
 
 If it refuses because an earlier round left findings open, it names that round's
 `still-open.json`: pass it as `--carry <that path>` and those findings are
 settled here too, by the same per-lens verdict files. The round it names is the
-most recent one below `<n>` that recorded what it left open, which is rarely
-`<n-1>` — a fix round and a panel round write no `still-open.json`, so the
+most recent one below `$ROUND` that recorded what it left open, which is rarely
+the round immediately before — a fix round and a panel round write no `still-open.json`, so the
 findings a re-check two or three rounds back could not close are still the ones
 being asked for. Refusing is the point — a round that starts without them drops
 them silently.
@@ -404,8 +549,23 @@ file is `incomplete`, not clean.
 a clean first round that skipped it would reach the merge with no review gate at
 all.
 
-There is no second fix round. Anything still open stops this spec, and "the fixer
-says fixed, the reviewer says not" is a terminal state, not another attempt.
+**Then decide whether another round runs, from what `recheck.mjs` just printed.**
+Another round runs only when this one left something a fixer can act on: a
+blocking or major finding still open. Nothing gating open ends the loop here —
+the limit is a ceiling, not a quota, and a clean round is never followed by
+another one. Minor and nit never start a round; neither does an `incomplete`
+review with nothing open, which is the missing-lens case and carries to step 9 as
+it does today, because there is nothing there for a fixer to repair.
+
+Continuing is `gates.mjs state ... reviewing` — the `verifying -> reviewing`
+edge, which costs nothing and is not a CI repair — and then step 6, which
+consumes the fix budget and refuses when it is spent, then step 3's commit and
+snapshot for the new round, step 4, step 5 in full, and this step again. Whether
+there is budget left for that is step 6's answer and not yours: go there and let
+it decide.
+
+"The fixer says fixed, the reviewer says not" is terminal only once the budget is
+spent. Until then it is the next round.
 
 ### 8. Publish
 
@@ -433,30 +593,55 @@ node "$P/scripts/ci-wait.mjs" --repo "$R" --pr <n> --wait-sec <ciWaitSec> --out 
 node "$P/scripts/gates.mjs" record "$S/<id>/state.json" ci "$OID" "$S/<id>/ci.json"
 ```
 
-A red CI gets exactly one repair, and **the repair is a new candidate, so it gets
-a new review round — not a shortcut back to the merge.** In full:
+A red CI gets up to `limits.ciRepairs` repairs, and **a repair is a new
+candidate, so it gets a new review round — not a shortcut back to the merge.** In
+full:
 
-1. `gates.mjs state ... reviewing`.
+1. Take the repair edge, before the repair's fixer is dispatched:
+
+   ```bash
+   node "$P/scripts/gates.mjs" state "$S/<id>/state.json" reviewing "$R/.tagteam/config.json"
+   ```
+
+   Taking that edge is what spends a repair, and it exits 4 when this repository
+   allows no more of them: **refused, dispatch nothing and go to step 9**, which
+   says what is failing and that the repairs are used up. Allowed, it prints the
+   same `budget` object step 6 reads — `ordinal` is which repair this is,
+   `limit` how many this repository allows — and those are the two numbers to
+   announce in one line before anything is dispatched, in plain English, the way
+   step 6 announces a fix round: "the second of the two CI repairs this
+   repository allows". Read them off that output; nothing here asks you to
+   remember how many repairs this session has had. A repair also starts a fresh
+   fix budget, so the review cycle below gets its fix rounds over again.
 2. Dispatch the fixer at `models.worker` / `effort.worker` with the failing check
-   output, blocking as in step 6, then commit and re-snapshot
-   with a fresh `<n>`, set `OID`, `bind` — which clears every gate — and re-run
-   verify.
-3. **Steps 5, 6 and 7 again, entirely.** The whole lens panel plus Codex against
-   the new commit, then a fix round if that finds anything, then the adversary
-   and the re-check. Not just the lenses that had findings last time: `bind`
-   cleared the review gate, `review.json` from the old candidate has nothing
-   left in `open` to re-check, and re-running only the re-check would hand this
-   commit a clean review gate that no lens ever looked at. Step 7 applies whole,
-   including its carry: if the most recent earlier round that recorded one left
-   findings open — the re-check before this repair, not necessarily `<n-1>` — its
-   `still-open/<lens>.json` files are dispatched for verdicts alongside this
-   round's own and `--carry` names its `still-open.json`. Without both halves the
-   re-check refuses, or settles `incomplete` on ids nobody was asked about.
+   output, blocking as in step 6, then commit and re-snapshot as in step 3, which
+   allocates the round into `$ROUND`, set `OID`, `bind` — which clears every gate
+   — and re-run verify.
+3. **Steps 5, 6 and 7 again, entirely**, including the fix rounds that cycle
+   allows — with one command left out: **step 5's opening
+   `gates.mjs state ... reviewing` is the edge point 1 already took.** Do not run
+   it a second time. `reviewing -> reviewing` is not a declared transition, so it
+   would stop the repair before its panel, and the repair it spent would be gone.
+   Start step 5 at its dispatch: the whole lens panel plus Codex against the new
+   commit, then a fix
+   round if that finds anything — and another after that for as long as step 6
+   allows one — then the adversary and the re-check. Not just the lenses that had
+   findings last time: `bind` cleared the review gate, `review.json` from the old
+   candidate has nothing left in `open` to re-check, and re-running only the
+   re-check would hand this commit a clean review gate that no lens ever looked
+   at. Step 7 applies whole, including its carry: if the most recent earlier
+   round that recorded one left findings open — the re-check before this repair,
+   not necessarily the round immediately before — its `still-open/<lens>.json`
+   files are dispatched for verdicts alongside this round's own and `--carry`
+   names its `still-open.json`. Without both halves the re-check refuses, or
+   settles `incomplete` on ids nobody was asked about.
 4. `verifying -> publishing`, `git -C "$W" push --force-with-lease`, then
    `gates.mjs pr` with the new head and `ci-wait.mjs` again, recording the new CI
    gate before you evaluate.
 
-A second CI failure stops the spec.
+A CI failure with no repair left in the budget stops the spec here: the pull
+request stays open, and step 9 says what failed and what a person would change to
+allow another repair.
 
 ### 9. Merge or stop
 
@@ -500,11 +685,23 @@ this. If you reached this step on a resume and never ran it in this session,
 that summary is in a context that has ended — get it back with
 
 ```bash
-node "$P/scripts/recheck.mjs" --print "$S/<id>/rounds/<n>/recheck.json"
+node "$P/scripts/recheck.mjs" --print "$S/<id>/rounds/$ROUND/recheck.json"
 ```
 
 which re-renders what the earlier run printed and settles nothing. That is the
-supported way; opening a findings file is still not.
+supported way; opening a findings file is still not. On a resume `$ROUND` is
+gone with the context that set it — the highest-numbered round under
+`$S/<id>/rounds/` that holds a `recheck.json` is the last one that settled
+anything, and that is the file to print.
+
+**When a budget is what stopped this spec, say that too, in the same plain
+English.** What it set out to deliver, that it used every fix round (or every CI
+repair) this repository allows, what is still open in behaviour terms, and that
+`limits.fixRounds` — or `limits.ciRepairs` — in `.tagteam/config.json` is what a
+person would raise to let it try again. The setting name is an aside for someone
+who wants it, never the explanation: "three attempts at this and the recovery
+path still drops the second token" is the sentence, and the file name comes
+after it.
 
 What you must not pass on is the shape it arrived in.
 `1.correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
@@ -536,7 +733,7 @@ what stopped and why.
 ## Discipline
 
 Never read `review.diff` or a findings file. Never re-derive the reviewed commit
-with `git rev-parse HEAD` — after the fix round that is a different commit, and
+with `git rev-parse HEAD` — after a fix round that is a different commit, and
 `state.json` holds the right one. Never merge without `merge.mjs`. Never put a
 finding id, a commit oid, a gate name, or a file-and-line coordinate into a
 question or into the text around one. Never run one of these scripts over output

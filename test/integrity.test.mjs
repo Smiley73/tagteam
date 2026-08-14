@@ -138,6 +138,160 @@ test("the ship command never re-derives the reviewed commit from HEAD", () => {
   assert.match(ship, /Never re-derive the reviewed commit/);
 });
 
+// How many fix rounds a change gets is this repository's configuration. A model
+// told there is exactly one rations its findings against a number nobody chose
+// for it — and a fixer told the diff was reviewed once is wrong from the second
+// round on.
+test("no brief describing a fix round claims there is only one", () => {
+  // Flattened, here and below: these are sentences, and a sentence the author
+  // re-wrapped is the same claim.
+  const singular = /\b(the|one|a single) fix round\b/i;
+  for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agents/fixer.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.doesNotMatch(text, singular, `${file} still tells a model there is exactly one fix round`);
+  }
+});
+
+// Each of these sentences said the loop was one iteration long. The orchestrator
+// follows this file literally, so any one of them left behind stops a spec that
+// still has budget — and contradicts the command that actually decides.
+test("the ship command no longer asserts a single fix round or a single CI repair", () => {
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  for (const claim of [
+    "There is no second fix round",
+    "Fix, once",
+    "exactly one repair",
+    "A second CI failure stops the spec"
+  ]) {
+    assert.ok(!ship.includes(claim), `ship.md still says "${claim}"`);
+  }
+});
+
+// Both limits are named where the loops they bound are described, so the person
+// told a spec ran out of rounds can find the thing to raise.
+test("the ship command names both limits its loops are bounded by", () => {
+  const ship = read("commands", "ship.md");
+  assert.match(ship, /fixRounds/);
+  assert.match(ship, /ciRepairs/);
+});
+
+// The invariant most likely to be optimised away by a later edit: after a CI
+// repair, `bind` has cleared the review gate and the old candidate's findings
+// are gone from `open`, so a re-check alone would decide nothing and the recorded
+// review gate would be one no lens produced.
+test("a CI repair still re-runs the whole panel, and still says why", () => {
+  // Matched against the prose with its line wrapping flattened: a sentence that
+  // survived a re-wrap is the sentence, and a test that fails on one is a test
+  // people learn to edit rather than read.
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  assert.match(ship, /\*\*Steps 5, 6 and 7 again, entirely\*\*/);
+  assert.match(ship, /whole lens panel plus Codex/);
+  assert.match(ship, /a clean review gate that no lens ever looked at/);
+});
+
+// One step of ship.md, flattened, for the orderings below. A step ends where the
+// next one begins, so a rule that drifted into another step is not counted as
+// still in this one.
+function shipStep(heading, next) {
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  const start = ship.indexOf(heading);
+  const end = ship.indexOf(next);
+  assert.ok(start > -1 && end > start, `ship.md no longer has a ${heading} ending at ${next}`);
+  return ship.slice(start, end);
+}
+
+const stepSix = () => shipStep("### 6.", "### 7.");
+const stepSeven = () => shipStep("### 7.", "### 8.");
+
+// The budget has to be consumed before anything is dispatched: a fixer that runs
+// first leaves a commit on the branch no round covers and a branch ahead of the
+// reviewed candidate, and an exhausted budget discovered at snapshot time cannot
+// take it back. Nothing else in the repository catches a step 6 reordered so the
+// transition happens at commit time.
+test("step 6 takes the budgeted edge before it dispatches the fixer", () => {
+  const step = stepSix();
+  const budget = step.indexOf('gates.mjs" state "$S/<id>/state.json" fixing');
+  const fixer = step.indexOf("tagteam:fixer");
+  assert.ok(budget > -1, "step 6 no longer takes the fixing edge at all");
+  assert.ok(fixer > -1, "step 6 no longer dispatches a fixer");
+  assert.ok(budget < fixer, "step 6 dispatches the fixer before it consumes the fix budget");
+});
+
+// Running out of fix rounds is what "there is no second fix round" meant: the
+// spec still publishes and step 9 tells a person why it is waiting. Routed to
+// `failed` instead, a bounded loop that reached its bound reads as a broken one,
+// and the pull request nobody opened cannot be looked at.
+test("step 6 says a spent budget publishes rather than fails", () => {
+  const step = stepSix();
+  assert.match(step, /A budget stop is not a failure and never goes to `failed`/);
+  assert.match(step, /still publishes, still opens a pull request/);
+  assert.match(step, /gates\.mjs state \.\.\. verifying`, then step 8/,
+    "step 6's refusal path no longer converges on verifying before step 8");
+});
+
+// The adversary is the reader most likely to raise the finding that starts a
+// second round, and it is dispatched here as a fresh pass and nothing else —
+// while `recheck.mjs` requires a verdict file from it for any adversary finding
+// an earlier round left open. Step 7 says "lens" everywhere, which is a word the
+// adversary is never called by, so a round that inherits one dispatches nobody
+// for it: the finding stays open with no verdict in this round and in every
+// round after it, the loop spends its whole fix budget re-fixing a defect that
+// can never be settled, and the review gate is `incomplete` at the end of it.
+test("step 7 dispatches the adversary a re-check of the findings it carried", () => {
+  const step = stepSeven();
+  assert.match(step, /The adversary is one of the lenses this bullet covers/,
+    "step 7 no longer says the adversary is one of the readers its carried bullet covers");
+  assert.match(step, /still-open\/adversary\.json` as\s?its input/,
+    "step 7 no longer names the carried adversary record as an input to a re-check");
+  assert.match(step, /rounds\/\$ROUND\/recheck\/adversary\.json`/,
+    "step 7 no longer names the file the adversary's re-check writes");
+  assert.match(step, /`recheck\/adversary\.json` when the adversary is/,
+    "step 7's watcher no longer waits for the adversary's re-check the way it waits for Codex's");
+});
+
+// The dispatch above only works if the agent it dispatches is defined to read
+// the brief it is handed. `agents/adversary.md` enumerates the briefs it may be
+// pointed at; without the re-check clause the agent's own definition tells it to
+// treat a re-check as judging a diff, and it writes a findings-shaped file that
+// `recheck.mjs` rejects against `recheck.schema.json` — the carried adversary
+// finding stays open with no verdict, which is the deadlock step 7 exists to
+// close, reintroduced one file over. `agents/reviewer.md` carries the same
+// clause for the same reason.
+test("every agent dispatched to a re-check is defined to read the re-check brief", () => {
+  for (const name of ["adversary", "reviewer"]) {
+    const agent = read("agents", `${name}.md`);
+    assert.match(agent, /prompts\/recheck\.md/,
+      `agents/${name}.md no longer names prompts/recheck.md, but step 7 dispatches it under that brief`);
+  }
+  assert.match(read("agents", "adversary.md"), /recheck\.schema\.json/,
+    "agents/adversary.md no longer names the schema its re-check output must match");
+});
+
+// From the second fix round on, step 5 runs in full and step 7 follows in the
+// same round. Handing each lens the findings it raised minutes earlier, against
+// the same diff with no commit in between, asks `prompts/recheck.md`'s question —
+// "a fixer has changed the code, is it resolved?" — about a finding no fixer has
+// seen, and a `resolved` there clears a blocking finding that nothing repaired.
+test("step 7 re-checks only what an earlier round left open", () => {
+  const step = stepSeven();
+  assert.match(step, /\*\*only when a fixer ran between the raising and now\*\*/,
+    "step 7's re-check bullet no longer requires a fixer between the raising and the verdict");
+  assert.match(step, /\*\*Skip this bullet whenever step 5 ran in this round\*\*/,
+    "step 7 no longer skips the re-check of findings this round's own panel raised");
+  // And the step before it no longer promises the re-check that must not happen.
+  const five = shipStep("### 5.", "### 6.");
+  assert.match(five, /What this panel raises is not re-checked in this round/,
+    "step 5 still tells the reader its own findings are re-checked in this round");
+});
+
+// A round number substituted by hand is prose counting, and it is exactly what
+// made a second round overwrite the first.
+test("no round path in the ship command is a number the orchestrator picks", () => {
+  const ship = read("commands", "ship.md");
+  assert.ok(!ship.includes("rounds/<n>"), "ship.md still substitutes <n> into a round path by hand");
+  assert.match(ship, /ROUND=\$\(node/, "ship.md never takes the round from the allocator");
+});
+
 test("the commit chain always runs guard-staged between add and commit", () => {
   const ship = read("commands", "ship.md");
   for (const [, chain] of ship.matchAll(/(git -C "\$W" add -A[^\n]*)/g)) {

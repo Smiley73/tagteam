@@ -32,15 +32,16 @@ Severity:
   that is reachable but narrow; a missing test for behaviour the spec named.
 - `minor` / `nit` — recorded, never gating, never fixed automatically.
 
-There is exactly one fix round. A finding you rank too low will not come back.
-A finding you inflate spends that round on the wrong thing.
+Fix rounds are few, and how many this repository allows is its own configuration
+— you do not know it and must not assume more than one. A finding you rank too
+low may never come back. A finding you inflate spends a round on the wrong thing.
 
 ## Discipline
 
 Verify before you assert. If you claim something is never called, look. If you
 claim a case is unhandled, find the handler and confirm it is missing. A
-confident wrong finding costs a fix round, and the fixer will usually try to
-satisfy it.
+confident wrong finding costs a round this change may not have, and the fixer will
+usually try to satisfy it.
 
 Empty findings is a complete and useful answer. Write the summary either way: it
 is how the run knows the lens actually looked.

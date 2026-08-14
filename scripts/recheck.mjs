@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { findingId, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
+import { findingId, findingRound, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
@@ -243,7 +243,7 @@ function clearDerived(roundDir, out, candidate) {
 }
 
 export function settle({
-  review, dir, candidate, schemaPath, round, reviewRound = round, carried = [],
+  review, dir, candidate, schemaPath, round, reviewRound = round, carried = [], carriedRound = null,
   adversary = null, adversarySchemaPath = null
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
@@ -256,7 +256,20 @@ export function settle({
   // of every adversary finding under an id that already exists. Found by Codex
   // review, in the case the first idempotence fix did not reach: a *gating*
   // adversary finding, where `open` is non-empty.
-  const raised = (review.open ?? []).filter((finding) => finding.lens !== "adversary");
+  //
+  // A carry supersedes the collection for every round it speaks for, which is
+  // its own round and every round below it. `resolveReview` requires the most
+  // recent collection to be the one settled, and that collection is not
+  // re-collected between rounds: a second fix round handed `review.open` again
+  // would re-raise findings an earlier re-check already resolved, find no
+  // verdict for them — nobody was asked, they are closed — and record them open
+  // as "no verdict was returned", for ever. The carried record is the settled
+  // account of those rounds: what is not in it is not outstanding. An id with no
+  // round in it decides nothing and is kept, because keeping it leaves it open.
+  const superseded = (finding) => carriedRound !== null
+    && findingRound(finding.id) !== null && findingRound(finding.id) <= carriedRound;
+  const raised = (review.open ?? [])
+    .filter((finding) => finding.lens !== "adversary" && !superseded(finding));
   // An earlier round's unresolved findings reach this round through the
   // carried record and nowhere else. That separation is what lets an adversary
   // finding be re-checked at all: the filter above drops every adversary entry
@@ -270,7 +283,20 @@ export function settle({
   for (const finding of raised) byId.set(finding.id, finding);
   for (const finding of carried) byId.set(finding.id, { ...finding, carried: true });
   const outstanding = [...byId.values()];
-  const lenses = [...new Set(outstanding.map((finding) => finding.lens))];
+  // A re-check asks one question: a fixer was given this finding and changed the
+  // code, is it resolved? That question has an answer only for a finding raised
+  // before the round being settled. A finding raised *at* this round came from
+  // this round's own panel, against this round's own diff, with no commit and no
+  // fixer since — so nobody is asked about it, no lens owes a verdict file for
+  // it, and no verdict clears it. Left in, it made every round after the second
+  // ask each lens about findings it had raised minutes earlier under a prompt
+  // asserting they had been fixed, where a `resolved` closes a blocking finding
+  // nothing repaired; taken out but still expected, the lens with nothing to
+  // re-check would be recorded as a lens that produced no evidence. It stays
+  // outstanding, and this round's `still-open.json` hands it to the next fixer.
+  const asked = (finding) => findingRound(finding.id) !== round;
+  const judged = outstanding.filter(asked);
+  const lenses = [...new Set(judged.map((finding) => finding.lens))];
   const verdicts = new Map();
   // A lens an earlier review never got evidence from is still missing evidence.
   // Carrying it forward is what stops an incomplete review from being laundered
@@ -309,7 +335,7 @@ export function settle({
     // A lens may only clear findings it raised. Otherwise one reviewer can
     // resolve another's work by returning its ids. Carried findings are no
     // different: the round in the id says who raised it, not who may clear it.
-    const ownIds = new Set(outstanding.filter((finding) => finding.lens === lens).map((finding) => finding.id));
+    const ownIds = new Set(judged.filter((finding) => finding.lens === lens).map((finding) => finding.id));
     for (const verdict of parsed.verdicts) {
       if (ownIds.has(verdict.id)) verdicts.set(verdict.id, verdict);
     }
@@ -323,6 +349,11 @@ export function settle({
   // hands the next round a finding with a title and a path. The generic text is
   // the last resort, for a finding that never carried an evidence of its own.
   const settled = outstanding.map((finding) => {
+    // Nobody was asked, so "no verdict was returned" would read as a reviewer
+    // that failed to answer, in the record the next fixer is handed.
+    if (!asked(finding)) {
+      return { ...finding, resolved: false, evidence: finding.evidence ?? "raised by this round's own panel; no fixer has seen it yet" };
+    }
     const verdict = verdicts.get(finding.id);
     return {
       ...finding,
@@ -540,6 +571,11 @@ async function main() {
       round,
       reviewRound: collected,
       carried: carry === null ? [] : carriedFindings(carry),
+      // The round that wrote the carry, which `resolveCarry` has already
+      // established is a numbered round below this one. It is what makes the
+      // carried record authoritative for its own round and everything below it;
+      // see `settle`.
+      carriedRound: carry === null ? null : Number(path.basename(path.dirname(carry))),
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")
     });

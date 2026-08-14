@@ -32,8 +32,9 @@ nit or leave it out.
 
 Verify before asserting. If you claim something is never called, look. If you
 claim a case is unhandled, find the handler and confirm it is missing. A
-confident wrong finding spends the one fix round this change gets, and the fixer
-will usually try to satisfy it.
+confident wrong finding spends a fix round this change may not get again — how
+many it gets is this repository's configuration, and you do not know it — and the
+fixer will usually try to satisfy it.
 
 Severity: blocking means it must not merge; major means it must not merge without
 a person deciding; minor and nit are recorded and never gating.
