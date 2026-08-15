@@ -1,7 +1,6 @@
 .DS_Store
 node_modules/
 .plan/
-.codegraph/
 
 # tagteam run state — config and approved plans are committable, the rest is not
 coverage/
@@ -14,4 +13,5 @@ coverage/
 .tagteam/**/.codex-slots/
 .tagteam/**/.codex-artifact-locks/
 .tagteam/**/.quota/
+.codegraph/
 # <<< tagteam managed <<<

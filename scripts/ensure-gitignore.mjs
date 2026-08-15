@@ -7,6 +7,11 @@
 // prompts, slot and quota bookkeeping). This writes the second list into one
 // managed block, repairs it in place on every run, and then asks Git whether
 // the result actually ignores those paths.
+//
+// The first list is fixed. On top of it a repository may opt into further
+// entries — see OPTIONAL_ENTRIES — for the artifacts whose right answer depends
+// on the project rather than on the tool: a team commits the reviewed plan, a
+// single developer keeps their goals and specs out of history entirely.
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -31,18 +36,6 @@ export const MANAGED_ENTRIES = [
   { pattern: ".tagteam/**/.quota/", probe: ".tagteam/plans/slug/.quota/0123456789abcdef0123456789abcdef.json" }
 ];
 
-// `/tagteam:init` runs `codegraph init` when the user opts in, which creates
-// `.codegraph/` in the repository root. Its database self-ignores; the
-// directory shell does not, so setup left a new untracked directory behind
-// without saying anything about it. Managed only when the caller passes
-// --codegraph, because a repository that declined the index has no such
-// directory and a rule for one would be a claim about a tool it does not use.
-export const CODEGRAPH_ENTRY = { pattern: ".codegraph/", probe: ".codegraph/graph.db" };
-
-export function managedEntries({ codegraph = false } = {}) {
-  return codegraph ? [...MANAGED_ENTRIES, CODEGRAPH_ENTRY] : [...MANAGED_ENTRIES];
-}
-
 // Committable on purpose: an approved plan is the reviewed record a ship runs
 // from, and the config is how a project pins its own settings.
 export const KEPT_PATHS = [
@@ -52,6 +45,64 @@ export const KEPT_PATHS = [
   ".tagteam/plans/<slug>/specs/",
   ".tagteam/plans/<slug>/approved.json"
 ];
+
+// Entries a repository may opt into, on top of the block above. The list above
+// is not negotiable — it is machine state that would corrupt a shared history.
+// These are choices, because what they cover is legitimately committable for one
+// project and legitimately private for another: a team wants the reviewed plan
+// in history, a single developer wants their own scratch goals and specs out of
+// it. `hides` names what the choice stops being committable, so the report at
+// the end of setup describes the repository the user actually asked for.
+//
+// `codegraph`: `/tagteam:init` runs `codegraph init` when the user opts in,
+// which creates `.codegraph/` in the repository root. Its database self-ignores;
+// the directory shell does not, so setup left a new untracked directory behind
+// without saying anything about it. Managed only on request, because a
+// repository that declined the index has no such directory and a rule for one
+// would be a claim about a tool it does not use.
+export const OPTIONAL_ENTRIES = {
+  codegraph: { pattern: ".codegraph/", probe: ".codegraph/graph.db", hides: [], tracked: ".codegraph" },
+  plans: {
+    pattern: ".tagteam/plans/",
+    probe: ".tagteam/plans/slug/plan.md",
+    hides: KEPT_PATHS.filter((kept) => kept.startsWith(".tagteam/plans/")),
+    tracked: ".tagteam/plans"
+  },
+  config: {
+    pattern: ".tagteam/config.json",
+    probe: ".tagteam/config.json",
+    hides: [".tagteam/config.json"],
+    tracked: ".tagteam/config.json"
+  }
+};
+
+export const OPTIONAL_KEYS = Object.keys(OPTIONAL_ENTRIES);
+
+// Kept for the one caller that names the codegraph entry directly.
+export const CODEGRAPH_ENTRY = OPTIONAL_ENTRIES.codegraph;
+
+// `ignore` is the set of optional keys the repository opted into. Unknown keys
+// are an error rather than a silent no-op: a typo there is a rule the user
+// believes is in force and is not.
+export function optionalEntries(ignore = []) {
+  const chosen = [...new Set(ignore)];
+  const unknown = chosen.filter((key) => !(key in OPTIONAL_ENTRIES));
+  if (unknown.length > 0) {
+    throw new Error(`unknown ignore option: ${unknown.join(", ")} (known: ${OPTIONAL_KEYS.join(", ")})`);
+  }
+  // Ordered by OPTIONAL_KEYS, not by what the caller typed, so the same set of
+  // choices always renders the same block.
+  return OPTIONAL_KEYS.filter((key) => chosen.includes(key)).map((key) => OPTIONAL_ENTRIES[key]);
+}
+
+export function managedEntries({ ignore = [] } = {}) {
+  return [...MANAGED_ENTRIES, ...optionalEntries(ignore)];
+}
+
+export function keptPaths({ ignore = [] } = {}) {
+  const hidden = new Set(optionalEntries(ignore).flatMap((entry) => entry.hides));
+  return KEPT_PATHS.filter((kept) => !hidden.has(kept));
+}
 
 function block(entries) {
   return [BEGIN, ...entries.map((entry) => entry.pattern), END];
@@ -92,8 +143,8 @@ function orphanedComments(lines, removedIndexes) {
 
 // Rewrites the managed block and drops loose copies of its patterns that older
 // setups wrote by hand. Lines outside the block are never reordered or edited.
-export function renderGitignore(existing, { codegraph = false } = {}) {
-  const entries = managedEntries({ codegraph });
+export function renderGitignore(existing, { ignore = [] } = {}) {
+  const entries = managedEntries({ ignore });
   const patterns = new Set(entries.map((entry) => entry.pattern));
   const original = existing ?? "";
   const lines = original.length === 0 ? [] : original.replace(/\n$/, "").split("\n");
@@ -140,11 +191,24 @@ export function verifyIgnored(repo, entries = MANAGED_ENTRIES) {
   return entries.filter((entry) => !ignored.has(entry.probe)).map((entry) => entry.pattern);
 }
 
-export function ensureGitignore(repo, { check = false, codegraph = false } = {}) {
-  const entries = managedEntries({ codegraph });
+// A pattern only governs a path Git is not already tracking. A repository that
+// committed its plans before choosing to keep them private stays exactly as it
+// was, and nothing in the ignore file says so — so the choice reads as taken
+// effect when it has not. Naming the tracked files is the whole fix: removing
+// them from the index is a history decision, and this script does not make it.
+function trackedUnder(repo, entries) {
+  const paths = entries.map((entry) => entry.tracked).filter(Boolean);
+  if (paths.length === 0) return [];
+  const result = spawnSync("git", ["-C", repo, "ls-files", "--", ...paths], { encoding: "utf8" });
+  if (result.status !== 0) return [];
+  return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+export function ensureGitignore(repo, { check = false, ignore = [] } = {}) {
+  const entries = managedEntries({ ignore });
   const target = path.join(repo, ".gitignore");
   const existing = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null;
-  const rendered = renderGitignore(existing, { codegraph });
+  const rendered = renderGitignore(existing, { ignore });
   if (rendered.changed && !check) fs.writeFileSync(target, rendered.content);
   return {
     path: target,
@@ -158,7 +222,11 @@ export function ensureGitignore(repo, { check = false, codegraph = false } = {})
     // Verification reflects what is on disk, so in --check mode a pending
     // change is reported as still unresolved rather than as already correct.
     notIgnored: rendered.changed && check ? entries.map((entry) => entry.pattern) : verifyIgnored(repo, entries),
-    kept: KEPT_PATHS
+    kept: keptPaths({ ignore }),
+    ignore: optionalEntries(ignore).map((entry) => entry.pattern),
+    // Files an opted-in pattern covers that Git already tracks, so ignoring them
+    // changes nothing until someone removes them from the index.
+    alreadyTracked: trackedUnder(repo, optionalEntries(ignore))
   };
 }
 
@@ -166,12 +234,25 @@ function main() {
   try {
     const argv = process.argv.slice(2);
     const check = argv.includes("--check");
-    const codegraph = argv.includes("--codegraph");
-    const repo = argv.find((value) => !value.startsWith("--"));
-    if (!repo) throw new Error("usage: ensure-gitignore.mjs <repo> [--check] [--codegraph]");
+    // --ignore takes a comma-separated list; repeating the flag also works.
+    // `--codegraph` stays as the spelling for its own entry.
+    const ignore = argv.flatMap((value, index) => {
+      if (value === "--codegraph") return ["codegraph"];
+      if (value.startsWith("--ignore=")) return value.slice("--ignore=".length).split(",");
+      if (value === "--ignore") return (argv[index + 1] ?? "").split(",");
+      return [];
+    }).map((key) => key.trim()).filter(Boolean);
+    const consumed = new Set();
+    argv.forEach((value, index) => { if (value === "--ignore") consumed.add(index + 1); });
+    const repo = argv.find((value, index) => !value.startsWith("--") && !consumed.has(index));
+    if (!repo) {
+      throw new Error(
+        `usage: ensure-gitignore.mjs <repo> [--check] [--codegraph] [--ignore ${OPTIONAL_KEYS.join(",")}]`
+      );
+    }
     const root = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
     if (root.status !== 0) throw new Error(`not a Git repository: ${repo}`);
-    const report = ensureGitignore(root.stdout.trim(), { check, codegraph });
+    const report = ensureGitignore(root.stdout.trim(), { check, ignore });
     process.stdout.write(JSON.stringify({ ok: report.notIgnored.length === 0, ...report }, null, 2) + "\n");
     if (report.notIgnored.length > 0) process.exitCode = 1;
   } catch (error) {

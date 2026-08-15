@@ -6,7 +6,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  BEGIN, CODEGRAPH_ENTRY, END, MANAGED_ENTRIES, ensureGitignore, renderGitignore
+  BEGIN, CODEGRAPH_ENTRY, END, MANAGED_ENTRIES, OPTIONAL_ENTRIES,
+  ensureGitignore, keptPaths, renderGitignore
 } from "../scripts/ensure-gitignore.mjs";
 
 function repo() {
@@ -27,7 +28,7 @@ test("a repository with no .gitignore gets one that Git agrees ignores tagteam w
   assert.equal(content.endsWith(`${END}\n`), true);
 });
 
-test("an approved plan and the config stay committable", () => {
+test("an approved plan and the config stay committable by default", () => {
   const dir = repo();
   ensureGitignore(dir);
   const committable = [
@@ -114,9 +115,9 @@ test("the CLI reports success as JSON and fails when a pattern does not take eff
 // new untracked directory the moment init finished. Managed only on request:
 // a repository that declined the index has no such directory, and a rule for
 // one would be a claim about a tool it does not use.
-test("--codegraph covers the index init creates, and its absence leaves it alone", () => {
+test("codegraph covers the index init creates, and its absence leaves it alone", () => {
   const dir = repo();
-  const report = ensureGitignore(dir, { codegraph: true });
+  const report = ensureGitignore(dir, { ignore: ["codegraph"] });
   assert.deepEqual(report.notIgnored, []);
   const lines = fs.readFileSync(path.join(dir, ".gitignore"), "utf8").trimEnd().split("\n");
   assert.deepEqual(lines.slice(lines.indexOf(BEGIN) + 1, lines.indexOf(END)), [
@@ -198,6 +199,100 @@ test("the quota probe shows the hashed basename codex.mjs writes, and the patter
     quotaPaths,
     "everything under a .quota directory must be ignored, whatever its basename"
   );
+});
+
+// Whether a plan belongs in history is the project's call, not the tool's: a
+// team commits the reviewed record, a single developer keeps their goals and
+// specs out of it. The choice has to actually take effect in Git, and it has to
+// change what setup reports as committable — a report still promising a
+// committed plan while Git ignores it is worse than not offering the choice.
+test("choosing to keep plans private ignores every plan artifact and stops promising it is committed", () => {
+  const dir = repo();
+  const report = ensureGitignore(dir, { ignore: ["plans"] });
+  assert.deepEqual(report.notIgnored, []);
+  assert.deepEqual(report.kept, [".tagteam/config.json"]);
+  assert.deepEqual(report.ignore, [".tagteam/plans/"]);
+
+  const plan = [
+    ".tagteam/plans/slug/goal.md",
+    ".tagteam/plans/slug/plan.md",
+    ".tagteam/plans/slug/specs/01-thing.md",
+    ".tagteam/plans/slug/approved.json"
+  ];
+  const result = spawnSync("git", ["-C", dir, "check-ignore", "--no-index", "--", ...plan], { encoding: "utf8" });
+  assert.deepEqual(result.stdout.trim().split("\n"), plan);
+  // The config is a separate choice and was not made here.
+  assert.equal(spawnSync("git", [
+    "-C", dir, "check-ignore", "--no-index", "--", ".tagteam/config.json"
+  ], { encoding: "utf8" }).stdout.trim(), "");
+});
+
+test("choosing to keep the config private too leaves nothing committable", () => {
+  const dir = repo();
+  const report = ensureGitignore(dir, { ignore: ["config", "plans"] });
+  assert.deepEqual(report.notIgnored, []);
+  assert.deepEqual(report.kept, []);
+  // Rendered in a fixed order whatever order the caller asked in.
+  assert.deepEqual(report.ignore, [".tagteam/plans/", ".tagteam/config.json"]);
+  assert.equal(spawnSync("git", [
+    "-C", dir, "check-ignore", "--no-index", "--", ".tagteam/config.json"
+  ], { encoding: "utf8" }).stdout.trim(), ".tagteam/config.json");
+});
+
+// A pattern does not govern a tracked path. Choosing privacy for plans a
+// repository already committed changes nothing until someone removes them from
+// the index, and that silence is what would let a person believe otherwise.
+test("plan files Git already tracks are named, not quietly left in the index", () => {
+  const dir = repo();
+  fs.mkdirSync(path.join(dir, ".tagteam/plans/slug"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".tagteam/plans/slug/plan.md"), "# plan\n");
+  assert.equal(spawnSync("git", ["-C", dir, "add", ".tagteam/plans/slug/plan.md"]).status, 0);
+
+  const report = ensureGitignore(dir, { ignore: ["plans"] });
+  assert.deepEqual(report.alreadyTracked, [".tagteam/plans/slug/plan.md"]);
+  // Still tracked, exactly as Git left it: this script does not rewrite the index.
+  assert.equal(
+    spawnSync("git", ["-C", dir, "ls-files"], { encoding: "utf8" }).stdout.trim(),
+    ".tagteam/plans/slug/plan.md"
+  );
+
+  assert.deepEqual(ensureGitignore(repo(), { ignore: ["plans"] }).alreadyTracked, []);
+});
+
+test("a choice dropped on reconfigure leaves the block, and Git, without it", () => {
+  const dir = repo();
+  ensureGitignore(dir, { ignore: ["plans"] });
+  const report = ensureGitignore(dir);
+  assert.equal(report.changed, true);
+  assert.deepEqual(report.ignore, []);
+  assert.equal(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").includes(".tagteam/plans/\n"), false);
+  assert.equal(spawnSync("git", [
+    "-C", dir, "check-ignore", "--no-index", "--", ".tagteam/plans/slug/plan.md"
+  ], { encoding: "utf8" }).stdout.trim(), "");
+});
+
+test("an unknown ignore option is an error, not a rule the user thinks is in force", () => {
+  assert.throws(() => ensureGitignore(repo(), { ignore: ["specs"] }), /unknown ignore option: specs/);
+  assert.deepEqual(keptPaths(), keptPaths({ ignore: [] }));
+});
+
+test("the CLI accepts the ignore options and reports what they cover", () => {
+  const dir = repo();
+  const script = path.resolve(import.meta.dirname, "../scripts/ensure-gitignore.mjs");
+  const run = spawnSync(process.execPath, [script, "--ignore", "plans,codegraph", dir], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const report = JSON.parse(run.stdout);
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.ignore, [OPTIONAL_ENTRIES.codegraph.pattern, OPTIONAL_ENTRIES.plans.pattern]);
+  assert.deepEqual(report.kept, [".tagteam/config.json"]);
+
+  // The repository argument is still found when it follows a consumed value.
+  const equals = spawnSync(process.execPath, [script, dir, "--ignore=config", "--check"], { encoding: "utf8" });
+  assert.deepEqual(JSON.parse(equals.stdout).kept, keptPaths({ ignore: ["config"] }));
+
+  const bad = spawnSync(process.execPath, [script, dir, "--ignore", "plan"], { encoding: "utf8" });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /unknown ignore option: plan/);
 });
 
 test("rendering keeps every user line, ends with exactly one newline, and needs no file to exist", () => {
