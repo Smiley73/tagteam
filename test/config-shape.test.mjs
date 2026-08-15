@@ -491,7 +491,10 @@ test("validating the shipped configuration prints the cost note on stderr", () =
   assert.match(result.stdout, /valid/);
   const note = result.stderr.split("\n").find((line) => line.startsWith("note:"));
   assert.ok(note, `expected a note: line on stderr, got: ${JSON.stringify(result.stderr)}`);
-  assert.match(note, /\b4\b/);
+  // The count itself belongs to whatever this repository's limits happen to be,
+  // and those are a live setting `/tagteam:init` asks about. Pinning the number
+  // here would make raising a limit fail a test about whether the line prints.
+  assert.match(note, /\b\d+ full review panels\b/);
 });
 
 test("validating expensive limits prints a warning line per limit and still exits 0", () => {
@@ -526,13 +529,13 @@ test("a retired key and a declared key cannot be the same key", () => {
   assert.deepEqual(both, [], `${both.join(", ")} is both retired and declared`);
 });
 
-test("the shipped configurations state today's behaviour", () => {
-  // Raising a shipped limit would change the cost of every repository that
-  // copies this file, silently and at once.
-  const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
-  for (const [label, config] of [["examples/config.json", example], [".tagteam/config.json", own]]) {
-    assert.deepEqual(config.limits, { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 }, label);
-  }
+test("the shipped example states today's behaviour", () => {
+  // Raising this limit would change the cost of every repository that copies
+  // this file, silently and at once. `.tagteam/config.json` is deliberately not
+  // held to it: nobody copies this repository's own settings, and `limits` is a
+  // question `/tagteam:init` asks, so pinning the answer here would mean tagteam
+  // could not configure itself the way it offers to configure everyone else.
+  assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 }, "examples/config.json");
 });
 
 test("the schema declares no default anywhere", () => {

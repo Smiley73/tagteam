@@ -10,7 +10,7 @@
   },
   "effort": {
     "lead": "high",
-    "worker": "medium",
+    "worker": "high",
     "codex": "high"
   },
   "reviewers": {
@@ -26,12 +26,20 @@
       "conventions",
       "docs"
     ],
-    "default": ["correctness", "test-coverage"]
+    "default": [
+      "correctness",
+      "test-coverage",
+      "conventions",
+      "docs"
+    ]
   },
   "verify": [
     {
       "command": "npm test",
-      "when": { "globs": [], "keywords": [] },
+      "when": {
+        "globs": [],
+        "keywords": []
+      },
       "timeoutSec": 600
     }
   ],
@@ -42,11 +50,11 @@
     "copyUntracked": [],
     "setupTimeoutSec": 300
   },
-  "reviewExclude": ["package-lock.json"],
+  "reviewExclude": [],
   "maxConcurrentCodex": 3,
   "limits": {
-    "fixRounds": 1,
+    "fixRounds": 2,
     "ciRepairs": 1,
-    "planReviewRounds": 1
+    "planReviewRounds": 2
   }
 }

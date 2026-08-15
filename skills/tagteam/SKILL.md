@@ -41,6 +41,13 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
 
+`/tagteam:init` can move the two `committed` groups above — the config, and the
+plan artifacts (`goal.md`, `plan.md`, `specs/`, `approved.json`) — to ignored,
+one choice each, recorded in the managed `.gitignore` block and nowhere else.
+Nothing else in this table is negotiable. A repository that keeps its plans
+private still ships from them: the implementer is given a spec by path in the
+working tree, so what Git tracks never decides what a spec can see.
+
 Everything committed is the record a person approved. Everything ignored is
 working state, and **the working state is the resume mechanism**: there are no
 fingerprints, no reuse ledgers, and no invocation descriptors. A re-run looks at
