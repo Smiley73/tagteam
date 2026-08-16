@@ -24,7 +24,11 @@
       "ux",
       "data-integrity",
       "conventions",
-      "docs"
+      "docs",
+      "concurrency",
+      "reliability",
+      "cost",
+      "prompt-grounding"
     ],
     "default": ["correctness", "test-coverage"]
   },

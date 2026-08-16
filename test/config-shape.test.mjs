@@ -381,6 +381,42 @@ test("adversary and codex are roles, not lenses a configuration may select", asy
   assert.deepEqual(semanticErrors("config.schema.json", example, {}), [], "the example must stay valid");
 });
 
+test("a rostered lens with no brief is refused rather than reviewed on improvisation", async () => {
+  // The failure this replaces is invisible: `agents/reviewer.md` points the
+  // subagent at `prompts/lenses/<lens>.md`, and when that file is not there the
+  // reviewer decides for itself what the lens means, mentions it in prose, and
+  // writes a findings file `collect-findings.mjs`, the review gate and the pull
+  // request body all count as a calibrated reviewer's. Config validation is the
+  // one place it is decidable, and both skills run it in preflight.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const rostered = (...extra) => ({ ...example, reviewers: { roster: [...example.reviewers.roster, ...extra], default: example.reviewers.default } });
+
+  const errors = semanticErrors("config.schema.json", rostered("telepathy"), {});
+  assert.equal(errors.length, 1, `expected one error, got ${JSON.stringify(errors)}`);
+  assert.match(errors[0], /telepathy/);
+  assert.match(errors[0], /prompts\/lenses\/telepathy\.md/);
+  // The message has to say what may be named instead; a refusal with no menu
+  // sends the person to the plugin directory to find one.
+  assert.match(errors[0], /correctness/);
+
+  // A reserved role is refused as a role, not as a lens missing a brief: two
+  // errors about one entry is one of them telling the person the wrong fix.
+  const reserved = semanticErrors("config.schema.json", rostered("adversary"), {});
+  assert.equal(reserved.length, 1, `expected one error, got ${JSON.stringify(reserved)}`);
+  assert.match(reserved[0], /a role that already runs on every spec/);
+});
+
+test("the roster check reads the briefs on disk, not a list in the script", async () => {
+  // A hardcoded list would validate a roster the plugin can no longer calibrate,
+  // and the reviewer is dispatched at the path rather than at the list.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const shipped = fs.readdirSync(path.join(root, "prompts", "lenses")).map((entry) => entry.replace(/\.md$/, ""));
+  for (const lens of shipped) {
+    const config = { ...example, reviewers: { roster: [lens], default: [] } };
+    assert.deepEqual(semanticErrors("config.schema.json", config, {}), [], `${lens} ships a brief and must be rosterable`);
+  }
+});
+
 // --- version 7: the limits object ---
 
 test("a version-6 configuration reports stale rather than invalid", () => {

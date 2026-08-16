@@ -60,7 +60,7 @@ show at the end, which is where they are useful. See *Asking* in the skill.
    `$P/skills/tagteam/SKILL.md` for why.
 3. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
-   gets four readers. Show the full roster and let them adjust.
+   gets four readers. Show the full roster and let them pick from it.
 4. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
    workflows, no question — it is 0.
 5. Any ignored file a build needs copied into a worktree
@@ -103,6 +103,16 @@ Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
 `examples/config.json`.
 
+**The roster is closed.** Every lens in it must have a brief at
+`$P/prompts/lenses/<name>.md` — that brief is what calibrates the reviewer
+dispatched on the lens, it ships with the plugin, and a repository cannot add
+one. Take the roster from `examples/config.json` as it stands. Do not invent an
+entry because this repository looks like it needs one: a lens with no brief does
+not fail, it produces a reviewer that decides for itself what the word means and
+findings nothing downstream can tell from a calibrated reviewer's. The validator
+below refuses a roster it cannot calibrate, so an invented entry costs a rewrite
+here rather than a train.
+
 ## Write
 
 ```bash
@@ -129,6 +139,12 @@ rather than 1. Defaulting to what is already there is the whole protection: a
 reconfigure that was about lenses must not reset a limit someone raised
 deliberately, and showing them the number they chose and letting them keep it is
 what guarantees that.
+
+The roster carries forward the same way, minus any entry with no brief. A
+repository that narrowed its roster keeps it narrowed, but a lens that was added
+by hand and never had a brief is dropped rather than written again — say which
+ones and that a reviewer was never calibrated for them. Mention any brief this
+plugin ships that the current roster does not name, and let them add it.
 
 An older configuration is not upgraded — each version is a different shape, not
 an extension, and there is no migration. Say that the old file is being replaced,
