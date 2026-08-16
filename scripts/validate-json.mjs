@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
 
 function typeMatches(value, expected) {
@@ -183,6 +183,23 @@ function repositoryPathErrors(label, namedPath, { repo, mustBeFile = false }) {
   return errors;
 }
 
+// Names a configuration may not use as a lens; see the check that reports them.
+const RESERVED_ROLES = ["adversary", "codex"];
+
+// The lenses this plugin can calibrate a reviewer for: one brief per file in
+// `prompts/lenses/`. Read from the directory rather than listed here, because a
+// list would be a second place to update and the reviewer is dispatched at the
+// path, not at the list. A plugin missing the directory calibrates nothing,
+// which is what an empty set says.
+function shippedLenses() {
+  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "prompts", "lenses");
+  try {
+    return fs.readdirSync(dir).filter((entry) => entry.endsWith(".md")).map((entry) => entry.slice(0, -3)).sort();
+  } catch {
+    return [];
+  }
+}
+
 export function semanticErrors(schemaName, value, { repo } = {}) {
   const errors = [];
   if (schemaName !== "config.schema.json") return errors;
@@ -199,10 +216,39 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   // reaches the merge gate as a duplicate, and the pull request body as an
   // ambiguous reference. Found by Codex review; nothing had reserved them.
   for (const key of ["roster", "default"]) {
-    for (const reserved of ["adversary", "codex"]) {
+    for (const reserved of RESERVED_ROLES) {
       if ((value.reviewers?.[key] ?? []).includes(reserved)) {
         errors.push(`reviewers.${key} names "${reserved}", which is a role that already runs on every spec, not a lens to select`);
       }
+    }
+  }
+
+  // A rostered lens is a reviewer that can be dispatched, and what calibrates
+  // that reviewer is the brief `agents/reviewer.md` sends it to read:
+  // `prompts/lenses/<name>.md`, inside the plugin, which a repository has no way
+  // to supply. A roster entry with no brief does not fail anywhere downstream —
+  // the subagent improvises the lens from the word itself, says so in prose
+  // nobody parses, and writes a findings file that `collect-findings.mjs`, the
+  // review gate and the pull request body all read as a calibrated lens's. This
+  // is the only place the two can be told apart, and it is also the cheapest:
+  // both skills validate the configuration in preflight and `/tagteam:init`
+  // validates what it has just written, so the gap costs one command rather
+  // than a train of uncalibrated review.
+  const shipped = shippedLenses();
+  const calibrated = new Set(shipped);
+  // The menu of what may be named instead, on the first of these errors only: a
+  // refusal without one sends the person to the plugin directory to find a name,
+  // and the same fourteen names under every entry buries the entries.
+  let listed = shipped.length === 0;
+  for (const lens of value.reviewers?.roster ?? []) {
+    // A role is reported above and a name of any other shape was reported by the
+    // schema; either way this would be the second error about one entry.
+    if (typeof lens !== "string" || RESERVED_ROLES.includes(lens) || !/^[a-z][a-z0-9-]*$/.test(lens)) continue;
+    if (!calibrated.has(lens)) {
+      errors.push(`reviewers.roster names "${lens}", which has no lens brief at prompts/lenses/${lens}.md — a `
+        + "reviewer dispatched on it invents the lens and files findings nothing can tell from a calibrated "
+        + `reviewer's${listed ? "" : `; this plugin ships ${shipped.join(", ")}`}`);
+      listed = true;
     }
   }
 

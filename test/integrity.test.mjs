@@ -70,6 +70,32 @@ test("every lens in the example roster has a brief", () => {
   }
 });
 
+// The other direction. `validate-json.mjs` decides what a roster may name by
+// listing this directory, so anything left in it is a lens a configuration can
+// select and a reviewer can be dispatched on — a draft, a note, a README would
+// each become one silently. A brief is a file named for its lens that opens by
+// naming it.
+test("every file in prompts/lenses is a brief for the lens it is named for", () => {
+  const dir = path.join(root, "prompts", "lenses");
+  for (const entry of fs.readdirSync(dir)) {
+    assert.match(entry, /^[a-z][a-z0-9-]*\.md$/, `prompts/lenses/${entry} is not named for a lens a roster could hold`);
+    const first = read("prompts", "lenses", entry).split("\n")[0];
+    assert.match(first, /^# Lens: /, `prompts/lenses/${entry} does not open with a lens heading: ${first}`);
+  }
+});
+
+// The example roster is what /tagteam:init writes, so a shipped brief missing
+// from it is a lens nobody can select without hand-editing the configuration —
+// the same invisibility, from the other side.
+test("every brief this plugin ships is in the example roster", () => {
+  const example = JSON.parse(read("examples", "config.json"));
+  const rostered = new Set(example.reviewers.roster);
+  for (const entry of fs.readdirSync(path.join(root, "prompts", "lenses"))) {
+    const lens = entry.replace(/\.md$/, "");
+    assert.ok(rostered.has(lens), `prompts/lenses/${entry} ships but examples/config.json does not roster ${lens}`);
+  }
+});
+
 test("the example configuration is valid against the schema", async () => {
   const { loadAndValidate } = await import("../scripts/validate-json.mjs");
   const { errors, document } = loadAndValidate(
