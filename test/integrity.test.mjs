@@ -178,15 +178,36 @@ test("every command that asks a person something points at the Asking rule", () 
 // never the prose — the caveat's wording, the option labels and the question
 // numbers must stay free to improve.
 test("the init command asks about both of the settings a person can only get here", () => {
-  // Scoped to the interview itself: naming a key in the paragraph that writes
-  // the file is not asking anybody anything.
+  // Scoped to the numbered questions themselves, not to the section: the section
+  // ends with "Everything else takes its default" and the roster paragraph, and
+  // naming a key there is documentation, not a question. An item runs from its
+  // number to the next number, and its continuation lines are indented — the
+  // first unindented line that is not a number ends the list.
   const init = read("commands", "init.md");
   const start = init.indexOf("## Then ask");
   assert.ok(start > -1, "init.md no longer has a Then ask section");
-  const questions = init.slice(start, init.indexOf("\n## ", start + 1));
-  for (const key of ["escalation", "plan"]) {
-    assert.match(questions, new RegExp(`\`${key}\``), `init.md never asks about ${key}`);
+  const section = init.slice(start, init.indexOf("\n## ", start + 1));
+  const items = [];
+  for (const line of section.split("\n")) {
+    if (/^\d+\. /.test(line)) items.push(line);
+    else if (items.length === 0) continue;
+    else if (line.trim() === "" || /^\s/.test(line)) items[items.length - 1] += `\n${line}`;
+    else break;
   }
+  assert.ok(items.length > 4, `only ${items.length} numbered questions were found in Then ask`);
+  const asked = new Map();
+  for (const key of ["escalation", "plan"]) {
+    const where = items.flatMap((item, index) => (item.includes(`\`${key}\``) ? [index] : []));
+    assert.ok(where.length > 0, `no numbered question in init.md asks about ${key}`);
+    asked.set(key, where);
+  }
+  // Two questions, not one: the trade-off of neither survives being folded into
+  // the other, and a fold leaves both names in a single item. Which numbers they
+  // are, and in which order, stays free.
+  assert.ok(
+    asked.get("escalation").some((one) => asked.get("plan").some((other) => other !== one)),
+    "init.md asks about escalation and plan in the same question instead of two"
+  );
 });
 
 test("the ship command never re-derives the reviewed commit from HEAD", () => {
