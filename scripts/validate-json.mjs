@@ -148,6 +148,65 @@ export function limitNotices(config) {
   return notices;
 }
 
+// Two ways an `escalation` block validates and then buys nothing. Both are said
+// out loud rather than refused, and both name the keys and the numbers involved
+// so the sentence stands on its own away from the file.
+//
+// The first is arithmetic: escalated settings take over after `escalation.after`
+// ordinary fix rounds, so an `after` at or above `limits.fixRounds` means the
+// cycle is out of fix rounds before the raised ones start. That is advice and
+// not a refusal because `limits.fixRounds` is a live setting `/tagteam:init`
+// asks about: lowering it must not invalidate a working configuration and stop
+// both `/tagteam:ship` and `/tagteam:plan`. The behaviour it produces is today's,
+// visibly.
+//
+// The second is equality: an `escalation` naming exactly the models and effort
+// the top-level keys already name escalates to where it already is. Only exact
+// equality is detectable — this project has no ordering over `opus` / `fable` /
+// `sonnet` or over the Codex model names, so an `escalation` that is merely
+// *weaker* cannot be told from a stronger one and nothing here implies an order
+// exists. The maps are compared structurally rather than by naming lead / worker
+// / codex, so a role added to `$defs/roleModels` later is covered without an
+// edit here.
+//
+// Pure and total, for the same reason as `limitNotices`: `semanticErrors` runs
+// on documents whose shape has not validated, so an `escalation` of `3`, of
+// `[]`, or with `after: "2"` returns no notices rather than throwing or saying
+// something nonsensical.
+export function escalationNotices(config) {
+  const escalation = config?.escalation;
+  if (escalation === null || typeof escalation !== "object" || Array.isArray(escalation)) return [];
+  const notices = [];
+
+  const { after } = escalation;
+  const fixRounds = config?.limits?.fixRounds;
+  if (Number.isInteger(after) && after >= 1 && Number.isInteger(fixRounds) && fixRounds >= 1 && after >= fixRounds) {
+    notices.push(
+      `warning: escalation.after is ${after} and limits.fixRounds is ${fixRounds}, so the fix rounds run out `
+      + "before the escalated ones start and nothing is ever dispatched at the raised settings"
+    );
+  }
+
+  // Same keys, same values, both maps. A non-object on either side is a shape
+  // error the schema reports, and two documents that cannot be compared are not
+  // identical.
+  const sameMap = (left, right) => {
+    for (const map of [left, right]) {
+      if (map === null || typeof map !== "object" || Array.isArray(map)) return false;
+    }
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length && keys.every((key) => left[key] === right[key]);
+  };
+  if (sameMap(escalation.models, config?.models) && sameMap(escalation.effort, config?.effort)) {
+    notices.push(
+      "warning: escalation.models and escalation.effort name exactly what models and effort already name, "
+      + "so escalating changes nothing about how anything is dispatched"
+    );
+  }
+
+  return notices;
+}
+
 // A path named in configuration is read by a model, rendered into a prompt, or
 // passed to git. All three want the same three things: no traversal, no control
 // characters that could add lines of their own, and no escape from the checkout
@@ -321,6 +380,12 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
       }
     }
   }
+
+  // Advice, not correctness: an escalation that buys nothing is legal, and a
+  // configuration with `escalation: null` says nothing here at all. Emitted
+  // before the limits so the cost note stays the last line printed. These lines
+  // never join the error list.
+  for (const notice of escalationNotices(value)) process.stderr.write(`${notice}\n`);
 
   // Cost, not correctness: a limit above the advisory ceiling is allowed, and the
   // note is emitted for every configuration that has limits at all, including
