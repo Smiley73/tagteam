@@ -123,18 +123,22 @@ See *Asking* in the skill.
    request to repair.
 
    If they turned escalation on in question 3, this is where that answer gets
-   priced. Compare the round they named there against the `fixRounds` this
-   question would otherwise offer — 1 on a fresh init, whatever the file already
-   holds under `--reconfigure`. When that round is at or above the offer, the
-   two answers contradict each other, and this question puts that to them rather
+   priced. Compare the round they named there against the `fixRounds` **they
+   answer here**, not against the number this question offered them — an answer
+   that lowers the cap creates the contradiction just as surely as an offer that
+   was always too low, and comparing against the offer is how that case slips
+   through unasked. When their `fixRounds` is at or above that round, the two
+   answers contradict each other, and this question puts that to them rather
    than settling it: as things stand a spec runs out of fix rounds before it
    ever reaches the raised models and effort they chose, so escalation buys
    nothing; raising `fixRounds` above that round is what lets it run at least
    once; and `fixRounds` is also the number that bounds how many paid review
-   rounds this repository can run with nobody watching. Offer both answers and
+   rounds this repository can run with nobody watching, so keeping it where it
+   is holds that ceiling down and leaves the raised settings as something to
+   turn on later rather than something running tonight. Offer both answers and
    prefer neither — keep the cap where it is and leave the raised settings out
-   of reach, or raise it far enough that escalation fires — and say what each
-   one costs them, because which of the two matters more here is theirs to
+   of reach, or raise it far enough that escalation fires — naming the number
+   each one writes, because which of the two matters more here is theirs to
    decide. This works the same way on a fresh init and under `--reconfigure`:
    init does not raise a limit on its own and does not quietly leave a setting
    someone turned on unreachable, it asks. The validator's warning about raised
@@ -191,9 +195,11 @@ deliberately, and showing them the number they chose and letting them keep it is
 what guarantees that.
 
 `escalation` and `plan` carry forward on the same terms: a key that is `null`
-today is re-offered as off, and a configured one is offered its own models,
-effort and round back rather than the question starting from off. A reconfigure
-about something else must not be what quietly switches escalation off.
+today is re-offered as off, and a configured one is offered its own models and
+effort back rather than the question starting from off — plus, for `escalation`
+alone, the round it already names. `plan` has no round; it holds `models` and
+`effort` and nothing else. A reconfigure about something else must not be what
+quietly switches escalation off.
 
 The roster carries forward the same way, minus any entry with no brief. A
 repository that narrowed its roster keeps it narrowed, but a lens that was added

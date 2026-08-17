@@ -319,11 +319,12 @@ fixer. None of them is a reason to answer one way rather than the other.
 
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts.
-A key in their own configuration is one of these: `reviewers.default`,
-`ciWaitSec`, `limits.fixRounds`, `escalation` are settings they set and will
-later edit in `.tagteam/config.json`, and a lens name is a value they put in one
-of them. So say what the setting or the lens does *and* name it wherever they
-might go looking for it afterwards. Naming a thing they will have to find again
+A key in their own configuration is one of these: `ciWaitSec`,
+`limits.fixRounds`, `escalation` and `plan` are settings they set and will later
+edit in `.tagteam/config.json`. A lens name is one too — they choose the set in
+`reviewers.default` and change it per spec in that spec's own front matter, which
+is where a plan's selection actually lives. So say what the setting or the lens
+does *and* name it wherever they might go looking for it afterwards. Naming a thing they will have to find again
 is being useful; naming a thing only this run knows about is not.
 
 This is a rule about your internal coordinates, not a licence to be vague: a
