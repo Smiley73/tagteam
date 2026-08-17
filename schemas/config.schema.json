@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 7",
+  "title": "tagteam project configuration, version 8",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "autoMerge", "worktree", "reviewExclude",
-    "maxConcurrentCodex", "limits"
+    "maxConcurrentCodex", "limits", "escalation", "plan"
   ],
   "properties": {
-    "version": { "const": 7, "type": "integer" },
+    "version": { "const": 8, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -25,24 +25,12 @@
       "description": "A repository document implementers and reviewers are told to read. Null when there is none."
     },
     "models": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["lead", "worker", "codex"],
-      "properties": {
-        "lead": { "$ref": "#/$defs/claudeModel" },
-        "worker": { "$ref": "#/$defs/claudeModel" },
-        "codex": { "type": "string", "minLength": 1 }
-      }
+      "$ref": "#/$defs/roleModels",
+      "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
     },
     "effort": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["lead", "worker", "codex"],
-      "properties": {
-        "lead": { "$ref": "#/$defs/claudeEffort" },
-        "worker": { "$ref": "#/$defs/claudeEffort" },
-        "codex": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] }
-      }
+      "$ref": "#/$defs/roleEffort",
+      "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
     },
     "reviewers": {
       "type": "object",
@@ -147,10 +135,69 @@
           "description": "How many rounds of plan review — three readers plus one revision — a goal approval may take."
         }
       }
+    },
+    "escalation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["after", "models", "effort"],
+      "description": "Raised settings for a ship cycle whose fix rounds have stalled. Null is today's behaviour: every dispatch runs at `models` and `effort`.",
+      "properties": {
+        "after": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many fix rounds run at the ordinary settings before the raised ones take over. At least 1: the ordinary settings always get one fix round, and wanting the raised model from the first fix is already expressible by setting `models`/`effort` to it."
+        },
+        "models": {
+          "$ref": "#/$defs/roleModels",
+          "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
+        },
+        "effort": {
+          "$ref": "#/$defs/roleEffort",
+          "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
+        }
+      }
+    },
+    "plan": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["models", "effort"],
+      "description": "Settings for the whole of /tagteam:plan, replacing `models` and `effort` there. Null is today's behaviour: every dispatch runs at `models` and `effort`.",
+      "properties": {
+        "models": {
+          "$ref": "#/$defs/roleModels",
+          "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
+        },
+        "effort": {
+          "$ref": "#/$defs/roleEffort",
+          "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
+        }
+      }
     }
   },
   "$defs": {
     "claudeModel": { "type": "string", "enum": ["opus", "fable", "sonnet"] },
-    "claudeEffort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
+    "claudeEffort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
+    "roleModels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lead", "worker", "codex"],
+      "description": "The model each role is dispatched at. Every site carrying a role triple $refs this one, so a role added here is a role added everywhere. Note that `validate-json.mjs` returns on a $ref: a keyword written beside one of those $refs is silently ignored, so anything extra a site needs belongs here instead. Codex model names are not enumerable, which is why `codex` is a non-empty string.",
+      "properties": {
+        "lead": { "$ref": "#/$defs/claudeModel" },
+        "worker": { "$ref": "#/$defs/claudeModel" },
+        "codex": { "type": "string", "minLength": 1 }
+      }
+    },
+    "roleEffort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lead", "worker", "codex"],
+      "description": "The effort each role is dispatched at. Every site carrying a role triple $refs this one, so a role added here is a role added everywhere. Note that `validate-json.mjs` returns on a $ref: a keyword written beside one of those $refs is silently ignored, so anything extra a site needs belongs here instead. The two effort ladders diverge on purpose — the Claude one has `max` and the Codex one does not.",
+      "properties": {
+        "lead": { "$ref": "#/$defs/claudeEffort" },
+        "worker": { "$ref": "#/$defs/claudeEffort" },
+        "codex": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] }
+      }
+    }
   }
 }
