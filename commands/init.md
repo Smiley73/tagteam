@@ -122,12 +122,17 @@ See *Asking* in the skill.
    Skip `ciRepairs` when the repository has no workflows; there is no red pull
    request to repair.
 
-   If they turned escalation on in question 3, this is where that answer gets
-   priced, and say so in the question: `fixRounds` has to be higher than the
-   round they named there, because a spec that runs out of fix rounds first
-   never reaches the raised settings and the models and effort they chose buy
-   nothing. Offer a `fixRounds` one above that round rather than 1, so the
-   offered answer is one that lets escalation run at least once.
+   On a fresh init, if they turned escalation on in question 3, this is where
+   that answer gets priced, and say so in the question: `fixRounds` has to be
+   higher than the round they named there, because a spec that runs out of fix
+   rounds first never reaches the raised settings and the models and effort they
+   chose buy nothing. Offer a `fixRounds` one above that round rather than 1, so
+   the offered answer is one that lets escalation run at least once. Under
+   `--reconfigure` this does not apply: offer the `limits.fixRounds` already in
+   the file, whatever it is, and say the same thing about escalation without
+   changing the offer. Raising a limit someone set is not something a
+   reconfigure does on its own, and the validator's warning about raised
+   settings nothing reaches is already shown after the write.
 
    This is a question, not a default, because it is the only setting that
    decides what the tool spends and how often it hands work back. Filing it

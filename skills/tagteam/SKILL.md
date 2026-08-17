@@ -311,18 +311,20 @@ fixer. None of them is a reason to answer one way rather than the other.
   yet. A pull request link is for afterwards, not for understanding what you
   asked.
 - **Drop the vocabulary of the run**: finding ids, severities, gate and state
-  names, schema fields, commit oids. "Nothing in this change has a test that runs
-  it" rather than `verify: not-applicable`.
+  names, schema paths and internal ids, commit oids. "Nothing in this change has
+  a test that runs it" rather than `verify: not-applicable`.
 - **Offer actions, not verdicts.** "Merge it anyway" and "Send it back" are
   choices a person can make; "Override" and "Reject" ask them to translate first.
   Each description says what happens next if they pick it.
 
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts.
-A lens name is one of these: it is a value they set in `reviewers.default` and
-edit in a spec's front matter, so say what the lens reads for *and* name it
-wherever they might go looking for it afterwards. Naming a thing they will have
-to find again is being useful; naming a thing only this run knows about is not.
+A key in their own configuration is one of these: `reviewers.default`,
+`ciWaitSec`, `limits.fixRounds`, `escalation` are settings they set and will
+later edit in `.tagteam/config.json`, and a lens name is a value they put in one
+of them. So say what the setting or the lens does *and* name it wherever they
+might go looking for it afterwards. Naming a thing they will have to find again
+is being useful; naming a thing only this run knows about is not.
 
 This is a rule about your internal coordinates, not a licence to be vague: a
 question that says "some of the error paths" where it could have said "what
