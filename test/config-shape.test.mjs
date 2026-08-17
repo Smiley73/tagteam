@@ -28,7 +28,11 @@ const CONSUMED = [
   ["scripts/guard-staged.mjs", ["worktree.copyUntracked"]],
   ["scripts/snapshot-candidate.mjs", ["reviewExclude", "verify"]],
   ["scripts/specs.mjs", ["reviewers.roster", "reviewers.default"]],
-  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs"]]
+  // `models`, `effort` and `escalation` as top-level keys only: the guard below
+  // resolves a dotted key through `?.` against `examples/config.json` and asserts
+  // it is not undefined, and a nullable key has no sub-keys to resolve in an
+  // example that leaves it null.
+  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]]
 ];
 
 // Keys older config shapes had and the current one does not. A key that comes

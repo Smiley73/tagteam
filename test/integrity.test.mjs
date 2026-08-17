@@ -482,6 +482,278 @@ test("nothing a person reads still says these cycles happen once", () => {
   }
 });
 
+// --- which model each dispatch runs at ---
+//
+// Six assertions over prose, because the failure they catch is silent: a clause
+// naming a setting nothing defines dispatches a subagent with no model set, and
+// it inherits the session default. Nothing errors and the run looks normal. The
+// same goes for a clause that names the wrong one of two near-twin jobs — the
+// step-5 panel and the step-7 re-check, the step-6 fixer and the step-8 repair
+// fixer — where exactly one of each pair escalates.
+
+// The roles come from the schema, never from a list here: a role added to
+// `$defs/roleModels` and `$defs/roleEffort` is a role these files may name from
+// that moment on, and a second copy of the vocabulary is a copy that goes stale.
+const configSchema = JSON.parse(read("schemas", "config.schema.json"));
+const schemaRoles = new Set([
+  ...Object.keys(configSchema.$defs.roleModels.properties),
+  ...Object.keys(configSchema.$defs.roleEffort.properties)
+]);
+
+// A *bare* `models.<role>` / `effort.<role>` reference: the leading character
+// class refuses a preceding dot, so `plan.models.lead` is not one of these. That
+// distinction is load-bearing in the absence and mirror assertions below, where
+// the ordinary key and its override have to be told apart.
+const ROLE_REFERENCE = /(^|[^.\w])(models|effort)\.([a-z][a-z0-9-]*)/g;
+// The same reference with an optional `plan.` prefix, for the schema-role check
+// only. A typo'd role is just as dead inside an override as outside one —
+// `plan.models.leed` resolves to nothing and the subagent inherits the session
+// default — and the bare pattern cannot see it at all.
+const ANY_ROLE_REFERENCE = /(^|[^.\w])(?:plan\.)?(models|effort)\.([a-z][a-z0-9-]*)/g;
+
+function markdownFiles(dir) {
+  return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? markdownFiles(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
+}
+
+test("every model or effort reference names a role the schema defines", () => {
+  assert.ok(schemaRoles.size > 0, "the schema no longer defines any roles");
+  const failures = [];
+  for (const dir of ["commands", "skills", "prompts", "agents"]) {
+    for (const file of markdownFiles(dir)) {
+      if (!file.endsWith(".md")) continue;
+      for (const [, , key, role] of fs.readFileSync(path.join(root, file), "utf8").matchAll(ANY_ROLE_REFERENCE)) {
+        if (!schemaRoles.has(role)) failures.push(`${file} names ${key}.${role}, which the schema declares no role for`);
+      }
+    }
+  }
+  assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+const shipText = () => read("commands", "ship.md");
+const planText = () => read("commands", "plan.md");
+
+test("every resolver job commands/ship.md names is one the resolver emits", async () => {
+  const { resolveRoles } = await import("../scripts/gates.mjs");
+  const emitted = new Set(Object.keys(resolveRoles({ fixRoundsUsed: 0 }, JSON.parse(read("examples", "config.json"))).jobs));
+  const named = [...shipText().matchAll(/`roles\.([a-z-]+)`/g)].map(([, job]) => job);
+  assert.ok(named.length > 0, "ship.md names no resolver job at all");
+  for (const job of named) {
+    assert.ok(emitted.has(job), `ship.md dispatches roles.${job}, which gates.mjs roles does not emit`);
+  }
+});
+
+// Absence, not just resolvability. The likeliest mistake is a rewiring that
+// leaves one clause reading `models.worker`: the assertion above passes
+// vacuously, because it quantifies over the jobs that are named rather than the
+// clauses that must name one, and that fixer then never escalates. There were
+// exactly seven such references before this rule and all seven were dispatch
+// clauses, so zero is a clean line. Scoped to `models.`/`effort.` and not to
+// config keys generally: ship.md must go on naming `limits.fixRounds` and
+// `limits.ciRepairs` where it describes its bounded loops, and the test above
+// requires it.
+test("commands/ship.md names no model or effort config key at all", () => {
+  const found = [...shipText().matchAll(ROLE_REFERENCE)].map(([, , key, role]) => `${key}.${role}`);
+  assert.deepEqual(found, [], `ship.md still resolves a dispatch from the configuration: ${found.join(", ")}`);
+});
+
+// References that resolve and are still wrong: `plan` never applies to a ship
+// cycle, and nothing in /tagteam:plan may escalate — it has no fixer, no finding
+// ids and nothing that verifies a repair, so a plan clause reading `escalation`
+// is reading a key about a loop it does not run.
+test("neither command file names the other's key", () => {
+  assert.doesNotMatch(shipText(), /plan\.(models|effort)/, "ship.md names a plan-side override");
+  assert.doesNotMatch(planText(), /escalation\./, "plan.md names an escalation key");
+});
+
+// The mapping, which the four assertions above do not check: they check
+// vocabulary. Within a step, each dispatch's agent token opens the span its job
+// name must fall in, and **a step's first span begins at the step heading** —
+// otherwise the settings line in step 6's announce paragraph, which precedes
+// step 6's only token, falls in no span at all. So k tokens give k spans.
+//
+// `ship.md:4`'s `allowed-tools` frontmatter names all four agent tokens and is
+// excluded because this is step-scoped and the frontmatter precedes every step
+// heading. That exclusion is load-bearing, not incidental: counted, every step
+// would hold four tokens more than it has dispatches.
+//
+// Rejected: anchoring on the artifact path each dispatch writes —
+// `recheck/<lens>.json` is already named in two different bullets of step 7.
+const SHIP_STEP_JOBS = [
+  ["### 2.", "### 3.", ["implement"]],
+  ["### 5.", "### 6.", ["review-lens", "review-codex"]],
+  ["### 6.", "### 7.", ["fix"]],
+  ["### 7.", "### 8.", ["adversary-fresh", "recheck-lens", "recheck-adversary", "recheck-codex"]],
+  ["### 8.", "### 9.", ["repair-fix"]]
+];
+const DISPATCH_TOKEN = /`(?:tagteam:(?:implementer|reviewer|adversary|fixer)|codex\.mjs)`/g;
+
+test("each resolver job is named inside the step of ship.md that dispatches it", () => {
+  const allJobs = new Set(SHIP_STEP_JOBS.flatMap(([, , jobs]) => jobs));
+  for (const [heading, next, jobs] of SHIP_STEP_JOBS) {
+    const step = shipStep(heading, next);
+    const tokens = [...step.matchAll(DISPATCH_TOKEN)];
+    // A step holding fewer tokens than jobs is a step whose spans have silently
+    // widened — two bullets merged by a later re-wording, and a job name now free
+    // to sit in a clause that dispatches something else.
+    assert.equal(tokens.length, jobs.length,
+      `ship.md ${heading} holds ${tokens.length} dispatch tokens for ${jobs.length} jobs`);
+    const bounds = jobs.map((_, index) => [
+      index === 0 ? 0 : tokens[index].index,
+      index + 1 < tokens.length ? tokens[index + 1].index : step.length
+    ]);
+    for (const [index, job] of jobs.entries()) {
+      const [from, to] = bounds[index];
+      const occurrences = [...step.matchAll(new RegExp(`\`roles\\.${job}\``, "g"))].map((match) => match.index);
+      assert.ok(occurrences.length > 0, `ship.md ${heading} dispatches roles.${job} but never names it`);
+      for (const at of occurrences) {
+        assert.ok(at >= from && at < to,
+          `ship.md ${heading} names roles.${job} outside the dispatch it belongs to`);
+      }
+    }
+    // And nothing else's job, which no span of this step could hold.
+    for (const [, job] of step.matchAll(/`roles\.([a-z-]+)`/g)) {
+      assert.ok(jobs.includes(job),
+        `ship.md ${heading} names roles.${job}, which another step dispatches`);
+      assert.ok(allJobs.has(job), `ship.md ${heading} names roles.${job}, which no step is mapped to`);
+    }
+  }
+});
+
+// The reads the clauses above read from. Assertion five checks what each clause
+// names; nothing in it checks that the resolution is taken at all, or where —
+// and both failures are silent. A deleted read leaves the orchestrator
+// dispatching off whatever reading it last took; a read hoisted above the state
+// transition of step 6 or step 8 resolves from a counter that transition is
+// about to move, so escalation fires one round late (step 6, whose fixing edge
+// increments the fix counter) or the repair fixer starts at the raised settings
+// the published cycle had reached (step 8, whose repair edge resets it — the
+// exact reordering the D4 gates test proves matters and nothing here caught).
+// `:253` is the positional precedent: indexOf comparisons inside shipStep
+// output.
+const ROLES_READ = /gates\.mjs" roles "\$S\/<id>\/state\.json"/g;
+const SHIP_STEP_READS = [
+  ["### 2.", "### 3.", 1],
+  ["### 5.", "### 6.", 1],
+  ["### 6.", "### 7.", 2], // the fix dispatch, and the missing-lens re-dispatch
+  ["### 7.", "### 8.", 1],
+  ["### 8.", "### 9.", 1]
+];
+
+test("every dispatching step takes its own resolver read, below the edge that moves its counter", () => {
+  for (const [heading, next, count] of SHIP_STEP_READS) {
+    const step = shipStep(heading, next);
+    const reads = [...step.matchAll(ROLES_READ)];
+    assert.equal(reads.length, count,
+      `ship.md ${heading} holds ${reads.length} resolver reads for its ${count} dispatching messages`);
+    // Counting the reads says nothing about where they sit. A read that drifts
+    // below the step's first dispatch — into the bullets it is meant to settle,
+    // or the prose after them — leaves that dispatch running off whatever
+    // reading the orchestrator last took, silently, at the wrong settings.
+    const firstDispatch = step.search(DISPATCH_TOKEN);
+    assert.ok(firstDispatch > -1, `ship.md ${heading} lost its dispatch tokens`);
+    assert.ok(reads[0].index < firstDispatch,
+      `ship.md ${heading} dispatches before it reads the resolver`);
+  }
+
+  const six = stepSix();
+  const sixEdge = six.indexOf('gates.mjs" state "$S/<id>/state.json" fixing');
+  const sixRead = six.search(ROLES_READ);
+  const sixFixer = six.indexOf("tagteam:fixer");
+  assert.ok(sixEdge > -1 && sixRead > -1 && sixFixer > -1, "step 6 lost its edge, its read, or its fixer");
+  assert.ok(sixEdge < sixRead, "step 6 reads the resolver above the fixing edge, a round behind the counter");
+  assert.ok(sixRead < sixFixer, "step 6 dispatches the fixer before it reads the resolver");
+
+  const eight = shipStep("### 8.", "### 9.");
+  const repairEdge = eight.indexOf('gates.mjs" state "$S/<id>/state.json" reviewing');
+  const eightRead = eight.search(ROLES_READ);
+  const eightFixer = eight.indexOf("tagteam:fixer");
+  assert.ok(repairEdge > -1 && eightRead > -1 && eightFixer > -1, "step 8 lost its edge, its read, or its fixer");
+  assert.ok(repairEdge < eightRead,
+    "step 8 reads the resolver above the repair edge, so the repair fixer starts at the stale raised settings");
+  assert.ok(eightRead < eightFixer, "step 8 dispatches the repair fixer before it reads the resolver");
+});
+
+// The plan side has no absence rule to lean on — `models.lead` there is a legal
+// role reference — so six clauses gaining the override and one not would pass
+// everything above. The mirror is what catches the other way round: a clause
+// that *substitutes*, naming only `plan.models.lead`, names nothing at all in
+// every repository that has left `plan` null, and the subagent inherits the
+// session default.
+//
+// Both of those are driven by a line that already names a key, so a clause that
+// names *no* setting at all — plan.md:227 as it stood, the gap this deliverable
+// was bought for — matches neither and is invisible to both. The anchors below
+// close that: each dispatch's token opens the span its settings must fall in,
+// exactly as assertion five does for ship.md, and a span naming no role, or the
+// wrong one, fails. Unlike ship.md these tokens are not a per-step alphabet but
+// a fixed ordered list, because plan.md dispatches from prose rather than from
+// numbered steps and clauses share tokens: `plan-drafter` at :134 and :257, and
+// `spec-writer` twice in step 6 — the per-deliverable fan-out and the
+// re-dispatch of a rejected spec. The re-dispatch is its own entry because a
+// span may not vouch for another clause's: with one `spec-writer` span running
+// to end of file, either clause naming the keys satisfied both, and the other
+// could lose its settings silently. plan.md:4's `allowed-tools` frontmatter
+// names every agent too, and is excluded by the backticks — the frontmatter
+// writes them bare.
+const PLAN_CLAUSES = [
+  ["`Explore`", "lead"],
+  ["`tagteam:plan-drafter`", "lead"],
+  ["`tagteam:plan-reviewer`", "lead"],
+  ["`$P/prompts/codex/plan-review.md`", "codex"],
+  ["`tagteam:adversary`", "lead"],
+  ["`tagteam:plan-drafter`", "lead"],
+  ["`tagteam:spec-writer`", "lead"],
+  ["`tagteam:spec-writer`", "lead"]
+];
+const PLAN_DISPATCH_TOKEN =
+  /`(?:Explore|tagteam:(?:plan-drafter|plan-reviewer|adversary|spec-writer)|\$P\/prompts\/codex\/plan-review\.md)`/g;
+
+test("every model or effort clause in commands/plan.md names the plan override too", () => {
+  const failures = [];
+  const plan = planText();
+  const tokens = [...plan.matchAll(PLAN_DISPATCH_TOKEN)];
+  // A clause that lost its token, or a new one that gained no entry here, leaves
+  // the spans below covering something other than the eight dispatches — so the
+  // shape is checked before it is relied on.
+  assert.deepEqual(tokens.map(([token]) => token), PLAN_CLAUSES.map(([token]) => token),
+    "plan.md no longer dispatches the eight clauses this assertion spans, in this order");
+  for (const [index, [token, role]] of PLAN_CLAUSES.entries()) {
+    const span = plan.slice(tokens[index].index,
+      index + 1 < tokens.length ? tokens[index + 1].index : plan.length);
+    for (const key of ["models", "effort"]) {
+      if (!new RegExp(`(^|[^.\\w])${key}\\.${role}(?![a-z0-9-])`).test(span)) {
+        failures.push(`plan.md dispatches ${token} without naming ${key}.${role}`);
+      }
+    }
+    // And no other role's, which nothing in this clause dispatches: a clause
+    // pointed at the wrong role resolves to a real setting and reads normally.
+    for (const [, , key, named] of span.matchAll(ROLE_REFERENCE)) {
+      if (named !== role) {
+        failures.push(`plan.md's ${token} dispatch names ${key}.${named}, not ${key}.${role}`);
+      }
+    }
+  }
+  for (const line of plan.split("\n")) {
+    // `ROLE_REFERENCE` refuses a `.` before the key, so `plan.models.lead` is not
+    // one of these: these are the ordinary keys, named without a prefix.
+    const bare = [...line.matchAll(ROLE_REFERENCE)];
+    // The override itself, per role named, not the substring `plan.`: plan.md is
+    // full of lines mentioning `$D/plan.md`, so a prefix test would be satisfied
+    // by the filename — and by a half-override, `plan.models.lead` named while
+    // `plan.effort.lead` is forgotten and the effort stays inherited.
+    for (const [, , key, role] of bare) {
+      if (!new RegExp(`plan\\.${key}\\.${role}(?![a-z0-9-])`).test(line)) {
+        failures.push(`plan.md names ${key}.${role} without plan.${key}.${role} beside it: ${line.trim()}`);
+      }
+    }
+    if (/plan\.(models|effort)\./.test(line) && bare.length === 0) {
+      failures.push(`plan.md substitutes a plan override for the key it overrides: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(failures, [], failures.join("\n"));
+});
+
 test("the commit chain always runs guard-staged between add and commit", () => {
   const ship = read("commands", "ship.md");
   for (const [, chain] of ship.matchAll(/(git -C "\$W" add -A[^\n]*)/g)) {

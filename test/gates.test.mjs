@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import {
   initState, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope,
-  budgetTaken
+  budgetTaken, resolveRoles
 } from "../scripts/gates.mjs";
 
 const A = "a".repeat(40);
@@ -438,6 +438,127 @@ test("a counter that is present but not a round count is refused, not read as un
     );
     assert.throws(() => reconcileBudgets(at("reviewing", { fixRoundsUsed: broken }), []), /fixRoundsUsed/);
   }
+});
+
+// --- which settings each dispatch runs at ---
+//
+// The resolver is read per dispatching message and nothing checks what the
+// orchestrator did with it, so the property that matters here is the one that is
+// invisible when it breaks: a repair fixer dispatched at the raised settings the
+// cycle before it had reached, with nothing erroring.
+
+const ORDINARY = {
+  models: { lead: "opus", worker: "sonnet", codex: "gpt-5-codex" },
+  effort: { lead: "high", worker: "medium", codex: "medium" },
+  escalation: null
+};
+const RAISED = {
+  ...ORDINARY,
+  escalation: {
+    after: 1,
+    models: { lead: "opus", worker: "opus", codex: "gpt-5-codex" },
+    effort: { lead: "max", worker: "high", codex: "high" }
+  }
+};
+// The fixer and the three re-checks, plus the repair fixer — which is a fixer
+// like any other. What keeps a repair on the ordinary settings is the counter
+// reset on the repair edge, not an exemption here, which is what the test below
+// is about.
+const ESCALATING = ["fix", "recheck-lens", "recheck-adversary", "recheck-codex", "repair-fix"];
+const raisedJobs = (state, config) =>
+  Object.entries(resolveRoles(state, config).jobs).filter(([, job]) => job.escalated).map(([name]) => name);
+
+test("a CI repair puts every job back on the ordinary settings, and its own stalled rounds raise them again", () => {
+  const limits = { fixRounds: 3, ciRepairs: 2 };
+  const stalled = at("publishing", { fixRoundsUsed: 3 });
+  assert.deepEqual(raisedJobs(stalled, RAISED), ESCALATING, "a stalled cycle should be running raised");
+
+  // The repair edge resets the fix counter, so the repair's own fixer starts
+  // where the cycle did. A resolver read taken above that edge returns the stale
+  // high counter and dispatches this fixer raised, which is exactly what D4 says
+  // it must not run at — and nothing about that failure is loud.
+  const repaired = step(stalled, "reviewing", limits);
+  assert.equal(repaired.fixRoundsUsed, 0);
+  const jobs = resolveRoles(repaired, RAISED).jobs;
+  assert.deepEqual(raisedJobs(repaired, RAISED), []);
+  assert.deepEqual(jobs["repair-fix"], { model: "sonnet", effort: "medium", escalated: false });
+  assert.deepEqual(jobs.fix, { model: "sonnet", effort: "medium", escalated: false });
+
+  // And the repair cycle escalates on its own stalled rounds, from zero.
+  let cycle = step(repaired, "fixing", limits);
+  assert.deepEqual(raisedJobs(cycle, RAISED), [], "the repair's first fix round is still ordinary");
+  cycle = step({ ...cycle, state: "reviewing" }, "fixing", limits);
+  assert.deepEqual(raisedJobs(cycle, RAISED), ESCALATING);
+  assert.deepEqual(resolveRoles(cycle, RAISED).jobs["recheck-lens"], { model: "opus", effort: "max", escalated: true });
+});
+
+test("escalation fires past `after`, not at it, and never without an escalation key", () => {
+  // Strictly greater. The edge into `fixing` sets the counter to `spent + 1`
+  // before ship.md dispatches anything, so the fixer of fix round N reads N —
+  // `>=` would raise the very first fix round at `after: 1`.
+  assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: 1 }), RAISED), []);
+  assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: 2 }), RAISED), ESCALATING);
+
+  // The names alone say nothing about the settings the other four come back at:
+  // a resolver that raised every job would still list exactly these five as
+  // escalated. So read the triples of a raised round directly, on both sides of
+  // the line — the fresh reader must be running the ordinary settings while the
+  // fixer runs the raised ones, which is D1's whole point.
+  const raised = resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs;
+  assert.deepEqual(raised.fix, { model: "opus", effort: "high", escalated: true });
+  assert.deepEqual(raised["review-lens"], { model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(raised["adversary-fresh"], { model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(raised["review-codex"], { model: "gpt-5-codex", effort: "medium", escalated: false });
+
+  for (const spent of [0, 1, 2, 7]) {
+    assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: spent }), ORDINARY), [],
+      "a null escalation is today's behaviour at every counter");
+  }
+  const nulled = resolveRoles(at("fixing", { fixRoundsUsed: 7 }), ORDINARY);
+  assert.equal(nulled.fixRoundsUsed, 7, "the counter is reported for diagnosis");
+  assert.deepEqual(nulled.jobs["review-codex"], { model: "gpt-5-codex", effort: "medium", escalated: false });
+  assert.deepEqual(nulled.jobs["adversary-fresh"], { model: "opus", effort: "high", escalated: false });
+
+  // A hand-edited counter fails here as loudly as it does on a budgeted edge.
+  assert.throws(() => resolveRoles(at("fixing", { fixRoundsUsed: "1" }), RAISED), /fixRoundsUsed/);
+});
+
+// The whole mapping at once. The triples above prove both sides of the
+// escalation line for the jobs they name, but `implement`, `recheck-adversary`
+// and `recheck-codex` appear in none of them — so `implement` rewired to the
+// lead's settings, or the Codex re-check handed a Claude model name, dispatched
+// every run wrong with nothing erroring. One deepEqual of the whole `jobs`
+// object pins the count (nine), every job name, and every job-to-role mapping
+// in a single assertion, on both sides of the line.
+test("the resolver emits exactly nine jobs, each mapped to its role's settings", () => {
+  const worker = { model: "sonnet", effort: "medium", escalated: false };
+  const lead = { model: "opus", effort: "high", escalated: false };
+  const codex = { model: "gpt-5-codex", effort: "medium", escalated: false };
+  assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 1 }), RAISED).jobs, {
+    implement: worker,
+    "review-lens": lead,
+    "review-codex": codex,
+    fix: worker,
+    "adversary-fresh": lead,
+    "recheck-lens": lead,
+    "recheck-adversary": lead,
+    "recheck-codex": codex,
+    "repair-fix": worker
+  }, "an ordinary round runs every job at its role's base settings");
+
+  // A raised round moves the five escalating jobs to the escalation block's
+  // settings for their roles and leaves the other four exactly where they were.
+  assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs, {
+    implement: worker,
+    "review-lens": lead,
+    "review-codex": codex,
+    fix: { model: "opus", effort: "high", escalated: true },
+    "adversary-fresh": lead,
+    "recheck-lens": { model: "opus", effort: "max", escalated: true },
+    "recheck-adversary": { model: "opus", effort: "max", escalated: true },
+    "recheck-codex": { model: "gpt-5-codex", effort: "high", escalated: true },
+    "repair-fix": { model: "opus", effort: "high", escalated: true }
+  }, "a raised round moves exactly the escalating five");
 });
 
 test("gates.mjs state takes the budgeted edge through the CLI with the configured limits", async () => {
