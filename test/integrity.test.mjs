@@ -626,9 +626,55 @@ test("each resolver job is named inside the step of ship.md that dispatches it",
 // that *substitutes*, naming only `plan.models.lead`, names nothing at all in
 // every repository that has left `plan` null, and the subagent inherits the
 // session default.
+//
+// Both of those are driven by a line that already names a key, so a clause that
+// names *no* setting at all — plan.md:227 as it stood, the gap this deliverable
+// was bought for — matches neither and is invisible to both. The anchors below
+// close that: each dispatch's token opens the span its settings must fall in,
+// exactly as assertion five does for ship.md, and a span naming no role, or the
+// wrong one, fails. Unlike ship.md these tokens are not a per-step alphabet but
+// a fixed ordered list, because plan.md dispatches from prose rather than from
+// numbered steps and two of the seven clauses (`plan-drafter` at :134 and :257)
+// share a token. plan.md:4's `allowed-tools` frontmatter names every agent too,
+// and is excluded by the backticks — the frontmatter writes them bare.
+const PLAN_CLAUSES = [
+  ["`Explore`", "lead"],
+  ["`tagteam:plan-drafter`", "lead"],
+  ["`tagteam:plan-reviewer`", "lead"],
+  ["`$P/prompts/codex/plan-review.md`", "codex"],
+  ["`tagteam:adversary`", "lead"],
+  ["`tagteam:plan-drafter`", "lead"],
+  ["`tagteam:spec-writer`", "lead"]
+];
+const PLAN_DISPATCH_TOKEN =
+  /`(?:Explore|tagteam:(?:plan-drafter|plan-reviewer|adversary|spec-writer)|\$P\/prompts\/codex\/plan-review\.md)`/g;
+
 test("every model or effort clause in commands/plan.md names the plan override too", () => {
   const failures = [];
-  for (const line of planText().split("\n")) {
+  const plan = planText();
+  const tokens = [...plan.matchAll(PLAN_DISPATCH_TOKEN)];
+  // A clause that lost its token, or a new one that gained no entry here, leaves
+  // the spans below covering something other than the seven dispatches — so the
+  // shape is checked before it is relied on.
+  assert.deepEqual(tokens.map(([token]) => token), PLAN_CLAUSES.map(([token]) => token),
+    "plan.md no longer dispatches the seven clauses this assertion spans, in this order");
+  for (const [index, [token, role]] of PLAN_CLAUSES.entries()) {
+    const span = plan.slice(tokens[index].index,
+      index + 1 < tokens.length ? tokens[index + 1].index : plan.length);
+    for (const key of ["models", "effort"]) {
+      if (!new RegExp(`(^|[^.\\w])${key}\\.${role}(?![a-z0-9-])`).test(span)) {
+        failures.push(`plan.md dispatches ${token} without naming ${key}.${role}`);
+      }
+    }
+    // And no other role's, which nothing in this clause dispatches: a clause
+    // pointed at the wrong role resolves to a real setting and reads normally.
+    for (const [, , key, named] of span.matchAll(ROLE_REFERENCE)) {
+      if (named !== role) {
+        failures.push(`plan.md's ${token} dispatch names ${key}.${named}, not ${key}.${role}`);
+      }
+    }
+  }
+  for (const line of plan.split("\n")) {
     // `ROLE_REFERENCE` refuses a `.` before the key, so `plan.models.lead` is not
     // one of these: these are the ordinary keys, named without a prefix.
     const bare = [...line.matchAll(ROLE_REFERENCE)];
