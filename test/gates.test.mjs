@@ -523,6 +523,44 @@ test("escalation fires past `after`, not at it, and never without an escalation 
   assert.throws(() => resolveRoles(at("fixing", { fixRoundsUsed: "1" }), RAISED), /fixRoundsUsed/);
 });
 
+// The whole mapping at once. The triples above prove both sides of the
+// escalation line for the jobs they name, but `implement`, `recheck-adversary`
+// and `recheck-codex` appear in none of them — so `implement` rewired to the
+// lead's settings, or the Codex re-check handed a Claude model name, dispatched
+// every run wrong with nothing erroring. One deepEqual of the whole `jobs`
+// object pins the count (nine), every job name, and every job-to-role mapping
+// in a single assertion, on both sides of the line.
+test("the resolver emits exactly nine jobs, each mapped to its role's settings", () => {
+  const worker = { model: "sonnet", effort: "medium", escalated: false };
+  const lead = { model: "opus", effort: "high", escalated: false };
+  const codex = { model: "gpt-5-codex", effort: "medium", escalated: false };
+  assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 1 }), RAISED).jobs, {
+    implement: worker,
+    "review-lens": lead,
+    "review-codex": codex,
+    fix: worker,
+    "adversary-fresh": lead,
+    "recheck-lens": lead,
+    "recheck-adversary": lead,
+    "recheck-codex": codex,
+    "repair-fix": worker
+  }, "an ordinary round runs every job at its role's base settings");
+
+  // A raised round moves the five escalating jobs to the escalation block's
+  // settings for their roles and leaves the other four exactly where they were.
+  assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs, {
+    implement: worker,
+    "review-lens": lead,
+    "review-codex": codex,
+    fix: { model: "opus", effort: "high", escalated: true },
+    "adversary-fresh": lead,
+    "recheck-lens": { model: "opus", effort: "max", escalated: true },
+    "recheck-adversary": { model: "opus", effort: "max", escalated: true },
+    "recheck-codex": { model: "gpt-5-codex", effort: "high", escalated: true },
+    "repair-fix": { model: "opus", effort: "high", escalated: true }
+  }, "a raised round moves exactly the escalating five");
+});
+
 test("gates.mjs state takes the budgeted edge through the CLI with the configured limits", async () => {
   // The interface the ship loop drives. In-process `transition()` tests say
   // nothing about where `main()` reads the config from: one place off and every

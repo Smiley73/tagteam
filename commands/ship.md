@@ -226,8 +226,8 @@ executable evidence waits for a person.
 
 `gates.mjs state ... reviewing`, then dispatch **in a single message**, one per
 resolved lens plus Codex. (A CI repair reaches this step already in `reviewing` —
-its own edge in step 8 was that transition — so it starts at the dispatch and
-skips this line; taking it twice is refused.)
+its own edge in step 8 was that transition — so it skips only this line and
+still takes the resolver read below it; taking the transition twice is refused.)
 
 Read the resolver here, below that transition and immediately before the
 dispatching message:
@@ -701,8 +701,9 @@ full:
    `gates.mjs state ... reviewing` is the edge point 1 already took.** Do not run
    it a second time. `reviewing -> reviewing` is not a declared transition, so it
    would stop the repair before its panel, and the repair it spent would be gone.
-   Start step 5 at its dispatch: the whole lens panel plus Codex against the new
-   commit, then a fix
+   Start step 5 at its resolver read — the repair's panel gets a reading of its
+   own, taken below the edge point 1 took — then the whole lens panel plus Codex
+   against the new commit, then a fix
    round if that finds anything — and another after that for as long as step 6
    allows one — then the adversary and the re-check. Not just the lenses that had
    findings last time: `bind` cleared the review gate, `review.json` from the old

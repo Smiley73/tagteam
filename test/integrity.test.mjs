@@ -620,6 +620,51 @@ test("each resolver job is named inside the step of ship.md that dispatches it",
   }
 });
 
+// The reads the clauses above read from. Assertion five checks what each clause
+// names; nothing in it checks that the resolution is taken at all, or where —
+// and both failures are silent. A deleted read leaves the orchestrator
+// dispatching off whatever reading it last took; a read hoisted above the state
+// transition of step 6 or step 8 resolves from a counter that transition is
+// about to move, so escalation fires one round late (step 6, whose fixing edge
+// increments the fix counter) or the repair fixer starts at the raised settings
+// the published cycle had reached (step 8, whose repair edge resets it — the
+// exact reordering the D4 gates test proves matters and nothing here caught).
+// `:253` is the positional precedent: indexOf comparisons inside shipStep
+// output.
+const ROLES_READ = /gates\.mjs" roles "\$S\/<id>\/state\.json"/g;
+const SHIP_STEP_READS = [
+  ["### 2.", "### 3.", 1],
+  ["### 5.", "### 6.", 1],
+  ["### 6.", "### 7.", 2], // the fix dispatch, and the missing-lens re-dispatch
+  ["### 7.", "### 8.", 1],
+  ["### 8.", "### 9.", 1]
+];
+
+test("every dispatching step takes its own resolver read, below the edge that moves its counter", () => {
+  for (const [heading, next, count] of SHIP_STEP_READS) {
+    const reads = [...shipStep(heading, next).matchAll(ROLES_READ)];
+    assert.equal(reads.length, count,
+      `ship.md ${heading} holds ${reads.length} resolver reads for its ${count} dispatching messages`);
+  }
+
+  const six = stepSix();
+  const sixEdge = six.indexOf('gates.mjs" state "$S/<id>/state.json" fixing');
+  const sixRead = six.search(ROLES_READ);
+  const sixFixer = six.indexOf("tagteam:fixer");
+  assert.ok(sixEdge > -1 && sixRead > -1 && sixFixer > -1, "step 6 lost its edge, its read, or its fixer");
+  assert.ok(sixEdge < sixRead, "step 6 reads the resolver above the fixing edge, a round behind the counter");
+  assert.ok(sixRead < sixFixer, "step 6 dispatches the fixer before it reads the resolver");
+
+  const eight = shipStep("### 8.", "### 9.");
+  const repairEdge = eight.indexOf('gates.mjs" state "$S/<id>/state.json" reviewing');
+  const eightRead = eight.search(ROLES_READ);
+  const eightFixer = eight.indexOf("tagteam:fixer");
+  assert.ok(repairEdge > -1 && eightRead > -1 && eightFixer > -1, "step 8 lost its edge, its read, or its fixer");
+  assert.ok(repairEdge < eightRead,
+    "step 8 reads the resolver above the repair edge, so the repair fixer starts at the stale raised settings");
+  assert.ok(eightRead < eightFixer, "step 8 dispatches the repair fixer before it reads the resolver");
+});
+
 // The plan side has no absence rule to lean on — `models.lead` there is a legal
 // role reference — so six clauses gaining the override and one not would pass
 // everything above. The mirror is what catches the other way round: a clause
@@ -634,9 +679,14 @@ test("each resolver job is named inside the step of ship.md that dispatches it",
 // exactly as assertion five does for ship.md, and a span naming no role, or the
 // wrong one, fails. Unlike ship.md these tokens are not a per-step alphabet but
 // a fixed ordered list, because plan.md dispatches from prose rather than from
-// numbered steps and two of the seven clauses (`plan-drafter` at :134 and :257)
-// share a token. plan.md:4's `allowed-tools` frontmatter names every agent too,
-// and is excluded by the backticks — the frontmatter writes them bare.
+// numbered steps and clauses share tokens: `plan-drafter` at :134 and :257, and
+// `spec-writer` twice in step 6 — the per-deliverable fan-out and the
+// re-dispatch of a rejected spec. The re-dispatch is its own entry because a
+// span may not vouch for another clause's: with one `spec-writer` span running
+// to end of file, either clause naming the keys satisfied both, and the other
+// could lose its settings silently. plan.md:4's `allowed-tools` frontmatter
+// names every agent too, and is excluded by the backticks — the frontmatter
+// writes them bare.
 const PLAN_CLAUSES = [
   ["`Explore`", "lead"],
   ["`tagteam:plan-drafter`", "lead"],
@@ -644,6 +694,7 @@ const PLAN_CLAUSES = [
   ["`$P/prompts/codex/plan-review.md`", "codex"],
   ["`tagteam:adversary`", "lead"],
   ["`tagteam:plan-drafter`", "lead"],
+  ["`tagteam:spec-writer`", "lead"],
   ["`tagteam:spec-writer`", "lead"]
 ];
 const PLAN_DISPATCH_TOKEN =
@@ -654,10 +705,10 @@ test("every model or effort clause in commands/plan.md names the plan override t
   const plan = planText();
   const tokens = [...plan.matchAll(PLAN_DISPATCH_TOKEN)];
   // A clause that lost its token, or a new one that gained no entry here, leaves
-  // the spans below covering something other than the seven dispatches — so the
+  // the spans below covering something other than the eight dispatches — so the
   // shape is checked before it is relied on.
   assert.deepEqual(tokens.map(([token]) => token), PLAN_CLAUSES.map(([token]) => token),
-    "plan.md no longer dispatches the seven clauses this assertion spans, in this order");
+    "plan.md no longer dispatches the eight clauses this assertion spans, in this order");
   for (const [index, [token, role]] of PLAN_CLAUSES.entries()) {
     const span = plan.slice(tokens[index].index,
       index + 1 < tokens.length ? tokens[index + 1].index : plan.length);

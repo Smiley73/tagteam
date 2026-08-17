@@ -347,8 +347,8 @@ quietly missing, and `approved.json` records it that way.
 
 Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
 checks front matter, resolves each spec's lenses against the default set, and
-returns dependency order. Fix what it reports by re-dispatching the writer for
-that spec at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null — **with `run_in_background: false`,
+returns dependency order. Fix what it reports by re-dispatching that spec's
+`tagteam:spec-writer` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null — **with `run_in_background: false`,
 not behind a watcher.** A spec it rejected is a spec that exists, so `[ -f ]` on
 the path the writer is rewriting returns having waited for nothing, and
 `specs.mjs` re-runs against the file that already failed.
