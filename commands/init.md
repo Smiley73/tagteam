@@ -51,9 +51,12 @@ train.
 Batch these; do not ask one at a time — `AskUserQuestion` takes at most four
 questions in one call, so ask them in order, four to a call, and let a follow-up
 that only some answers need ride in the next batch. Ask what each setting
-*does*, never what it is called — "how long should a pull request wait for its
-checks before this stops to ask you?" rather than `ciWaitSec`. The key names are
-in the file you show at the end, which is where they are useful.
+*does*, and name it while you do — "how long should a pull request wait for its
+checks before this stops to ask you?" is the question, and `ciWaitSec` is the
+name it goes under in the file you show at the end. The behaviour is what they
+answer on; the name is what they go looking for when they want to change the
+answer later, and a setting they own is not something to withhold. What stays
+out is the run's own vocabulary — schema paths, gate names, internal ids.
 See *Asking* in the skill.
 
 1. Confirm the inferred verify commands and setup commands. Show them.
@@ -118,6 +121,13 @@ See *Asking* in the skill.
    what tagteam did before the object existed — and let them raise any of them.
    Skip `ciRepairs` when the repository has no workflows; there is no red pull
    request to repair.
+
+   If they turned escalation on in question 3, this is where that answer gets
+   priced, and say so in the question: `fixRounds` has to be higher than the
+   round they named there, because a spec that runs out of fix rounds first
+   never reaches the raised settings and the models and effort they chose buy
+   nothing. Offer a `fixRounds` one above that round rather than 1, so the
+   offered answer is one that lets escalation run at least once.
 
    This is a question, not a default, because it is the only setting that
    decides what the tool spends and how often it hands work back. Filing it
