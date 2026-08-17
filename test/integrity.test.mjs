@@ -169,6 +169,47 @@ test("every command that asks a person something points at the Asking rule", () 
   }
 });
 
+// Escalation and plan-side models are two unrelated decisions, and the trade-off
+// of neither survives being folded into the other question or into a line of
+// documentation nobody reads. A later edit that trims init back to one model
+// question is invisible to every other test here: the schema, the validator and
+// the dispatch wiring all stay green while a person is never offered either key,
+// and the config the interview writes says `null` to both forever. Names only,
+// never the prose — the caveat's wording, the option labels and the question
+// numbers must stay free to improve.
+test("the init command asks about both of the settings a person can only get here", () => {
+  // Scoped to the numbered questions themselves, not to the section: the section
+  // ends with "Everything else takes its default" and the roster paragraph, and
+  // naming a key there is documentation, not a question. An item runs from its
+  // number to the next number, and its continuation lines are indented — the
+  // first unindented line that is not a number ends the list.
+  const init = read("commands", "init.md");
+  const start = init.indexOf("## Then ask");
+  assert.ok(start > -1, "init.md no longer has a Then ask section");
+  const section = init.slice(start, init.indexOf("\n## ", start + 1));
+  const items = [];
+  for (const line of section.split("\n")) {
+    if (/^\d+\. /.test(line)) items.push(line);
+    else if (items.length === 0) continue;
+    else if (line.trim() === "" || /^\s/.test(line)) items[items.length - 1] += `\n${line}`;
+    else break;
+  }
+  assert.ok(items.length > 4, `only ${items.length} numbered questions were found in Then ask`);
+  for (const key of ["escalation", "plan"]) {
+    const where = items.filter((item) => item.includes(`\`${key}\``));
+    assert.ok(where.length > 0, `no numbered question in init.md asks about ${key}`);
+  }
+  // Two questions, not one: the trade-off of neither survives being folded into
+  // the other, and a fold leaves both names in a single item. Disjointness, not
+  // the existence of some differing pair — another question is free to name
+  // either key in passing, and the check still has to fail on the fold. Which
+  // numbers the two questions are, and in which order, stays free.
+  assert.ok(
+    !items.some((item) => item.includes("`escalation`") && item.includes("`plan`")),
+    "init.md asks about escalation and plan in the same question instead of two"
+  );
+});
+
 test("the ship command never re-derives the reviewed commit from HEAD", () => {
   const ship = read("commands", "ship.md");
   const bash = [...ship.matchAll(/```bash\n([\s\S]*?)```/g)].map(([, body]) => body).join("\n");
