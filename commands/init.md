@@ -122,17 +122,23 @@ See *Asking* in the skill.
    Skip `ciRepairs` when the repository has no workflows; there is no red pull
    request to repair.
 
-   On a fresh init, if they turned escalation on in question 3, this is where
-   that answer gets priced, and say so in the question: `fixRounds` has to be
-   higher than the round they named there, because a spec that runs out of fix
-   rounds first never reaches the raised settings and the models and effort they
-   chose buy nothing. Offer a `fixRounds` one above that round rather than 1, so
-   the offered answer is one that lets escalation run at least once. Under
-   `--reconfigure` this does not apply: offer the `limits.fixRounds` already in
-   the file, whatever it is, and say the same thing about escalation without
-   changing the offer. Raising a limit someone set is not something a
-   reconfigure does on its own, and the validator's warning about raised
-   settings nothing reaches is already shown after the write.
+   If they turned escalation on in question 3, this is where that answer gets
+   priced. Compare the round they named there against the `fixRounds` this
+   question would otherwise offer — 1 on a fresh init, whatever the file already
+   holds under `--reconfigure`. When that round is at or above the offer, the
+   two answers contradict each other, and this question puts that to them rather
+   than settling it: as things stand a spec runs out of fix rounds before it
+   ever reaches the raised models and effort they chose, so escalation buys
+   nothing; raising `fixRounds` above that round is what lets it run at least
+   once; and `fixRounds` is also the number that bounds how many paid review
+   rounds this repository can run with nobody watching. Offer both answers and
+   prefer neither — keep the cap where it is and leave the raised settings out
+   of reach, or raise it far enough that escalation fires — and say what each
+   one costs them, because which of the two matters more here is theirs to
+   decide. This works the same way on a fresh init and under `--reconfigure`:
+   init does not raise a limit on its own and does not quietly leave a setting
+   someone turned on unreachable, it asks. The validator's warning about raised
+   settings nothing reaches is shown after the write either way.
 
    This is a question, not a default, because it is the only setting that
    decides what the tool spends and how often it hands work back. Filing it

@@ -195,17 +195,17 @@ test("the init command asks about both of the settings a person can only get her
     else break;
   }
   assert.ok(items.length > 4, `only ${items.length} numbered questions were found in Then ask`);
-  const asked = new Map();
   for (const key of ["escalation", "plan"]) {
-    const where = items.flatMap((item, index) => (item.includes(`\`${key}\``) ? [index] : []));
+    const where = items.filter((item) => item.includes(`\`${key}\``));
     assert.ok(where.length > 0, `no numbered question in init.md asks about ${key}`);
-    asked.set(key, where);
   }
   // Two questions, not one: the trade-off of neither survives being folded into
-  // the other, and a fold leaves both names in a single item. Which numbers they
-  // are, and in which order, stays free.
+  // the other, and a fold leaves both names in a single item. Disjointness, not
+  // the existence of some differing pair — another question is free to name
+  // either key in passing, and the check still has to fail on the fold. Which
+  // numbers the two questions are, and in which order, stays free.
   assert.ok(
-    asked.get("escalation").some((one) => asked.get("plan").some((other) => other !== one)),
+    !items.some((item) => item.includes("`escalation`") && item.includes("`plan`")),
     "init.md asks about escalation and plan in the same question instead of two"
   );
 });
