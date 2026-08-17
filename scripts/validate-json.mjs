@@ -173,31 +173,38 @@ export function limitNotices(config) {
 // on documents whose shape has not validated, so an `escalation` of `3`, of
 // `[]`, or with `after: "2"` returns no notices rather than throwing or saying
 // something nonsensical.
+//
+// Every field either warning reads is checked before either is evaluated, and a
+// single malformed one silences both. Gating each branch on only the fields it
+// happens to read would let a document the schema is about to reject — an
+// `after` of `"2"`, a missing `escalation.models` — still collect advice about
+// the half of the block that is well formed, and that advice arrives next to a
+// shape error that is the better message.
 export function escalationNotices(config) {
+  // `typeof null` and `typeof []` are both "object", so both are excluded here.
+  const isMap = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   const escalation = config?.escalation;
-  if (escalation === null || typeof escalation !== "object" || Array.isArray(escalation)) return [];
+  const limits = config?.limits;
+  if (!isMap(escalation) || !isMap(limits)) return [];
+  const { after } = escalation;
+  const { fixRounds } = limits;
+  if (![after, fixRounds].every((value) => Number.isInteger(value) && value >= 1)) return [];
+  if (![escalation.models, escalation.effort, config?.models, config?.effort].every(isMap)) return [];
   const notices = [];
 
-  const { after } = escalation;
-  const fixRounds = config?.limits?.fixRounds;
-  if (Number.isInteger(after) && after >= 1 && Number.isInteger(fixRounds) && fixRounds >= 1 && after >= fixRounds) {
+  if (after >= fixRounds) {
     notices.push(
       `warning: escalation.after is ${after} and limits.fixRounds is ${fixRounds}, so the fix rounds run out `
       + "before the escalated ones start and nothing is ever dispatched at the raised settings"
     );
   }
 
-  // Same keys, same values, both maps. A non-object on either side is a shape
-  // error the schema reports, and two documents that cannot be compared are not
-  // identical.
+  // Same keys, same values. Both sides are known to be maps by the guard above.
   const sameMap = (left, right) => {
-    for (const map of [left, right]) {
-      if (map === null || typeof map !== "object" || Array.isArray(map)) return false;
-    }
     const keys = Object.keys(left);
     return keys.length === Object.keys(right).length && keys.every((key) => left[key] === right[key]);
   };
-  if (sameMap(escalation.models, config?.models) && sameMap(escalation.effort, config?.effort)) {
+  if (sameMap(escalation.models, config.models) && sameMap(escalation.effort, config.effort)) {
     notices.push(
       "warning: escalation.models and escalation.effort name exactly what models and effort already name, "
       + "so escalating changes nothing about how anything is dispatched"

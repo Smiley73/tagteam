@@ -661,7 +661,21 @@ test("escalationNotices is safe on a document that has not passed shape validati
     { ...example, limits: 3, escalation: { after: 9, models: raised, effort: example.effort } },
     { ...example, limits: null, escalation: { after: 9, models: raised, effort: example.effort } },
     { ...example, limits: [], escalation: { after: 9, models: raised, effort: example.effort } },
-    { ...example, limits: { fixRounds: "3" }, escalation: { after: 9, models: raised, effort: example.effort } }
+    { ...example, limits: { fixRounds: "3" }, escalation: { after: 9, models: raised, effort: example.effort } },
+    // The same malformed documents, arranged so that the branch the malformed
+    // field does not feed would otherwise fire on its own: a bad `after` beside
+    // maps identical to the top-level ones, and a missing or non-object map
+    // beside an `after` that has already run out of fix rounds. One malformed
+    // field silences the whole block, because the schema error is the message
+    // that belongs on screen.
+    { ...example, limits: roomy, escalation: { after: "2", models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: roomy, escalation: { after: 1.5, models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: roomy, escalation: { models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: null, escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, effort: example.effort } },
+    { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised } },
+    { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: [], effort: example.effort } },
+    { ...example, models: "opus", limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised, effort: example.effort } }
   ];
   for (const candidate of candidates) {
     assert.deepEqual(escalationNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notices`);
