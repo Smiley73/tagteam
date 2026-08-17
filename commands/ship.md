@@ -115,7 +115,23 @@ node "$P/scripts/gates.mjs" state "$S/<id>/state.json" implementing
 
 ### 2. Implement
 
-One `tagteam:implementer` at `models.worker` / `effort.worker`. Give it the
+**Every message in this command that dispatches anything is preceded by its own
+read of the resolver**, against the state file as it stands at that moment:
+
+```bash
+node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
+```
+
+It prints one entry per dispatch of a ship cycle, each with the model and the
+effort that dispatch runs at. Every clause below names the job it is about to
+start, and you read that job's `model` and `effort` off this output — the
+clause's job and no other. **A `gates.mjs state` call between the read and the
+dispatch invalidates the read**, even when both sit inside one numbered step:
+those transitions move the counters the resolution is made from, so read again
+below them. Never carry a reading into another message, and never reuse one
+after a resume.
+
+One `tagteam:implementer` at `roles.implement`'s model and effort. Give it the
 spec **path**, the worktree path, and `conventionsPath` if set. It reads the spec
 itself; you do not.
 
@@ -213,10 +229,19 @@ resolved lens plus Codex. (A CI repair reaches this step already in `reviewing` 
 its own edge in step 8 was that transition — so it starts at the dispatch and
 skips this line; taking it twice is refused.)
 
-- `tagteam:reviewer` at `models.lead` / `effort.lead` per lens, each given
+Read the resolver here, below that transition and immediately before the
+dispatching message:
+
+```bash
+node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
+```
+
+- `tagteam:reviewer` at `roles.review-lens`'s model and effort per lens, each given
   the lens name, `$S/<id>/rounds/$ROUND/review.diff`, the spec path, the candidate OID, and
   `$S/<id>/rounds/$ROUND/findings/<lens>.json` to write.
-- Codex via `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
+- Codex — the `codex.mjs` invocation in the skill, at `roles.review-codex`'s
+  model and effort rather than anything the skill's example substitutes — with
+  `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
   `--fence SPEC=<spec path> --fence DIFF=$S/<id>/rounds/$ROUND/review.diff`, schema
   `findings.schema.json`, out `$S/<id>/rounds/$ROUND/findings/codex.json`.
 
@@ -305,16 +330,33 @@ spend. A budget stop is not a failure and never goes to `failed`.
 Take it in this order for a reason: a fixer dispatched first leaves a commit on
 the branch that no round covers and a branch ahead of the reviewed candidate.
 
+**Then read the resolver — below the transition above, never before it.** That
+edge is what moves the fix counter, and this round's settings are resolved from
+it; read above it and every reading is a round behind:
+
+```bash
+node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
+```
+
 **Then announce the round, in one line, before dispatching.** Which round this
 is and how many this repository allows, in plain English — "the second of the
 three fix rounds this repository allows", not a setting name and a number. Both
-numbers were just printed for you by the command above: `budget.ordinal` is which
-fix round of this cycle you are starting and `budget.limit` is how many there
-are. Read them off that output and say them as words; do not count rounds
+numbers were just printed for you by the budget command above: `budget.ordinal`
+is which fix round of this cycle you are starting and `budget.limit` is how many
+there are. Read them off that output and say them as words; do not count rounds
 yourself and do not go looking for the numbers anywhere else. The counter behind
 `ordinal` is what a resumed attempt is bound by too — a fixer that was dispatched
 and died before it committed spent its round, and this is the only number that
 knows it.
+
+**Say in the same breath what model and what effort this fixer is being
+dispatched at**, read off the resolver output you have just taken — "at Opus, at
+high effort", in the same plain line. Say it on every fix round, whether or not
+the settings were raised: a round that quietly ran at the ordinary settings when
+this repository configured raised ones has to look different on screen from one
+that did not, and it only does if the ordinary case is said too. It is this
+fixer's pair and not the round's — an escalated round leaves the lens panel and
+the adversary's fresh pass exactly where they were.
 
 **Hand it the round's open record, never `review.json`.** Which record that is,
 and what runs after the new commit is verified, both follow from how you reached
@@ -343,8 +385,9 @@ nothing gated on and every reviewer is about to re-read. The two records above
 hold the blocking and major findings and nothing else. Minor and nit are reported
 in the pull request body, not repaired.
 
-Then one `tagteam:fixer` at `models.worker` / `effort.worker`, given the record
-named above, the worktree, and `$S/<id>/fix-report-$ROUND.json` to write.
+Then one `tagteam:fixer` at `roles.fix`'s model and effort — the pair you have
+just announced — given the record named above, the worktree, and
+`$S/<id>/fix-report-$ROUND.json` to write.
 Dispatch it with `run_in_background: false`: until it reports it is still editing
 the worktree you are about to commit. When it returns, record its report into the
 round:
@@ -377,8 +420,16 @@ Nothing open: skip straight to step 7 with the same `OID`.
 
 **A missing lens is not something a fixer can repair.** `incomplete` with nothing
 open means a reviewer produced no usable evidence, so re-dispatch exactly those
-lenses against the same candidate — no new commit, nothing to re-bind — and
-re-run `collect-findings.mjs`. **Exactly once, and that once is fixed by
+lenses against the same candidate — the same dispatch step 5 makes, at the same
+settings, so take a fresh resolver read for it first, because this is a
+dispatching message of its own:
+
+```bash
+node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
+```
+
+No new commit, nothing to re-bind — then re-run `collect-findings.mjs`.
+**Exactly once, and that once is fixed by
 decision.** It is not iterating on the work and no budget covers it: nothing was
 committed, no round was allocated, and no fix round was spent — you never took
 the transition above for it.
@@ -396,9 +447,17 @@ Still missing after that, carry it to step 9 and let a person decide;
 **The adversary always runs**, whether or not there was a fix. It is the only
 reader that looks at the final diff without already having an opinion about it.
 
+Read the resolver immediately before the dispatching message below — everything
+this step dispatches is in that one message, and one read covers all of it:
+
+```bash
+node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
+```
+
 In one message:
 
-- `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/code-adversary.md`,
+- `tagteam:adversary` at `roles.adversary-fresh`'s model and effort, pointed at
+  `prompts/code-adversary.md`,
   given the spec and `$S/<id>/rounds/$ROUND/review.diff`, writing
   `$S/<id>/rounds/$ROUND/findings/adversary.json` with `candidate` set to `$OID`.
 - Each lens named by `collect-findings.mjs` as having open findings, and **only**
@@ -410,11 +469,10 @@ In one message:
   the collector writes `open/` as a sibling of the findings directory it read, so
   when step 6 fixed something and the panel has not re-run in the round it opened,
   these files are in the round before this one and `rounds/$ROUND/open/` does not
-  exist at all. Hand the reviewer *that path*, plus the new diff, plus
-  `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write, under `prompts/recheck.md`,
-  at `models.lead` / `effort.lead`. Codex uses `$P/prompts/codex/recheck.md` with
-  schema `recheck.schema.json`, at `models.codex` / `effort.codex` like every
-  other Codex call.
+  exist at all. Hand the `tagteam:reviewer` of each lens *that path*, plus the new
+  diff, plus `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write, under
+  `prompts/recheck.md`, at `roles.recheck-lens`'s model and effort. Codex uses
+  `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
 
   **Skip this bullet whenever step 5 ran in this round** — a second or later fix
   round, or a round whose step 6 was refused for want of budget. `<r>` is
@@ -432,7 +490,8 @@ In one message:
   that wrote one, when that round left findings open — only a re-check writes
   `still-open/`, so that round is not always the round before this one; the round
   before this one is usually the panel or fix round, which writes none. The same
-  re-check dispatch, with `still-open/<lens>.json` as its input and
+  re-check dispatch, at `roles.recheck-lens`'s model and effort, with
+  `still-open/<lens>.json` as its input and
   `$S/<id>/rounds/$ROUND/recheck/<lens>.json`
   as its output, merged into the bullet above for a lens that appears in both.
   Those ids are settled by the `--carry` below and stay open without a verdict,
@@ -440,15 +499,22 @@ In one message:
   Skip both of these bullets entirely when there is nothing to re-check: no
   earlier round left anything open, and this round's findings are its own.
 
+  This is the only live lens re-check in a second or later fix round — which is
+  exactly the round whose settings may have been raised, so take the pair off
+  the read above and not off what the round before ran at.
+
   **The adversary is one of the lenses this bullet covers.** A round whose
   carried `still-open/` holds `adversary.json` dispatches `tagteam:adversary`
   **twice, in this same message**: the fresh pass in the first bullet, pointed at
   `prompts/code-adversary.md` and writing `findings/adversary.json`, and a
-  re-check, pointed at `prompts/recheck.md` with `still-open/adversary.json` as
+  re-check at `roles.recheck-adversary`'s model and effort, pointed at
+  `prompts/recheck.md` with `still-open/adversary.json` as
   its input and `$S/<id>/rounds/$ROUND/recheck/adversary.json` as its output. Two
-  dispatches of one agent, different prompts, different files. The fresh pass
-  does not settle the adversary's earlier findings — it does not read them, and
-  its ids are this round's — so a round that dispatches only the fresh pass
+  dispatches of one agent, different prompts, different files — and two jobs in
+  the resolver, because the settings they run at are not always the same pair.
+  The fresh pass does not settle the adversary's earlier findings — it does not
+  read them, and its ids are this round's — so a round that dispatches only the
+  fresh pass
   leaves every carried adversary id open with no verdict, and it stays open
   through every round after it. `recheck.mjs` asks for that verdict file by name.
 
@@ -458,8 +524,11 @@ In one message:
   every verdict fails to bind. That reads as "no verdict was returned" and holds
   the pull request on findings that were actually fixed.
 
-The Codex re-check is a Bash call: `run_in_background`, and read its result, like
-the Codex review in step 5.
+The Codex re-check named in those bullets is a Bash call rather than an agent: a
+`codex.mjs` invocation at `roles.recheck-codex`'s model and effort, run with
+`run_in_background` and its result read, like the Codex review in step 5. This
+describes that dispatch; whether it happens at all is the bullets' decision and
+not this paragraph's.
 
 **Then wait for every one of them before `recheck.mjs`** — the adversary file
 and each re-check file — with one background watcher, as in step 5 and
@@ -613,7 +682,17 @@ full:
    repository allows". Read them off that output; nothing here asks you to
    remember how many repairs this session has had. A repair also starts a fresh
    fix budget, so the review cycle below gets its fix rounds over again.
-2. Dispatch the fixer at `models.worker` / `effort.worker` with the failing check
+2. Read the resolver here, **below the edge in point 1 and not above it** — that
+   edge starts a fresh fix budget, so a reading taken before it is the settings
+   the cycle that just published had reached, and this repair is meant to start
+   at the ordinary ones:
+
+   ```bash
+   node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
+   ```
+
+   Then dispatch one `tagteam:fixer` at `roles.repair-fix`'s model and effort
+   with the failing check
    output, blocking as in step 6, then commit and re-snapshot as in step 3, which
    allocates the round into `$ROUND`, set `OID`, `bind` — which clears every gate
    — and re-run verify.

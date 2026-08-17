@@ -130,6 +130,79 @@ export function budgetTaken(before, after, { limits } = {}) {
   };
 }
 
+// Every dispatch a ship cycle makes, and the role each one runs as, keyed
+// exactly as `commands/ship.md` names them. A clause there names its job and
+// reads the model and effort off this, so "which settings does this dispatch run
+// at" is decided in code: getting it wrong is silent, and a round dispatched at
+// the ordinary settings when the configuration bought the raised ones looks
+// exactly like a round that was never meant to escalate.
+const SHIP_JOBS = {
+  implement: "worker",         // step 2
+  "review-lens": "lead",       // step 5
+  "review-codex": "codex",     // step 5
+  fix: "worker",               // step 6
+  "adversary-fresh": "lead",   // step 7
+  "recheck-lens": "lead",      // step 7
+  "recheck-adversary": "lead", // step 7
+  "recheck-codex": "codex",    // step 7
+  "repair-fix": "worker"       // step 8
+};
+
+// Which jobs escalate: the fixer and the three re-checks, and nothing else.
+//
+// A re-check is id-bound — `recheck.schema.json` admits only
+// `{id, resolved, evidence}`, and `recheck.mjs` discards a verdict whose id that
+// lens did not raise in that round — so a stronger model on a re-check can only
+// close or keep findings that already exist. The lens panel and the adversary's
+// fresh pass read with fresh eyes and can open new ones, and new blocking
+// findings raised late in a cycle are findings the remaining fix budget cannot
+// repair: escalating a fresh reader stops the pull request instead of settling
+// it.
+//
+// The pair this is invisible for is `commands/ship.md:444`, which dispatches
+// `tagteam:adversary` **twice in one message** — the fresh pass pointed at
+// `prompts/code-adversary.md`, which never escalates, and a re-check pointed at
+// `prompts/recheck.md` with the carried `still-open/adversary.json` as its
+// input, which does. Nothing about the shared agent token tells the two apart,
+// which is why they are two jobs here and not one.
+//
+// The repair fixer is in this set like any other fixer. What keeps a CI repair
+// on the ordinary settings is the `resets: FIX_COUNTER` on the repair edge in
+// `budgetedEdge`, and nothing else.
+const ESCALATING_JOBS = new Set(["fix", "recheck-lens", "recheck-adversary", "recheck-codex", "repair-fix"]);
+
+/**
+ * The model and effort every dispatch of a ship cycle runs at, for this spec as
+ * it stands right now.
+ *
+ * Read once per dispatching message, off the current state file: the fix counter
+ * moves between step 5 and step 7, and the repair edge resets it inside step 8,
+ * so a resolution carried across a `gates.mjs state` call is about a round that
+ * has already ended.
+ *
+ * Escalation is `fixRoundsUsed > escalation.after`, strictly greater. The edge
+ * into `fixing` sets the counter to `spent + 1` before anything is dispatched,
+ * so the fixer of fix round N reads N — `>=` would raise the very first fix
+ * round at `after: 1`, which is the setting a repository is most likely to
+ * choose and the one the minimum of 1 exists to protect.
+ */
+export function resolveRoles(state, config) {
+  const fixRoundsUsed = counterOf(state, FIX_COUNTER);
+  const escalation = config?.escalation ?? null;
+  const raised = Boolean(escalation) && fixRoundsUsed > escalation.after;
+  const jobs = {};
+  for (const [job, role] of Object.entries(SHIP_JOBS)) {
+    const escalated = raised && ESCALATING_JOBS.has(job);
+    const settings = escalated ? escalation : config;
+    jobs[job] = {
+      model: settings?.models?.[role] ?? null,
+      effort: settings?.effort?.[role] ?? null,
+      escalated
+    };
+  }
+  return { spec: state?.spec ?? null, fixRoundsUsed, jobs };
+}
+
 export function transition(state, next, { limits } = {}) {
   if (!TRANSITIONS[state.state]?.includes(next)) {
     throw new Error(`invalid state transition: ${state.state} -> ${next}`);
@@ -375,12 +448,18 @@ const USAGE = `usage:
   gates.mjs record   <state.json> <review|verify|ci|human> <candidateOid> <value.json>
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
+  gates.mjs roles    <state.json> <config.json>
   gates.mjs adopt-merge <state.json> --repo <repo>
 
   \`state\` needs the configuration for the budgeted edges — entering fixing, and
   entering reviewing from publishing or awaiting-approval — and refuses them
   without it. On one of those edges it prints a \`budget\` object: which round or
   repair this is (\`ordinal\`), out of how many (\`limit\`).
+
+  \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
+  one entry per job, resolved from this spec's fix counter and \`escalation\`. It
+  writes nothing, and it is read once per dispatching message: a \`state\` call
+  between the read and the dispatch invalidates it.
 `;
 
 // The limits, or a refusal. A configuration without them is a version-6 file:
@@ -418,6 +497,19 @@ async function main() {
   const [action, ...values] = process.argv.slice(2);
   if (action === "evaluate") {
     process.stdout.write(`${JSON.stringify(evaluate(readJson(values[0]), readJson(values[1])), null, 2)}\n`);
+    return;
+  }
+  if (action === "roles") {
+    const [stateFile, configFile] = values;
+    if (!stateFile || !configFile) {
+      const error = new Error(USAGE.trimEnd());
+      error.exitCode = 2;
+      throw error;
+    }
+    // Deliberately not through `readLimits`: this resolution needs no limits, and
+    // refusing a configuration for a reason unrelated to what was asked would
+    // stop a dispatch that had nothing to do with a budget.
+    process.stdout.write(`${JSON.stringify(resolveRoles(readJson(stateFile), readJson(configFile)), null, 2)}\n`);
     return;
   }
   if (action === "adopt-merge") {

@@ -38,7 +38,7 @@ Seven steps. Exactly one of them loops — step 5's review, bounded by
 
 ## 1 — Orient
 
-Dispatch one `Explore` subagent at `models.lead` / `effort.lead`: how the areas this goal touches are built today,
+Dispatch one `Explore` subagent at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null: how the areas this goal touches are built today,
 which modules own them, what patterns the repository already uses, and where the
 tests for them live. Ask for the conclusion, not the file contents.
 
@@ -131,7 +131,7 @@ Run this before **every** step from here on — draft, revise, expand, approve. 
 is one command and it is the only thing standing between "the plan was built from
 what you approved" and a claim nobody checked.
 
-Dispatch `tagteam:plan-drafter` at `models.lead` / `effort.lead`. Give it `$D/goal.md`,
+Dispatch `tagteam:plan-drafter` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null. Give it `$D/goal.md`,
 the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
 count — do not read the plan. `run_in_background: false`, so the call blocks: the
 three readers in step 5 are pointed at `$D/plan.md` on disk, and a reviewer
@@ -223,10 +223,10 @@ not ready.
 
 Three readers, dispatched in a single message so they run concurrently:
 
-- `tagteam:plan-reviewer` at `models.lead` / `effort.lead`, writing `$D/work/review/$ROUND/claude.json`
-- Codex, via `$P/prompts/codex/plan-review.md`, fencing `GOAL` and `PLAN` from
+- `tagteam:plan-reviewer` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, writing `$D/work/review/$ROUND/claude.json`
+- Codex, via `$P/prompts/codex/plan-review.md`, at `models.codex` / `effort.codex`, or `plan.models.codex` / `plan.effort.codex` when `plan` is not null, fencing `GOAL` and `PLAN` from
   disk, writing `$D/work/review/$ROUND/codex.json`
-- `tagteam:adversary` at `models.lead` / `effort.lead`, pointed at `prompts/plan-adversary.md`,
+- `tagteam:adversary` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, pointed at `prompts/plan-adversary.md`,
   writing `$D/work/review/$ROUND/adversary.json`
 
 Run the Codex call with `run_in_background` — it outlives what the Bash tool will
@@ -254,7 +254,7 @@ and the floor is this rule.
 
 Otherwise, a finding against the *goal* rather than the plan goes through the
 section below first, inside this round. Then pass every `blocking` and `major`
-finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`.
+finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null.
 That one blocks too — `run_in_background: false`. It rewrites a `plan.md` that
 already exists, so there is nothing a watcher could wait for, and
 `deliverables.mjs` in step 6 would happily return the rows the revision is in the
@@ -328,7 +328,7 @@ user-visibility, and the row verbatim. It is how you dispatch without reading
 `plan.md`: the rows come out as data, the plan body stays out of your context.
 
 Dispatch one `tagteam:spec-writer` per deliverable, **all in one message**, each
-at `models.lead` / `effort.lead` and each writing exactly `$D/specs/<id>.md`. Give each one the
+at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, and each writing exactly `$D/specs/<id>.md`. Give each one the
 goal path, the plan path, its own row, and the configured default lens set so it
 knows what it is naming exceptions to.
 
@@ -348,7 +348,7 @@ quietly missing, and `approved.json` records it that way.
 Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
 checks front matter, resolves each spec's lenses against the default set, and
 returns dependency order. Fix what it reports by re-dispatching the writer for
-that spec at `models.lead` / `effort.lead` — **with `run_in_background: false`,
+that spec at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null — **with `run_in_background: false`,
 not behind a watcher.** A spec it rejected is a spec that exists, so `[ -f ]` on
 the path the writer is rewriting returns having waited for nothing, and
 `specs.mjs` re-runs against the file that already failed.

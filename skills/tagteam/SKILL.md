@@ -83,7 +83,7 @@ script, so an older configuration is incomplete rather than upgradable.
 | `base` | Branch pull requests target and each spec branches from |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
-| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, `Explore`), `worker` (implementer, fixer), `codex` (every `scripts/codex.mjs` invocation). Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
+| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, `Explore`), `worker` (implementer, fixer), `codex` (each `scripts/codex.mjs` invocation). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
 | `reviewers.roster` | Every lens a plan may assign |
 | `reviewers.default` | Lenses applied to every spec unless it drops one |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
@@ -168,9 +168,18 @@ node "$P/scripts/codex.mjs" \
   --template "$P/prompts/codex/review.md" \
   --var CANDIDATE=<oid> --fence SPEC=<path> --fence DIFF=<path> \
   --schema "$P/schemas/findings.schema.json" --out <artifact.json> \
-  --model <models.codex> --effort <effort.codex> \
+  --model <the caller's model> --effort <the caller's effort> \
   --cd <worktree> --slots <plan-or-ship-dir> --max-concurrent <maxConcurrentCodex> [--reuse]
 ```
+
+**The model and the effort come from the clause that is making this call, not
+from one place in the configuration.** In `/tagteam:ship` they come from the
+resolver — `gates.mjs roles`, read for that dispatching message, off the job that
+clause names — because a Codex re-check late in a stalled cycle may be running at
+raised settings while the panel that read the same code was not. In
+`/tagteam:plan` they are `models.codex` / `effort.codex`, overridden by
+`plan.models.codex` / `plan.effort.codex` when `plan` is not null. Substitute
+what your clause tells you and never resolve them here.
 
 The script composes the prompt from the template, substitutes `--var` values, and
 appends each `--fence` payload read **off disk, beside the engine**. A large
