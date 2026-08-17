@@ -169,6 +169,26 @@ test("every command that asks a person something points at the Asking rule", () 
   }
 });
 
+// Escalation and plan-side models are two unrelated decisions, and the trade-off
+// of neither survives being folded into the other question or into a line of
+// documentation nobody reads. A later edit that trims init back to one model
+// question is invisible to every other test here: the schema, the validator and
+// the dispatch wiring all stay green while a person is never offered either key,
+// and the config the interview writes says `null` to both forever. Names only,
+// never the prose — the caveat's wording, the option labels and the question
+// numbers must stay free to improve.
+test("the init command asks about both of the settings a person can only get here", () => {
+  // Scoped to the interview itself: naming a key in the paragraph that writes
+  // the file is not asking anybody anything.
+  const init = read("commands", "init.md");
+  const start = init.indexOf("## Then ask");
+  assert.ok(start > -1, "init.md no longer has a Then ask section");
+  const questions = init.slice(start, init.indexOf("\n## ", start + 1));
+  for (const key of ["escalation", "plan"]) {
+    assert.match(questions, new RegExp(`\`${key}\``), `init.md never asks about ${key}`);
+  }
+});
+
 test("the ship command never re-derives the reviewed commit from HEAD", () => {
   const ship = read("commands", "ship.md");
   const bash = [...ship.matchAll(/```bash\n([\s\S]*?)```/g)].map(([, body]) => body).join("\n");
