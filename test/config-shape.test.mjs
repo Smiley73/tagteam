@@ -566,6 +566,161 @@ test("validating expensive limits prints a warning line per limit and still exit
   assert.match(result.stderr, /^note:.*\b100\b/m);
 });
 
+test("escalationNotices warns at and above fixRounds, not below", async () => {
+  // The boundary is the interesting case: `after` equal to `fixRounds` means the
+  // last ordinary fix round is also the last round, so the raised settings never
+  // run. A `>` where a `>=` belongs fails here.
+  const { escalationNotices } = await import("../scripts/validate-json.mjs");
+  const notices = (after) => escalationNotices({
+    ...example,
+    limits: { ...example.limits, fixRounds: 3 },
+    escalation: { after, models: { ...example.models, lead: "fable" }, effort: example.effort }
+  });
+  for (const after of [3, 4]) {
+    const warning = notices(after).find((line) => line.includes("escalation.after"));
+    assert.ok(warning, `after: ${after} should warn`);
+    assert.ok(warning.startsWith("warning:"));
+    assert.ok(warning.includes("limits.fixRounds"), `expected the limit named, got: ${warning}`);
+    assert.ok(warning.includes(String(after)) && warning.includes("3"), `expected both numbers, got: ${warning}`);
+  }
+  assert.deepEqual(notices(2), []);
+});
+
+test("escalationNotices warns only when the models and effort are exactly the top-level ones", async () => {
+  // Equality is all that is detectable: nothing in this project orders opus,
+  // fable and sonnet, so an escalation to a weaker model cannot be told from a
+  // raise. Changing any single value is enough to mean something.
+  const { escalationNotices } = await import("../scripts/validate-json.mjs");
+  const identical = (over = {}) => escalationNotices({
+    ...example,
+    limits: { ...example.limits, fixRounds: 3 },
+    escalation: { after: 1, models: { ...example.models }, effort: { ...example.effort }, ...over }
+  }).filter((line) => line.includes("escalation.models"));
+  assert.equal(identical().length, 1);
+  // `after` is below fixRounds here, so the equality warning arrives alone: the
+  // two checks are independent.
+  assert.equal(escalationNotices({
+    ...example,
+    limits: { ...example.limits, fixRounds: 3 },
+    escalation: { after: 1, models: { ...example.models }, effort: { ...example.effort } }
+  }).length, 1);
+  for (const models of [{ ...example.models, lead: "fable" }, { ...example.models, codex: "gpt-5.6-terra" }]) {
+    assert.deepEqual(identical({ models }), []);
+  }
+  assert.deepEqual(identical({ effort: { ...example.effort, worker: "low" } }), []);
+  assert.deepEqual(identical({ effort: { ...example.effort, codex: "low" } }), []);
+  // And the other way round: a real raise past the fix rounds warns about the
+  // rounds only.
+  const raisedAndTooLate = escalationNotices({
+    ...example,
+    limits: { ...example.limits, fixRounds: 2 },
+    escalation: { after: 2, models: { ...example.models, worker: "opus" }, effort: example.effort }
+  });
+  assert.equal(raisedAndTooLate.length, 1);
+  assert.ok(raisedAndTooLate[0].includes("escalation.after"));
+  // Both at once is a legal configuration and prints both lines.
+  const both = escalationNotices({
+    ...example,
+    limits: { ...example.limits, fixRounds: 2 },
+    escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } }
+  });
+  assert.equal(both.length, 2);
+});
+
+test("an escalation of null says nothing, and neither does the shipped example", async () => {
+  // What every repository that never turns the key on ships.
+  const { escalationNotices } = await import("../scripts/validate-json.mjs");
+  assert.deepEqual(escalationNotices(example), []);
+  assert.deepEqual(escalationNotices({ ...example, escalation: null }), []);
+});
+
+test("escalationNotices is safe on a document that has not passed shape validation", async () => {
+  // semanticErrors runs on those too, and the schema error is the better message
+  // there — a throw here would replace it with a stack trace. typeof null and
+  // typeof [] are both "object", which is why each is tested.
+  const { escalationNotices } = await import("../scripts/validate-json.mjs");
+  // Raised models throughout, so nothing here is silenced by the equality check
+  // happening to fail for the wrong reason.
+  const raised = { ...example.models, worker: "opus" };
+  const roomy = { ...example.limits, fixRounds: 3 };
+  const candidates = [
+    {},
+    { escalation: null },
+    { escalation: 3 },
+    { escalation: "opus" },
+    { escalation: [] },
+    // No `models` at all, and no `after` at all.
+    { ...example, limits: roomy, escalation: { after: 1, effort: example.effort } },
+    { ...example, limits: roomy, escalation: { models: raised, effort: example.effort } },
+    // An `after` the schema would have refused.
+    { ...example, limits: roomy, escalation: { after: "2", models: raised, effort: example.effort } },
+    { ...example, limits: roomy, escalation: { after: 1.5, models: raised, effort: example.effort } },
+    { ...example, limits: roomy, escalation: { after: 0, models: raised, effort: example.effort } },
+    // Limits that are absent or not an object: nothing to compare `after` to.
+    { models: example.models, effort: example.effort, escalation: { after: 9, models: raised, effort: example.effort } },
+    { ...example, limits: 3, escalation: { after: 9, models: raised, effort: example.effort } },
+    { ...example, limits: null, escalation: { after: 9, models: raised, effort: example.effort } },
+    { ...example, limits: [], escalation: { after: 9, models: raised, effort: example.effort } },
+    { ...example, limits: { fixRounds: "3" }, escalation: { after: 9, models: raised, effort: example.effort } },
+    // The same malformed documents, arranged so that the branch the malformed
+    // field does not feed would otherwise fire on its own: a bad `after` beside
+    // maps identical to the top-level ones, and a missing or non-object map
+    // beside an `after` that has already run out of fix rounds. One malformed
+    // field silences the whole block, because the schema error is the message
+    // that belongs on screen.
+    { ...example, limits: roomy, escalation: { after: "2", models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: roomy, escalation: { after: 1.5, models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: roomy, escalation: { models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: null, escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } } },
+    { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, effort: example.effort } },
+    { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised } },
+    { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: [], effort: example.effort } },
+    { ...example, models: "opus", limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised, effort: example.effort } }
+  ];
+  for (const candidate of candidates) {
+    assert.deepEqual(escalationNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notices`);
+  }
+  assert.deepEqual(escalationNotices(undefined), []);
+});
+
+test("the escalation notices never become validation errors", async () => {
+  // Advice, like the cost note: a configuration that trips both still validates.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const pointless = {
+    ...example,
+    escalation: { after: example.limits.fixRounds, models: { ...example.models }, effort: { ...example.effort } }
+  };
+  assert.deepEqual(semanticErrors("config.schema.json", pointless, {}), []);
+});
+
+test("validating a pointless escalation prints both warnings and still exits 0", async () => {
+  // Same reason as the limits CLI test: deleting the stderr write in
+  // semanticErrors, or sending it to stdout, leaves every function-level test
+  // above green. All three limits stay at or below 5 so the only warnings on
+  // stderr are the escalation ones.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-escalation-"));
+  const configPath = path.join(dir, "config.json");
+  const config = {
+    ...example,
+    limits: { fixRounds: 2, ciRepairs: 2, planReviewRounds: 2 },
+    escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } }
+  };
+  assert.deepEqual(validateJson(schema, config), []);
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "schemas", "config.schema.json"), configPath
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /valid/);
+  const warnings = result.stderr.split("\n").filter((line) => line.startsWith("warning:"));
+  assert.equal(warnings.length, 2, `expected two warnings, got: ${JSON.stringify(result.stderr)}`);
+  for (const warning of warnings) {
+    assert.ok(warning.includes("escalation"), `expected every warning to name escalation, got: ${warning}`);
+  }
+});
+
 test("a retired key and a declared key cannot be the same key", () => {
   // `limits` was retired from an older shape and is live again. Leaving it on the
   // retired list makes the next deliverable fail a test it did not break, with a
