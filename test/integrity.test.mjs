@@ -642,9 +642,18 @@ const SHIP_STEP_READS = [
 
 test("every dispatching step takes its own resolver read, below the edge that moves its counter", () => {
   for (const [heading, next, count] of SHIP_STEP_READS) {
-    const reads = [...shipStep(heading, next).matchAll(ROLES_READ)];
+    const step = shipStep(heading, next);
+    const reads = [...step.matchAll(ROLES_READ)];
     assert.equal(reads.length, count,
       `ship.md ${heading} holds ${reads.length} resolver reads for its ${count} dispatching messages`);
+    // Counting the reads says nothing about where they sit. A read that drifts
+    // below the step's first dispatch — into the bullets it is meant to settle,
+    // or the prose after them — leaves that dispatch running off whatever
+    // reading the orchestrator last took, silently, at the wrong settings.
+    const firstDispatch = step.search(DISPATCH_TOKEN);
+    assert.ok(firstDispatch > -1, `ship.md ${heading} lost its dispatch tokens`);
+    assert.ok(reads[0].index < firstDispatch,
+      `ship.md ${heading} dispatches before it reads the resolver`);
   }
 
   const six = stepSix();
