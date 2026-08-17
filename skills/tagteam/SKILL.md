@@ -70,11 +70,11 @@ rule does not cover them.
 
 ## Configuration
 
-`.tagteam/config.json`, version 7, validated by
+`.tagteam/config.json`, version 8, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:init` and stop. There is no migration: version 7
+tell the person to run `/tagteam:init` and stop. There is no migration: version 8
 requires keys an older file does not carry, and no key has a fallback in a
 script, so an older configuration is incomplete rather than upgradable.
 
@@ -93,6 +93,8 @@ script, so an older configuration is incomplete rather than upgradable.
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository |
 | `limits` | `fixRounds` (fix rounds per spec), `ciRepairs` (repairs of a red pull request), `planReviewRounds` (plan review rounds per goal approval). Each at least 1; all 1 is today's behaviour |
+| `escalation` | `null`, or `{after, models, effort}` on the same role triple as `models`/`effort`. `after` counts fix rounds and is at least 1. Null is the default and means today's behaviour: every dispatch runs at `models` and `effort` |
+| `plan` | `null`, or `{models, effort}` on the same role triple. Null is the default and means today's behaviour: every dispatch runs at `models` and `effort` |
 
 `examples/config.json` is a complete file.
 

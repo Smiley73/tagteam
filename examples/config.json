@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
@@ -62,5 +62,7 @@
     "fixRounds": 1,
     "ciRepairs": 1,
     "planReviewRounds": 1
-  }
+  },
+  "escalation": null,
+  "plan": null
 }

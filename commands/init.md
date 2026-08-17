@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 7. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 8. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -146,9 +146,12 @@ by hand and never had a brief is dropped rather than written again — say which
 ones and that a reviewer was never calibrated for them. Mention any brief this
 plugin ships that the current roster does not name, and let them add it.
 
+Write `escalation` and `plan` as an explicit `null` unless the person has
+configured them; there is no fallback anywhere, so an omitted key is an invalid
+file rather than an unused feature.
+
 An older configuration is not upgraded — each version is a different shape, not
 an extension, and there is no migration. Say that the old file is being replaced,
-and what version 7 adds: a required `limits` object bounding fix rounds per spec,
-CI repairs per pull request, and plan review rounds per goal approval. Offered at
-1, which is what the previous version did without saying so, and raisable at
-question 7 — an upgrade is the first time anyone gets to set them.
+and what version 8 adds: two required keys, `escalation` and `plan`, each written
+as `null` and each meaning today's behaviour when it is — every dispatch runs at
+`models` and `effort`.

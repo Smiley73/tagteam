@@ -94,13 +94,15 @@ export function validateJson(schema, value) {
   return errors;
 }
 
-// The configuration version the current plugin writes. Version 7 adds a required
-// `limits` object, and no key in this project has a fallback in a script: the
-// file is the whole configuration, so a missing key is a hard error rather than a
-// silently-assumed value. That makes an older configuration incomplete rather
-// than upgradable — there is nothing to read the old file for — so it is reported
-// stale and `/tagteam:init` writes a new one.
-export const CONFIG_VERSION = 7;
+// The configuration version the current plugin writes. Version 8 adds two
+// required nullable keys, `escalation` and `plan`, and no key in this project has
+// a fallback in a script: the file is the whole configuration, so a missing key is
+// a hard error rather than a silently-assumed value — which is why both are
+// written as an explicit `null` when unused rather than omitted. That makes an
+// older configuration incomplete rather than upgradable — there is nothing to
+// read the old file for — so it is reported stale and `/tagteam:init` writes a
+// new one.
+export const CONFIG_VERSION = 8;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.

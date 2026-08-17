@@ -162,11 +162,11 @@ test("a version-5 configuration reports stale rather than invalid", async () => 
   assert.match(result.stdout, /run \/tagteam:init/);
 });
 
-test("a version-7 configuration carrying the old four role keys is invalid", async () => {
+test("a version-8 configuration carrying the old four role keys is invalid", async () => {
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 7,
+    version: 8,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { plan: "high", implement: "high", review: "high", codex: "high" }
   };
@@ -181,7 +181,7 @@ test("a version-7 configuration carrying the old four role keys is invalid", asy
   );
 });
 
-test("a version-7 configuration with one leftover old key alongside the new shape is invalid", async () => {
+test("a version-8 configuration with one leftover old key alongside the new shape is invalid", async () => {
   // The hybrid case: the new lead/worker/codex keys are all present and
   // correct, but one old key is left over. Only additionalProperties: false
   // catches this — required alone would not, since lead/worker/codex are
@@ -209,8 +209,10 @@ test("the Claude model enum exists once, referenced from both models.lead and mo
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const modelDef = schema.$defs?.claudeModel;
   assert.ok(modelDef && Array.isArray(modelDef.enum), "schema must declare a claudeModel enum in $defs");
-  assert.equal(schema.properties.models.properties.lead.$ref, "#/$defs/claudeModel");
-  assert.equal(schema.properties.models.properties.worker.$ref, "#/$defs/claudeModel");
+  // `models` is a $ref to the hoisted role map now, so the enum is reached one
+  // level further in — through `$defs/roleModels` rather than off `properties`.
+  assert.equal(schema.$defs?.roleModels?.properties?.lead?.$ref, "#/$defs/claudeModel");
+  assert.equal(schema.$defs?.roleModels?.properties?.worker?.$ref, "#/$defs/claudeModel");
 
   for (const value of modelDef.enum) {
     for (const role of ["lead", "worker"]) {
@@ -230,6 +232,14 @@ test("the Claude model enum exists once, referenced from both models.lead and mo
 
 test("effort.codex and effort.lead/worker keep their divergent vocabularies", async () => {
   const { validateJson } = await import("../scripts/validate-json.mjs");
+  // The two ladders diverge on purpose and the hoist must not have merged them:
+  // `lead`/`worker` reach the Claude enum, which has `max`; `codex` carries its
+  // own inline enum, which does not.
+  const effortDef = schema.$defs?.roleEffort;
+  assert.equal(effortDef?.properties?.lead?.$ref, "#/$defs/claudeEffort");
+  assert.equal(effortDef?.properties?.worker?.$ref, "#/$defs/claudeEffort");
+  assert.deepEqual(effortDef?.properties?.codex?.enum, ["low", "medium", "high", "xhigh"]);
+
   const codexMax = { ...example, effort: { ...example.effort, codex: "max" } };
   const codexErrors = validateJson(schema, codexMax);
   assert.ok(
@@ -435,7 +445,7 @@ test("a version-6 configuration reports stale rather than invalid", () => {
   assert.match(result.stdout, /run \/tagteam:init/);
 });
 
-test("a version-7 configuration without limits is invalid", async () => {
+test("a version-8 configuration without limits is invalid", async () => {
   // Catches `limits` being declared as a property but left off the root
   // `required` list, which would make it optional and therefore invisible.
   const { validateJson } = await import("../scripts/validate-json.mjs");
@@ -590,4 +600,150 @@ test("the schema declares no default anywhere", () => {
   };
   walk(schema, "", false);
   assert.deepEqual(defaults, [], `a default at ${defaults.join(", ")} would make a missing key invisible`);
+});
+
+// --- version 8: the hoisted role maps ---
+
+// A populated pair, used wherever a non-null `escalation`/`plan` is needed. Not
+// this repository's settings and not a recommendation — only a shape.
+const RAISED_MODELS = { lead: "opus", worker: "opus", codex: "gpt-5.6-sol" };
+const RAISED_EFFORT = { lead: "max", worker: "max", codex: "xhigh" };
+const configured = (overrides) => ({
+  ...example,
+  escalation: { after: 1, models: RAISED_MODELS, effort: RAISED_EFFORT },
+  plan: { models: RAISED_MODELS, effort: RAISED_EFFORT },
+  ...overrides
+});
+
+test("all six role-triple sites are $refs to the hoisted maps, with no inline copy", () => {
+  // The drift this prevents is a role added to one site and not the others,
+  // which validates silently. A copy sitting beside the $ref would pass a
+  // pointer-spelling check and reintroduce exactly that, so the absence of
+  // `properties`/`required` at each site is half the assertion.
+  const sites = [
+    ["models", schema.properties.models, "#/$defs/roleModels"],
+    ["effort", schema.properties.effort, "#/$defs/roleEffort"],
+    ["escalation.models", schema.properties.escalation.properties.models, "#/$defs/roleModels"],
+    ["escalation.effort", schema.properties.escalation.properties.effort, "#/$defs/roleEffort"],
+    ["plan.models", schema.properties.plan.properties.models, "#/$defs/roleModels"],
+    ["plan.effort", schema.properties.plan.properties.effort, "#/$defs/roleEffort"]
+  ];
+  for (const [label, site, pointer] of sites) {
+    assert.equal(site.$ref, pointer, `${label} must $ref ${pointer}`);
+    assert.equal(site.properties, undefined, `${label} declares its own properties beside the $ref`);
+    assert.equal(site.required, undefined, `${label} declares its own required beside the $ref`);
+  }
+});
+
+test("the $refs validate, rather than merely spelling a pointer", async () => {
+  // Pointer equality would pass with `escalation.models` aimed at `roleEffort`.
+  // Only driving values through them says which $def each site reached.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+
+  const belowFloor = configured({
+    escalation: { after: 1, models: { ...RAISED_MODELS, worker: "haiku" }, effort: RAISED_EFFORT }
+  });
+  const floorErrors = validateJson(schema, belowFloor);
+  assert.ok(
+    floorErrors.some((error) => error.includes("escalation.models.worker")),
+    `expected escalation.models.worker: "haiku" to be refused, got: ${floorErrors.join("; ")}`
+  );
+
+  const codexMax = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, codex: "max" } } });
+  const codexErrors = validateJson(schema, codexMax);
+  assert.ok(
+    codexErrors.some((error) => error.includes("plan.effort.codex")),
+    `expected plan.effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
+  );
+
+  const leadMax = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, lead: "max" } } });
+  assert.deepEqual(validateJson(schema, leadMax), [], 'plan.effort.lead: "max" must validate');
+});
+
+test("escalation and plan are required keys, not optional ones", async () => {
+  // Catches either being declared in `properties` but left off the root
+  // `required` list, which would make it optional and therefore invisible.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  for (const key of ["escalation", "plan"]) {
+    const { [key]: removed, ...without } = example;
+    const errors = validateJson(schema, without);
+    assert.ok(
+      errors.some((error) => error.includes(key)),
+      `expected an error naming ${key}, got: ${errors.join("; ")}`
+    );
+  }
+});
+
+test("both keys validate as an explicit null and as a populated object", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  assert.equal(example.escalation, null, "examples/config.json must ship escalation as an explicit null");
+  assert.equal(example.plan, null, "examples/config.json must ship plan as an explicit null");
+  assert.deepEqual(validateJson(schema, example), [], "the example as shipped must validate");
+  assert.deepEqual(validateJson(schema, configured({})), [], "a fully populated escalation and plan must validate");
+});
+
+test("escalation.after is an integer of at least 1", async () => {
+  // D10: the ordinary settings always get at least one fix round. 0 is the value
+  // that matters — it would mean the raised settings from the first fix, which is
+  // already expressible by setting `models`/`effort` to them.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const errorsFor = (after) => validateJson(schema, configured({
+    escalation: { after, models: RAISED_MODELS, effort: RAISED_EFFORT }
+  })).filter((error) => error.includes("escalation.after"));
+  for (const bad of [0, -1, 1.5, "2"]) {
+    assert.ok(errorsFor(bad).length > 0, `escalation.after: ${JSON.stringify(bad)} should be refused`);
+  }
+  assert.deepEqual(errorsFor(1), [], "escalation.after: 1 must validate");
+});
+
+test("the escalation and plan wrappers are closed and complete", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const errorsFor = (overrides, key) => validateJson(schema, configured(overrides)).filter((error) => error.includes(key));
+
+  assert.ok(
+    errorsFor({ escalation: { after: 1, models: RAISED_MODELS, effort: RAISED_EFFORT, before: 2 } }, "escalation.before").length > 0,
+    "an unknown key inside escalation must not pass silently"
+  );
+  assert.ok(
+    errorsFor({ plan: { models: RAISED_MODELS, effort: RAISED_EFFORT, after: 2 } }, "plan.after").length > 0,
+    "an unknown key inside plan must not pass silently"
+  );
+  assert.ok(
+    errorsFor({ escalation: { models: RAISED_MODELS, effort: RAISED_EFFORT } }, "escalation.after").length > 0,
+    "escalation without after must be refused"
+  );
+  assert.ok(
+    errorsFor({ plan: { effort: RAISED_EFFORT } }, "plan.models").length > 0,
+    "plan without models must be refused"
+  );
+  // The type array, not `anyOf`: an array or a string is neither an object nor
+  // null, and the error names the key rather than "must match at least one
+  // allowed shape".
+  for (const wrong of [[], "high"]) {
+    assert.ok(
+      errorsFor({ escalation: wrong }, "escalation").length > 0,
+      `escalation: ${JSON.stringify(wrong)} should be refused`
+    );
+    assert.ok(
+      errorsFor({ plan: wrong }, "plan").length > 0,
+      `plan: ${JSON.stringify(wrong)} should be refused`
+    );
+  }
+});
+
+test("a version-7 configuration reports stale rather than invalid", () => {
+  // The upgrade path every existing user takes, and the whole user-visible claim
+  // of this version: a complete v7 file is merely old, and exit 3 is what routes
+  // the person to /tagteam:init instead of telling them their file is broken.
+  // Only a spawned run proves the exit code.
+  const { escalation, plan, ...withoutNewKeys } = example;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v7-"));
+  const old = path.join(dir, "config.json");
+  fs.writeFileSync(old, JSON.stringify({ ...withoutNewKeys, version: 7 }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "schemas", "config.schema.json"), old
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /run \/tagteam:init/);
 });

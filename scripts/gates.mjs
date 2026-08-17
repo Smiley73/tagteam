@@ -391,7 +391,7 @@ function readLimits(file) {
   const limits = config?.limits;
   if (limits === null || typeof limits !== "object" || Array.isArray(limits)) {
     throw new Error(`${file} has no limits object, so no budget can be enforced — run /tagteam:init to bring the `
-      + "configuration up to version 7");
+      + "configuration up to version 8");
   }
   return limits;
 }
