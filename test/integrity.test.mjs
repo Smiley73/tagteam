@@ -500,10 +500,16 @@ const schemaRoles = new Set([
   ...Object.keys(configSchema.$defs.roleEffort.properties)
 ]);
 
-// A `models.<role>` or `effort.<role>` reference, `plan.`-prefixed or not. The
-// leading character class is what makes `plan.models.lead` a reference to the
-// role `lead` here and a *prefixed* one below, where the difference matters.
+// A *bare* `models.<role>` / `effort.<role>` reference: the leading character
+// class refuses a preceding dot, so `plan.models.lead` is not one of these. That
+// distinction is load-bearing in the absence and mirror assertions below, where
+// the ordinary key and its override have to be told apart.
 const ROLE_REFERENCE = /(^|[^.\w])(models|effort)\.([a-z][a-z0-9-]*)/g;
+// The same reference with an optional `plan.` prefix, for the schema-role check
+// only. A typo'd role is just as dead inside an override as outside one —
+// `plan.models.leed` resolves to nothing and the subagent inherits the session
+// default — and the bare pattern cannot see it at all.
+const ANY_ROLE_REFERENCE = /(^|[^.\w])(?:plan\.)?(models|effort)\.([a-z][a-z0-9-]*)/g;
 
 function markdownFiles(dir) {
   return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) =>
@@ -516,7 +522,7 @@ test("every model or effort reference names a role the schema defines", () => {
   for (const dir of ["commands", "skills", "prompts", "agents"]) {
     for (const file of markdownFiles(dir)) {
       if (!file.endsWith(".md")) continue;
-      for (const [, , key, role] of fs.readFileSync(path.join(root, file), "utf8").matchAll(ROLE_REFERENCE)) {
+      for (const [, , key, role] of fs.readFileSync(path.join(root, file), "utf8").matchAll(ANY_ROLE_REFERENCE)) {
         if (!schemaRoles.has(role)) failures.push(`${file} names ${key}.${role}, which the schema declares no role for`);
       }
     }
@@ -626,9 +632,14 @@ test("every model or effort clause in commands/plan.md names the plan override t
     // `ROLE_REFERENCE` refuses a `.` before the key, so `plan.models.lead` is not
     // one of these: these are the ordinary keys, named without a prefix.
     const bare = [...line.matchAll(ROLE_REFERENCE)];
-    if (bare.length > 0 && !line.includes("plan.")) {
-      const [, , key, role] = bare[0];
-      failures.push(`plan.md names ${key}.${role} without the plan override beside it: ${line.trim()}`);
+    // The override itself, per role named, not the substring `plan.`: plan.md is
+    // full of lines mentioning `$D/plan.md`, so a prefix test would be satisfied
+    // by the filename — and by a half-override, `plan.models.lead` named while
+    // `plan.effort.lead` is forgotten and the effort stays inherited.
+    for (const [, , key, role] of bare) {
+      if (!new RegExp(`plan\\.${key}\\.${role}(?![a-z0-9-])`).test(line)) {
+        failures.push(`plan.md names ${key}.${role} without plan.${key}.${role} beside it: ${line.trim()}`);
+      }
     }
     if (/plan\.(models|effort)\./.test(line) && bare.length === 0) {
       failures.push(`plan.md substitutes a plan override for the key it overrides: ${line.trim()}`);

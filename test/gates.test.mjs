@@ -499,6 +499,17 @@ test("escalation fires past `after`, not at it, and never without an escalation 
   assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: 1 }), RAISED), []);
   assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: 2 }), RAISED), ESCALATING);
 
+  // The names alone say nothing about the settings the other four come back at:
+  // a resolver that raised every job would still list exactly these five as
+  // escalated. So read the triples of a raised round directly, on both sides of
+  // the line — the fresh reader must be running the ordinary settings while the
+  // fixer runs the raised ones, which is D1's whole point.
+  const raised = resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs;
+  assert.deepEqual(raised.fix, { model: "opus", effort: "high", escalated: true });
+  assert.deepEqual(raised["review-lens"], { model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(raised["adversary-fresh"], { model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(raised["review-codex"], { model: "gpt-5-codex", effort: "medium", escalated: false });
+
   for (const spent of [0, 1, 2, 7]) {
     assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: spent }), ORDINARY), [],
       "a null escalation is today's behaviour at every counter");
