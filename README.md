@@ -58,7 +58,7 @@ that runs out.
 title: The plan cycle
 ---
 flowchart TD
-    orient["Orient — an Explore agent reads the repository first"]
+    orient["Orient — an explorer agent reads the repository first"]
     interview["Interview — batched questions until nothing material is ambiguous"]
     goal["Goal gate — you read goal.md, edit it if it is wrong, approve it"]
     draft["Draft — one plan-drafter writes plan.md"]

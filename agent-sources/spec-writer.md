@@ -1,7 +1,7 @@
 ---
 name: spec-writer
+role: lead
 description: Writes one self-contained spec file for one deliverable of an approved plan.
-model: inherit
 tools: Read, Write, Glob, Grep, mcp__codegraph__codegraph_explore
 ---
 

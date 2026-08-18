@@ -19,11 +19,22 @@ const readme = read("README.md");
 const everything = [...commands.map((entry) => entry.text), skill].join("\n");
 
 const agentNames = fs.readdirSync(path.join(root, "agents")).map((file) => file.replace(/\.md$/, ""));
+// An agent file is one agent at one effort, because effort can only reach a
+// dispatch through the agent's frontmatter. A command therefore dispatches
+// `tagteam:<agent>-<effort>` and every level of the ladder must exist and be
+// allowed, since the resolver picks the level and the command file cannot know
+// which one it will get.
+const EFFORTS = JSON.parse(read("schemas", "config.schema.json")).$defs.claudeEffort.enum;
+const dispatchedAgents = (text) =>
+  [...text.matchAll(/`tagteam:([a-z-]+)-<effort>`/g)].map(([, name]) => name);
 
-test("every agent a command dispatches exists", () => {
+test("every agent a command dispatches exists, at every effort it may resolve to", () => {
   for (const { file, text } of commands) {
-    for (const [, name] of text.matchAll(/`tagteam:([a-z-]+)`/g)) {
-      assert.ok(agentNames.includes(name), `${file} dispatches tagteam:${name}, which has no agent file`);
+    for (const name of dispatchedAgents(text)) {
+      for (const effort of EFFORTS) {
+        assert.ok(agentNames.includes(`${name}-${effort}`),
+          `${file} dispatches tagteam:${name}, which has no agent file at ${effort} effort`);
+      }
     }
   }
 });
@@ -31,11 +42,13 @@ test("every agent a command dispatches exists", () => {
 test("every agent is declared in the allowed-tools of a command that uses it", () => {
   for (const { file, text } of commands) {
     const allowed = /allowed-tools:(.*)/.exec(text)?.[1] ?? "";
-    for (const [, name] of text.matchAll(/`tagteam:([a-z-]+)`/g)) {
-      assert.ok(
-        allowed.includes(`Agent(tagteam:${name})`),
-        `${file} dispatches tagteam:${name} but does not allow Agent(tagteam:${name}) — the dispatch would be refused mid-run`
-      );
+    for (const name of dispatchedAgents(text)) {
+      for (const effort of EFFORTS) {
+        assert.ok(
+          allowed.includes(`Agent(tagteam:${name}-${effort})`),
+          `${file} dispatches tagteam:${name} but does not allow Agent(tagteam:${name}-${effort}) — the dispatch would be refused mid-run`
+        );
+      }
     }
   }
 });
@@ -229,7 +242,7 @@ test("no brief describing a fix round claims there is only one", () => {
   // Flattened, here and below: these are sentences, and a sentence the author
   // re-wrapped is the same claim.
   const singular = /\b(the|one|a single) fix round\b/i;
-  for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agents/fixer.md"]) {
+  for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agent-sources/fixer.md"]) {
     const text = read(...file.split("/")).replace(/\s+/g, " ");
     assert.doesNotMatch(text, singular, `${file} still tells a model there is exactly one fix round`);
   }
@@ -342,12 +355,12 @@ test("step 7 dispatches the adversary a re-check of the findings it carried", ()
 // clause for the same reason.
 test("every agent dispatched to a re-check is defined to read the re-check brief", () => {
   for (const name of ["adversary", "reviewer"]) {
-    const agent = read("agents", `${name}.md`);
+    const agent = read("agent-sources", `${name}.md`);
     assert.match(agent, /prompts\/recheck\.md/,
-      `agents/${name}.md no longer names prompts/recheck.md, but step 7 dispatches it under that brief`);
+      `agent-sources/${name}.md no longer names prompts/recheck.md, but step 7 dispatches it under that brief`);
   }
-  assert.match(read("agents", "adversary.md"), /recheck\.schema\.json/,
-    "agents/adversary.md no longer names the schema its re-check output must match");
+  assert.match(read("agent-sources", "adversary.md"), /recheck\.schema\.json/,
+    "agent-sources/adversary.md no longer names the schema its re-check output must match");
 });
 
 // From the second fix round on, step 5 runs in full and step 7 follows in the
@@ -627,7 +640,7 @@ const SHIP_STEP_JOBS = [
   ["### 7.", "### 8.", ["adversary-fresh", "recheck-lens", "recheck-adversary", "recheck-codex"]],
   ["### 8.", "### 9.", ["repair-fix"]]
 ];
-const DISPATCH_TOKEN = /`(?:tagteam:(?:implementer|reviewer|adversary|fixer)|codex\.mjs)`/g;
+const DISPATCH_TOKEN = /`(?:tagteam:(?:implementer|reviewer|adversary|fixer)-<effort>|codex\.mjs)`/g;
 
 test("each resolver job is named inside the step of ship.md that dispatches it", () => {
   const allJobs = new Set(SHIP_STEP_JOBS.flatMap(([, , jobs]) => jobs));
@@ -738,17 +751,17 @@ test("every dispatching step takes its own resolver read, below the edge that mo
 // names every agent too, and is excluded by the backticks — the frontmatter
 // writes them bare.
 const PLAN_CLAUSES = [
-  ["`Explore`", "lead"],
-  ["`tagteam:plan-drafter`", "lead"],
-  ["`tagteam:plan-reviewer`", "lead"],
+  ["`tagteam:explorer-<effort>`", "lead"],
+  ["`tagteam:plan-drafter-<effort>`", "lead"],
+  ["`tagteam:plan-reviewer-<effort>`", "lead"],
   ["`$P/prompts/codex/plan-review.md`", "codex"],
-  ["`tagteam:adversary`", "lead"],
-  ["`tagteam:plan-drafter`", "lead"],
-  ["`tagteam:spec-writer`", "lead"],
-  ["`tagteam:spec-writer`", "lead"]
+  ["`tagteam:adversary-<effort>`", "lead"],
+  ["`tagteam:plan-drafter-<effort>`", "lead"],
+  ["`tagteam:spec-writer-<effort>`", "lead"],
+  ["`tagteam:spec-writer-<effort>`", "lead"]
 ];
 const PLAN_DISPATCH_TOKEN =
-  /`(?:Explore|tagteam:(?:plan-drafter|plan-reviewer|adversary|spec-writer)|\$P\/prompts\/codex\/plan-review\.md)`/g;
+  /`(?:tagteam:(?:explorer|plan-drafter|plan-reviewer|adversary|spec-writer)-<effort>|\$P\/prompts\/codex\/plan-review\.md)`/g;
 
 test("every model or effort clause in commands/plan.md names the plan override too", () => {
   const failures = [];

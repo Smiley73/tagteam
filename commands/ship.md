@@ -1,7 +1,7 @@
 ---
 description: Implement, review, and merge an approved plan one spec at a time
 argument-hint: <plan-dir>
-allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer)
+allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:implementer-low), Agent(tagteam:implementer-medium), Agent(tagteam:implementer-high), Agent(tagteam:implementer-xhigh), Agent(tagteam:implementer-max), Agent(tagteam:reviewer-low), Agent(tagteam:reviewer-medium), Agent(tagteam:reviewer-high), Agent(tagteam:reviewer-xhigh), Agent(tagteam:reviewer-max), Agent(tagteam:adversary-low), Agent(tagteam:adversary-medium), Agent(tagteam:adversary-high), Agent(tagteam:adversary-xhigh), Agent(tagteam:adversary-max), Agent(tagteam:fixer-low), Agent(tagteam:fixer-medium), Agent(tagteam:fixer-high), Agent(tagteam:fixer-xhigh), Agent(tagteam:fixer-max)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
@@ -131,9 +131,21 @@ those transitions move the counters the resolution is made from, so read again
 below them. Never carry a reading into another message, and never reuse one
 after a resume.
 
-One `tagteam:implementer` at `roles.implement`'s model and effort. Give it the
-spec **path**, the worktree path, and `conventionsPath` if set. It reads the spec
-itself; you do not.
+**The two halves of that pair are applied differently, and this is the whole of
+it.** The model is an argument: pass the job's `model` to the Agent tool. The
+effort is not — the Agent tool has no effort parameter, so it is carried by
+*which agent you name*. Every tagteam agent ships as one variant per effort,
+named `tagteam:<agent>-<effort>`: a `fix` job resolving to xhigh is dispatched
+as tagteam:fixer-xhigh, and the same job at high is tagteam:fixer-high. **No
+unsuffixed agent name exists**, here or anywhere else in this command — a bare
+name is not a shortcut, it is a dispatch that does not exist, and the run stops
+until you name a variant. So every clause below that says "at `roles.<job>`'s
+model and effort" means: pass `roles.<job>`'s model, and append `roles.<job>`'s
+effort to the agent's name.
+
+One `tagteam:implementer-<effort>` at `roles.implement`'s model and effort. Give
+it the spec **path**, the worktree path, and `conventionsPath` if set. It reads
+the spec itself; you do not.
 
 Dispatch it with `run_in_background: false` so the call blocks until it reports.
 It writes code into `$W` and no artifact you could watch for, and committing a
@@ -236,9 +248,9 @@ dispatching message:
 node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
 ```
 
-- `tagteam:reviewer` at `roles.review-lens`'s model and effort per lens, each given
-  the lens name, `$S/<id>/rounds/$ROUND/review.diff`, the spec path, the candidate OID, and
-  `$S/<id>/rounds/$ROUND/findings/<lens>.json` to write.
+- `tagteam:reviewer-<effort>` at `roles.review-lens`'s model and effort per lens,
+  each given the lens name, `$S/<id>/rounds/$ROUND/review.diff`, the spec path,
+  the candidate OID, and `$S/<id>/rounds/$ROUND/findings/<lens>.json` to write.
 - Codex — the `codex.mjs` invocation in the skill, at `roles.review-codex`'s
   model and effort rather than anything the skill's example substitutes — with
   `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
@@ -385,8 +397,8 @@ nothing gated on and every reviewer is about to re-read. The two records above
 hold the blocking and major findings and nothing else. Minor and nit are reported
 in the pull request body, not repaired.
 
-Then one `tagteam:fixer` at `roles.fix`'s model and effort — the pair you have
-just announced — given the record named above, the worktree, and
+Then one `tagteam:fixer-<effort>` at `roles.fix`'s model and effort — the pair
+you have just announced — given the record named above, the worktree, and
 `$S/<id>/fix-report-$ROUND.json` to write.
 Dispatch it with `run_in_background: false`: until it reports it is still editing
 the worktree you are about to commit. When it returns, record its report into the
@@ -456,8 +468,8 @@ node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
 
 In one message:
 
-- `tagteam:adversary` at `roles.adversary-fresh`'s model and effort, pointed at
-  `prompts/code-adversary.md`,
+- `tagteam:adversary-<effort>` at `roles.adversary-fresh`'s model and effort,
+  pointed at `prompts/code-adversary.md`,
   given the spec and `$S/<id>/rounds/$ROUND/review.diff`, writing
   `$S/<id>/rounds/$ROUND/findings/adversary.json` with `candidate` set to `$OID`.
 - Each lens named by `collect-findings.mjs` as having open findings, and **only**
@@ -469,10 +481,10 @@ In one message:
   the collector writes `open/` as a sibling of the findings directory it read, so
   when step 6 fixed something and the panel has not re-run in the round it opened,
   these files are in the round before this one and `rounds/$ROUND/open/` does not
-  exist at all. Hand the `tagteam:reviewer` of each lens *that path*, plus the new
-  diff, plus `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write, under
-  `prompts/recheck.md`, at `roles.recheck-lens`'s model and effort. Codex uses
-  `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
+  exist at all. Hand the `tagteam:reviewer-<effort>` of each lens *that path*,
+  plus the new diff, plus `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write,
+  under `prompts/recheck.md`, at `roles.recheck-lens`'s model and effort. Codex
+  uses `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
 
   **Skip this bullet whenever step 5 ran in this round** — a second or later fix
   round, or a round whose step 6 was refused for want of budget. `<r>` is
@@ -504,14 +516,18 @@ In one message:
   the read above and not off what the round before ran at.
 
   **The adversary is one of the lenses this bullet covers.** A round whose
-  carried `still-open/` holds `adversary.json` dispatches `tagteam:adversary`
-  **twice, in this same message**: the fresh pass in the first bullet, pointed at
-  `prompts/code-adversary.md` and writing `findings/adversary.json`, and a
+  carried `still-open/` holds `adversary.json` dispatches
+  `tagteam:adversary-<effort>` **twice, in this same message**: the fresh pass in
+  the first bullet, pointed at `prompts/code-adversary.md` and writing
+  `findings/adversary.json`, and a
   re-check at `roles.recheck-adversary`'s model and effort, pointed at
   `prompts/recheck.md` with `still-open/adversary.json` as
   its input and `$S/<id>/rounds/$ROUND/recheck/adversary.json` as its output. Two
   dispatches of one agent, different prompts, different files — and two jobs in
   the resolver, because the settings they run at are not always the same pair.
+  Their two efforts are two different variant names, so resolve the suffix per
+  job: dispatching one variant twice is how an escalated re-check quietly runs
+  at the fresh pass's effort.
   The fresh pass does not settle the adversary's earlier findings — it does not
   read them, and its ids are this round's — so a round that dispatches only the
   fresh pass
@@ -691,11 +707,10 @@ full:
    node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
    ```
 
-   Then dispatch one `tagteam:fixer` at `roles.repair-fix`'s model and effort
-   with the failing check
-   output, blocking as in step 6, then commit and re-snapshot as in step 3, which
-   allocates the round into `$ROUND`, set `OID`, `bind` — which clears every gate
-   — and re-run verify.
+   Then dispatch one `tagteam:fixer-<effort>` at `roles.repair-fix`'s model and
+   effort with the failing check output, blocking as in step 6, then commit and
+   re-snapshot as in step 3, which allocates the round into `$ROUND`, set `OID`,
+   `bind` — which clears every gate — and re-run verify.
 3. **Steps 5, 6 and 7 again, entirely**, including the fix rounds that cycle
    allows — with one command left out: **step 5's opening
    `gates.mjs state ... reviewing` is the edge point 1 already took.** Do not run

@@ -83,7 +83,7 @@ script, so an older configuration is incomplete rather than upgradable.
 | `base` | Branch pull requests target and each spec branches from |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
-| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, `Explore`), `worker` (implementer, fixer), `codex` (each `scripts/codex.mjs` invocation). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
+| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, explorer), `worker` (implementer, fixer), `codex` (each `scripts/codex.mjs` invocation). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
 | `reviewers.roster` | Every lens a plan may assign |
 | `reviewers.default` | Lenses applied to every spec unless it drops one |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
@@ -99,6 +99,26 @@ script, so an older configuration is incomplete rather than upgradable.
 `examples/config.json` is a complete file.
 
 ## Dispatching and waiting
+
+**The model is an argument; the effort is a name.** The Agent tool takes a
+`model` parameter, so a resolved model is passed to it directly. It has no
+`effort` parameter — none exists — so a resolved effort cannot be passed at all.
+What carries it is agent frontmatter, which Claude Code reads off the agent file
+and pins that agent's turns to. Effort is therefore fixed per agent file, and the
+plugin ships every agent once per level of the `lead`/`worker` ladder, named for
+it: `tagteam:fixer-low` through `tagteam:fixer-max`. **A dispatch selects an
+effort by selecting a variant**, and there is no unsuffixed `tagteam:fixer`,
+`tagteam:reviewer`, or anything else — a bare name names nothing, and the
+dispatch fails rather than quietly running at the session's effort.
+
+Those files are generated. `agent-sources/` holds one source per agent and
+`scripts/generate-agents.mjs` writes `agents/`, reading the ladder from
+`claudeEffort` in the config schema so a level a user may configure cannot exist
+without an agent that can be dispatched at it. Edit the source, re-run the
+generator; `test/effort-dispatch.test.mjs` fails on drift.
+
+Codex is the exception both ways: `scripts/codex.mjs` takes `--model` and
+`--effort` as real arguments, because it is a subprocess rather than a subagent.
 
 **A dispatched subagent does not block by default.** The Agent tool returns the
 moment it is dispatched, which is what makes "in a single message" mean

@@ -1,9 +1,12 @@
 ---
-name: plan-drafter
-description: Writes and revises a plan index from a settled goal and repository evidence.
+name: plan-drafter-medium
+description: Writes and revises a plan index from a settled goal and repository evidence. Runs at medium effort — dispatch the variant the resolver names.
 model: inherit
+effort: medium
 tools: Read, Write, Edit, Glob, Grep, mcp__codegraph__codegraph_explore
 ---
+
+<!-- Generated from agent-sources/plan-drafter.md by scripts/generate-agents.mjs. Edit the source, then re-run it. -->
 
 Read `${CLAUDE_PLUGIN_ROOT}/prompts/plan-draft.md` and follow it.
 
