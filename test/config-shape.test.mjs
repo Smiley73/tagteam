@@ -159,7 +159,7 @@ test("a version-5 configuration reports stale rather than invalid", async () => 
     effort: { plan: "high", implement: "high", review: "high", codex: "high" }
   }));
   const result = spawnSync("node", [
-    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
@@ -431,6 +431,124 @@ test("the roster check reads the briefs on disk, not a list in the script", asyn
   }
 });
 
+// --- 0.8.2: briefs a repository supplies ---
+
+// A repository holding `.tagteam/lenses/<lens>.md` for each name given, plus the
+// conventions document the example configuration names.
+function repoCalibrating(...lenses) {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-repo-lens-")));
+  fs.mkdirSync(path.join(dir, ".tagteam", "lenses"), { recursive: true });
+  fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
+  for (const lens of lenses) {
+    fs.writeFileSync(path.join(dir, ".tagteam", "lenses", `${lens}.md`), `# Lens: ${lens}\n\nWhat to look for.\n`);
+  }
+  return dir;
+}
+
+test("a roster entry the repository calibrates is valid, and the same entry without the brief is not", async () => {
+  // The whole point. `financial` and `math` were rostered in a real repository
+  // and had no brief in the plugin, so the only move /tagteam:init could offer
+  // was to drop both — losing the readers most likely to catch a stale
+  // contribution limit or a rounding mode that compounds across a projection.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const config = { ...example, reviewers: { roster: ["financial", "math"], default: ["financial"] } };
+
+  assert.deepEqual(semanticErrors("config.schema.json", config, { repo: repoCalibrating("financial", "math") }), []);
+
+  const half = semanticErrors("config.schema.json", config, { repo: repoCalibrating("financial") });
+  assert.equal(half.length, 1, `expected one error, got ${JSON.stringify(half)}`);
+  assert.match(half[0], /"math"/);
+  // The refusal has to name both places a brief can live, or it sends someone
+  // looking in the plugin for a file only they can write.
+  assert.match(half[0], /\.tagteam\/lenses\/math\.md/);
+  assert.match(half[0], /prompts\/lenses\/math\.md/);
+});
+
+test("a brief that is there and unusable is refused for what is wrong with it", async () => {
+  // "No brief anywhere" about a file sitting visibly in the directory is a
+  // refusal nobody can act on.
+  const { semanticErrors } = await import("../scripts/validate-json.mjs");
+  const repo = repoCalibrating();
+  fs.writeFileSync(path.join(repo, ".tagteam", "lenses", "financial.md"), "");
+  const config = { ...example, reviewers: { roster: ["financial"], default: [] } };
+  const errors = semanticErrors("config.schema.json", config, { repo });
+  assert.equal(errors.length, 1, `expected one error, got ${JSON.stringify(errors)}`);
+  assert.match(errors[0], /\.tagteam\/lenses\/financial\.md is empty/);
+});
+
+test("validating a configuration without --repo is refused rather than half-answered", () => {
+  // Half the answer to "is this roster calibrated" lives in the repository, so a
+  // run that cannot see `.tagteam/lenses/` would refuse a roster that is fine.
+  const repo = repoCalibrating("financial");
+  const configPath = path.join(repo, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ ...example, reviewers: { roster: ["financial"], default: [] } }));
+  const bare = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "schemas", "config.schema.json"), configPath
+  ], { encoding: "utf8" });
+  assert.equal(bare.status, 2, `expected exit 2, got ${bare.status}: ${bare.stderr}`);
+  assert.match(bare.stderr, /--repo/);
+
+  const withRepo = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", repo,
+    path.join(root, "schemas", "config.schema.json"), configPath
+  ], { encoding: "utf8" });
+  assert.equal(withRepo.status, 0, `expected exit 0, got ${withRepo.status}: ${withRepo.stderr}`);
+});
+
+test("what a repository calibrates, overrides, orphans or has not committed is said out loud", async () => {
+  // None of these is an error, and every one of them is invisible downstream: a
+  // findings file says `correctness` whichever brief produced it.
+  const { lensNotices } = await import("../scripts/validate-json.mjs");
+  const repo = repoCalibrating("financial", "correctness", "orphan");
+  fs.writeFileSync(path.join(repo, ".tagteam", "lenses", "codex.md"), "# Lens: codex\n\nx\n");
+  const config = { ...example, reviewers: { roster: ["financial", "correctness"], default: [] } };
+  const notices = lensNotices(config, { repo });
+
+  const note = notices.filter((line) => line.startsWith("note:"));
+  assert.equal(note.length, 1, `one line for all of them, got ${JSON.stringify(note)}`);
+  assert.match(note[0], /financial/);
+
+  const warnings = notices.filter((line) => line.startsWith("warning:"));
+  assert.ok(warnings.some((line) => /correctness/.test(line) && /instead of the brief this plugin ships/.test(line)));
+  assert.ok(warnings.some((line) => /orphan/.test(line) && /roster does not name/.test(line)));
+  assert.ok(warnings.some((line) => /codex/.test(line) && /role that runs on every spec/.test(line)));
+  // Not a git repository, so nothing is reported as untracked rather than
+  // everything: advice that fires on a directory Git cannot answer about is noise.
+  assert.ok(!warnings.some((line) => /not tracked by Git/.test(line)));
+});
+
+test("a brief the roster needs and Git has never seen is a warning, not a refusal", () => {
+  // A brief and the roster entry naming it are a pair, and only one of them is
+  // in a file anybody thinks to commit.
+  const repo = repoCalibrating("financial");
+  assert.equal(spawnSync("git", ["-C", repo, "init", "-q"], { encoding: "utf8" }).status, 0);
+  const configPath = path.join(repo, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ ...example, reviewers: { roster: ["financial"], default: [] } }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", repo,
+    path.join(root, "schemas", "config.schema.json"), configPath
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stderr, /^warning:.*\.tagteam\/lenses\/financial\.md.*not tracked by Git/m);
+});
+
+test("the cost note stays the last line printed even when a repository calibrates lenses", () => {
+  // `semanticErrors` says so out loud, and the test that reads the cost note
+  // takes the first `note:` line off stderr.
+  const repo = repoCalibrating("financial");
+  const configPath = path.join(repo, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ ...example, reviewers: { roster: ["financial"], default: [] } }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", repo,
+    path.join(root, "schemas", "config.schema.json"), configPath
+  ], { encoding: "utf8" });
+  const notes = result.stderr.split("\n").filter((line) => line.startsWith("note:"));
+  assert.equal(notes.length, 2, `expected two notes, got ${JSON.stringify(result.stderr)}`);
+  assert.match(notes[0], /calibrates financial/);
+  assert.match(notes.at(-1), /full review panels/);
+});
+
 // --- version 7: the limits object ---
 
 test("a version-6 configuration reports stale rather than invalid", () => {
@@ -442,7 +560,7 @@ test("a version-6 configuration reports stale rather than invalid", () => {
   const old = path.join(dir, "config.json");
   fs.writeFileSync(old, JSON.stringify({ ...withoutLimits, version: 6 }));
   const result = spawnSync("node", [
-    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
@@ -552,12 +670,15 @@ test("validating expensive limits prints a warning line per limit and still exit
   // repository that deliberately raised its limits could not run a preflight.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-limits-"));
   const configPath = path.join(dir, "config.json");
+  // The example names a conventions document, and `--repo` — required for a
+  // configuration since 0.8.2 — is what makes that name checkable.
+  fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
   fs.writeFileSync(configPath, JSON.stringify({
     ...example,
     limits: { fixRounds: 9, ciRepairs: 9, planReviewRounds: 9 }
   }));
   const result = spawnSync("node", [
-    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), configPath
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
@@ -705,6 +826,7 @@ test("validating a pointless escalation prints both warnings and still exits 0",
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-escalation-"));
   const configPath = path.join(dir, "config.json");
+  fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
   const config = {
     ...example,
     limits: { fixRounds: 2, ciRepairs: 2, planReviewRounds: 2 },
@@ -713,7 +835,7 @@ test("validating a pointless escalation prints both warnings and still exits 0",
   assert.deepEqual(validateJson(schema, config), []);
   fs.writeFileSync(configPath, JSON.stringify(config));
   const result = spawnSync("node", [
-    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), configPath
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
@@ -900,7 +1022,7 @@ test("a version-7 configuration reports stale rather than invalid", () => {
   const old = path.join(dir, "config.json");
   fs.writeFileSync(old, JSON.stringify({ ...withoutNewKeys, version: 7 }));
   const result = spawnSync("node", [
-    path.join(root, "scripts", "validate-json.mjs"),
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);

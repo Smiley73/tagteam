@@ -88,7 +88,10 @@ See *Asking* in the skill.
    question 2 without asking, and do not raise `worker` in the question.
 5. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
-   gets four readers. Show the full roster and let them pick from it.
+   gets four readers. Show the full roster and let them pick from it — the
+   shipped briefs plus anything this repository calibrates in
+   `.tagteam/lenses/`, which are equally selectable and, on a reconfigure, are
+   usually the ones this project cares most about.
 6. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
    workflows, no question — it is 0.
 7. Any ignored file a build needs copied into a worktree
@@ -153,15 +156,25 @@ Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
 `examples/config.json`.
 
-**The roster is closed.** Every lens in it must have a brief at
-`$P/prompts/lenses/<name>.md` — that brief is what calibrates the reviewer
-dispatched on the lens, it ships with the plugin, and a repository cannot add
-one. Take the roster from `examples/config.json` as it stands. Do not invent an
-entry because this repository looks like it needs one: a lens with no brief does
-not fail, it produces a reviewer that decides for itself what the word means and
-findings nothing downstream can tell from a calibrated reviewer's. The validator
-below refuses a roster it cannot calibrate, so an invented entry costs a rewrite
-here rather than a train.
+**The roster is closed to names nothing calibrates.** Every lens in it must have
+a brief — the file that tells the reviewer dispatched on that lens what to look
+for — in one of two places: `$P/prompts/lenses/<name>.md`, which ships with the
+plugin, or `$R/.tagteam/lenses/<name>.md`, which this repository writes and
+commits. A repository brief of the same name as a shipped one replaces it, and
+the validator says so; the shipped set is the default and stays the default.
+
+Start from the roster in `examples/config.json`. Do not invent an entry and
+leave it at that: a lens with no brief does not fail anywhere downstream, it
+produces a reviewer that decides for itself what the word means and findings
+nothing can tell from a calibrated reviewer's. The validator below refuses a
+roster it cannot calibrate, so it costs a rewrite here rather than a train.
+
+Adding a lens is therefore a two-part answer, and both parts are this
+repository's: name it in the roster, and write its brief. Offer that when this
+repository plainly wants a reader the plugin has no brief for — a project whose
+correctness lives in tax years, dosages, or currency rounding has a `financial`
+or a `math` reviewer worth having, and nothing but the missing file stands in
+the way. Writing one is the step under *Briefs this repository writes* below.
 
 ## Write
 
@@ -181,7 +194,12 @@ Then show the file and say what it means: which commands prove a candidate, whic
 lenses read every spec, and whether merges happen without asking. The validator
 prints a `note:` line giving the worst-case cost the limits commit this
 repository to; show that line as it came out rather than restating the
-arithmetic, so what the person reads is what the code computes. It may also
+arithmetic, so what the person reads is what the code computes. It prints a
+second `note:` when this repository calibrates lenses of its own, and `warning:`
+lines for each one that replaces a brief the plugin ships, for a brief in
+`.tagteam/lenses/` that the roster does not name — nothing is ever dispatched on
+it — for one named after `codex` or `adversary`, which have prompts of their own
+and read no brief, and for one Git is not tracking. It may also
 print `warning:` lines about an escalation that validates and then buys nothing
 — one whose raised settings are never reached, or that names what `models` and
 `effort` already name. Show those the same way, as the validator wrote them,
@@ -201,11 +219,48 @@ alone, the round it already names. `plan` has no round; it holds `models` and
 `effort` and nothing else. A reconfigure about something else must not be what
 quietly switches escalation off.
 
-The roster carries forward the same way, minus any entry with no brief. A
-repository that narrowed its roster keeps it narrowed, but a lens that was added
-by hand and never had a brief is dropped rather than written again — say which
-ones and that a reviewer was never calibrated for them. Mention any brief this
-plugin ships that the current roster does not name, and let them add it.
+The roster carries forward the same way, minus any entry with no brief **in
+either place**. A repository that narrowed its roster keeps it narrowed, and a
+lens it calibrates itself survives a reconfigure exactly as a shipped one does —
+`.tagteam/lenses/<name>.md` is as good an answer as `prompts/lenses/<name>.md`
+and is not second class.
+
+An entry with no brief anywhere is the one that would be dropped, and **dropping
+it is not the only offer.** Say what the entry is and that no reviewer was ever
+calibrated for it, then offer both: write a brief for it now and keep it, or drop
+it. Prefer neither — a lens someone put in this roster by hand was put there for
+a reason, and a repository that has been shipping without it has also been
+shipping without whatever it was meant to catch. Dropping was the only option
+before this plugin could read a brief from the repository, and it is still the
+right answer for an entry nobody wants any more.
+
+Mention any brief this plugin ships that the current roster does not name, and
+let them add it.
+
+### Briefs this repository writes
+
+When they choose to write one, interview for it rather than guessing: what this
+lens must catch **in this repository**, what a reviewer would have to know about
+the domain to catch it, and what it must not spend findings on — a lens with no
+edges is a second `correctness` under another name. Then write
+`$R/.tagteam/lenses/<name>.md` in the shape the shipped briefs use: a
+`# Lens: <something readable>` heading on the first line — the validator requires
+that line and nothing reads a file without it — then what the reviewer is looking
+for, what counts as a finding here, and what belongs to another lens. Read two or
+three of `$P/prompts/lenses/` first and match their length and altitude; they are
+the calibration this one has to sit beside.
+
+Say two things afterwards, because neither is visible from the file:
+
+- **It is not committed.** This command writes files and never touches Git. The
+  brief and the roster entry naming it are a pair, and a clone that has the
+  config without the brief has a roster nothing can calibrate — so they go into
+  the same commit. The validator warns about a brief Git is not tracking;
+  show that line.
+- **Everyone here needs this plugin version or newer.** A roster naming a lens
+  only this repository calibrates is refused outright by an older snapshot, which
+  will tell whoever runs it to drop the lens. `README.md` has the refresh
+  commands.
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; there is no fallback anywhere, so an omitted key is an invalid

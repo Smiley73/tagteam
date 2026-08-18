@@ -14,7 +14,13 @@ code and findings; you never let a diff or a findings body into your own context
 ## Preflight
 
 1. `$D/approved.json` must exist. It does not: tell them to run `/tagteam:plan`.
-2. Validate the config. Exit 3: `/tagteam:init`, then stop.
+2. Validate the config. Exit 3: `/tagteam:init`, then stop. Show any `note:` or
+   `warning:` line it prints about lens briefs as the validator wrote it — which
+   lenses this repository calibrates itself, which of those replace a brief the
+   plugin ships, and any brief Git is not tracking. A repository brief changes
+   what every reviewer dispatched on that lens reads for the whole train, and the
+   findings arrive under the same lens name either way, so this line is the only
+   place the substitution is visible.
 3. `codex --version` and `gh auth status`. Either fails: stop and say which.
 4. Reject any path argument containing control characters or shell
    metacharacters. You build shell strings where a script would have built argv.
@@ -63,7 +69,7 @@ is already there — but the branch commands after it are not idempotent, and a
 resumed ship reaches this step for specs that are already part-way through.
 
 ```bash
-node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base> <userVisible> <lens,lens>
+node "$P/scripts/gates.mjs" init "$S/<id>/state.json" <id> <slug> <branch> <base> <userVisible> <lens,lens> --repo "$R"
 ```
 
 If that reports `"existing": true` with a state other than `pending`, this spec
@@ -249,8 +255,17 @@ node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
 ```
 
 - `tagteam:reviewer-<effort>` at `roles.review-lens`'s model and effort per lens,
-  each given the lens name, `$S/<id>/rounds/$ROUND/review.diff`, the spec path,
+  each given the lens name, **the brief path `roles.briefs` names for that lens**,
+  `$S/<id>/rounds/$ROUND/review.diff`, the spec path,
   the candidate OID, and `$S/<id>/rounds/$ROUND/findings/<lens>.json` to write.
+
+  The brief is what calibrates the reviewer, and it is not always the plugin's:
+  a repository may calibrate a lens the plugin does not ship, or replace one it
+  does, by committing `.tagteam/lenses/<lens>.md`. `gates.mjs init` resolved that
+  once for this spec and `roles` hands it back here, so take the path off the
+  read rather than building one — a reviewer pointed at the plugin's copy of a
+  lens this repository overrode reviews through a brief nobody chose, files a
+  valid findings file, and nothing downstream can tell.
 - Codex — the `codex.mjs` invocation in the skill, at `roles.review-codex`'s
   model and effort rather than anything the skill's example substitutes — with
   `$P/prompts/codex/review.md`, `--var CANDIDATE=<oid>`,
@@ -483,8 +498,14 @@ In one message:
   these files are in the round before this one and `rounds/$ROUND/open/` does not
   exist at all. Hand the `tagteam:reviewer-<effort>` of each lens *that path*,
   plus the new diff, plus `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write,
+  plus the brief path `roles.briefs` names for that lens,
   under `prompts/recheck.md`, at `roles.recheck-lens`'s model and effort. Codex
   uses `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
+
+  The brief goes to the re-check for the same reason it goes to the panel: the
+  finding being judged was raised through it, and a lens this repository
+  calibrated itself means nothing to a reader that has not read the brief. It is
+  on the same `roles` read this bullet already takes.
 
   **Skip this bullet whenever step 5 ran in this round** — a second or later fix
   round, or a round whose step 6 was refused for want of budget. `<r>` is

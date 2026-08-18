@@ -23,6 +23,8 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
 ```
 .tagteam/config.json                       committed
+.tagteam/lenses/<lens>.md  a brief this repository wrote, calibrating a lens
+                   the plugin does not ship or replacing one it does  committed
 .tagteam/plans/<slug>/
   goal.md          the settled outcome — binding on everything downstream   committed
   plan.md          the deliverables index                                   committed
@@ -41,9 +43,12 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
 
-`/tagteam:init` can move the two `committed` groups above — the config, and the
-plan artifacts (`goal.md`, `plan.md`, `specs/`, `approved.json`) — to ignored,
-one choice each, recorded in the managed `.gitignore` block and nowhere else.
+`/tagteam:init` can move two of the `committed` groups above — the config, and
+the plan artifacts (`goal.md`, `plan.md`, `specs/`, `approved.json`) — to
+ignored, one choice each, recorded in the managed `.gitignore` block and nowhere
+else. Lens briefs are not one of those choices: they are content about this
+codebase rather than settings or a record, and the roster entry that needs one is
+in a file the rest of the team reads.
 Nothing else in this table is negotiable. A repository that keeps its plans
 private still ships from them: the implementer is given a spec by path in the
 working tree, so what Git tracks never decides what a spec can see.
@@ -84,7 +89,7 @@ script, so an older configuration is incomplete rather than upgradable.
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
 | `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, explorer), `worker` (implementer, fixer), `codex` (each `scripts/codex.mjs` invocation). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
-| `reviewers.roster` | Every lens a plan may assign |
+| `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused: it would produce a reviewer that invents the lens and findings nothing can tell from a calibrated reviewer's |
 | `reviewers.default` | Lenses applied to every spec unless it drops one |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks; 0 skips CI |
@@ -97,6 +102,29 @@ script, so an older configuration is incomplete rather than upgradable.
 | `plan` | `null`, or `{models, effort}` on the same role triple. Null is the default and means today's behaviour: every dispatch runs at `models` and `effort` |
 
 `examples/config.json` is a complete file.
+
+### Lens briefs
+
+A rostered lens is a reviewer that can be dispatched, and one file calibrates it.
+The plugin ships fourteen under `prompts/lenses/`; a repository writes its own
+under `.tagteam/lenses/`, which is how a roster names a lens the plugin has no
+brief for — `financial`, `math`, whatever this codebase's correctness actually
+turns on. A brief is a markdown file whose first line is a `# Lens: …` heading;
+an empty file, a stray note, a symlink or a directory is refused by name rather
+than treated as calibration, because a reviewer with nothing to read invents the
+lens and files findings the review gate, the merge decision and the pull request
+body all count as a calibrated reviewer's.
+
+Resolution is **repository first**, against the primary checkout and never the
+worktree — a brief written during the interview is untracked and does not exist
+at the base commit the worktree is checked out at. `gates.mjs init` resolves each
+lens once per spec and freezes the paths into `state.json`; `gates.mjs roles`
+hands them back at every dispatch that needs one, beside the model and effort, so
+the three cannot drift apart.
+
+Codex is not lens-calibrated and reads no brief. That is deliberate — it is the
+independent second engine, and `prompts/codex/review.md` says so — so nothing
+about a repository brief reaches it.
 
 ## Dispatching and waiting
 
@@ -290,7 +318,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
-| `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate` |
+| `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate`, `roles`. `init` also resolves each lens's brief and freezes it into the state file, and refuses a lens nothing calibrates |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in with `--carry`, into `recheck.json` and `still-open.json`; `--print <recheck.json>` re-renders a settled one |
 | `record-fix-report.mjs` | Validate the fixer's report, written outside the round, and record it as `rounds/<n>/fix-report.json` |

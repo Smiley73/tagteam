@@ -11,6 +11,12 @@ import {
   budgetTaken, resolveRoles
 } from "../scripts/gates.mjs";
 
+// `gates.mjs init` resolves each lens's brief, so it needs a repository to look
+// for `.tagteam/lenses/` in. These specs roster `correctness`, which the plugin
+// ships, so any real directory answers — what is being tested here is the state
+// machine, not where a brief came from.
+const root = path.resolve(import.meta.dirname, "..");
+
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const BASE = "c".repeat(40);
@@ -192,7 +198,7 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
   const file = path.join(dir, "state.json");
   const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
-  const init = () => spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "false", "correctness"], { encoding: "utf8" });
+  const init = () => spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
 
   init();
   const advanced = { ...JSON.parse(fsm.readFileSync(file, "utf8")), state: "awaiting-approval", pr: { number: 9 } };
@@ -201,6 +207,63 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   assert.match(again.stdout, /"existing":true/);
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).state, "awaiting-approval");
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).pr.number, 9);
+});
+
+test("init resolves each lens's brief and freezes it into the state file", async () => {
+  // The brief a reviewer reads is decided here, once, and read back off the
+  // state file at every dispatch — the same treatment `reviewers` gets. Carrying
+  // it in the orchestrator's memory instead is how a reviewer quietly ends up
+  // reading the plugin's brief for a lens the repository overrode, which nothing
+  // downstream of the reviewer could tell.
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const dir = fsm.realpathSync(fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-briefs-")));
+  fsm.mkdirSync(path.join(dir, ".tagteam", "lenses"), { recursive: true });
+  fsm.writeFileSync(path.join(dir, ".tagteam", "lenses", "financial.md"), "# Lens: financial\n\nMoney.\n");
+  const file = path.join(dir, "state.json");
+  const script = path.join(root, "scripts", "gates.mjs");
+
+  const run = spawnSync("node", [
+    script, "init", file, "01-x", "s", "b", "main", "false", "financial,correctness", "--repo", dir
+  ], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+
+  const state = JSON.parse(fsm.readFileSync(file, "utf8"));
+  assert.equal(state.briefs.financial, path.join(dir, ".tagteam", "lenses", "financial.md"));
+  assert.equal(state.briefs.correctness, path.join(root, "prompts", "lenses", "correctness.md"));
+  // Absolute, because the reviewer reads them with a tool that takes nothing else.
+  for (const brief of Object.values(state.briefs)) assert.ok(path.isAbsolute(brief), `${brief} is not absolute`);
+
+  // And the dispatch reads them off the same resolver call that gives it the
+  // model and the effort, so the two cannot drift apart.
+  assert.deepEqual(resolveRoles(state, { escalation: null, models: {}, effort: {} }).briefs, state.briefs);
+});
+
+test("init refuses a lens nothing calibrates rather than letting step 5 invent it", async () => {
+  // Finding this out at the dispatch costs an implementer, a commit and a verify
+  // run first, and then produces a findings file nothing can tell from a
+  // calibrated reviewer's.
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-uncalibrated-"));
+  const file = path.join(dir, "state.json");
+  const script = path.join(root, "scripts", "gates.mjs");
+
+  const run = spawnSync("node", [
+    script, "init", file, "01-x", "s", "b", "main", "false", "telepathy", "--repo", dir
+  ], { encoding: "utf8" });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /telepathy/);
+  assert.equal(fsm.existsSync(file), false, "a refused init must not leave a state file behind");
+
+  // And without a repository to look in, it refuses to guess at all.
+  const noRepo = spawnSync("node", [
+    script, "init", file, "01-x", "s", "b", "main", "false", "correctness"
+  ], { encoding: "utf8" });
+  assert.notEqual(noRepo.status, 0);
+  assert.match(noRepo.stderr, /--repo/);
 });
 
 // --- adopting a merge that happened without this tool ---
@@ -574,7 +637,7 @@ test("gates.mjs state takes the budgeted edge through the CLI with the configure
   const stateFile = path.join(dir, "state.json");
   const configFile = path.join(dir, "config.json");
   fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 } }));
-  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness"], { encoding: "utf8" });
+  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
 
   const to = (next) => spawnSync("node", [script, "state", stateFile, next, configFile], { encoding: "utf8" });
   const read = () => JSON.parse(fsm.readFileSync(stateFile, "utf8"));
@@ -612,7 +675,7 @@ test("gates.mjs round reconciles, allocates and writes the state file in one cal
   const rounds = path.join(dir, "rounds");
   const configFile = path.join(dir, "config.json");
   fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 } }));
-  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness"], { encoding: "utf8" });
+  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
 
   const round = (candidate, config = configFile) =>
     spawnSync("node", [script, "round", stateFile, rounds, candidate, config], { encoding: "utf8" });

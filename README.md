@@ -166,6 +166,13 @@ flowchart TD
     publish --> outcome
 ```
 
+Each lens is calibrated by a brief: the plugin ships fourteen, and a repository
+adds its own by committing `.tagteam/lenses/<lens>.md`. That is how a project
+whose correctness lives in tax years or dosages gets a `financial` or a `math`
+reviewer the plugin could never have written, and a brief named after one the
+plugin ships replaces it. A rostered lens with a brief in neither place is
+refused rather than reviewed on improvisation.
+
 The review panel is the spec's lenses plus a Codex cross-review. After a fix
 round, each reviewer that raised a finding re-checks its own findings against the
 new code, and an adversary reads the fixed diff fresh. Anything still open starts
@@ -243,6 +250,13 @@ Node built-ins only, no dependencies.
 
 The diagrams in this file are Mermaid source. GitHub renders them, and changing
 one is a text edit here, with no image files to regenerate.
+
+A repository that calibrates its own lenses needs plugin 0.8.2 or newer
+**everywhere it is run**. The configuration version did not change, so an older
+snapshot validates the file, reaches a roster entry it cannot find a brief for
+inside itself, and refuses it — telling whoever ran it to drop the lens. Commit
+the brief and the roster entry that names it in the same commit, and refresh the
+plugin below.
 
 This repository self-hosts tagteam. Unless you start Claude Code with
 `--plugin-dir`, it runs the installed plugin snapshot rather than this working

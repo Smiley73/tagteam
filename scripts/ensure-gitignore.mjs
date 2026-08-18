@@ -40,6 +40,13 @@ export const MANAGED_ENTRIES = [
 // from, and the config is how a project pins its own settings.
 export const KEPT_PATHS = [
   ".tagteam/config.json",
+  // A brief calibrates a reviewer this repository configured, so it belongs to
+  // whoever clones the repository rather than to the machine that wrote it. Not
+  // an optional entry like the config: the config holds settings a single
+  // developer may reasonably keep private, while a brief is only meaningful
+  // beside the roster entry that names it — and that entry is in a file the rest
+  // of the team reads.
+  ".tagteam/lenses/<lens>.md",
   ".tagteam/plans/<slug>/goal.md",
   ".tagteam/plans/<slug>/plan.md",
   ".tagteam/plans/<slug>/specs/",
