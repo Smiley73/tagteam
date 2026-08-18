@@ -35,11 +35,21 @@ function grantedAgents(text) {
   return new Set([...line.matchAll(/Agent\(tagteam:([a-z0-9-]+)\)/g)].map((m) => m[1]));
 }
 
-/** Every `tagteam:name` the command's body writes, suffixed or not, with its line. */
+/**
+ * Every `tagteam:…` token a command's body writes, with the line it sits on.
+ *
+ * Three forms reach here and all three must: `tagteam:fixer-<effort>`, the
+ * placeholder a dispatch clause writes; `tagteam:fixer-max`, a concrete variant;
+ * and `tagteam:fixer`, the bare name that is the bug. A pattern that misses the
+ * placeholder makes the coverage assertion below quantify over nothing while
+ * still passing, which is the same shape of hole as the one this file exists to
+ * close — so `-<effort>` is matched literally rather than by a character class
+ * that has to be re-read to be trusted.
+ */
 function mentionedAgents(text) {
   const body = text.slice(text.indexOf("\n---\n", 3) + 5);
   const lines = body.split("\n");
-  return [...body.matchAll(/`tagteam:([a-z0-9-]+(?:-<[a-z-]+'?s? ?effort>)?)`/g)].map((match) => ({
+  return [...body.matchAll(/`tagteam:([a-z0-9-]+(?:-<effort>)?)`/g)].map((match) => ({
     name: match[1],
     line: lines[body.slice(0, match.index).split("\n").length - 1]
   }));
@@ -97,9 +107,10 @@ test("each command pre-approves exactly the variants it dispatches", () => {
     const text = read(command);
     const granted = grantedAgents(text);
     const dispatched = new Set(
-      mentionedAgents(text).map(({ name }) => name.replace(/-<.*>$/, ""))
+      mentionedAgents(text).map(({ name }) => name.replace(/-<effort>$/, ""))
         .filter((name) => fs.existsSync(path.join(root, "agent-sources", `${name}.md`)))
     );
+    assert.ok(dispatched.size > 0, `${command}: no dispatch was found to check grants against`);
     for (const name of dispatched) {
       for (const effort of ladder) {
         assert.ok(granted.has(`${name}-${effort}`),

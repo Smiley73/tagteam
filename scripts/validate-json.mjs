@@ -292,7 +292,7 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   }
 
   // A rostered lens is a reviewer that can be dispatched, and what calibrates
-  // that reviewer is the brief `agents/reviewer.md` sends it to read:
+  // that reviewer is the brief `agent-sources/reviewer.md` sends it to read:
   // `prompts/lenses/<name>.md`, inside the plugin, which a repository has no way
   // to supply. A roster entry with no brief does not fail anywhere downstream —
   // the subagent improvises the lens from the word itself, says so in prose
