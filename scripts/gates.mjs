@@ -577,36 +577,51 @@ async function main() {
   let next;
   let budget = null;
   if (action === "init") {
-    // Refuses to overwrite. A resumed ship re-runs this step, and a spec that was
-    // mid-flight — a pull request open, waiting for a person — would otherwise
-    // have its state and its recorded gates reset to pending.
-    if (fs.existsSync(path.resolve(values[0])) && !process.argv.includes("--force")) {
-      const existing = readJson(values[0]);
-      process.stdout.write(`${JSON.stringify({ ok: true, existing: true, spec: existing.spec, state: existing.state, candidateOid: existing.candidateOid })}\n`);
-      return;
-    }
     const repoIndex = values.indexOf("--repo");
     if (repoIndex < 0 || !values[repoIndex + 1]) {
       throw new Error("init requires --repo <repo>: a lens may be calibrated by a brief in the repository, "
         + "and the reviewer is dispatched at that path");
     }
     const repo = values[repoIndex + 1];
-    const reviewers = (values[6] ?? "").split(",").filter(Boolean);
     // Resolved here, at the top of the spec, rather than at the dispatch that
     // needs it. A lens nothing calibrates is a reviewer that invents the lens
     // and files findings nothing can tell from a real one — and finding that out
     // in step 5 costs an implementer, a commit and a verify run first.
-    const briefs = {};
-    const uncalibrated = [];
-    for (const lens of reviewers) {
-      const brief = lensBrief(lens, { repo });
-      if (brief.path) briefs[lens] = brief.path;
-      else uncalibrated.push(brief.problems.length > 0 ? `${lens} (${brief.problems[0].reason})` : lens);
+    const resolveBriefs = (lenses) => {
+      const briefs = {};
+      const uncalibrated = [];
+      for (const lens of lenses) {
+        const brief = lensBrief(lens, { repo });
+        if (brief.path) briefs[lens] = brief.path;
+        else uncalibrated.push(brief.problems.length > 0 ? `${lens} (${brief.problems[0].reason})` : lens);
+      }
+      if (uncalibrated.length > 0) {
+        throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:init, or write `
+          + `${REPO_LENS_DIR}/<lens>.md in this repository`);
+      }
+      return briefs;
+    };
+
+    // Refuses to overwrite. A resumed ship re-runs this step, and a spec that was
+    // mid-flight — a pull request open, waiting for a person — would otherwise
+    // have its state and its recorded gates reset to pending.
+    if (fs.existsSync(path.resolve(values[0])) && !process.argv.includes("--force")) {
+      const existing = readJson(values[0]);
+      // One exception to "never overwrites", and it repairs rather than resets:
+      // a state file written before briefs were recorded carries none, so a spec
+      // that was mid-flight across an upgrade would reach step 5 with no brief
+      // for any lens and stop there. The lens set stays exactly as that spec
+      // froze it — only the paths its own lenses resolve to are filled in.
+      const missing = existing.reviewers?.length > 0 && Object.keys(existing.briefs ?? {}).length === 0;
+      if (missing) writeJson(values[0], { ...existing, briefs: resolveBriefs(existing.reviewers) });
+      process.stdout.write(`${JSON.stringify({
+        ok: true, existing: true, spec: existing.spec, state: existing.state, candidateOid: existing.candidateOid,
+        ...(missing ? { briefsRecorded: true } : {})
+      })}\n`);
+      return;
     }
-    if (uncalibrated.length > 0) {
-      throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:init, or write `
-        + `${REPO_LENS_DIR}/<lens>.md in this repository`);
-    }
+    const reviewers = (values[6] ?? "").split(",").filter(Boolean);
+    const briefs = resolveBriefs(reviewers);
     next = initState({
       spec: values[1],
       slug: values[2],

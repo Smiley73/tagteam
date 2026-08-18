@@ -700,3 +700,39 @@ test("gates.mjs round reconciles, allocates and writes the state file in one cal
   assert.notEqual(without.status, 0);
   assert.match(without.stderr, /tagteam:init/);
 });
+
+test("a state file written before briefs were recorded gets them on resume, and nothing else", async () => {
+  // The upgrade hazard. `init` runs on every resume and refuses to overwrite, so
+  // a spec that was mid-flight when the plugin was upgraded would keep a state
+  // file with no briefs in it — and reach step 5 with no brief for any lens,
+  // where the reviewer stops rather than inventing one. Filling them in is a
+  // repair, not a reset: state, gates and the frozen lens set are untouched.
+  const { spawnSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const fsm = await import("node:fs");
+  const script = path.join(root, "scripts", "gates.mjs");
+  const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-resume-"));
+  const stateFile = path.join(dir, "state.json");
+  const before = {
+    ...initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: ["correctness"] }),
+    state: "reviewing"
+  };
+  delete before.briefs;
+  fsm.writeFileSync(stateFile, JSON.stringify(before));
+
+  const argv = [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root];
+  const run = spawnSync("node", argv, { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(JSON.parse(run.stdout).briefsRecorded, true);
+
+  const after = JSON.parse(fsm.readFileSync(stateFile, "utf8"));
+  assert.equal(after.state, "reviewing", "a resumed spec must not be reset to pending");
+  assert.deepEqual(after.reviewers, ["correctness"]);
+  assert.ok(path.isAbsolute(after.briefs.correctness), "the reviewer has Read and no Bash");
+  assert.ok(after.briefs.correctness.endsWith(path.join("prompts", "lenses", "correctness.md")));
+
+  // Idempotent: a second resume records nothing and changes nothing.
+  const again = spawnSync("node", argv, { encoding: "utf8" });
+  assert.equal(JSON.parse(again.stdout).briefsRecorded, undefined);
+  assert.deepEqual(JSON.parse(fsm.readFileSync(stateFile, "utf8")), after);
+});
