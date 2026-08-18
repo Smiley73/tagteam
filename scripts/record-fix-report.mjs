@@ -20,7 +20,7 @@
 // clean and the fixer re-dispatchable.
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { roundRootForWrite, writeRoundFile } from "./lib/round-store.mjs";
 
@@ -88,7 +88,7 @@ async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
     const schemaPath = options.schema
-      ?? path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "schemas", "fix-report.schema.json");
+      ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "fix-report.schema.json");
     const report = recordFixReport({ ...options, schemaPath });
     process.stdout.write(`${summaryLines(report, path.resolve(options.out)).join("\n")}\n`);
   } catch (error) {

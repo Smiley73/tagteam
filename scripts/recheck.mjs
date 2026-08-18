@@ -20,7 +20,7 @@
 // next one. Nothing here loops; this is what makes a loop survivable.
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { findingId, findingRound, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
@@ -549,7 +549,7 @@ async function main() {
       // the merge decision actually reads.
       return;
     }
-    const here = path.dirname(new URL(import.meta.url).pathname);
+    const here = path.dirname(fileURLToPath(import.meta.url));
     const schemaPath = options.schema ?? path.resolve(here, "..", "schemas", "recheck.schema.json");
     const round = parseRound(options.round);
     // Both directories are checked against `--round`, because both mint or match
