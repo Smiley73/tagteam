@@ -1,7 +1,7 @@
 ---
 description: Turn a goal into a reviewed plan and a set of implementable spec files
 argument-hint: <goal, however vague> [--resume <slug>]
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(Explore), Agent(tagteam:plan-drafter), Agent(tagteam:plan-reviewer), Agent(tagteam:adversary), Agent(tagteam:spec-writer)
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:explorer-low), Agent(tagteam:explorer-medium), Agent(tagteam:explorer-high), Agent(tagteam:explorer-xhigh), Agent(tagteam:explorer-max), Agent(tagteam:plan-drafter-low), Agent(tagteam:plan-drafter-medium), Agent(tagteam:plan-drafter-high), Agent(tagteam:plan-drafter-xhigh), Agent(tagteam:plan-drafter-max), Agent(tagteam:plan-reviewer-low), Agent(tagteam:plan-reviewer-medium), Agent(tagteam:plan-reviewer-high), Agent(tagteam:plan-reviewer-xhigh), Agent(tagteam:plan-reviewer-max), Agent(tagteam:adversary-low), Agent(tagteam:adversary-medium), Agent(tagteam:adversary-high), Agent(tagteam:adversary-xhigh), Agent(tagteam:adversary-max), Agent(tagteam:spec-writer-low), Agent(tagteam:spec-writer-medium), Agent(tagteam:spec-writer-high), Agent(tagteam:spec-writer-xhigh), Agent(tagteam:spec-writer-max)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
@@ -10,6 +10,17 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
 
 You are the orchestrator. You run the scripts and hold the sequence; subagents do
 the model work and write their own files.
+
+**How a resolved effort reaches a dispatch.** Every clause below names a model
+and an effort, and the two are applied differently. The model is an argument:
+pass it to the Agent tool. The effort is not — the Agent tool has no effort
+parameter, so it is carried by *which agent you name*. Every tagteam agent ships
+as one variant per effort, named `tagteam:<agent>-<effort>`: at a resolved lead
+effort of xhigh the drafter is tagteam:plan-drafter-xhigh, and at high it is
+tagteam:plan-drafter-high. **No unsuffixed agent name exists** — a bare name is a
+dispatch that does not exist, not a shortcut. So `tagteam:<agent>-<effort>` below
+means: substitute the effort that clause resolved. Codex is the exception and
+takes its effort as a real argument, as `SKILL.md` shows.
 
 ## Before anything
 
@@ -38,7 +49,7 @@ Seven steps. Exactly one of them loops — step 5's review, bounded by
 
 ## 1 — Orient
 
-Dispatch one `Explore` subagent at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null: how the areas this goal touches are built today,
+Dispatch one `tagteam:explorer-<effort>` subagent at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null: how the areas this goal touches are built today,
 which modules own them, what patterns the repository already uses, and where the
 tests for them live. Ask for the conclusion, not the file contents.
 
@@ -131,7 +142,7 @@ Run this before **every** step from here on — draft, revise, expand, approve. 
 is one command and it is the only thing standing between "the plan was built from
 what you approved" and a claim nobody checked.
 
-Dispatch `tagteam:plan-drafter` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null. Give it `$D/goal.md`,
+Dispatch `tagteam:plan-drafter-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null. Give it `$D/goal.md`,
 the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
 count — do not read the plan. `run_in_background: false`, so the call blocks: the
 three readers in step 5 are pointed at `$D/plan.md` on disk, and a reviewer
@@ -223,10 +234,10 @@ not ready.
 
 Three readers, dispatched in a single message so they run concurrently:
 
-- `tagteam:plan-reviewer` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, writing `$D/work/review/$ROUND/claude.json`
+- `tagteam:plan-reviewer-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, writing `$D/work/review/$ROUND/claude.json`
 - Codex, via `$P/prompts/codex/plan-review.md`, at `models.codex` / `effort.codex`, or `plan.models.codex` / `plan.effort.codex` when `plan` is not null, fencing `GOAL` and `PLAN` from
   disk, writing `$D/work/review/$ROUND/codex.json`
-- `tagteam:adversary` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, pointed at `prompts/plan-adversary.md`,
+- `tagteam:adversary-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, pointed at `prompts/plan-adversary.md`,
   writing `$D/work/review/$ROUND/adversary.json`
 
 Run the Codex call with `run_in_background` — it outlives what the Bash tool will
@@ -254,7 +265,7 @@ and the floor is this rule.
 
 Otherwise, a finding against the *goal* rather than the plan goes through the
 section below first, inside this round. Then pass every `blocking` and `major`
-finding to one `tagteam:plan-drafter` revision at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null.
+finding to one `tagteam:plan-drafter-<effort>` revision at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null.
 That one blocks too — `run_in_background: false`. It rewrites a `plan.md` that
 already exists, so there is nothing a watcher could wait for, and
 `deliverables.mjs` in step 6 would happily return the rows the revision is in the
@@ -327,7 +338,7 @@ That returns one object per deliverable — id, what it delivers, dependencies,
 user-visibility, and the row verbatim. It is how you dispatch without reading
 `plan.md`: the rows come out as data, the plan body stays out of your context.
 
-Dispatch one `tagteam:spec-writer` per deliverable, **all in one message**, each
+Dispatch one `tagteam:spec-writer-<effort>` per deliverable, **all in one message**, each
 at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, and each writing exactly `$D/specs/<id>.md`. Give each one the
 goal path, the plan path, its own row, and the configured default lens set so it
 knows what it is naming exceptions to.
@@ -348,7 +359,7 @@ quietly missing, and `approved.json` records it that way.
 Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
 checks front matter, resolves each spec's lenses against the default set, and
 returns dependency order. Fix what it reports by re-dispatching that spec's
-`tagteam:spec-writer` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null — **with `run_in_background: false`,
+`tagteam:spec-writer-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null — **with `run_in_background: false`,
 not behind a watcher.** A spec it rejected is a spec that exists, so `[ -f ]` on
 the path the writer is rewriting returns having waited for nothing, and
 `specs.mjs` re-runs against the file that already failed.

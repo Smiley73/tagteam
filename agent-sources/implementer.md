@@ -1,7 +1,7 @@
 ---
 name: implementer
+role: worker
 description: Implements one spec inside an isolated worktree.
-model: inherit
 tools: Read, Write, Edit, Glob, Grep, Bash, mcp__codegraph__codegraph_explore
 ---
 

@@ -1,9 +1,12 @@
 ---
-name: reviewer
-description: Read-only reviewer of one candidate diff through one named lens.
+name: reviewer-max
+description: Read-only reviewer of one candidate diff through one named lens. Runs at max effort — dispatch the variant the resolver names.
 model: inherit
+effort: max
 tools: Read, Write, Glob, Grep, mcp__codegraph__codegraph_explore
 ---
+
+<!-- Generated from agent-sources/reviewer.md by scripts/generate-agents.mjs. Edit the source, then re-run it. -->
 
 Read `${CLAUDE_PLUGIN_ROOT}/prompts/review.md`, then the lens brief at
 `${CLAUDE_PLUGIN_ROOT}/prompts/lenses/<lens>.md`, and review only through that

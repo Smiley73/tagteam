@@ -396,7 +396,7 @@ test("adversary and codex are roles, not lenses a configuration may select", asy
 });
 
 test("a rostered lens with no brief is refused rather than reviewed on improvisation", async () => {
-  // The failure this replaces is invisible: `agents/reviewer.md` points the
+  // The failure this replaces is invisible: `agent-sources/reviewer.md` points the
   // subagent at `prompts/lenses/<lens>.md`, and when that file is not there the
   // reviewer decides for itself what the lens means, mentions it in prose, and
   // writes a findings file `collect-findings.mjs`, the review gate and the pull

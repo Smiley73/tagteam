@@ -159,8 +159,8 @@ const SHIP_JOBS = {
 // repair: escalating a fresh reader stops the pull request instead of settling
 // it.
 //
-// The pair this is invisible for is `commands/ship.md:444`, which dispatches
-// `tagteam:adversary` **twice in one message** — the fresh pass pointed at
+// The pair this is invisible for is step 7 of `commands/ship.md`, which dispatches
+// the adversary **twice in one message** — the fresh pass pointed at
 // `prompts/code-adversary.md`, which never escalates, and a re-check pointed at
 // `prompts/recheck.md` with the carried `still-open/adversary.json` as its
 // input, which does. Nothing about the shared agent token tells the two apart,
