@@ -210,7 +210,7 @@ test("choosing to keep plans private ignores every plan artifact and stops promi
   const dir = repo();
   const report = ensureGitignore(dir, { ignore: ["plans"] });
   assert.deepEqual(report.notIgnored, []);
-  assert.deepEqual(report.kept, [".tagteam/config.json"]);
+  assert.deepEqual(report.kept, [".tagteam/config.json", ".tagteam/lenses/<lens>.md"]);
   assert.deepEqual(report.ignore, [".tagteam/plans/"]);
 
   const plan = [
@@ -227,11 +227,16 @@ test("choosing to keep plans private ignores every plan artifact and stops promi
   ], { encoding: "utf8" }).stdout.trim(), "");
 });
 
-test("choosing to keep the config private too leaves nothing committable", () => {
+test("choosing to keep the config private too leaves only the lens briefs committable", () => {
+  // Both choices this command offers, taken together, and a lens brief survives
+  // them: the two optional entries are about settings and about the plan record,
+  // and a brief is neither. It is content about this codebase — what a reviewer
+  // dispatched on `financial` here must look for — so it belongs to whoever
+  // clones the repository even when the roster naming it does not.
   const dir = repo();
   const report = ensureGitignore(dir, { ignore: ["config", "plans"] });
   assert.deepEqual(report.notIgnored, []);
-  assert.deepEqual(report.kept, []);
+  assert.deepEqual(report.kept, [".tagteam/lenses/<lens>.md"]);
   // Rendered in a fixed order whatever order the caller asked in.
   assert.deepEqual(report.ignore, [".tagteam/plans/", ".tagteam/config.json"]);
   assert.equal(spawnSync("git", [
@@ -284,7 +289,7 @@ test("the CLI accepts the ignore options and reports what they cover", () => {
   const report = JSON.parse(run.stdout);
   assert.equal(report.ok, true);
   assert.deepEqual(report.ignore, [OPTIONAL_ENTRIES.codegraph.pattern, OPTIONAL_ENTRIES.plans.pattern]);
-  assert.deepEqual(report.kept, [".tagteam/config.json"]);
+  assert.deepEqual(report.kept, [".tagteam/config.json", ".tagteam/lenses/<lens>.md"]);
 
   // The repository argument is still found when it follows a consumed value.
   const equals = spawnSync(process.execPath, [script, dir, "--ignore=config", "--check"], { encoding: "utf8" });

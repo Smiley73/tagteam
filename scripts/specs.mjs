@@ -7,7 +7,7 @@
 // in is decided arithmetically rather than by reading a table in a plan.
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 
 // Deliberately minimal: keys are `name: value`, values are either a scalar or a
@@ -114,7 +114,7 @@ async function main() {
     return;
   }
   try {
-    const here = path.dirname(new URL(import.meta.url).pathname);
+    const here = path.dirname(fileURLToPath(import.meta.url));
     const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
     const order = readSpecs(planDir, config, path.resolve(here, "..", "schemas", "spec.schema.json"));
     process.stdout.write(`${JSON.stringify({ ok: true, order }, null, 2)}\n`);

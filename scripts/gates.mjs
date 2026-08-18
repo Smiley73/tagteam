@@ -12,6 +12,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
+import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 
 const GATES = ["review", "verify", "ci", "human"];
 
@@ -66,7 +67,7 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-export function initState({ spec, slug, branch, base, userVisible, reviewers }) {
+export function initState({ spec, slug, branch, base, userVisible, reviewers, briefs = {} }) {
   return {
     spec,
     slug,
@@ -74,6 +75,19 @@ export function initState({ spec, slug, branch, base, userVisible, reviewers }) 
     base,
     planUserVisible: Boolean(userVisible),
     reviewers,
+    // The brief that calibrates each lens, absolute, resolved once here and
+    // frozen for the whole spec — the same treatment `reviewers` gets, and for
+    // the same reason: every round of one spec is reviewed through the same
+    // lenses, so every round should be reviewed through the same briefs. A
+    // repository may add or change one mid-train; the spec that is already
+    // running keeps what it started with, and the next one picks the change up.
+    //
+    // It is here rather than in the orchestrator's memory because a train is
+    // long and the lock token two steps up is written to a file for exactly that
+    // reason. A brief path that quietly reverts to the shipped one is a reviewer
+    // reading a different brief than the repository configured, and nothing
+    // downstream of it could tell.
+    briefs,
     state: "pending",
     baseOid: null,
     candidateOid: null,
@@ -200,7 +214,11 @@ export function resolveRoles(state, config) {
       escalated
     };
   }
-  return { spec: state?.spec ?? null, fixRoundsUsed, jobs };
+  // The briefs ride along because this is read immediately before every
+  // dispatching message that needs one — step 5's panel and step 7's re-check
+  // both — so the model, the effort and the brief a reviewer is given all come
+  // off the same read and cannot drift apart.
+  return { spec: state?.spec ?? null, fixRoundsUsed, jobs, briefs: state?.briefs ?? {} };
 }
 
 export function transition(state, next, { limits } = {}) {
@@ -441,7 +459,7 @@ function writeJson(file, value) {
 }
 
 const USAGE = `usage:
-  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> [--force]
+  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--force]
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs bind     <state.json> <candidateOid> <baseOid> [changed-paths.json]
@@ -456,10 +474,14 @@ const USAGE = `usage:
   without it. On one of those edges it prints a \`budget\` object: which round or
   repair this is (\`ordinal\`), out of how many (\`limit\`).
 
+  \`init\` needs the repository to resolve each lens's brief, and refuses a lens
+  nothing calibrates rather than letting a reviewer invent one in step 5.
+
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
-  one entry per job, resolved from this spec's fix counter and \`escalation\`. It
-  writes nothing, and it is read once per dispatching message: a \`state\` call
-  between the read and the dispatch invalidates it.
+  one entry per job, resolved from this spec's fix counter and \`escalation\`,
+  plus the brief each lens is calibrated by. It writes nothing, and it is read
+  once per dispatching message: a \`state\` call between the read and the dispatch
+  invalidates it.
 `;
 
 // The limits, or a refusal. A configuration without them is a version-6 file:
@@ -555,21 +577,59 @@ async function main() {
   let next;
   let budget = null;
   if (action === "init") {
+    const repoIndex = values.indexOf("--repo");
+    if (repoIndex < 0 || !values[repoIndex + 1]) {
+      throw new Error("init requires --repo <repo>: a lens may be calibrated by a brief in the repository, "
+        + "and the reviewer is dispatched at that path");
+    }
+    const repo = values[repoIndex + 1];
+    // Resolved here, at the top of the spec, rather than at the dispatch that
+    // needs it. A lens nothing calibrates is a reviewer that invents the lens
+    // and files findings nothing can tell from a real one — and finding that out
+    // in step 5 costs an implementer, a commit and a verify run first.
+    const resolveBriefs = (lenses) => {
+      const briefs = {};
+      const uncalibrated = [];
+      for (const lens of lenses) {
+        const brief = lensBrief(lens, { repo });
+        if (brief.path) briefs[lens] = brief.path;
+        else uncalibrated.push(brief.problems.length > 0 ? `${lens} (${brief.problems[0].reason})` : lens);
+      }
+      if (uncalibrated.length > 0) {
+        throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:init, or write `
+          + `${REPO_LENS_DIR}/<lens>.md in this repository`);
+      }
+      return briefs;
+    };
+
     // Refuses to overwrite. A resumed ship re-runs this step, and a spec that was
     // mid-flight — a pull request open, waiting for a person — would otherwise
     // have its state and its recorded gates reset to pending.
     if (fs.existsSync(path.resolve(values[0])) && !process.argv.includes("--force")) {
       const existing = readJson(values[0]);
-      process.stdout.write(`${JSON.stringify({ ok: true, existing: true, spec: existing.spec, state: existing.state, candidateOid: existing.candidateOid })}\n`);
+      // One exception to "never overwrites", and it repairs rather than resets:
+      // a state file written before briefs were recorded carries none, so a spec
+      // that was mid-flight across an upgrade would reach step 5 with no brief
+      // for any lens and stop there. The lens set stays exactly as that spec
+      // froze it — only the paths its own lenses resolve to are filled in.
+      const missing = existing.reviewers?.length > 0 && Object.keys(existing.briefs ?? {}).length === 0;
+      if (missing) writeJson(values[0], { ...existing, briefs: resolveBriefs(existing.reviewers) });
+      process.stdout.write(`${JSON.stringify({
+        ok: true, existing: true, spec: existing.spec, state: existing.state, candidateOid: existing.candidateOid,
+        ...(missing ? { briefsRecorded: true } : {})
+      })}\n`);
       return;
     }
+    const reviewers = (values[6] ?? "").split(",").filter(Boolean);
+    const briefs = resolveBriefs(reviewers);
     next = initState({
       spec: values[1],
       slug: values[2],
       branch: values[3],
       base: values[4],
       userVisible: values[5] === "true",
-      reviewers: (values[6] ?? "").split(",").filter(Boolean)
+      reviewers,
+      briefs
     });
   } else if (action === "state") {
     const before = readJson(values[0]);

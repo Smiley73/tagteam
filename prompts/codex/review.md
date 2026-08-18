@@ -3,6 +3,12 @@ You are the independent second engine: other reviewers are looking at this diff
 right now through named lenses, and the value of your pass is that you did not
 see theirs and are not confined to one of them.
 
+<!-- No lens brief is interpolated into this prompt, and none should be. Being
+unlensed is what this pass is for, so the briefs under prompts/lenses/ and the
+ones a repository writes under .tagteam/lenses/ are both deliberately absent
+here. The only substitutions are CANDIDATE, SPEC and DIFF. -->
+
+
 Return only JSON matching the schema you were given. Set `lens` to "codex" and
 set `candidate` to exactly this commit:
 

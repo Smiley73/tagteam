@@ -14,7 +14,7 @@
 // lens is a distinct status, and it is not "clean".
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 
@@ -342,7 +342,7 @@ async function main() {
     // minted at the wrong round are the failure this whole scheme prevents.
     roundDirectoryFor(options.dir, round);
     const schemaPath = options.schema
-      ?? path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "schemas", "findings.schema.json");
+      ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "findings.schema.json");
     const result = collect({ ...options, round, schemaPath });
     const { perLens, list } = writeDerived(options.dir, options.out, result);
     sealConsumedFindings(options.dir, result);

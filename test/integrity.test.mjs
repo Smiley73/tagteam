@@ -8,7 +8,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -107,6 +109,91 @@ test("every brief this plugin ships is in the example roster", () => {
     const lens = entry.replace(/\.md$/, "");
     assert.ok(rostered.has(lens), `prompts/lenses/${entry} ships but examples/config.json does not roster ${lens}`);
   }
+});
+
+// Where a repository puts its own briefs is a path three prose files tell a
+// person or a subagent to use and two scripts resolve. Spelled differently in
+// any one of them, a repository writes a brief nothing reads — and the failure
+// is a reviewer that invents its lens, which is the thing none of this can
+// otherwise detect.
+test("the repository brief directory is spelled the same in every file that names one", async () => {
+  const { REPO_LENS_DIR } = await import("../scripts/lib/lenses.mjs");
+  assert.equal(REPO_LENS_DIR, ".tagteam/lenses");
+  const naming = [
+    ["agent-sources", "reviewer.md"],
+    ["commands", "ship.md"],
+    ["commands", "init.md"],
+    ["commands", "plan.md"],
+    ["skills", "tagteam", "SKILL.md"],
+    ["README.md"]
+  ];
+  for (const parts of naming) {
+    const text = read(...parts);
+    assert.match(text, new RegExp(REPO_LENS_DIR.replace(/\//g, "\\/")),
+      `${parts.join("/")} does not name ${REPO_LENS_DIR}`);
+    // A near miss reads correctly and resolves nowhere.
+    assert.doesNotMatch(text, /\.tagteam\/(lens|brief|briefs|lense)\//,
+      `${parts.join("/")} names a brief directory that is not ${REPO_LENS_DIR}`);
+  }
+});
+
+// A script that has to find a file shipped beside it derives the plugin root
+// from `import.meta.url`, and there is exactly one correct way to do that.
+// `new URL(import.meta.url).pathname` is percent-encoded: under
+// `~/.claude/plugins/cache/`, which is where this plugin actually runs, a home
+// directory with a space in it yields `/Users/First%20Last/...` and every
+// `readFileSync` against it throws ENOENT. It works on every developer machine
+// whose paths happen to have no spaces in them, which is what makes it worth a
+// test rather than a code review.
+test("no script derives a path from import.meta.url through .pathname", () => {
+  const offenders = [];
+  for (const dir of ["scripts", "scripts/lib"]) {
+    for (const name of fs.readdirSync(path.join(root, dir)).filter((entry) => entry.endsWith(".mjs"))) {
+      const file = path.join(dir, name);
+      if (/new URL\(import\.meta\.url\)\s*\.pathname/.test(read(...file.split("/")))) offenders.push(file);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `${offenders.join(", ")} must use fileURLToPath(import.meta.url), which decodes what .pathname leaves encoded`);
+});
+
+test("a plugin installed under a path with a space in it still finds its own schemas", () => {
+  // The failure the rule above prevents, run rather than asserted. Every script
+  // that reads a schema beside itself is exercised through the one that reads
+  // the most of them.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-"));
+  const plugin = path.join(home, "First Last", "plugin cache", "tagteam");
+  fs.mkdirSync(plugin, { recursive: true });
+  for (const dir of ["scripts", "schemas", "prompts"]) {
+    fs.cpSync(path.join(root, dir), path.join(plugin, dir), { recursive: true });
+  }
+  assert.ok(plugin.includes(" "), "the point of this test is the space");
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-repo-"));
+  const planDir = path.join(repo, "plan");
+  fs.mkdirSync(path.join(planDir, "specs"), { recursive: true });
+  fs.writeFileSync(path.join(planDir, "specs", "01-a.md"),
+    "---\nid: 01-a\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nSomething.\n");
+  const configPath = path.join(repo, "config.json");
+  fs.writeFileSync(configPath, read("examples", "config.json"));
+
+  const result = spawnSync("node", [path.join(plugin, "scripts", "specs.mjs"), planDir, configPath], { encoding: "utf8" });
+  assert.equal(result.status, 0, `specs.mjs failed from a spaced path: ${result.stderr}`);
+  assert.deepEqual(JSON.parse(result.stdout).order.map((entry) => entry.id), ["01-a"]);
+});
+
+// `gates.mjs init` and the configuration validator both refuse to run without a
+// repository since 0.8.2, because half the answer to "what calibrates this lens"
+// lives in `.tagteam/lenses/`. A command file that invokes either without
+// `--repo` fails mid-run — after the worktree, and for `init`, once per spec.
+test("every command invocation that now requires --repo passes it", () => {
+  const offenders = [];
+  for (const { file, text } of commands) {
+    for (const [, line] of text.matchAll(/^(.*scripts\/(?:gates\.mjs" init|validate-json\.mjs).*)$/gm)) {
+      if (!line.includes("--repo")) offenders.push(`${file}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `${offenders.join("; ")} would be refused for want of --repo`);
 });
 
 test("the example configuration is valid against the schema", async () => {
@@ -587,12 +674,23 @@ test("every model or effort reference names a role the schema defines", () => {
 const shipText = () => read("commands", "ship.md");
 const planText = () => read("commands", "plan.md");
 
+// `roles` emits jobs and it emits `briefs`, and ship.md reads both off the same
+// call. A dispatch takes its model and effort off a job and its lens brief off
+// `briefs`, so the resolver's own top-level keys are as nameable as its jobs —
+// what must not appear is a job name the resolver has no entry for.
+const RESOLVER_KEYS = new Set(["briefs"]);
+
 test("every resolver job commands/ship.md names is one the resolver emits", async () => {
   const { resolveRoles } = await import("../scripts/gates.mjs");
-  const emitted = new Set(Object.keys(resolveRoles({ fixRoundsUsed: 0 }, JSON.parse(read("examples", "config.json"))).jobs));
+  const resolved = resolveRoles({ fixRoundsUsed: 0 }, JSON.parse(read("examples", "config.json")));
+  const emitted = new Set(Object.keys(resolved.jobs));
+  for (const key of RESOLVER_KEYS) {
+    assert.ok(Object.hasOwn(resolved, key), `roles no longer emits ${key}, which ship.md reads off it`);
+  }
   const named = [...shipText().matchAll(/`roles\.([a-z-]+)`/g)].map(([, job]) => job);
   assert.ok(named.length > 0, "ship.md names no resolver job at all");
   for (const job of named) {
+    if (RESOLVER_KEYS.has(job)) continue;
     assert.ok(emitted.has(job), `ship.md dispatches roles.${job}, which gates.mjs roles does not emit`);
   }
 });
@@ -665,8 +763,12 @@ test("each resolver job is named inside the step of ship.md that dispatches it",
           `ship.md ${heading} names roles.${job} outside the dispatch it belongs to`);
       }
     }
-    // And nothing else's job, which no span of this step could hold.
+    // And nothing else's job, which no span of this step could hold. The
+    // resolver's non-job keys are exempt: `roles.briefs` is one map for every
+    // lens, read by whichever step is dispatching a lens reviewer, so it belongs
+    // to no single job's span.
     for (const [, job] of step.matchAll(/`roles\.([a-z-]+)`/g)) {
+      if (RESOLVER_KEYS.has(job)) continue;
       assert.ok(jobs.includes(job),
         `ship.md ${heading} names roles.${job}, which another step dispatches`);
       assert.ok(allJobs.has(job), `ship.md ${heading} names roles.${job}, which no step is mapped to`);

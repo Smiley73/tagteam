@@ -26,7 +26,11 @@ takes its effort as a real argument, as `SKILL.md` shows.
 
 1. `git -C "$R" rev-parse --show-toplevel`. Not a repository: say so and stop.
 2. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
-   `/tagteam:init` and stop. No config at all: same. Carry `limits.planReviewRounds`
+   `/tagteam:init` and stop. No config at all: same. Show any `note:` or
+   `warning:` line it prints about lens briefs as the validator wrote it: a lens
+   this repository calibrates itself is one a plan may assign like any other, and
+   a brief that replaces one the plugin ships changes what that reviewer reads
+   without changing its name anywhere else. Carry `limits.planReviewRounds`
    from it with the other settings you take from here — it is how many review
    rounds step 5 may run against one goal approval, and you pass it to the
    allocator rather than counting rounds yourself.
@@ -375,6 +379,12 @@ Show: the deliverables in dependency order, the lenses `specs.mjs` resolved for
 each one, the note that Codex and the adversary run on every spec regardless, and
 the count of anything left unanswered. Say that the lens selection lives in each
 spec's front matter and is editable there, the way `goal.md` was.
+
+A lens this repository calibrates itself has its brief at
+`$R/.tagteam/lenses/<lens>.md`, and that file is the only place its description
+can come from — the plugin has nothing to say about a `financial` reviewer this
+project defined. Read it to describe the lens; do not infer what it reads for
+from its name.
 
 Give each lens as what it reads for *and* by name — "a reader checking that the
 failure paths behave (`error-handling`)". The description is what makes the

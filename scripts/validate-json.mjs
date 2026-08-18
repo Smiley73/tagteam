@@ -5,8 +5,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
+import { REPO_LENS_DIR, RESERVED_ROLES, lensBrief, lensInventory, shippedLenses, untrackedBriefs } from "./lib/lenses.mjs";
 
 function typeMatches(value, expected) {
   if (expected === "null") return value === null;
@@ -251,21 +252,73 @@ function repositoryPathErrors(label, namedPath, { repo, mustBeFile = false }) {
   return errors;
 }
 
-// Names a configuration may not use as a lens; see the check that reports them.
-const RESERVED_ROLES = ["adversary", "codex"];
+// What a repository calibrates for itself, and what it says out loud.
+//
+// None of these is an error. A repository brief that overrides a shipped one is
+// a supported thing to want; the reason it is reported on every validation is
+// that the findings still arrive under the shipped lens's name, so nothing
+// downstream of the reviewer can tell which brief calibrated it. A line here is
+// the only place the two can be told apart.
+//
+// Pure and total, like `limitNotices` and `escalationNotices`: it runs on
+// documents whose shape has not validated, and a `reviewers` of `3` returns no
+// notices rather than throwing.
+export function lensNotices(value, { repo } = {}) {
+  if (!repo) return [];
+  const notices = [];
+  const rostered = new Set((value?.reviewers?.roster ?? []).filter((lens) => typeof lens === "string"));
+  const { repository, shadowed, reserved, malformed, broken } = lensInventory({ repo });
 
-// The lenses this plugin can calibrate a reviewer for: one brief per file in
-// `prompts/lenses/`. Read from the directory rather than listed here, because a
-// list would be a second place to update and the reviewer is dispatched at the
-// path, not at the list. A plugin missing the directory calibrates nothing,
-// which is what an empty set says.
-function shippedLenses() {
-  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "prompts", "lenses");
-  try {
-    return fs.readdirSync(dir).filter((entry) => entry.endsWith(".md")).map((entry) => entry.slice(0, -3)).sort();
-  } catch {
-    return [];
+  // One line for all of them. A repository with five briefs would otherwise put
+  // five lines in front of every ship and every plan.
+  if (repository.length > 0) {
+    notices.push(`note: this repository calibrates ${repository.join(", ")} from ${REPO_LENS_DIR}/`);
   }
+  for (const lens of shadowed.filter((lens) => rostered.has(lens))) {
+    notices.push(
+      `warning: ${REPO_LENS_DIR}/${lens}.md calibrates "${lens}" instead of the brief this plugin ships, `
+      + "so a reviewer dispatched on it reads yours while its findings still arrive under that lens's name"
+    );
+  }
+  // The mirror of the check that a shipped brief is in the example roster: a
+  // brief nothing names is a reviewer its author believes is running.
+  for (const lens of repository.filter((lens) => !rostered.has(lens))) {
+    notices.push(
+      `warning: ${REPO_LENS_DIR}/${lens}.md is a brief for "${lens}", which reviewers.roster does not name, `
+      + "so no reviewer is ever dispatched on it"
+    );
+  }
+  for (const name of reserved) {
+    notices.push(
+      `warning: ${REPO_LENS_DIR}/${name}.md calibrates nothing — "${name}" is a role that runs on every spec `
+      + "with a prompt of its own, not a lens a roster may name"
+    );
+  }
+  for (const name of malformed) {
+    notices.push(`warning: ${REPO_LENS_DIR}/${name}.md is not named for a lens a roster could hold, so nothing reads it`);
+  }
+  // A file named for a lens that is not a brief. The roster check already
+  // refuses the case where this leaves the lens uncalibrated, and repeating it
+  // here would be two messages about one file — one of them proposing the wrong
+  // fix. What is left is the case nothing else can see: the plugin ships a brief
+  // for this lens, so the review runs normally on the plugin's brief and the
+  // override its author wrote is silently not in effect.
+  for (const { lens, relative, reason } of broken) {
+    if (lensBrief(lens, { repo }).path === null) continue;
+    notices.push(
+      `warning: ${relative} ${reason}, so "${lens}" is calibrated by the brief this plugin ships `
+      + "and this file is not in effect"
+    );
+  }
+  // A brief and the roster entry naming it are a pair, and only one of them is
+  // in a file anybody thinks to commit.
+  for (const file of untrackedBriefs(repo, repository.filter((lens) => rostered.has(lens)))) {
+    notices.push(
+      `warning: ${file} calibrates a rostered lens but is not tracked by Git, so a clone that has this `
+      + "configuration without it has a roster nothing can calibrate"
+    );
+  }
+  return notices;
 }
 
 export function semanticErrors(schemaName, value, { repo } = {}) {
@@ -303,7 +356,6 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   // validates what it has just written, so the gap costs one command rather
   // than a train of uncalibrated review.
   const shipped = shippedLenses();
-  const calibrated = new Set(shipped);
   // The menu of what may be named instead, on the first of these errors only: a
   // refusal without one sends the person to the plugin directory to find a name,
   // and the same fourteen names under every entry buries the entries.
@@ -312,12 +364,20 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
     // A role is reported above and a name of any other shape was reported by the
     // schema; either way this would be the second error about one entry.
     if (typeof lens !== "string" || RESERVED_ROLES.includes(lens) || !/^[a-z][a-z0-9-]*$/.test(lens)) continue;
-    if (!calibrated.has(lens)) {
-      errors.push(`reviewers.roster names "${lens}", which has no lens brief at prompts/lenses/${lens}.md — a `
-        + "reviewer dispatched on it invents the lens and files findings nothing can tell from a calibrated "
-        + `reviewer's${listed ? "" : `; this plugin ships ${shipped.join(", ")}`}`);
-      listed = true;
+    const brief = lensBrief(lens, { repo });
+    if (brief.path) continue;
+    // A file that is there and unusable gets its own sentence. "No brief
+    // anywhere" said about a file sitting visibly in the directory is a refusal
+    // the person cannot act on.
+    for (const problem of brief.problems) {
+      errors.push(`reviewers.roster names "${lens}", whose brief at ${problem.relative ?? problem.path} ${problem.reason}`);
     }
+    if (brief.problems.length > 0) continue;
+    errors.push(`reviewers.roster names "${lens}", which has no lens brief at ${REPO_LENS_DIR}/${lens}.md in this `
+      + `repository or prompts/lenses/${lens}.md in the plugin — a reviewer dispatched on it invents the lens and `
+      + `files findings nothing can tell from a calibrated reviewer's${listed ? "" : `; this plugin ships ${shipped.join(", ")}`}`
+      + `${listed ? "" : `, and this repository can calibrate any other name by writing ${REPO_LENS_DIR}/${lens}.md`}`);
+    listed = true;
   }
 
   if (value.conventionsPath) {
@@ -388,6 +448,10 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
     }
   }
 
+  // What calibrates the reviewers, and what a repository committed only half of.
+  // First, because the cost note is deliberately the last line printed.
+  for (const notice of lensNotices(value, { repo })) process.stderr.write(`${notice}\n`);
+
   // Advice, not correctness: an escalation that buys nothing is legal, and a
   // configuration with `escalation: null` says nothing here at all. Emitted
   // before the limits so the cost note stays the last line printed. These lines
@@ -412,7 +476,8 @@ export function loadAndValidate(schemaPath, documentPath, options = {}) {
   return { schema, document, errors };
 }
 
-const USAGE = "usage: validate-json.mjs [--repo <path>] <schema.json> <document.json>\n";
+const USAGE = "usage: validate-json.mjs [--repo <path>] <schema.json> <document.json>\n"
+  + "  --repo is required for config.schema.json\n";
 
 // Returns undefined when the flag is absent and null when it is present with no
 // value, so a truncated command line reaches the usage error rather than a raw
@@ -442,6 +507,16 @@ async function main() {
     // exit-3 path that says "run /tagteam:init" was unreachable for the only
     // files that need it.
     if (path.basename(argv[0]) === "config.schema.json") {
+      // Required, not optional, for a configuration: half the answer to "is this
+      // roster calibrated" lives in the repository, and a run that cannot see
+      // `.tagteam/lenses/` would refuse a roster that is fine. Every caller in
+      // this plugin already passes it.
+      if (repo === undefined) {
+        process.stderr.write("validating a configuration needs --repo <path>: a roster may be calibrated by "
+          + `${REPO_LENS_DIR}/ in the repository, which cannot be read without it\n`);
+        process.exitCode = 2;
+        return;
+      }
       let document = null;
       try { document = JSON.parse(fs.readFileSync(path.resolve(argv[1]), "utf8")); } catch {}
       const staleness = configStaleness(document ?? {});
