@@ -182,6 +182,20 @@ test("a plugin installed under a path with a space in it still finds its own sch
   assert.deepEqual(JSON.parse(result.stdout).order.map((entry) => entry.id), ["01-a"]);
 });
 
+// `gates.mjs init` and the configuration validator both refuse to run without a
+// repository since 0.8.2, because half the answer to "what calibrates this lens"
+// lives in `.tagteam/lenses/`. A command file that invokes either without
+// `--repo` fails mid-run — after the worktree, and for `init`, once per spec.
+test("every command invocation that now requires --repo passes it", () => {
+  const offenders = [];
+  for (const { file, text } of commands) {
+    for (const [, line] of text.matchAll(/^(.*scripts\/(?:gates\.mjs" init|validate-json\.mjs).*)$/gm)) {
+      if (!line.includes("--repo")) offenders.push(`${file}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `${offenders.join("; ")} would be refused for want of --repo`);
+});
+
 test("the example configuration is valid against the schema", async () => {
   const { loadAndValidate } = await import("../scripts/validate-json.mjs");
   const { errors, document } = loadAndValidate(
