@@ -174,7 +174,48 @@ test("a brief Git is not tracking is named, because the roster entry that needs 
 test("a repository with no brief directory at all is the ordinary case, not an error", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-nolenses-"));
   assert.deepEqual(repositoryLenses(dir), []);
-  assert.deepEqual(unusableRepositoryBriefs(dir), { reserved: [], malformed: [] });
+  assert.deepEqual(unusableRepositoryBriefs(dir), { reserved: [], malformed: [], broken: [] });
   assert.deepEqual(untrackedBriefs(dir, []), []);
   assert.equal(lensBrief("correctness", { repo: dir }).source, "plugin");
+});
+
+// The quiet one. A brief that is not a brief, for a lens this plugin also ships,
+// resolves to the plugin's copy and reviews perfectly normally — so the override
+// its author committed is simply not in effect and no gate, no findings file and
+// no pull request body is any different for it. Found by running the case rather
+// than by reading the code: every other broken-brief case surfaces as a roster
+// error, and this one surfaced as nothing at all.
+test("a repository brief that is not a brief is reported even when the plugin has one to fall back to", () => {
+  const repo = repoWith({ "correctness.md": "" });
+  // The lens still resolves — that is the point — and it resolves to the plugin.
+  const resolved = lensBrief("correctness", { repo });
+  assert.equal(resolved.source, "plugin");
+  assert.ok(resolved.path.startsWith(root), "the plugin's brief is what a reviewer would be handed");
+
+  const { broken } = unusableRepositoryBriefs(repo);
+  assert.deepEqual(broken.map((entry) => entry.lens), ["correctness"]);
+  assert.match(broken[0].reason, /empty/);
+});
+
+test("the notice for an ignored override names the file, the reason, and what ran instead", async () => {
+  const { lensNotices } = await import("../scripts/validate-json.mjs");
+  const repo = repoWith({ "correctness.md": "not a brief, no heading\n" });
+  const config = { reviewers: { roster: ["correctness"], default: [] } };
+  const warnings = lensNotices(config, { repo }).filter((line) => line.startsWith("warning:"));
+  const ignored = warnings.filter((line) => line.includes("correctness.md"));
+  assert.equal(ignored.length, 1, `expected exactly one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(ignored[0], /not in effect/);
+});
+
+test("a broken brief nothing else calibrates is reported once, as the roster error", async () => {
+  // Two messages about one file is one of them proposing the wrong fix: the
+  // roster error already says this lens has no brief and why.
+  const { lensNotices, semanticErrors } = await import("../scripts/validate-json.mjs");
+  const repo = repoWith({ "financial.md": "" });
+  const config = { reviewers: { roster: ["financial"], default: [] } };
+  const errors = semanticErrors("config.schema.json", config, { repo }).filter((line) => line.includes("financial"));
+  const warnings = lensNotices(config, { repo }).filter((line) => line.includes("financial"));
+  assert.equal(errors.length, 1, `expected one error, got ${JSON.stringify(errors)}`);
+  assert.match(errors[0], /is empty/);
+  assert.deepEqual(warnings, [], "the error already covers it");
 });

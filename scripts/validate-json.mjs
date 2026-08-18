@@ -267,7 +267,7 @@ export function lensNotices(value, { repo } = {}) {
   if (!repo) return [];
   const notices = [];
   const rostered = new Set((value?.reviewers?.roster ?? []).filter((lens) => typeof lens === "string"));
-  const { repository, shadowed, reserved, malformed } = lensInventory({ repo });
+  const { repository, shadowed, reserved, malformed, broken } = lensInventory({ repo });
 
   // One line for all of them. A repository with five briefs would otherwise put
   // five lines in front of every ship and every plan.
@@ -296,6 +296,19 @@ export function lensNotices(value, { repo } = {}) {
   }
   for (const name of malformed) {
     notices.push(`warning: ${REPO_LENS_DIR}/${name}.md is not named for a lens a roster could hold, so nothing reads it`);
+  }
+  // A file named for a lens that is not a brief. The roster check already
+  // refuses the case where this leaves the lens uncalibrated, and repeating it
+  // here would be two messages about one file — one of them proposing the wrong
+  // fix. What is left is the case nothing else can see: the plugin ships a brief
+  // for this lens, so the review runs normally on the plugin's brief and the
+  // override its author wrote is silently not in effect.
+  for (const { lens, relative, reason } of broken) {
+    if (lensBrief(lens, { repo }).path === null) continue;
+    notices.push(
+      `warning: ${relative} ${reason}, so "${lens}" is calibrated by the brief this plugin ships `
+      + "and this file is not in effect"
+    );
   }
   // A brief and the roster entry naming it are a pair, and only one of them is
   // in a file anybody thinks to commit.

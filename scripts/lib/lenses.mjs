@@ -188,17 +188,36 @@ export function repositoryLenses(repo) {
 // separately from `repositoryLenses` because the point of reporting them is that
 // they look like briefs and do nothing.
 export function unusableRepositoryBriefs(repo) {
-  if (!repo) return { reserved: [], malformed: [] };
+  if (!repo) return { reserved: [], malformed: [], broken: [] };
   let entries;
   try {
     entries = fs.readdirSync(path.join(path.resolve(repo), REPO_LENS_DIR));
   } catch {
-    return { reserved: [], malformed: [] };
+    return { reserved: [], malformed: [], broken: [] };
   }
   const names = entries.filter((entry) => entry.endsWith(".md")).map((entry) => entry.slice(0, -3));
+  const resolved = path.resolve(repo);
   return {
     reserved: names.filter((name) => RESERVED_ROLES.includes(name)).sort(),
-    malformed: names.filter((name) => !RESERVED_ROLES.includes(name) && !LENS_NAME.test(name)).sort()
+    malformed: names.filter((name) => !RESERVED_ROLES.includes(name) && !LENS_NAME.test(name)).sort(),
+    // Named for a lens, and not a brief: empty, headingless, a directory, a
+    // symlink. These are the quiet ones. A broken `financial.md` that nothing
+    // else calibrates surfaces as a roster error, but a broken `security.md`
+    // does not — `lensBrief` falls through to the brief this plugin ships, the
+    // review runs, and the override its author wrote is simply not in effect.
+    // Nothing downstream could notice, which is why the file is reported here
+    // rather than left to the lens it is named for.
+    broken: names
+      .filter((name) => !RESERVED_ROLES.includes(name) && LENS_NAME.test(name))
+      .map((lens) => ({
+        lens,
+        relative: `${REPO_LENS_DIR}/${lens}.md`,
+        reason: briefProblem(path.join(resolved, REPO_LENS_DIR, `${lens}.md`), {
+          repo: resolved, relative: `${REPO_LENS_DIR}/${lens}.md`
+        })
+      }))
+      .filter((entry) => entry.reason !== null && entry.reason !== ABSENT)
+      .sort((left, right) => left.lens.localeCompare(right.lens))
   };
 }
 
