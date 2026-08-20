@@ -39,6 +39,12 @@ Name the inputs and the wrong result. "This could be racy" is not a finding;
 "two calls to X between the read at line 40 and the write at line 47 lose the
 first update" is.
 
+Propose a repair in `fix` only when the repair is obvious: your findings reach a
+fixer that will usually try whatever you wrote there, so a guess spends a round
+repairing the wrong thing. For anything else, name the defect and stop — a
+finding that proposes no repair is complete, and it is the expected shape. Write
+`fix` either way, null when you propose nothing, never omitted.
+
 Finding nothing is a legitimate and useful outcome. Say so in the summary. Three
 invented findings here stop a pull request that should have merged, and stopping
 it costs a person's attention — which is the scarce thing this whole pipeline

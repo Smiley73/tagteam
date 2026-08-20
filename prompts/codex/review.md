@@ -36,6 +36,12 @@ that into `detail`: the value, the path through the code, the observable
 consequence. A finding that cannot say how it fails is a preference — file it at
 nit or leave it out.
 
+Propose a repair in `fix` only when the repair is obvious. For anything else,
+name the defect and stop: a finding that proposes no repair is complete, and it
+is the expected shape. Write `fix` either way — null when you propose nothing,
+never omitted; a findings object missing the key does not validate, and the run
+records this pass as having found nothing at all.
+
 Verify before asserting. If you claim something is never called, look. If you
 claim a case is unhandled, find the handler and confirm it is missing. A
 confident wrong finding spends a fix round this change may not get again — how
