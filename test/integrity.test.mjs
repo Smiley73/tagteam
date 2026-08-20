@@ -315,6 +315,24 @@ test("every flag a command passes is one its script accepts", () => {
 // from every command that asks one. A pointer to a section that has been renamed
 // away sends the orchestrator looking and finding nothing, which is how a rule
 // stops applying without anyone deciding that it should.
+// A codex template's {{SECTIONS}} arrive as flags the orchestrator builds from
+// prose, and a section the prose never names is a dispatch that dies in
+// composePrompt mid-round — after the diff, the panel and the fixer were paid
+// for. Step 7's re-check once ran exactly that way: recheck.md needs CANDIDATE,
+// FINDINGS and DIFF, and the step named none of them.
+test("every section a codex template needs is named by the prose that invokes it", () => {
+  for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
+    for (const [, template] of text.matchAll(/prompts\/codex\/([a-z0-9-]+\.md)/g)) {
+      const placeholders = [...read("prompts", "codex", template).matchAll(/\{\{([A-Z0-9_]+)\}\}/g)];
+      assert.ok(placeholders.length > 0, `prompts/codex/${template} declares no sections at all`);
+      for (const [, name] of placeholders) {
+        assert.match(text, new RegExp(`(--fence |--var |\`)${name}\\b`),
+          `${file} invokes prompts/codex/${template} but never names its ${name} section`);
+      }
+    }
+  }
+});
+
 test("every command that asks a person something points at the Asking rule", () => {
   assert.match(skill, /^## Asking$/m, "SKILL.md no longer has an Asking section");
   for (const { file, text } of commands) {
@@ -561,6 +579,21 @@ test("no round path in the ship command is a number the orchestrator picks", () 
   const ship = read("commands", "ship.md");
   assert.ok(!ship.includes("rounds/<n>"), "ship.md still substitutes <n> into a round path by hand");
   assert.match(ship, /ROUND=\$\(node/, "ship.md never takes the round from the allocator");
+});
+
+// `round.json` is the round store's reserved marker name: a file so named makes
+// the directory holding it read as a round, and an ownerless one refuses every
+// guarded write beneath it — which is how step 3's allocator record, once
+// redirected to `$S/<id>/round.json`, stopped step 6 from recording the first
+// fix report.
+test("no command puts a file at the round store's marker name", async () => {
+  const { ROUND_MARKER } = await import("../scripts/lib/round-store.mjs");
+  const reserved = new RegExp(`\\/${ROUND_MARKER.replaceAll(".", "\\.")}`);
+  for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
+    assert.doesNotMatch(text, reserved, `${file} places a file at the reserved marker name`);
+  }
+  assert.match(read("commands", "ship.md"), /> "\$S\/<id>\/round-alloc\.json"/,
+    "ship.md does not route the allocator record to round-alloc.json");
 });
 
 // The plan review is a bounded loop now, and the bound is a refusal from the

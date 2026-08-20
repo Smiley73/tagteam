@@ -237,6 +237,19 @@ test("a report the fixer dropped inside the round is refused, not recorded", () 
   assert.equal(fs.existsSync(path.join(dir, "fix-report.json")), false);
 });
 
+test("an allocator record stranded at the marker name still fails closed, naming the marker", () => {
+  // The shape a ship once produced: allocator stdout redirected to `round.json`
+  // beside the report — valid JSON, no owner. Refusing is right; the prose is
+  // what stops the shape existing, and loosening this to "not a marker" would
+  // also read a damaged real marker as no round at all.
+  const spec = temp("spec");
+  fs.writeFileSync(path.join(spec, ROUND_MARKER), JSON.stringify({ ok: true, round: 1, scope: "repair:0" }));
+  const result = record(reportAt(spec, "fixed it"), path.join(roundAt(), "fix-report.json"));
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /unreadable/);
+  assert.match(result.stderr, /reserved marker name/);
+});
+
 test("an invalid report is refused before the round holds it", () => {
   // A report recorded into a round can never be replaced with a corrected one, so
   // the schema check has to come first: refusing leaves the round clean and the

@@ -162,8 +162,8 @@ worktree the implementer is still writing commits half a change.
 ```bash
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "feat: <spec title>"
 OID=$(git -C "$W" rev-parse HEAD)
-node "$P/scripts/gates.mjs" round "$S/<id>/state.json" "$S/<id>/rounds" "$OID" "$R/.tagteam/config.json" > "$S/<id>/round.json" && cat "$S/<id>/round.json"
-ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$S/<id>/round.json")
+node "$P/scripts/gates.mjs" round "$S/<id>/state.json" "$S/<id>/rounds" "$OID" "$R/.tagteam/config.json" > "$S/<id>/round-alloc.json" && cat "$S/<id>/round-alloc.json"
+ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$S/<id>/round-alloc.json")
 node "$P/scripts/snapshot-candidate.mjs" --primary "$R" --worktree "$W" --base "$BASE" \
   --candidate "$OID" --out-dir "$S/<id>/rounds/$ROUND" --config "$R/.tagteam/config.json"
 node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/rounds/$ROUND/changed-paths.json"
@@ -193,6 +193,11 @@ numbers step 6 announces a fix round with are not these: they come from step 6's
 own budget call, which is the authority on how much has been spent. This
 allocator refuses too when the budget is gone, naming the limit; step 6 is where
 that refusal is meant to land, before a fixer has changed anything.
+
+The record's name is `round-alloc.json` and nothing else: `round.json` is the
+round marker's reserved name, and a file called that makes the directory holding
+it read as a round — step 6's fix report, recorded beside it, would be refused
+as a write into a round whose owner cannot be read.
 
 The round directory is a record. The snapshot writes `review.diff`,
 `changed-paths.json` and `candidate.json` into it, marks it with the commit that
@@ -500,7 +505,9 @@ In one message:
   plus the new diff, plus `$S/<id>/rounds/$ROUND/recheck/<lens>.json` to write,
   plus the brief path `roles.briefs` names for that lens,
   under `prompts/recheck.md`, at `roles.recheck-lens`'s model and effort. Codex
-  uses `$P/prompts/codex/recheck.md` with schema `recheck.schema.json`.
+  uses `$P/prompts/codex/recheck.md` with schema `recheck.schema.json` — its
+  findings travel as `--fence FINDINGS=<this same path>`, and the full
+  invocation is spelled out below the bullets.
 
   The brief goes to the re-check for the same reason it goes to the panel: the
   finding being judged was raised through it, and a lens this repository
@@ -563,7 +570,13 @@ In one message:
 
 The Codex re-check named in those bullets is a Bash call rather than an agent: a
 `codex.mjs` invocation at `roles.recheck-codex`'s model and effort, run with
-`run_in_background` and its result read, like the Codex review in step 5. This
+`run_in_background` and its result read, like the Codex review in step 5 — with
+`--var CANDIDATE=<oid>`, `--fence FINDINGS=<the open/codex.json or
+still-open/codex.json path the bullet names as its input>`,
+`--fence DIFF=$S/<id>/rounds/$ROUND/review.diff`, schema `recheck.schema.json`,
+out `$S/<id>/rounds/$ROUND/recheck/codex.json`. The section names are the
+template's, not yours: it asks for CANDIDATE, FINDINGS and DIFF, and a fence
+under any other name is refused before anything is sent. This
 describes that dispatch; whether it happens at all is the bullets' decision and
 not this paragraph's.
 

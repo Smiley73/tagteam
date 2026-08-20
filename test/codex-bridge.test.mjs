@@ -164,6 +164,9 @@ test("a template variable with no value is refused", () => {
   const result = run(space);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /needs a MISSING section/);
+  // The refusal teaches the flag that fixes it: an orchestrator that guessed a
+  // section's name wrong should not need the script's source to guess again.
+  assert.match(result.stderr, /--fence MISSING=/);
 });
 
 test("--min-bytes catches a request that composed to almost nothing", () => {
