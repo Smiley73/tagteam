@@ -17,8 +17,8 @@
           "id": { "type": "string", "minLength": 1 },
           "outcome": {
             "type": "string",
-            "enum": ["fixed", "wont-fix", "failed"],
-            "description": "wont-fix means the finding is wrong or the repair is a decision for a person; failed means the repair was attempted and did not work."
+            "enum": ["fixed", "fixed-differently", "wont-fix", "failed"],
+            "description": "fixed means the defect is gone by the repair the finding proposed, or by any repair where it proposed none; fixed-differently means the finding was right and the defect is gone, but the repair departs from the one the finding proposed. wont-fix means the finding is wrong or the repair is a decision for a person; failed means the repair was attempted and did not work."
           },
           "note": {
             "type": "string",

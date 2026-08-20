@@ -74,14 +74,21 @@ export function recordFixReport({ report, out, schemaPath }) {
 
 export function summaryLines(report, file) {
   const outcomes = report.outcomes ?? [];
-  const tally = ["fixed", "wont-fix", "failed"]
+  // Every outcome the schema allows belongs here, or a report validates and its
+  // outcome never reaches the line the run prints. Printed in the order a person
+  // scans rather than alphabetically: the two repair outcomes read together.
+  const counted = ["fixed", "fixed-differently", "wont-fix", "failed"];
+  const tally = counted
     .map((outcome) => [outcome, outcomes.filter((entry) => entry.outcome === outcome).length])
     .filter(([, count]) => count > 0)
     .map(([outcome, count]) => `${count} ${outcome}`)
     .join(", ") || "nothing reported";
+  // Wide enough for the longest outcome, so one long name does not shove its own
+  // row's note out of the column every other row's note sits in.
+  const column = Math.max(...counted.map((outcome) => outcome.length));
   return [
     `fix report: ${tally} — recorded at ${file}`,
-    ...outcomes.map((entry) => `  ${entry.id.padEnd(22)} ${entry.outcome.padEnd(8)} ${entry.note}`)
+    ...outcomes.map((entry) => `  ${entry.id.padEnd(22)} ${entry.outcome.padEnd(column)} ${entry.note}`)
   ];
 }
 
