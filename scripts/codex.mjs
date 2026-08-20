@@ -225,6 +225,25 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
   // execution, and appending across attempts and re-runs is how a single plan
   // accumulated megabytes of it.
   const events = fs.createWriteStream(eventsPath, { flags: "w", mode: 0o600 });
+  // `end()` only asks for the stdout still sitting in the stream's buffer to be
+  // written; `close` is when it has been. Nothing may return from here before
+  // that, because the caller reads the session id out of this file the instant it
+  // gets control back, and the next attempt reopens the same path with `w`. Get
+  // it wrong and a fast, perfectly valid call reads a short file and reports
+  // itself unobservable — or, worse, a late line from the previous attempt lands
+  // in the file the next one is read from, and the call removes the wrong session
+  // and leaves the right one behind.
+  //
+  // A stream error is captured rather than thrown: an event log that could not be
+  // written is something the observation already answers for — as a routing
+  // nobody could read, which asks a person — and never a reason to fail a review
+  // that has already been paid for.
+  events.on("error", () => {});
+  const eventsClosed = new Promise((resolve) => events.once("close", resolve));
+  const closeEvents = async () => {
+    events.end();
+    await eventsClosed;
+  };
   const child = spawn(options.codexBin, argv, {
     cwd: path.resolve(options.cd),
     shell: false,
@@ -258,7 +277,7 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     child.stdin.end(prompt);
   } catch (error) {
     killProcessGroup(child, "SIGTERM");
-    events.end();
+    await closeEvents();
     throw error;
   }
 
@@ -270,8 +289,8 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
   }, options.timeoutSec * 1000);
   const exitCode = await closePromise.finally(() => {
     clearTimeout(timer);
-    events.end();
   });
+  await closeEvents();
   return { argv, stderr, timedOut, exitCode };
 }
 
@@ -294,6 +313,32 @@ function sha256(value) {
 // disagreement here is a disagreement about the run, not about spelling.
 function sameEffort(observed, requested) {
   return String(observed).trim().toLocaleLowerCase() === String(requested).trim().toLocaleLowerCase();
+}
+
+// Remove something a later run could count, and answer with what is true
+// afterwards rather than with what was attempted. A file that was not there
+// needed no removing and is not a failure. A file that will not unlink — held
+// open without delete sharing, flagged immutable, sitting in a directory that
+// stopped being writable — is emptied instead, so that whatever is left at the
+// path cannot parse as a finished review even though something is still on disk.
+// The remaining case is reported to the caller and never swallowed:
+// `collect-findings.mjs` reads a findings artifact without ever opening the
+// sidecar beside it, so a schema-valid file left at --out by an earlier dispatch
+// still counts as this candidate's review, and a refusal that claims a removal it
+// did not perform is how that goes unnoticed.
+function removeCountable(file) {
+  try {
+    fs.unlinkSync(file);
+    return null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    try {
+      fs.writeFileSync(file, "");
+      return `${file} could not be removed (${error.message}) and was emptied in place instead`;
+    } catch (second) {
+      return `${file} could not be removed (${error.message}) or emptied (${second.message}) and can still be read as a finished review`;
+    }
+  }
 }
 
 // One record of how the call that produced this artifact routed, written into
@@ -462,14 +507,18 @@ export async function runCodex(options) {
         // between the two leaves something non-reusable rather than something
         // reused for the wrong request. `.prompt.md` and `.events.jsonl` stay —
         // nothing counts them, and they are what a person opens.
-        try { fs.unlinkSync(requestPath); } catch {}
-        try { fs.unlinkSync(artifact); } catch {}
+        const stranded = [removeCountable(requestPath), removeCountable(artifact)].filter((note) => note !== null);
         // The session is named because a Codex release renaming an effort word
         // fires this the same way a mis-routed run does, and that file is the
-        // only thing that shows which of the two happened.
+        // only thing that shows which of the two happened. What the removal
+        // actually managed is named for a blunter reason: this message is the
+        // only account anyone gets of a refusal, and a removal that failed is
+        // precisely the case where something countable is still at --out.
         throw new Error(
           `Codex ran at ${attempt.effort} effort but the request asked for ${options.effort}. `
-          + `The artifact at ${artifact} and its request record were removed so nothing later can count them. `
+          + (stranded.length === 0
+            ? `The artifact at ${artifact} and its request record were removed so nothing later can count them. `
+            : `${stranded.join("; ")}; check those paths by hand before anything reads what is there as this candidate's review. `)
           + `The session Codex wrote is kept at ${attempt.rollout}.`
         );
       }

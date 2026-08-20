@@ -58,6 +58,26 @@ test("a turn_context carrying no effort reads as nothing observed at all", () =>
     "a record with no effort was read as an observation");
 });
 
+// Absence is not disagreement for every field the record carries, not only for
+// effort. This is the realistic upgrade shape -- a release that keeps `effort`
+// and renames or drops what sits beside it -- and it has to read as a triple with
+// nulls in it, never as a throw and never as nothing observed at all.
+test("a turn_context carrying an effort and nothing else reads as that effort and two nulls", () => {
+  const only = { type: "turn_context", payload: { effort: "xhigh" } };
+  assert.deepEqual(routingFromRollout(rollout([SESSION_META, only])), { model: null, effort: "xhigh", sandbox: null },
+    "a record carrying only an effort was not read as one");
+});
+
+test("a sandbox_policy with no type, and a model that is not a string, read as absent", () => {
+  const noType = { ...TURN_CONTEXT.payload, sandbox_policy: {} };
+  assert.deepEqual(routingFromRollout(rollout([{ ...TURN_CONTEXT, payload: noType }])),
+    { model: "gpt-5.1-codex", effort: "xhigh", sandbox: null },
+    "a sandbox_policy carrying no type was not read as no sandbox");
+  const oddModel = { ...TURN_CONTEXT.payload, model: 42 };
+  assert.deepEqual(routingFromRollout(rollout([{ ...TURN_CONTEXT, payload: oddModel }])), { model: null, effort: "xhigh", sandbox: "read-only" },
+    "a model that is not a string was not read as no model");
+});
+
 test("a rollout with no turn_context in it reads as nothing observed at all", () => {
   assert.equal(routingFromRollout(rollout([SESSION_META])), null, "a rollout with only a session_meta was read as an observation");
   assert.equal(routingFromRollout(""), null, "empty text was read as an observation");
@@ -91,6 +111,18 @@ test("an events file with no thread.started yields no session id", () => {
   assert.equal(sessionIdFromEvents('{"type":"turn.started"}\n{"type":"item.completed"}\n'), null,
     "a session id was invented from events that carry none");
   assert.equal(sessionIdFromEvents(""), null, "a session id was invented from an empty file");
+});
+
+// A `thread.started` whose id is not a string is a record whose shape moved, not
+// a session: nothing could be looked at or removed by it, so it reads as absent
+// rather than as an id something would later try to use.
+test("a thread.started whose thread_id is not a string yields no session id", () => {
+  assert.equal(sessionIdFromEvents('{"type":"thread.started","thread_id":42}\n'), null,
+    "a number was returned as a session id");
+  assert.equal(sessionIdFromEvents('{"type":"thread.started","thread_id":null}\n'), null,
+    "a null thread_id was returned as a session id");
+  assert.equal(sessionIdFromEvents('{"type":"thread.started"}\n'), null,
+    "a thread.started with no thread_id at all was returned as a session id");
 });
 
 // The events file is a live stream that was being written while Codex ran, so a

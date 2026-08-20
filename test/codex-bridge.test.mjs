@@ -109,6 +109,11 @@ process.stdin.on("end", async () => {
     const payload = { turn_id: id, cwd: process.cwd(), ...routing };
     if (mode === "no-effort") delete payload.effort;
     if (mode === "effort-drift") payload.effort = effort === "low" ? "high" : "low";
+    // The same effort, spelled the way a recording change would spell it.
+    if (mode === "effort-case") payload.effort = " " + effort.toUpperCase() + " ";
+    // A record that kept its effort and lost everything beside it: the shape a
+    // release that renames a field actually has.
+    if (mode === "effort-only") { delete payload.model; delete payload.sandbox_policy; }
     if (mode === "model-drift") payload.model = "codex-auto-review";
     writeRollout(id, [meta, { timestamp: stamp, ordinal: 5, type: "turn_context", payload }]);
   }
@@ -493,6 +498,38 @@ test("a turn_context carrying no effort is unobservable rather than a mismatch",
   const record = sidecar(space.dir).routing;
   assert.equal(record.observed, null, "a record with no effort was treated as an observation");
   assert.ok(String(record.observedReason ?? "").length > 0, "no reason was recorded for the missing field");
+});
+
+// The comparison is trimmed and case-folded deliberately, and this is the only
+// test that reaches the fold. `HIGH` with padding around it is the effort the
+// request asked for, recorded differently -- and a byte-exact comparison would
+// refuse the call, unlink the artifact and fail the run over it, which is the one
+// outcome the spec says a recording change must never produce. Delete
+// `.trim().toLocaleLowerCase()` from `sameEffort` and this is what fails.
+test("an effort recorded in a different case, with padding, is the effort that was asked for", () => {
+  const space = workspace();
+  const result = run(space, [], { FAKE_CODEX_MODE: "effort-case" });
+  assert.equal(result.status, 0, `an effort recorded as " HIGH " refused the call: ${result.stderr}`);
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true, "a matching run wrote no artifact");
+  const record = sidecar(space.dir).routing;
+  assert.equal(record.observed.effort, " HIGH ", "the effort was not recorded exactly as Codex wrote it");
+  assert.equal(record.observedReason, null, "a matching run recorded a reason it could not be observed");
+});
+
+// Absence is not disagreement for every field, not only for effort. A release
+// that keeps `effort` and renames `model` or `sandbox_policy` records the rest as
+// null, and the guards in `reportRouting` are what keep "Codex answered as model
+// null" off a person's terminal. This is the run that reaches them.
+test("a turn_context carrying only an effort records the rest as absent and says nothing about it", () => {
+  const space = workspace();
+  const result = run(space, [], { FAKE_CODEX_MODE: "effort-only" });
+  assert.equal(result.status, 0, `a record carrying only an effort refused the call: ${result.stderr}`);
+  const record = sidecar(space.dir).routing;
+  assert.equal(record.observed.effort, "high", "the one field the record carried was not observed");
+  assert.equal(record.observed.model, null, "a model the record does not carry was not recorded as absent");
+  assert.equal(record.observed.sandbox, null, "a sandbox the record does not carry was not recorded as absent");
+  assert.ok(!/answered as model/.test(result.stderr), `an absent model was reported as a disagreement: ${result.stderr}`);
+  assert.ok(!/sandbox rather than/.test(result.stderr), `an absent sandbox was reported as a disagreement: ${result.stderr}`);
 });
 
 test("a session that will not delete is reported and does not fail the run", () => {
