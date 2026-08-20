@@ -5,9 +5,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
 import { REPO_LENS_DIR, RESERVED_ROLES, lensBrief, lensInventory, shippedLenses, untrackedBriefs } from "./lib/lenses.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 function typeMatches(value, expected) {
   if (expected === "null") return value === null;
@@ -539,4 +539,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

@@ -17,7 +17,6 @@ import path from "node:path";
 import process from "node:process";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateJson } from "./validate-json.mjs";
 import { acquireLock, acquireSlot } from "./lib/locks.mjs";
@@ -27,6 +26,7 @@ import {
   parseResetTime,
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 const SANDBOX = "read-only";
 const SCHEMA_ATTEMPTS = 2;
@@ -428,4 +428,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

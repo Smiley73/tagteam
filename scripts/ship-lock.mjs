@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./lib/is-main.mjs";
 
 const NAME = "ship.lock";
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000;
@@ -177,4 +177,4 @@ async function main() {
 
 export { acquire, heartbeat, release, lockPathFor, STALE_AFTER_MS };
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

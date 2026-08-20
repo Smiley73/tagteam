@@ -9,8 +9,8 @@
 // JSON. Nothing is reconciled and nothing is repaired — that is `gates.mjs`.
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { listRounds } from "./lib/rounds.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 function directories(root) {
   try {
@@ -232,6 +232,6 @@ export function inventory(repoRoot) {
   return { plans, ships };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMain(import.meta.url)) {
   process.stdout.write(`${JSON.stringify(inventory(process.argv[2] ?? "."), null, 2)}\n`);
 }

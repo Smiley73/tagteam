@@ -13,9 +13,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { classifyChecks } from "./lib/ci-state.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 const POLL_MS = 20_000;
 
@@ -91,4 +91,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

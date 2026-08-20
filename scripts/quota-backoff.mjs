@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./lib/is-main.mjs";
 
 const MODEL_UNAVAILABLE = [
   "model not found", "unknown model", "does not exist", "not entitled",
@@ -62,4 +62,4 @@ async function main() {
   process.stdout.write(`${classifyProviderError(rest.join(" "), provider).kind}\n`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

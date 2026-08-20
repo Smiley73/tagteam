@@ -20,9 +20,10 @@
 // clean and the fixer re-dispatchable.
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { roundRootForWrite, writeRoundFile } from "./lib/round-store.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 function parseArgs(argv) {
   const options = {};
@@ -97,4 +98,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

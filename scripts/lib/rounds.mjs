@@ -36,9 +36,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
 import { ROUND_MARKER, enterRound, readRoundMarker } from "./round-store.mjs";
 import { acquireLock } from "./locks.mjs";
+import { isMain } from "./is-main.mjs";
 
 const NUMBERED = /^[1-9][0-9]*$/;
 
@@ -389,7 +389,7 @@ function parseArgs(argv) {
   return { root, ...options, limit: count(options.limit), exempt: count(options.exempt) };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMain(import.meta.url)) {
   try {
     const { root, ...options } = parseArgs(process.argv.slice(2));
     process.stdout.write(`${JSON.stringify(await allocateRound(root, options), null, 2)}\n`);

@@ -3,10 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { matchWhen } from "./lib/matcher.mjs";
 import { validateCandidateSnapshot } from "./snapshot-candidate.mjs";
 import { createRoundStream, writeRoundFile } from "./lib/round-store.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 function killGroup(child, signal) {
   try {
@@ -93,4 +93,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

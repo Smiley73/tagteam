@@ -14,9 +14,10 @@
 // lens is a distinct status, and it is not "clean".
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 const GATING = new Set(["blocking", "major"]);
@@ -362,4 +363,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

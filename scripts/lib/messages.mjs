@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { pathToFileURL } from "node:url";
+import { isMain } from "./is-main.mjs";
 
 const DETAILS = ({ shipId = "-", pr = "-", branch = "-", sha = "-", command = "-", artifact = "-" }) =>
   `Details: ship ${shipId}; PR ${pr}; branch ${branch}; commit ${sha}; command ${command}; artifact ${artifact}`;
@@ -155,4 +155,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();
