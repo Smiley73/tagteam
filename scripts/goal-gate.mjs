@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./lib/is-main.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -90,4 +90,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

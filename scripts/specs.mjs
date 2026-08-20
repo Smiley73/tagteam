@@ -7,8 +7,9 @@
 // in is decided arithmetically rather than by reading a table in a plan.
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 // Deliberately minimal: keys are `name: value`, values are either a scalar or a
 // `[a, b]` inline list. A spec's front matter is five keys, and a YAML parser
@@ -124,4 +125,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

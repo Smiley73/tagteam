@@ -20,6 +20,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { isMain } from "./lib/is-main.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SOURCE_DIR = path.join(root, "agent-sources");
@@ -145,4 +146,4 @@ function main(argv) {
   return 0;
 }
 
-if (process.argv[1] === import.meta.filename) process.exit(main(process.argv.slice(2)));
+if (isMain(import.meta.url)) process.exit(main(process.argv.slice(2)));

@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 function copyPreservingMode(source, destination) {
   const stat = fs.lstatSync(source);
@@ -87,4 +87,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

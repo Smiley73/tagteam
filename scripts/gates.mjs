@@ -10,9 +10,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 const GATES = ["review", "verify", "ci", "human"];
 
@@ -656,7 +656,7 @@ async function main() {
   })}\n`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMain(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`${error.message}\n`);
     // 4 is a spent budget: the run stopped because it was told how far it may

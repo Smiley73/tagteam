@@ -2,10 +2,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { globToRegExp, normalizeRepoPath } from "./lib/matcher.mjs";
 import { enterRound, writeRoundFile } from "./lib/round-store.mjs";
+import { isMain } from "./lib/is-main.mjs";
 
 function git(cwd, args, { allowFailure = false, encoding = "utf8" } = {}) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding, shell: false, maxBuffer: 128 * 1024 * 1024 });
@@ -249,4 +249,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

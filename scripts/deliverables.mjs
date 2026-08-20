@@ -12,7 +12,7 @@
 // plan body still never reaches the orchestrator.
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./lib/is-main.mjs";
 
 const SLUG = /^[0-9]{2}-[a-z0-9][a-z0-9-]*$/;
 
@@ -107,4 +107,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+if (isMain(import.meta.url)) await main();

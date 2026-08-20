@@ -157,35 +157,83 @@ test("no script derives a path from import.meta.url through .pathname", () => {
     `${offenders.join(", ")} must use fileURLToPath(import.meta.url), which decodes what .pathname leaves encoded`);
 });
 
-test("a plugin installed under a path with a space in it still finds its own schemas", () => {
-  // The failure the rule above prevents, run rather than asserted. Every script
-  // that reads a schema beside itself is exercised through the one that reads
-  // the most of them.
-  //
-  // Realpath'd because the script is spawned from inside this directory: macOS's
-  // tmpdir is a symlink into /private, Node resolves the main module's real path
-  // for import.meta.url, and specs.mjs's run-as-main guard compares that URL to
-  // argv[1] textually — spawned through the symlink, main() is silently skipped
-  // and stdout is empty, which is not the failure this test is about.
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-")));
-  const plugin = path.join(home, "First Last", "plugin cache", "tagteam");
-  fs.mkdirSync(plugin, { recursive: true });
+// The two halves of a spawned-specs fixture, shared by the installed-path tests
+// below: a copy of the plugin's scripts with the schemas they read, and a
+// one-spec plan with the example configuration beside it.
+function stagePlugin(into) {
+  fs.mkdirSync(into, { recursive: true });
   for (const dir of ["scripts", "schemas", "prompts"]) {
-    fs.cpSync(path.join(root, dir), path.join(plugin, dir), { recursive: true });
+    fs.cpSync(path.join(root, dir), path.join(into, dir), { recursive: true });
   }
-  assert.ok(plugin.includes(" "), "the point of this test is the space");
+}
 
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-repo-"));
+function stagePlan() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-fixture-"));
   const planDir = path.join(repo, "plan");
   fs.mkdirSync(path.join(planDir, "specs"), { recursive: true });
   fs.writeFileSync(path.join(planDir, "specs", "01-a.md"),
     "---\nid: 01-a\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nSomething.\n");
   const configPath = path.join(repo, "config.json");
   fs.writeFileSync(configPath, read("examples", "config.json"));
+  return { planDir, configPath };
+}
+
+test("a plugin installed under a path with a space in it still finds its own schemas", () => {
+  // The failure the rule above prevents, run rather than asserted. Every script
+  // that reads a schema beside itself is exercised through the one that reads
+  // the most of them. Realpath'd so this test exercises the space and nothing
+  // else — the symlink macOS puts in front of every tmpdir is the next test's
+  // subject.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-")));
+  const plugin = path.join(home, "First Last", "plugin cache", "tagteam");
+  stagePlugin(plugin);
+  assert.ok(plugin.includes(" "), "the point of this test is the space");
+  const { planDir, configPath } = stagePlan();
 
   const result = spawnSync("node", [path.join(plugin, "scripts", "specs.mjs"), planDir, configPath], { encoding: "utf8" });
   assert.equal(result.status, 0, `specs.mjs failed from a spaced path: ${result.stderr}`);
   assert.deepEqual(JSON.parse(result.stdout).order.map((entry) => entry.id), ["01-a"]);
+});
+
+// The other way an installed path can differ from the path a script sees: Node
+// resolves the entry's symlinks before it sets `import.meta.url`, while argv[1]
+// stays as invoked, so a run-as-main guard that compares the two textually is
+// false through any symlinked path component — main() is silently skipped,
+// stdout is empty, and the exit code is still 0, a no-op that reads as success
+// to the orchestrator. macOS puts a symlink in front of every tmpdir, and a
+// symlinked ~/.claude puts one in front of every real install.
+test("a plugin invoked through a symlinked path still runs its scripts at all", () => {
+  const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-linked-")));
+  const plugin = path.join(real, "tagteam");
+  stagePlugin(plugin);
+  const linked = path.join(real, "linked");
+  fs.symlinkSync(plugin, linked);
+  const { planDir, configPath } = stagePlan();
+
+  const result = spawnSync("node", [path.join(linked, "scripts", "specs.mjs"), planDir, configPath], { encoding: "utf8" });
+  assert.equal(result.status, 0, `specs.mjs failed through a symlink: ${result.stderr}`);
+  assert.deepEqual(JSON.parse(result.stdout).order.map((entry) => entry.id), ["01-a"]);
+});
+
+// The pattern the test above catches at runtime, decided statically for every
+// script at once: comparing `import.meta.url` to `pathToFileURL(argv[1])` — or
+// `import.meta.filename` to `argv[1]`, the spelling generate-agents.mjs used —
+// works until the invoked path holds a symlink. Any equality against either
+// import.meta property is that guard in some spelling, whichever side it is
+// written on, so the rule refuses them all: each script takes the answer from
+// `lib/is-main.mjs` instead, which compares real paths.
+test("no script decides run-as-main by comparing import.meta.url textually", () => {
+  const TEXTUAL_GUARD =
+    /import\.meta\.(?:url|filename)\s*[!=]==|[!=]==\s*import\.meta\.(?:url|filename)/;
+  const offenders = [];
+  for (const dir of ["scripts", "scripts/lib"]) {
+    for (const name of fs.readdirSync(path.join(root, dir)).filter((entry) => entry.endsWith(".mjs"))) {
+      const file = path.join(dir, name);
+      if (TEXTUAL_GUARD.test(read(...file.split("/")))) offenders.push(file);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `${offenders.join(", ")} must take isMain() from scripts/lib/is-main.mjs, which compares real paths`);
 });
 
 // `gates.mjs init` and the configuration validator both refuse to run without a

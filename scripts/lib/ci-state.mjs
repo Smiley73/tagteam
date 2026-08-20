@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./is-main.mjs";
 
 const FAILED = new Set(["FAILURE", "TIMED_OUT", "ACTION_REQUIRED"]);
 const RUNNING = new Set(["PENDING", "QUEUED", "IN_PROGRESS"]);
@@ -24,7 +24,7 @@ export function classifyChecks(rows) {
   return { status: "not-run", reason: "checks were skipped, neutral, or cancelled" };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMain(import.meta.url)) {
   const file = process.argv[2];
   if (!file) {
     process.stderr.write("usage: ci-state.mjs <gh-checks.json>\n");
