@@ -12,4 +12,5 @@ coverage/
 .tagteam/**/.codex-artifact-locks/
 .tagteam/**/.quota/
 .codegraph/
+.tagteam/plans/
 # <<< tagteam managed <<<
