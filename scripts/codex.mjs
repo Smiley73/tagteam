@@ -27,9 +27,13 @@ import {
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { codexHome, observeRouting, removeSessions } from "./lib/codex-session.mjs";
 
 const SANDBOX = "read-only";
 const SCHEMA_ATTEMPTS = 2;
+// A call that never started Codex has nothing to report about how Codex routed:
+// a --reuse hit and a --dry-run both answer without spawning anything.
+const NOT_RUN = { ran: false, observed: null, observedReason: null, sessions: [], sessionsKept: false };
 
 function splitPair(flag, raw) {
   const index = String(raw ?? "").indexOf("=");
@@ -191,10 +195,16 @@ function killProcessGroup(child, signal) {
 
 // The exact invocation, exported so a test can assert on it without spawning.
 // Notably absent, and meant to stay absent:
-// --dangerously-bypass-approvals-and-sandbox.
+// --dangerously-bypass-approvals-and-sandbox, and --ephemeral. The second one
+// looks harmless — "run without persisting session files to disk" — and it is
+// what this bridge passed until 0.8.4. What it does is suppress the rollout, the
+// only record of the model and effort Codex actually ran at. Put it back and
+// there is nothing to observe and nothing to delete: every call silently records
+// its routing as unobservable, and the question that raises is asked of a person
+// on every single dispatch.
 export function codexArgv(options, outputPath) {
   return [
-    "exec", "--json", "--ephemeral",
+    "exec", "--json",
     "--cd", path.resolve(options.cd),
     "--sandbox", SANDBOX,
     "-m", options.model,
@@ -215,6 +225,25 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
   // execution, and appending across attempts and re-runs is how a single plan
   // accumulated megabytes of it.
   const events = fs.createWriteStream(eventsPath, { flags: "w", mode: 0o600 });
+  // `end()` only asks for the stdout still sitting in the stream's buffer to be
+  // written; `close` is when it has been. Nothing may return from here before
+  // that, because the caller reads the session id out of this file the instant it
+  // gets control back, and the next attempt reopens the same path with `w`. Get
+  // it wrong and a fast, perfectly valid call reads a short file and reports
+  // itself unobservable — or, worse, a late line from the previous attempt lands
+  // in the file the next one is read from, and the call removes the wrong session
+  // and leaves the right one behind.
+  //
+  // A stream error is captured rather than thrown: an event log that could not be
+  // written is something the observation already answers for — as a routing
+  // nobody could read, which asks a person — and never a reason to fail a review
+  // that has already been paid for.
+  events.on("error", () => {});
+  const eventsClosed = new Promise((resolve) => events.once("close", resolve));
+  const closeEvents = async () => {
+    events.end();
+    await eventsClosed;
+  };
   const child = spawn(options.codexBin, argv, {
     cwd: path.resolve(options.cd),
     shell: false,
@@ -248,7 +277,7 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     child.stdin.end(prompt);
   } catch (error) {
     killProcessGroup(child, "SIGTERM");
-    events.end();
+    await closeEvents();
     throw error;
   }
 
@@ -260,8 +289,8 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
   }, options.timeoutSec * 1000);
   const exitCode = await closePromise.finally(() => {
     clearTimeout(timer);
-    events.end();
   });
+  await closeEvents();
   return { argv, stderr, timedOut, exitCode };
 }
 
@@ -279,10 +308,67 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+// Exact word, trimmed and case-folded, and nothing cleverer. Codex records the
+// same four words the configuration uses — low, medium, high, xhigh — so a
+// disagreement here is a disagreement about the run, not about spelling.
+function sameEffort(observed, requested) {
+  return String(observed).trim().toLocaleLowerCase() === String(requested).trim().toLocaleLowerCase();
+}
+
+// Remove something a later run could count, and answer with what is true
+// afterwards rather than with what was attempted. A file that was not there
+// needed no removing and is not a failure. A file that will not unlink — held
+// open without delete sharing, flagged immutable, sitting in a directory that
+// stopped being writable — is emptied instead, so that whatever is left at the
+// path cannot parse as a finished review even though something is still on disk.
+// The remaining case is reported to the caller and never swallowed:
+// `collect-findings.mjs` reads a findings artifact without ever opening the
+// sidecar beside it, so a schema-valid file left at --out by an earlier dispatch
+// still counts as this candidate's review, and a refusal that claims a removal it
+// did not perform is how that goes unnoticed.
+function removeCountable(file) {
+  try {
+    fs.unlinkSync(file);
+    return null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    try {
+      fs.writeFileSync(file, "");
+      return `${file} could not be removed (${error.message}) and was emptied in place instead`;
+    } catch (second) {
+      return `${file} could not be removed (${error.message}) or emptied (${second.message}) and can still be read as a finished review`;
+    }
+  }
+}
+
+// One record of how the call that produced this artifact routed, written into
+// the sidecar and printed on stdout as the same object, so a command reading the
+// result and a person reading the file are looking at the same thing. Exactly
+// one of `observed` and `observedReason` is non-null, and both are about the
+// attempt whose answer became the artifact — that is the run being compared
+// against the request. `sessions` is every session the whole call created,
+// invalid attempts and quota retries included, because those are Codex sessions
+// in someone's history whether or not their answers were used.
+function routingRecord(attempt, sessions) {
+  if (!attempt) return { ...NOT_RUN };
+  const observed = attempt.reason === null
+    ? {
+      model: attempt.model,
+      effort: attempt.effort,
+      sandbox: attempt.sandbox,
+      sessionId: attempt.sessionId,
+      rollout: attempt.rollout
+    }
+    : null;
+  return { ran: true, observed, observedReason: attempt.reason, sessions, sessionsKept: observed === null };
+}
+
 // The provenance sidecar. It is the only thing that distinguishes a findings
 // file this run produced from one left by a different model, a different prompt,
 // or an abandoned earlier attempt -- which matters precisely because resume
-// works by looking at what is on disk.
+// works by looking at what is on disk. The success path adds a `routing` key to
+// what this returns, so the file holds what the call asked for and what Codex
+// reported it did side by side.
 function requestRecord(options, prompt) {
   return {
     model: options.model,
@@ -292,6 +378,31 @@ function requestRecord(options, prompt) {
     schemaSha256: sha256(fs.readFileSync(path.resolve(options.schema))),
     completedAt: new Date().toISOString()
   };
+}
+
+// One line each, and only when there is something to say. None of these stops
+// anything: the only comparison that refuses is effort, and it has already
+// refused by the time this runs.
+function reportRouting(routing, options, requestPath) {
+  if (!routing.ran) return;
+  if (routing.observed === null) {
+    // The sessions are named only when there are any: an attempt that never
+    // announced a session id left nothing to keep.
+    const kept = routing.sessions.length > 0
+      ? ` The ${routing.sessions.length === 1 ? "session it created was" : "sessions it created were"} kept: ${routing.sessions.join(", ")}.`
+      : "";
+    process.stderr.write(`Codex ran, but how it routed could not be confirmed: ${routing.observedReason} Recorded in ${requestPath}.${kept}\n`);
+    return;
+  }
+  if (routing.observed.model !== null && routing.observed.model !== options.model) {
+    // Recorded and said, never matched: a configured name legitimately prefixes
+    // another model's, and Codex routinely records a name that extends no alias
+    // at all, so there is no comparison here that would not eventually be wrong.
+    process.stderr.write(`Codex answered as model ${routing.observed.model}, while the request asked for ${options.model}. Recorded; nothing was blocked.\n`);
+  }
+  if (routing.observed.sandbox !== null && routing.observed.sandbox !== SANDBOX) {
+    process.stderr.write(`Codex ran under the ${routing.observed.sandbox} sandbox rather than ${SANDBOX}. Recorded; nothing was blocked.\n`);
+  }
 }
 
 export async function runCodex(options) {
@@ -320,7 +431,7 @@ export async function runCodex(options) {
       && recorded.model === record.model
       && recorded.effort === record.effort) {
       process.stderr.write(`Reusing the validated artifact at ${artifact}; Codex was not invoked.\n`);
-      return { result: existing.value, reused: true, artifact, promptPath, bytes, sections };
+      return { result: existing.value, reused: true, artifact, promptPath, bytes, sections, routing: { ...NOT_RUN } };
     }
   }
 
@@ -340,9 +451,12 @@ export async function runCodex(options) {
   // outside the slot root — where a successful run then unlinks it.
   const quotaKey = sha256(`${options.model}\u0000${options.effort}`).slice(0, 32);
   const quotaStatePath = path.join(slotsRoot, ".quota", `${quotaKey}.json`);
+  const sessionsRoot = path.join(codexHome(), "sessions");
   try {
     let amendedPrompt = prompt;
     let invalidAttempts = 0;
+    // What Codex said about each attempt this call made, in the order they ran.
+    const attempts = [];
     while (invalidAttempts < SCHEMA_ATTEMPTS) {
       const attemptPath = `${artifact}.attempt-${invalidAttempts + 1}-${process.pid}.tmp`;
       try { fs.unlinkSync(attemptPath); } catch {}
@@ -367,9 +481,53 @@ export async function runCodex(options) {
         try { fs.unlinkSync(attemptPath); } catch {}
         throw new Error(`Codex exceeded its ${options.timeoutSec}s timeout and was terminated`);
       }
+
+      // Read how this attempt routed before anything can start another one: the
+      // event log is opened `{flags: "w"}` per attempt, so the next pass through
+      // this loop truncates the record the session id is read from, and a
+      // session nobody read the id of is one nothing can look at or remove.
+      const attempt = outcome.dryRun ? null : await observeRouting({ eventsPath, sessionsRoot });
+      if (attempt) attempts.push(attempt);
+
+      // An effort that disagrees refuses, and refuses here rather than after
+      // validation: the answer may well be schema-valid, and a valid answer
+      // bought at the wrong effort is exactly the thing there is no way to
+      // notice later. Not a retry either — the next attempt routes the same way,
+      // so it would spend the same money to learn the same thing. Same shape as
+      // the model-unavailable refusal below.
+      if (attempt?.reason === null && !sameEffort(attempt.effort, options.effort)) {
+        try { fs.unlinkSync(attemptPath); } catch {}
+        // Removing a pre-existing artifact and sidecar at --out is the
+        // load-bearing part. A Codex lens re-dispatched into a round it already
+        // wrote into overwrites those files as a set; if this refusal only
+        // skipped the rename, the first dispatch's artifact would survive,
+        // `collect-findings.mjs` would read it, bind it to this same candidate,
+        // and a refused run would have produced a review that counts. Sidecar
+        // first, for the reason the ordering comment below gives: a crash
+        // between the two leaves something non-reusable rather than something
+        // reused for the wrong request. `.prompt.md` and `.events.jsonl` stay —
+        // nothing counts them, and they are what a person opens.
+        const stranded = [removeCountable(requestPath), removeCountable(artifact)].filter((note) => note !== null);
+        // The session is named because a Codex release renaming an effort word
+        // fires this the same way a mis-routed run does, and that file is the
+        // only thing that shows which of the two happened. What the removal
+        // actually managed is named for a blunter reason: this message is the
+        // only account anyone gets of a refusal, and a removal that failed is
+        // precisely the case where something countable is still at --out.
+        throw new Error(
+          `Codex ran at ${attempt.effort} effort but the request asked for ${options.effort}. `
+          + (stranded.length === 0
+            ? `The artifact at ${artifact} and its request record were removed so nothing later can count them. `
+            : `${stranded.join("; ")}; check those paths by hand before anything reads what is there as this candidate's review. `)
+          + `The session Codex wrote is kept at ${attempt.rollout}.`
+        );
+      }
+
       const validation = validateArtifact(schema, attemptPath);
       if (validation.ok) {
         fs.chmodSync(attemptPath, 0o600);
+        const routing = routingRecord(attempt, attempts.map((entry) => entry.sessionId).filter(Boolean));
+        record.routing = routing;
         // The sidecar is removed before the artifact moves and rewritten after,
         // so a crash between them leaves a result that will not be reused rather
         // than one reused for the wrong request.
@@ -377,7 +535,19 @@ export async function runCodex(options) {
         fs.renameSync(attemptPath, artifact);
         fs.writeFileSync(requestPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
         try { fs.unlinkSync(quotaStatePath); } catch {}
-        return { result: validation.value, reused: false, artifact, promptPath, bytes, sections };
+        reportRouting(routing, options, requestPath);
+        // Removal is the last thing, after the sidecar is written: a stall or a
+        // failure in `codex delete` must never leave the artifact in the window
+        // where it exists and the record of what produced it does not.
+        if (routing.ran && !routing.sessionsKept) {
+          for (const outcome of removeSessions({ codexBin: options.codexBin, sessionIds: routing.sessions })) {
+            if (outcome.ok) continue;
+            // Reported, never fatal: the review is finished and paid for, and a
+            // session that would not delete is untidiness, not a failure.
+            process.stderr.write(`Codex session ${outcome.id} could not be removed: ${outcome.message || "no message"}.\n`);
+          }
+        }
+        return { result: validation.value, reused: false, artifact, promptPath, bytes, sections, routing };
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
@@ -421,8 +591,8 @@ export async function runCodex(options) {
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
-    const { result, reused, artifact, promptPath, bytes, sections } = await runCodex(options);
-    process.stdout.write(`${JSON.stringify({ ok: true, reused, artifact, promptPath, bytes, sections, result })}\n`);
+    const { result, reused, artifact, promptPath, bytes, sections, routing } = await runCodex(options);
+    process.stdout.write(`${JSON.stringify({ ok: true, reused, artifact, promptPath, bytes, sections, routing, result })}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

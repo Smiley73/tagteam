@@ -43,6 +43,12 @@ takes its effort as a real argument, as `SKILL.md` shows.
    only that file lets you skip it. Otherwise derive a slug from the goal —
    lowercase, hyphenated, three or four words — and create `$D/work/`.
 
+   Either way, `rm -f "$D/work/codex-routing-ack"` as you enter. An answer
+   someone gave about one version of Codex must not be inherited by a session
+   resumed days later, and nothing on disk distinguishes a resumed plan from a
+   fresh one, so the start of the command is the only honest place to reset it.
+   What it is for is *When Codex could not say how it ran*, below.
+
    A resumed session that stopped inside step 5 does not start a review round: the
    allocator hands back the round that never recorded its outcome, empties it, and
    spends nothing. So resuming there means running step 5 again from the top, not
@@ -246,7 +252,9 @@ Three readers, dispatched in a single message so they run concurrently:
 
 Run the Codex call with `run_in_background` — it outlives what the Bash tool will
 hold in the foreground — and read its result when it returns, because a failed
-Codex call writes no artifact for anything to wait on.
+Codex call writes no artifact for anything to wait on. If that result says Codex
+ran but could not say how it routed, take *When Codex could not say how it ran*
+before you go on.
 
 **All three must have reported before you read anything.** Dispatch returns
 immediately; the files do not exist yet. Wait with one background watcher over
@@ -407,6 +415,32 @@ Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.js
 `goal.md`, `plan.md`, `specs/`, `approved.json`, and tell them to run
 `/tagteam:ship <plan-dir>` **in a new session** — the interview loaded material
 shipping does not need.
+
+## When Codex could not say how it ran
+
+The `codex.mjs` call reports how the run it made was routed. **The trigger is
+what that result says**: it says Codex ran, and it says the routing could not be
+observed. Read it off the result, not off a guess about the text on stderr, and
+not off a failed call.
+
+`$D/work/codex-routing-ack` exists: say nothing about it and carry on.
+
+Otherwise ask once, with `AskUserQuestion`. Tell them the answer arrived and is
+valid, that tagteam could not confirm which model Codex used or how hard it was
+told to think, and that the likeliest cause is a newer Codex recording a run
+differently than this version of tagteam knows how to read. Three options: carry
+on; carry on and stop asking for the rest of this run; stop here.
+
+Only the middle one writes anything: `printf '' > "$D/work/codex-routing-ack"`,
+which is what "the rest of this run" means — step 4 cleared it, so the next
+`/tagteam:plan` asks again. Do not describe that to them as a file, a path or a
+setting; it is not one.
+
+An unconfirmed routing blocks nothing on its own: no gate changes, the review
+counts exactly as it did, and nothing is held for it. **And it is not the other
+thing** — a Codex call that reports it ran at a different effort than it was
+asked for **failed**, wrote nothing, and is reported the way any failed Codex
+call in that step is.
 
 ## Discipline
 
