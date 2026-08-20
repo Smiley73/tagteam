@@ -401,14 +401,16 @@ const fixFieldProse = [
     { file, statement: "a repair is proposed only when the repair is obvious",
       pattern: /Propose a repair in `fix` only when the repair is obvious/ },
     { file, statement: "naming the defect and stopping is a complete finding",
-      pattern: /name the defect and stop/ },
+      pattern: /name the defect and stop.{0,40}proposes no repair is complete/ },
     { file, statement: "`fix` is written either way, never omitted",
       pattern: /Write `fix` either way/ }
   ]),
   { file: "prompts/fix.md", statement: "a proposed repair is one reader's hypothesis, checked before it is adopted",
-    pattern: /one reader's hypothesis/ },
+    pattern: /one reader's hypothesis.{0,160}Check it against the code before you adopt/ },
   { file: "prompts/fix.md", statement: "what `fixed-differently` reports",
-    pattern: /`fixed-differently` — the finding was right/ },
+    pattern: /`fixed-differently` — the finding was right and the defect is gone, but the repair is not the one it proposed/ },
+  { file: "prompts/fix.md", statement: "what a departure reports when the finding proposed nothing, or was wrong",
+    pattern: /proposed no repair there was nothing to depart from and the outcome is `fixed`.{0,120}still `wont-fix`/ },
   { file: "prompts/fix.md", statement: "a proposal repeated on a carried finding loses to that finding's `evidence`",
     pattern: /repetition is not a fresh endorsement.{0,160}`evidence` is what is true now/ }
 ];

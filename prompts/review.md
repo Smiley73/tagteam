@@ -28,7 +28,8 @@ Propose a repair in `fix` only when the repair is obvious. For anything else,
 name the defect and stop: a finding that proposes no repair is complete, and it
 is the expected shape. Write `fix` either way — `null` when you propose nothing,
 never omitted; a findings file missing the key is rejected whole, and the run
-records your lens as having found nothing at all.
+records your lens as having produced no usable evidence — which is incomplete,
+not clean, and is re-dispatched rather than merged.
 
 Severity:
 
