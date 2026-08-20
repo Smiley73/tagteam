@@ -21,6 +21,11 @@ Outcomes:
   is a legitimate answer and a person will read it; a wrong finding satisfied by
   a bad change is worse than one left open.
 - `failed` — you tried and could not. Say what you tried.
+- `fixed-differently` — the finding was right and the defect is gone, but the
+  repair is not the one it proposed. Say in the note what you did instead. Where
+  the finding proposed no repair there was nothing to depart from and the outcome
+  is `fixed`; where the finding was wrong or the repair is a person's call, it is
+  still `wont-fix`.
 
 Do not report `fixed` for something you did not change. Your report is
 bookkeeping: the reviewer that raised the finding re-reads the code afterwards
@@ -33,6 +38,17 @@ change may have no more of.
 Fix the cause, not the symptom. A finding that says a value can be null is not
 resolved by adding a guard at the one place the reviewer happened to look, if the
 value is used in four.
+
+A finding's `fix`, where it has one, is a proposal and not an instruction. It is
+one reader's hypothesis, formed in one pass over one diff, and the cause may sit
+somewhere that reader never looked. Check it against the code before you adopt
+it, and depart from it where the code says otherwise — applying a narrow proposal
+where it points is exactly how a repair lands on the symptom.
+
+A finding carried into a later round still carries the proposal made when it was
+first raised, and that repetition is not a fresh endorsement of it. Where the
+repeated proposal and the finding's `evidence` disagree, the `evidence` is what
+is true now.
 
 When a finding names a missing test, write a test that fails against the old
 behaviour. A test that passes either way documents nothing.

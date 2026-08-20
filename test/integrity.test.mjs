@@ -389,6 +389,40 @@ test("no brief describing a fix round claims there is only one", () => {
   }
 });
 
+// A finding's `fix` is written by four briefs and read by one, and neither end
+// works from the field's schema description alone: a reviewer that proposes a
+// repair it half-considered spends a round on the wrong thing, and a fixer that
+// applies one without checking repairs where the proposal pointed rather than
+// where the cause is. Each statement is pinned on its own — a brief that lost one
+// of its three still reads, to anyone skimming it, like a brief that says all of
+// them.
+const fixFieldProse = [
+  ...["prompts/review.md", "prompts/codex/review.md", "prompts/code-adversary.md"].flatMap((file) => [
+    { file, statement: "a repair is proposed only when the repair is obvious",
+      pattern: /Propose a repair in `fix` only when the repair is obvious/ },
+    { file, statement: "naming the defect and stopping is a complete finding",
+      pattern: /name the defect and stop.{0,40}proposes no repair is complete/ },
+    { file, statement: "`fix` is written either way, never omitted",
+      pattern: /Write `fix` either way/ }
+  ]),
+  { file: "prompts/fix.md", statement: "a proposed repair is one reader's hypothesis, checked before it is adopted",
+    pattern: /one reader's hypothesis.{0,160}Check it against the code before you adopt/ },
+  { file: "prompts/fix.md", statement: "what `fixed-differently` reports",
+    pattern: /`fixed-differently` — the finding was right and the defect is gone, but the repair is not the one it proposed/ },
+  { file: "prompts/fix.md", statement: "what a departure reports when the finding proposed nothing, or was wrong",
+    pattern: /proposed no repair there was nothing to depart from and the outcome is `fixed`.{0,120}still `wont-fix`/ },
+  { file: "prompts/fix.md", statement: "a proposal repeated on a carried finding loses to that finding's `evidence`",
+    pattern: /repetition is not a fresh endorsement.{0,160}`evidence` is what is true now/ }
+];
+
+test("every brief at either end of a finding's `fix` field still says what it means", () => {
+  for (const { file, statement, pattern } of fixFieldProse) {
+    // Flattened, as above: a sentence the author re-wrapped is the same sentence.
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.match(text, pattern, `${file} no longer says ${statement}`);
+  }
+});
+
 // Each of these sentences said the loop was one iteration long. The orchestrator
 // follows this file literally, so any one of them left behind stops a spec that
 // still has budget — and contradicts the command that actually decides.
