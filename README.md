@@ -32,14 +32,24 @@ flowchart LR
 ## Install
 
 Requires Claude Code, Git, the [Codex CLI](https://github.com/openai/codex), and
-an authenticated GitHub CLI. CodeGraph is optional.
+an authenticated GitHub CLI.
 
 ```bash
-claude plugin marketplace add /absolute/path/to/tagteam
-claude plugin install tagteam@tagteam-local
+claude plugin marketplace add Smiley73/tagteam
+claude plugin install tagteam@tagteam
 ```
 
-Or run Claude Code with `--plugin-dir /absolute/path/to/tagteam`.
+There is no release to download — Claude Code installs plugins from the
+repository itself, and `claude plugin update` picks up each version bump. From
+a local checkout, `claude plugin marketplace add` the checkout's absolute path
+instead, or run Claude Code with `--plugin-dir /absolute/path/to/tagteam`.
+
+[CodeGraph](https://github.com/colbymchenry/codegraph) is optional, but every
+agent tagteam dispatches can use it: one query returns a symbol's source
+together with its callers, so a reviewer sees a diff's blast radius — and an
+implementer the code around its change — without spending context on search.
+Without the index the agents read files instead; with `codegraph` on your
+PATH, `/tagteam:init` offers to build one.
 
 ## Use
 
@@ -276,13 +286,13 @@ Which refresh applies depends on which version moved. If the package version in
 update in place:
 
 ```bash
-claude plugin marketplace update tagteam-local
-claude plugin update tagteam@tagteam-local
+claude plugin marketplace update tagteam
+claude plugin update tagteam@tagteam
 ```
 
 For every other change — including a `.tagteam/config.json` version bump at an
 unchanged package version, the usual case while developing — `update` reports
-there is nothing to do. Run `claude plugin uninstall tagteam@tagteam-local` and
+there is nothing to do. Run `claude plugin uninstall tagteam@tagteam` and
 install again with the [Install](#install) command. Restart the session either
 way.
 
