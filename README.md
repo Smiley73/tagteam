@@ -1,7 +1,10 @@
 # tagteam
 
 A Claude Code plugin that takes a change from a vague idea to merged pull
-requests, using Claude and Codex together.
+requests, using Claude and Codex together. It is multi-agent orchestration for
+agentic, spec-driven development: autonomous AI agents from Anthropic and
+OpenAI plan the work, implement it, and cross-review every diff, with an
+adversarial AI code review on both the plan and the code.
 
 You describe what you want, however roughly. Tagteam interviews you until the
 outcome is concrete, writes a plan, has it reviewed by three independent readers
