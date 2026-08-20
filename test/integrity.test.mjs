@@ -636,6 +636,56 @@ test("the plan command takes its review rounds from the allocator, not from pros
   }
 });
 
+// "Stop asking about this" lasts for one command invocation and no longer. The
+// executable half of that promise is a line that clears the marker before any
+// work happens: an answer given about one version of Codex must not be inherited
+// by a run days later, and nothing on disk distinguishes a resumed run from a
+// fresh one.
+test("both commands clear the Codex routing acknowledgement before any work", () => {
+  const cases = [
+    { file: "ship.md", clear: 'rm -f "$S/codex-routing-ack"', first: "## Per spec, in order" },
+    { file: "plan.md", clear: 'rm -f "$D/work/codex-routing-ack"', first: "## 1 — Orient" }
+  ];
+  for (const { file, clear, first } of cases) {
+    const text = read("commands", file);
+    const at = text.indexOf(clear);
+    assert.ok(at > -1, `${file} never clears the acknowledgement with ${clear}`);
+    const heading = text.indexOf(first);
+    assert.ok(heading > -1, `${file} no longer has a ${first} heading to measure against`);
+    assert.ok(at < heading, `${file} clears the acknowledgement after ${first}, which is after work has started`);
+  }
+});
+
+// A marker that outlives the invocation is the configuration key this design
+// rejected — an answer that silences every later run. A path that drifts to `$R`
+// or to a home directory is exactly how it would get one.
+test("neither command records the routing acknowledgement outside the directory that run works out of", () => {
+  const cases = [
+    { file: "ship.md", prefix: "$S/" },
+    { file: "plan.md", prefix: "$D/work/" }
+  ];
+  for (const { file, prefix } of cases) {
+    const text = read("commands", file);
+    const offenders = [];
+    for (const match of text.matchAll(/codex-routing-ack/g)) {
+      const before = text.slice(Math.max(0, match.index - prefix.length), match.index);
+      if (before !== prefix) offenders.push(text.slice(Math.max(0, match.index - 30), match.index + 18).trim());
+    }
+    assert.deepEqual(offenders, [], `${file} records the acknowledgement somewhere other than ${prefix}: ${offenders.join("; ")}`);
+  }
+});
+
+// The behaviour lives in one section per command so neither Codex step has to
+// repeat it — which only works if the steps that can trigger it point at it.
+test("both commands carry the unobserved-routing section and the ship steps point at it", () => {
+  const heading = "When Codex could not say how it ran";
+  for (const file of ["ship.md", "plan.md"]) {
+    assert.match(read("commands", file), new RegExp(`## ${heading}`), `${file} has no ${heading} section`);
+  }
+  assert.ok(shipStep("### 5.", "### 6.").includes(heading), `ship.md step 5 does not point at ${heading}`);
+  assert.ok(stepSeven().includes(heading), `ship.md step 7 does not point at ${heading}`);
+});
+
 // The same false certainty, one file over: a reader told it has exactly one
 // revision is being calibrated against a number the repository did not choose.
 test("no plan review brief claims there is exactly one revision", () => {

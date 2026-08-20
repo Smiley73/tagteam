@@ -235,6 +235,14 @@ payload therefore never passes through the orchestrator's context. It writes the
 artifact, a `.prompt.md`, a `.request.json` provenance sidecar, and a truncated
 `.events.jsonl`.
 
+The sidecar records what Codex itself reported it ran at, beside what the call
+asked for. An effort that disagrees with the request **fails the call** and
+leaves no artifact and no sidecar behind — including any an earlier dispatch to
+the same path had left. A model that disagrees is recorded and said once, and
+blocks nothing: nothing anywhere matches model names. The Codex sessions a good
+call created are deleted afterwards, so reviews do not pile up in someone's own
+Codex history; a call whose routing could not be read keeps them instead.
+
 Three things to know:
 
 - **Codex runs read-only and cannot write files.** Its output is the artifact the

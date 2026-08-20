@@ -31,6 +31,12 @@ code and findings; you never let a diff or a findings body into your own context
    `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"` when you
    finish or stop for any reason.
 
+   Then `rm -f "$S/codex-routing-ack"`. An answer someone gave about one version
+   of Codex must not be inherited by a train that resumes days later, and nothing
+   on disk tells a resumed ship from a fresh one, so the start of the command is
+   the only honest place to clear it. What it is for is *When Codex could not say
+   how it ran*, below.
+
    Already held: **say who holds it and ask** — which plan holds it and since
    when, not the contents of the lock file. A session that was killed rather
    than stopped leaves the lock behind, and it does not go stale for six hours, so
@@ -294,7 +300,9 @@ diff turns out to be, where nothing else is looking with fresh eyes.
 
 Run the Codex call with `run_in_background` — it outlives what the Bash tool
 will hold in the foreground — and read its result when it returns, because a
-failed Codex call writes no artifact at all.
+failed Codex call writes no artifact at all. If that result says Codex ran but
+could not say how it routed, take *When Codex could not say how it ran* before
+you go on.
 
 Then **wait for all of them** — see *Dispatching and waiting* in the skill. One
 background watcher, one `-f` per file you commissioned, the Codex artifact
@@ -576,7 +584,9 @@ still-open/codex.json path the bullet names as its input>`,
 `--fence DIFF=$S/<id>/rounds/$ROUND/review.diff`, schema `recheck.schema.json`,
 out `$S/<id>/rounds/$ROUND/recheck/codex.json`. The section names are the
 template's, not yours: it asks for CANDIDATE, FINDINGS and DIFF, and a fence
-under any other name is refused before anything is sent. This
+under any other name is refused before anything is sent. Its result gets the same
+reading as step 5's: a call that ran but could not say how it routed goes through
+*When Codex could not say how it ran*. This
 describes that dispatch; whether it happens at all is the bullets' decision and
 not this paragraph's.
 
@@ -858,6 +868,39 @@ not.
 Release the ship lock: `node "$P/scripts/ship-lock.mjs" release "$R" "$(cat "$S/lock-token")"`. `git -C "$R" worktree remove "$W"` — never `--force`; a
 worktree that will not come out is a signal. Summarise: what merged, what waits,
 what stopped and why.
+
+## When Codex could not say how it ran
+
+Every `codex.mjs` call reports how the run it made was routed. **The trigger is
+what that result says**: it says Codex ran, and it says the routing could not be
+observed. Read it off the result, not off a guess about the text on stderr, and
+not off a failed call — a call that failed is a failed call and is reported as
+one.
+
+`$S/codex-routing-ack` exists: say nothing about it and carry on with the step
+you were in.
+
+Otherwise ask once, with `AskUserQuestion`. Tell them the answer arrived and is
+valid, that tagteam could not confirm which model Codex used or how hard it was
+told to think, and that the likeliest cause is a newer Codex recording a run
+differently than this version of tagteam knows how to read. Three options:
+carry on; carry on and stop asking for the rest of this run; stop here.
+
+Only the middle one writes anything: `printf '' > "$S/codex-routing-ack"`, which
+is what "the rest of this run" means — preflight cleared it, so the next
+`/tagteam:ship` asks again. Do not describe that to them as a file, a path or a
+setting; it is not one, and there is nothing for them to clean up afterwards. On
+*stop here*, release the lock and stop as *Teardown* says.
+
+An unconfirmed routing blocks nothing on its own: no gate changes, the findings
+count exactly as they did, and the pull request is not held for it. The question
+is asked because a Codex upgrade is worth knowing about, not because anything is
+wrong with the review.
+
+**This is not the other thing.** A Codex call that reports it ran at a different
+effort than it was asked for **failed**: it wrote no artifact and no record, and
+you report it the way you report any failed Codex call in the step it happened
+in. It is not this question and it has no acknowledgement.
 
 ## Discipline
 
