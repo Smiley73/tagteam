@@ -21,6 +21,7 @@ import {
   writeRoundFile
 } from "../scripts/lib/round-store.mjs";
 import { snapshotCandidate } from "../scripts/snapshot-candidate.mjs";
+import { summaryLines } from "../scripts/record-fix-report.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const OID = "a".repeat(40);
@@ -190,14 +191,19 @@ const record = (report, out) => spawnSync("node", [
   path.join(root, "scripts", "record-fix-report.mjs"), "--report", report, "--out", out
 ], { encoding: "utf8" });
 
-const reportAt = (dir, note) => {
+const reportAt = (dir, note, outcome = "fixed") => {
   const file = path.join(dir, "fix-report-1.json");
   fs.writeFileSync(file, `${JSON.stringify({
-    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note }],
+    outcomes: [{ id: "1.correctness.1", outcome, note }],
     notes: ""
   }, null, 2)}\n`);
   return file;
 };
+
+const tallyOf = (...outcomes) => summaryLines({
+  outcomes: outcomes.map((outcome, index) => ({ id: `1.correctness.${index + 1}`, outcome, note: "n" })),
+  notes: ""
+}, "rounds/1/fix-report.json")[0];
 
 test("a fix report is recorded once: a re-dispatched fixer cannot replace it", () => {
   const dir = roundAt();
@@ -243,6 +249,48 @@ test("an invalid report is refused before the round holds it", () => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /fix-report schema/);
   assert.equal(fs.existsSync(path.join(dir, "fix-report.json")), false);
+});
+
+test("a report departing from the proposed repair is recorded, not refused", () => {
+  // The outcome only exists if the shipped schema allows it, so this goes through
+  // the script rather than a copy of the enum.
+  const dir = roundAt();
+  const out = path.join(dir, "fix-report.json");
+  const report = reportAt(temp("fix-differently"), "took the lock in the caller instead", "fixed-differently");
+
+  const result = record(report, out);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(out, "utf8")).outcomes[0].outcome, "fixed-differently");
+});
+
+test("the tally counts a departure beside the other outcomes, and stays quiet without one", () => {
+  const mixed = tallyOf("fixed-differently", "wont-fix", "fixed-differently");
+  assert.ok(mixed.includes("2 fixed-differently"), mixed);
+  assert.ok(mixed.includes("1 wont-fix"), mixed);
+  // A round with no departure prints what it printed before the outcome existed:
+  // zero counts are filtered out, and `0 fixed-differently` on every clean round
+  // would be noise nobody asked for.
+  assert.ok(!tallyOf("fixed", "failed").includes("fixed-differently"));
+});
+
+test("every outcome the schema allows reaches the printed tally", () => {
+  // The list `summaryLines` counts is a literal, so nothing but this ties it to
+  // the enum: without it, the next outcome added validates and never prints.
+  const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas", "fix-report.schema.json"), "utf8"));
+  const enumerated = schema.properties.outcomes.items.properties.outcome.enum;
+  const tally = tallyOf(...enumerated);
+  for (const outcome of enumerated) assert.ok(tally.includes(`1 ${outcome}`), `${outcome} is missing from: ${tally}`);
+});
+
+test("a long outcome leaves the note column where the other rows put it", () => {
+  const [, short, long] = summaryLines({
+    outcomes: [
+      { id: "1.correctness.1", outcome: "fixed", note: "NOTE" },
+      { id: "1.correctness.2", outcome: "fixed-differently", note: "NOTE" }
+    ],
+    notes: ""
+  }, "rounds/1/fix-report.json");
+  assert.equal(long.indexOf("NOTE"), short.indexOf("NOTE"), `misaligned:\n${short}\n${long}`);
 });
 
 // --- snapshot-candidate against a real repository -------------------------
