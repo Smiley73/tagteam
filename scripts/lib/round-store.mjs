@@ -62,7 +62,9 @@ const refuse = (file, reason) =>
 
 const unreadableMarker = (markerPath) =>
   new Error(`the round marker at ${markerPath} is unreadable; a round with an unknown owner is neither `
-    + "re-entered nor written into — move it aside or use a fresh round directory");
+    + "re-entered nor written into — move it aside or use a fresh round directory. A file that was never "
+    + `a marker earns this too: ${ROUND_MARKER} is the reserved marker name, and anything else saved under `
+    + "it makes the directory holding it read as a round");
 
 /** The parsed marker of `roundDir`, or null when it is absent or unparseable. */
 export function readRoundMarker(roundDir) {

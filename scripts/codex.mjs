@@ -141,7 +141,8 @@ export function composePrompt(options) {
   const used = new Set();
   const prompt = template.replace(/\{\{([A-Z0-9_]+)\}\}/g, (_match, name) => {
     if (!replacements.has(name)) {
-      throw new Error(`The template ${templatePath} needs a ${name} section, but none was supplied.`);
+      throw new Error(`The template ${templatePath} needs a ${name} section, but none was supplied. `
+        + `A section arrives as --fence ${name}=<file>, or --var ${name}=<text> for a short value like a commit id.`);
     }
     used.add(name);
     return replacements.get(name);
