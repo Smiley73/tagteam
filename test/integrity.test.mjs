@@ -161,7 +161,13 @@ test("a plugin installed under a path with a space in it still finds its own sch
   // The failure the rule above prevents, run rather than asserted. Every script
   // that reads a schema beside itself is exercised through the one that reads
   // the most of them.
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-"));
+  //
+  // Realpath'd because the script is spawned from inside this directory: macOS's
+  // tmpdir is a symlink into /private, Node resolves the main module's real path
+  // for import.meta.url, and specs.mjs's run-as-main guard compares that URL to
+  // argv[1] textually — spawned through the symlink, main() is silently skipped
+  // and stdout is empty, which is not the failure this test is about.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-")));
   const plugin = path.join(home, "First Last", "plugin cache", "tagteam");
   fs.mkdirSync(plugin, { recursive: true });
   for (const dir of ["scripts", "schemas", "prompts"]) {
