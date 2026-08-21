@@ -373,6 +373,15 @@ Render it in this order:
    repositories are not tagteam, and a line saying so on every run of every
    command is noise a person learns to skip past, which costs the identity line
    above it too.
+
+   **`repo.isPlugin` null: rules 3 to 6 do not apply either.** Whether this
+   checkout is an install of what is running could not be decided, so no
+   individual file can be named and neither version comparison means anything —
+   `drift` is null there and rule 7 is the whole of what to print. Silence is not
+   the alternative: it would read as "nothing differs", which is the one thing
+   that is not known.
+
+   Rules 3 to 6 are for `repo.isPlugin` true.
 3. **`repo.sameTree` true**: one clause — this repository is the copy that is
    running, so nothing can be out of date.
 4. **`drift` empty and the two versions equal**: one clause, not a paragraph —
