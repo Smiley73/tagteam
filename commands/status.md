@@ -11,8 +11,10 @@ For each spec waiting, give the pull request link and one line on why it stopped
 — read `state.json` for the reason rather than guessing, and say it as a reason
 rather than as the name of one: "waiting because this changes something people
 will see" rather than `user-visible`, "a reviewer found something that is still
-there" rather than `review-open`. Nobody reading this list has the gate names in
-their head, and this command exists to be read at a glance.
+there" rather than `review-open`, "the agent that wrote this never confirmed it
+finished what it was given" rather than `work-not-accounted-for`. Nobody reading
+this list has the gate names in their head, and this command exists to be read at
+a glance.
 
 **Say what is left before each thing stops**, in one short clause, led by what it
 means rather than by the number. Every spec still running has a `budgets` entry

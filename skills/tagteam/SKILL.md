@@ -38,7 +38,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   rounds/<n>/  round.json (the commit that owns this round, and how many times
                it has been entered), review.diff, findings/, recheck/,
                verify/, candidate.json, review.json, recheck.json,
-               still-open.json, still-open/<lens>.json, fix-report.json   ignored
+               still-open.json, still-open/<lens>.json, report.json    ignored
+  implement-report.json  fix-report.json  what the round's agent said about its
+               own work, written outside every round and recorded into one  ignored
   pr-body.md  ci.json                                                ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
@@ -66,12 +68,13 @@ overwritten or cleared by another.
 
 A round is a record: once `round.json` names the commit that owns it, every file
 tagteam writes beneath it is written once, and re-snapshotting that same commit
-re-enters the round — empties it back to the marker and rebuilds it — while a
-different commit is refused. Codex's own output is the exception. Its artifact
-and the `.prompt.md`, `.request.json` and `.events.jsonl` beside it are one set
-written together, and a Codex lens that produced nothing usable is re-dispatched
-into the same round, so those files are replaced in place and the write-once
-rule does not cover them.
+re-enters the round — empties it back to the marker and the round's report, the
+two records that belong to the owning commit rather than to the attempt, and
+rebuilds it — while a different commit is refused. Codex's own output is the
+exception. Its artifact and the `.prompt.md`, `.request.json` and
+`.events.jsonl` beside it are one set written together, and a Codex lens that
+produced nothing usable is re-dispatched into the same round, so those files are
+replaced in place and the write-once rule does not cover them.
 
 ## Configuration
 
@@ -304,8 +307,9 @@ underneath it.
 
 A pull request stops and waits when: the spec is marked user-visible; verification
 failed, or CI failed or proved nothing; a finding is still open after the
-re-check; **a selected reviewer produced no usable evidence**; or
-`.github/workflows/**` changed.
+re-check; **a selected reviewer produced no usable evidence**;
+`.github/workflows/**` changed; or the agent that wrote the code never confirmed
+it finished what it was given.
 
 User-visibility is the plan's judgement, settled per spec by the person who
 approved it and raised by the spec writer if writing the spec revealed a surface
@@ -318,6 +322,13 @@ findings file yields an empty finding set, and an empty finding set is
 indistinguishable from a clean review. `collect-findings.mjs` reports it as
 `incomplete`, which is not `clean`.
 
+The last one is the round's own account of its work. Each round that writes code
+ends with its agent's report — `rounds/<n>/report.json` — and an absent report
+and one that says `unfinished` are the same answer to the only question that gate
+asks: nobody has said this change is finished. A round that lost its account goes
+on asking on every candidate after it, so a later round's clean report cannot
+bury it.
+
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
 a new commit appears — and every fix round makes one.
 
@@ -329,7 +340,7 @@ a new commit appears — and every fix round makes one.
 | `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate`, `roles`. `init` also resolves each lens's brief and freezes it into the state file, and refuses a lens nothing calibrates |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in with `--carry`, into `recheck.json` and `still-open.json`; `--print <recheck.json>` re-renders a settled one |
-| `record-fix-report.mjs` | Validate the fixer's report, written outside the round, and record it as `rounds/<n>/fix-report.json` |
+| `record-round-report.mjs` | Validate the report the round's agent wrote outside the round — the implementer's or the fixer's — and record it as `rounds/<n>/report.json`, or record that the round has none |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |

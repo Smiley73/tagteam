@@ -33,6 +33,7 @@ function reviewed(overrides = {}) {
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "passed" });
   state = recordGate(state, "ci", A, { status: "passed" });
+  state = recordGate(state, "report", A, { status: "complete", kind: "implement" });
   return state;
 }
 
@@ -45,7 +46,7 @@ test("a fully cleared candidate merges without asking", () => {
 
 test("a new candidate clears every gate — the fix round always makes one", () => {
   const fixed = bindCandidate(reviewed(), B, BASE);
-  assert.deepEqual(Object.values(fixed.gates), [null, null, null, null]);
+  assert.deepEqual(Object.values(fixed.gates), [null, null, null, null, null]);
   const verdict = evaluate(fixed, CONFIG);
   assert.equal(verdict.ready, false);
   assert.ok(verdict.blockers.includes("review-not-recorded"));
@@ -58,7 +59,7 @@ test("the budget counters are the one thing a new candidate does not clear", () 
   // would be the first.
   const spent = { ...reviewed(), fixRoundsUsed: 1, ciRepairsUsed: 1 };
   const fixed = bindCandidate(spent, B, BASE);
-  assert.deepEqual(Object.values(fixed.gates), [null, null, null, null]);
+  assert.deepEqual(Object.values(fixed.gates), [null, null, null, null, null]);
   assert.equal(fixed.fixRoundsUsed, 1);
   assert.equal(fixed.ciRepairsUsed, 1);
 });
@@ -136,6 +137,104 @@ test("binding refuses anything that is not a commit id", () => {
   assert.throws(() => bindCandidate(state, A, ""), /base OID is required/);
 });
 
+// --- the round's account of its own work ---
+//
+// A round that never said whether it finished is indistinguishable, from
+// everywhere downstream, from one that finished cleanly: the diff compiles, the
+// panel reads it, and nothing anywhere says the agent walked away half-way. This
+// gate is the only place that difference exists.
+
+// `reviewed()` with the report gate taken back off, which is what a round whose
+// agent returned without writing one leaves behind.
+const unreported = (state = reviewed()) => ({ ...state, gates: { ...state.gates, report: null } });
+
+test("a candidate whose round never accounted for its work waits for a person", () => {
+  const verdict = evaluate(unreported(), CONFIG);
+  assert.ok(verdict.approvals.includes("work-not-accounted-for"));
+  // An approval and not a blocker: a blocker is cleared by nothing, and an
+  // implementer that correctly refused to guess at a contradictory spec would
+  // strand its own branch for ever.
+  assert.deepEqual(verdict.blockers, []);
+  assert.equal(verdict.ready, false);
+  assert.equal(verdict.needsHuman, true);
+});
+
+test("an unfinished report and no report at all stop the merge for the same reason", () => {
+  const missing = evaluate(unreported(), CONFIG);
+  const unfinished = evaluate(
+    recordGate(unreported(), "report", A, { status: "unfinished", kind: "implement" }), CONFIG
+  );
+  // Asserted against each other rather than against two literals: two spellings
+  // of this reason is one of them nobody translates into English at step 9.
+  assert.deepEqual(unfinished.approvals, missing.approvals);
+  assert.deepEqual(unfinished.approvals, ["work-not-accounted-for"]);
+  assert.equal(unfinished.ready, false);
+});
+
+test("a person who has read the account can approve it, and both cases merge", () => {
+  for (const state of [unreported(), recordGate(unreported(), "report", A, { status: "unfinished", kind: "fix" })]) {
+    assert.equal(evaluate(recordGate(state, "human", A, { approved: true }), CONFIG).ready, true);
+  }
+});
+
+test("a round that accounted for nothing goes on asking after the next round is clean", () => {
+  // The case the whole carry exists for. A fix round replaces the tip, and the
+  // round before it is gone from `gates` with every other gate, so a clean report
+  // on the new commit would bury it.
+  //
+  // Both ways a round fails to account for itself are run, because the carry
+  // decides on `status === "complete"` as well as on the OID: an honest
+  // `unfinished` is the likelier of the two in practice — it is exactly what
+  // provokes the fix round that replaces the tip — and a carry that only noticed
+  // an absent report would bury it while every test here still passed.
+  const stalls = [
+    ["no report at all", unreported()],
+    ["a report that said unfinished",
+      recordGate(unreported(), "report", A, { status: "unfinished", kind: "implement" })]
+  ];
+  for (const [what, stalled] of stalls) {
+    let next = bindCandidate(stalled, B, BASE);
+    assert.deepEqual(next.unaccountedCandidates, [A], `${what} was not carried onto the next candidate`);
+    next = recordGate(next, "review", B, { status: "clean" });
+    next = recordGate(next, "verify", B, { status: "passed" });
+    next = recordGate(next, "ci", B, { status: "passed" });
+    next = recordGate(next, "report", B, { status: "complete", kind: "fix" });
+
+    const verdict = evaluate(next, CONFIG);
+    assert.ok(verdict.approvals.includes("work-not-accounted-for"),
+      `a clean report on the fix commit buried the round that answered with ${what}`);
+    assert.equal(verdict.ready, false);
+    // And a person judging this candidate is what clears it, which is the only
+    // route out.
+    assert.equal(evaluate(recordGate(next, "human", B, { approved: true }), CONFIG).ready, true);
+  }
+
+  // A round that did account for itself is not carried at all.
+  assert.deepEqual(bindCandidate(reviewed(), B, BASE).unaccountedCandidates, []);
+});
+
+test("re-entering a round is not a candidate that went unaccounted for", () => {
+  // Step 3 runs again against the same commit on every resume, and the recording
+  // below it records the gate again. Counting that as a lost account would leave
+  // every resumed spec waiting for a person for ever.
+  const rebound = bindCandidate(unreported(), A, BASE);
+  assert.deepEqual(rebound.unaccountedCandidates, []);
+  assert.equal(evaluate(recordGate(rebound, "report", A, { status: "complete", kind: "implement" }), CONFIG)
+    .approvals.includes("work-not-accounted-for"), false);
+});
+
+test("a report recorded against an older candidate accounts for nothing here", () => {
+  let state = bindCandidate(reviewed(), B, BASE);
+  state = recordGate(state, "review", B, { status: "clean" });
+  state = recordGate(state, "verify", B, { status: "passed" });
+  state = recordGate(state, "ci", B, { status: "passed" });
+  // What a `bind` that failed to clear, or a hand-edited state file, would leave:
+  // the previous candidate's account still sitting in the gate.
+  state = { ...state, gates: { ...state.gates, report: { status: "complete", kind: "implement", candidateOid: A } } };
+  assert.ok(evaluate(state, CONFIG).approvals.includes("work-not-accounted-for"));
+  assert.throws(() => recordGate(state, "report", A, { status: "complete" }), /current candidate/);
+});
+
 // --- regressions from the Codex review of this rewrite ---
 
 test("a round that found something reaches publishing through fixing", () => {
@@ -177,6 +276,7 @@ test("a repository that waits for CI must have CI evidence recorded", () => {
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "passed" });
+  state = recordGate(state, "report", A, { status: "complete", kind: "implement" });
   assert.ok(evaluate(state, withCi).blockers.includes("continuous-integration-not-recorded"));
 
   // Cancelled and skipped both arrive as not-run: nothing was proven, so a
@@ -312,7 +412,7 @@ test("adoption records which gates had no evidence, rather than implying they pa
   state = recordGate(state, "verify", A, { status: "passed" });
   const adopted = adoptMerge(withPr(state), asMerged());
   assert.deepEqual(adopted.history.at(-1).adopted.evidence, {
-    review: null, verify: "passed", ci: null, human: null
+    review: null, verify: "passed", ci: null, report: null, human: null
   });
 });
 

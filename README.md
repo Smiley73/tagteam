@@ -194,7 +194,8 @@ the pull request stops with the findings on it and says so.
 
 A pull request merges unattended unless: the spec is marked user-visible,
 verification failed or CI proved nothing, a finding is still open, **a reviewer
-produced no usable evidence**, or `.github/workflows/` changed.
+produced no usable evidence**, `.github/workflows/` changed, or the agent that
+wrote it never confirmed it finished what it was given.
 
 That fourth one matters more than it sounds: an absent or malformed findings file
 yields an empty finding set, and an empty finding set otherwise reads as a clean
@@ -215,6 +216,7 @@ flowchart TD
     evaluate -->|"a finding is still open"| wait
     evaluate -->|"a reviewer produced no usable evidence"| wait
     evaluate -->|".github/workflows/ changed"| wait
+    evaluate -->|"the agent that wrote it never confirmed it finished"| wait
 ```
 
 ## How it is built

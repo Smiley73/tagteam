@@ -165,8 +165,15 @@ model and effort" means: pass `roles.<job>`'s model, and append `roles.<job>`'s
 effort to the agent's name.
 
 One `tagteam:implementer-<effort>` at `roles.implement`'s model and effort. Give
-it the spec **path**, the worktree path, and `conventionsPath` if set. It reads
-the spec itself; you do not.
+it the spec **path**, the worktree path, `conventionsPath` if set, and
+`$S/<id>/implement-report.json` to write. It reads the spec itself; you do not.
+
+That last path is the implementer's account of its own work: whether it finished
+the spec, what it changed, and what it left undone with the reason. Step 3 records
+it against the commit and a gate reads it. **No report is not a neutral outcome** —
+a round that wrote none stops this pull request for a person exactly as one that
+says the work is unfinished does, and nothing here writes one on an agent's
+behalf. Name the path in the dispatch; there is nowhere else it can come from.
 
 Dispatch it with `run_in_background: false` so the call blocks until it reports.
 It writes code into `$W` and no artifact you could watch for, and committing a
@@ -182,11 +189,69 @@ ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$
 node "$P/scripts/snapshot-candidate.mjs" --primary "$R" --worktree "$W" --base "$BASE" \
   --candidate "$OID" --out-dir "$S/<id>/rounds/$ROUND" --config "$R/.tagteam/config.json"
 node "$P/scripts/gates.mjs" bind "$S/<id>/state.json" "$OID" "$BASE" "$S/<id>/rounds/$ROUND/changed-paths.json"
+node "$P/scripts/record-round-report.mjs" --dir "$S/<id>" --out "$S/<id>/rounds/$ROUND/report.json"
+node "$P/scripts/gates.mjs" record "$S/<id>/state.json" report "$OID" "$S/<id>/rounds/$ROUND/report.json"
 ```
 
 `rev-parse HEAD` here is the one place it is correct: you are naming the commit
 you just made, before anything is bound to it. Everywhere after this, the
 reviewed commit comes from `state.json`.
+
+**On a resume, the commit may already exist.** Step 1 restarts an interrupted
+spec here against whatever is committed, and a stop at the recording lines below
+also resumes here — after the first line already committed. In both cases the
+worktree is clean and `git -C "$W" status --porcelain` prints nothing: skip the
+first line and start at `OID=`. Everything below is built to re-run against the
+same commit — the allocator re-enters the round that commit owns, the snapshot
+rebuilds it, `bind` binds the same candidate again, and the recording lines
+either meet the account the round already holds and pass, or record what is at
+the scratch paths now that it is corrected or moved aside. "Nothing to commit"
+from the first line is this same case noticed late; it is never a reason to
+manufacture a change so that a commit succeeds.
+
+**The last two lines record the round's account of its own work, and they sit
+below `bind` on every route into this step.** Every gate is evidence about one
+candidate, and nothing may be counted against a commit before that commit is the
+candidate — so the account is recorded here, at the one place the implementer's
+route, step 6's fix and step 8's CI repair all converge, and at the first moment
+the commit is the one being reviewed. The reporting agent wrote its report outside
+every round; these lines validate it, write the round's copy through the
+write-once guard, and record the gate against `$OID`.
+
+The first line's stdout is your view of the report — what the agent says it
+finished, what it left undone and why, and for a fix round the outcome of each
+finding. Do not open the file for anything else. A missing entry in the fix report
+ends this spec: say which findings it failed to account for. **A round with no new
+report is recorded as having none** and waits for a person at step 9. That is the
+honest outcome of an agent that returned without writing one, and nothing in this
+command writes a report on an agent's behalf.
+
+**A non-zero exit from either of those two lines is a stop, and it is a stop
+here.** Nothing later in this command clears either, and no agent is dispatched
+to deal with it: the agent that wrote the report is gone, a fresh one never did
+the work, and anything sent into `$W` after the commit leaves edits that step 4
+would verify while every gate names a commit that does not contain them. The
+recorder's error text says which of its two refusals you have:
+
+- **The report cannot be read or does not match its schema.** Broken agent
+  output, not a failure of the code under review. The recorder wrote nothing, so
+  the round holds no account and the second line then fails on a file that is
+  not there. Move the agent's file aside — keep it; it is what a person reads to
+  see what the agent claimed — and re-run both lines: the round records that it
+  has no account and waits for a person at step 9. Or stop now and show a person
+  what was printed.
+- **The round's own `report.json` refused different bytes.** The round already
+  holds the account of this commit, a new and different report has since arrived
+  at the scratch path, and the held account stands. The scratch file is the only
+  copy of that second report — the evidence a person compares the two by — so
+  nothing may write over it. Move it aside and re-run both lines: the recorder
+  finds the round already accounted for and passes. Then say what happened,
+  naming both files.
+
+**Do not go on and do not commit again while a refused file sits at the scratch
+path**: the agents' report paths carry no round number, so it is the same file
+the next round reads, it is refused there in the same place, and the report that
+round does have is never looked at.
 
 **The round number is `gates.mjs round`'s to give, once per candidate, here.** It
 reconciles what this attempt has spent against the rounds already on disk, hands
@@ -211,20 +276,25 @@ that refusal is meant to land, before a fixer has changed anything.
 
 The record's name is `round-alloc.json` and nothing else: `round.json` is the
 round marker's reserved name, and a file called that makes the directory holding
-it read as a round — step 6's fix report, recorded beside it, would be refused
-as a write into a round whose owner cannot be read.
+it read as a round — the round report, recorded out of that same directory, would
+be refused as a write into a round whose owner cannot be read.
 
 The round directory is a record. The snapshot writes `review.diff`,
 `changed-paths.json` and `candidate.json` into it, marks it with the commit that
 owns it, and from then on every file tagteam writes beneath it — the verify
 results and logs, `review.json` and `recheck.json`, `to-fix.json`,
-`open/<lens>.json`, `still-open.json` — is written once: a
+`open/<lens>.json`, `still-open.json`, `report.json` — is written once: a
 different-bytes rewrite is refused, naming the path, rather than silently
 overwriting. Re-running this step against the *same* commit **re-enters** the
-round: it is emptied back to its marker and rebuilt, which is what a ship
-resumed on the round's own commit does and it costs no new round. Re-running it
-against a *different* commit is refused naming both commits — which is why the
-allocator, and not you, decides that a fix's commit belongs in the next round.
+round: it is emptied back to its marker and its `report.json` — the two records
+that are about the commit and not about the attempt to review it — and rebuilt,
+which is what a ship resumed on the round's own commit does and it costs no new
+round. The report survives because re-entry is not a re-dispatch: the commit is
+the same one, so the account of what went into it is still the account, and a
+second, different report arriving over it is refused by name rather than
+replacing it. Re-running it against a *different* commit is refused naming both
+commits — which is why the allocator, and not you, decides that a fix's commit
+belongs in the next round.
 
 One thing in a round is outside that rule: Codex's own output — the artifact,
 its `.prompt.md`, `.request.json` and `.events.jsonl` — because one invocation
@@ -233,11 +303,15 @@ Codex lens that produced no usable evidence into the same round (step 5) has to
 replace all of them. Everything else is a record. The files an agent writes with
 its own Write tool cannot be intercepted at write time, so they are protected one
 step later: a reviewer's `findings/<lens>.json` and `recheck/<lens>.json` are
-sealed read-only by the script that consumes them, and the fixer writes its
-report *outside* the round, where `record-fix-report.mjs` validates it and writes
-the round's copy through the same guard (step 6). Everything a script derives,
-`review.json`, `recheck.json`, `still-open.json` and `still-open/` included, is
-written once.
+sealed read-only by the script that consumes them, and both reporting agents —
+the implementer of step 2 and the fixer of steps 6 and 8 — write their report
+*outside* every round, at a path with no round number in it, where the two
+recording lines at the top of this step validate it and write the round's copy
+through the same guard. That is also why the recording refuses to count a report
+another round already holds: an agent that returned without writing anything
+leaves the last one sitting there, and counting it would put a report against a
+commit it does not describe. Everything a script derives, `review.json`,
+`recheck.json`, `still-open.json` and `still-open/` included, is written once.
 
 Never skip `guard-staged.mjs`, and never split that chain. It is the only thing
 between a copied `.env` and a push.
@@ -409,9 +483,8 @@ the adversary's fresh pass exactly where they were.
 
 **Hand it the round's open record, never `review.json`.** Which record that is,
 and what runs after the new commit is verified, both follow from how you reached
-this step. `$ROUND` in these two paths — and in the fix report below, up to the
-re-snapshot that changes it — is still the round you are dispatching out of, the
-one the panel or the last re-check wrote into:
+this step. `$ROUND` in these two paths is still the round you are dispatching out
+of, the one the panel or the last re-check wrote into:
 
 - **From step 5 — the first fix of this cycle.** The record is
   `$S/<id>/rounds/$ROUND/to-fix.json`, the panel's own brief. After the commit and
@@ -436,34 +509,19 @@ in the pull request body, not repaired.
 
 Then one `tagteam:fixer-<effort>` at `roles.fix`'s model and effort — the pair
 you have just announced — given the record named above, the worktree, and
-`$S/<id>/fix-report-$ROUND.json` to write.
+`$S/<id>/fix-report.json` to write: one entry per finding, and its own account of
+whether it finished what it was handed. That path carries no round number because
+the report is recorded after the re-snapshot below has already changed `$ROUND`.
 Dispatch it with `run_in_background: false`: until it reports it is still editing
-the worktree you are about to commit. When it returns, record its report into the
-round:
-
-```bash
-node "$P/scripts/record-fix-report.mjs" --report "$S/<id>/fix-report-$ROUND.json" \
-  --out "$S/<id>/rounds/$ROUND/fix-report.json"
-```
-
-**The fixer's own path is outside the round on purpose.** A file an agent writes
-with its Write tool cannot be refused at write time, so a re-dispatched fixer
-would silently replace the round's account of what the first one claimed. This
-step validates the report against `fix-report.schema.json` and writes the round's
-copy through the write-once guard: an identical re-record passes, a different one
-is refused naming the file, and the fixer's scratch copy is left where it is so a
-person can compare them. Its stdout is your view of the report — do not open the
-file.
+the worktree you are about to commit.
 
 Then commit and re-snapshot exactly as in step 3, which takes the next round from
-the allocator into `$ROUND`, sets `OID` to the new commit, and `gates.mjs bind`s
-it — which clears every gate, because they were about the old one. Re-run verify
-against the new commit. **`$ROUND` is the new round from here on**: every path
-after this line, in this step and in the ones it sends you to, is that round's,
-and the round the fixer was dispatched out of is the one before it.
-
-A missing entry in the fix report ends this spec. Say which findings it failed to
-account for.
+the allocator into `$ROUND`, sets `OID` to the new commit, `gates.mjs bind`s it —
+which clears every gate, because they were about the old one — and records the
+fixer's report and the report gate into that new round. Re-run verify against the
+new commit. **`$ROUND` is the new round from here on**: every path after this
+line, in this step and in the ones it sends you to, is that round's, and the round
+the fixer was dispatched out of is the one before it.
 
 Nothing open: skip straight to step 7 with the same `OID`.
 
@@ -761,9 +819,14 @@ full:
    ```
 
    Then dispatch one `tagteam:fixer-<effort>` at `roles.repair-fix`'s model and
-   effort with the failing check output, blocking as in step 6, then commit and
+   effort with the failing check output and `$S/<id>/fix-report.json` to write,
+   on the same terms as step 6 — its account is of the failing check it was
+   handed and of nothing else, and with no findings in front of it there is
+   nothing to enumerate, so its `outcomes` is an empty array and the repair is
+   described in `summary` — blocking as in step 6, then commit and
    re-snapshot as in step 3, which allocates the round into `$ROUND`, set `OID`,
-   `bind` — which clears every gate — and re-run verify.
+   `bind` — which clears every gate — record the report and the report gate into
+   that round, and re-run verify.
 3. **Steps 5, 6 and 7 again, entirely**, including the fix rounds that cycle
    allows — with one command left out: **step 5's opening
    `gates.mjs state ... reviewing` is the edge point 1 already took.** Do not run
@@ -850,6 +913,34 @@ person would raise to let it try again. The setting name is an aside for someone
 who wants it, never the explanation: "three attempts at this and the recovery
 path still drops the second token" is the sentence, and the file name comes
 after it.
+
+**When nothing accounted for the work, say what that means.**
+`work-not-accounted-for` is the run saying that an agent which wrote code on this
+branch did not confirm it finished what it was given: it either named the part it
+left undone, or it returned without an account at all. **This is a stop for a
+person, not a failed check** — nothing is broken, and the question is whether to
+merge work its own author did not vouch for.
+
+**Find the round that lost its account; it is usually not the one you are
+standing in.** The reason is raised by the current candidate *and* by every
+earlier round of this spec that was never accounted for, on every candidate after
+it — so the current round's report is often a clean fixer's report that says the
+opposite of the reason you are explaining. What to read out is every
+`$S/<id>/rounds/*/report.json` whose `status` is not `complete`, usually just
+one. That scan is also what replaces `$ROUND` on a resume, where it is gone with
+the context that set it. Each of those files is the one file in a round you may
+open here — it holds no diff and no findings, only what the agent said about its
+own work — and a round whose agent wrote nothing says that in the same file,
+`status: "missing"` with the reason.
+
+**What the agent was answering for is its `kind`.** An `implement` report is the
+account of the spec: "the agent that wrote this change never confirmed it
+finished the spec, so nobody has said what is missing from it". A `fix` report is
+not — that fixer was handed findings, or a failing check, and never the spec — so
+it is "the fixer that made this commit never confirmed it finished the findings
+it was given", and it says nothing either way about the rest of the spec. Then
+read out that report's summary and the parts it lists as unfinished, in the
+agent's own words.
 
 What you must not pass on is the shape it arrived in.
 `1.correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,
