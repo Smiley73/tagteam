@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { stagePlugin, stagePlan } from "./stage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -156,27 +157,6 @@ test("no script derives a path from import.meta.url through .pathname", () => {
   assert.deepEqual(offenders, [],
     `${offenders.join(", ")} must use fileURLToPath(import.meta.url), which decodes what .pathname leaves encoded`);
 });
-
-// The two halves of a spawned-specs fixture, shared by the installed-path tests
-// below: a copy of the plugin's scripts with the schemas they read, and a
-// one-spec plan with the example configuration beside it.
-function stagePlugin(into) {
-  fs.mkdirSync(into, { recursive: true });
-  for (const dir of ["scripts", "schemas", "prompts"]) {
-    fs.cpSync(path.join(root, dir), path.join(into, dir), { recursive: true });
-  }
-}
-
-function stagePlan() {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-fixture-"));
-  const planDir = path.join(repo, "plan");
-  fs.mkdirSync(path.join(planDir, "specs"), { recursive: true });
-  fs.writeFileSync(path.join(planDir, "specs", "01-a.md"),
-    "---\nid: 01-a\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nSomething.\n");
-  const configPath = path.join(repo, "config.json");
-  fs.writeFileSync(configPath, read("examples", "config.json"));
-  return { planDir, configPath };
-}
 
 test("a plugin installed under a path with a space in it still finds its own schemas", () => {
   // The failure the rule above prevents, run rather than asserted. Every script
@@ -759,7 +739,15 @@ test("the ship diagram's panel says what it reads and where a re-run panel goes"
 // the prose that disagrees with the list under it, since a model that reads the
 // count rather than the list renders the wrong sentence.
 test("commands/status.md documents every reason a budget can be unknown", () => {
-  const statusMd = commands.find((entry) => entry.file === "status.md")?.text ?? "";
+  const whole = commands.find((entry) => entry.file === "status.md")?.text ?? "";
+  // Scoped to the text above the drift section, which documents its own reasons
+  // in this same bullet shape. Unscoped, this test reads both sets as one and
+  // fails on reasons that are correctly documented — and the index is asserted
+  // first so that a renamed heading fails saying so, rather than silently
+  // slicing one character off the end of the file and passing.
+  const at = whole.indexOf("## Which plugin is running");
+  assert.ok(at > -1, "commands/status.md no longer has a Which plugin is running section to scope against");
+  const statusMd = whole.slice(0, at);
   const inventory = read("scripts", "status.mjs");
   const documented = [...statusMd.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
   assert.deepEqual([...documented].sort(), ["counter", "rounds", "settings"]);
@@ -772,6 +760,100 @@ test("commands/status.md documents every reason a budget can be unknown", () => 
     assert.equal(words[counted], documented.length,
       `commands/status.md says there are ${counted} reasons and then lists ${documented.length}`);
   }
+});
+
+// --- which plugin snapshot is running ---
+//
+// An edit to a script or a command file does nothing until the installed copy is
+// refreshed, and the copy is what runs. A command that never says which copy
+// that is leaves "why did my change do nothing" to be worked out from scratch
+// every time, by someone who has already lost an hour to it.
+test("every command that could be run from a stale snapshot says which one is running", () => {
+  for (const file of ["status.md", "plan.md", "ship.md"]) {
+    assert.match(read("commands", file), /scripts\/running-plugin\.mjs/,
+      `commands/${file} never says which plugin snapshot is executing it`);
+  }
+});
+
+// The rendering rules live in one place with two pointers at it, the arrangement
+// the Asking rule already has. Two copies of them in two command files is two
+// copies that drift, and the one that drifts is the one nobody re-reads.
+test("the running-snapshot rules have one home and both commands point at it", () => {
+  assert.match(skill, /^## The running snapshot$/m, "SKILL.md has no running snapshot section for the commands to point at");
+  for (const file of ["plan.md", "ship.md"]) {
+    assert.match(read("commands", file), /\*The running snapshot\* in the skill/,
+      `commands/${file} runs the snapshot check but never says how to render it`);
+  }
+});
+
+// The sentence is load-bearing rather than decorative. In both preflight lists
+// every neighbouring item ends in "stop", so an orchestrator reading a new
+// neighbour among them treats a difference as another failed check — and
+// blocking here would lock the author of a one-character edit out of their own
+// repository until they reinstalled.
+test("the snapshot report never becomes a reason to stop", () => {
+  const NEVER = "never stops anything";
+  for (const file of ["plan.md", "ship.md"]) {
+    const text = read("commands", file);
+    const at = text.indexOf("scripts/running-plugin.mjs");
+    assert.ok(at > -1, `commands/${file} does not run the snapshot check at all`);
+    // The item runs from the invocation to the next numbered item; its
+    // continuation lines are indented, so an unindented number ends it.
+    const rest = text.slice(at);
+    const end = rest.search(/\n\d+\. /);
+    const item = end === -1 ? rest : rest.slice(0, end);
+    assert.ok(item.includes(NEVER),
+      `commands/${file} runs the snapshot check in a list of stop conditions without saying it ${NEVER}`);
+  }
+  const statusMd = read("commands", "status.md");
+  const section = statusMd.slice(statusMd.indexOf("## Which plugin is running"));
+  assert.ok(section.includes(NEVER), `commands/status.md's snapshot section does not say it ${NEVER}`);
+  const rules = skill.slice(skill.indexOf("## The running snapshot"));
+  assert.ok(rules.slice(0, rules.indexOf("\n## ", 1)).includes(NEVER),
+    `SKILL.md's running snapshot section does not say it ${NEVER}`);
+});
+
+// The same failure as the budget reasons above, one section down: each reason
+// means a different thing and sends a reader somewhere different, so an
+// undocumented one renders as whichever sentence is nearest. The expected set is
+// derived from the script rather than written here, because a fourth reason
+// added to the script is exactly the one that would arrive undocumented.
+test("commands/status.md documents every reason drift can be unknown", () => {
+  const statusMd = read("commands", "status.md");
+  const at = statusMd.indexOf("## Which plugin is running");
+  assert.ok(at > -1, "commands/status.md no longer has a Which plugin is running section");
+  const section = statusMd.slice(at);
+  const source = read("scripts", "running-plugin.mjs");
+  const emitted = new Set([...source.matchAll(/driftUnknown: "(\w+)"/g)].map(([, reason]) => reason));
+  assert.ok(emitted.size > 0, "no drift reasons were found in running-plugin.mjs to check against");
+  const documented = [...section.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
+  for (const reason of documented) {
+    assert.ok(emitted.has(reason), `commands/status.md renders "${reason}", which running-plugin.mjs never emits`);
+  }
+  for (const reason of emitted) {
+    assert.ok(documented.includes(reason), `running-plugin.mjs emits "${reason}", which commands/status.md never renders`);
+  }
+});
+
+// The boundary of the comparison is the whole defence. An install is a copy of
+// the entire repository, so an unscoped comparison reports the machine state a
+// copy differs on by construction — 134 differences on a clean checkout, against
+// 0 for the directories a run actually executes out of.
+test("the compared set is exactly the directories the plugin reaches into", async () => {
+  const { EXECUTED_ROOTS } = await import("../scripts/running-plugin.mjs");
+  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills"]);
+  // The other direction, and the one that earns its keep: a new plugin directory
+  // a command starts reading out of the snapshot mid-run is a directory this
+  // check would silently never compare, so a stale copy of it would never be
+  // reported. Classifying it is a decision, and this fails until someone makes
+  // it.
+  const unclassified = [];
+  for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
+    for (const [, dir] of text.matchAll(/(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$P)\/([A-Za-z0-9._-]+)\//g)) {
+      if (!EXECUTED_ROOTS.includes(dir)) unclassified.push(`${file} reads $P/${dir}/, which no drift check compares`);
+    }
+  }
+  assert.deepEqual(unclassified, [], unclassified.join("\n"));
 });
 
 // Every one of these sentences told a reader the cycle happens exactly once.

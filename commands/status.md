@@ -61,4 +61,54 @@ one you were given:
   read from its own `work/review` directory". Again, not a configuration
   problem.
 
+## Which plugin is running
+
+Claude Code runs an installed *copy* of this plugin, not the working tree it was
+installed from, so an edit to a script or a command file does nothing until that
+copy is refreshed. Run:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/running-plugin.mjs" "$(git rev-parse --show-toplevel)"
+```
+
+**Print the identity line first**, above the table, even though this section is
+last in this file: "Running tagteam 0.8.2 from
+`/Users/…/.claude/plugins/cache/tagteam/tagteam/0.8.2`." A null `plugin.version`
+is a snapshot that does not name its own version — say that, and still give the
+path, because the path is what makes the copy visible.
+
+**This never stops anything.** Print it and carry on. Nothing here is a reason to
+stop, and nothing here is a reason to offer to reinstall.
+
+Then, and only when `repo.isPlugin` is `true`:
+
+- `repo.sameTree` true — one clause: this repository is the copy that is running,
+  so nothing can be out of date.
+- `drift` empty and the two versions equal — one clause: this checkout is the
+  version that is running and every file it runs matches.
+- The versions differ — name both numbers, and say the working tree's version is
+  not the one that ran.
+- `drift` non-empty — name the differing files by path, at most ten, then "and N
+  more". Never their contents and never a diff. Say plainly that what was edited
+  is not what ran, and name the refresh that would pick it up: if the versions
+  differ, `claude plugin marketplace update tagteam` then `claude plugin update
+  tagteam@tagteam`; if they are equal, `update` reports there is nothing to do,
+  so it takes `claude plugin uninstall tagteam@tagteam` and installing again.
+  Restart the session either way. Say it; they run it.
+
+`repo.isPlugin` false is the ordinary case — most repositories are not tagteam.
+Say nothing at all about differing files there: a line saying so on every run of
+every command is noise a person learns to skip past, which costs the identity
+line above it too.
+
+**A `drift` of `null` means nothing was compared** — not that nothing differs.
+The `driftUnknown` key beside it says why, and each reason means a different
+thing, so say the one you were given:
+
+- `"identity"` — "whether this checkout is an install of the plugin that is
+  running could not be decided, because one of the two
+  `.claude-plugin/plugin.json` files could not be read".
+- `"snapshot"` — "the installed copy could not be read, so nothing was compared".
+- `"worktree"` — "this checkout could not be read, so nothing was compared".
+
 Read-only. Change nothing, merge nothing, and do not offer to.

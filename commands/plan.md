@@ -25,7 +25,16 @@ takes its effort as a real argument, as `SKILL.md` shows.
 ## Before anything
 
 1. `git -C "$R" rev-parse --show-toplevel`. Not a repository: say so and stop.
-2. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
+2. `node "$P/scripts/running-plugin.mjs" "$R"` — which installed snapshot is
+   running this, and, when this repository is a checkout of that same plugin,
+   which of the files it actually executes differ from the working tree. Render
+   it as *The running snapshot* in the skill says, identity line first.
+
+   **This never stops anything, whatever it says.** Print it and carry on to the
+   next item — a difference is not a failure, and it is never a reason to refuse
+   a plan or to offer to reinstall. Every other item in this list ends in "stop";
+   this one does not.
+3. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
    `/tagteam:init` and stop. No config at all: same. Show any `note:` or
    `warning:` line it prints about lens briefs as the validator wrote it: a lens
    this repository calibrates itself is one a plan may assign like any other, and
@@ -34,8 +43,8 @@ takes its effort as a real argument, as `SKILL.md` shows.
    from it with the other settings you take from here — it is how many review
    rounds step 5 may run against one goal approval, and you pass it to the
    allocator rather than counting rounds yourself.
-3. `codex --version`. It fails: stop and say Codex is required.
-4. `--resume <slug>`: pick up at the first step below whose output is missing.
+4. `codex --version`. It fails: stop and say Codex is required.
+5. `--resume <slug>`: pick up at the first step below whose output is missing.
    **`$D/goal.md` existing is not enough to skip step 3** — a session that
    stopped while you were waiting for the owner to read it leaves exactly that
    file behind, and drafting from an unapproved goal makes decisions binding that
