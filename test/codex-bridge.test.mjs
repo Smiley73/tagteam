@@ -352,6 +352,26 @@ test("two invalid answers fail without leaving an artifact behind", () => {
   assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false);
 });
 
+// The same state a fresh workspace cannot show, for the end that is not a
+// refusal: the retries run out, the attempt files are cleaned up, and the
+// earlier dispatch's artifact is still sitting at --out for
+// collect-findings.mjs to read as this candidate's review.
+test("an exhausted retry takes an earlier good run's artifact and sidecar with it", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  const result = run(space, [], { FAKE_CODEX_MODE: "always-invalid" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /after 2 attempts/);
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
+    "the earlier artifact survived two invalid answers");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
+    "the earlier sidecar survived two invalid answers");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the exhausted retry does not say what became of what was at --out");
+});
+
 // A provider failure is not a bad answer, and reporting it as one costs a second
 // call and tells a person the wrong thing to fix. The bytes the fake emits here
 // are the ones codex-cli 0.148.0-alpha.21 emitted against an account that could
@@ -515,6 +535,26 @@ test("a hung Codex is killed at the timeout, and the timeout is terminal", () =>
   // thing, so there is exactly one attempt.
   assert.equal(execs(space.dir).length, 1);
   assert.ok(elapsed < 20_000, `the timeout did not take effect (${elapsed}ms)`);
+});
+
+// A timeout is terminal, and terminal ends owe --out what the refusals owe it.
+// The bridge is dispatched at the same --out on a re-run, so a lens whose second
+// call hangs would otherwise have its first call's artifact counted as the
+// review of a candidate that answered nothing.
+test("a timeout takes an earlier good run's artifact and sidecar with it", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  const result = run(space, ["--timeout-sec", "1"], { FAKE_CODEX_MODE: "hang" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /exceeded its 1s timeout/);
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
+    "the earlier artifact survived a timeout");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
+    "the earlier sidecar survived a timeout");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the timeout does not say what became of what was at --out");
 });
 
 test("the sidecar records the model, effort and sandbox Codex itself wrote down", () => {

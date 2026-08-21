@@ -498,6 +498,33 @@ test("step 6 says a spent budget publishes rather than fails", () => {
     "step 6's refusal path no longer converges on verifying before step 8");
 });
 
+// A fixer may answer every finding `wont-fix`, and a round that changes nothing
+// makes no commit: step 3's opening chain fails, no round is allocated, and
+// `record-round-report.mjs` never runs, so the account of why the fixer
+// disagreed is recorded in no round at all. An orchestrator with no branch for
+// it here reads step 3's resume paragraph instead — the worktree is clean there
+// too — re-enters the round `HEAD` already owns, and has the recorder refuse
+// this report against a commit that does not contain its work. Step 6 is the
+// only place that can catch it: it is the last one before the commit, and the
+// only one that knows a fixer just ran.
+test("step 6 has a branch for a fixer that changed nothing", () => {
+  const step = stepSix();
+  assert.match(step, /status --porcelain/,
+    "step 6 gives the orchestrator no test for a fixer that changed nothing");
+  assert.match(step, /\*\*A fixer that changed nothing does not make a round\.\*\*/,
+    "step 6 no longer has a branch for the round that makes no commit");
+  assert.match(step, /manufacture one/,
+    "step 6 does not forbid manufacturing a commit so that a round can be allocated");
+  // Nothing records the report on this path, so the run itself has to carry it:
+  // no round ever holds the file, and the next fixer writes over it.
+  assert.match(step, /## Risk/,
+    "step 6 does not carry the declined findings anywhere a person reads them");
+  // Step 3 sends that clean worktree back here rather than treating it as a
+  // resume of a commit that already exists.
+  assert.match(stepThree(), /arrived from step 6/,
+    "step 3's resume branch still swallows the fix round that made no commit");
+});
+
 // The adversary is the reader most likely to raise the finding that starts a
 // second round, and it is dispatched here as a fresh pass and nothing else —
 // while `recheck.mjs` requires a verdict file from it for any adversary finding

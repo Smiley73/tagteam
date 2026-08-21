@@ -377,6 +377,20 @@ function clearCountable(requestPath, artifact) {
     : `${stranded.join("; ")}; check those paths by hand before anything reads what is there as this candidate's review.`;
 }
 
+// A terminal failure that has already cleared `--out` and worded its own account
+// of what it found there. The mark is read by the `catch` at the bottom of
+// `runCodex`, which clears for every other way out of the call — a child that
+// never spawned, an unexpected write failure, whatever a later edit throws in
+// there — so that "every terminal failure" is a property of the function rather
+// than of the throws someone remembered. Marked errors are left alone: clearing
+// twice would say the same thing twice, and the second sentence would land after
+// the truncated provider quote the refusals below deliberately end on.
+function cleared(message) {
+  const error = new Error(message);
+  error.clearedCountable = true;
+  return error;
+}
+
 // One record of how the call that produced this artifact routed, written into
 // the sidecar and printed on stdout as the same object, so a command reading the
 // result and a person reading the file are looking at the same thing. Exactly
@@ -512,10 +526,17 @@ export async function runCodex(options) {
       }
       // A timeout is terminal, not a retryable bad answer: retrying it would
       // spend the same wall clock again to learn the same thing, and the caller
-      // is usually waiting on a train of these.
+      // is usually waiting on a train of these. Terminal, so it owes --out the
+      // same clearing the refusals below do: a lens re-dispatched into a round
+      // it already wrote into would otherwise leave the earlier dispatch's
+      // artifact where it was, and a call that answered nothing would still have
+      // produced a review that counts.
       if (outcome.timedOut) {
         try { fs.unlinkSync(attemptPath); } catch {}
-        throw new Error(`Codex exceeded its ${options.timeoutSec}s timeout and was terminated`);
+        throw cleared(
+          `Codex exceeded its ${options.timeoutSec}s timeout and was terminated. `
+          + clearCountable(requestPath, artifact)
+        );
       }
 
       // Read how this attempt routed before anything can start another one: the
@@ -539,7 +560,7 @@ export async function runCodex(options) {
         // review. The session is named because a Codex release renaming an
         // effort word fires this the same way a mis-routed run does, and that
         // file is the only thing that shows which of the two happened.
-        throw new Error(
+        throw cleared(
           `Codex ran at ${attempt.effort} effort but the request asked for ${options.effort}. `
           + `${clearCountable(requestPath, artifact)} `
           + `The session Codex wrote is kept at ${attempt.rollout}.`
@@ -591,7 +612,7 @@ export async function runCodex(options) {
         // above: a re-dispatch that the provider turns away has to leave nothing
         // at --out that a later command can read as this candidate's review. The
         // provider's sentence goes last because it is the truncated part.
-        throw new Error(
+        throw cleared(
           `Codex model ${options.model} at ${options.effort} effort is unavailable, so --model is what has to change. `
           + `${clearCountable(requestPath, artifact)} `
           + `What Codex said: ${said.slice(-1000)}`
@@ -605,7 +626,7 @@ export async function runCodex(options) {
           if (next.action === "abort") {
             try { fs.unlinkSync(quotaStatePath); } catch {}
             // Terminal, so it owes --out the same clearing the refusals above do.
-            throw new Error(
+            throw cleared(
               `Codex quota did not clear within four hours for ${options.model}/${options.effort}. `
               + clearCountable(requestPath, artifact)
             );
@@ -621,13 +642,33 @@ export async function runCodex(options) {
       if (invalidAttempts < SCHEMA_ATTEMPTS) {
         amendedPrompt = `${prompt}\n\nYour previous response did not produce JSON matching the required schema. Return only a complete schema-valid response.`;
       } else {
-        throw new Error(
-          `Codex did not produce a valid artifact after ${SCHEMA_ATTEMPTS} attempts: ${validation.errors.join("; ")}`
-          + (said ? `; ${said.slice(-1000)}` : "")
+        // Terminal too, and the one that a fresh workspace hides: the attempt
+        // files are gone, but an earlier dispatch's artifact and sidecar are
+        // still at --out, and `collect-findings.mjs` would read that file as
+        // this candidate's review. The provider's sentence stays last because
+        // it is the truncated part.
+        throw cleared(
+          `Codex did not produce a valid artifact after ${SCHEMA_ATTEMPTS} attempts: ${validation.errors.join("; ")}. `
+          + clearCountable(requestPath, artifact)
+          + (said ? ` What Codex said: ${said.slice(-1000)}` : "")
         );
       }
     }
     throw new Error("unreachable");
+  } catch (thrown) {
+    // The last of the terminal ends, and the ones nobody wrote a sentence for: a
+    // child that never spawned, a write that failed, whatever a later edit
+    // throws inside this loop. They owe `--out` exactly what the refusals above
+    // owe it, and clearing here is what makes that a property of the function
+    // rather than of the throws someone remembered. It runs before the `finally`
+    // below, so the artifact lock is still held while the removal happens and no
+    // other call can be writing that path meanwhile.
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    if (!error.clearedCountable) {
+      error.clearedCountable = true;
+      error.message = `${error.message} ${clearCountable(requestPath, artifact)}`;
+    }
+    throw error;
   } finally {
     artifactLock.release();
     slot.release();

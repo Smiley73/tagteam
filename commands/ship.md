@@ -206,7 +206,9 @@ same commit — the allocator re-enters the round that commit owns, the snapshot
 rebuilds it, `bind` binds the same candidate again, and the recording lines
 either meet the account the round already holds and pass, or record what is at
 the scratch paths now that it is corrected or moved aside. "Nothing to commit"
-from the first line is this same case noticed late; it is never a reason to
+from the first line is this same case noticed late — unless you arrived from
+step 6, where a clean worktree means the fixer changed nothing and step 6's own
+branch for that is where you go back to, not `OID=`. It is never a reason to
 manufacture a change so that a commit succeeds.
 
 **The last two lines record the round's account of its own work, and they sit
@@ -515,8 +517,40 @@ the report is recorded after the re-snapshot below has already changed `$ROUND`.
 Dispatch it with `run_in_background: false`: until it reports it is still editing
 the worktree you are about to commit.
 
-Then commit and re-snapshot exactly as in step 3, which takes the next round from
-the allocator into `$ROUND`, sets `OID` to the new commit, `gates.mjs bind`s it —
+**A fixer that changed nothing does not make a round.** Ask
+`git -C "$W" status --porcelain` before you commit anything. It prints nothing
+when the fixer answered every finding `wont-fix` — a legitimate answer, and the
+shape a disagreement about whether a finding is real arrives in — and there is
+then no commit to make. Do not manufacture one, and **do not read that clean
+worktree as step 3's resume**: `HEAD` is the round before this one, it already
+owns a round, and re-entering it files this fixer's report against a commit that
+does not contain its work — which the recorder refuses, naming `report.json`,
+after the snapshot has already rebuilt a round nothing new went into.
+
+So there is no commit, no round is allocated, and nothing records the report:
+**you are what carries it.** Read `$S/<id>/fix-report.json` and say, in plain
+English, that the fixer changed nothing and what it says about each finding it
+declined — then say it again in the pull request under `## Risk`, because every
+one of those findings is still open. That file is the only copy of the account
+and the next fixer this spec dispatches writes over it, so say what it holds now
+rather than pointing at the path.
+
+Then put the state back where both paths converge, exactly as the budget refusal
+above does — this round was bought, so the state is at `fixing`:
+
+- You arrived from step 5 and this candidate has no review gate yet: go to step
+  7. The adversary still runs, and its re-check bullet is skipped there for the
+  reason that bullet gives — no fixer changed this diff.
+- You arrived from step 7 and its gate is already recorded against this commit:
+  `gates.mjs state ... verifying`, then step 8.
+
+Either way the spec still publishes and step 9 stops the merge on findings that
+are still open, which is where a person weighs the fixer's disagreement against
+the reviewer that raised them. A fixer that changed nothing is not a failure and
+never goes to `failed`.
+
+Otherwise commit and re-snapshot exactly as in step 3, which takes the next
+round from the allocator into `$ROUND`, sets `OID` to the new commit, `gates.mjs bind`s it —
 which clears every gate, because they were about the old one — and records the
 fixer's report and the report gate into that new round. Re-run verify against the
 new commit. **`$ROUND` is the new round from here on**: every path after this
@@ -590,10 +624,10 @@ In one message:
   on the same `roles` read this bullet already takes.
 
   **Skip this bullet whenever step 5 ran in this round** — a second or later fix
-  round, or a round whose step 6 was refused for want of budget. `<r>` is
-  `$ROUND` there, the panel read `rounds/$ROUND/review.diff` minutes ago, and
-  that is the same diff you would hand back with no commit and no fixer in
-  between. `prompts/recheck.md` opens by telling the reviewer that a fixer has
+  round, a round whose step 6 was refused for want of budget, or one whose fixer
+  changed nothing. `<r>` is `$ROUND` there, the panel read
+  `rounds/$ROUND/review.diff` minutes ago, and that is the same diff you would
+  hand back with no commit and no fixer in between. `prompts/recheck.md` opens by telling the reviewer that a fixer has
   been given its findings and has changed the code, which would be false, and a
   `resolved` verdict extracted that way clears a blocking finding nobody
   repaired. Nothing is lost by not asking: `recheck.mjs` settles a finding raised
