@@ -16,6 +16,8 @@ what turn a clean re-check into another round. Work only beneath the worktree
 path you are given. Never commit, push, or switch branches.
 
 Write your fix report to the path you are given, matching
-`schemas/fix-report.schema.json`, with exactly one entry per finding.
+`schemas/fix-report.schema.json`, before you return: exactly one entry per
+finding, and whether you finished what you were handed — which is about those
+findings or that failing check, never about a spec you were not given.
 
 Return one line: the report path and the count of each outcome.

@@ -29,15 +29,15 @@
 // per-file write-once rule cannot express "replace this set together", so
 // guarding the bridge makes that recovery either impossible or destructive.
 //
-// Nothing else is exempt, and the fixer's report is the case that shows what
-// that costs. It is written by an agent's Write tool, like a reviewer's
+// Nothing else is exempt, and the round report is the case that shows what that
+// costs. It is written by an agent's Write tool, like a reviewer's
 // `findings/<lens>.json`, and no script can intercept such a write — so the
-// fixer writes it *outside* every round and `record-fix-report.mjs` records the
-// round's copy through `writeRoundFile`. A report cannot be protected where it
-// lands, so it is recorded somewhere it can be. The alternative, leaving it
-// where the fixer put it because nothing reads it, means a re-dispatched fixer
-// overwrites the round's only account of what the previous one claimed, and
-// nothing on disk says the earlier attempt happened.
+// implementer and the fixer each write theirs *outside* every round and
+// `record-round-report.mjs` records the round's copy through `writeRoundFile`. A
+// report cannot be protected where it lands, so it is recorded somewhere it can
+// be. The alternative, leaving it where the agent put it because nothing reads
+// it, means a re-dispatched agent overwrites the round's only account of what the
+// previous one claimed, and nothing on disk says the earlier attempt happened.
 //
 // Transient coordination state (`.codex-artifact-locks/`, `.codex-slots/`,
 // `.quota/`, `*.tmp` attempt files) is not a record and is not routed through

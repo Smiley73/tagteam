@@ -1,37 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "What the fixer did with each finding it was given",
-  "description": "Bookkeeping, not proof. Every outcome here is re-checked by the reviewer that raised the finding.",
+  "title": "What the implementer did with the spec it was given",
+  "description": "The round's account of its own work. A round that records none, and a round that records unfinished work, both stop the pull request for a person to read — so an honest `unfinished` costs nothing that silence does not cost too.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["outcomes", "notes", "status", "summary", "unfinished"],
+  "required": ["status", "summary", "unfinished"],
   "properties": {
-    "outcomes": {
-      "type": "array",
-      "description": "Exactly one entry per finding supplied. A missing entry ends the pull request.",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "outcome", "note"],
-        "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "outcome": {
-            "type": "string",
-            "enum": ["fixed", "fixed-differently", "wont-fix", "failed"],
-            "description": "fixed means the defect is gone by the repair the finding proposed, or by any repair where it proposed none; fixed-differently means the finding was right and the defect is gone, but the repair departs from the one the finding proposed. wont-fix means the finding is wrong or the repair is a decision for a person; failed means the repair was attempted and did not work."
-          },
-          "note": {
-            "type": "string",
-            "minLength": 1,
-            "description": "What changed, or why nothing did."
-          }
-        }
-      }
-    },
-    "notes": {
-      "type": "string",
-      "description": "Anything the reviewer re-checking this work needs and cannot read from the diff."
-    },
     "status": {
       "type": "string",
       "enum": ["complete", "unfinished"],

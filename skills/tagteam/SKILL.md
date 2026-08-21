@@ -38,7 +38,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   rounds/<n>/  round.json (the commit that owns this round, and how many times
                it has been entered), review.diff, findings/, recheck/,
                verify/, candidate.json, review.json, recheck.json,
-               still-open.json, still-open/<lens>.json, fix-report.json   ignored
+               still-open.json, still-open/<lens>.json, report.json    ignored
+  implement-report.json  fix-report.json  what the round's agent said about its
+               own work, written outside every round and recorded into one  ignored
   pr-body.md  ci.json                                                ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
@@ -329,7 +331,7 @@ a new commit appears — and every fix round makes one.
 | `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate`, `roles`. `init` also resolves each lens's brief and freezes it into the state file, and refuses a lens nothing calibrates |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in with `--carry`, into `recheck.json` and `still-open.json`; `--print <recheck.json>` re-renders a settled one |
-| `record-fix-report.mjs` | Validate the fixer's report, written outside the round, and record it as `rounds/<n>/fix-report.json` |
+| `record-round-report.mjs` | Validate the report the round's agent wrote outside the round — the implementer's or the fixer's — and record it as `rounds/<n>/report.json`, or record that the round has none |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |

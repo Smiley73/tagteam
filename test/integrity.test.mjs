@@ -553,6 +553,106 @@ test("step 7 re-checks only what an earlier round left open", () => {
     "step 5 still tells the reader its own findings are re-checked in this round");
 });
 
+// Every round that writes code ends with an account of its own work, and the two
+// lines that record one are reachable on all four routes into step 3 — the first
+// implement, a fix round, a CI repair, and a resume — because every one of them
+// arrives here. The ordering below is the whole guarantee: a gate is evidence
+// about one candidate, so a report counted before `bind` is counted against
+// whatever the last candidate was, and a report counted before the commit is
+// counted against work that is not in it.
+const stepThree = () => shipStep("### 3.", "### 4.");
+
+test("step 3 records the round's report and its gate below the commit and the bind", () => {
+  const step = stepThree();
+  const commit = step.indexOf('git -C "$W" add -A');
+  const bind = step.indexOf('gates.mjs" bind "$S/<id>/state.json"');
+  const recorded = step.indexOf("record-round-report.mjs");
+  const gate = step.indexOf('gates.mjs" record "$S/<id>/state.json" report');
+  assert.ok(commit > -1, "step 3 no longer commits");
+  assert.ok(bind > -1, "step 3 no longer binds the candidate");
+  assert.ok(recorded > -1, "step 3 no longer records the round's report");
+  assert.ok(gate > -1, "step 3 no longer records the report gate");
+  assert.ok(commit < recorded, "step 3 records a report against a commit that does not exist yet");
+  assert.ok(bind < recorded, "step 3 records the report before the commit it describes is the candidate");
+  assert.ok(recorded < gate, "step 3 records the report gate before the report it reads");
+  // The gate is recorded against the commit just made, not against whatever
+  // `state.json` happened to be bound to before this step ran.
+  assert.match(step, /gates\.mjs" record "\$S\/<id>\/state\.json" report "\$OID" "\$S\/<id>\/rounds\/\$ROUND\/report\.json"/,
+    "step 3's report gate is not recorded for $OID from the round's own report.json");
+});
+
+test("the round report is recorded in exactly one step of the ship command", () => {
+  // A second invocation is a recording that runs somewhere before the commit —
+  // step 6 and step 8 both hand back before theirs exists — and a report counted
+  // there is counted against the commit before it.
+  const uses = [...read("commands", "ship.md").matchAll(/record-round-report\.mjs/g)];
+  assert.equal(uses.length, 1, `record-round-report.mjs appears ${uses.length} times in ship.md`);
+});
+
+// A dispatch that does not name the path is an agent with nowhere to write, and
+// its round evaluates as one that accounted for nothing — silently, and for the
+// rest of the spec.
+test("every reporting dispatch names the path its agent must write", () => {
+  const cases = [
+    ["### 2.", "### 3.", "$S/<id>/implement-report.json"],
+    ["### 6.", "### 7.", "$S/<id>/fix-report.json"],
+    ["### 8.", "### 9.", "$S/<id>/fix-report.json"]
+  ];
+  for (const [heading, next, wanted] of cases) {
+    const step = shipStep(heading, next);
+    assert.ok(step.includes(wanted), `ship.md ${heading} dispatches a reporting agent without naming ${wanted}`);
+  }
+  // And no round number in either path: the recording happens after the
+  // re-snapshot has changed `$ROUND`, and on a `fixing` resume the old number is
+  // not recoverable from anything.
+  assert.doesNotMatch(read("commands", "ship.md"), /-report-\$ROUND\.json/,
+    "a reporting path in ship.md still carries the round it was dispatched out of");
+});
+
+// A reason nobody translates reaches a person as a gate name, which is the one
+// thing both of these commands say not to do.
+test("work-not-accounted-for is rendered as a sentence in both commands that show it", () => {
+  const rendered = /(did not confirm|never confirmed) it finished/;
+  for (const file of ["ship.md", "status.md"]) {
+    const text = read("commands", file).replace(/\s+/g, " ");
+    const at = text.indexOf("work-not-accounted-for");
+    assert.ok(at > -1, `commands/${file} never names work-not-accounted-for`);
+    assert.match(text.slice(Math.max(0, at - 600), at + 600), rendered,
+      `commands/${file} names work-not-accounted-for without saying what it means`);
+  }
+});
+
+// A brief that does not name its schema leaves the shape of the report to the
+// model, and a report that fails validation is refused after the work is done.
+test("every reporting brief names the schema its report is validated against", () => {
+  const cases = [
+    ["prompts/implement.md", "schemas/implement-report.schema.json"],
+    ["agent-sources/implementer.md", "schemas/implement-report.schema.json"],
+    ["prompts/fix.md", "schemas/fix-report.schema.json"],
+    ["agent-sources/fixer.md", "schemas/fix-report.schema.json"]
+  ];
+  for (const [file, schema] of cases) {
+    assert.ok(read(...file.split("/")).includes(schema), `${file} does not name ${schema}`);
+    assert.ok(fs.existsSync(path.join(root, schema)), `${schema} does not exist`);
+  }
+});
+
+// One gate reads both reports, so the three fields it reads have to be the same
+// question in both schemas. `validate-json.mjs` refuses a non-local `$ref`, so
+// they are duplicated on purpose — and a description that drifts is a different
+// question asked of two agents whose answers are then compared.
+test("the fields the report gate reads are identical in both report schemas", () => {
+  const implement = JSON.parse(read("schemas", "implement-report.schema.json"));
+  const fix = JSON.parse(read("schemas", "fix-report.schema.json"));
+  for (const field of ["status", "summary", "unfinished"]) {
+    assert.deepEqual(fix.properties[field], implement.properties[field],
+      `${field} differs between the two report schemas`);
+    for (const schema of [implement, fix]) {
+      assert.ok(schema.required.includes(field), `${schema.title} does not require ${field}`);
+    }
+  }
+});
+
 // A round number substituted by hand is prose counting, and it is exactly what
 // made a second round overwrite the first.
 test("no round path in the ship command is a number the orchestrator picks", () => {

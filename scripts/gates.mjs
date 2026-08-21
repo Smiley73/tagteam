@@ -14,7 +14,12 @@ import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mj
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
-const GATES = ["review", "verify", "ci", "human"];
+const GATES = ["review", "verify", "ci", "report", "human"];
+
+// The candidates that went by without an account of their own work. Not evidence
+// about the current commit, which is why it survives `bindCandidate` — see the
+// comment there.
+const UNACCOUNTED = "unaccountedCandidates";
 
 // How much of this attempt's budget has been spent. Counters rather than a
 // derivation from disk alone, because they are the resume mechanism: a fixer
@@ -96,6 +101,7 @@ export function initState({ spec, slug, branch, base, userVisible, reviewers, br
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
     [FIX_COUNTER]: 0,
     [REPAIR_COUNTER]: 0,
+    [UNACCOUNTED]: [],
     history: []
   };
 }
@@ -297,21 +303,39 @@ export function reconcileBudgets(state, rounds) {
 // being merged, so all of it is cleared. This is what stops "reviewed A, merged
 // B", and it is the reason the reviewed OID is never re-derived from HEAD.
 //
-// The two budget counters are the deliberate exception, and they are the only
-// one. They are not evidence about a commit; they are the record of how much
-// budget this attempt has spent, and every fix round produces exactly the new
-// commit that would clear them. Clearing them here would make the budget
-// unspendable — every round would be the first — so they survive binding and
-// move only on the state-machine edges in `transition`.
+// The two budget counters are the first deliberate exception. They are not
+// evidence about a commit; they are the record of how much budget this attempt
+// has spent, and every fix round produces exactly the new commit that would clear
+// them. Clearing them here would make the budget unspendable — every round would
+// be the first — so they survive binding and move only on the state-machine edges
+// in `transition`.
+//
+// `unaccountedCandidates` is the second, and it is a list of commits rather than
+// a document because of what it has to survive. A round that recorded no report
+// admits nothing, so there is no admission anywhere for a later round to carry:
+// after a fix round the tip holds only that fixer's report, and the round that
+// accounted for nothing is gone from `gates` with every other gate. So what is
+// carried is the *unsatisfied state*. The outgoing candidate is written down here
+// whenever its report gate was not a recorded `complete`, and `evaluate` raises
+// the same reason from this list as it does for the current candidate. Binding
+// the same OID again is a round re-entry rather than a new candidate and records
+// nothing — the recording that follows re-entry records the gate again. Nothing
+// removes an entry: a spec that lost a round's account waits for a person on
+// every candidate after it, which is the point.
 export function bindCandidate(state, candidateOid, baseOid, changedPaths = null) {
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) throw new Error(`candidate OID is required, got: ${candidateOid}`);
   if (!/^[0-9a-f]{40,64}$/.test(baseOid ?? "")) throw new Error(`base OID is required, got: ${baseOid}`);
+  const outgoing = state.candidateOid ?? null;
+  const reported = state.gates?.report;
+  const accounted = reported?.candidateOid === outgoing && reported?.status === "complete";
+  const carried = state[UNACCOUNTED] ?? [];
   return {
     ...state,
     candidateOid,
     baseOid,
     changedPaths: changedPaths ?? state.changedPaths,
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
+    [UNACCOUNTED]: outgoing !== null && outgoing !== candidateOid && !accounted ? [...carried, outgoing] : carried,
     history: [...state.history, { candidateOid, baseOid, at: new Date().toISOString() }]
   };
 }
@@ -395,6 +419,7 @@ export function evaluate(state, config) {
   const review = currentGate(state, "review");
   const verify = currentGate(state, "verify");
   const ci = currentGate(state, "ci");
+  const report = currentGate(state, "report");
   const human = currentGate(state, "human");
 
   // (d) A lens that produced no evidence is not a lens that found nothing. An
@@ -427,6 +452,19 @@ export function evaluate(state, config) {
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
     approvals.push("workflow-change");
+  }
+
+  // (f) The agent that wrote this code never said it finished what it was given.
+  // An absent report and an `unfinished` one are the same answer to the only
+  // question this gate asks, and an earlier candidate that was never accounted
+  // for asks it again here — a later round's clean report accounts for that
+  // round's work and for nothing before it.
+  //
+  // An approval and not a blocker, deliberately: a blocker is cleared by nothing,
+  // and an implementer that correctly refuses to guess at a contradictory spec
+  // would strand the branch. A person reads the account and decides.
+  if (!report || report.status !== "complete" || (state[UNACCOUNTED] ?? []).length > 0) {
+    approvals.push("work-not-accounted-for");
   }
 
   // Nothing actually ran. Not a failure, and not evidence either.
@@ -463,7 +501,7 @@ const USAGE = `usage:
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs bind     <state.json> <candidateOid> <baseOid> [changed-paths.json]
-  gates.mjs record   <state.json> <review|verify|ci|human> <candidateOid> <value.json>
+  gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
   gates.mjs roles    <state.json> <config.json>

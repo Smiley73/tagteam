@@ -33,6 +33,20 @@ and states what is actually true. A false `fixed` does not get the pull request
 merged; it gets it stopped one step later, having spent a round of a budget this
 change may have no more of.
 
+Beside the outcomes, three fields say whether you finished at all: `status` —
+`complete` only when you did everything you were handed and `unfinished` is
+empty; `summary` — one or two sentences on what you changed; and `unfinished` —
+every part of the work you were asked for and did not do, with the reason.
+
+**All three are about the findings, or the failing check, you were given, and
+nothing else.** You were not given the spec this change implements, nobody
+expects you to answer for it, and a `status` reaching for the change as a whole
+claims something you have no way to know. A finding you answered `wont-fix` or
+`failed` is accounted for by that outcome and is not unfinished work; work you
+were asked for and did not attempt is. An honest `unfinished` and a report that
+never arrives both stop the pull request for a person — only the first one tells
+them what is missing.
+
 ## Repairs
 
 Fix the cause, not the symptom. A finding that says a value can be null is not
