@@ -515,14 +515,27 @@ test("step 6 has a branch for a fixer that changed nothing", () => {
     "step 6 no longer has a branch for the round that makes no commit");
   assert.match(step, /manufacture one/,
     "step 6 does not forbid manufacturing a commit so that a round can be allocated");
-  // Nothing records the report on this path, so the run itself has to carry it:
-  // no round ever holds the file, and the next fixer writes over it.
-  assert.match(step, /## Risk/,
-    "step 6 does not carry the declined findings anywhere a person reads them");
   // Step 3 sends that clean worktree back here rather than treating it as a
   // resume of a commit that already exists.
   assert.match(stepThree(), /arrived from step 6/,
     "step 3's resume branch still swallows the fix round that made no commit");
+});
+
+// The report this branch leaves behind is the one report in the whole command
+// that no round records, and `record-round-report.mjs` tells a counted report
+// from a new one by what the *other rounds* hold — so an orphan at the scratch
+// path is invisible to that check. Left there, the next round whose agent
+// returns without writing one adopts it: the recorder exits 0, writes
+// `{"status":"complete","kind":"fix"}` into that round, and the report gate
+// `gates.mjs` would have made wait for a person passes on an account of a commit
+// it never saw. Step 8's CI-repair fixer writes the same path, so the window
+// stays open for the rest of the spec.
+test("the changed-nothing branch takes the orphaned report off the path a later round reads", () => {
+  const step = stepSix();
+  assert.match(step, /mv "\$S\/<id>\/fix-report\.json"/,
+    "step 6 leaves the declining fixer's report where the next round reads it as its own");
+  assert.match(step, /records it as its own account/,
+    "step 6 does not say what happens to the report it leaves at the scratch path");
 });
 
 // The adversary is the reader most likely to raise the finding that starts a

@@ -378,13 +378,11 @@ function clearCountable(requestPath, artifact) {
 }
 
 // A terminal failure that has already cleared `--out` and worded its own account
-// of what it found there. The mark is read by the `catch` at the bottom of
-// `runCodex`, which clears for every other way out of the call — a child that
-// never spawned, an unexpected write failure, whatever a later edit throws in
-// there — so that "every terminal failure" is a property of the function rather
-// than of the throws someone remembered. Marked errors are left alone: clearing
-// twice would say the same thing twice, and the second sentence would land after
-// the truncated provider quote the refusals below deliberately end on.
+// of what it found there. The mark is read by `runCodex`, which wraps the whole
+// call and clears for every other way out of it — a payload that was not there,
+// a lock that timed out, a child that never spawned, whatever a later edit
+// throws — so that "every terminal failure" is a property of the function rather
+// than of the throws someone remembered.
 function cleared(message) {
   const error = new Error(message);
   error.clearedCountable = true;
@@ -455,12 +453,46 @@ function reportRouting(routing, options, requestPath) {
   }
 }
 
+// The invariant, owned by the function rather than by the throws someone
+// remembered: every terminal end of a call clears what a later command could
+// count at `--out`. It wraps `dispatch` rather than sitting inside it because
+// the ends that clear nothing are the early ones — a payload file that is not
+// there, a schema that will not parse, a slot or an artifact lock that times out
+// — and all of those are thrown before the first `try` `dispatch` opens. The
+// only two ways out that do not clear are the two that return: a validated
+// artifact this call just wrote, and a `--reuse` hit.
+//
+// The refusals inside `dispatch` word their own account of the removal, and are
+// marked so this does not repeat it — clearing twice would say the same thing
+// twice, and the second sentence would land after the truncated provider quote
+// those messages deliberately end on.
+//
+// An early failure clears without holding the artifact lock, because it failed
+// before there was one to hold. What it races is another call writing this exact
+// artifact path at this exact moment, which is the thing that lock exists to
+// forbid; and the loser of that race is left with no artifact rather than with a
+// stale one that counts, which is the direction this whole file errs in. A
+// `--reuse` candidate is cleared too: an answer nothing may count is not an
+// answer a later run may resume from either.
 export async function runCodex(options) {
+  const artifact = path.resolve(options.out);
+  const requestPath = `${artifact}.request.json`;
+  try {
+    return await dispatch(options, artifact, requestPath);
+  } catch (thrown) {
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    if (!error.clearedCountable) {
+      error.clearedCountable = true;
+      error.message = `${error.message} ${clearCountable(requestPath, artifact)}`;
+    }
+    throw error;
+  }
+}
+
+async function dispatch(options, artifact, requestPath) {
   const { prompt, bytes, sections } = composePrompt(options);
   const schema = JSON.parse(fs.readFileSync(path.resolve(options.schema), "utf8"));
-  const artifact = path.resolve(options.out);
   const promptPath = `${artifact}.prompt.md`;
-  const requestPath = `${artifact}.request.json`;
   const eventsPath = `${artifact}.events.jsonl`;
   const record = requestRecord(options, prompt);
 
@@ -655,20 +687,6 @@ export async function runCodex(options) {
       }
     }
     throw new Error("unreachable");
-  } catch (thrown) {
-    // The last of the terminal ends, and the ones nobody wrote a sentence for: a
-    // child that never spawned, a write that failed, whatever a later edit
-    // throws inside this loop. They owe `--out` exactly what the refusals above
-    // owe it, and clearing here is what makes that a property of the function
-    // rather than of the throws someone remembered. It runs before the `finally`
-    // below, so the artifact lock is still held while the removal happens and no
-    // other call can be writing that path meanwhile.
-    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
-    if (!error.clearedCountable) {
-      error.clearedCountable = true;
-      error.message = `${error.message} ${clearCountable(requestPath, artifact)}`;
-    }
-    throw error;
   } finally {
     artifactLock.release();
     slot.release();

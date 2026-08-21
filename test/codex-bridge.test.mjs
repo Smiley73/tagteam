@@ -12,6 +12,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { ensureGitignore } from "../scripts/ensure-gitignore.mjs";
+import { acquireSlot } from "../scripts/lib/locks.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const bridge = path.join(root, "scripts", "codex.mjs");
@@ -535,6 +536,56 @@ test("a hung Codex is killed at the timeout, and the timeout is terminal", () =>
   // thing, so there is exactly one attempt.
   assert.equal(execs(space.dir).length, 1);
   assert.ok(elapsed < 20_000, `the timeout did not take effect (${elapsed}ms)`);
+});
+
+// The terminal ends that happen before Codex is anywhere in sight. A call that
+// cannot compose its request never reaches the loop where the refusals live, and
+// ship.md documents exactly the re-dispatch that makes what it leaves behind
+// countable: step 6 re-dispatches a missing lens "against the same candidate",
+// onto a path that is usually already there.
+test("a request that cannot be composed clears the artifact an earlier run left at --out", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  fs.rmSync(path.join(space.dir, "payload.diff"));
+  const result = run(space);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /The diff section is missing/);
+  assert.equal(execs(space.dir).length, 1, "a call that composed no request still reached Codex");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
+    "the earlier artifact survived a request that was never composed");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
+    "the earlier sidecar survived a request that was never composed");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the refusal does not say what became of what was at --out");
+});
+
+// The other end that is thrown before the first `try` inside the call: the slot
+// this bridge bounds its concurrency with. The slot is held by this test process
+// rather than by a sibling bridge, so the holder is unmistakably live and the
+// wait is not shortened by a reclaim; `TAGTEAM_LOCK_WAIT_TIMEOUT_MS` is what
+// keeps the wait to a second.
+test("a call that never gets a slot clears the artifact an earlier run left at --out", async () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  const held = await acquireSlot(path.join(space.dir, "slots", ".codex-slots"), 1);
+  try {
+    const result = run(space, ["--max-concurrent", "1"], { TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1000" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /execution slot/);
+    assert.equal(execs(space.dir).length, 1, "a call that never got a slot still reached Codex");
+    assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
+      "the earlier artifact survived a call that never got a slot");
+    assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
+      "the earlier sidecar survived a call that never got a slot");
+    assert.match(result.stderr, /were removed so nothing later can count them/,
+      "the refusal does not say what became of what was at --out");
+  } finally {
+    held.release();
+  }
 });
 
 // A timeout is terminal, and terminal ends owe --out what the refusals owe it.

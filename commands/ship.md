@@ -528,12 +528,33 @@ does not contain its work — which the recorder refuses, naming `report.json`,
 after the snapshot has already rebuilt a round nothing new went into.
 
 So there is no commit, no round is allocated, and nothing records the report:
-**you are what carries it.** Read `$S/<id>/fix-report.json` and say, in plain
-English, that the fixer changed nothing and what it says about each finding it
-declined — then say it again in the pull request under `## Risk`, because every
-one of those findings is still open. That file is the only copy of the account
-and the next fixer this spec dispatches writes over it, so say what it holds now
-rather than pointing at the path.
+**you are what carries it, and then it has to leave that path.** Read
+`$S/<id>/fix-report.json` and say, in plain English, that the fixer changed
+nothing and what it says about each finding it declined. The findings
+themselves reach the pull request the way every open finding does — through
+step 8's `## Risk` rule, as what goes wrong and for whom — and the fixer's
+reasoning about them is for the person reading this run, not for that body.
+Then move the file aside, keeping it the way step 3 keeps a report it refused:
+
+```bash
+mkdir -p "$S/<id>/declined"
+mv "$S/<id>/fix-report.json" \
+  "$S/<id>/declined/round-$ROUND-$(date -u +%Y%m%dT%H%M%SZ).json"
+```
+
+**Moving it is not tidying, and skipping it loses a later round's account.**
+The recorder tells a report it has already counted from a new one by looking at
+what the *other rounds* hold, so a report no round holds at all is invisible to
+that check. Left where it is, the next round whose agent returns without
+writing one — the case step 3's "a round with no new report is recorded as
+having none" exists for — reads this file, records it as its own account of a
+commit it never saw, and a round that should have waited for a person passes
+the report gate on someone else's `complete`. Step 8's CI-repair fixer writes
+that same path, so the window stays open for the rest of the spec. The stamp is
+in the name because this round can decline twice: no commit means no new round,
+so a second declining fixer is dispatched out of the same `$ROUND` and must not
+write over the first one's account. Say where you moved it, in the run's own
+words, so the person reading this spec can find what the fixer actually said.
 
 Then put the state back where both paths converge, exactly as the budget refusal
 above does — this round was bought, so the state is at `fixing`:
@@ -544,10 +565,17 @@ above does — this round was bought, so the state is at `fixing`:
 - You arrived from step 7 and its gate is already recorded against this commit:
   `gates.mjs state ... verifying`, then step 8.
 
-Either way the spec still publishes and step 9 stops the merge on findings that
-are still open, which is where a person weighs the fixer's disagreement against
-the reviewer that raised them. A fixer that changed nothing is not a failure and
-never goes to `failed`.
+Where those two end differs, and the difference is step 7's to decide rather than
+this branch's. Arriving from step 7, the spec publishes and step 9 puts the
+still-open findings in front of a person, who is the one to weigh this fixer's
+disagreement against the reviewer that raised them. Arriving from step 5, step
+7's closing decision finds exactly what it looks for — a blocking or major
+finding still open — so with fix budget left it takes `verifying -> reviewing`
+and comes back here for another round, and this spec publishes later rather than
+now. That is the right answer and not a loop to break: a finding one fixer
+declined is one another fixer may repair, and step 6 refuses on its own when the
+budget is gone. A fixer that changed nothing is not a failure and never goes to
+`failed`.
 
 Otherwise commit and re-snapshot exactly as in step 3, which takes the next
 round from the allocator into `$ROUND`, sets `OID` to the new commit, `gates.mjs bind`s it —
