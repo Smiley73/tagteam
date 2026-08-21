@@ -63,11 +63,24 @@ export const ROUND_REPORT = "report.json";
 // only way to rebuild a round, and it empties the round first — safe at the
 // snapshot step, where the round holds nothing yet, and destructive at any later
 // one, where it deletes evidence a model wrote and cannot be asked for again.
+//
+// The round's report is the one path where that recovery is not the recovery at
+// all: `clearRound` keeps it, so re-entering the round rebuilds everything around
+// it and leaves this refusal standing. An agent told to re-enter would pay the
+// price — the round's findings, recheck and verify evidence — and arrive back at
+// the identical message, so this refusal says what is actually true of the file
+// it names.
 const refuse = (file, reason) =>
   new Error(`the round already records ${reason}: ${file} — a round record is written once. `
-    + "Re-entering the round (re-running the snapshot against the same commit) rebuilds it, but empties it "
-    + "first: every findings, recheck and verify file in it is deleted. That is only safe before the review "
-    + "has run; later, work out why this path is being written twice instead");
+    + (path.basename(file) === ROUND_REPORT
+      ? "Re-entering the round does not clear this one: the round's report is about the commit rather than "
+        + "about the attempt to review it, so re-running the snapshot keeps it and refuses here again. What "
+        + "is in front of you is two different accounts of one commit — the round holds the first, the "
+        + "second is still at the scratch path its agent wrote it to, and which agent wrote which is the "
+        + "thing to work out before anything else"
+      : "Re-entering the round (re-running the snapshot against the same commit) rebuilds it, but empties it "
+        + "first: every findings, recheck and verify file in it is deleted. That is only safe before the "
+        + "review has run; later, work out why this path is being written twice instead"));
 
 const unreadableMarker = (markerPath) =>
   new Error(`the round marker at ${markerPath} is unreadable; a round with an unknown owner is neither `

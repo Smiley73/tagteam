@@ -589,6 +589,18 @@ test("the round report is recorded in exactly one step of the ship command", () 
   assert.equal(uses.length, 1, `record-round-report.mjs appears ${uses.length} times in ship.md`);
 });
 
+test("step 3 says what a non-zero exit from the recording lines means", () => {
+  // The recorder writes nothing when a report is malformed, so the gate line
+  // after it fails too — and the file stays at a path with no round number in it,
+  // where the next round reads it and refuses in the same place, before that
+  // round's own report is looked at. An orchestrator with no instruction here
+  // commits again and loses an account per round; the instruction is the only
+  // thing that stops it, because nothing later in the command clears the file.
+  const step = stepThree();
+  assert.match(step, /non-zero exit/, "step 3 does not say what a failing recording line means");
+  assert.match(step, /do not commit again/i, "step 3 lets the run carry a refused report into the next round");
+});
+
 // A dispatch that does not name the path is an agent with nowhere to write, and
 // its round evaluates as one that accounted for nothing — silently, and for the
 // rest of the spec.

@@ -26,15 +26,24 @@
 // validated, not only the one that turns out to be its own — the alternative
 // files malformed agent output away as an absence nobody has to look at.
 //
+// That refusal has to be dealt with in the round that raises it, and the message
+// says so, because nothing here can deal with it later: the refused file sits at
+// a path with no round number in it, nothing removes it, and it was never
+// recorded anywhere, so no later round can tell it from a report of its own. Left
+// where it is, it is re-read and refused by every round after this one — before
+// the report that round does have has been looked at — and each of those rounds
+// ends up with no account of its work. Exiting 2 is a stop, not a warning.
+//
 // **A report already recorded in another round of this spec is not a report for
 // this round.** The agents' paths carry no round number — the recording happens
 // after the re-snapshot that changes it, and on a `fixing` resume the old number
 // is not recoverable from anything — so a stable path is only honest if this
 // refuses to count one report twice. An agent that returned without writing
 // anything leaves the previous round's file sitting there, and counting it would
-// record a report against a commit it does not describe. Re-entering a round
-// clears the round's copy, which makes the agent's file uncounted again and lets
-// an interrupted round be recorded properly.
+// record a report against a commit it does not describe. Re-entry does not undo
+// that: the round's copy is one of the two records `clearRound` keeps, so a
+// re-entered round can only be recorded again by the same report, byte for byte,
+// and a later agent's file cannot become the account of a commit it did not make.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +58,15 @@ const KINDS = [
   { kind: "implement", file: "implement-report.json", schema: "implement-report.schema.json" },
   { kind: "fix", file: "fix-report.json", schema: "fix-report.schema.json" }
 ];
+
+// Carried by both refusals, whose reader is an autonomous orchestrator: a broken
+// report is only broken once if it is rewritten now, and is a stop for every
+// later round of the spec if it is not.
+const CORRECT_IT_NOW = "Nothing was recorded, so this round has no account of its work and the gate that reads "
+  + "one is unsatisfied. The path has no round number in it and nothing clears it: left as it is, every later "
+  + "round of this spec reads this same file and refuses here too, before the report that round does have is "
+  + "looked at. Have the agent that wrote it write it again at this path, or move the file aside, and re-run "
+  + "this before the next commit.";
 
 function parseArgs(argv) {
   const options = {};
@@ -134,7 +152,7 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     try {
       parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     } catch (error) {
-      throw new Error(`the report at ${file} is unreadable: ${error.message}`);
+      throw new Error(`the report at ${file} is unreadable: ${error.message}\n${CORRECT_IT_NOW}`);
     }
     const round = held.get(serialize(parsed));
     if (round !== undefined) {
@@ -153,7 +171,7 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     if (errors.length > 0) {
       throw new Error(`the report at ${file} does not match the `
         + `${candidate.schema.replace(/\.schema\.json$/, "")} schema:\n`
-        + errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n"));
+        + `${errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n")}\n${CORRECT_IT_NOW}`);
     }
     found.push({ ...candidate, file, parsed });
   }

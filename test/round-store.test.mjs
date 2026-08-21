@@ -418,6 +418,45 @@ test("re-entering a round after a second agent ran cannot record its report over
   assert.equal(scratch.outcomes[0].outcome, "wont-fix");
 });
 
+test("the refusal at the round's report does not send its reader to re-enter the round", () => {
+  // The reader is usually an agent that acts on what a tool prints, and re-entry
+  // is the one recovery that cannot work here: it keeps the report, so following
+  // that advice deletes the round's findings, recheck and verify evidence and
+  // arrives back at the identical refusal. Every other path in the round still
+  // gets the re-entry advice, which is true there.
+  const ship = shipAt();
+  const round = roundIn(ship, 1);
+  implementReportAt(ship, "wrote the recorder and its gate");
+  assert.equal(record(ship, reportPath(ship, 1)).status, 0);
+  fs.rmSync(path.join(ship, "implement-report.json"));
+  fixReportAt(ship, "took the lock before the read");
+
+  const refused = record(ship, reportPath(ship, 1));
+  assert.equal(refused.status, 2, refused.stdout);
+  assert.match(refused.stderr, /Re-entering the round does not clear this one/);
+  assert.doesNotMatch(refused.stderr, /rebuilds it, but empties it first/);
+
+  plant(round, "findings/correctness.json", "first");
+  assert.throws(() => writeRoundFile(path.join(round, "findings", "correctness.json"), "second"),
+    /rebuilds it, but empties it first/, "a round file that re-entry does rebuild lost its recovery");
+});
+
+test("a malformed report is refused with what it costs every later round of the spec", () => {
+  // The file sits at a path with no round number in it and nothing removes it, so
+  // an orchestrator that reads this as a warning and commits again meets the same
+  // refusal in the next round — where it lands before the report that round does
+  // have is looked at, and that round's real account is lost. The refusal is only
+  // survivable if it says so where it is read.
+  const ship = shipAt();
+  roundIn(ship, 1);
+  fs.writeFileSync(path.join(ship, "implement-report.json"), JSON.stringify({ summary: "did it", unfinished: [] }));
+  const result = record(ship, reportPath(ship, 1));
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /every later round of this spec reads this same file/);
+  assert.match(result.stderr, /before the next commit/);
+});
+
 test("a report that claims complete while listing unfinished work is recorded as unfinished", () => {
   // Neither refused nor believed. The gate reads the wrapper, so the
   // contradiction is settled in the direction that asks a person.

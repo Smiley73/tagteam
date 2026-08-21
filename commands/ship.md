@@ -214,6 +214,18 @@ report is recorded as having none** and waits for a person at step 9. That is th
 honest outcome of an agent that returned without writing one, and nothing in this
 command writes a report on an agent's behalf.
 
+**A non-zero exit from either of those two lines is a stop, and it is a stop
+here.** The first exits 2 when a report an agent wrote cannot be read or does not
+match its schema — broken agent output, not a failure of the code under review —
+and it writes nothing, so the round holds no account and the second line then
+fails on a file that is not there. Nothing later in this command clears either.
+Re-dispatch the reporting agent for this round with the same path and the error
+text so it writes the file again, or stop and show a person what it printed; then
+re-run both lines. **Do not go on and do not commit again with that file as it
+is**: the agents' report paths carry no round number, so it is the same file the
+next round reads, it is refused there in the same place, and the report that
+round does have is never looked at.
+
 **The round number is `gates.mjs round`'s to give, once per candidate, here.** It
 reconciles what this attempt has spent against the rounds already on disk, hands
 back the next number, and refuses to reuse one: a commit that already owns a
