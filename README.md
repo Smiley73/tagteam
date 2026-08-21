@@ -279,7 +279,10 @@ does nothing here until the snapshot is refreshed; a change to that file's
 `version` does worse, because the snapshot's validator compares it against its
 own and exits 3, stopping `/tagteam:plan` and `/tagteam:ship` with an
 instruction to run the old snapshot's `/tagteam:init` — which would rewrite the
-config back.
+config back. `/tagteam:status`, `/tagteam:plan` and `/tagteam:ship` each say
+which snapshot is running them and, in a checkout of the plugin itself, name the
+files that actually execute whose installed copy differs from the working tree —
+so this is something you are told rather than something you have to remember.
 
 Which refresh applies depends on which version moved. If the package version in
 `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` was raised,

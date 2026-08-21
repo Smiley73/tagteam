@@ -22,9 +22,18 @@ code and findings; you never let a diff or a findings body into your own context
    findings arrive under the same lens name either way, so this line is the only
    place the substitution is visible.
 3. `codex --version` and `gh auth status`. Either fails: stop and say which.
-4. Reject any path argument containing control characters or shell
+4. `node "$P/scripts/running-plugin.mjs" "$R"` — which installed snapshot is
+   running this, and, when this repository is a checkout of that same plugin,
+   which of the files it actually executes differ from the working tree. Render
+   it as *The running snapshot* in the skill says, identity line first.
+
+   **This never stops anything, whatever it says.** Print it and carry on to the
+   next item — a difference is not a failure, and it is never a reason to refuse
+   a ship or to offer to reinstall. Every other item in this list ends in "stop"
+   or "ask"; this one does not.
+5. Reject any path argument containing control characters or shell
    metacharacters. You build shell strings where a script would have built argv.
-5. Take the ship lock:
+6. Take the ship lock:
    `node "$P/scripts/ship-lock.mjs" acquire "$R" "<slug>"`. It returns a `token` —
    write it to `$S/lock-token` immediately, because releasing requires it and your
    own memory of it will not survive a long train. Release with
@@ -44,10 +53,10 @@ code and findings; you never let a diff or a findings body into your own context
    the outside and only a person can tell them apart. If they confirm the other
    run is gone, `acquire ... --force` reclaims it and quarantines the old holder.
    Never reclaim on your own judgement.
-6. `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"` → the ordered
+7. `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"` → the ordered
    specs with their resolved lenses. Skip every spec whose
    `$S/<id>/state.json` says `merged`. Announce where you are starting.
-7. Worktree, once for the whole train:
+8. Worktree, once for the whole train:
 
 ```bash
 git -C "$R" fetch origin --prune

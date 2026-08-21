@@ -344,6 +344,60 @@ a new commit appears — and every fix round makes one.
 | `ensure-gitignore.mjs` | Maintain the managed `.gitignore` block |
 | `notify.mjs` | Desktop notification when a run needs a person |
 | `status.mjs` | Inventory for `/tagteam:status` |
+| `running-plugin.mjs` | Which snapshot is executing, and which executed files it differs from this checkout on |
+
+## The running snapshot
+
+Claude Code runs an installed *copy* of this plugin, not the working tree it was
+installed from, so an edit to a script or a command file does nothing until the
+snapshot is refreshed. Both commands report which copy is running before they do
+any work:
+
+```bash
+node "$P/scripts/running-plugin.mjs" "$R"
+```
+
+**This never stops anything.** Print what it says and carry on — whatever it
+says. Do not stop, do not ask, do not offer to reinstall, and never treat a
+difference as a reason to refuse a plan or a ship. A one-character edit to a
+repository must not lock its author out until they reinstall.
+
+Render it in this order:
+
+1. **The identity line, first**, before anything else that command prints:
+   "Running tagteam 0.8.2 from
+   `/Users/…/.claude/plugins/cache/tagteam/tagteam/0.8.2`." A null
+   `plugin.version` is a snapshot that does not name its own version — say that,
+   and still give the path, because the path is what makes the copy visible.
+2. **`repo.isPlugin` false: stop there.** Say nothing about differing files. Most
+   repositories are not tagteam, and a line saying so on every run of every
+   command is noise a person learns to skip past, which costs the identity line
+   above it too.
+3. **`repo.sameTree` true**: one clause — this repository is the copy that is
+   running, so nothing can be out of date.
+4. **`drift` empty and the two versions equal**: one clause, not a paragraph —
+   this checkout is the version that is running and every file it runs matches.
+5. **The versions differ**: name both numbers and say the working tree's version
+   is not the one that ran.
+6. **`drift` non-empty**: name the differing files by path, at most ten, then
+   "and N more" — never their contents, and never a diff. Say plainly that what
+   was edited is not what ran. Then the repair, chosen by which version moved. If
+   the versions differ, the snapshot can be updated in place:
+
+   ```bash
+   claude plugin marketplace update tagteam
+   claude plugin update tagteam@tagteam
+   ```
+
+   If they are equal, `update` reports there is nothing to do, so it takes
+   `claude plugin uninstall tagteam@tagteam` and installing again. Restart the
+   session either way. Say it; they run it.
+7. **`drift` null**: one clause for the `driftUnknown` reason you were given, and
+   only that one — `"identity"`, whether this checkout is an install of what is
+   running could not be decided, because one of the two
+   `.claude-plugin/plugin.json` files could not be read; `"snapshot"`, the
+   installed copy could not be read, so nothing was compared; `"worktree"`, this
+   checkout could not be read, so nothing was compared.
 
 ## Asking
 
