@@ -712,9 +712,40 @@ git -C "$W" push -u origin "<branch>"
 gh pr create --base <base> --head <branch> --title "<title>" --body-file "$S/<id>/pr-body.md"
 ```
 
-Title: ≤70 characters of `[A-Za-z0-9 ._:-]`. Body: what the spec delivers, what
-verification ran, what the review found, and any minor findings left open. Write
-it in `$S`, never in the worktree.
+Title: ≤70 characters of `[A-Za-z0-9 ._:-]`. Write the body in `$S`, never in
+the worktree.
+
+**The body is functional, not technical**, in this shape:
+
+```md
+## Summary
+## What you can now do
+## Risk
+```
+
+Write it for whoever reads this pull request cold, and for whoever reads it a
+year from now looking for when a behaviour changed. That reader wants what is
+different for the person using this software and why it was worth doing.
+Anything about *how* is in the diff, one click away, and does not belong here.
+
+So: no file paths, function names, constants or schema keys — a reader who wants
+them greps for them. No account of how the change was built. And **nothing about
+the review or the verification** — not how many rounds it took, not what the
+lenses raised, not what the adversary tried, not the test count. That record
+exists under `.tagteam/ships/` for anyone who needs it, and none of it tells a
+reader whether to merge.
+
+Two things do carry over from the run, because they are about the software
+rather than the process:
+
+- **A finding still open goes under `## Risk`**, said as what goes wrong and for
+  whom, in the same plain English step 9 uses for a person. Not its id, not its
+  severity, not the lens that raised it.
+- **A budget that ran out goes there too** — what the change still gets wrong,
+  and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
+  to let it try again.
+
+`## Risk` says "nothing known" when there is nothing, rather than being dropped.
 
 ```bash
 node "$P/scripts/gates.mjs" pr "$S/<id>/state.json" <number> <url> "$OID"
