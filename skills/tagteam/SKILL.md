@@ -485,6 +485,9 @@ mid-train is the failure this design exists to avoid. Three rules:
   re-run. Committed work is on its branch.
 - **Codex quota**: the bridge waits, in slices, to a four-hour ceiling, then
   fails. Nothing else needs doing.
+- **A model Codex cannot use**: the bridge refuses on the first attempt, naming
+  the model and quoting what the provider said. The repair is the configured
+  model, not a retry — a second call reaches the same account.
 - **A schema 400**: a property missing from `required` or a `const` with no
   `type`. Fix the schema; retries cannot help.
 - **The plugin is a snapshot.** Claude Code runs a copy under

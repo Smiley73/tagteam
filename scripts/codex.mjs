@@ -24,6 +24,7 @@ import {
   classifyProviderError,
   nextBackoff,
   parseResetTime,
+  providerFailureEvidence,
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
 import { isMain } from "./lib/is-main.mjs";
@@ -218,7 +219,7 @@ export function codexArgv(options, outputPath) {
 
 async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () => {} }) {
   const argv = codexArgv(options, outputPath);
-  if (options.dryRun) return { argv, dryRun: true, stderr: "", timedOut: false, exitCode: 0 };
+  if (options.dryRun) return { argv, dryRun: true, stderr: "", evidence: "", timedOut: false, exitCode: 0 };
 
   fs.mkdirSync(path.dirname(eventsPath), { recursive: true, mode: 0o700 });
   // Truncating rather than appending: this file is the raw transcript of one
@@ -251,7 +252,20 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     stdio: ["pipe", "pipe", "pipe"]
   });
   let stderr = "";
+  // A failure `codex exec --json` reports on stdout is why this tail exists: the
+  // run that refused an unusable model left stderr at 0 bytes and put the
+  // provider's own sentence in an event. Kept in flight rather than read back
+  // out of the event log, because that file is opened `w` per attempt and its
+  // last writes land asynchronously — a read right after the child closes can
+  // miss exactly the lines that say what happened. Same 64 KiB bound as stderr,
+  // for the same reason: a long run must not be held in memory whole. A failure
+  // event buried under more than that degrades to what happened before this
+  // tail existed, which is a schema retry.
+  let stdout = "";
   child.stdout.pipe(events, { end: false });
+  child.stdout.on("data", (chunk) => {
+    stdout = (stdout + chunk.toString()).slice(-65_536);
+  });
   child.stderr.on("data", (chunk) => {
     stderr = (stderr + chunk.toString()).slice(-65_536);
   });
@@ -291,7 +305,7 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     clearTimeout(timer);
   });
   await closeEvents();
-  return { argv, stderr, timedOut, exitCode };
+  return { argv, stderr, evidence: providerFailureEvidence(stdout), timedOut, exitCode };
 }
 
 function validateArtifact(schema, file) {
@@ -551,13 +565,26 @@ export async function runCodex(options) {
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
-      const classification = classifyProviderError(outcome.stderr, "codex");
+      // Both streams, because a provider failure arrives on either one and
+      // nothing says which: the exhausted-quota message anyone has seen came on
+      // stderr, and the unusable-model refusal came on stdout with stderr empty.
+      // Reading one of them was how both of the branches below became
+      // unreachable and every provider failure was reported as a bad answer.
+      const said = [outcome.evidence, outcome.stderr].filter(Boolean).join("\n");
+      const classification = classifyProviderError(said, "codex");
       if (classification.kind === "model-unavailable") {
-        throw new Error(`Codex model ${options.model} at ${options.effort} effort is unavailable: ${outcome.stderr.slice(-1000)}`);
+        // Named as the flag rather than as the model alone: the thing to change
+        // is the configured model this run was dispatched with, and a retry
+        // cannot reach a model the account may not use. Quoting the provider is
+        // the rest of it — its sentence says which of "misspelled", "retired"
+        // and "not on this plan" this is, and nothing here can tell them apart.
+        throw new Error(
+          `Codex model ${options.model} at ${options.effort} effort is unavailable, so --model is what has to change: ${said.slice(-1000)}`
+        );
       }
       if (classification.kind === "quota") {
         const state = readOrCreateQuotaState(quotaStatePath);
-        const targetAt = parseResetTime(outcome.stderr);
+        const targetAt = parseResetTime(said);
         while (true) {
           const next = nextBackoff({ firstDetectedAt: state.firstDetectedAt, targetAt });
           if (next.action === "abort") {
@@ -577,7 +604,7 @@ export async function runCodex(options) {
       } else {
         throw new Error(
           `Codex did not produce a valid artifact after ${SCHEMA_ATTEMPTS} attempts: ${validation.errors.join("; ")}`
-          + (outcome.stderr ? `; ${outcome.stderr.slice(-1000)}` : "")
+          + (said ? `; ${said.slice(-1000)}` : "")
         );
       }
     }
