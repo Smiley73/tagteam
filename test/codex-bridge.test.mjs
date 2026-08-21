@@ -372,6 +372,23 @@ test("a model this account cannot use ends the call on the first attempt, in the
   assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the refused call left an artifact behind");
 });
 
+// The state a fresh workspace cannot show: a lens re-dispatched into a round it
+// already wrote into. The provider turning the second call away leaves the first
+// call's artifact where it was, and collect-findings.mjs reads that file without
+// consulting the sidecar, so the refused dispatch would count as a review.
+test("an unusable model clears the artifact and sidecar an earlier good run left at --out", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  const result = run(space, [], { FAKE_CODEX_MODE: "unusable-model" });
+  assert.equal(result.status, 1, "the re-dispatch should have refused");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived an unusable model");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived an unusable model");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the refusal does not say what became of what was at --out");
+});
+
 // The trap. An `item.completed` whose `item.type` is "error" is an advisory, and
 // a run that succeeds emits them too. Matching error-shaped things anywhere in
 // the stream turns this notice into a terminal refusal.
@@ -431,6 +448,24 @@ test("a quota signal carried on stdout reaches the same wait", () => {
     "a quota reported on stdout did not reach the four-hour ceiling");
   assert.ok(!/after 2 attempts/.test(result.stderr), "a quota failure was reported as a schema failure");
   assert.equal(execs(space.dir).length, 1, "a quota that had already run out was retried");
+});
+
+// The ceiling is terminal, and a terminal end owes --out what the refusals owe
+// it: an earlier dispatch's artifact left in place is one a later command counts
+// as this candidate's review.
+test("a quota that never clears takes the earlier run's artifact and sidecar with it", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  // Seeded after the good run, which removes the quota state it finds.
+  seedExhaustedQuota(space.dir);
+  const result = run(space, [], { FAKE_CODEX_MODE: "quota" }, { timeout: 60_000 });
+  assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived an exhausted quota");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived an exhausted quota");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the abort does not say what became of what was at --out");
 });
 
 // The --slots root is a plan or ship directory, which a project commits from,
