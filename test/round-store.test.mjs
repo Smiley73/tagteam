@@ -273,6 +273,29 @@ test("a fix report is recorded the same way, and the round holds one of them", (
   assert.match(result.stdout, /1 fixed/);
 });
 
+test("a repair round's report with no outcomes is recorded and summarised by its summary", () => {
+  // Step 8's CI-repair fixer is handed a failing check and no findings, so
+  // `outcomes` is an empty array and the repair lives in `summary` — the only
+  // shape a repair round can produce. If `outcomes` ever grew `minItems: 1`,
+  // every CI repair would stop at the recording step with the whole suite
+  // green; this is what notices.
+  const ship = shipAt();
+  roundIn(ship, 1);
+  fs.writeFileSync(path.join(ship, "fix-report.json"), `${JSON.stringify({
+    outcomes: [], notes: "", status: "complete", summary: "re-ran the failing check", unfinished: []
+  }, null, 2)}\n`);
+  const result = record(ship, reportPath(ship, 1));
+
+  assert.equal(result.status, 0, result.stderr);
+  const wrapper = readWrapper(reportPath(ship, 1));
+  assert.equal(wrapper.kind, "fix");
+  assert.equal(wrapper.status, "complete");
+  assert.equal(wrapper.report.outcomes.length, 0);
+  // With nothing to tally, the header says so and the summary is the account.
+  assert.match(result.stdout, /fix report: complete, nothing reported/);
+  assert.match(result.stdout, /re-ran the failing check/);
+});
+
 test("a report an earlier round already holds is not a report for this round", () => {
   // The assertion that keeps a path with no round number in it honest: an agent
   // that returned without writing anything leaves the last round's file sitting
@@ -416,6 +439,60 @@ test("re-entering a round after a second agent ran cannot record its report over
   // what a person compares the two by.
   const scratch = JSON.parse(fs.readFileSync(path.join(ship, "fix-report.json"), "utf8"));
   assert.equal(scratch.outcomes[0].outcome, "wont-fix");
+
+  // The refusal names the way past it, and the way past it works: the scratch
+  // file is moved aside — never written over — and the recording then finds the
+  // round already accounted for and passes without touching the record. Without
+  // this branch there is no input that gets past the refusal for this commit:
+  // keeping the second report is different bytes, and removing it used to
+  // regenerate a `missing` wrapper over the held account — different bytes too.
+  assert.match(again.stderr, /move the scratch file aside/);
+  fs.renameSync(path.join(ship, "fix-report.json"), path.join(ship, "fix-report.disputed.json"));
+  const cleared = record(ship, reportPath(ship, 2));
+  assert.equal(cleared.status, 0, cleared.stderr);
+  assert.equal(readWrapper(reportPath(ship, 2)).report.outcomes[0].note, "took the lock before the read");
+  assert.match(cleared.stdout, /1 fixed/);
+});
+
+test("a round recorded as missing survives re-entry without reproducing the reason", () => {
+  // The `missing` wrapper's reason is a generated string over a mutable, shared
+  // scratch directory, and re-entry keeps `report.json` — so the resume route
+  // the spec names (back to the commit-and-snapshot step, re-entering the round)
+  // must not depend on regenerating those bytes exactly. The recorder finds the
+  // round already accounted for and leaves the record alone; this is the case
+  // the feature exists for, an agent that returned without writing a report.
+  const ship = shipAt();
+  const round = roundIn(ship, 1);
+  assert.equal(record(ship, reportPath(ship, 1)).status, 0);
+  const before = readWrapper(reportPath(ship, 1));
+  assert.equal(before.status, "missing");
+
+  enterRound(round, { owner: OID });
+  const again = record(ship, reportPath(ship, 1));
+  assert.equal(again.status, 0, again.stderr);
+  const after = readWrapper(reportPath(ship, 1));
+  assert.equal(after.status, "missing");
+  assert.equal(after.reason, before.reason);
+  assert.match(again.stdout, /missing/);
+});
+
+test("a malformed-report stop, resumed with a fresh round entry, still records the round", () => {
+  // The stop happens after the commit is made and the round is bound, so the
+  // documented resume comes back through re-entry and re-runs the recording.
+  // The refusal must leave that path open: nothing recorded, the round still
+  // enterable, and the absence recorded once the broken file is moved aside —
+  // which is the recovery now that no agent is re-dispatched to rewrite it.
+  const ship = shipAt();
+  const round = roundIn(ship, 1);
+  fs.writeFileSync(path.join(ship, "implement-report.json"), JSON.stringify({ summary: "did it", unfinished: [] }));
+  assert.equal(record(ship, reportPath(ship, 1)).status, 2);
+  assert.equal(fs.existsSync(reportPath(ship, 1)), false, "a refused report left a record behind");
+
+  enterRound(round, { owner: OID });
+  fs.renameSync(path.join(ship, "implement-report.json"), path.join(ship, "implement-report.broken.json"));
+  const resumed = record(ship, reportPath(ship, 1));
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(readWrapper(reportPath(ship, 1)).status, "missing");
 });
 
 test("the refusal at the round's report does not send its reader to re-enter the round", () => {
@@ -504,8 +581,9 @@ test("an allocator record stranded at the marker name still fails closed, naming
 test("an invalid report is refused before the round holds it", () => {
   // A report recorded into a round can never be replaced with a corrected one, so
   // the schema check has to come first: refusing leaves the round clean and the
-  // agent re-dispatchable. The asymmetry with the absent report above is
-  // deliberate — a malformed one is a broken agent output a person must see now.
+  // absence recordable once the file is moved aside. The asymmetry with the
+  // absent report above is deliberate — a malformed one is a broken agent
+  // output a person must see now.
   const ship = shipAt();
   roundIn(ship, 1);
   fs.writeFileSync(path.join(ship, "fix-report.json"), JSON.stringify({

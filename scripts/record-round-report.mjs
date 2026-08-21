@@ -22,7 +22,8 @@
 //
 // The report is validated first, because an invalid one recorded into a round can
 // never be replaced with a valid one: refusing before the write leaves the round
-// clean and the agent re-dispatchable. Every report this round could be about is
+// clean, and the absence still recordable once the broken file is moved aside.
+// Every report this round could be about is
 // validated, not only the one that turns out to be its own — the alternative
 // files malformed agent output away as an absence nobody has to look at.
 //
@@ -44,6 +45,17 @@
 // that: the round's copy is one of the two records `clearRound` keeps, so a
 // re-entered round can only be recorded again by the same report, byte for byte,
 // and a later agent's file cannot become the account of a commit it did not make.
+//
+// A round that already holds its account is never asked to reproduce it. The
+// held wrapper's bytes are a function of the scratch directory, which is mutable
+// and shared, so a resume cannot be required to regenerate them — a scratch file
+// overwritten or moved between the first recording and the re-entry would turn
+// the documented resume into a permanent refusal. Re-entry cannot change which
+// commit owns the round (`enterRound` refuses a different owner), so when
+// `--out` already holds a wrapper and this run found no new report, the held
+// wrapper is the answer: print it and write nothing. That is also where the
+// refusal at `report.json` sends its reader — move the scratch file aside and
+// re-run, and the recording lands on this branch.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,8 +77,9 @@ const KINDS = [
 const CORRECT_IT_NOW = "Nothing was recorded, so this round has no account of its work and the gate that reads "
   + "one is unsatisfied. The path has no round number in it and nothing clears it: left as it is, every later "
   + "round of this spec reads this same file and refuses here too, before the report that round does have is "
-  + "looked at. Have the agent that wrote it write it again at this path, or move the file aside, and re-run "
-  + "this before the next commit.";
+  + "looked at. No agent can be asked to rewrite it — the one that wrote it is gone, and a fresh one never did "
+  + "the work. Move the file aside, keeping it for the person who reads this round, and re-run this before the "
+  + "next commit: the round then records that it has no account, and the run waits for a person.";
 
 function parseArgs(argv) {
   const options = {};
@@ -117,6 +130,23 @@ function recordedElsewhere(roundsRoot, ownRound) {
     if (!held.has(serialize(recorded.report))) held.set(serialize(recorded.report), entry.name);
   }
   return held;
+}
+
+// The wrapper the round already holds at `out`, or null when there is none or
+// what sits there never came from this script. Consulted only when a run found
+// no new report: a held wrapper plus nothing new is a re-entered round whose
+// account stands, and writing a fresh `missing` record over it would be refused
+// as different bytes — turning every resume of an accounted round whose scratch
+// files have moved on into a stop with no way past it.
+function heldWrapper(target) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(target, "utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  return typeof parsed.status === "string" ? parsed : null;
 }
 
 /**
@@ -174,6 +204,15 @@ export function recordRoundReport({ dir, out, schemaDir }) {
         + `${errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n")}\n${CORRECT_IT_NOW}`);
     }
     found.push({ ...candidate, file, parsed });
+  }
+
+  // No new report, and the round already holds its account — a re-entered round
+  // whose recording is a no-op. The held wrapper is what a resumed run prints,
+  // and it is not rewritten: its bytes came from a scratch directory that may
+  // have changed since, and the owner they describe has not.
+  if (found.length === 0) {
+    const alreadyRecorded = heldWrapper(target);
+    if (alreadyRecorded !== null) return alreadyRecorded;
   }
 
   if (found.length !== 1) {

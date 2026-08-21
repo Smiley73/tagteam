@@ -77,7 +77,9 @@ const refuse = (file, reason) =>
         + "about the attempt to review it, so re-running the snapshot keeps it and refuses here again. What "
         + "is in front of you is two different accounts of one commit — the round holds the first, the "
         + "second is still at the scratch path its agent wrote it to, and which agent wrote which is the "
-        + "thing to work out before anything else"
+        + "thing to work out before anything else. The held account stands: once that is worked out, move "
+        + "the scratch file aside rather than writing over it, and re-run the recording — it then finds "
+        + "the round already accounted for and passes"
       : "Re-entering the round (re-running the snapshot against the same commit) rebuilds it, but empties it "
         + "first: every findings, recheck and verify file in it is deleted. That is only safe before the "
         + "review has run; later, work out why this path is being written twice instead"));

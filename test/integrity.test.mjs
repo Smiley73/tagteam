@@ -599,6 +599,26 @@ test("step 3 says what a non-zero exit from the recording lines means", () => {
   const step = stepThree();
   assert.match(step, /non-zero exit/, "step 3 does not say what a failing recording line means");
   assert.match(step, /do not commit again/i, "step 3 lets the run carry a refused report into the next round");
+  // The two refusals need different handling — a schema failure records an
+  // absence once the file is moved aside; a refused `report.json` stands and the
+  // scratch copy is the evidence — and neither may dispatch an agent: the one
+  // that wrote the report is gone, a fresh one never did the work, and a
+  // code-writing agent sent into $W after the commit leaves edits step 4 would
+  // verify against a tree that is not the candidate.
+  assert.match(step, /refused different bytes/, "step 3 no longer tells the two recorder refusals apart");
+  assert.doesNotMatch(step, /[Rr]e-dispatch the reporting agent/,
+    "step 3 asks a fresh agent to rewrite a report whose work it never did");
+});
+
+test("step 3 has a resume branch for a commit that already exists", () => {
+  // Step 1 restarts interrupted specs here against work that is already
+  // committed, and a stop at the recording lines resumes here too — after the
+  // commit. Both arrive with a clean worktree, so the first line's `git commit`
+  // exits with "nothing to commit", and an orchestrator with no branch for that
+  // halts on the opening chain and never reaches the recording lines again.
+  const step = stepThree();
+  assert.match(step, /status --porcelain/, "step 3 gives no test for the nothing-to-commit resume");
+  assert.match(step, /skip the first line/i, "step 3 does not say to skip the commit when it already exists");
 });
 
 // A dispatch that does not name the path is an agent with nowhere to write, and

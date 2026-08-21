@@ -197,6 +197,18 @@ node "$P/scripts/gates.mjs" record "$S/<id>/state.json" report "$OID" "$S/<id>/r
 you just made, before anything is bound to it. Everywhere after this, the
 reviewed commit comes from `state.json`.
 
+**On a resume, the commit may already exist.** Step 1 restarts an interrupted
+spec here against whatever is committed, and a stop at the recording lines below
+also resumes here — after the first line already committed. In both cases the
+worktree is clean and `git -C "$W" status --porcelain` prints nothing: skip the
+first line and start at `OID=`. Everything below is built to re-run against the
+same commit — the allocator re-enters the round that commit owns, the snapshot
+rebuilds it, `bind` binds the same candidate again, and the recording lines
+either meet the account the round already holds and pass, or record what is at
+the scratch paths now that it is corrected or moved aside. "Nothing to commit"
+from the first line is this same case noticed late; it is never a reason to
+manufacture a change so that a commit succeeds.
+
 **The last two lines record the round's account of its own work, and they sit
 below `bind` on every route into this step.** Every gate is evidence about one
 candidate, and nothing may be counted against a commit before that commit is the
@@ -215,15 +227,30 @@ honest outcome of an agent that returned without writing one, and nothing in thi
 command writes a report on an agent's behalf.
 
 **A non-zero exit from either of those two lines is a stop, and it is a stop
-here.** The first exits 2 when a report an agent wrote cannot be read or does not
-match its schema — broken agent output, not a failure of the code under review —
-and it writes nothing, so the round holds no account and the second line then
-fails on a file that is not there. Nothing later in this command clears either.
-Re-dispatch the reporting agent for this round with the same path and the error
-text so it writes the file again, or stop and show a person what it printed; then
-re-run both lines. **Do not go on and do not commit again with that file as it
-is**: the agents' report paths carry no round number, so it is the same file the
-next round reads, it is refused there in the same place, and the report that
+here.** Nothing later in this command clears either, and no agent is dispatched
+to deal with it: the agent that wrote the report is gone, a fresh one never did
+the work, and anything sent into `$W` after the commit leaves edits that step 4
+would verify while every gate names a commit that does not contain them. The
+recorder's error text says which of its two refusals you have:
+
+- **The report cannot be read or does not match its schema.** Broken agent
+  output, not a failure of the code under review. The recorder wrote nothing, so
+  the round holds no account and the second line then fails on a file that is
+  not there. Move the agent's file aside — keep it; it is what a person reads to
+  see what the agent claimed — and re-run both lines: the round records that it
+  has no account and waits for a person at step 9. Or stop now and show a person
+  what was printed.
+- **The round's own `report.json` refused different bytes.** The round already
+  holds the account of this commit, a new and different report has since arrived
+  at the scratch path, and the held account stands. The scratch file is the only
+  copy of that second report — the evidence a person compares the two by — so
+  nothing may write over it. Move it aside and re-run both lines: the recorder
+  finds the round already accounted for and passes. Then say what happened,
+  naming both files.
+
+**Do not go on and do not commit again while a refused file sits at the scratch
+path**: the agents' report paths carry no round number, so it is the same file
+the next round reads, it is refused there in the same place, and the report that
 round does have is never looked at.
 
 **The round number is `gates.mjs round`'s to give, once per candidate, here.** It
