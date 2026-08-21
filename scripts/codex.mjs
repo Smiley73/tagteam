@@ -24,6 +24,7 @@ import {
   classifyProviderError,
   nextBackoff,
   parseResetTime,
+  providerFailureEvidence,
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
 import { isMain } from "./lib/is-main.mjs";
@@ -218,7 +219,7 @@ export function codexArgv(options, outputPath) {
 
 async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () => {} }) {
   const argv = codexArgv(options, outputPath);
-  if (options.dryRun) return { argv, dryRun: true, stderr: "", timedOut: false, exitCode: 0 };
+  if (options.dryRun) return { argv, dryRun: true, stderr: "", evidence: "", timedOut: false, exitCode: 0 };
 
   fs.mkdirSync(path.dirname(eventsPath), { recursive: true, mode: 0o700 });
   // Truncating rather than appending: this file is the raw transcript of one
@@ -251,7 +252,20 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     stdio: ["pipe", "pipe", "pipe"]
   });
   let stderr = "";
+  // A failure `codex exec --json` reports on stdout is why this tail exists: the
+  // run that refused an unusable model left stderr at 0 bytes and put the
+  // provider's own sentence in an event. Kept in flight rather than read back
+  // out of the event log, because that file is opened `w` per attempt and its
+  // last writes land asynchronously — a read right after the child closes can
+  // miss exactly the lines that say what happened. Same 64 KiB bound as stderr,
+  // for the same reason: a long run must not be held in memory whole. A failure
+  // event buried under more than that degrades to what happened before this
+  // tail existed, which is a schema retry.
+  let stdout = "";
   child.stdout.pipe(events, { end: false });
+  child.stdout.on("data", (chunk) => {
+    stdout = (stdout + chunk.toString()).slice(-65_536);
+  });
   child.stderr.on("data", (chunk) => {
     stderr = (stderr + chunk.toString()).slice(-65_536);
   });
@@ -291,7 +305,7 @@ async function runChild({ options, prompt, outputPath, eventsPath, onSpawn = () 
     clearTimeout(timer);
   });
   await closeEvents();
-  return { argv, stderr, timedOut, exitCode };
+  return { argv, stderr, evidence: providerFailureEvidence(stdout), timedOut, exitCode };
 }
 
 function validateArtifact(schema, file) {
@@ -339,6 +353,28 @@ function removeCountable(file) {
       return `${file} could not be removed (${error.message}) or emptied (${second.message}) and can still be read as a finished review`;
     }
   }
+}
+
+// What every terminal failure owes `--out`, in one place because they all owe
+// it the same thing. A Codex lens re-dispatched into a round it already wrote
+// into overwrites the artifact and its sidecar as a set; a call that ends
+// without renaming anything leaves the earlier dispatch's artifact where it was,
+// and `collect-findings.mjs` reads that file without consulting the sidecar, so
+// a run that got no usable answer would still have produced a review that
+// counts. Sidecar first, for the reason the write path's ordering comment gives:
+// a crash between the two leaves something non-reusable rather than something
+// reused for the wrong request. `.prompt.md` and `.events.jsonl` stay — nothing
+// counts them, and they are what a person opens.
+//
+// It returns a sentence rather than nothing, because what the removal actually
+// managed is the part a person needs: the failure message is the only account
+// anyone gets, and a removal that failed is precisely the case where something
+// countable is still sitting at `--out`.
+function clearCountable(requestPath, artifact) {
+  const stranded = [removeCountable(requestPath), removeCountable(artifact)].filter((note) => note !== null);
+  return stranded.length === 0
+    ? `The artifact at ${artifact} and its request record were removed so nothing later can count them.`
+    : `${stranded.join("; ")}; check those paths by hand before anything reads what is there as this candidate's review.`;
 }
 
 // One record of how the call that produced this artifact routed, written into
@@ -497,28 +533,15 @@ export async function runCodex(options) {
       // the model-unavailable refusal below.
       if (attempt?.reason === null && !sameEffort(attempt.effort, options.effort)) {
         try { fs.unlinkSync(attemptPath); } catch {}
-        // Removing a pre-existing artifact and sidecar at --out is the
-        // load-bearing part. A Codex lens re-dispatched into a round it already
-        // wrote into overwrites those files as a set; if this refusal only
-        // skipped the rename, the first dispatch's artifact would survive,
-        // `collect-findings.mjs` would read it, bind it to this same candidate,
-        // and a refused run would have produced a review that counts. Sidecar
-        // first, for the reason the ordering comment below gives: a crash
-        // between the two leaves something non-reusable rather than something
-        // reused for the wrong request. `.prompt.md` and `.events.jsonl` stay —
-        // nothing counts them, and they are what a person opens.
-        const stranded = [removeCountable(requestPath), removeCountable(artifact)].filter((note) => note !== null);
-        // The session is named because a Codex release renaming an effort word
-        // fires this the same way a mis-routed run does, and that file is the
-        // only thing that shows which of the two happened. What the removal
-        // actually managed is named for a blunter reason: this message is the
-        // only account anyone gets of a refusal, and a removal that failed is
-        // precisely the case where something countable is still at --out.
+        // Clearing a pre-existing artifact and sidecar at --out is the
+        // load-bearing part: if this refusal only skipped the rename, an earlier
+        // dispatch's artifact would survive and be counted as this candidate's
+        // review. The session is named because a Codex release renaming an
+        // effort word fires this the same way a mis-routed run does, and that
+        // file is the only thing that shows which of the two happened.
         throw new Error(
           `Codex ran at ${attempt.effort} effort but the request asked for ${options.effort}. `
-          + (stranded.length === 0
-            ? `The artifact at ${artifact} and its request record were removed so nothing later can count them. `
-            : `${stranded.join("; ")}; check those paths by hand before anything reads what is there as this candidate's review. `)
+          + `${clearCountable(requestPath, artifact)} `
           + `The session Codex wrote is kept at ${attempt.rollout}.`
         );
       }
@@ -551,18 +574,41 @@ export async function runCodex(options) {
       }
 
       try { fs.unlinkSync(attemptPath); } catch {}
-      const classification = classifyProviderError(outcome.stderr, "codex");
+      // Both streams, because a provider failure arrives on either one and
+      // nothing says which: the exhausted-quota message anyone has seen came on
+      // stderr, and the unusable-model refusal came on stdout with stderr empty.
+      // Reading one of them was how both of the branches below became
+      // unreachable and every provider failure was reported as a bad answer.
+      const said = [outcome.evidence, outcome.stderr].filter(Boolean).join("\n");
+      const classification = classifyProviderError(said, "codex");
       if (classification.kind === "model-unavailable") {
-        throw new Error(`Codex model ${options.model} at ${options.effort} effort is unavailable: ${outcome.stderr.slice(-1000)}`);
+        // Named as the flag rather than as the model alone: the thing to change
+        // is the configured model this run was dispatched with, and a retry
+        // cannot reach a model the account may not use. Quoting the provider is
+        // the rest of it — its sentence says which of "misspelled", "retired"
+        // and "not on this plan" this is, and nothing here can tell them apart.
+        // The removal is here for the same reason it is in the effort refusal
+        // above: a re-dispatch that the provider turns away has to leave nothing
+        // at --out that a later command can read as this candidate's review. The
+        // provider's sentence goes last because it is the truncated part.
+        throw new Error(
+          `Codex model ${options.model} at ${options.effort} effort is unavailable, so --model is what has to change. `
+          + `${clearCountable(requestPath, artifact)} `
+          + `What Codex said: ${said.slice(-1000)}`
+        );
       }
       if (classification.kind === "quota") {
         const state = readOrCreateQuotaState(quotaStatePath);
-        const targetAt = parseResetTime(outcome.stderr);
+        const targetAt = parseResetTime(said);
         while (true) {
           const next = nextBackoff({ firstDetectedAt: state.firstDetectedAt, targetAt });
           if (next.action === "abort") {
             try { fs.unlinkSync(quotaStatePath); } catch {}
-            throw new Error(`Codex quota did not clear within four hours for ${options.model}/${options.effort}`);
+            // Terminal, so it owes --out the same clearing the refusals above do.
+            throw new Error(
+              `Codex quota did not clear within four hours for ${options.model}/${options.effort}. `
+              + clearCountable(requestPath, artifact)
+            );
           }
           if (next.action === "retry") break;
           process.stderr.write(`Codex usage limit reached; retrying at ${new Date(targetAt).toISOString()} (ceiling ${new Date(next.ceilingAt).toISOString()}).\n`);
@@ -577,7 +623,7 @@ export async function runCodex(options) {
       } else {
         throw new Error(
           `Codex did not produce a valid artifact after ${SCHEMA_ATTEMPTS} attempts: ${validation.errors.join("; ")}`
-          + (outcome.stderr ? `; ${outcome.stderr.slice(-1000)}` : "")
+          + (said ? `; ${said.slice(-1000)}` : "")
         );
       }
     }

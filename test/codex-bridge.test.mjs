@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { ensureGitignore } from "../scripts/ensure-gitignore.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -98,6 +99,25 @@ process.stdin.on("end", async () => {
   const attempt = record({ argv, prompt: stdin, home: codexHome }).filter((entry) => entry.argv[0] === "exec").length;
   if (mode === "hang") { setInterval(() => {}, 1000); await new Promise(() => {}); }
   if (mode === "quota") { process.stderr.write("429 rate limit reached; retry-after: 1\\n"); process.exit(1); }
+  // The same words, on the other stream, inside a top-level failure event.
+  if (mode === "quota-stdout") {
+    process.stdout.write(JSON.stringify({ type: "error", message: "429 rate limit reached; retry-after: 1" }) + "\\n");
+    process.exit(1);
+  }
+  // What codex-cli 0.148.0-alpha.21 actually emits for a model the account may
+  // not use: two events on stdout, nothing on stderr, no artifact. The inner
+  // JSON is built with JSON.stringify rather than pasted escaped, so these are
+  // the CLI's bytes and not this file's escaping of them.
+  if (mode === "unusable-model") {
+    const detail = JSON.stringify({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", message: "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account." }
+    });
+    process.stdout.write(JSON.stringify({ type: "error", message: detail }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "turn.failed" }) + "\\n");
+    process.exit(1);
+  }
 
   const id = randomUUID();
   const stamp = new Date().toISOString();
@@ -121,12 +141,24 @@ process.stdin.on("end", async () => {
   if (mode === "invalid-then-ok") {
     if (attempt === 1) fs.writeFileSync(out, JSON.stringify({ wrong: true }));
     else fs.writeFileSync(out, JSON.stringify({ verdict: "ok", notes: ["second"] }));
-  } else if (mode === "always-invalid") {
+  } else if (mode === "always-invalid" || mode === "advisory-item" || mode === "unrecognised-failure") {
     fs.writeFileSync(out, JSON.stringify({ wrong: true }));
   } else {
     fs.writeFileSync(out, JSON.stringify({ verdict: "ok", notes: ["fake"] }));
   }
   if (mode !== "no-thread-id") process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: id }) + "\\n");
+  // An informational notice on a run that is otherwise fine, shaped like an
+  // error and worded like an unusable model. The real one said "Model metadata
+  // ... Defaulting to fallback metadata".
+  if (mode === "advisory-item") {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { type: "error", text: "Model metadata for an invalid model could not be read. Defaulting to fallback metadata." }
+    }) + "\\n");
+  }
+  if (mode === "unrecognised-failure") {
+    process.stdout.write(JSON.stringify({ type: "error", message: "upstream connect error or disconnect/reset before headers" }) + "\\n");
+  }
   process.stdout.write(JSON.stringify({ type: "item.completed" }) + "\\n");
 });
 `;
@@ -145,7 +177,12 @@ function workspace() {
   return { dir, fake };
 }
 
-function run({ dir, fake }, extra = [], env = {}) {
+// `spawnOptions` exists for the quota tests, which pre-seed the bridge's own
+// state so the first backoff decision is `abort` and the call returns at once. A
+// seed the bridge does not find is a call that waits out a real reset instead,
+// so those tests bound the child: a stall becomes a failed assertion rather than
+// a test run nobody sees finish.
+function run({ dir, fake }, extra = [], env = {}, spawnOptions = {}) {
   return spawnSync("node", [
     bridge,
     "--template", path.join(dir, "template.md"),
@@ -162,7 +199,8 @@ function run({ dir, fake }, extra = [], env = {}) {
     encoding: "utf8",
     // CODEX_HOME is set here rather than per test so that no test can write a
     // session into, or delete a session out of, the developer's own ~/.codex.
-    env: { ...process.env, FAKE_CODEX_DIR: dir, CODEX_HOME: path.join(dir, "codex-home"), ...env }
+    env: { ...process.env, FAKE_CODEX_DIR: dir, CODEX_HOME: path.join(dir, "codex-home"), ...env },
+    ...spawnOptions
   });
 }
 
@@ -312,6 +350,122 @@ test("two invalid answers fail without leaving an artifact behind", () => {
   assert.match(result.stderr, /after 2 attempts/);
   assert.equal(execs(space.dir).length, 2);
   assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false);
+});
+
+// A provider failure is not a bad answer, and reporting it as one costs a second
+// call and tells a person the wrong thing to fix. The bytes the fake emits here
+// are the ones codex-cli 0.148.0-alpha.21 emitted against an account that could
+// not use the model it was asked for: on stdout, with stderr empty.
+test("a model this account cannot use ends the call on the first attempt, in the provider's own words", () => {
+  const space = workspace();
+  const result = run(space, [], { FAKE_CODEX_MODE: "unusable-model" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /model m1/, "the refusal does not name the model that was asked for");
+  assert.match(result.stderr, /high effort/, "the refusal does not name the effort");
+  assert.match(result.stderr, /--model/, "the refusal does not name the flag that supplies the model");
+  assert.match(result.stderr, /is not supported when using Codex with a ChatGPT account/,
+    "the refusal does not carry what the provider actually said");
+  // The assertion that separates a refusal from a schema retry: a model this
+  // account may not use will not become usable on a second call.
+  assert.equal(execs(space.dir).length, 1, "an unusable model was retried");
+  assert.ok(!/after 2 attempts/.test(result.stderr), "a provider failure was reported as a schema failure");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the refused call left an artifact behind");
+});
+
+// The state a fresh workspace cannot show: a lens re-dispatched into a round it
+// already wrote into. The provider turning the second call away leaves the first
+// call's artifact where it was, and collect-findings.mjs reads that file without
+// consulting the sidecar, so the refused dispatch would count as a review.
+test("an unusable model clears the artifact and sidecar an earlier good run left at --out", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  const result = run(space, [], { FAKE_CODEX_MODE: "unusable-model" });
+  assert.equal(result.status, 1, "the re-dispatch should have refused");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived an unusable model");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived an unusable model");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the refusal does not say what became of what was at --out");
+});
+
+// The trap. An `item.completed` whose `item.type` is "error" is an advisory, and
+// a run that succeeds emits them too. Matching error-shaped things anywhere in
+// the stream turns this notice into a terminal refusal.
+test("an advisory error item cannot refuse a run, however much it sounds like an unusable model", () => {
+  const space = workspace();
+  const result = run(space, [], { FAKE_CODEX_MODE: "advisory-item" });
+  assert.equal(result.status, 1);
+  assert.equal(execs(space.dir).length, 2, "an advisory notice stopped the schema retry");
+  assert.match(result.stderr, /after 2 attempts/, "an advisory notice was reported as a provider failure");
+});
+
+test("a failure with no name here still says what the provider said", () => {
+  const space = workspace();
+  const result = run(space, [], { FAKE_CODEX_MODE: "unrecognised-failure" });
+  assert.equal(execs(space.dir).length, 2, "an unrecognised failure was not retried");
+  assert.match(result.stderr, /upstream connect error/,
+    "the reported failure carries nothing of what the provider said");
+});
+
+// The state the bridge would have written five hours ago, at the path it reads
+// it from, so the first backoff decision is `abort` and no test here waits out a
+// reset. The key is computed the way codex.mjs computes it rather than pasted:
+// a hard-coded digest would stop matching in silence, and a seed that does not
+// match is a call that waits.
+function seedExhaustedQuota(dir) {
+  const key = createHash("sha256").update("m1\u0000high").digest("hex").slice(0, 32);
+  const quota = path.join(dir, "slots", ".quota");
+  fs.mkdirSync(quota, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(quota, `${key}.json`), JSON.stringify({ firstDetectedAt: Date.now() - 5 * 60 * 60_000 }));
+}
+
+test("an exhausted quota reaches the wait and its four-hour ceiling", () => {
+  const space = workspace();
+  seedExhaustedQuota(space.dir);
+  const result = run(space, [], { FAKE_CODEX_MODE: "quota" }, { timeout: 60_000 });
+  assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
+  assert.match(result.stderr, /quota did not clear within four hours for m1\/high/,
+    "an exhausted quota did not reach the four-hour ceiling");
+  assert.ok(!/after 2 attempts/.test(result.stderr), "a quota failure was reported as a schema failure");
+  assert.equal(execs(space.dir).length, 1, "a quota that had already run out was retried");
+});
+
+// Be honest about what this one shows. The test above is pinned to the only
+// quota evidence anyone has: `429 rate limit reached; retry-after: 1` on stderr.
+// Nobody can provoke an exhausted quota on demand, so nobody has seen what
+// `codex exec --json` emits on stdout when one runs out -- this fixture is
+// written to match the implementation's assumption, and a fixture written to
+// match the implementation cannot show that the stdout half fires live. It
+// guards the code path; it is not evidence about the CLI. That is why the token
+// list was only ever extended, and why the stderr path above stays asserted.
+test("a quota signal carried on stdout reaches the same wait", () => {
+  const space = workspace();
+  seedExhaustedQuota(space.dir);
+  const result = run(space, [], { FAKE_CODEX_MODE: "quota-stdout" }, { timeout: 60_000 });
+  assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
+  assert.match(result.stderr, /quota did not clear within four hours for m1\/high/,
+    "a quota reported on stdout did not reach the four-hour ceiling");
+  assert.ok(!/after 2 attempts/.test(result.stderr), "a quota failure was reported as a schema failure");
+  assert.equal(execs(space.dir).length, 1, "a quota that had already run out was retried");
+});
+
+// The ceiling is terminal, and a terminal end owes --out what the refusals owe
+// it: an earlier dispatch's artifact left in place is one a later command counts
+// as this candidate's review.
+test("a quota that never clears takes the earlier run's artifact and sidecar with it", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0, "the first run should have written an artifact");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+
+  // Seeded after the good run, which removes the quota state it finds.
+  seedExhaustedQuota(space.dir);
+  const result = run(space, [], { FAKE_CODEX_MODE: "quota" }, { timeout: 60_000 });
+  assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived an exhausted quota");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived an exhausted quota");
+  assert.match(result.stderr, /were removed so nothing later can count them/,
+    "the abort does not say what became of what was at --out");
 });
 
 // The --slots root is a plan or ship directory, which a project commits from,
