@@ -22,7 +22,9 @@
 //
 // The report is validated first, because an invalid one recorded into a round can
 // never be replaced with a valid one: refusing before the write leaves the round
-// clean and the agent re-dispatchable.
+// clean and the agent re-dispatchable. Every report this round could be about is
+// validated, not only the one that turns out to be its own — the alternative
+// files malformed agent output away as an absence nobody has to look at.
 //
 // **A report already recorded in another round of this spec is not a report for
 // this round.** The agents' paths carry no round number — the recording happens
@@ -140,6 +142,19 @@ export function recordRoundReport({ dir, out, schemaDir }) {
       continue;
     }
     considered.push(`${file} (new)`);
+    // Validated here, before anything is counted, and not after one report has
+    // been singled out. Two new reports are recorded as an absence below, and an
+    // absence is approvable — so validating only the singled-out one would let a
+    // malformed report be filed away as "this round had none" whenever a second
+    // report happened to sit beside it. Every report this round is considering is
+    // looked at, or none of them is.
+    const schemaPath = path.join(schemaDir, candidate.schema);
+    const errors = validateJson(JSON.parse(fs.readFileSync(schemaPath, "utf8")), parsed);
+    if (errors.length > 0) {
+      throw new Error(`the report at ${file} does not match the `
+        + `${candidate.schema.replace(/\.schema\.json$/, "")} schema:\n`
+        + errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n"));
+    }
     found.push({ ...candidate, file, parsed });
   }
 
@@ -158,12 +173,7 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     return record;
   }
 
-  const [{ kind, schema, file, parsed }] = found;
-  const errors = validateJson(JSON.parse(fs.readFileSync(path.join(schemaDir, schema), "utf8")), parsed);
-  if (errors.length > 0) {
-    throw new Error(`the report at ${file} does not match the ${schema.replace(/\.schema\.json$/, "")} schema:\n`
-      + errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n"));
-  }
+  const [{ kind, file, parsed }] = found;
 
   // A document that says `complete` while listing unfinished work contradicts
   // itself, and neither refusing it nor believing it is right: the gate reads

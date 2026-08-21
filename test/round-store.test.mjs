@@ -313,6 +313,49 @@ test("a round whose agent wrote nothing records the absence and exits 0", () => 
   assert.match(result.stdout, /missing/);
 });
 
+test("two new reports for one round are an absence too, naming both paths", () => {
+  // A round is one agent's work, so two reports nobody has counted yet leave the
+  // recorder with no way to say which one this commit's account is — and picking
+  // either would record a report against a commit it may not describe. The other
+  // half of the `found.length !== 1` guard: without this, narrowing it to `=== 0`
+  // or reordering the two kinds keeps every other test green while the wrong
+  // report is filed as the round's account, and filed as `complete`.
+  const ship = shipAt();
+  roundIn(ship, 1);
+  implementReportAt(ship, "wrote the recorder and its gate");
+  fixReportAt(ship, "took the lock before the read");
+  const result = record(ship, reportPath(ship, 1));
+
+  assert.equal(result.status, 0, result.stderr);
+  const wrapper = readWrapper(reportPath(ship, 1));
+  assert.equal(wrapper.status, "missing");
+  assert.equal(wrapper.kind, null);
+  assert.equal(wrapper.source, null);
+  assert.equal(wrapper.report, null);
+  assert.match(wrapper.reason, /implement-report\.json \(new\)/);
+  assert.match(wrapper.reason, /fix-report\.json \(new\)/);
+});
+
+test("a malformed report beside a second one is still refused, not downgraded to an absence", () => {
+  // An absence is approvable and is written into the round for good; malformed
+  // agent output is a broken tool a person has to see now. Validating only the
+  // report that turns out to be this round's would swap the second for the first
+  // whenever two reports happen to sit side by side — and the sealed `missing`
+  // wrapper cannot be replaced afterwards by correcting the scratch file.
+  const ship = shipAt();
+  roundIn(ship, 1);
+  implementReportAt(ship, "wrote the recorder and its gate");
+  fs.writeFileSync(path.join(ship, "fix-report.json"), `${JSON.stringify({
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "n" }],
+    notes: "", summary: "s", unfinished: []
+  }, null, 2)}\n`);
+  const result = record(ship, reportPath(ship, 1));
+
+  assert.equal(result.status, 2, "a schema-invalid report was recorded as this round having none");
+  assert.match(result.stderr, /fix-report schema/);
+  assert.equal(fs.existsSync(reportPath(ship, 1)), false);
+});
+
 test("a report is recorded once: a re-dispatched agent cannot replace it", () => {
   const ship = shipAt();
   roundIn(ship, 1);
@@ -332,20 +375,47 @@ test("a report is recorded once: a re-dispatched agent cannot replace it", () =>
   assert.equal(readWrapper(out).report.outcomes[0].note, "took the lock before the read");
 });
 
-test("a re-entered round records the round's report again, byte for byte", () => {
-  // Re-entry empties the round back to its marker, which makes the agent's own
-  // file uncounted again — that is what lets an interrupted round be recorded
-  // without anyone remembering the old round number.
+test("a re-entered round keeps its account and records the same report again, byte for byte", () => {
+  // Re-entry empties the round of what the *attempt* produced and keeps what
+  // belongs to the owning commit — the marker and this report. Re-entry does not
+  // change which commit owns the round, so the account of the work in that commit
+  // is still the account, and the recording that follows re-entry meets its own
+  // bytes and passes.
   const ship = shipAt();
   const round = roundIn(ship, 1);
   implementReportAt(ship, "wrote the recorder and its gate");
   assert.equal(record(ship, reportPath(ship, 1)).status, 0);
 
   enterRound(round, { owner: OID });
-  assert.equal(fs.existsSync(reportPath(ship, 1)), false, "re-entry left the round's report behind");
+  assert.equal(fs.existsSync(reportPath(ship, 1)), true, "re-entry destroyed the round's only account");
   const again = record(ship, reportPath(ship, 1));
   assert.equal(again.status, 0, again.stderr);
   assert.equal(readWrapper(reportPath(ship, 1)).status, "complete");
+});
+
+test("re-entering a round after a second agent ran cannot record its report over the first's", () => {
+  // The sequence: round 2 owns the fix commit and holds fixer #1's report; a
+  // second fixer is dispatched, answers everything `wont-fix`, changes nothing
+  // and so produces no commit; the allocator re-enters round 2 against the same
+  // commit. If re-entry cleared the report, the recorder would find the second
+  // fixer's file uncounted and file it as the account of a commit it did not
+  // make — with the first report gone from the round, from the gates `bind`
+  // rebuilds, and from the scratch path it was overwritten at.
+  const ship = shipAt();
+  const round = roundIn(ship, 2);
+  fixReportAt(ship, "took the lock before the read");
+  assert.equal(record(ship, reportPath(ship, 2)).status, 0);
+
+  fixReportAt(ship, "could not reproduce any of them", "wont-fix");
+  enterRound(round, { owner: OID });
+  const again = record(ship, reportPath(ship, 2));
+
+  assert.equal(again.status, 2, "the second agent's report became the account of a commit it did not make");
+  assert.equal(readWrapper(reportPath(ship, 2)).report.outcomes[0].note, "took the lock before the read");
+  // And the second report is still on disk where its author wrote it, which is
+  // what a person compares the two by.
+  const scratch = JSON.parse(fs.readFileSync(path.join(ship, "fix-report.json"), "utf8"));
+  assert.equal(scratch.outcomes[0].outcome, "wont-fix");
 });
 
 test("a report that claims complete while listing unfinished work is recorded as unfinished", () => {

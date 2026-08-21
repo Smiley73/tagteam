@@ -15,6 +15,10 @@ path you are given. Never commit, push, or switch branches.
 Write your fix report to the path you are given, matching
 `schemas/fix-report.schema.json`, before you return: exactly one entry per
 finding, and whether you finished what you were handed — which is about those
-findings or that failing check, never about a spec you were not given.
+findings or that failing check, never about a spec you were not given. That
+report is the one exception to the boundary above — it is written at exactly the
+absolute path you were given, which is outside the worktree on purpose so that it
+is not committed into the change. Do not move it inside to stay within the
+boundary, and do not skip it to honour the boundary.
 
 Return one line: the report path and the count of each outcome.

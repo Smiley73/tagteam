@@ -179,23 +179,35 @@ test("a person who has read the account can approve it, and both cases merge", (
 
 test("a round that accounted for nothing goes on asking after the next round is clean", () => {
   // The case the whole carry exists for. A fix round replaces the tip, and the
-  // round before it — which recorded nothing — is gone from `gates` with every
-  // other gate, so a clean report on the new commit would bury it.
-  const stalled = unreported();
-  let next = bindCandidate(stalled, B, BASE);
-  assert.deepEqual(next.unaccountedCandidates, [A]);
-  next = recordGate(next, "review", B, { status: "clean" });
-  next = recordGate(next, "verify", B, { status: "passed" });
-  next = recordGate(next, "ci", B, { status: "passed" });
-  next = recordGate(next, "report", B, { status: "complete", kind: "fix" });
+  // round before it is gone from `gates` with every other gate, so a clean report
+  // on the new commit would bury it.
+  //
+  // Both ways a round fails to account for itself are run, because the carry
+  // decides on `status === "complete"` as well as on the OID: an honest
+  // `unfinished` is the likelier of the two in practice — it is exactly what
+  // provokes the fix round that replaces the tip — and a carry that only noticed
+  // an absent report would bury it while every test here still passed.
+  const stalls = [
+    ["no report at all", unreported()],
+    ["a report that said unfinished",
+      recordGate(unreported(), "report", A, { status: "unfinished", kind: "implement" })]
+  ];
+  for (const [what, stalled] of stalls) {
+    let next = bindCandidate(stalled, B, BASE);
+    assert.deepEqual(next.unaccountedCandidates, [A], `${what} was not carried onto the next candidate`);
+    next = recordGate(next, "review", B, { status: "clean" });
+    next = recordGate(next, "verify", B, { status: "passed" });
+    next = recordGate(next, "ci", B, { status: "passed" });
+    next = recordGate(next, "report", B, { status: "complete", kind: "fix" });
 
-  const verdict = evaluate(next, CONFIG);
-  assert.ok(verdict.approvals.includes("work-not-accounted-for"),
-    "a clean report on the fix commit buried the round that never accounted for its work");
-  assert.equal(verdict.ready, false);
-  // And a person judging this candidate is what clears it, which is the only
-  // route out.
-  assert.equal(evaluate(recordGate(next, "human", B, { approved: true }), CONFIG).ready, true);
+    const verdict = evaluate(next, CONFIG);
+    assert.ok(verdict.approvals.includes("work-not-accounted-for"),
+      `a clean report on the fix commit buried the round that answered with ${what}`);
+    assert.equal(verdict.ready, false);
+    // And a person judging this candidate is what clears it, which is the only
+    // route out.
+    assert.equal(evaluate(recordGate(next, "human", B, { approved: true }), CONFIG).ready, true);
+  }
 
   // A round that did account for itself is not carried at all.
   assert.deepEqual(bindCandidate(reviewed(), B, BASE).unaccountedCandidates, []);

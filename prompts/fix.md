@@ -27,6 +27,10 @@ Outcomes:
   is `fixed`; where the finding was wrong or the repair is a person's call, it is
   still `wont-fix`.
 
+**A repair dispatch hands you a failing check and no findings at all.** There is
+nothing to enumerate then, so `outcomes` is an empty array — written, not left
+out, because the key is required — and what you repaired is said in `summary`.
+
 Do not report `fixed` for something you did not change. Your report is
 bookkeeping: the reviewer that raised the finding re-reads the code afterwards
 and states what is actually true. A false `fixed` does not get the pull request
@@ -75,3 +79,10 @@ and will be again.
 Work only beneath the worktree path you are given. Do not commit, push, switch
 branches, or touch the primary checkout — the run records the exact commit your
 work becomes, and every gate is bound to it.
+
+**Your fix report is the one exception, and it is the only one.** It is written
+outside the worktree, at exactly the absolute path the dispatch named and nowhere
+else — that path is deliberately not under the worktree, so that the report is
+not committed into the change being reviewed. Do not move it inside to stay
+within the boundary, and do not skip writing it to honour the boundary: a report
+the run cannot find at the path it named is a round that accounted for nothing.

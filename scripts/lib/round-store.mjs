@@ -9,8 +9,10 @@
 //
 // That is only survivable because a round belongs to exactly one candidate
 // commit. `round.json` records the owner, and re-running the snapshot against
-// that same owner **re-enters** the round: everything below the marker is
-// cleared and rebuilt. A different owner is refused and nothing is removed.
+// that same owner **re-enters** the round: everything the previous attempt at
+// reviewing that commit produced is cleared and rebuilt, and the two records
+// that belong to the commit rather than to the attempt — the marker and the
+// round's report — are kept. A different owner is refused and nothing is removed.
 // Re-entry is the only thing that empties a round, which is what keeps the
 // documented resume path — restart at the commit-and-snapshot step against
 // whatever is committed in the worktree — working without a fresh round number.
@@ -38,6 +40,8 @@
 // be. The alternative, leaving it where the agent put it because nothing reads
 // it, means a re-dispatched agent overwrites the round's only account of what the
 // previous one claimed, and nothing on disk says the earlier attempt happened.
+// That is also why the recorded copy is the one thing besides the marker that
+// survives re-entry — `clearRound` says why.
 //
 // Transient coordination state (`.codex-artifact-locks/`, `.codex-slots/`,
 // `.quota/`, `*.tmp` attempt files) is not a record and is not routed through
@@ -48,6 +52,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 export const ROUND_MARKER = "round.json";
+
+// The round's account of the work in the commit that owns it, recorded by
+// `record-round-report.mjs`. Named here because `clearRound` has to know it: see
+// the comment there for why re-entry leaves it alone.
+export const ROUND_REPORT = "report.json";
 
 // The reader of this message is usually an autonomous agent that acts on what a
 // tool prints, so the recovery has to carry its price with it. Re-entry is the
@@ -156,9 +165,26 @@ function discardMarkerTemporaries(dir, entries) {
   });
 }
 
+// Re-entry clears what the *attempt* produced and keeps what belongs to the
+// *owner*, and the round has exactly two of the second kind. The marker is one:
+// it names the commit, and `enterRound` refuses a different one, so re-entry
+// never changes whose round this is. The report is the other, and for the same
+// reason — it is the account of the work in that one commit, so a second attempt
+// at reviewing that commit does not make it untrue, and re-entry is not a
+// re-dispatch of the agent that wrote it.
+//
+// Clearing it is not a smaller loss than clearing the marker would be. It is the
+// only durable copy: the gate's copy is rebuilt all-null by the next
+// `bindCandidate`, and the agent's own scratch file is at a stable path that the
+// next agent of the same kind overwrites. Cleared here, the round's account of
+// its commit is gone from disk entirely, and `record-round-report.mjs` — which
+// counts a report as this round's whenever no *other* round holds it — would
+// then record whatever scratch file is lying around as the account of a commit
+// it does not describe. Keeping it means `writeRoundFile` meets the second
+// report and refuses it by name, with the first still on disk to compare it to.
 function clearRound(roundDir) {
   for (const entry of fs.readdirSync(roundDir)) {
-    if (entry === ROUND_MARKER) continue;
+    if (entry === ROUND_MARKER || entry === ROUND_REPORT) continue;
     fs.rmSync(path.join(roundDir, entry), { recursive: true, force: true });
   }
 }
@@ -176,8 +202,9 @@ function reenter(roundDir, marker) {
 /**
  * Claim `roundDir` for `owner` — an opaque non-empty string; the ship side
  * passes the candidate OID. A fresh directory is created and marked. The same
- * owner re-enters: the round is emptied back to its marker and rebuilt. A
- * different owner throws, having removed nothing.
+ * owner re-enters: the round is emptied back to its marker and its report — the
+ * two records that belong to the owning commit — and rebuilt. A different owner
+ * throws, having removed nothing.
  */
 export function enterRound(roundDir, { owner } = {}) {
   if (typeof owner !== "string" || owner === "") throw new Error("a round needs a non-empty owner");

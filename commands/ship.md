@@ -247,10 +247,15 @@ results and logs, `review.json` and `recheck.json`, `to-fix.json`,
 `open/<lens>.json`, `still-open.json`, `report.json` — is written once: a
 different-bytes rewrite is refused, naming the path, rather than silently
 overwriting. Re-running this step against the *same* commit **re-enters** the
-round: it is emptied back to its marker and rebuilt, which is what a ship
-resumed on the round's own commit does and it costs no new round. Re-running it
-against a *different* commit is refused naming both commits — which is why the
-allocator, and not you, decides that a fix's commit belongs in the next round.
+round: it is emptied back to its marker and its `report.json` — the two records
+that are about the commit and not about the attempt to review it — and rebuilt,
+which is what a ship resumed on the round's own commit does and it costs no new
+round. The report survives because re-entry is not a re-dispatch: the commit is
+the same one, so the account of what went into it is still the account, and a
+second, different report arriving over it is refused by name rather than
+replacing it. Re-running it against a *different* commit is refused naming both
+commits — which is why the allocator, and not you, decides that a fix's commit
+belongs in the next round.
 
 One thing in a round is outside that rule: Codex's own output — the artifact,
 its `.prompt.md`, `.request.json` and `.events.jsonl` — because one invocation
@@ -777,7 +782,9 @@ full:
    Then dispatch one `tagteam:fixer-<effort>` at `roles.repair-fix`'s model and
    effort with the failing check output and `$S/<id>/fix-report.json` to write,
    on the same terms as step 6 — its account is of the failing check it was
-   handed and of nothing else — blocking as in step 6, then commit and
+   handed and of nothing else, and with no findings in front of it there is
+   nothing to enumerate, so its `outcomes` is an empty array and the repair is
+   described in `summary` — blocking as in step 6, then commit and
    re-snapshot as in step 3, which allocates the round into `$ROUND`, set `OID`,
    `bind` — which clears every gate — record the report and the report gate into
    that round, and re-run verify.
@@ -869,18 +876,32 @@ path still drops the second token" is the sentence, and the file name comes
 after it.
 
 **When nothing accounted for the work, say what that means.**
-`work-not-accounted-for` is the run saying that the agent which wrote this code
-did not confirm it finished what it was given: it either named the part it left
-undone, or it returned without an account at all — and an earlier round of this
-spec that was never accounted for raises it here too, on every candidate after
-it. Say it as that: "the agent that wrote this change never confirmed it finished
-the spec, so nobody has said what is missing from it". **This is a stop for a
+`work-not-accounted-for` is the run saying that an agent which wrote code on this
+branch did not confirm it finished what it was given: it either named the part it
+left undone, or it returned without an account at all. **This is a stop for a
 person, not a failed check** — nothing is broken, and the question is whether to
-merge work its own author did not vouch for. The account is
-`$S/<id>/rounds/$ROUND/report.json`: its summary and the parts it lists as
-unfinished are what to read out, in the agent's own words, and it is the one file
-in a round you may open here — it holds no diff and no findings, only what the
-agent said about its own work. A round that has none says so in the same file.
+merge work its own author did not vouch for.
+
+**Find the round that lost its account; it is usually not the one you are
+standing in.** The reason is raised by the current candidate *and* by every
+earlier round of this spec that was never accounted for, on every candidate after
+it — so the current round's report is often a clean fixer's report that says the
+opposite of the reason you are explaining. What to read out is every
+`$S/<id>/rounds/*/report.json` whose `status` is not `complete`, usually just
+one. That scan is also what replaces `$ROUND` on a resume, where it is gone with
+the context that set it. Each of those files is the one file in a round you may
+open here — it holds no diff and no findings, only what the agent said about its
+own work — and a round whose agent wrote nothing says that in the same file,
+`status: "missing"` with the reason.
+
+**What the agent was answering for is its `kind`.** An `implement` report is the
+account of the spec: "the agent that wrote this change never confirmed it
+finished the spec, so nobody has said what is missing from it". A `fix` report is
+not — that fixer was handed findings, or a failing check, and never the spec — so
+it is "the fixer that made this commit never confirmed it finished the findings
+it was given", and it says nothing either way about the rest of the spec. Then
+read out that report's summary and the parts it lists as unfinished, in the
+agent's own words.
 
 What you must not pass on is the shape it arrived in.
 `1.correctness.2 blocking src/auth/recovery.ts:214` is a coordinate for a fixer,

@@ -48,6 +48,13 @@ switch branches, create branches, stage anything, or touch the primary checkout.
 The run that dispatched you does all of that, and it records the exact commit
 your work becomes — a commit you make yourself is one nothing reviewed.
 
+**Your report is the one exception, and it is the only one.** It is written
+outside the worktree, at exactly the absolute path the dispatch named and nowhere
+else — that path is deliberately not under the worktree, so that the report is
+not committed into the change being reviewed. Do not move it inside to stay
+within the boundary, and do not skip writing it to honour the boundary: a report
+the run cannot find at the path it named is a round that accounted for nothing.
+
 ## Return
 
 One line: what you changed in one sentence, and how many files. If you left part
