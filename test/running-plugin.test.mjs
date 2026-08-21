@@ -94,6 +94,31 @@ test("a file edited in the checkout is named, under whichever executed root it s
   ]);
 });
 
+// The edit that only a byte comparison catches, in the place only a
+// relative-path key finds it. `sameBytes` compares sizes first and reads
+// contents only when they match, so a size-changing edit — which is every other
+// drift assertion in this file — never reaches the byte comparison at all: with
+// this test absent, replacing that function's body with the size check alone
+// leaves the suite green while a one-character edit to a lens brief runs stale
+// under a report that says nothing differs. The nested path is the second half:
+// `filesUnder` keys entries by path relative to the root, and a key that
+// flattened to the entry's name would collide `prompts/lenses/docs.md` with
+// another `docs.md` elsewhere in the tree and under-report just as quietly.
+test("a same-size edit to a file below the top of a root is still named, by its path", () => {
+  const snapshot = stageTree("snapshot");
+  const worktree = stageTree("worktree");
+  const edited = path.join(worktree, "prompts", "lenses", "docs.md");
+  const text = fs.readFileSync(edited, "utf8");
+  fs.writeFileSync(edited, text.replace(/^#/, "%"));
+  assert.equal(
+    fs.statSync(edited).size,
+    fs.statSync(path.join(snapshot, "prompts", "lenses", "docs.md")).size,
+    "the edit changed the file's length, so it proves nothing about the byte comparison"
+  );
+
+  assert.deepEqual(report(snapshot, worktree).drift, [{ file: "prompts/lenses/docs.md", state: "differs" }]);
+});
+
 test("a file only one side has says which side that is", () => {
   const snapshot = stageTree("snapshot");
   const worktree = stageTree("worktree");
@@ -132,6 +157,24 @@ test("a repository that is not this plugin gets no drift report at all, empty or
   assert.equal(out.repo.isPlugin, false);
   assert.equal(Object.hasOwn(out, "drift"), false, "a repository that is not this plugin was given a drift list");
   assert.equal(Object.hasOwn(out, "driftUnknown"), false, "a repository that is not this plugin was given a reason");
+});
+
+// The ordinary repository: no `.claude-plugin/` at all. Absence is decidable —
+// a repository with no manifest is not a checkout of this plugin — and only a
+// manifest that exists and cannot be read leaves the question open. Folding the
+// two together, the way `status.mjs` rightly does for its own question, would
+// give every repository that is not tagteam `isPlugin: null` and a
+// `driftUnknown` of `"identity"`, which renders as "whether this checkout is an
+// install of what is running could not be decided" on every run of every
+// command — the per-run noise the identity line above it cannot survive.
+test("a repository with no manifest at all is decidably not this plugin, not undecided", () => {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bare-"));
+  assert.equal(fs.existsSync(path.join(bare, ".claude-plugin")), false, "the bare fixture has a manifest to read");
+
+  const out = runningPlugin(bare);
+  assert.equal(out.repo.isPlugin, false, "a repository with no manifest was left undecided rather than answered");
+  assert.equal(Object.hasOwn(out, "drift"), false, "a repository that is not this plugin was given a drift list");
+  assert.equal(Object.hasOwn(out, "driftUnknown"), false, "a repository with no manifest was given a reason to be unknown");
 });
 
 // The version is identity and is reported on its own, so a bump does not also

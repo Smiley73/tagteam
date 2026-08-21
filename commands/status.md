@@ -80,7 +80,12 @@ path, because the path is what makes the copy visible.
 **This never stops anything.** Print it and carry on. Nothing here is a reason to
 stop, and nothing here is a reason to offer to reinstall.
 
-Then, and only when `repo.isPlugin` is `true`:
+**`repo.isPlugin` false: stop there.** It is the ordinary case — most
+repositories are not tagteam. Say nothing at all about differing files: a line
+saying so on every run of every command is noise a person learns to skip past,
+which costs the identity line above it too.
+
+Anything else falls through. When `repo.isPlugin` is `true`:
 
 - `repo.sameTree` true — one clause: this repository is the copy that is running,
   so nothing can be out of date.
@@ -96,10 +101,11 @@ Then, and only when `repo.isPlugin` is `true`:
   so it takes `claude plugin uninstall tagteam@tagteam` and installing again.
   Restart the session either way. Say it; they run it.
 
-`repo.isPlugin` false is the ordinary case — most repositories are not tagteam.
-Say nothing at all about differing files there: a line saying so on every run of
-every command is noise a person learns to skip past, which costs the identity
-line above it too.
+When `repo.isPlugin` is `null`, whether this checkout is an install of what is
+running could not be decided, so there are no individual files to name and none
+of the four bullets applies. `drift` is null there, and the paragraph below is
+what to say — silence would read as "nothing differs", which is the one thing
+that is not known.
 
 **A `drift` of `null` means nothing was compared** — not that nothing differs.
 The `driftUnknown` key beside it says why, and each reason means a different
