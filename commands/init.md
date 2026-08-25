@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 8. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 9. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -25,7 +25,7 @@ command.
 
 The Codex probe matters: a Codex that runs but cannot honour `--output-schema`
 fails on every review, and finding that out here costs one call instead of a
-train.
+train. Its working directory is temporary.
 
 ## Infer first
 
@@ -64,7 +64,21 @@ See *Asking* in the skill.
    `lead: opus`, `worker: sonnet`, `codex: <installed model>`, all at `high` —
    and let them override. Sonnet is the floor for `worker`; see
    `$P/skills/tagteam/SKILL.md` for why.
-3. `escalation` — whether a spec whose fix rounds keep failing to settle should
+3. `providers` — which engine writes code for `implementer` and `fixer`, chosen
+   independently. Offer `claude` for both first, which is the behaviour before
+   this setting existed. A worker set to `codex` uses the configured
+   `models.codex` / `effort.codex` pair through the same bridge as reviews, but
+   with workspace write access; a Claude worker uses `models.worker` /
+   `effort.worker`. The fixer choice also applies to CI repairs. Explain that
+   choosing Codex here saves Claude Code subagent usage, but the main Claude Code
+   session still orchestrates the train.
+
+   If either choice is `codex`, repeat the live schema probe in a fresh temporary
+   directory with `--sandbox workspace-write` and an instruction that makes no
+   edit. Abort on failure: read-only review capability does not prove that this
+   Codex installation can start the writable worker the user just selected. Skip
+   this second call when both choices are `claude`.
+4. `escalation` — whether a spec whose fix rounds keep failing to settle should
    finish under raised models and effort instead of the ones from question 2.
    Offer leaving it off first: every dispatch in a ship cycle runs at `models`
    and `effort` from the first round to the last, which is what tagteam did
@@ -78,7 +92,7 @@ See *Asking* in the skill.
    rounds the raised ones take over — at least 1, because the ordinary settings
    always get a fix round — and the model and effort for `lead`, `worker` and
    `codex` under them.
-4. `plan` — one set of `models` and `effort` for the whole of `/tagteam:plan`,
+5. `plan` — one set of `models` and `effort` for the whole of `/tagteam:plan`,
    replacing the ones from question 2 for every dispatch that command makes, so
    planning can run cheaper, or more expensively, than shipping. Offer leaving it
    off first: planning runs at the same settings as shipping, which writes
@@ -86,17 +100,17 @@ See *Asking* in the skill.
    on, ask them for the model and effort for `lead` and `codex`, the two roles
    the plan cycle dispatches. Carry the worker entries over from the answers to
    question 2 without asking, and do not raise `worker` in the question.
-5. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
+6. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
    gets four readers. Show the full roster and let them pick from it — the
    shipped briefs plus anything this repository calibrates in
    `.tagteam/lenses/`, which are equally selectable and, on a reconfigure, are
    usually the ones this project cares most about.
-6. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
+7. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
    workflows, no question — it is 0.
-7. Any ignored file a build needs copied into a worktree
+8. Any ignored file a build needs copied into a worktree
    (`worktree.copyUntracked`) — most repositories have none.
-8. What of tagteam's own output belongs in this repository's history. Machine
+9. What of tagteam's own output belongs in this repository's history. Machine
    working state is never committed and is not up for discussion; the question
    is only about the two things a project can reasonably answer either way:
 
@@ -115,17 +129,17 @@ See *Asking* in the skill.
    Pass the answers to `ensure-gitignore.mjs` as `--ignore plans,config`, adding
    `codegraph` when the index was set up. Under `--reconfigure`, default each
    answer to what the current `.gitignore` block already says.
-9. `limits` — how many more attempts a spec, a pull request, or a plan gets
+10. `limits` — how many more attempts a spec, a pull request, or a plan gets
    before this stops and asks a person. Ask the three together, as one question
    about how much unattended work is worth buying, and price them: a fix round
    is another full review panel over a new commit, and a plan review round is
    three more readers over the draft. What a panel costs depends on the answer
-   to question 5, so ask this one after it. Offer 1 across the board — that is
+   to question 6, so ask this one after it. Offer 1 across the board — that is
    what tagteam did before the object existed — and let them raise any of them.
    Skip `ciRepairs` when the repository has no workflows; there is no red pull
    request to repair.
 
-   If they turned escalation on in question 3, this is where that answer gets
+   If they turned escalation on in question 4, this is where that answer gets
    priced. Compare the round they named there against the `fixRounds` **they
    answer here**, not against the number this question offered them — an answer
    that lowers the cap creates the contradiction just as surely as an offer that
@@ -268,6 +282,7 @@ file rather than an unused feature.
 
 An older configuration is not upgraded — each version is a different shape, not
 an extension, and there is no migration. Say that the old file is being replaced,
-and what version 8 adds: two required keys, `escalation` and `plan`, each written
-as `null` and each meaning today's behaviour when it is — every dispatch runs at
-`models` and `effort`.
+and what version 9 adds: the required `providers` map. `claude` for both workers
+is the previous behaviour; choosing `codex` for either is the opt-in. Under
+`--reconfigure`, carry both provider choices forward as their own defaults so a
+reconfigure about something else cannot silently switch an engine.

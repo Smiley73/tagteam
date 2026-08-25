@@ -9,9 +9,11 @@
 // them. Here they are read once, beside the engine, by the process that sends
 // them.
 //
-// Codex runs read-only. It reviews; it never edits. That is what lets this file
-// omit worktree writer locks, completion checkpoints, and the double-apply
-// guards a writable engine needs.
+// Reviews run read-only. Implementer and fixer calls opt into workspace-write,
+// but writable calls are deliberately neither reusable nor automatically
+// retried: an answer can fail after its tool calls have already edited the
+// worktree, and replaying it would apply the same task twice. The ship lock and
+// one-worker-at-a-time protocol own writer exclusion outside this bridge.
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -30,8 +32,8 @@ import {
 import { isMain } from "./lib/is-main.mjs";
 import { codexHome, observeRouting, removeSessions } from "./lib/codex-session.mjs";
 
-const SANDBOX = "read-only";
-const SCHEMA_ATTEMPTS = 2;
+const SANDBOXES = new Set(["read-only", "workspace-write"]);
+const READ_ONLY_SCHEMA_ATTEMPTS = 2;
 // A call that never started Codex has nothing to report about how Codex routed:
 // a --reuse hit and a --dry-run both answer without spawning anything.
 const NOT_RUN = { ran: false, observed: null, observedReason: null, sessions: [], sessionsKept: false };
@@ -46,6 +48,7 @@ export function parseArgs(argv) {
   const options = {
     vars: [],
     fences: [],
+    sandbox: "read-only",
     timeoutSec: 900,
     maxConcurrent: 3,
     codexBin: process.env.TAGTEAM_CODEX_BIN || "codex"
@@ -86,6 +89,12 @@ export function parseArgs(argv) {
   }
   if (!Number.isInteger(options.maxConcurrent) || options.maxConcurrent <= 0) {
     throw new Error("--max-concurrent must be a positive integer");
+  }
+  if (!SANDBOXES.has(options.sandbox)) {
+    throw new Error(`--sandbox must be one of ${[...SANDBOXES].join(", ")}`);
+  }
+  if (options.reuse && options.sandbox === "workspace-write") {
+    throw new Error("--reuse is not safe with --sandbox workspace-write: an artifact cannot prove its edits exist in this worktree");
   }
   return options;
 }
@@ -204,13 +213,25 @@ function killProcessGroup(child, signal) {
 // its routing as unobservable, and the question that raises is asked of a person
 // on every single dispatch.
 export function codexArgv(options, outputPath) {
+  // `--sandbox workspace-write` selects the policy, but user- and project-level
+  // config may still add writable roots or network access inside that policy.
+  // Pin both at the command line for workers. The sandbox's ordinary temporary
+  // directories stay available because build tools commonly need them; this
+  // removes only configured extra roots.
+  const writableOverrides = options.sandbox === "workspace-write"
+    ? [
+        "-c", "sandbox_workspace_write.writable_roots=[]",
+        "-c", "sandbox_workspace_write.network_access=false"
+      ]
+    : [];
   return [
     "exec", "--json",
     "--cd", path.resolve(options.cd),
-    "--sandbox", SANDBOX,
+    "--sandbox", options.sandbox,
     "-m", options.model,
     "-c", `model_reasoning_effort="${options.effort}"`,
     "-c", 'approval_policy="never"',
+    ...writableOverrides,
     "--output-schema", path.resolve(options.schema),
     "-o", outputPath,
     "-"
@@ -421,7 +442,7 @@ function requestRecord(options, prompt) {
   return {
     model: options.model,
     effort: options.effort,
-    sandbox: SANDBOX,
+    sandbox: options.sandbox,
     promptSha256: sha256(prompt),
     schemaSha256: sha256(fs.readFileSync(path.resolve(options.schema))),
     completedAt: new Date().toISOString()
@@ -448,8 +469,8 @@ function reportRouting(routing, options, requestPath) {
     // at all, so there is no comparison here that would not eventually be wrong.
     process.stderr.write(`Codex answered as model ${routing.observed.model}, while the request asked for ${options.model}. Recorded; nothing was blocked.\n`);
   }
-  if (routing.observed.sandbox !== null && routing.observed.sandbox !== SANDBOX) {
-    process.stderr.write(`Codex ran under the ${routing.observed.sandbox} sandbox rather than ${SANDBOX}. Recorded; nothing was blocked.\n`);
+  if (routing.observed.sandbox !== null && routing.observed.sandbox !== options.sandbox) {
+    process.stderr.write(`Codex ran under the ${routing.observed.sandbox} sandbox rather than ${options.sandbox}. Recorded; nothing was blocked.\n`);
   }
 }
 
@@ -500,9 +521,9 @@ async function dispatch(options, artifact, requestPath) {
   fs.writeFileSync(promptPath, prompt, { mode: 0o600 });
 
   // Opt-in reuse, and deliberately shallow: a validating artifact whose sidecar
-  // records this exact prompt, model, effort and schema is the answer to this
+  // records this exact prompt, model, effort, sandbox and schema is the answer to this
   // exact question, so a resumed run does not re-buy it. Nothing is inferred
-  // beyond those four fields.
+  // beyond those five fields.
   if (options.reuse && fs.existsSync(artifact)) {
     const existing = validateArtifact(schema, artifact);
     let recorded = null;
@@ -511,7 +532,8 @@ async function dispatch(options, artifact, requestPath) {
       && recorded?.promptSha256 === record.promptSha256
       && recorded.schemaSha256 === record.schemaSha256
       && recorded.model === record.model
-      && recorded.effort === record.effort) {
+      && recorded.effort === record.effort
+      && recorded.sandbox === record.sandbox) {
       process.stderr.write(`Reusing the validated artifact at ${artifact}; Codex was not invoked.\n`);
       return { result: existing.value, reused: true, artifact, promptPath, bytes, sections, routing: { ...NOT_RUN } };
     }
@@ -537,9 +559,13 @@ async function dispatch(options, artifact, requestPath) {
   try {
     let amendedPrompt = prompt;
     let invalidAttempts = 0;
+    // A read-only answer can safely be asked for again when only its final JSON
+    // was malformed. A writable answer cannot: its tool calls may already have
+    // changed the worktree, so the first malformed answer is terminal.
+    const schemaAttempts = options.sandbox === "workspace-write" ? 1 : READ_ONLY_SCHEMA_ATTEMPTS;
     // What Codex said about each attempt this call made, in the order they ran.
     const attempts = [];
-    while (invalidAttempts < SCHEMA_ATTEMPTS) {
+    while (invalidAttempts < schemaAttempts) {
       const attemptPath = `${artifact}.attempt-${invalidAttempts + 1}-${process.pid}.tmp`;
       try { fs.unlinkSync(attemptPath); } catch {}
       fs.writeFileSync(attemptPath, "", { mode: 0o600 });
@@ -601,6 +627,26 @@ async function dispatch(options, artifact, requestPath) {
 
       const validation = validateArtifact(schema, attemptPath);
       if (validation.ok) {
+        // Read-only results can ask a person what to do when a future CLI
+        // records routing differently. A valid worker result is the thing that
+        // would let the orchestrator commit edits, so it must prove the exact
+        // write policy first. Failed calls reach their provider classification
+        // below instead, where quota and model errors keep their useful cause.
+        if (!outcome.dryRun && options.sandbox === "workspace-write"
+          && (attempt?.reason !== null || attempt?.sandbox !== "workspace-write")) {
+          try { fs.unlinkSync(attemptPath); } catch {}
+          const detail = attempt?.reason
+            ? `its sandbox could not be observed (${attempt.reason})`
+            : `it recorded ${attempt?.sandbox ?? "no sandbox"}`;
+          const evidence = attempt?.rollout
+            ? ` The session Codex wrote is kept at ${attempt.rollout}.`
+            : "";
+          throw cleared(
+            `Writable Codex result refused because the request required workspace-write but ${detail}. `
+            + `The worktree may already contain edits. ${clearCountable(requestPath, artifact)}`
+            + evidence
+          );
+        }
         fs.chmodSync(attemptPath, 0o600);
         const routing = routingRecord(attempt, attempts.map((entry) => entry.sessionId).filter(Boolean));
         record.routing = routing;
@@ -651,6 +697,16 @@ async function dispatch(options, artifact, requestPath) {
         );
       }
       if (classification.kind === "quota") {
+        // A read-only question can wait and ask again without changing anything.
+        // A writable one cannot prove the quota arrived before its tool calls,
+        // so even the otherwise-safe quota retry is a possible double apply.
+        if (options.sandbox === "workspace-write") {
+          throw cleared(
+            `Codex reported a usage limit during a writable call. It was not retried because the worktree may already contain edits. `
+            + `${clearCountable(requestPath, artifact)} `
+            + `What Codex said: ${said.slice(-1000)}`
+          );
+        }
         const state = readOrCreateQuotaState(quotaStatePath);
         const targetAt = parseResetTime(said);
         while (true) {
@@ -671,7 +727,7 @@ async function dispatch(options, artifact, requestPath) {
         continue;
       }
       invalidAttempts += 1;
-      if (invalidAttempts < SCHEMA_ATTEMPTS) {
+      if (invalidAttempts < schemaAttempts) {
         amendedPrompt = `${prompt}\n\nYour previous response did not produce JSON matching the required schema. Return only a complete schema-valid response.`;
       } else {
         // Terminal too, and the one that a fresh workspace hides: the attempt
@@ -680,7 +736,7 @@ async function dispatch(options, artifact, requestPath) {
         // this candidate's review. The provider's sentence stays last because
         // it is the truncated part.
         throw cleared(
-          `Codex did not produce a valid artifact after ${SCHEMA_ATTEMPTS} attempts: ${validation.errors.join("; ")}. `
+          `Codex did not produce a valid artifact after ${schemaAttempts} attempt${schemaAttempts === 1 ? "" : "s"}: ${validation.errors.join("; ")}. `
           + clearCountable(requestPath, artifact)
           + (said ? ` What Codex said: ${said.slice(-1000)}` : "")
         );

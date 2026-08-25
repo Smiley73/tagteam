@@ -136,6 +136,7 @@ process.stdin.on("end", async () => {
     // release that renames a field actually has.
     if (mode === "effort-only") { delete payload.model; delete payload.sandbox_policy; }
     if (mode === "model-drift") payload.model = "codex-auto-review";
+    if (mode === "sandbox-drift") payload.sandbox_policy = { type: "danger-full-access" };
     writeRollout(id, [meta, { timestamp: stamp, ordinal: 5, type: "turn_context", payload }]);
   }
 
@@ -257,6 +258,40 @@ test("the invocation is read-only and never bypasses the sandbox", () => {
   assert.ok(!call.argv.includes("--dangerously-bypass-approvals-and-sandbox"));
 });
 
+test("a writable worker opts into workspace-write without the dangerous sandbox bypass", () => {
+  const space = workspace();
+  const result = run(space, ["--sandbox", "workspace-write"]);
+  assert.equal(result.status, 0, result.stderr);
+  const [call] = execs(space.dir);
+  assert.equal(call.argv[call.argv.indexOf("--sandbox") + 1], "workspace-write");
+  assert.ok(call.argv.includes('approval_policy="never"'));
+  assert.ok(call.argv.includes("sandbox_workspace_write.writable_roots=[]"));
+  assert.ok(call.argv.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(!call.argv.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.equal(sidecar(space.dir).sandbox, "workspace-write");
+  assert.equal(sidecar(space.dir).routing.observed.sandbox, "workspace-write");
+});
+
+test("a writable worker refuses a result that ran with broader sandbox authority", () => {
+  const space = workspace();
+  const result = run(space, ["--sandbox", "workspace-write"], { FAKE_CODEX_MODE: "sandbox-drift" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /required workspace-write but it recorded danger-full-access/);
+  assert.match(result.stderr, /worktree may already contain edits/);
+  assert.equal(execs(space.dir).length, 1, "a sandbox mismatch replayed a writable task");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false);
+});
+
+test("a writable worker refuses a result whose sandbox cannot be observed", () => {
+  const space = workspace();
+  const result = run(space, ["--sandbox", "workspace-write"], { FAKE_CODEX_MODE: "no-turn-context" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sandbox could not be observed/);
+  assert.match(result.stderr, /worktree may already contain edits/);
+  assert.equal(execs(space.dir).length, 1, "unobservable routing replayed a writable task");
+  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false);
+});
+
 test("writes a provenance sidecar and truncates the event log", () => {
   const space = workspace();
   run(space);
@@ -283,6 +318,31 @@ test("--reuse returns the existing artifact, and a changed payload invalidates i
   fs.writeFileSync(path.join(space.dir, "payload.diff"), "diff --git a/y b/y\n+changed\n");
   run(space, ["--reuse"]);
   assert.equal(execs(space.dir).length, 2, "a changed payload is a different question");
+});
+
+test("a writable worker cannot reuse an artifact that does not prove its edits exist", () => {
+  const space = workspace();
+  const result = run(space, ["--sandbox", "workspace-write", "--reuse"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--reuse is not safe with --sandbox workspace-write/);
+  assert.equal(execs(space.dir).length, 0, "an unsafe reuse reached Codex");
+});
+
+test("a writable worker never replays a task after a malformed final report", () => {
+  const space = workspace();
+  const result = run(space, ["--sandbox", "workspace-write"], { FAKE_CODEX_MODE: "always-invalid" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /after 1 attempt:/);
+  assert.equal(execs(space.dir).length, 1, "a worker that may already have edited the worktree was replayed");
+});
+
+test("a writable worker never retries after a quota response that may follow edits", () => {
+  const space = workspace();
+  const result = run(space, ["--sandbox", "workspace-write"], { FAKE_CODEX_MODE: "quota" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /usage limit during a writable call/);
+  assert.match(result.stderr, /worktree may already contain edits/);
+  assert.equal(execs(space.dir).length, 1, "a quota response replayed a writable task");
 });
 
 test("a missing payload stops the request before Codex is started", () => {

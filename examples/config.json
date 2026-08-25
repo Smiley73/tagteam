@@ -1,8 +1,12 @@
 {
-  "version": 8,
+  "version": 9,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
+  "providers": {
+    "implementer": "claude",
+    "fixer": "claude"
+  },
   "models": {
     "lead": "opus",
     "worker": "sonnet",

@@ -12,10 +12,10 @@ expands it into spec files. `/tagteam:ship` implements
 those specs one at a time, reviews each with a cross-engine panel, and merges the
 ones that need no human judgement.
 
-**The orchestrator is the main agent.** It runs git, Codex, and the scripts in
-this plugin directly through Bash, and dispatches subagents only for model work.
-Subagents write their own output files; the orchestrator reads them. Nothing is
-ever moved between steps by passing it through a model.
+**The orchestrator is the main agent.** It runs git and the plugin's scripts,
+dispatches Claude subagents, and invokes Codex through the bridge. Workers write
+their own output files; the orchestrator reads them. Nothing is ever moved
+between steps by passing it through a model.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -78,11 +78,11 @@ replaced in place and the write-once rule does not cover them.
 
 ## Configuration
 
-`.tagteam/config.json`, version 8, validated by
+`.tagteam/config.json`, version 9, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:init` and stop. There is no migration: version 8
+tell the person to run `/tagteam:init` and stop. There is no migration: version 9
 requires keys an older file does not carry, and no key has a fallback in a
 script, so an older configuration is incomplete rather than upgradable.
 
@@ -91,7 +91,8 @@ script, so an older configuration is incomplete rather than upgradable.
 | `base` | Branch pull requests target and each spec branches from |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
-| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, explorer), `worker` (implementer, fixer), `codex` (each `scripts/codex.mjs` invocation). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
+| `providers` | Which engine writes code for `implementer` and `fixer`, independently: `claude` or `codex`. The fixer choice also owns CI repairs. Claude workers use the `worker` model/effort; Codex workers use the `codex` pair. The main Claude Code session remains the orchestrator either way. |
+| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, explorer), `worker` (implementer/fixer when their provider is Claude), `codex` (every `scripts/codex.mjs` invocation, including a worker selected in `providers`). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
 | `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused: it would produce a reviewer that invents the lens and findings nothing can tell from a calibrated reviewer's |
 | `reviewers.default` | Lenses applied to every spec unless it drops one |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
@@ -131,7 +132,12 @@ about a repository brief reaches it.
 
 ## Dispatching and waiting
 
-**The model is an argument; the effort is a name.** The Agent tool takes a
+**The provider comes from the resolver.** In a ship cycle, read the job's
+`provider`, `model`, and `effort` together. A worker whose provider is `claude`
+uses the Agent dispatch below; one whose provider is `codex` uses the writable
+bridge call in the Codex section. Never infer the provider from a model name.
+
+**For Claude, the model is an argument; the effort is a name.** The Agent tool takes a
 `model` parameter, so a resolved model is passed to it directly. It has no
 `effort` parameter — none exists — so a resolved effort cannot be passed at all.
 What carries it is agent frontmatter, which Claude Code reads off the agent file
@@ -194,14 +200,18 @@ the first, and `echo` calls emitted only to burn a turn are all the same
 mistake: they put dozens of lines into the transcript a person is reading and
 not one of them makes the work finish sooner.
 
-**A Codex call in a fan-out is a Bash call, not an agent**, and it has to run
-with `run_in_background`: `codex.mjs` allows itself 900 seconds and waits out a
-quota in slices to a four-hour ceiling, while the Bash tool kills a foreground
-command at 600. Its artifact belongs in the watcher — the script renames it into
-place atomically, so its presence means a whole file — but **read the background
-call's result as well**. A schema 400, an unavailable model, a timeout, or
-exhausted quota each end with no artifact and the reason only in that result.
-Waiting on a file Codex has already failed to write is a stall with no end.
+**A Codex call is a Bash call, not an agent**, and it has to run with
+`run_in_background`: `codex.mjs` allows itself 900 seconds, while the Bash tool
+kills a foreground command at 600. Read-only calls also wait out a quota in
+slices to a four-hour ceiling. Writable calls stop on a quota response because
+the response cannot prove whether tool calls already edited the worktree. In a
+fan-out, its artifact belongs in the watcher — the script renames it into place
+atomically, so its presence means a whole file. For a single writable worker,
+wait for the background call itself before touching the worktree. In both cases,
+**read the background call's result as well**. A schema 400, an unavailable
+model, a timeout, or exhausted quota each end with no artifact and the reason
+only in that result. Waiting on a file Codex has already failed to write is a
+stall with no end.
 
 The watcher tells you the outputs exist, not that the agents were right; the
 aggregation script is still what judges them. When something has reported
@@ -211,8 +221,10 @@ honest verdict, and it is the one you would have reached anyway.
 
 ## Codex
 
-Required. If `codex --version` fails, stop and say so — there is no
-single-provider mode and no `--provider` flag.
+Required. If `codex --version` fails, stop and say so. Cross-reviews always use
+Codex even when both configurable workers use Claude.
+
+### Read-only review
 
 ```bash
 node "$P/scripts/codex.mjs" \
@@ -222,6 +234,46 @@ node "$P/scripts/codex.mjs" \
   --model <the caller's model> --effort <the caller's effort> \
   --cd <worktree> --slots <plan-or-ship-dir> --max-concurrent <maxConcurrentCodex> [--reuse]
 ```
+
+Review calls omit `--sandbox`, whose safe default is `read-only`.
+
+### Writable workers
+
+When `roles.implement.provider` is `codex`, implement with:
+
+```bash
+node "$P/scripts/codex.mjs" \
+  --template "$P/prompts/codex/implement.md" \
+  --fence SPEC=<spec-path> <conventions-argument> \
+  --schema "$P/schemas/implement-report.schema.json" \
+  --out "$S/<id>/implement-report.json" \
+  --model <roles.implement.model> --effort <roles.implement.effort> \
+  --sandbox workspace-write --cd "$W" --slots "$S" \
+  --max-concurrent <maxConcurrentCodex>
+```
+
+`<conventions-argument>` is `--fence CONVENTIONS=<absolute-path>` when
+`conventionsPath` is set, and `--var "CONVENTIONS=No conventions document is
+configured."` otherwise.
+
+When `roles.fix.provider` or `roles.repair-fix.provider` is `codex`, fix with:
+
+```bash
+node "$P/scripts/codex.mjs" \
+  --template "$P/prompts/codex/fix.md" \
+  --var WORK_KIND=findings --fence WORK=<brief-path> \
+  --schema "$P/schemas/fix-report.schema.json" \
+  --out "$S/<id>/fix-report.json" \
+  --model <the job's model> --effort <the job's effort> \
+  --sandbox workspace-write --cd "$W" --slots "$S" \
+  --max-concurrent <maxConcurrentCodex>
+```
+
+Use that form with the `to-fix.json` or `still-open.json` brief. For a CI repair,
+substitute `--var "WORK_KIND=failing check output"` and fence the saved CI
+failure log. The artifact the bridge writes is
+the worker's report; Codex edits only the worktree and never writes the report
+path itself.
 
 **The model and the effort come from the clause that is making this call, not
 from one place in the configuration.** In `/tagteam:ship` they come from the
@@ -246,16 +298,29 @@ blocks nothing: nothing anywhere matches model names. The Codex sessions a good
 call created are deleted afterwards, so reviews do not pile up in someone's own
 Codex history; a call whose routing could not be read keeps them instead.
 
-Three things to know:
+Five things to know:
 
-- **Codex runs read-only and cannot write files.** Its output is the artifact the
-  script writes from `--output-schema`. Never instruct it to write one.
+- **Review calls run read-only.** Their output is the artifact the script writes
+  from `--output-schema`; never instruct Codex to write it.
+- **Worker calls run `workspace-write`, still with approvals set to `never` and
+  without any sandbox bypass.** Command-line overrides remove configured extra
+  writable roots and disable sandbox network access. The bridge accepts the
+  report only when Codex records the exact `workspace-write` policy; an
+  unobservable or different sandbox stops the worker. The orchestrator, not
+  Codex, stages and commits whatever changed.
 - **Schemas must be strict-mode legal**: every property in `required`, every
   `const` given a `type`. Otherwise the request returns HTTP 400 before the model
-  runs, identically on every retry.
-- **`--reuse` is safe and shallow.** It returns an existing artifact only when
-  the sidecar records this exact prompt, schema, model, and effort. Use it on
-  every resumed step; a completed review is not worth buying twice.
+  runs.
+- **`--reuse` is review-only.** It returns an existing read-only artifact only
+  when the sidecar records this exact prompt, schema, model, effort, and sandbox.
+  A writable call rejects it because a report cannot prove its edits exist in
+  the current worktree.
+- **A writable call gets one schema attempt.** A malformed final report may
+  arrive after edits already happened, so replaying the whole task could apply it
+  twice. A quota response is terminal for the same reason. A failed worker call
+  may therefore leave a dirty worktree: do not commit it and do not re-dispatch
+  automatically. Stop, report the bridge failure, and leave the worktree for a
+  person to inspect or resume deliberately.
 
 ## The Git protocol
 

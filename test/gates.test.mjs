@@ -611,6 +611,7 @@ test("a counter that is present but not a round count is refused, not read as un
 // cycle before it had reached, with nothing erroring.
 
 const ORDINARY = {
+  providers: { implementer: "claude", fixer: "claude" },
   models: { lead: "opus", worker: "sonnet", codex: "gpt-5-codex" },
   effort: { lead: "high", worker: "medium", codex: "medium" },
   escalation: null
@@ -644,15 +645,17 @@ test("a CI repair puts every job back on the ordinary settings, and its own stal
   assert.equal(repaired.fixRoundsUsed, 0);
   const jobs = resolveRoles(repaired, RAISED).jobs;
   assert.deepEqual(raisedJobs(repaired, RAISED), []);
-  assert.deepEqual(jobs["repair-fix"], { model: "sonnet", effort: "medium", escalated: false });
-  assert.deepEqual(jobs.fix, { model: "sonnet", effort: "medium", escalated: false });
+  assert.deepEqual(jobs["repair-fix"], { provider: "claude", model: "sonnet", effort: "medium", escalated: false });
+  assert.deepEqual(jobs.fix, { provider: "claude", model: "sonnet", effort: "medium", escalated: false });
 
   // And the repair cycle escalates on its own stalled rounds, from zero.
   let cycle = step(repaired, "fixing", limits);
   assert.deepEqual(raisedJobs(cycle, RAISED), [], "the repair's first fix round is still ordinary");
   cycle = step({ ...cycle, state: "reviewing" }, "fixing", limits);
   assert.deepEqual(raisedJobs(cycle, RAISED), ESCALATING);
-  assert.deepEqual(resolveRoles(cycle, RAISED).jobs["recheck-lens"], { model: "opus", effort: "max", escalated: true });
+  assert.deepEqual(resolveRoles(cycle, RAISED).jobs["recheck-lens"], {
+    provider: "claude", model: "opus", effort: "max", escalated: true
+  });
 });
 
 test("escalation fires past `after`, not at it, and never without an escalation key", () => {
@@ -668,10 +671,10 @@ test("escalation fires past `after`, not at it, and never without an escalation 
   // the line — the fresh reader must be running the ordinary settings while the
   // fixer runs the raised ones, which is D1's whole point.
   const raised = resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs;
-  assert.deepEqual(raised.fix, { model: "opus", effort: "high", escalated: true });
-  assert.deepEqual(raised["review-lens"], { model: "opus", effort: "high", escalated: false });
-  assert.deepEqual(raised["adversary-fresh"], { model: "opus", effort: "high", escalated: false });
-  assert.deepEqual(raised["review-codex"], { model: "gpt-5-codex", effort: "medium", escalated: false });
+  assert.deepEqual(raised.fix, { provider: "claude", model: "opus", effort: "high", escalated: true });
+  assert.deepEqual(raised["review-lens"], { provider: "claude", model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(raised["adversary-fresh"], { provider: "claude", model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(raised["review-codex"], { provider: "codex", model: "gpt-5-codex", effort: "medium", escalated: false });
 
   for (const spent of [0, 1, 2, 7]) {
     assert.deepEqual(raisedJobs(at("fixing", { fixRoundsUsed: spent }), ORDINARY), [],
@@ -679,8 +682,12 @@ test("escalation fires past `after`, not at it, and never without an escalation 
   }
   const nulled = resolveRoles(at("fixing", { fixRoundsUsed: 7 }), ORDINARY);
   assert.equal(nulled.fixRoundsUsed, 7, "the counter is reported for diagnosis");
-  assert.deepEqual(nulled.jobs["review-codex"], { model: "gpt-5-codex", effort: "medium", escalated: false });
-  assert.deepEqual(nulled.jobs["adversary-fresh"], { model: "opus", effort: "high", escalated: false });
+  assert.deepEqual(nulled.jobs["review-codex"], {
+    provider: "codex", model: "gpt-5-codex", effort: "medium", escalated: false
+  });
+  assert.deepEqual(nulled.jobs["adversary-fresh"], {
+    provider: "claude", model: "opus", effort: "high", escalated: false
+  });
 
   // A hand-edited counter fails here as loudly as it does on a budgeted edge.
   assert.throws(() => resolveRoles(at("fixing", { fixRoundsUsed: "1" }), RAISED), /fixRoundsUsed/);
@@ -694,9 +701,9 @@ test("escalation fires past `after`, not at it, and never without an escalation 
 // object pins the count (nine), every job name, and every job-to-role mapping
 // in a single assertion, on both sides of the line.
 test("the resolver emits exactly nine jobs, each mapped to its role's settings", () => {
-  const worker = { model: "sonnet", effort: "medium", escalated: false };
-  const lead = { model: "opus", effort: "high", escalated: false };
-  const codex = { model: "gpt-5-codex", effort: "medium", escalated: false };
+  const worker = { provider: "claude", model: "sonnet", effort: "medium", escalated: false };
+  const lead = { provider: "claude", model: "opus", effort: "high", escalated: false };
+  const codex = { provider: "codex", model: "gpt-5-codex", effort: "medium", escalated: false };
   assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 1 }), RAISED).jobs, {
     implement: worker,
     "review-lens": lead,
@@ -715,13 +722,37 @@ test("the resolver emits exactly nine jobs, each mapped to its role's settings",
     implement: worker,
     "review-lens": lead,
     "review-codex": codex,
-    fix: { model: "opus", effort: "high", escalated: true },
+    fix: { provider: "claude", model: "opus", effort: "high", escalated: true },
     "adversary-fresh": lead,
-    "recheck-lens": { model: "opus", effort: "max", escalated: true },
-    "recheck-adversary": { model: "opus", effort: "max", escalated: true },
-    "recheck-codex": { model: "gpt-5-codex", effort: "high", escalated: true },
-    "repair-fix": { model: "opus", effort: "high", escalated: true }
+    "recheck-lens": { provider: "claude", model: "opus", effort: "max", escalated: true },
+    "recheck-adversary": { provider: "claude", model: "opus", effort: "max", escalated: true },
+    "recheck-codex": { provider: "codex", model: "gpt-5-codex", effort: "high", escalated: true },
+    "repair-fix": { provider: "claude", model: "opus", effort: "high", escalated: true }
   }, "a raised round moves exactly the escalating five");
+});
+
+test("implementer and fixer providers select their engines independently, and CI repair follows the fixer", () => {
+  const mixed = {
+    ...ORDINARY,
+    providers: { implementer: "codex", fixer: "claude" }
+  };
+  const jobs = resolveRoles(at("implementing"), mixed).jobs;
+  assert.deepEqual(jobs.implement, {
+    provider: "codex", model: "gpt-5-codex", effort: "medium", escalated: false
+  });
+  assert.deepEqual(jobs.fix, {
+    provider: "claude", model: "sonnet", effort: "medium", escalated: false
+  });
+  assert.deepEqual(jobs["repair-fix"], jobs.fix, "a CI repair did not inherit the configured fixer provider");
+
+  const codexFixer = {
+    ...RAISED,
+    providers: { implementer: "claude", fixer: "codex" }
+  };
+  const raised = resolveRoles(at("fixing", { fixRoundsUsed: 2 }), codexFixer).jobs;
+  assert.deepEqual(raised.fix, {
+    provider: "codex", model: "gpt-5-codex", effort: "high", escalated: true
+  }, "an escalated Codex fixer did not use the escalation block's Codex settings");
 });
 
 test("gates.mjs state takes the budgeted edge through the CLI with the configured limits", async () => {

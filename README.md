@@ -64,6 +64,23 @@ Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**. The interview
 loads repository material that shipping does not need, and context is the thing
 that runs out.
 
+The implementer and fixer can each use Claude or Codex. Existing installations
+must run `/tagteam:init --reconfigure` first: version 9 adds this required map,
+and changing the map alone does not upgrade a version 8 configuration. Then set
+the two choices independently in `.tagteam/config.json`:
+
+```json
+"providers": {
+  "implementer": "codex",
+  "fixer": "codex"
+}
+```
+
+Claude is the default for both. A Codex worker uses `models.codex` and
+`effort.codex`; a Claude worker uses the `worker` pair. The fixer choice also
+applies to CI repairs. This saves Claude Code subagent usage when that allowance
+is tight, although the main Claude Code session still orchestrates the run.
+
 ### Planning
 
 ```mermaid
@@ -134,13 +151,13 @@ title: The ship cycle, per spec
 ---
 flowchart TD
     branch["Branch — from the base, in a dedicated worktree"]
-    implement["Implement — one implementer, given only the spec"]
+    implement["Implement — one configured Claude or Codex worker,<br>given only the spec"]
     snapshot["Commit + snapshot — the candidate commit every gate binds to"]
     verify["Verify — executable evidence, recorded as a gate"]
     lenses["One reviewer per lens"]
     codexr["Codex cross-review"]
     open{"Anything blocking or major open?"}
-    fixer["Fix — a fixer gets the blocking and major findings, nothing else"]
+    fixer["Fix — one configured Claude or Codex worker gets<br>the blocking and major findings, nothing else"]
     route{"Which review does the fixed commit get?"}
     adv["Adversary — reads the final diff fresh"]
     recheck["Re-check — each reviewer that raised a finding judges its own against the new code"]
@@ -222,9 +239,10 @@ flowchart TD
 ## How it is built
 
 The orchestrator is the main Claude Code agent following the command files. It
-runs git, Codex, and this plugin's scripts directly, and dispatches subagents only
-for model work. Subagents write their own outputs; the orchestrator reads them.
-Nothing large is ever moved between steps by passing it through a model.
+runs git, Codex, and this plugin's scripts directly. Claude workers are
+subagents; Codex workers and reviews use the same non-interactive bridge.
+Workers write their own outputs; the orchestrator reads them. Nothing large is
+ever moved between steps by passing it through a model.
 
 Decisions that are silent when wrong are code, not prose: which commit gets
 merged, whether the gates are satisfied, and how CI checks classify. Everything
@@ -236,8 +254,13 @@ does not.
 
 ## Safety
 
-- Reviewers have no write or shell tools. Codex runs `read-only` and only ever
-  reviews.
+- Reviewers have no write or shell tools, and Codex reviews run `read-only`.
+- Codex implementers and fixers run under `workspace-write` with approval prompts
+  disabled, no extra writable roots, no sandbox network access, and without the
+  dangerous sandbox bypass. The recorded sandbox must exactly match before the
+  report is accepted. Writable calls cannot reuse an old artifact and are not
+  replayed after a malformed report or quota response; only the orchestrator
+  commits them.
 - Codex runs through `codex exec --output-schema`. MCP is unsupported because its
   tool contract cannot enforce a response schema.
 - Every gate binds to one commit; a new commit clears all of them, and every fix

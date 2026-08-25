@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 8",
+  "title": "tagteam project configuration, version 9",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
+    "version", "base", "branchPrefix", "conventionsPath", "providers", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "autoMerge", "worktree", "reviewExclude",
     "maxConcurrentCodex", "limits", "escalation", "plan"
   ],
   "properties": {
-    "version": { "const": 8, "type": "integer" },
+    "version": { "const": 9, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -23,6 +23,10 @@
     "conventionsPath": {
       "type": ["string", "null"],
       "description": "A repository document implementers and reviewers are told to read. Null when there is none."
+    },
+    "providers": {
+      "$ref": "#/$defs/workerProviders",
+      "description": "Selects which engine implements specs and fixes findings. Claude workers use models.worker/effort.worker; Codex workers use models.codex/effort.codex."
     },
     "models": {
       "$ref": "#/$defs/roleModels",
@@ -175,6 +179,15 @@
     }
   },
   "$defs": {
+    "workerProviders": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementer", "fixer"],
+      "properties": {
+        "implementer": { "type": "string", "enum": ["claude", "codex"] },
+        "fixer": { "type": "string", "enum": ["claude", "codex"] }
+      }
+    },
     "claudeModel": { "type": "string", "enum": ["opus", "fable", "sonnet"] },
     "claudeEffort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
     "roleModels": {

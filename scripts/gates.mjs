@@ -150,22 +150,27 @@ export function budgetTaken(before, after, { limits } = {}) {
   };
 }
 
-// Every dispatch a ship cycle makes, and the role each one runs as, keyed
-// exactly as `commands/ship.md` names them. A clause there names its job and
-// reads the model and effort off this, so "which settings does this dispatch run
-// at" is decided in code: getting it wrong is silent, and a round dispatched at
-// the ordinary settings when the configuration bought the raised ones looks
-// exactly like a round that was never meant to escalate.
+// Every dispatch a ship cycle makes, and how its engine is selected, keyed
+// exactly as `commands/ship.md` names them. Most jobs have a fixed engine and
+// role. The two code-writing workers instead name a key in `config.providers`:
+// Claude routes through the worker role, while Codex routes through the codex
+// role. The repair fixer deliberately shares the fixer's key.
+//
+// A clause in ship.md names its job and reads the provider, model and effort off
+// this, so "how does this dispatch run" is decided in code. Getting it wrong is
+// silent: a Codex worker handed a Claude model name, or a round dispatched at the
+// ordinary settings when the configuration bought the raised ones, otherwise
+// looks exactly like a run that was meant to happen.
 const SHIP_JOBS = {
-  implement: "worker",         // step 2
-  "review-lens": "lead",       // step 5
-  "review-codex": "codex",     // step 5
-  fix: "worker",               // step 6
-  "adversary-fresh": "lead",   // step 7
-  "recheck-lens": "lead",      // step 7
-  "recheck-adversary": "lead", // step 7
-  "recheck-codex": "codex",    // step 7
-  "repair-fix": "worker"       // step 8
+  implement: { role: "worker", providerKey: "implementer" }, // step 2
+  "review-lens": { role: "lead", provider: "claude" },       // step 5
+  "review-codex": { role: "codex", provider: "codex" },      // step 5
+  fix: { role: "worker", providerKey: "fixer" },              // step 6
+  "adversary-fresh": { role: "lead", provider: "claude" },   // step 7
+  "recheck-lens": { role: "lead", provider: "claude" },      // step 7
+  "recheck-adversary": { role: "lead", provider: "claude" }, // step 7
+  "recheck-codex": { role: "codex", provider: "codex" },     // step 7
+  "repair-fix": { role: "worker", providerKey: "fixer" }     // step 8
 };
 
 // Which jobs escalate: the fixer and the three re-checks, and nothing else.
@@ -192,8 +197,8 @@ const SHIP_JOBS = {
 const ESCALATING_JOBS = new Set(["fix", "recheck-lens", "recheck-adversary", "recheck-codex", "repair-fix"]);
 
 /**
- * The model and effort every dispatch of a ship cycle runs at, for this spec as
- * it stands right now.
+ * The provider, model and effort every dispatch of a ship cycle runs at, for
+ * this spec as it stands right now.
  *
  * Read once per dispatching message, off the current state file: the fix counter
  * moves between step 5 and step 7, and the repair edge resets it inside step 8,
@@ -211,18 +216,25 @@ export function resolveRoles(state, config) {
   const escalation = config?.escalation ?? null;
   const raised = Boolean(escalation) && fixRoundsUsed > escalation.after;
   const jobs = {};
-  for (const [job, role] of Object.entries(SHIP_JOBS)) {
+  for (const [job, route] of Object.entries(SHIP_JOBS)) {
     const escalated = raised && ESCALATING_JOBS.has(job);
     const settings = escalated ? escalation : config;
+    const provider = route.providerKey ? (config?.providers?.[route.providerKey] ?? null) : route.provider;
+    const role = route.providerKey && provider === "codex"
+      ? "codex"
+      : route.providerKey && provider !== "claude"
+        ? null
+        : route.role;
     jobs[job] = {
-      model: settings?.models?.[role] ?? null,
-      effort: settings?.effort?.[role] ?? null,
+      provider,
+      model: role === null ? null : (settings?.models?.[role] ?? null),
+      effort: role === null ? null : (settings?.effort?.[role] ?? null),
       escalated
     };
   }
   // The briefs ride along because this is read immediately before every
   // dispatching message that needs one — step 5's panel and step 7's re-check
-  // both — so the model, the effort and the brief a reviewer is given all come
+  // both — so the provider, model, effort and brief a reviewer is given all come
   // off the same read and cannot drift apart.
   return { spec: state?.spec ?? null, fixRoundsUsed, jobs, briefs: state?.briefs ?? {} };
 }
@@ -515,9 +527,9 @@ const USAGE = `usage:
   \`init\` needs the repository to resolve each lens's brief, and refuses a lens
   nothing calibrates rather than letting a reviewer invent one in step 5.
 
-  \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
-  one entry per job, resolved from this spec's fix counter and \`escalation\`,
-  plus the brief each lens is calibrated by. It writes nothing, and it is read
+  \`roles\` prints the provider, model and effort every dispatch of a ship cycle
+  runs at, one entry per job, resolved from this spec's fix counter,
+  \`providers\`, and \`escalation\`, plus the brief each lens is calibrated by. It writes nothing, and it is read
   once per dispatching message: a \`state\` call between the read and the dispatch
   invalidates it.
 `;
@@ -530,7 +542,7 @@ function readLimits(file) {
   const limits = config?.limits;
   if (limits === null || typeof limits !== "object" || Array.isArray(limits)) {
     throw new Error(`${file} has no limits object, so no budget can be enforced — run /tagteam:init to bring the `
-      + "configuration up to version 8");
+      + "configuration up to version 9");
   }
   return limits;
 }

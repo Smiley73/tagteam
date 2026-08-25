@@ -32,7 +32,7 @@ const CONSUMED = [
   // resolves a dotted key through `?.` against `examples/config.json` and asserts
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
-  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]]
+  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "providers", "models", "effort", "escalation"]]
 ];
 
 // Keys older config shapes had and the current one does not. A key that comes
@@ -863,6 +863,8 @@ test("the shipped example states today's behaviour", () => {
   // question `/tagteam:init` asks, so pinning the answer here would mean tagteam
   // could not configure itself the way it offers to configure everyone else.
   assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 }, "examples/config.json");
+  assert.deepEqual(example.providers, { implementer: "claude", fixer: "claude" },
+    "the example must preserve the pre-provider worker behavior");
 });
 
 test("the schema declares no default anywhere", () => {
@@ -1021,6 +1023,54 @@ test("a version-7 configuration reports stale rather than invalid", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v7-"));
   const old = path.join(dir, "config.json");
   fs.writeFileSync(old, JSON.stringify({ ...withoutNewKeys, version: 7 }));
+  const result = spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
+    path.join(root, "schemas", "config.schema.json"), old
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /run \/tagteam:init/);
+});
+
+// --- version 9: selectable code-writing providers ---
+
+test("providers is a required closed map with one independent choice per worker", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const { providers, ...withoutProviders } = example;
+  let errors = validateJson(schema, withoutProviders);
+  assert.ok(errors.some((error) => error.includes("providers")),
+    `a configuration without providers validated: ${errors.join("; ")}`);
+
+  for (const key of ["implementer", "fixer"]) {
+    const { [key]: removed, ...partial } = providers;
+    errors = validateJson(schema, { ...example, providers: partial });
+    assert.ok(errors.some((error) => error.includes(`providers.${key}`)),
+      `providers without ${key} validated: ${errors.join("; ")}`);
+  }
+
+  for (const implementer of ["claude", "codex"]) {
+    for (const fixer of ["claude", "codex"]) {
+      assert.deepEqual(validateJson(schema, { ...example, providers: { implementer, fixer } }), [],
+        `${implementer}/${fixer} should be a valid provider pair`);
+    }
+  }
+
+  errors = validateJson(schema, {
+    ...example,
+    providers: { implementer: "claude", fixer: "codex", reviewer: "codex" }
+  });
+  assert.ok(errors.some((error) => error.includes("providers.reviewer")),
+    `an unknown provider role validated: ${errors.join("; ")}`);
+
+  errors = validateJson(schema, { ...example, providers: { implementer: "openai", fixer: "claude" } });
+  assert.ok(errors.some((error) => error.includes("providers.implementer")),
+    `an unknown provider validated: ${errors.join("; ")}`);
+});
+
+test("a version-8 configuration reports stale so init can add worker providers", () => {
+  const { providers, ...withoutProviders } = example;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v8-"));
+  const old = path.join(dir, "config.json");
+  fs.writeFileSync(old, JSON.stringify({ ...withoutProviders, version: 8 }));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), old

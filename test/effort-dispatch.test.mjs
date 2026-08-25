@@ -144,7 +144,20 @@ test("every Claude-role ship job can be dispatched at any effort it resolves", a
   const resolved = resolveRoles(state, config);
   const ladder = new Set(efforts());
   for (const [job, entry] of Object.entries(resolved.jobs)) {
-    if (job.includes("codex")) continue;
+    if (entry.provider !== "claude") continue;
     assert.ok(ladder.has(entry.effort), `job ${job} resolved effort ${entry.effort}, which has no agent variant`);
+  }
+});
+
+test("Codex workers resolve onto the Codex effort ladder instead of a Claude agent variant", async () => {
+  const { resolveRoles } = await import("../scripts/gates.mjs");
+  const config = JSON.parse(read("examples/config.json"));
+  config.providers = { implementer: "codex", fixer: "codex" };
+  const resolved = resolveRoles({ spec: "s1", state: "implementing", history: [] }, config);
+  const codexLadder = new Set(JSON.parse(read("schemas/config.schema.json")).$defs.roleEffort.properties.codex.enum);
+  for (const job of ["implement", "fix", "repair-fix"]) {
+    assert.equal(resolved.jobs[job].provider, "codex");
+    assert.ok(codexLadder.has(resolved.jobs[job].effort),
+      `job ${job} resolved Codex effort ${resolved.jobs[job].effort}, which the bridge cannot pass`);
   }
 });

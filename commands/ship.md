@@ -143,41 +143,55 @@ read of the resolver**, against the state file as it stands at that moment:
 node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
 ```
 
-It prints one entry per dispatch of a ship cycle, each with the model and the
-effort that dispatch runs at. Every clause below names the job it is about to
-start, and you read that job's `model` and `effort` off this output — the
-clause's job and no other. **A `gates.mjs state` call between the read and the
+It prints one entry per dispatch of a ship cycle, each with the provider, model,
+and effort that dispatch runs at. Every clause below names the job it is about to
+start, and you read that job's `provider`, `model`, and `effort` off this output —
+the clause's job and no other. **A `gates.mjs state` call between the read and the
 dispatch invalidates the read**, even when both sit inside one numbered step:
 those transitions move the counters the resolution is made from, so read again
 below them. Never carry a reading into another message, and never reuse one
 after a resume.
 
-**The two halves of that pair are applied differently, and this is the whole of
-it.** The model is an argument: pass the job's `model` to the Agent tool. The
-effort is not — the Agent tool has no effort parameter, so it is carried by
-*which agent you name*. Every tagteam agent ships as one variant per effort,
+**For a Claude dispatch, the model and effort are applied differently.** The
+model is an argument: pass the job's `model` to the Agent tool. The effort is not
+— the Agent tool has no effort parameter, so it is carried by *which agent you
+name*. Every tagteam agent ships as one variant per effort,
 named `tagteam:<agent>-<effort>`: a `fix` job resolving to xhigh is dispatched
 as tagteam:fixer-xhigh, and the same job at high is tagteam:fixer-high. **No
 unsuffixed agent name exists**, here or anywhere else in this command — a bare
 name is not a shortcut, it is a dispatch that does not exist, and the run stops
 until you name a variant. So every clause below that says "at `roles.<job>`'s
 model and effort" means: pass `roles.<job>`'s model, and append `roles.<job>`'s
-effort to the agent's name.
+effort to the agent's name. For a Codex dispatch, both are real arguments to the
+bridge call. Never infer the provider from the model name; use the resolver's
+`provider` field.
 
-One `tagteam:implementer-<effort>` at `roles.implement`'s model and effort. Give
-it the spec **path**, the worktree path, `conventionsPath` if set, and
-`$S/<id>/implement-report.json` to write. It reads the spec itself; you do not.
+At `roles.implement`'s provider, model, and effort:
+
+- `claude` — one `tagteam:implementer-<effort>`. Give it the spec **path**, the
+  worktree path, `conventionsPath` if set, and
+  `$S/<id>/implement-report.json` to write. It reads the spec itself; you do not.
+  Dispatch it with `run_in_background: false` so the call blocks until it
+  reports.
+- `codex` — the writable implement call in the skill, with this job's model and
+  effort, the spec and optional conventions fenced from disk, and the same
+  implementation report path as its schema output. Run the Bash call in the
+  background because its own timeout is longer than a foreground Bash call can
+  survive, then wait for and read that call's result before continuing. Do not
+  pass `--reuse`. A failed call may already have edited the worktree: commit
+  nothing, do not dispatch it again automatically, report the failure, and stop
+  with the worktree intact for inspection.
 
 That last path is the implementer's account of its own work: whether it finished
 the spec, what it changed, and what it left undone with the reason. Step 3 records
 it against the commit and a gate reads it. **No report is not a neutral outcome** —
 a round that wrote none stops this pull request for a person exactly as one that
-says the work is unfinished does, and nothing here writes one on an agent's
-behalf. Name the path in the dispatch; there is nowhere else it can come from.
+says the work is unfinished does, and nothing here invents one from the diff on
+a worker's behalf. Name the path in the dispatch; there is nowhere else it can
+come from.
 
-Dispatch it with `run_in_background: false` so the call blocks until it reports.
-It writes code into `$W` and no artifact you could watch for, and committing a
-worktree the implementer is still writing commits half a change.
+Both providers write code into `$W`; the report path is the completion evidence.
+Committing while either one is still working commits half a change.
 
 ### 3. Commit and snapshot
 
@@ -474,14 +488,14 @@ yourself and do not go looking for the numbers anywhere else. The counter behind
 and died before it committed spent its round, and this is the only number that
 knows it.
 
-**Say in the same breath what model and what effort this fixer is being
-dispatched at**, read off the resolver output you have just taken — "at Opus, at
-high effort", in the same plain line. Say it on every fix round, whether or not
-the settings were raised: a round that quietly ran at the ordinary settings when
-this repository configured raised ones has to look different on screen from one
-that did not, and it only does if the ordinary case is said too. It is this
-fixer's pair and not the round's — an escalated round leaves the lens panel and
-the adversary's fresh pass exactly where they were.
+**Say in the same breath what provider, model, and effort this fixer is being
+dispatched at**, read off the resolver output you have just taken — "with Codex,
+at gpt-5.6-sol, at high effort", in the same plain line. Say it on every fix
+round, whether or not the settings were raised: a round that quietly ran at the
+ordinary settings when this repository configured raised ones has to look
+different on screen from one that did not, and it only does if the ordinary case
+is said too. It is this fixer's route and not the round's — an escalated round
+leaves the lens panel and the adversary's fresh pass exactly where they were.
 
 **Hand it the round's open record, never `review.json`.** Which record that is,
 and what runs after the new commit is verified, both follow from how you reached
@@ -509,13 +523,23 @@ nothing gated on and every reviewer is about to re-read. The two records above
 hold the blocking and major findings and nothing else. Minor and nit are reported
 in the pull request body, not repaired.
 
-Then one `tagteam:fixer-<effort>` at `roles.fix`'s model and effort — the pair
-you have just announced — given the record named above, the worktree, and
-`$S/<id>/fix-report.json` to write: one entry per finding, and its own account of
-whether it finished what it was handed. That path carries no round number because
-the report is recorded after the re-snapshot below has already changed `$ROUND`.
-Dispatch it with `run_in_background: false`: until it reports it is still editing
-the worktree you are about to commit.
+At `roles.fix`'s provider, model, and effort — the route you have just announced:
+
+- `claude` — one `tagteam:fixer-<effort>`, given the record named above, the
+  worktree, and `$S/<id>/fix-report.json` to write. Dispatch it with
+  `run_in_background: false`.
+- `codex` — the writable fix call in the skill, with `WORK_KIND=findings`, the
+  same record fenced as `WORK`, and `$S/<id>/fix-report.json` as its schema
+  output. Run the Bash call in the background, then wait for and read its result.
+  Do not pass `--reuse`. On failure, commit nothing and do not automatically
+  replay a task that may already have edited the worktree; report it and stop
+  with the worktree intact.
+
+Either provider returns one entry per finding and its own account of whether it
+finished what it was handed. The report path carries no round number because it
+is recorded after the re-snapshot below has already changed `$ROUND`. Until the
+selected worker reports, it is still editing the worktree you are about to
+commit.
 
 **A fixer that changed nothing does not make a round.** Ask
 `git -C "$W" status --porcelain` before you commit anything. It prints nothing
@@ -911,12 +935,17 @@ full:
    node "$P/scripts/gates.mjs" roles "$S/<id>/state.json" "$R/.tagteam/config.json"
    ```
 
-   Then dispatch one `tagteam:fixer-<effort>` at `roles.repair-fix`'s model and
-   effort with the failing check output and `$S/<id>/fix-report.json` to write,
-   on the same terms as step 6 — its account is of the failing check it was
-   handed and of nothing else, and with no findings in front of it there is
-   nothing to enumerate, so its `outcomes` is an empty array and the repair is
-   described in `summary` — blocking as in step 6, then commit and
+   Announce `roles.repair-fix`'s provider, model, and effort, then use them on the
+   same terms as step 6. For `claude`, dispatch one
+   `tagteam:fixer-<effort>` with the failing check output and
+   `$S/<id>/fix-report.json` to write. For `codex`, use the skill's writable fix
+   call with `WORK_KIND=failing check output`, fence the saved check output as
+   `WORK`, and use the same fix report path as its schema output; run it in the
+   background, wait for and read its result, never pass `--reuse`, and on failure
+   commit nothing and do not replay automatically. Its account is of the failing
+   check it was handed and of nothing else, and with no findings in front of it
+   there is nothing to enumerate, so its `outcomes` is an empty array and the
+   repair is described in `summary` — blocking as in step 6, then commit and
    re-snapshot as in step 3, which allocates the round into `$ROUND`, set `OID`,
    `bind` — which clears every gate — record the report and the report gate into
    that round, and re-run verify.
@@ -1088,7 +1117,7 @@ setting; it is not one, and there is nothing for them to clean up afterwards. On
 An unconfirmed routing blocks nothing on its own: no gate changes, the findings
 count exactly as they did, and the pull request is not held for it. The question
 is asked because a Codex upgrade is worth knowing about, not because anything is
-wrong with the review.
+wrong with the result.
 
 **This is not the other thing.** A Codex call that reports it ran at a different
 effort than it was asked for **failed**: it wrote no artifact and no record, and
