@@ -60,6 +60,29 @@ export function parsePorcelain(output) {
   return entries;
 }
 
+// `git diff --name-status -z` is a different shape from the porcelain above and
+// needs its own parser: the status is a NUL-terminated field of its own rather
+// than a fixed two characters, and it carries a similarity score for the `R`
+// (and, under `-C`, `C`) entries that rename detection produces — `R073`, not
+// `R `. Those entries are followed by two path fields, source first and
+// destination second, which is the reverse of porcelain's order.
+export function parseNameStatus(output) {
+  const fields = String(output).split("\0");
+  const entries = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const status = fields[index];
+    if (status === "") continue;
+    const wanted = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+    const paths = [];
+    while (paths.length < wanted && index + 1 < fields.length && fields[index + 1] !== "") {
+      index += 1;
+      paths.push(fields[index]);
+    }
+    entries.push({ status, paths });
+  }
+  return entries;
+}
+
 const TAGTEAM_STATE = ".tagteam/";
 
 // What the primary-checkout gate below is actually asserting is that no code
@@ -143,7 +166,7 @@ export function snapshotCandidate(options) {
   const outDir = path.resolve(options["out-dir"]);
   const baseOid = git(worktree, ["rev-parse", options.base]).stdout.trim();
   const candidateOid = git(worktree, ["rev-parse", options.candidate]).stdout.trim();
-  const changedBuffer = git(worktree, ["diff", "--name-only", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
+  const changedBuffer = git(worktree, ["diff", "--name-only", "-M", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
   const changedPaths = changedBuffer.toString("utf8").split("\0").filter(Boolean).map(normalizeRepoPath);
   const config = readConfig(options.config);
   const exclusions = config?.reviewExclude ?? [];
@@ -151,10 +174,21 @@ export function snapshotCandidate(options) {
   const isExcluded = (file) => exclusionMatchers.some(({ expression }) => expression.test(file));
   const fullDiff = git(worktree, ["diff", "--no-ext-diff", "--binary", `${baseOid}..${candidateOid}`]).stdout;
   const textualDiff = git(worktree, ["diff", "--no-ext-diff", "--no-color", `${baseOid}..${candidateOid}`]).stdout;
-  const includedPaths = changedPaths.filter((file) => !isExcluded(file));
+  // Both listings ask for rename detection explicitly rather than inheriting
+  // whatever `diff.renames` the repository happens to set, so the two agree on
+  // what counts as one entry no matter whose checkout this runs in.
+  const nameStatusBuffer = git(worktree, ["diff", "--no-ext-diff", "--name-status", "-M", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
   let reviewDiff = "";
-  for (const file of includedPaths) {
-    reviewDiff += git(worktree, ["diff", "--no-ext-diff", `${baseOid}..${candidateOid}`, "--", file]).stdout;
+  for (const entry of parseNameStatus(nameStatusBuffer.toString("utf8"))) {
+    // The last path is the destination, which is the one `--name-only` reports
+    // and the one `reviewExclude` is written against; for anything but a rename
+    // it is the only path there is.
+    if (isExcluded(normalizeRepoPath(entry.paths[entry.paths.length - 1]))) continue;
+    // A rename is diffed against *both* of its paths. Restricted to the
+    // destination alone, git cannot see the source's deletion to pair it with,
+    // so it renders a renamed-and-edited file as a brand-new addition and the
+    // content removed from the old path never reaches the reviewers or Codex.
+    reviewDiff += git(worktree, ["diff", "--no-ext-diff", "-M", `${baseOid}..${candidateOid}`, "--", ...entry.paths]).stdout;
   }
   const excluded = changedPaths.filter(isExcluded).map((file) => ({
     path: file,
