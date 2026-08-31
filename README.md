@@ -179,7 +179,7 @@ flowchart TD
     publish --> outcome
 ```
 
-Each lens is calibrated by a brief: the plugin ships fourteen, and a repository
+Each lens is calibrated by a brief: the plugin ships eight, and a repository
 adds its own by committing `.tagteam/lenses/<lens>.md`. That is how a project
 whose correctness lives in tax years or dosages gets a `financial` or a `math`
 reviewer the plugin could never have written, and a brief named after one the

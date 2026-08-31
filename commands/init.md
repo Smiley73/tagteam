@@ -86,7 +86,7 @@ See *Asking* in the skill.
    on, ask them for the model and effort for `lead` and `codex`, the two roles
    the plan cycle dispatches. Carry the worker entries over from the answers to
    question 2 without asking, and do not raise `worker` in the question.
-5. `reviewers.default`. Recommend `correctness` and `test-coverage`, and explain
+5. `reviewers.default`. Recommend `correctness` and `code-quality`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
    gets four readers. Show the full roster and let them pick from it — the
    shipped briefs plus anything this repository calibrates in

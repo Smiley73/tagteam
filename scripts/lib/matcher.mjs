@@ -94,7 +94,7 @@ export function selectReviewers({
 }) {
   const forceAll = forced.includes("all");
   const forceSet = new Set(forced);
-  if (uiVerdict === "yes" || uiVerdict === "unknown") forceSet.add("accessibility");
+  if (uiVerdict === "yes" || uiVerdict === "unknown") forceSet.add("experience");
   const selected = [];
   const skipped = [];
   const errors = [];

@@ -1,6 +1,6 @@
 {
   "name": "tagteam",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "description": "Plan, implement, review, and merge substantial changes with Claude and Codex together.",
   "author": {
     "name": "tagteam contributors"

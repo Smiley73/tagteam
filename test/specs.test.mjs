@@ -8,7 +8,7 @@ import { parseFrontMatter, resolveReviewers, readSpecs } from "../scripts/specs.
 
 const root = path.resolve(import.meta.dirname, "..");
 const SCHEMA = path.join(root, "schemas", "spec.schema.json");
-const CONFIG = { reviewers: { roster: ["correctness", "test-coverage", "security", "ux", "docs"], default: ["correctness", "test-coverage"] } };
+const CONFIG = { reviewers: { roster: ["correctness", "code-quality", "security", "experience", "consistency"], default: ["correctness", "code-quality"] } };
 
 function planWith(specs) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-specs-"));
@@ -34,9 +34,9 @@ test("a file with no front matter is refused", () => {
 });
 
 test("the default set applies, a bare lens adds, and a leading minus removes", () => {
-  assert.deepEqual(resolveReviewers([], CONFIG, { file: "x" }), ["correctness", "test-coverage"]);
-  assert.deepEqual(resolveReviewers(["security"], CONFIG, { file: "x" }), ["correctness", "security", "test-coverage"]);
-  assert.deepEqual(resolveReviewers(["-test-coverage"], CONFIG, { file: "x" }), ["correctness"]);
+  assert.deepEqual(resolveReviewers([], CONFIG, { file: "x" }), ["code-quality", "correctness"]);
+  assert.deepEqual(resolveReviewers(["security"], CONFIG, { file: "x" }), ["code-quality", "correctness", "security"]);
+  assert.deepEqual(resolveReviewers(["-code-quality"], CONFIG, { file: "x" }), ["correctness"]);
 });
 
 test("a lens outside the roster is a configuration error, not a silent no-op", () => {
@@ -72,8 +72,8 @@ test("front matter id must match the file name", () => {
 });
 
 test("resolved lenses and user-visibility ride along with the order", () => {
-  const dir = planWith({ "01-a.md": spec("01-a", { visible: true, reviewers: ["ux"] }) });
+  const dir = planWith({ "01-a.md": spec("01-a", { visible: true, reviewers: ["experience"] }) });
   const [entry] = readSpecs(dir, CONFIG, SCHEMA);
   assert.equal(entry.userVisible, true);
-  assert.deepEqual(entry.reviewers, ["correctness", "test-coverage", "ux"]);
+  assert.deepEqual(entry.reviewers, ["code-quality", "correctness", "experience"]);
 });

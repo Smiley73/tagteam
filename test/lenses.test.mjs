@@ -102,11 +102,14 @@ test("a file that is there and unusable is refused by name, not reported as abse
 });
 
 test("the heading rule matches the shipped briefs, which head themselves readably", () => {
-  // Seven of the fourteen do not name their own file — `# Lens: user experience`
-  // calibrates `ux` — so the rule is the prefix, not the lens name. Pinned here
-  // because tightening it to an exact name match would refuse half the plugin's
-  // own briefs, and the tightening looks harmless in isolation.
-  assert.equal(briefProblem(path.join(root, "prompts", "lenses", "ux.md")), null);
+  // Two of the eight do not name their own file — `# Lens: user experience`
+  // calibrates `experience`, and `# Lens: code quality` calibrates
+  // `code-quality` — so the rule is the prefix, not the lens name. Pinned here
+  // because tightening it to an exact name match would refuse both briefs, and
+  // the tightening looks harmless in isolation.
+  for (const lens of ["code-quality", "experience"]) {
+    assert.equal(briefProblem(path.join(root, "prompts", "lenses", `${lens}.md`)), null);
+  }
   assert.deepEqual(shippedLenses(), fs.readdirSync(path.join(root, "prompts", "lenses"))
     .map((entry) => entry.replace(/\.md$/, "")).sort());
 });

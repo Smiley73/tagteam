@@ -358,7 +358,7 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   const shipped = shippedLenses();
   // The menu of what may be named instead, on the first of these errors only: a
   // refusal without one sends the person to the plugin directory to find a name,
-  // and the same fourteen names under every entry buries the entries.
+  // and the same eight names under every entry buries the entries.
   let listed = shipped.length === 0;
   for (const lens of value.reviewers?.roster ?? []) {
     // A role is reported above and a name of any other shape was reported by the
