@@ -102,21 +102,22 @@ test("a file edited in the checkout is named, under whichever executed root it s
 // leaves the suite green while a one-character edit to a lens brief runs stale
 // under a report that says nothing differs. The nested path is the second half:
 // `filesUnder` keys entries by path relative to the root, and a key that
-// flattened to the entry's name would collide `prompts/lenses/docs.md` with
-// another `docs.md` elsewhere in the tree and under-report just as quietly.
+// flattened to the entry's name would collide `prompts/lenses/consistency.md`
+// with another `consistency.md` elsewhere in the tree and under-report just as
+// quietly.
 test("a same-size edit to a file below the top of a root is still named, by its path", () => {
   const snapshot = stageTree("snapshot");
   const worktree = stageTree("worktree");
-  const edited = path.join(worktree, "prompts", "lenses", "docs.md");
+  const edited = path.join(worktree, "prompts", "lenses", "consistency.md");
   const text = fs.readFileSync(edited, "utf8");
   fs.writeFileSync(edited, text.replace(/^#/, "%"));
   assert.equal(
     fs.statSync(edited).size,
-    fs.statSync(path.join(snapshot, "prompts", "lenses", "docs.md")).size,
+    fs.statSync(path.join(snapshot, "prompts", "lenses", "consistency.md")).size,
     "the edit changed the file's length, so it proves nothing about the byte comparison"
   );
 
-  assert.deepEqual(report(snapshot, worktree).drift, [{ file: "prompts/lenses/docs.md", state: "differs" }]);
+  assert.deepEqual(report(snapshot, worktree).drift, [{ file: "prompts/lenses/consistency.md", state: "differs" }]);
 });
 
 test("a file only one side has says which side that is", () => {

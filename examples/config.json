@@ -16,21 +16,15 @@
   "reviewers": {
     "roster": [
       "correctness",
+      "resilience",
       "security",
-      "error-handling",
-      "test-coverage",
-      "performance",
-      "accessibility",
-      "ux",
-      "data-integrity",
-      "conventions",
-      "docs",
-      "concurrency",
-      "reliability",
-      "cost",
-      "prompt-grounding"
+      "architecture",
+      "code-quality",
+      "experience",
+      "consistency",
+      "cost"
     ],
-    "default": ["correctness", "test-coverage"]
+    "default": ["correctness", "code-quality"]
   },
   "verify": [
     {

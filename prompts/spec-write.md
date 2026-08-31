@@ -14,7 +14,7 @@ Write exactly one file, at the path you are given.
 id: 03-recovery-ui
 depends_on: [02-recovery-api]
 user_visible: true
-reviewers: [accessibility, ux]
+reviewers: [experience]
 ---
 
 ## Outcome
@@ -31,7 +31,7 @@ a real dependency the plan missed. `user_visible` copies the plan's judgement;
 raise it to true if writing the spec showed you a surface the plan did not see.
 `reviewers` names only the lenses this spec needs *beyond* the configured
 default set, or a lens prefixed with `-` to drop a default that does not apply
-(a docs-only spec has nothing for `test-coverage` to say). Leave it `[]` when
+(a docs-only spec has nothing for `code-quality` to say). Leave it `[]` when
 the defaults are right, which is most of the time.
 
 **Outcome** — what must be true when this is done, observable from outside.

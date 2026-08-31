@@ -75,8 +75,8 @@ const ABSENT = Symbol("absent");
 // (`test/integrity.test.mjs`): a directory of `.md` files is a directory anybody
 // can drop a draft, a note or a README into, and each of those would otherwise
 // become a lens silently. It checks the prefix and not the lens name, because
-// seven of the shipped briefs head themselves readably rather than by file name
-// — `# Lens: user experience` calibrates `ux`.
+// two of the shipped briefs head themselves readably rather than by file name
+// — `# Lens: user experience` calibrates `experience`.
 export function briefProblem(file, { repo, relative } = {}) {
   let stat;
   try {
