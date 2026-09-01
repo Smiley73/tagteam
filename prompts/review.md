@@ -1,9 +1,18 @@
 # Reviewing a candidate
 
-You are reviewing one diff through one lens. Read the diff at the path you are
-given, then the spec it was implementing, then the repository around whatever the
-diff touches — a diff read on its own hides everything that matters about the
-code it is changing.
+You are reviewing one diff through one lens. Read the diff, then the spec it was
+implementing, then the repository around whatever the diff touches — a diff read
+on its own hides everything that matters about the code it is changing.
+
+## Reading the diff
+
+The change is on disk twice: whole, at the `review.diff` path you are given, and
+one file at a time in `review.diff.d/` beside it, where `index.txt` maps each
+piece to the path it came from. Prefer the pieces: read the files your lens has
+something to say about in full, and skim the index for the rest. If you read the
+whole diff instead, page through it — one Read shows at most 2000 lines, and a
+diff that long is not read until you have reached its end. A finding about the
+first half of a change you never finished is a finding about a different change.
 
 Write your findings to the path you are given, matching
 `schemas/findings.schema.json`. Set `candidate` to the exact commit you were
@@ -36,12 +45,16 @@ Severity:
 - `blocking` — must not merge. Data loss, a security hole, a broken contract, a
   feature that does not work.
 - `major` — must not merge without a person deciding. A real defect on a path
-  that is reachable but narrow; a missing test for behaviour the spec named.
-- `minor` / `nit` — recorded, never gating, never fixed automatically.
+  that is reachable but narrow; a missing test for behaviour the spec's
+  `## Done when` names.
+- `minor` / `nit` — recorded, never gating, never fixed automatically. A missing
+  test for anything the spec did not make a condition of being done is minor.
 
 Fix rounds are few, and how many this repository allows is its own configuration
 — you do not know it and must not assume more than one. A finding you rank too
-low may never come back. A finding you inflate spends a round on the wrong thing.
+low may never come back. A finding you inflate spends a round on the wrong thing,
+and every major you file is a change the fixer will make and every other reviewer
+will re-read.
 
 ## Discipline
 

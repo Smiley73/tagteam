@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 8. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 9. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -55,48 +55,59 @@ that only some answers need ride in the next batch. Ask what each setting
 checks before this stops to ask you?" is the question, and `ciWaitSec` is the
 name it goes under in the file you show at the end. The behaviour is what they
 answer on; the name is what they go looking for when they want to change the
-answer later, and a setting they own is not something to withhold. What stays
-out is the run's own vocabulary — schema paths, gate names, internal ids.
-See *Asking* in the skill.
+answer later. What stays out is the run's own vocabulary — schema paths, gate
+names, internal ids. See *Asking* in the skill.
 
 1. Confirm the inferred verify commands and setup commands. Show them.
-2. `models` and `effort` for `lead`, `worker`, `codex`. Offer the defaults —
-   `lead: opus`, `worker: sonnet`, `codex: <installed model>`, all at `high` —
-   and let them override. Sonnet is the floor for `worker`; see
+2. `models` — which model reads and plans (`lead`: every reviewer, re-check,
+   adversary, explorer, drafter and spec writer), which one writes code
+   (`worker`: the implementer and the fixer), and which Codex model every Codex
+   call uses (`codex`). Offer `lead: opus`, `worker: sonnet`, `codex: <installed
+   model>` and let them override. Sonnet is the floor for `worker`; see
    `$P/skills/tagteam/SKILL.md` for why.
-3. `escalation` — whether a spec whose fix rounds keep failing to settle should
-   finish under raised models and effort instead of the ones from question 2.
-   Offer leaving it off first: every dispatch in a ship cycle runs at `models`
-   and `effort` from the first round to the last, which is what tagteam did
-   before this key existed and what writes `escalation` as an explicit `null`.
-   Say before they choose, not after, that a stronger judge is not reliably a
-   more forgiving one — a raised panel can close findings a weaker one left
-   open, and can just as easily refuse to close ones the weaker one would have
-   waved through — so turning this on may mean *more* specs stop and wait for a
-   person rather than fewer. Propose no model and no effort level of your own;
-   if they turn it on, ask them for the settings: after how many unsettled fix
-   rounds the raised ones take over — at least 1, because the ordinary settings
-   always get a fix round — and the model and effort for `lead`, `worker` and
-   `codex` under them.
-4. `plan` — one set of `models` and `effort` for the whole of `/tagteam:plan`,
-   replacing the ones from question 2 for every dispatch that command makes, so
-   planning can run cheaper, or more expensively, than shipping. Offer leaving it
-   off first: planning runs at the same settings as shipping, which writes
-   `plan` as an explicit `null`. Propose nothing here either; if they turn it
-   on, ask them for the model and effort for `lead` and `codex`, the two roles
-   the plan cycle dispatches. Carry the worker entries over from the answers to
-   question 2 without asking, and do not raise `worker` in the question.
-5. `reviewers.default`. Recommend `correctness` and `code-quality`, and explain
+3. `effort` — how hard each job thinks, one setting per job: `implementer`,
+   `fixer`, `reviewer`, `recheck`, `adversary`, `planner` (the explorer, the
+   drafter, the plan reviewer and the spec writer together) and `codex`. Offer
+   the measured defaults and say why they differ: `implementer` and `fixer`
+   `high` because they write the code; `adversary` `high` because it is the one
+   reader looking for what everyone else missed; `reviewer` `medium`, because
+   at high effort more than half of what a reviewer produced was its own
+   thinking and its findings did not get better for it; `recheck` `low`,
+   because a re-check only has to answer whether one fix landed; `planner`
+   `high`; `codex` `high`. Let them override any of them.
+4. `escalation` — whether a spec whose fix rounds keep failing to settle should
+   finish under raised models and effort instead of the ones from questions 2
+   and 3. Offer leaving it off first: every dispatch in a ship cycle runs at
+   `models` and `effort` from the first round to the last, which writes
+   `escalation` as an explicit `null`. Say before they choose, not after, that a
+   stronger judge is not reliably a more forgiving one — a raised panel can close
+   findings a weaker one left open, and can just as easily refuse to close ones
+   the weaker one would have waved through — so turning this on may mean *more*
+   specs stop and wait for a person rather than fewer. Propose no model and no
+   effort of your own; if they turn it on, ask them for the settings: after how
+   many unsettled fix rounds the raised ones take over — at least 1, because the
+   ordinary settings always get a fix round — and the raised `models` for the
+   three roles and `effort` for the seven jobs.
+5. `plan` — one set of `models` and `effort` for the whole of `/tagteam:plan`,
+   replacing the ones from questions 2 and 3 for every dispatch that command
+   makes, so planning can run cheaper, or more expensively, than shipping. Offer
+   leaving it off first: planning runs at the same settings as shipping, which
+   writes `plan` as an explicit `null`. Propose nothing here either; if they
+   turn it on, ask them for the `lead` and `codex` models and the `planner`,
+   `adversary` and `codex` efforts, the settings the plan cycle actually
+   dispatches at; carry the rest over from questions 2 and 3 without asking.
+6. `reviewers.default`. Recommend `correctness` and `code-quality`, and explain
    that Codex and the adversary run on every spec regardless, so a typical spec
-   gets four readers. Show the full roster and let them pick from it — the
-   shipped briefs plus anything this repository calibrates in
-   `.tagteam/lenses/`, which are equally selectable and, on a reconfigure, are
-   usually the ones this project cares most about.
-6. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
+   gets four readers, and that every lens is one more reader over every round of
+   every spec. Show the full roster and let them pick from it — the shipped
+   briefs plus anything this repository calibrates in `.tagteam/lenses/`, which
+   are equally selectable and, on a reconfigure, are usually the ones this
+   project cares most about.
+7. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
    workflows, no question — it is 0.
-7. Any ignored file a build needs copied into a worktree
+8. Any ignored file a build needs copied into a worktree
    (`worktree.copyUntracked`) — most repositories have none.
-8. What of tagteam's own output belongs in this repository's history. Machine
+9. What of tagteam's own output belongs in this repository's history. Machine
    working state is never committed and is not up for discussion; the question
    is only about the two things a project can reasonably answer either way:
 
@@ -109,48 +120,35 @@ See *Asking* in the skill.
    - **the config** — committed pins the same settings for everyone who runs
      tagteam here; ignored keeps them yours.
 
-   Default to committing both, which is what tagteam did before this was a
-   choice. Ask it as one question about who else works in this repository.
+   Default to committing both. Ask it as one question about who else works in
+   this repository.
 
    Pass the answers to `ensure-gitignore.mjs` as `--ignore plans,config`, adding
    `codegraph` when the index was set up. Under `--reconfigure`, default each
    answer to what the current `.gitignore` block already says.
-9. `limits` — how many more attempts a spec, a pull request, or a plan gets
-   before this stops and asks a person. Ask the three together, as one question
-   about how much unattended work is worth buying, and price them: a fix round
-   is another full review panel over a new commit, and a plan review round is
-   three more readers over the draft. What a panel costs depends on the answer
-   to question 5, so ask this one after it. Offer 1 across the board — that is
-   what tagteam did before the object existed — and let them raise any of them.
-   Skip `ciRepairs` when the repository has no workflows; there is no red pull
-   request to repair.
+10. `limits` — how many more attempts a spec or a pull request gets before this
+    stops and asks a person. Ask the two together, as one question about how
+    much unattended work is worth buying, and price them: a fix round is a fixer
+    and then either the re-checks or another full review panel over a new
+    commit, and a CI repair is a new candidate through the whole cycle again.
+    What a panel costs depends on the answer to question 6, so ask this one
+    after it. Offer 1 for both and let them raise either. Skip `ciRepairs` when
+    the repository has no workflows; there is no red pull request to repair.
 
-   If they turned escalation on in question 3, this is where that answer gets
-   priced. Compare the round they named there against the `fixRounds` **they
-   answer here**, not against the number this question offered them — an answer
-   that lowers the cap creates the contradiction just as surely as an offer that
-   was always too low, and comparing against the offer is how that case slips
-   through unasked. When their `fixRounds` is at or above that round, the two
-   answers contradict each other, and this question puts that to them rather
-   than settling it: as things stand a spec runs out of fix rounds before it
-   ever reaches the raised models and effort they chose, so escalation buys
-   nothing; raising `fixRounds` above that round is what lets it run at least
-   once; and `fixRounds` is also the number that bounds how many paid review
-   rounds this repository can run with nobody watching, so keeping it where it
-   is holds that ceiling down and leaves the raised settings as something to
-   turn on later rather than something running tonight. Offer both answers and
-   prefer neither — keep the cap where it is and leave the raised settings out
-   of reach, or raise it far enough that escalation fires — naming the number
-   each one writes, because which of the two matters more here is theirs to
-   decide. This works the same way on a fresh init and under `--reconfigure`:
-   init does not raise a limit on its own and does not quietly leave a setting
-   someone turned on unreachable, it asks. The validator's warning about raised
-   settings nothing reaches is shown after the write either way.
+    If they turned escalation on in question 4, this is where that answer gets
+    priced. Compare the round they named there against the `fixRounds` **they
+    answer here**: when their `fixRounds` is at or below that round, the two
+    answers contradict each other, and this question puts that to them rather
+    than settling it — as things stand a spec runs out of fix rounds before it
+    ever reaches the raised settings, so escalation buys nothing; raising
+    `fixRounds` above that round is what lets it run at least once; and
+    `fixRounds` is also the number that bounds how many paid review rounds this
+    repository can run with nobody watching. Offer both answers and prefer
+    neither, naming the number each one writes. The validator's warning about
+    raised settings nothing reaches is shown after the write either way.
 
-   This is a question, not a default, because it is the only setting that
-   decides what the tool spends and how often it hands work back. Filing it
-   with `branchPrefix` would make the cost note printed at the end a report on
-   a number nobody was offered.
+    This is a question, not a default, because it is the only setting that
+    decides what the tool spends and how often it hands work back.
 
 Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
@@ -191,48 +189,37 @@ anything, so those files stay in history until someone runs `git rm --cached` on
 them, and this command will not do that on its own.
 
 Then show the file and say what it means: which commands prove a candidate, which
-lenses read every spec, and whether merges happen without asking. The validator
-prints a `note:` line giving the worst-case cost the limits commit this
-repository to; show that line as it came out rather than restating the
-arithmetic, so what the person reads is what the code computes. It prints a
-second `note:` when this repository calibrates lenses of its own, and `warning:`
-lines for each one that replaces a brief the plugin ships, for a brief in
-`.tagteam/lenses/` that the roster does not name — nothing is ever dispatched on
-it — for one named after `codex` or `adversary`, which have prompts of their own
-and read no brief, and for one Git is not tracking. It may also
-print `warning:` lines about an escalation that validates and then buys nothing
-— one whose raised settings are never reached, or that names what `models` and
-`effort` already name. Show those the same way, as the validator wrote them,
-rather than re-deciding them or turning them into a verdict of your own.
+lenses read every spec, which jobs think how hard, and whether merges happen
+without asking. The validator prints a `note:` line giving the worst-case cost
+the limits commit this repository to; show that line as it came out rather than
+restating the arithmetic. It prints a second `note:` when this repository
+calibrates lenses of its own, and `warning:` lines for each one that replaces a
+brief the plugin ships, for a brief in `.tagteam/lenses/` that the roster does
+not name, for one named after `codex` or `adversary`, which have prompts of their
+own and read no brief, and for one Git is not tracking. It may also print
+`warning:` lines about an escalation that validates and then buys nothing. Show
+those the same way, as the validator wrote them.
 
 `--reconfigure` re-runs the whole interview with the current values as defaults,
-`limits` included — a repository that raised one is offered its own number back
-rather than 1. Defaulting to what is already there is the whole protection: a
-reconfigure that was about lenses must not reset a limit someone raised
-deliberately, and showing them the number they chose and letting them keep it is
-what guarantees that.
+`limits` and `effort` included — a repository that raised or lowered one is
+offered its own number back. Defaulting to what is already there is the whole
+protection: a reconfigure that was about lenses must not reset a limit someone
+chose deliberately.
 
 `escalation` and `plan` carry forward on the same terms: a key that is `null`
 today is re-offered as off, and a configured one is offered its own models and
 effort back rather than the question starting from off — plus, for `escalation`
-alone, the round it already names. `plan` has no round; it holds `models` and
-`effort` and nothing else. A reconfigure about something else must not be what
-quietly switches escalation off.
+alone, the round it already names. A reconfigure about something else must not
+be what quietly switches escalation off.
 
 The roster carries forward the same way, minus any entry with no brief **in
 either place**. A repository that narrowed its roster keeps it narrowed, and a
-lens it calibrates itself survives a reconfigure exactly as a shipped one does —
-`.tagteam/lenses/<name>.md` is as good an answer as `prompts/lenses/<name>.md`
-and is not second class.
+lens it calibrates itself survives a reconfigure exactly as a shipped one does.
 
 An entry with no brief anywhere is the one that would be dropped, and **dropping
 it is not the only offer.** Say what the entry is and that no reviewer was ever
 calibrated for it, then offer both: write a brief for it now and keep it, or drop
-it. Prefer neither — a lens someone put in this roster by hand was put there for
-a reason, and a repository that has been shipping without it has also been
-shipping without whatever it was meant to catch. Dropping was the only option
-before this plugin could read a brief from the repository, and it is still the
-right answer for an entry nobody wants any more.
+it. Prefer neither.
 
 Mention any brief this plugin ships that the current roster does not name, and
 let them add it.
@@ -247,8 +234,7 @@ edges is a second `correctness` under another name. Then write
 `# Lens: <something readable>` heading on the first line — the validator requires
 that line and nothing reads a file without it — then what the reviewer is looking
 for, what counts as a finding here, and what belongs to another lens. Read two or
-three of `$P/prompts/lenses/` first and match their length and altitude; they are
-the calibration this one has to sit beside.
+three of `$P/prompts/lenses/` first and match their length and altitude.
 
 Say two things afterwards, because neither is visible from the file:
 
@@ -257,10 +243,8 @@ Say two things afterwards, because neither is visible from the file:
   config without the brief has a roster nothing can calibrate — so they go into
   the same commit. The validator warns about a brief Git is not tracking;
   show that line.
-- **Everyone here needs this plugin version or newer.** A roster naming a lens
-  only this repository calibrates is refused outright by an older snapshot, which
-  will tell whoever runs it to drop the lens. `README.md` has the refresh
-  commands.
+- **Everyone here needs this plugin version or newer.** `README.md` has the
+  refresh commands.
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; there is no fallback anywhere, so an omitted key is an invalid
@@ -268,6 +252,8 @@ file rather than an unused feature.
 
 An older configuration is not upgraded — each version is a different shape, not
 an extension, and there is no migration. Say that the old file is being replaced,
-and what version 8 adds: two required keys, `escalation` and `plan`, each written
-as `null` and each meaning today's behaviour when it is — every dispatch runs at
-`models` and `effort`.
+and what version 9 changes: `effort` is one setting per job rather than one per
+role, so a re-check can think less than the reviewer whose finding it judges; and
+`limits.planReviewRounds` is gone, because the plan is reviewed once and its
+findings answered rather than re-reviewed. Everything else carries the same
+meaning it had.

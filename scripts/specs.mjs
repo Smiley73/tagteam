@@ -11,6 +11,14 @@ import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
+// A spec is written for a capable implementer reading the repository with full
+// tool access. Its target is 12 KB and this is the ceiling the run enforces: left
+// to a sentence, specs averaged 16 KB and reached 68 KB, and every one of those
+// bytes is read by the implementer, every reviewer, Codex, the adversary and the
+// fixer. Over the ceiling, the writer is re-dispatched to cut.
+export const SPEC_TARGET_BYTES = 12_000;
+export const SPEC_MAX_BYTES = 18_000;
+
 // Deliberately minimal: keys are `name: value`, values are either a scalar or a
 // `[a, b]` inline list. A spec's front matter is five keys, and a YAML parser
 // would be a dependency and a surface for a spec to carry structure nothing
@@ -81,7 +89,7 @@ function topologicalOrder(specs, planDir) {
   return ordered;
 }
 
-export function readSpecs(planDir, config, schemaPath) {
+export function readSpecs(planDir, config, schemaPath, { enforceSize = false } = {}) {
   const dir = path.resolve(planDir);
   const specsDir = path.join(dir, "specs");
   if (!fs.existsSync(specsDir)) throw new Error(`no specs directory at ${specsDir}`);
@@ -89,7 +97,16 @@ export function readSpecs(planDir, config, schemaPath) {
   const specs = [];
   for (const name of fs.readdirSync(specsDir).filter((entry) => entry.endsWith(".md")).sort()) {
     const file = path.join(specsDir, name);
-    const { front } = parseFrontMatter(fs.readFileSync(file, "utf8"), name);
+    const text = fs.readFileSync(file, "utf8");
+    const size = Buffer.byteLength(text, "utf8");
+    // Enforced where a spec is written, at step 6 of the plan. A plan approved
+    // before the ceiling existed still ships from the specs it has.
+    if (enforceSize && size > SPEC_MAX_BYTES) {
+      throw new Error(`${name} is ${size} bytes; a spec has a ${SPEC_TARGET_BYTES / 1000} KB target and a `
+        + `${SPEC_MAX_BYTES / 1000} KB ceiling — re-dispatch its writer to cut it to the target, dropping anything `
+        + "the implementer can read out of the repository");
+    }
+    const { front } = parseFrontMatter(text, name);
     const errors = validateJson(schema, front);
     if (errors.length > 0) throw new Error(`${name}: ${errors.join("; ")}`);
     if (front.id !== name.replace(/\.md$/, "")) {
@@ -108,16 +125,18 @@ export function readSpecs(planDir, config, schemaPath) {
 }
 
 async function main() {
-  const [planDir, configPath] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const enforceSize = argv.includes("--enforce-size");
+  const [planDir, configPath] = argv.filter((entry) => entry !== "--enforce-size");
   if (!planDir || !configPath) {
-    process.stderr.write("usage: specs.mjs <plan-dir> <config.json>\n");
+    process.stderr.write("usage: specs.mjs <plan-dir> <config.json> [--enforce-size]\n");
     process.exitCode = 2;
     return;
   }
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
     const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
-    const order = readSpecs(planDir, config, path.resolve(here, "..", "schemas", "spec.schema.json"));
+    const order = readSpecs(planDir, config, path.resolve(here, "..", "schemas", "spec.schema.json"), { enforceSize });
     process.stdout.write(`${JSON.stringify({ ok: true, order }, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

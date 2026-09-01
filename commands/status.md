@@ -18,20 +18,18 @@ a glance.
 
 **Say what is left before each thing stops**, in one short clause, led by what it
 means rather than by the number. Every spec still running has a `budgets` entry
-under its ship, and every plan still being written has `reviewRoundsRemaining`:
+under its ship:
 
 - "one more round of fixes before this one stops and waits", "no fix rounds
   left — the next thing a reviewer finds stops it", "two more repair attempts if
   CI comes back red".
-- For a plan: "two more review rounds on this plan before it goes to specs
-  as it stands".
 
 Naming the setting after the clause is useful — it is a value they set in their
 own config and may want to raise, so "…(`limits.fixRounds`)" earns its place —
 but the sentence has to make sense without it, and the number on its own is not a
-sentence. A spec that has merged or stopped has no entry and nothing to say, and
-so does a plan that is approved or still being interviewed: **a missing key is no
-budget, not an unknown one.** Say nothing about a budget that is not there.
+sentence. A spec that has merged or stopped has no entry and nothing to say:
+**a missing key is no budget, not an unknown one.** Say nothing about a budget
+that is not there.
 
 A budget entry carrying `fixBudgetRestarts` is a spec that is waiting for a
 person or publishing and still has repair attempts left, so its fix rounds are
@@ -59,9 +57,15 @@ one you were given:
   "this spec's record of rounds spent in `state.json` is not a number of rounds,
   so no budget can be enforced against it — the next run will stop and ask for it
   to be fixed by hand". Do not send them to the configuration for this one.
-- `"rounds"` — "how many review rounds this plan has already had could not be
-  read from its own `work/review` directory". Again, not a configuration
-  problem.
+
+**What each spec cost**, when the ship could read its own session transcripts,
+is under `usage` on the ship, keyed by spec: `equivalentTokens` is the whole
+spend as input-token equivalents (cache reads at a tenth, cache writes at a
+quarter over, output at five times the uncached rate), split into the
+orchestrator's share and the agents', with the number of agents and the minutes
+it ran. Give it as one line per spec — "about 14M input-token equivalents over
+two hours, 19 agents, a third of it the orchestrator itself" — and say nothing
+for a spec with no entry: absent is unknown, not free.
 
 ## Which plugin is running
 
@@ -74,8 +78,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/running-plugin.mjs" "$(git rev-parse --show-
 ```
 
 **Print the identity line first**, above the table, even though this section is
-last in this file: "Running tagteam 0.8.2 from
-`/Users/…/.claude/plugins/cache/tagteam/tagteam/0.8.2`." A null `plugin.version`
+last in this file: "Running tagteam 0.9.0 from
+`/Users/…/.claude/plugins/cache/tagteam/tagteam/0.9.0`." A null `plugin.version`
 is a snapshot that does not name its own version — say that, and still give the
 path, because the path is what makes the copy visible.
 

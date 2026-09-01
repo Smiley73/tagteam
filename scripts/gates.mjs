@@ -150,22 +150,24 @@ export function budgetTaken(before, after, { limits } = {}) {
   };
 }
 
-// Every dispatch a ship cycle makes, and the role each one runs as, keyed
-// exactly as `commands/ship.md` names them. A clause there names its job and
-// reads the model and effort off this, so "which settings does this dispatch run
-// at" is decided in code: getting it wrong is silent, and a round dispatched at
-// the ordinary settings when the configuration bought the raised ones looks
-// exactly like a round that was never meant to escalate.
-const SHIP_JOBS = {
-  implement: "worker",         // step 2
-  "review-lens": "lead",       // step 5
-  "review-codex": "codex",     // step 5
-  fix: "worker",               // step 6
-  "adversary-fresh": "lead",   // step 7
-  "recheck-lens": "lead",      // step 7
-  "recheck-adversary": "lead", // step 7
-  "recheck-codex": "codex",    // step 7
-  "repair-fix": "worker"       // step 8
+// Every dispatch a ship cycle makes: the role whose *model* it runs, and the job
+// whose *effort* it runs at. `scripts/ship.mjs` reads both off this when it
+// prints a dispatch, so "which settings does this dispatch run at" is decided in
+// code: getting it wrong is silent, and a round dispatched at the ordinary
+// settings when the configuration bought the raised ones looks exactly like a
+// round that was never meant to escalate. Effort is per job rather than per role
+// because a re-check answering whether one fix landed needs far less thinking
+// than the reviewer that raised the finding, and both are `lead`.
+export const SHIP_JOBS = {
+  implement: { role: "worker", effort: "implementer" },           // step 2
+  "review-lens": { role: "lead", effort: "reviewer" },            // step 5
+  "review-codex": { role: "codex", effort: "codex" },             // step 5
+  fix: { role: "worker", effort: "fixer" },                       // step 6
+  "adversary-fresh": { role: "lead", effort: "adversary" },       // step 7
+  "recheck-lens": { role: "lead", effort: "recheck" },            // step 7
+  "recheck-adversary": { role: "lead", effort: "recheck" },       // step 7
+  "recheck-codex": { role: "codex", effort: "codex" },            // step 7
+  "repair-fix": { role: "worker", effort: "fixer" }               // step 8
 };
 
 // Which jobs escalate: the fixer and the three re-checks, and nothing else.
@@ -211,12 +213,12 @@ export function resolveRoles(state, config) {
   const escalation = config?.escalation ?? null;
   const raised = Boolean(escalation) && fixRoundsUsed > escalation.after;
   const jobs = {};
-  for (const [job, role] of Object.entries(SHIP_JOBS)) {
+  for (const [job, { role, effort }] of Object.entries(SHIP_JOBS)) {
     const escalated = raised && ESCALATING_JOBS.has(job);
     const settings = escalated ? escalation : config;
     jobs[job] = {
       model: settings?.models?.[role] ?? null,
-      effort: settings?.effort?.[role] ?? null,
+      effort: settings?.effort?.[effort] ?? null,
       escalated
     };
   }
@@ -239,7 +241,7 @@ export function transition(state, next, { limits } = {}) {
     // edge taken without limits is a usage error rather than a free pass.
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error(`${state.spec} cannot enter ${next} without ${budgeted.limitName}: it must be an integer of `
-        + `at least 1, got ${JSON.stringify(limit ?? null)} — pass the configuration file, and run /tagteam:init `
+        + `at least 1, got ${JSON.stringify(limit ?? null)} — pass the configuration file, and run /tagteam:configure `
         + "if it has no limits object");
     }
     const spent = counterOf(state, budgeted.counter);
@@ -517,9 +519,8 @@ const USAGE = `usage:
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
-  plus the brief each lens is calibrated by. It writes nothing, and it is read
-  once per dispatching message: a \`state\` call between the read and the dispatch
-  invalidates it.
+  plus the brief each lens is calibrated by. It writes nothing. \`scripts/ship.mjs\`
+  reads it immediately before every dispatch it prints.
 `;
 
 // The limits, or a refusal. A configuration without them is a version-6 file:
@@ -529,7 +530,7 @@ function readLimits(file) {
   const config = readJson(file);
   const limits = config?.limits;
   if (limits === null || typeof limits !== "object" || Array.isArray(limits)) {
-    throw new Error(`${file} has no limits object, so no budget can be enforced — run /tagteam:init to bring the `
+    throw new Error(`${file} has no limits object, so no budget can be enforced — run /tagteam:configure to bring the `
       + "configuration up to version 8");
   }
   return limits;
@@ -634,7 +635,7 @@ async function main() {
         else uncalibrated.push(brief.problems.length > 0 ? `${lens} (${brief.problems[0].reason})` : lens);
       }
       if (uncalibrated.length > 0) {
-        throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:init, or write `
+        throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:configure, or write `
           + `${REPO_LENS_DIR}/<lens>.md in this repository`);
       }
       return briefs;

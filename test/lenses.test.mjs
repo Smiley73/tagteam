@@ -36,7 +36,7 @@ const brief = (lens, body = "What to look for.") => `# Lens: ${lens}\n\n${body}\
 
 test("a repository calibrates a lens this plugin does not ship", () => {
   // The case this feature exists for: a roster naming `financial` had no way to
-  // be calibrated from inside the repository, so /tagteam:init could only drop it.
+  // be calibrated from inside the repository, so /tagteam:configure could only drop it.
   const repo = repoWith({ "financial.md": brief("financial") });
   assert.ok(!shippedLenses().includes("financial"), "the plugin must not ship this one, or the test proves nothing");
 

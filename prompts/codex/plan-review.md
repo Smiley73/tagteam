@@ -28,19 +28,22 @@ What to look for:
   a real dependency the plan omits.
 - An assertion about this repository that is wrong. A spec written from a wrong
   assertion is wrong.
-- Over-specification. The plan is an index; per-deliverable detail is written
-  later into separate spec files. File lists, function signatures, code
-  sketches, and step-by-step instructions do not belong here. Report them as
-  major, with a remedy naming what to cut. You are explicitly expected to report
-  a plan for saying too much — every other pressure on this document pushes it
-  to grow.
+- Over-specification. The plan is an index with an 8 KB target; per-deliverable
+  detail is written later into separate spec files. File lists, function
+  signatures, code sketches, and step-by-step instructions do not belong here.
+  Report them as major, with a remedy naming what to cut. You are explicitly
+  expected to report a plan for saying too much — every other pressure on this
+  document pushes it to grow.
 - A deliverable row that does not make clear what would exist afterwards.
 
 Ground every finding in the goal or in a file you read. A critique citing
-neither is an opinion about software in general, and it costs a revision round.
+neither is an opinion about software in general.
 
-How many review rounds this plan gets is this repository's configuration, and it
-may well be one. A finding ranked too low may never be raised again.
-Severity: blocking means this does not produce the goal as written; major means
-it produces the wrong thing somewhere specific; minor means worth fixing while
-revising anyway.
+The plan is reviewed once. The drafter answers each blocking and major finding —
+applies it, or rejects it with a reason the person approving the plan reads —
+and nothing is re-reviewed. Severity therefore decides whether a finding is
+answered at all: blocking means this does not produce the goal as written; major
+means it produces the wrong thing somewhere specific; minor means worth fixing
+while revising and never answered. A finding you inflate is answered at the cost
+of attention to the real ones; a real one you rank minor is never answered.
+Finding nothing is a complete and useful answer.

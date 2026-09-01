@@ -85,55 +85,6 @@ export function matchWhen(when, changedPaths, addedLines) {
   return { matched: errors.length > 0 || pathMatch || keywordMatch, errors };
 }
 
-export function selectReviewers({
-  reviewers,
-  changedPaths,
-  addedLines,
-  forced = [],
-  uiVerdict = "no"
-}) {
-  const forceAll = forced.includes("all");
-  const forceSet = new Set(forced);
-  if (uiVerdict === "yes" || uiVerdict === "unknown") forceSet.add("experience");
-  const selected = [];
-  const skipped = [];
-  const errors = [];
-
-  for (const [dimension, config] of Object.entries(reviewers)) {
-    const forcedDimension = forceAll || forceSet.has(dimension);
-    const match = matchWhen(config.when, changedPaths, addedLines);
-    errors.push(...match.errors.map((message) => ({ dimension, message })));
-    if (forcedDimension || (config.enabled && match.matched)) selected.push(dimension);
-    else skipped.push({
-      dimension,
-      reason: !config.enabled ? "disabled" : "condition-did-not-match"
-    });
-  }
-  return { selected, skipped, errors };
-}
-
-export function recursiveMerge(base, override) {
-  if (Array.isArray(override)) return structuredClone(override);
-  if (!override || typeof override !== "object") return override;
-  const result = base && typeof base === "object" && !Array.isArray(base) ? structuredClone(base) : {};
-  for (const [key, value] of Object.entries(override)) {
-    result[key] = value && typeof value === "object" && !Array.isArray(value)
-      ? recursiveMerge(result[key], value)
-      : structuredClone(value);
-  }
-  return result;
-}
-
-export function resolveReviewerRuntime(config, dimension, engine) {
-  const reviewer = config.reviewers[dimension];
-  if (!reviewer) throw new Error(`unknown reviewer dimension: ${dimension}`);
-  if (reviewer[engine]) return reviewer[engine];
-  const tierName = reviewer.tier ?? "standard";
-  const tier = config.reviewTiers[tierName];
-  if (!tier?.[engine]) throw new Error(`review tier ${tierName} has no ${engine} runtime`);
-  return tier[engine];
-}
-
 export function assertSafeRelativePath(value) {
   if (typeof value !== "string" || value.length === 0) throw new Error("path must be non-empty");
   if (path.isAbsolute(value)) throw new Error(`path must be repository-relative: ${value}`);

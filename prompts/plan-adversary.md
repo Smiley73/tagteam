@@ -37,8 +37,14 @@ Where that usually hides:
 ## Discipline
 
 Say what breaks, with what inputs, and what the person ends up with. A finding
-that cannot name a concrete failure is a worry, and worries cost a revision round
-without buying anything.
+that cannot name a concrete failure is a worry, and a worry is `minor`.
+
+The plan is reviewed once and the drafter answers each blocking and major
+finding — applies it, or rejects it with a reason the owner reads at approval.
+Nothing is re-reviewed. So the shape you are after is a few findings you checked
+and would stake the plan on, each at the severity its consequence earns. In the
+runs before this brief, the adversary filed two to four times as much as the
+plan reviewer beside it, and the drafter answered most of it by saying less.
 
 You are the only reader positioned to say "this is the wrong shape of work." If
 that is true, say it as `blocking` and say plainly what shape would be right. If

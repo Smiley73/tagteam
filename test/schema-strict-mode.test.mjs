@@ -20,14 +20,19 @@ const root = path.resolve(import.meta.dirname, "..");
 
 function codexBoundSchemas() {
   const names = new Set();
+  // The Codex invocations are composed in code now — `ship.mjs` and `plan.mjs`
+  // name the schema each call is bound to — so those files are the sources, with
+  // the commands and the reference kept for any schema they still name.
   const sources = [
     ...fs.readdirSync(path.join(root, "commands")).map((file) => path.join(root, "commands", file)),
-    path.join(root, "skills", "tagteam", "SKILL.md")
+    path.join(root, "skills", "tagteam", "SKILL.md"),
+    path.join(root, "scripts", "ship.mjs"),
+    path.join(root, "scripts", "plan.mjs")
   ];
   for (const file of sources) {
     const text = fs.readFileSync(file, "utf8");
     for (const [, name] of text.matchAll(/schemas\/([a-z0-9-]+\.schema\.json)/g)) names.add(name);
-    for (const [, name] of text.matchAll(/schema\s+`?([a-z0-9-]+\.schema\.json)`?/g)) names.add(name);
+    for (const [, name] of text.matchAll(/schema:?\s+`?"?([a-z0-9-]+\.schema\.json)`?"?/g)) names.add(name);
   }
   // Validated locally, never sent to Codex.
   names.delete("config.schema.json");

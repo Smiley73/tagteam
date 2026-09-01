@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // A JSON Schema subset validator, plus the semantic checks a schema cannot
-// express. Used by the Codex bridge to validate an artifact, and by /tagteam:init
+// express. Used by the Codex bridge to validate an artifact, and by /tagteam:configure
 // and both skills to validate `.tagteam/config.json`.
 import fs from "node:fs";
 import path from "node:path";
@@ -95,15 +95,16 @@ export function validateJson(schema, value) {
   return errors;
 }
 
-// The configuration version the current plugin writes. Version 8 adds two
-// required nullable keys, `escalation` and `plan`, and no key in this project has
+// The configuration version the current plugin writes. Version 9 keys `effort`
+// by job rather than by role, drops `limits.planReviewRounds` (the plan is
+// reviewed once and answered, never re-reviewed), and no key in this project has
 // a fallback in a script: the file is the whole configuration, so a missing key is
-// a hard error rather than a silently-assumed value — which is why both are
-// written as an explicit `null` when unused rather than omitted. That makes an
-// older configuration incomplete rather than upgradable — there is nothing to
-// read the old file for — so it is reported stale and `/tagteam:init` writes a
-// new one.
-export const CONFIG_VERSION = 8;
+// a hard error rather than a silently-assumed value — which is why `escalation`
+// and `plan` are written as an explicit `null` when unused rather than omitted.
+// That makes an older configuration incomplete rather than upgradable — there is
+// nothing to read the old file for — so it is reported stale and `/tagteam:configure`
+// writes a new one.
+export const CONFIG_VERSION = 9;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.
@@ -125,8 +126,8 @@ export function configStaleness(value) {
 export function limitNotices(config) {
   const limits = config?.limits;
   if (limits === null || typeof limits !== "object" || Array.isArray(limits)) return [];
-  const { fixRounds, ciRepairs, planReviewRounds } = limits;
-  const named = [["fixRounds", fixRounds], ["ciRepairs", ciRepairs], ["planReviewRounds", planReviewRounds]];
+  const { fixRounds, ciRepairs } = limits;
+  const named = [["fixRounds", fixRounds], ["ciRepairs", ciRepairs]];
   if (!named.every(([, value]) => Number.isInteger(value) && value >= 1)) return [];
 
   const notices = named
@@ -143,8 +144,7 @@ export function limitNotices(config) {
   const panels = perCandidate * cycles;
   notices.push(
     `note: these limits allow at most ${panels} full review panels per spec `
-    + `(${perCandidate} per candidate × ${cycles} candidate cycles) `
-    + `and at most ${planReviewRounds} plan review round${planReviewRounds === 1 ? "" : "s"} per goal approval`
+    + `(${perCandidate} per candidate × ${cycles} candidate cycles)`
   );
   return notices;
 }
@@ -156,7 +156,7 @@ export function limitNotices(config) {
 // The first is arithmetic: escalated settings take over after `escalation.after`
 // ordinary fix rounds, so an `after` at or above `limits.fixRounds` means the
 // cycle is out of fix rounds before the raised ones start. That is advice and
-// not a refusal because `limits.fixRounds` is a live setting `/tagteam:init`
+// not a refusal because `limits.fixRounds` is a live setting `/tagteam:configure`
 // asks about: lowering it must not invalidate a working configuration and stop
 // both `/tagteam:ship` and `/tagteam:plan`. The behaviour it produces is today's,
 // visibly.
@@ -352,7 +352,7 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   // nobody parses, and writes a findings file that `collect-findings.mjs`, the
   // review gate and the pull request body all read as a calibrated lens's. This
   // is the only place the two can be told apart, and it is also the cheapest:
-  // both skills validate the configuration in preflight and `/tagteam:init`
+  // both skills validate the configuration in preflight and `/tagteam:configure`
   // validates what it has just written, so the gap costs one command rather
   // than a train of uncalibrated review.
   const shipped = shippedLenses();
@@ -504,7 +504,7 @@ async function main() {
     // Version before shape. A version-6 configuration fails the version-7 schema
     // on a key it could not have carried, and reporting that as "invalid" told
     // the user their configuration was broken when it was merely old — the
-    // exit-3 path that says "run /tagteam:init" was unreachable for the only
+    // exit-3 path that says "run /tagteam:configure" was unreachable for the only
     // files that need it.
     if (path.basename(argv[0]) === "config.schema.json") {
       // Required, not optional, for a configuration: half the answer to "is this
@@ -521,7 +521,7 @@ async function main() {
       try { document = JSON.parse(fs.readFileSync(path.resolve(argv[1]), "utf8")); } catch {}
       const staleness = configStaleness(document ?? {});
       if (document && staleness.stale) {
-        process.stdout.write(`stale: configuration version ${staleness.version} predates ${CONFIG_VERSION}; run /tagteam:init\n`);
+        process.stdout.write(`stale: configuration version ${staleness.version} predates ${CONFIG_VERSION}; run /tagteam:configure\n`);
         process.exitCode = 3;
         return;
       }

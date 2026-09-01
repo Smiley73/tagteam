@@ -29,10 +29,10 @@ the ones that carry weight. An assertion that is wrong makes the spec written
 from it wrong.
 
 **Does it say too much?** This is a real finding and you are expected to report
-it. A plan is an index; the detail belongs in per-deliverable spec files written
-later. File lists, function signatures, code sketches, and step-by-step
-instructions in the index are all over-specification. Report them as `major`
-with a remedy that says what to cut. Do not soften this: every review lens
+it. A plan is an index with an 8 KB target; the detail belongs in per-deliverable
+spec files written later. File lists, function signatures, code sketches, and
+step-by-step instructions in the index are all over-specification. Report them as
+`major` with a remedy that says what to cut. Do not soften this: every review lens
 naturally pushes a document to grow, and this is the only one pushing back.
 
 **Does it say too little to be actionable?** The opposite failure. A deliverable
@@ -45,10 +45,13 @@ Do not restate the plan. Do not propose an alternative architecture because you
 would have approached it differently — the goal is settled, and so is the
 approach unless it fails to deliver. Do not raise anything you cannot ground in
 `goal.md` or in a file you actually read; a critique that cites neither is an
-opinion about software in general, and it costs a revision round.
+opinion about software in general.
 
-Severity means what it says. `blocking`: executed as written, this does not
-produce the goal. `major`: it produces the wrong thing somewhere specific.
-`minor`: worth fixing while revising anyway. How many review rounds this plan
-gets is this repository's configuration, and it may well be one — so a finding
-you rank too low may never be raised again.
+The plan is reviewed once. The drafter answers each blocking and major finding
+you file — applies it, or rejects it with a reason the person approving the plan
+reads — and nothing is re-reviewed. So severity is what decides whether a
+finding is answered at all: `blocking`, executed as written this does not
+produce the goal; `major`, it produces the wrong thing somewhere specific;
+`minor`, worth fixing while revising and never answered. A finding you inflate is
+answered at the cost of the drafter's attention to the real ones; a real one you
+rank minor is never answered. Finding nothing is a complete and useful answer.

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The drafter's answer to every blocking and major finding of the plan review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["responses"],
+  "properties": {
+    "responses": {
+      "type": "array",
+      "description": "Exactly one entry per finding id in the review brief. A gating finding with no entry is an unanswered finding, and the run refuses to go on until it has one.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "action", "note"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The id exactly as the brief printed it, e.g. adversary.2."
+          },
+          "action": {
+            "type": "string",
+            "enum": ["applied", "rejected", "needs-owner"],
+            "description": "applied: the plan changed for this finding. rejected: the finding is wrong, or belongs in a spec rather than the plan — a person reads the reason at approval. needs-owner: the finding is against the goal, not the plan, and only the owner can settle it; the run asks them and revises the plan once more with the answer."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One line: what changed, why not, or what the owner has to decide."
+          }
+        }
+      }
+    }
+  }
+}

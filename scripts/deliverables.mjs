@@ -16,6 +16,14 @@ import { isMain } from "./lib/is-main.mjs";
 
 const SLUG = /^[0-9]{2}-[a-z0-9][a-z0-9-]*$/;
 
+// A plan is an index. Its target is 8 KB and this is the ceiling the run
+// enforces: every plan this plugin has drafted without one grew past its target,
+// to 77 KB in one repository, because every review lens pushes a document to
+// grow and the target was a sentence. Over the ceiling, the drafter is
+// re-dispatched to cut — what belongs in a spec goes there.
+export const PLAN_TARGET_BYTES = 8_000;
+export const PLAN_MAX_BYTES = 12_000;
+
 function cells(line) {
   const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
   return trimmed.split("|").map((cell) => cell.trim());
@@ -30,6 +38,12 @@ export function readDeliverables(planPath) {
     text = fs.readFileSync(resolved, "utf8");
   } catch {
     throw new Error(`no plan at ${resolved}`);
+  }
+  const size = Buffer.byteLength(text, "utf8");
+  if (size > PLAN_MAX_BYTES) {
+    throw new Error(`${path.basename(resolved)} is ${size} bytes; a plan is an index with a ${PLAN_TARGET_BYTES / 1000} KB `
+      + `target and a ${PLAN_MAX_BYTES / 1000} KB ceiling — re-dispatch the drafter to cut it to the target, moving `
+      + "anything about how a deliverable is built into that deliverable's spec");
   }
   const lines = text.split("\n");
   const heading = lines.findIndex((line) => /^##\s+Deliverables\s*$/i.test(line));

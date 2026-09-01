@@ -1,21 +1,23 @@
 ---
 name: tagteam
-description: Shared reference for tagteam — configuration, artifact layout, the Git protocol, the Codex bridge, and recovery. Read by /tagteam:plan and /tagteam:ship before they do anything.
+description: Shared reference for tagteam — configuration, artifact layout, dispatching, the Codex bridge, the Git protocol, the gates and recovery. Read by /tagteam:plan and /tagteam:ship before they do anything.
 ---
 
 # tagteam reference
 
 Tagteam takes a vague goal to merged pull requests. `/tagteam:plan` interviews
-you until the outcome is concrete, drafts a plan, has it reviewed by three
-independent readers for as many rounds as `limits.planReviewRounds` allows, and
-expands it into spec files. `/tagteam:ship` implements
-those specs one at a time, reviews each with a cross-engine panel, and merges the
-ones that need no human judgement.
+you until the outcome is concrete, drafts a plan, has it reviewed once by three
+independent readers whose findings the drafter answers, and expands it into spec
+files. `/tagteam:ship` implements those specs one at a time, reviews each with a
+cross-engine panel, and merges the ones that need no human judgement.
 
-**The orchestrator is the main agent.** It runs git, Codex, and the scripts in
-this plugin directly through Bash, and dispatches subagents only for model work.
-Subagents write their own output files; the orchestrator reads them. Nothing is
-ever moved between steps by passing it through a model.
+**The orchestrator is the main agent.** It runs the scripts in this plugin
+directly through Bash and dispatches subagents only for model work. Subagents
+write their own output files; scripts read them and print summaries; the
+orchestrator reads the summaries. Nothing large is ever moved between steps by
+passing it through a model. In a ship, `scripts/ship.mjs` sequences every step
+and prints every dispatch; in a plan, `scripts/plan.mjs` resolves the settings
+and folds the review.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -30,79 +32,74 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   plan.md          the deliverables index                                   committed
   specs/NN-slug.md one self-contained spec per deliverable                  committed
   approved.json    when it was approved, and of what                        committed
-  work/            interview answers, drafts, Codex artifacts, goal-approved  ignored
-  work/review/<n>/ one review round — round.json, the three readers' findings,
-                   and outcome.json once the round is closed out             ignored
-.tagteam/ships/<slug>/<spec-id>/
-  state.json       the state machine, the reviewed commit, the gates        ignored
-  rounds/<n>/  round.json (the commit that owns this round, and how many times
-               it has been entered), review.diff, findings/, recheck/,
-               verify/, candidate.json, review.json, recheck.json,
-               still-open.json, still-open/<lens>.json, report.json    ignored
-  implement-report.json  fix-report.json  what the round's agent said about its
-               own work, written outside every round and recorded into one  ignored
-  pr-body.md  ci.json                                                ignored
+  work/            interview answers, exploration.md, goal-approved         ignored
+  work/review/     the one review: claude.json, codex.json (and its sidecars),
+                   adversary.json, findings.json, brief.md, response.json   ignored
+.tagteam/ships/<slug>/
+  train.json       the train: repository, worktree, base commit             ignored
+  <spec-id>/
+    state.json     the state machine, the reviewed commit, the gates        ignored
+    rounds/<n>/  round.json (the commit that owns this round), review.diff,
+                 review.diff.d/ (the same change one file at a time), findings/,
+                 recheck/, verify/, candidate.json, review.json, recheck.json,
+                 to-fix.json, open/, still-open.json, still-open/, report.json  ignored
+    implement-report.json  fix-report.json  what the round's agent said about its
+                 own work, written outside every round and recorded into one  ignored
+    fix-pending.json  recheck-plan.json  the driver's notes between two steps  ignored
+    pr-body.md  ci.json  usage.json                                          ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
 
-`/tagteam:init` can move two of the `committed` groups above — the config, and
+`/tagteam:configure` can move two of the `committed` groups above — the config, and
 the plan artifacts (`goal.md`, `plan.md`, `specs/`, `approved.json`) — to
 ignored, one choice each, recorded in the managed `.gitignore` block and nowhere
 else. Lens briefs are not one of those choices: they are content about this
-codebase rather than settings or a record, and the roster entry that needs one is
-in a file the rest of the team reads.
-Nothing else in this table is negotiable. A repository that keeps its plans
-private still ships from them: the implementer is given a spec by path in the
-working tree, so what Git tracks never decides what a spec can see.
+codebase rather than settings or a record.
 
 Everything committed is the record a person approved. Everything ignored is
-working state, and **the working state is the resume mechanism**: there are no
-fingerprints, no reuse ledgers, and no invocation descriptors. A re-run looks at
-what is on disk and continues from the first thing that is not done.
+working state, and **the working state is the resume mechanism**: a re-run looks
+at what is on disk and continues from the first thing that is not done.
 
-Each round holds its own review: `review.json` is what the lens panel found,
-`recheck.json` is what survived the re-check and is the review gate, and
+Each ship round holds its own review: `review.json` is what the lens panel
+found, `recheck.json` is what survived the re-check and is the review gate, and
 `still-open.json` is what the round left open. Finding ids are qualified by the
 round that raised them — `2.correctness.1` — so nothing one round settled can be
-overwritten or cleared by another.
-
-A round is a record: once `round.json` names the commit that owns it, every file
-tagteam writes beneath it is written once, and re-snapshotting that same commit
-re-enters the round — empties it back to the marker and the round's report, the
-two records that belong to the owning commit rather than to the attempt, and
-rebuilds it — while a different commit is refused. Codex's own output is the
-exception. Its artifact and the `.prompt.md`, `.request.json` and
-`.events.jsonl` beside it are one set written together, and a Codex lens that
-produced nothing usable is re-dispatched into the same round, so those files are
-replaced in place and the write-once rule does not cover them.
+overwritten or cleared by another. A round is a record: once `round.json` names
+the commit that owns it, every file tagteam writes beneath it is written once,
+and re-snapshotting that same commit re-enters the round — empties it back to
+the marker and the round's report and rebuilds it — while a different commit is
+refused. Codex's own output is the exception, replaced in place when a Codex
+lens that produced nothing usable is re-dispatched.
 
 ## Configuration
 
-`.tagteam/config.json`, version 8, validated by
+`.tagteam/config.json`, version 9, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:init` and stop. There is no migration: version 8
-requires keys an older file does not carry, and no key has a fallback in a
-script, so an older configuration is incomplete rather than upgradable.
+tell the person to run `/tagteam:configure` and stop. There is no migration: version 9
+keys `effort` by job and drops `limits.planReviewRounds`, and no key has a
+fallback in a script, so an older configuration is incomplete rather than
+upgradable.
 
 | Key | Meaning |
 |---|---|
 | `base` | Branch pull requests target and each spec branches from |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document implementers and reviewers are told to read, or null |
-| `models` / `effort` | Per role: `lead` (plan-drafter, plan-reviewer, spec-writer, reviewer, both adversaries, explorer), `worker` (implementer, fixer), `codex` (each `scripts/codex.mjs` invocation). These are the settings a dispatch runs at unless something above them says otherwise: in a ship cycle `gates.mjs roles` resolves each job against them and hands the raised ones to the fixer and the re-checks once `escalation` fires, and in `/tagteam:plan` a non-null `plan` replaces them for the whole run. Sonnet is the floor for `worker`: specs are written for a model of at least that capability, so lowering it below Sonnet would require them to say much more. |
-| `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused: it would produce a reviewer that invents the lens and findings nothing can tell from a calibrated reviewer's |
-| `reviewers.default` | Lenses applied to every spec unless it drops one |
+| `models` | Per role: `lead` (every reader and planner — reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer), `worker` (implementer, fixer), `codex` (every Codex call). Sonnet is the floor for `worker`: specs are written for a model of at least that capability |
+| `effort` | Per job: `implementer`, `fixer`, `reviewer`, `recheck`, `adversary`, `planner`, `codex`. Measured defaults are high for the three that write or falsify, medium for reviewers and low for re-checks: at high effort more than half of a reviewer's output was its own thinking, and a re-check only has to say whether one fix landed |
+| `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused |
+| `reviewers.default` | Lenses applied to every spec unless it drops one. Every lens is one more reader over every round of every spec |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks; 0 skips CI |
 | `autoMerge` | False makes every pull request wait |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository |
-| `limits` | `fixRounds` (fix rounds per spec), `ciRepairs` (repairs of a red pull request), `planReviewRounds` (plan review rounds per goal approval). Each at least 1; all 1 is today's behaviour |
-| `escalation` | `null`, or `{after, models, effort}` on the same role triple as `models`/`effort`. `after` counts fix rounds and is at least 1. Null is the default and means today's behaviour: every dispatch runs at `models` and `effort` |
-| `plan` | `null`, or `{models, effort}` on the same role triple. Null is the default and means today's behaviour: every dispatch runs at `models` and `effort` |
+| `limits` | `fixRounds` (fix rounds per spec per cycle), `ciRepairs` (repairs of a red pull request). Each at least 1 |
+| `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
+| `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
 
 `examples/config.json` is a complete file.
 
@@ -119,132 +116,75 @@ lens and files findings the review gate, the merge decision and the pull request
 body all count as a calibrated reviewer's.
 
 Resolution is **repository first**, against the primary checkout and never the
-worktree — a brief written during the interview is untracked and does not exist
-at the base commit the worktree is checked out at. `gates.mjs init` resolves each
-lens once per spec and freezes the paths into `state.json`; `gates.mjs roles`
-hands them back at every dispatch that needs one, beside the model and effort, so
-the three cannot drift apart.
+worktree. `gates.mjs init` resolves each lens once per spec and freezes the paths
+into `state.json`; `gates.mjs roles` hands them back, and `ship.mjs` puts the
+path into every reviewer's dispatch, so the model, the effort and the brief
+cannot drift apart.
 
-Codex is not lens-calibrated and reads no brief. That is deliberate — it is the
-independent second engine, and `prompts/codex/review.md` says so — so nothing
-about a repository brief reaches it.
+Codex is not lens-calibrated and reads no brief. It is the independent second
+engine; its review prompt names the lenses running beside it so it hunts for
+what falls between them, and nothing about a repository brief reaches it.
 
-## Dispatching and waiting
+## Dispatching
 
 **The model is an argument; the effort is a name.** The Agent tool takes a
 `model` parameter, so a resolved model is passed to it directly. It has no
-`effort` parameter — none exists — so a resolved effort cannot be passed at all.
-What carries it is agent frontmatter, which Claude Code reads off the agent file
-and pins that agent's turns to. Effort is therefore fixed per agent file, and the
-plugin ships every agent once per level of the `lead`/`worker` ladder, named for
-it: `tagteam:fixer-low` through `tagteam:fixer-max`. **A dispatch selects an
-effort by selecting a variant**, and there is no unsuffixed `tagteam:fixer`,
-`tagteam:reviewer`, or anything else — a bare name names nothing, and the
-dispatch fails rather than quietly running at the session's effort.
+`effort` parameter, so a resolved effort is carried by agent frontmatter, and the
+plugin ships every agent once per level of the ladder, named for it:
+`tagteam:fixer-low` through `tagteam:fixer-max`. **A dispatch selects an effort
+by selecting a variant**, and there is no unsuffixed `tagteam:fixer`. The one
+bare name is `tagteam:codex-runner`, plumbing at a fixed model and effort that
+no configuration reaches.
 
 Those files are generated. `agent-sources/` holds one source per agent and
 `scripts/generate-agents.mjs` writes `agents/`, reading the ladder from
-`claudeEffort` in the config schema so a level a user may configure cannot exist
-without an agent that can be dispatched at it. Edit the source, re-run the
-generator; `test/effort-dispatch.test.mjs` fails on drift.
+`claudeEffort` in the config schema. Edit the source, re-run the generator;
+`test/effort-dispatch.test.mjs` fails on drift.
 
-Codex is the exception both ways: `scripts/codex.mjs` takes `--model` and
-`--effort` as real arguments, because it is a subprocess rather than a subagent.
+**Every dispatch blocks, and a fan-out is one message.** Every Agent call is
+made with `run_in_background: false`; Agent calls in one message run at the
+same time, and the message returns when all of them have finished — this was
+verified, not assumed. So a review panel is one message of
+blocking calls: one reviewer per lens, plus the Codex runner. There is no
+background dispatch, no watcher, and nothing to poll for. The orchestrator that
+this replaced spent a third of its turns, and up to two thirds of its tokens,
+running `true` while it waited; every one of those turns re-read a context of
+several hundred thousand tokens. A turn that exists only to wait is the single
+most expensive thing an orchestrator can do, and there is never a reason for one.
 
-**A dispatched subagent does not block by default.** The Agent tool returns the
-moment it is dispatched, which is what makes "in a single message" mean
-concurrency. It also means you reach the next step of a command file while none
-of the work exists yet — and that step is almost always a script reading the
-files those agents were told to write. None of the scripts wait.
-`collect-findings.mjs` over a directory that is still filling reports
-`incomplete`, which is not clean and never merges; `specs.mjs` over one does not
-complain at all — it lists the specs that happen to be there and returns `ok`.
-
-**Everything you dispatched must have reported before you run the script that
-reads its output.** How you wait depends on whether the file it writes is new.
-
-**One agent, or an agent overwriting a file that is already on disk** — dispatch
-it with `run_in_background: false`. The tool call itself blocks until the agent
-reports, which is the whole wait. This is the only form that works for a
-re-dispatch: a reviewer re-run because its findings file was unreadable, or a
-spec writer re-run because `specs.mjs` rejected what it wrote, is overwriting a
-path that already exists, and a watcher on that path returns immediately having
-waited for nothing.
-
-**A fan-out writing new files** — dispatch them in one message, then wait with
-one background watcher over the paths you told them to write:
-
-```bash
-until [ -f "<path>" ] && [ -f "<path>" ]; do sleep 5; done
-```
-
-One `-f` test per output you actually commissioned — as many as there are,
-rather than the two an example shows, and none for an agent you did not
-dispatch. Run it with `run_in_background` and the largest `timeout` the Bash
-tool accepts (600000). It costs one tool call and one notification.
-
-**The notification is not the proof — the files are.** That watcher notifies
-when it exits, and it also exits when its timeout runs out, identically and with
-nothing written. So look at the paths when it returns. Missing and the work is
-still running: re-arm the same watcher. Missing and everything has reported:
-something wrote nothing.
-
-**Do not poll and do not fill.** Repeated `ls`, a second watcher running beside
-the first, and `echo` calls emitted only to burn a turn are all the same
-mistake: they put dozens of lines into the transcript a person is reading and
-not one of them makes the work finish sooner.
-
-**A Codex call in a fan-out is a Bash call, not an agent**, and it has to run
-with `run_in_background`: `codex.mjs` allows itself 900 seconds and waits out a
-quota in slices to a four-hour ceiling, while the Bash tool kills a foreground
-command at 600. Its artifact belongs in the watcher — the script renames it into
-place atomically, so its presence means a whole file — but **read the background
-call's result as well**. A schema 400, an unavailable model, a timeout, or
-exhausted quota each end with no artifact and the reason only in that result.
-Waiting on a file Codex has already failed to write is a stall with no end.
-
-The watcher tells you the outputs exist, not that the agents were right; the
-aggregation script is still what judges them. When something has reported
-without writing, stop waiting: kill the watcher rather than leaving it running,
-run the script, and say which agent produced no file — `incomplete` is the
-honest verdict, and it is the one you would have reached anyway.
+In a ship, `ship.mjs` prints the dispatch list with the agent variant, the model
+and the whole prompt for each; the orchestrator copies them into one message. In
+a plan, `plan.mjs roles` prints the settings and the command file names what each
+dispatch is given.
 
 ## Codex
 
-Required. If `codex --version` fails, stop and say so — there is no
-single-provider mode and no `--provider` flag.
+Required. If `codex --version` fails, stop and say so.
 
-```bash
-node "$P/scripts/codex.mjs" \
-  --template "$P/prompts/codex/review.md" \
-  --var CANDIDATE=<oid> --fence SPEC=<path> --fence DIFF=<path> \
-  --schema "$P/schemas/findings.schema.json" --out <artifact.json> \
-  --model <the caller's model> --effort <the caller's effort> \
-  --cd <worktree> --slots <plan-or-ship-dir> --max-concurrent <maxConcurrentCodex> [--reuse]
-```
+A Codex call is `scripts/codex.mjs`: it composes a prompt from a plugin-owned
+template, substitutes `--var` values, appends each `--fence` payload read off
+disk beside the engine, runs `codex exec --output-schema`, validates the answer
+and writes the artifact with a `.prompt.md`, a `.request.json` sidecar and a
+truncated `.events.jsonl`. A large payload never passes through the
+orchestrator's context.
 
-**The model and the effort come from the clause that is making this call, not
-from one place in the configuration.** In `/tagteam:ship` they come from the
-resolver — `gates.mjs roles`, read for that dispatching message, off the job that
-clause names — because a Codex re-check late in a stalled cycle may be running at
-raised settings while the panel that read the same code was not. In
-`/tagteam:plan` they are `models.codex` / `effort.codex`, overridden by
-`plan.models.codex` / `plan.effort.codex` when `plan` is not null. Substitute
-what your clause tells you and never resolve them here.
-
-The script composes the prompt from the template, substitutes `--var` values, and
-appends each `--fence` payload read **off disk, beside the engine**. A large
-payload therefore never passes through the orchestrator's context. It writes the
-artifact, a `.prompt.md`, a `.request.json` provenance sidecar, and a truncated
-`.events.jsonl`.
+**The orchestrator never runs it in the foreground.** The bridge allows itself
+900 seconds and waits out a quota in slices, longer than a single Bash call may
+run. Instead `ship.mjs` and `plan.mjs codex` write the invocation into a command
+file beside the artifact, and the orchestrator dispatches `tagteam:codex-runner`
+in the same blocking message as the reviewers. The runner starts the command
+detached, waits for its status file, and returns one line: the exit code and what
+the bridge said last — its routing report, or why it failed. A non-zero exit is
+a Codex call that wrote no artifact; `collect` and `settle` report the lens as
+having produced no usable evidence and re-dispatch it once.
 
 The sidecar records what Codex itself reported it ran at, beside what the call
 asked for. An effort that disagrees with the request **fails the call** and
-leaves no artifact and no sidecar behind — including any an earlier dispatch to
-the same path had left. A model that disagrees is recorded and said once, and
-blocks nothing: nothing anywhere matches model names. The Codex sessions a good
-call created are deleted afterwards, so reviews do not pile up in someone's own
-Codex history; a call whose routing could not be read keeps them instead.
+leaves no artifact behind. A model that disagrees is recorded and said once, and
+blocks nothing. The Codex sessions a good call created are deleted afterwards; a
+call whose routing could not be read keeps them, and the runner's line says so
+— that is the trigger for *When Codex could not say how it ran* in both
+commands.
 
 Three things to know:
 
@@ -253,13 +193,13 @@ Three things to know:
 - **Schemas must be strict-mode legal**: every property in `required`, every
   `const` given a `type`. Otherwise the request returns HTTP 400 before the model
   runs, identically on every retry.
-- **`--reuse` is safe and shallow.** It returns an existing artifact only when
-  the sidecar records this exact prompt, schema, model, and effort. Use it on
-  every resumed step; a completed review is not worth buying twice.
+- **`--reuse` is always on.** It returns an existing artifact only when the
+  sidecar records this exact prompt, schema, model and effort, so a resumed step
+  never buys a review twice and never reuses one bought for a different question.
 
 ## The Git protocol
 
-Only these forms. Anything else is a mistake, not a shortcut.
+`ship.mjs` runs every git and `gh` command of a train, and only these forms:
 
 ```bash
 git -C "$R" fetch origin --prune
@@ -271,11 +211,9 @@ git -C "$W" push -u origin "<branch>"
 git -C "$R" worktree remove "$R/.tagteam/worktrees/<slug>"
 ```
 
-The three-command commit runs as one chain, always.
-`guard-staged.mjs` refuses the commit when any file copied by
-`worktree.copyUntracked` has been staged — the reason a `.env.test` copied into
-a worktree does not end up in history. `git add -A` will stage it, so nothing
-except this check stands between it and a push.
+The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
+the commit when any file copied by `worktree.copyUntracked` has been staged —
+the reason a `.env.test` copied into a worktree does not end up in history.
 
 **Never:** amend, interactive-rebase, `push --force` without a lease,
 `reset --hard` over committed work, commit or check out in the primary checkout,
@@ -288,34 +226,29 @@ merge without `--match-head-commit`, delete a branch inside a merge command,
 `node $P/scripts/gates.mjs evaluate <state.json> <config.json>` decides whether a
 pull request merges unattended. It is code because it is silent when it is wrong.
 
-**A `ready` verdict is the owner's authorization to merge, and you act on it
-without asking.** Merging is outward-facing and hard to reverse, so the instinct
-to confirm is right in general and wrong here: the owner already confirmed, by
-setting `autoMerge` and running the command, and `ready` is the condition they
-attached. Asking again turns an unattended run into a queue of pull requests
-waiting on a keystroke. When a person really should decide, `evaluate` returns
-`needsHuman` and names why — that is what the gates below are for.
+**A `ready` verdict is the owner's authorization to merge, and `ship.mjs finish`
+acts on it without asking.** Merging is outward-facing and hard to reverse, so
+the instinct to confirm is right in general and wrong here: the owner already
+confirmed, by setting `autoMerge` and running the command, and `ready` is the
+condition they attached. When a person really should decide, `evaluate` returns
+`needsHuman` and names why.
 
-**It authorizes `merge.mjs`, and nothing else.** Not `gh pr merge` run directly,
-not another pull request, not a retry around a refusal, not relaxing a gate that
-fired. The distinction is not bookkeeping: `merge.mjs` re-fetches, compares
-`origin/<base>` against the base OID the review was bound to, and re-reads the
-live pull request's target and head before it merges. A hand-rolled `gh pr merge`
-with the right `--match-head-commit` still skips all three, and merges a result
-nobody reviewed whenever the base moved or the pull request was retargeted
-underneath it.
+**It authorizes `merge.mjs`, and nothing else.** `merge.mjs` re-fetches,
+compares `origin/<base>` against the base OID the review was bound to, and
+re-reads the live pull request's target and head before it merges. A hand-rolled
+`gh pr merge` skips all three.
 
-A pull request stops and waits when: the spec is marked user-visible; verification
-failed, or CI failed or proved nothing; a finding is still open after the
-re-check; **a selected reviewer produced no usable evidence**;
+A pull request stops and waits when: the spec is marked user-visible;
+verification failed, or CI failed or proved nothing; a finding is still open
+after the re-check; **a selected reviewer produced no usable evidence**;
 `.github/workflows/**` changed; or the agent that wrote the code never confirmed
 it finished what it was given.
 
 User-visibility is the plan's judgement, settled per spec by the person who
-approved it and raised by the spec writer if writing the spec revealed a surface
-the plan missed. There is deliberately no diff-derived signal: a reliable one
-needs per-project path conventions, and an unreliable one that reads as
-authoritative is worse than none.
+approved it. A plan marks a deliverable user-visible only when it is sure a
+person will see or do something different; unsure is not yes, because every
+user-visible spec stops for the owner, and in the runs before this rule the flag
+alone stopped a third of all specs.
 
 That fourth one is the important one. An absent, unparseable, or wrongly-bound
 findings file yields an empty finding set, and an empty finding set is
@@ -325,9 +258,7 @@ indistinguishable from a clean review. `collect-findings.mjs` reports it as
 The last one is the round's own account of its work. Each round that writes code
 ends with its agent's report — `rounds/<n>/report.json` — and an absent report
 and one that says `unfinished` are the same answer to the only question that gate
-asks: nobody has said this change is finished. A round that lost its account goes
-on asking on every candidate after it, so a later round's clean report cannot
-bury it.
+asks: nobody has said this change is finished.
 
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
 a new commit appears — and every fix round makes one.
@@ -336,26 +267,30 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `recheck`, `settle`, `publish`, `repair`, `finish`, `end`. Sequences the scripts below and prints every dispatch |
+| `plan.mjs` | The plan side: `roles`, `codex` (prepare the Codex plan review for the runner), `collect` (fold the three readers into a brief), `check` (every gating finding answered) |
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
-| `gates.mjs` | Per-spec state file; `init`, `state`, `bind`, `record`, `evaluate`, `roles`. `init` also resolves each lens's brief and freezes it into the state file, and refuses a lens nothing calibrates |
+| `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
-| `recheck.mjs` | Settle a round's findings, and any carried in with `--carry`, into `recheck.json` and `still-open.json`; `--print <recheck.json>` re-renders a settled one |
-| `record-round-report.mjs` | Validate the report the round's agent wrote outside the round — the implementer's or the fixer's — and record it as `rounds/<n>/report.json`, or record that the round has none |
+| `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
+| `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
-| `snapshot-candidate.mjs` | Write `review.diff`, changed paths, candidate record |
+| `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
-| `specs.mjs` | Validate spec front matter, resolve lenses, return dependency order |
+| `specs.mjs` | Validate spec front matter and size, resolve lenses, return dependency order |
+| `deliverables.mjs` | Extract the plan's deliverables table as data, refusing a plan over its ceiling |
 | `goal-gate.mjs` | Record and verify the hash of the goal a person approved |
-| `deliverables.mjs` | Extract the plan's deliverables table as data, without reading the plan |
 | `validate-json.mjs` | Schema validation and config checks |
+| `usage.mjs` | What a window of a run cost, from the session transcripts |
 | `ship-lock.mjs` | The repository-wide ship lock |
 | `ensure-gitignore.mjs` | Maintain the managed `.gitignore` block |
 | `notify.mjs` | Desktop notification when a run needs a person |
 | `status.mjs` | Inventory for `/tagteam:status` |
 | `running-plugin.mjs` | Which snapshot is executing, and which executed files it differs from this checkout on |
+| `generate-agents.mjs` | Write `agents/` from `agent-sources/` |
 
 ## The running snapshot
 
@@ -370,39 +305,31 @@ node "$P/scripts/running-plugin.mjs" "$R"
 
 **This never stops anything.** Print what it says and carry on — whatever it
 says. Do not stop, do not ask, do not offer to reinstall, and never treat a
-difference as a reason to refuse a plan or a ship. A one-character edit to a
-repository must not lock its author out until they reinstall.
+difference as a reason to refuse a plan or a ship.
 
 Render it in this order:
 
 1. **The identity line, first**, before anything else that command prints:
-   "Running tagteam 0.8.2 from
-   `/Users/…/.claude/plugins/cache/tagteam/tagteam/0.8.2`." A null
+   "Running tagteam 0.9.0 from
+   `/Users/…/.claude/plugins/cache/tagteam/tagteam/0.9.0`." A null
    `plugin.version` is a snapshot that does not name its own version — say that,
-   and still give the path, because the path is what makes the copy visible.
-2. **`repo.isPlugin` false: stop there.** Say nothing about differing files. Most
-   repositories are not tagteam, and a line saying so on every run of every
-   command is noise a person learns to skip past, which costs the identity line
-   above it too.
+   and still give the path.
+2. **`repo.isPlugin` false: stop there.** Say nothing about differing files.
 
    **`repo.isPlugin` null: rules 3 to 6 do not apply either.** Whether this
-   checkout is an install of what is running could not be decided, so no
-   individual file can be named and neither version comparison means anything —
-   `drift` is null there and rule 7 is the whole of what to print. Silence is not
-   the alternative: it would read as "nothing differs", which is the one thing
-   that is not known.
+   checkout is an install of what is running could not be decided; `drift` is
+   null there and rule 7 is the whole of what to print.
 
    Rules 3 to 6 are for `repo.isPlugin` true.
 3. **`repo.sameTree` true**: one clause — this repository is the copy that is
    running, so nothing can be out of date.
-4. **`drift` empty and the two versions equal**: one clause, not a paragraph —
-   this checkout is the version that is running and every file it runs matches.
+4. **`drift` empty and the two versions equal**: one clause — this checkout is
+   the version that is running and every file it runs matches.
 5. **The versions differ**: name both numbers and say the working tree's version
    is not the one that ran.
 6. **`drift` non-empty**: name the differing files by path, at most ten, then
-   "and N more" — never their contents, and never a diff. Say plainly that what
-   was edited is not what ran. Then the repair, chosen by which version moved. If
-   the versions differ, the snapshot can be updated in place:
+   "and N more" — never their contents. Say plainly that what was edited is not
+   what ran. Then the repair: if the versions differ,
 
    ```bash
    claude plugin marketplace update tagteam
@@ -412,12 +339,10 @@ Render it in this order:
    If they are equal, `update` reports there is nothing to do, so it takes
    `claude plugin uninstall tagteam@tagteam` and installing again. Restart the
    session either way. Say it; they run it.
-7. **`drift` null**: one clause for the `driftUnknown` reason you were given, and
-   only that one — `"identity"`, whether this checkout is an install of what is
-   running could not be decided, because one of the two
-   `.claude-plugin/plugin.json` files could not be read; `"snapshot"`, the
-   installed copy could not be read, so nothing was compared; `"worktree"`, this
-   checkout could not be read, so nothing was compared.
+7. **`drift` null**: one clause for the `driftUnknown` reason you were given —
+   `"identity"`, whether this checkout is an install of what is running could not
+   be decided; `"snapshot"`, the installed copy could not be read; `"worktree"`,
+   this checkout could not be read.
 
 ## Asking
 
@@ -434,28 +359,22 @@ fixer. None of them is a reason to answer one way rather than the other.
 
 - **Say what happens, not where it lives.** "Someone can ask for a second
   recovery email before the first expires, so one address can be flooded" is the
-  finding. `src/auth/recovery.ts:214 — unbounded resend` is its address, and
-  looking an address up is work you have already done for them.
+  finding. `src/auth/recovery.ts:214 — unbounded resend` is its address.
 - **Never make them open something to answer.** A question that only makes sense
   with the diff, a findings file, or `state.json` beside it is not a question
-  yet. A pull request link is for afterwards, not for understanding what you
-  asked.
+  yet.
 - **Drop the vocabulary of the run**: finding ids, severities, gate and state
-  names, schema paths and internal ids, commit oids. "Nothing in this change has
-  a test that runs it" rather than `verify: not-applicable`.
+  names, schema paths, commit oids. "Nothing in this change has a test that runs
+  it" rather than `verify: not-applicable`.
 - **Offer actions, not verdicts.** "Merge it anyway" and "Send it back" are
   choices a person can make; "Override" and "Reject" ask them to translate first.
-  Each description says what happens next if they pick it.
 
 Names they own are theirs and belong in the question — a file they wrote, a
-command they configured, a branch, the product's own words for its own parts.
-A key in their own configuration is one of these: `ciWaitSec`,
-`limits.fixRounds`, `escalation` and `plan` are settings they set and will later
-edit in `.tagteam/config.json`. A lens name is one too — they choose the set in
-`reviewers.default` and change it per spec in that spec's own front matter, which
-is where a plan's selection actually lives. So say what the setting or the lens
-does *and* name it wherever they might go looking for it afterwards. Naming a thing they will have to find again
-is being useful; naming a thing only this run knows about is not.
+command they configured, a branch, the product's own words for its own parts. A
+key in their own configuration is one of these: `ciWaitSec`, `limits.fixRounds`,
+`effort.reviewer`, `escalation` and `plan` are settings they set and will later
+edit in `.tagteam/config.json`. A lens name is one too. So say what the setting
+or the lens does *and* name it wherever they might go looking for it afterwards.
 
 This is a rule about your internal coordinates, not a licence to be vague: a
 question that says "some of the error paths" where it could have said "what
@@ -467,11 +386,9 @@ direction.
 The orchestrator's context is the scarce resource, and running out of it
 mid-train is the failure this design exists to avoid. Three rules:
 
-1. **Never read `review.diff`, a findings file, or a spec body yourself.** Pass
-   paths. `collect-findings.mjs` exists so findings arrive as a summary, and
-   `recheck.mjs --print` gives that summary back to a session that resumed after
-   the one which produced it ended — that is the way to describe an open finding
-   to a person, not opening the file it came from.
+1. **Never read `review.diff`, a findings file, a spec body or `plan.md`
+   yourself.** Pass paths. `collect-findings.mjs`, `recheck.mjs --print` and
+   `plan.mjs collect` exist so findings arrive as a summary.
 2. **Plan and ship in separate sessions.** The interview loads repository
    material that shipping does not need.
 3. **Stop between specs when context is tight**, report where you got to, and
@@ -479,15 +396,16 @@ mid-train is the failure this design exists to avoid. Three rules:
 
 ## Recovery
 
-- **A stopped ship**: re-run `/tagteam:ship <plan-dir>`. It skips every spec
-  whose `state.json` says merged and restarts the first that does not.
+- **A stopped ship**: re-run `/tagteam:ship <plan-dir>`. `start` skips every
+  spec whose `state.json` says merged and `begin` restarts each one from
+  whatever is committed on its branch.
 - **A stale worktree**: `git -C "$R" worktree remove` it (never `--force`), then
   re-run. Committed work is on its branch.
 - **Codex quota**: the bridge waits, in slices, to a four-hour ceiling, then
-  fails. Nothing else needs doing.
+  fails. The runner waits with it. Nothing else needs doing.
 - **A model Codex cannot use**: the bridge refuses on the first attempt, naming
   the model and quoting what the provider said. The repair is the configured
-  model, not a retry — a second call reaches the same account.
+  model, not a retry.
 - **A schema 400**: a property missing from `required` or a `const` with no
   `type`. Fix the schema; retries cannot help.
 - **The plugin is a snapshot.** Claude Code runs a copy under

@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  BEGIN, CODEGRAPH_ENTRY, END, MANAGED_ENTRIES, OPTIONAL_ENTRIES,
+  BEGIN, CODEGRAPH_ENTRY, END, LEGACY_BEGINS, MANAGED_ENTRIES, OPTIONAL_ENTRIES,
   ensureGitignore, keptPaths, renderGitignore
 } from "../scripts/ensure-gitignore.mjs";
 
@@ -309,4 +309,24 @@ test("rendering keeps every user line, ends with exactly one newline, and needs 
   const fresh = renderGitignore(null);
   assert.equal(fresh.changed, true);
   assert.equal(fresh.content.startsWith(BEGIN), true);
+});
+
+// The command was renamed and the header names the command. A repository
+// configured under the old name has to be recognised as already managed, or
+// every such repository gets a second block and a report about a comment nobody
+// wrote.
+test("a block written under the old command name is recognised and rewritten under the new one", () => {
+  const dir = repo();
+  const [legacy] = LEGACY_BEGINS;
+  assert.notEqual(legacy, BEGIN);
+  fs.writeFileSync(path.join(dir, ".gitignore"), `node_modules/\n\n${legacy}\n.tagteam/ships/\n${END}\n`);
+  const rendered = renderGitignore(fs.readFileSync(path.join(dir, ".gitignore"), "utf8"));
+  assert.equal(rendered.hadBlock, true, "the legacy header was not recognised as the managed block");
+  assert.deepEqual(rendered.orphanedComments, [], "the legacy header was reported as a comment a person wrote");
+  const report = ensureGitignore(dir);
+  assert.equal(report.applied, true);
+  const content = fs.readFileSync(path.join(dir, ".gitignore"), "utf8");
+  assert.equal(content.split("\n").filter((line) => line.startsWith("# >>> tagteam managed")).length, 1, "two managed blocks");
+  assert.ok(content.includes(BEGIN) && !content.includes(legacy), "the block was not rewritten under the new header");
+  assert.match(content, /^node_modules\/\n/);
 });

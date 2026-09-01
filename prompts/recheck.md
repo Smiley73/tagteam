@@ -14,10 +14,14 @@ says which review round raised the finding. Tidying it to `correctness.1`
 returns a verdict that binds to nothing, and the finding you judged resolved
 stays open.
 
-Then read the new diff at the path you are given and the current state of the
-files involved. Write your verdicts to the path you are given, matching
-`schemas/recheck.schema.json`, with `candidate` set to the exact post-fix commit
-you were given.
+Then read the new change. It is on disk twice: whole, at the `review.diff` path
+you are given, and one file at a time in `review.diff.d/` beside it, where
+`index.txt` maps each piece to its path. Read the pieces for the files your
+findings name, and the current state of those files. If you read the whole diff,
+page through it — one Read shows at most 2000 lines, and a fix that landed after
+line 2000 is invisible to a re-check that stopped there. Write your verdicts to
+the path you are given, matching `schemas/recheck.schema.json`, with `candidate`
+set to the exact post-fix commit you were given.
 
 ## Rules
 

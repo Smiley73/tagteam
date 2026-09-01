@@ -9,7 +9,6 @@
 // JSON. Nothing is reconciled and nothing is repaired — that is `gates.mjs`.
 import fs from "node:fs";
 import path from "node:path";
-import { listRounds } from "./lib/rounds.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
 function directories(root) {
@@ -127,24 +126,6 @@ function fixBudget(limits, spec, ciRemaining, ciUnknown) {
   return restarted.fixRoundsRemaining === null ? restarted : { ...restarted, fixBudgetRestarts: true };
 }
 
-// The rounds a plan has spent under its *current* goal approval. The numbering
-// climbs across the whole review root, but the budget is counted per approval —
-// a goal that was re-approved after a reviewer found a hole in it starts over —
-// so the marker's hash is what says which rounds still count. A round with no
-// scope of its own counts in every scope, as it does when one is allocated, and
-// an unreadable marker counts all of them: the conservative direction is the one
-// that never reports budget the allocator would refuse.
-function planRoundsSpent(planDir) {
-  const scope = json(path.join(planDir, "work", "goal-approved"))?.goalSha256 ?? null;
-  let rounds;
-  try {
-    rounds = listRounds(path.join(planDir, "work", "review"));
-  } catch {
-    return null;
-  }
-  return rounds.filter((entry) => scope === null || entry.scope === null || entry.scope === scope).length;
-}
-
 /**
  * Everything `/tagteam:status` renders: the plans, the ships, and how much
  * iteration budget each thing still in flight has left before it stops.
@@ -161,7 +142,6 @@ export function inventory(repoRoot) {
     const root = path.join(tagteam, "plans", slug);
     const specs = files(path.join(root, "specs"), ".md");
     const approved = json(path.join(root, "approved.json"));
-    const inFlight = !approved && (exists(path.join(root, "plan.md")) || exists(path.join(root, "goal.md")));
     return {
       slug,
       stage: approved ? "approved"
@@ -170,14 +150,6 @@ export function inventory(repoRoot) {
             : "interviewing",
       approvedAt: approved?.approvedAt ?? null,
       specs: specs.length,
-      // The key itself is absent for a plan that is not in flight: an approved
-      // plan reviews nothing further, so it has no budget at all. Emitting null
-      // there would collide with the null that means the remainder is unknown,
-      // and every finished plan in a healthy repository would be reported as a
-      // plan whose bookkeeping could not be read.
-      ...(inFlight
-        ? budget("reviewRounds", limitOf(limits, "planReviewRounds"), planRoundsSpent(root), "rounds")
-        : {}),
       path: root
     };
   });
@@ -187,6 +159,11 @@ export function inventory(repoRoot) {
     const specs = directories(root)
       .map((spec) => json(path.join(root, spec, "state.json")))
       .filter(Boolean);
+    // What each spec cost, when a ship could read its own session transcripts.
+    // Absent is unknown, never zero.
+    const usage = Object.fromEntries(directories(root)
+      .map((spec) => [spec, json(path.join(root, spec, "usage.json"))?.summary ?? null])
+      .filter(([, summary]) => summary !== null));
     const waiting = specs.filter((spec) => spec.state === "awaiting-approval");
     const merged = specs.filter((spec) => spec.state === "merged");
     const failed = specs.filter((spec) => spec.state === "failed");
@@ -200,6 +177,7 @@ export function inventory(repoRoot) {
       started: specs.length,
       waitingOn: waiting.map((spec) => ({ spec: spec.spec, pr: spec.pr?.number ?? null, branch: spec.branch })),
       stoppedOn: failed.map((spec) => ({ spec: spec.spec, branch: spec.branch })),
+      usage,
       // One entry per spec that could still spend something. A merged or failed
       // spec has no budget, so it has no entry — and a spec waiting for a person
       // does have one, because sending it back spends a CI repair and hands it a
