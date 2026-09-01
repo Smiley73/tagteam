@@ -1,10 +1,10 @@
 // Does the plugin actually hang together?
 //
-// The commands are prose the orchestrator follows literally: they name agents,
-// scripts, flags, prompt files, and schemas. Every one of those is a string that
-// can go stale silently, and the failure arrives mid-run as a subagent that does
-// not exist or a script that rejects its arguments — after the work that led up
-// to it has been paid for. All of it is decidable here.
+// The commands are prose the orchestrator follows literally, and the drivers are
+// code that names agents, scripts, prompt files and schemas. Every one of those
+// is a string that can go stale silently, and the failure arrives mid-run as a
+// subagent that does not exist or a script that rejects its arguments — after
+// the work that led up to it has been paid for. All of it is decidable here.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -19,14 +19,11 @@ const commandFiles = fs.readdirSync(path.join(root, "commands"));
 const commands = commandFiles.map((file) => ({ file, text: read("commands", file) }));
 const skill = read("skills", "tagteam", "SKILL.md");
 const readme = read("README.md");
+const shipDriver = read("scripts", "ship.mjs");
+const planDriver = read("scripts", "plan.mjs");
 const everything = [...commands.map((entry) => entry.text), skill].join("\n");
 
 const agentNames = fs.readdirSync(path.join(root, "agents")).map((file) => file.replace(/\.md$/, ""));
-// An agent file is one agent at one effort, because effort can only reach a
-// dispatch through the agent's frontmatter. A command therefore dispatches
-// `tagteam:<agent>-<effort>` and every level of the ladder must exist and be
-// allowed, since the resolver picks the level and the command file cannot know
-// which one it will get.
 const EFFORTS = JSON.parse(read("schemas", "config.schema.json")).$defs.claudeEffort.enum;
 const dispatchedAgents = (text) =>
   [...text.matchAll(/`tagteam:([a-z-]+)-<effort>`/g)].map(([, name]) => name);
@@ -63,15 +60,21 @@ test("every agent's frontmatter name matches its file name", () => {
   }
 });
 
-test("every prompt an agent or command points at exists", () => {
+test("every prompt an agent, a command or a driver points at exists", () => {
   const sources = [
     ...agentNames.map((name) => ({ file: `agents/${name}.md`, text: read("agents", `${name}.md`) })),
-    ...commands.map((entry) => ({ file: `commands/${entry.file}`, text: entry.text }))
+    ...commands.map((entry) => ({ file: `commands/${entry.file}`, text: entry.text })),
+    { file: "scripts/ship.mjs", text: shipDriver },
+    { file: "scripts/plan.mjs", text: planDriver }
   ];
   for (const { file, text } of sources) {
     for (const [, prompt] of text.matchAll(/prompts\/([a-z0-9/-]+\.md)/g)) {
       if (prompt.includes("<lens>")) continue;
       assert.ok(fs.existsSync(path.join(root, "prompts", prompt)), `${file} names prompts/${prompt}, which does not exist`);
+    }
+    // The drivers name templates by their basename against the codex directory.
+    for (const [, template] of text.matchAll(/template: "([a-z0-9-]+\.md)"/g)) {
+      assert.ok(fs.existsSync(path.join(root, "prompts", "codex", template)), `${file} names prompts/codex/${template}, which does not exist`);
     }
   }
 });
@@ -86,11 +89,9 @@ test("every lens in the example roster has a brief", () => {
   }
 });
 
-// The other direction. `validate-json.mjs` decides what a roster may name by
-// listing this directory, so anything left in it is a lens a configuration can
-// select and a reviewer can be dispatched on — a draft, a note, a README would
-// each become one silently. A brief is a file named for its lens that opens by
-// naming it.
+// `validate-json.mjs` decides what a roster may name by listing this directory,
+// so anything left in it is a lens a configuration can select and a reviewer can
+// be dispatched on — a draft, a note, a README would each become one silently.
 test("every file in prompts/lenses is a brief for the lens it is named for", () => {
   const dir = path.join(root, "prompts", "lenses");
   for (const entry of fs.readdirSync(dir)) {
@@ -100,9 +101,6 @@ test("every file in prompts/lenses is a brief for the lens it is named for", () 
   }
 });
 
-// The example roster is what /tagteam:init writes, so a shipped brief missing
-// from it is a lens nobody can select without hand-editing the configuration —
-// the same invisibility, from the other side.
 test("every brief this plugin ships is in the example roster", () => {
   const example = JSON.parse(read("examples", "config.json"));
   const rostered = new Set(example.reviewers.roster);
@@ -112,18 +110,12 @@ test("every brief this plugin ships is in the example roster", () => {
   }
 });
 
-// Where a repository puts its own briefs is a path three prose files tell a
-// person or a subagent to use and two scripts resolve. Spelled differently in
-// any one of them, a repository writes a brief nothing reads — and the failure
-// is a reviewer that invents its lens, which is the thing none of this can
-// otherwise detect.
 test("the repository brief directory is spelled the same in every file that names one", async () => {
   const { REPO_LENS_DIR } = await import("../scripts/lib/lenses.mjs");
   assert.equal(REPO_LENS_DIR, ".tagteam/lenses");
   const naming = [
     ["agent-sources", "reviewer.md"],
-    ["commands", "ship.md"],
-    ["commands", "init.md"],
+    ["commands", "configure.md"],
     ["commands", "plan.md"],
     ["skills", "tagteam", "SKILL.md"],
     ["README.md"]
@@ -132,7 +124,6 @@ test("the repository brief directory is spelled the same in every file that name
     const text = read(...parts);
     assert.match(text, new RegExp(REPO_LENS_DIR.replace(/\//g, "\\/")),
       `${parts.join("/")} does not name ${REPO_LENS_DIR}`);
-    // A near miss reads correctly and resolves nowhere.
     assert.doesNotMatch(text, /\.tagteam\/(lens|brief|briefs|lense)\//,
       `${parts.join("/")} names a brief directory that is not ${REPO_LENS_DIR}`);
   }
@@ -140,12 +131,6 @@ test("the repository brief directory is spelled the same in every file that name
 
 // A script that has to find a file shipped beside it derives the plugin root
 // from `import.meta.url`, and there is exactly one correct way to do that.
-// `new URL(import.meta.url).pathname` is percent-encoded: under
-// `~/.claude/plugins/cache/`, which is where this plugin actually runs, a home
-// directory with a space in it yields `/Users/First%20Last/...` and every
-// `readFileSync` against it throws ENOENT. It works on every developer machine
-// whose paths happen to have no spaces in them, which is what makes it worth a
-// test rather than a code review.
 test("no script derives a path from import.meta.url through .pathname", () => {
   const offenders = [];
   for (const dir of ["scripts", "scripts/lib"]) {
@@ -159,11 +144,6 @@ test("no script derives a path from import.meta.url through .pathname", () => {
 });
 
 test("a plugin installed under a path with a space in it still finds its own schemas", () => {
-  // The failure the rule above prevents, run rather than asserted. Every script
-  // that reads a schema beside itself is exercised through the one that reads
-  // the most of them. Realpath'd so this test exercises the space and nothing
-  // else — the symlink macOS puts in front of every tmpdir is the next test's
-  // subject.
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-spaced-")));
   const plugin = path.join(home, "First Last", "plugin cache", "tagteam");
   stagePlugin(plugin);
@@ -175,13 +155,6 @@ test("a plugin installed under a path with a space in it still finds its own sch
   assert.deepEqual(JSON.parse(result.stdout).order.map((entry) => entry.id), ["01-a"]);
 });
 
-// The other way an installed path can differ from the path a script sees: Node
-// resolves the entry's symlinks before it sets `import.meta.url`, while argv[1]
-// stays as invoked, so a run-as-main guard that compares the two textually is
-// false through any symlinked path component — main() is silently skipped,
-// stdout is empty, and the exit code is still 0, a no-op that reads as success
-// to the orchestrator. macOS puts a symlink in front of every tmpdir, and a
-// symlinked ~/.claude puts one in front of every real install.
 test("a plugin invoked through a symlinked path still runs its scripts at all", () => {
   const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-linked-")));
   const plugin = path.join(real, "tagteam");
@@ -195,13 +168,6 @@ test("a plugin invoked through a symlinked path still runs its scripts at all", 
   assert.deepEqual(JSON.parse(result.stdout).order.map((entry) => entry.id), ["01-a"]);
 });
 
-// The pattern the test above catches at runtime, decided statically for every
-// script at once: comparing `import.meta.url` to `pathToFileURL(argv[1])` — or
-// `import.meta.filename` to `argv[1]`, the spelling generate-agents.mjs used —
-// works until the invoked path holds a symlink. Any equality against either
-// import.meta property is that guard in some spelling, whichever side it is
-// written on, so the rule refuses them all: each script takes the answer from
-// `lib/is-main.mjs` instead, which compares real paths.
 test("no script decides run-as-main by comparing import.meta.url textually", () => {
   const TEXTUAL_GUARD =
     /import\.meta\.(?:url|filename)\s*[!=]==|[!=]==\s*import\.meta\.(?:url|filename)/;
@@ -217,13 +183,12 @@ test("no script decides run-as-main by comparing import.meta.url textually", () 
 });
 
 // `gates.mjs init` and the configuration validator both refuse to run without a
-// repository since 0.8.2, because half the answer to "what calibrates this lens"
-// lives in `.tagteam/lenses/`. A command file that invokes either without
-// `--repo` fails mid-run — after the worktree, and for `init`, once per spec.
-test("every command invocation that now requires --repo passes it", () => {
+// repository, because half the answer to "what calibrates this lens" lives in
+// `.tagteam/lenses/`. An invocation without `--repo` fails mid-run.
+test("every invocation that requires --repo passes it", () => {
   const offenders = [];
-  for (const { file, text } of commands) {
-    for (const [, line] of text.matchAll(/^(.*scripts\/(?:gates\.mjs" init|validate-json\.mjs).*)$/gm)) {
+  for (const { file, text } of [...commands, { file: "scripts/ship.mjs", text: shipDriver }]) {
+    for (const [, line] of text.matchAll(/^(.*(?:gates\.mjs"?,? \[?"?init|validate-json\.mjs).*)$/gm)) {
       if (!line.includes("--repo")) offenders.push(`${file}: ${line.trim()}`);
     }
   }
@@ -241,38 +206,26 @@ test("the example configuration is valid against the schema", async () => {
   assert.equal(document.version, CONFIG_VERSION);
 });
 
-test("every script a command runs exists", () => {
+test("every script a command or a driver runs exists", () => {
   for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
     for (const [, script] of text.matchAll(/scripts\/([a-z0-9/-]+\.mjs)/g)) {
       assert.ok(fs.existsSync(path.join(root, "scripts", script)), `${file} runs scripts/${script}, which does not exist`);
     }
+  }
+  // The driver spawns its siblings by basename.
+  for (const [, script] of shipDriver.matchAll(/node\("([a-z-]+\.mjs)"/g)) {
+    assert.ok(fs.existsSync(path.join(root, "scripts", script)), `ship.mjs spawns scripts/${script}, which does not exist`);
   }
 });
 
 // The expensive failure this whole file exists for: a command passing a flag the
 // script does not accept. It surfaces as a dead step in the middle of a train.
 test("every flag a command passes is one its script accepts", () => {
-  // Nested paths included: `scripts/lib/rounds.mjs` is run from a command like
-  // any other script, and a pattern that stopped at the first directory checked
-  // none of the flags it is passed. The line continuation is tried before the
-  // ordinary character for the same reason — greedy alternation that consumes the
-  // backslash first has nothing left to fail on, so it stops at the end of the
-  // first line and every flag on a wrapped invocation goes unchecked.
   const invocations = [...everything.matchAll(/scripts\/((?:[a-z0-9-]+\/)*[a-z0-9-]+\.mjs)((?:\\\n|[^\n`])*)/g)];
   assert.ok(invocations.length > 10, "no script invocations were found to check");
-  // Both halves of that pattern are load-bearing and invisible: a pattern that
-  // stops at the first directory, or one whose alternation eats the backslash
-  // before the newline, still matches plenty of invocations and this test still
-  // passes over the ones it silently truncates. Pin them on the invocation that
-  // needs both — nested, and wrapped over continuation lines.
-  assert.ok(
-    invocations.some(([, script, tail]) => script === "lib/rounds.mjs" && tail.includes("--limit-name")),
-    "the pattern no longer reads flags off a nested script's invocation wrapped over continuation lines"
-  );
   const sources = new Map();
   const failures = [];
   for (const [, script, rawTail] of invocations) {
-    // A nested `$( … )` is a different command's arguments, not this one's.
     const tail = rawTail.split("$(")[0];
     const file = path.join(root, "scripts", script);
     if (!fs.existsSync(file)) continue;
@@ -291,24 +244,21 @@ test("every flag a command passes is one its script accepts", () => {
   assert.deepEqual(failures, [], failures.join("\n"));
 });
 
-// The rule about how questions are worded lives in one place and is pointed at
-// from every command that asks one. A pointer to a section that has been renamed
-// away sends the orchestrator looking and finding nothing, which is how a rule
-// stops applying without anyone deciding that it should.
-// A codex template's {{SECTIONS}} arrive as flags the orchestrator builds from
-// prose, and a section the prose never names is a dispatch that dies in
+// A codex template's {{SECTIONS}} are supplied by the driver that composes the
+// call, and a section the driver never supplies is a dispatch that dies in
 // composePrompt mid-round — after the diff, the panel and the fixer were paid
-// for. Step 7's re-check once ran exactly that way: recheck.md needs CANDIDATE,
-// FINDINGS and DIFF, and the step named none of them.
-test("every section a codex template needs is named by the prose that invokes it", () => {
-  for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
-    for (const [, template] of text.matchAll(/prompts\/codex\/([a-z0-9-]+\.md)/g)) {
-      const placeholders = [...read("prompts", "codex", template).matchAll(/\{\{([A-Z0-9_]+)\}\}/g)];
-      assert.ok(placeholders.length > 0, `prompts/codex/${template} declares no sections at all`);
-      for (const [, name] of placeholders) {
-        assert.match(text, new RegExp(`(--fence |--var |\`)${name}\\b`),
-          `${file} invokes prompts/codex/${template} but never names its ${name} section`);
-      }
+// for. The drivers name every var and fence as `NAME:` in the object they build.
+test("every section a codex template needs is supplied by the driver that composes it", () => {
+  const templates = fs.readdirSync(path.join(root, "prompts", "codex"));
+  assert.ok(templates.length >= 3, "the codex templates are missing");
+  for (const template of templates) {
+    const placeholders = [...read("prompts", "codex", template).matchAll(/\{\{([A-Z0-9_]+)\}\}/g)].map(([, name]) => name);
+    assert.ok(placeholders.length > 0, `prompts/codex/${template} declares no sections at all`);
+    const composers = [shipDriver, planDriver].filter((source) => source.includes(`template: "${template}"`));
+    assert.ok(composers.length > 0, `no driver composes prompts/codex/${template}`);
+    for (const name of placeholders) {
+      assert.ok(composers.some((source) => new RegExp(`\\b${name}:`).test(source)),
+        `the driver composing prompts/codex/${template} never supplies its ${name} section`);
     }
   }
 });
@@ -321,23 +271,10 @@ test("every command that asks a person something points at the Asking rule", () 
   }
 });
 
-// Escalation and plan-side models are two unrelated decisions, and the trade-off
-// of neither survives being folded into the other question or into a line of
-// documentation nobody reads. A later edit that trims init back to one model
-// question is invisible to every other test here: the schema, the validator and
-// the dispatch wiring all stay green while a person is never offered either key,
-// and the config the interview writes says `null` to both forever. Names only,
-// never the prose — the caveat's wording, the option labels and the question
-// numbers must stay free to improve.
-test("the init command asks about both of the settings a person can only get here", () => {
-  // Scoped to the numbered questions themselves, not to the section: the section
-  // ends with "Everything else takes its default" and the roster paragraph, and
-  // naming a key there is documentation, not a question. An item runs from its
-  // number to the next number, and its continuation lines are indented — the
-  // first unindented line that is not a number ends the list.
-  const init = read("commands", "init.md");
+test("the configure command asks about both of the settings a person can only get here", () => {
+  const init = read("commands", "configure.md");
   const start = init.indexOf("## Then ask");
-  assert.ok(start > -1, "init.md no longer has a Then ask section");
+  assert.ok(start > -1, "configure.md no longer has a Then ask section");
   const section = init.slice(start, init.indexOf("\n## ", start + 1));
   const items = [];
   for (const line of section.split("\n")) {
@@ -347,39 +284,38 @@ test("the init command asks about both of the settings a person can only get her
     else break;
   }
   assert.ok(items.length > 4, `only ${items.length} numbered questions were found in Then ask`);
-  for (const key of ["escalation", "plan"]) {
+  for (const key of ["escalation", "plan", "effort"]) {
     const where = items.filter((item) => item.includes(`\`${key}\``));
-    assert.ok(where.length > 0, `no numbered question in init.md asks about ${key}`);
+    assert.ok(where.length > 0, `no numbered question in configure.md asks about ${key}`);
   }
-  // Two questions, not one: the trade-off of neither survives being folded into
-  // the other, and a fold leaves both names in a single item. Disjointness, not
-  // the existence of some differing pair — another question is free to name
-  // either key in passing, and the check still has to fail on the fold. Which
-  // numbers the two questions are, and in which order, stays free.
   assert.ok(
     !items.some((item) => item.includes("`escalation`") && item.includes("`plan`")),
-    "init.md asks about escalation and plan in the same question instead of two"
+    "configure.md asks about escalation and plan in the same question instead of two"
   );
+  // Every effort job the schema knows is offered by name, or a person cannot
+  // find the knob they are being asked to turn.
+  const jobs = Object.keys(JSON.parse(read("schemas", "config.schema.json")).$defs.jobEffort.properties);
+  const effortItem = items.find((item) => item.includes("`effort`"));
+  for (const job of jobs) assert.ok(effortItem.includes(`\`${job}\``), `configure.md's effort question never names ${job}`);
 });
 
-test("the ship command never re-derives the reviewed commit from HEAD", () => {
-  const ship = read("commands", "ship.md");
-  const bash = [...ship.matchAll(/```bash\n([\s\S]*?)```/g)].map(([, body]) => body).join("\n");
-  const uses = [...bash.matchAll(/rev-parse HEAD/g)];
-  // Exactly one runnable use: naming the commit just made, before anything is
-  // bound to it. Every later reference to the reviewed commit is state.json.
-  assert.equal(uses.length, 1, `rev-parse HEAD appears ${uses.length} times in ship.md's commands`);
-  assert.match(ship, /the one place it is correct/);
-  assert.match(ship, /Never re-derive the reviewed commit/);
+// The reviewed commit is read out of state.json everywhere except the one place
+// that names a commit just made, before anything is bound to it — which is now a
+// function of the driver rather than a line in a command file.
+test("only the driver's snapshot step reads HEAD, and no command file does", () => {
+  for (const { file, text } of commands) {
+    assert.ok(!text.includes("rev-parse HEAD"), `commands/${file} re-derives a commit from HEAD`);
+  }
+  const uses = [...shipDriver.matchAll(/rev-parse", "HEAD"/g)];
+  const snapshot = shipDriver.slice(shipDriver.indexOf("function snapshot("), shipDriver.indexOf("function verify("));
+  assert.equal(uses.length, [...snapshot.matchAll(/rev-parse", "HEAD"/g)].length,
+    "ship.mjs reads HEAD outside its snapshot step");
+  assert.match(skill, /`git rev-parse HEAD` to learn the reviewed commit/);
 });
 
 // How many fix rounds a change gets is this repository's configuration. A model
-// told there is exactly one rations its findings against a number nobody chose
-// for it — and a fixer told the diff was reviewed once is wrong from the second
-// round on.
+// told there is exactly one rations its findings against a number nobody chose.
 test("no brief describing a fix round claims there is only one", () => {
-  // Flattened, here and below: these are sentences, and a sentence the author
-  // re-wrapped is the same claim.
   const singular = /\b(the|one|a single) fix round\b/i;
   for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agent-sources/fixer.md"]) {
     const text = read(...file.split("/")).replace(/\s+/g, " ");
@@ -387,13 +323,6 @@ test("no brief describing a fix round claims there is only one", () => {
   }
 });
 
-// A finding's `fix` is written by four briefs and read by one, and neither end
-// works from the field's schema description alone: a reviewer that proposes a
-// repair it half-considered spends a round on the wrong thing, and a fixer that
-// applies one without checking repairs where the proposal pointed rather than
-// where the cause is. Each statement is pinned on its own — a brief that lost one
-// of its three still reads, to anyone skimming it, like a brief that says all of
-// them.
 const fixFieldProse = [
   ...["prompts/review.md", "prompts/codex/review.md", "prompts/code-adversary.md"].flatMap((file) => [
     { file, statement: "a repair is proposed only when the repair is obvious",
@@ -415,293 +344,108 @@ const fixFieldProse = [
 
 test("every brief at either end of a finding's `fix` field still says what it means", () => {
   for (const { file, statement, pattern } of fixFieldProse) {
-    // Flattened, as above: a sentence the author re-wrapped is the same sentence.
     const text = read(...file.split("/")).replace(/\s+/g, " ");
     assert.match(text, pattern, `${file} no longer says ${statement}`);
   }
 });
 
-// Each of these sentences said the loop was one iteration long. The orchestrator
-// follows this file literally, so any one of them left behind stops a spec that
-// still has budget — and contradicts the command that actually decides.
-test("the ship command no longer asserts a single fix round or a single CI repair", () => {
-  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
-  for (const claim of [
-    "There is no second fix round",
-    "Fix, once",
-    "exactly one repair",
-    "A second CI failure stops the spec"
-  ]) {
-    assert.ok(!ship.includes(claim), `ship.md still says "${claim}"`);
-  }
-});
-
-// Both limits are named where the loops they bound are described, so the person
-// told a spec ran out of rounds can find the thing to raise.
-test("the ship command names both limits its loops are bounded by", () => {
+test("the ship command names both limits its loops are bounded by, and asserts no single round", () => {
   const ship = read("commands", "ship.md");
   assert.match(ship, /fixRounds/);
   assert.match(ship, /ciRepairs/);
-});
-
-// The invariant most likely to be optimised away by a later edit: after a CI
-// repair, `bind` has cleared the review gate and the old candidate's findings
-// are gone from `open`, so a re-check alone would decide nothing and the recorded
-// review gate would be one no lens produced.
-test("a CI repair still re-runs the whole panel, and still says why", () => {
-  // Matched against the prose with its line wrapping flattened: a sentence that
-  // survived a re-wrap is the sentence, and a test that fails on one is a test
-  // people learn to edit rather than read.
-  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
-  assert.match(ship, /\*\*Steps 5, 6 and 7 again, entirely\*\*/);
-  assert.match(ship, /whole lens panel plus Codex/);
-  assert.match(ship, /a clean review gate that no lens ever looked at/);
-});
-
-// One step of ship.md, flattened, for the orderings below. A step ends where the
-// next one begins, so a rule that drifted into another step is not counted as
-// still in this one.
-function shipStep(heading, next) {
-  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
-  const start = ship.indexOf(heading);
-  const end = ship.indexOf(next);
-  assert.ok(start > -1 && end > start, `ship.md no longer has a ${heading} ending at ${next}`);
-  return ship.slice(start, end);
-}
-
-const stepSix = () => shipStep("### 6.", "### 7.");
-const stepSeven = () => shipStep("### 7.", "### 8.");
-
-// The budget has to be consumed before anything is dispatched: a fixer that runs
-// first leaves a commit on the branch no round covers and a branch ahead of the
-// reviewed candidate, and an exhausted budget discovered at snapshot time cannot
-// take it back. Nothing else in the repository catches a step 6 reordered so the
-// transition happens at commit time.
-test("step 6 takes the budgeted edge before it dispatches the fixer", () => {
-  const step = stepSix();
-  const budget = step.indexOf('gates.mjs" state "$S/<id>/state.json" fixing');
-  const fixer = step.indexOf("tagteam:fixer");
-  assert.ok(budget > -1, "step 6 no longer takes the fixing edge at all");
-  assert.ok(fixer > -1, "step 6 no longer dispatches a fixer");
-  assert.ok(budget < fixer, "step 6 dispatches the fixer before it consumes the fix budget");
-});
-
-// Running out of fix rounds is what "there is no second fix round" meant: the
-// spec still publishes and step 9 tells a person why it is waiting. Routed to
-// `failed` instead, a bounded loop that reached its bound reads as a broken one,
-// and the pull request nobody opened cannot be looked at.
-test("step 6 says a spent budget publishes rather than fails", () => {
-  const step = stepSix();
-  assert.match(step, /A budget stop is not a failure and never goes to `failed`/);
-  assert.match(step, /still publishes, still opens a pull request/);
-  assert.match(step, /gates\.mjs state \.\.\. verifying`, then step 8/,
-    "step 6's refusal path no longer converges on verifying before step 8");
-});
-
-// A fixer may answer every finding `wont-fix`, and a round that changes nothing
-// makes no commit: step 3's opening chain fails, no round is allocated, and
-// `record-round-report.mjs` never runs, so the account of why the fixer
-// disagreed is recorded in no round at all. An orchestrator with no branch for
-// it here reads step 3's resume paragraph instead — the worktree is clean there
-// too — re-enters the round `HEAD` already owns, and has the recorder refuse
-// this report against a commit that does not contain its work. Step 6 is the
-// only place that can catch it: it is the last one before the commit, and the
-// only one that knows a fixer just ran.
-test("step 6 has a branch for a fixer that changed nothing", () => {
-  const step = stepSix();
-  assert.match(step, /status --porcelain/,
-    "step 6 gives the orchestrator no test for a fixer that changed nothing");
-  assert.match(step, /\*\*A fixer that changed nothing does not make a round\.\*\*/,
-    "step 6 no longer has a branch for the round that makes no commit");
-  assert.match(step, /manufacture one/,
-    "step 6 does not forbid manufacturing a commit so that a round can be allocated");
-  // Step 3 sends that clean worktree back here rather than treating it as a
-  // resume of a commit that already exists.
-  assert.match(stepThree(), /arrived from step 6/,
-    "step 3's resume branch still swallows the fix round that made no commit");
-});
-
-// The report this branch leaves behind is the one report in the whole command
-// that no round records, and `record-round-report.mjs` tells a counted report
-// from a new one by what the *other rounds* hold — so an orphan at the scratch
-// path is invisible to that check. Left there, the next round whose agent
-// returns without writing one adopts it: the recorder exits 0, writes
-// `{"status":"complete","kind":"fix"}` into that round, and the report gate
-// `gates.mjs` would have made wait for a person passes on an account of a commit
-// it never saw. Step 8's CI-repair fixer writes the same path, so the window
-// stays open for the rest of the spec.
-test("the changed-nothing branch takes the orphaned report off the path a later round reads", () => {
-  const step = stepSix();
-  assert.match(step, /mv "\$S\/<id>\/fix-report\.json"/,
-    "step 6 leaves the declining fixer's report where the next round reads it as its own");
-  assert.match(step, /records it as its own account/,
-    "step 6 does not say what happens to the report it leaves at the scratch path");
-});
-
-// The adversary is the reader most likely to raise the finding that starts a
-// second round, and it is dispatched here as a fresh pass and nothing else —
-// while `recheck.mjs` requires a verdict file from it for any adversary finding
-// an earlier round left open. Step 7 says "lens" everywhere, which is a word the
-// adversary is never called by, so a round that inherits one dispatches nobody
-// for it: the finding stays open with no verdict in this round and in every
-// round after it, the loop spends its whole fix budget re-fixing a defect that
-// can never be settled, and the review gate is `incomplete` at the end of it.
-test("step 7 dispatches the adversary a re-check of the findings it carried", () => {
-  const step = stepSeven();
-  assert.match(step, /The adversary is one of the lenses this bullet covers/,
-    "step 7 no longer says the adversary is one of the readers its carried bullet covers");
-  assert.match(step, /still-open\/adversary\.json` as\s?its input/,
-    "step 7 no longer names the carried adversary record as an input to a re-check");
-  assert.match(step, /rounds\/\$ROUND\/recheck\/adversary\.json`/,
-    "step 7 no longer names the file the adversary's re-check writes");
-  assert.match(step, /`recheck\/adversary\.json` when the adversary is/,
-    "step 7's watcher no longer waits for the adversary's re-check the way it waits for Codex's");
-});
-
-// The dispatch above only works if the agent it dispatches is defined to read
-// the brief it is handed. `agents/adversary.md` enumerates the briefs it may be
-// pointed at; without the re-check clause the agent's own definition tells it to
-// treat a re-check as judging a diff, and it writes a findings-shaped file that
-// `recheck.mjs` rejects against `recheck.schema.json` — the carried adversary
-// finding stays open with no verdict, which is the deadlock step 7 exists to
-// close, reintroduced one file over. `agents/reviewer.md` carries the same
-// clause for the same reason.
-test("every agent dispatched to a re-check is defined to read the re-check brief", () => {
-  for (const name of ["adversary", "reviewer"]) {
-    const agent = read("agent-sources", `${name}.md`);
-    assert.match(agent, /prompts\/recheck\.md/,
-      `agent-sources/${name}.md no longer names prompts/recheck.md, but step 7 dispatches it under that brief`);
+  const flat = ship.replace(/\s+/g, " ");
+  for (const claim of ["There is no second fix round", "Fix, once", "exactly one repair", "A second CI failure stops the spec"]) {
+    assert.ok(!flat.includes(claim), `ship.md still says "${claim}"`);
   }
-  assert.match(read("agent-sources", "adversary.md"), /recheck\.schema\.json/,
-    "agent-sources/adversary.md no longer names the schema its re-check output must match");
 });
 
-// From the second fix round on, step 5 runs in full and step 7 follows in the
-// same round. Handing each lens the findings it raised minutes earlier, against
-// the same diff with no commit in between, asks `prompts/recheck.md`'s question —
-// "a fixer has changed the code, is it resolved?" — about a finding no fixer has
-// seen, and a `resolved` there clears a blocking finding that nothing repaired.
-test("step 7 re-checks only what an earlier round left open", () => {
-  const step = stepSeven();
-  assert.match(step, /\*\*only when a fixer ran between the raising and now\*\*/,
-    "step 7's re-check bullet no longer requires a fixer between the raising and the verdict");
-  assert.match(step, /\*\*Skip this bullet whenever step 5 ran in this round\*\*/,
-    "step 7 no longer skips the re-check of findings this round's own panel raised");
-  // And the step before it no longer promises the re-check that must not happen.
-  const five = shipStep("### 5.", "### 6.");
-  assert.match(five, /What this panel raises is not re-checked in this round/,
-    "step 5 still tells the reader its own findings are re-checked in this round");
+// --- the driver's routes, decided statically where the driver test cannot reach ---
+
+const driverFunction = (name) => {
+  const start = shipDriver.indexOf(`function ${name}(`);
+  assert.ok(start > -1, `ship.mjs has no ${name} step`);
+  const end = shipDriver.indexOf("\nfunction ", start + 1);
+  return shipDriver.slice(start, end === -1 ? undefined : end);
+};
+
+test("a CI repair is a new candidate through the whole cycle: repair sends to snapshot, and verify routes by scope", () => {
+  assert.match(driverFunction("repair"), /nextCommand\(ctx, "snapshot", id\)/, "repair does not route the repaired commit back through snapshot");
+  // The route out of verify is decided from the rounds on disk: the first fix of
+  // a cycle goes to the re-check, everything else to the whole panel — and a CI
+  // repair's rounds sit in a new scope, so its earlier rounds do not count.
+  assert.match(driverFunction("verify"), /reviewRouteFor\(ctx, id, state, round\.round\)/, "verify does not decide its route from the rounds on disk");
+  const route = driverFunction("reviewRouteFor");
+  assert.match(route, /entry\.scope === scope/, "the route ignores which repair cycle an earlier round belongs to");
+  assert.match(route, /collected && !settled \? "recheck" : "panel"/, "the route no longer sends an unsettled panel to the re-check");
+  // The panel dispatches every lens the state froze, never a subset.
+  assert.match(driverFunction("panel"), /const lenses = state\.reviewers;[\s\S]*lenses\.map\(/, "the panel does not dispatch one reviewer per frozen lens");
 });
 
-// Every round that writes code ends with an account of its own work, and the two
-// lines that record one are reachable on all four routes into step 3 — the first
-// implement, a fix round, a CI repair, and a resume — because every one of them
-// arrives here. The ordering below is the whole guarantee: a gate is evidence
-// about one candidate, so a report counted before `bind` is counted against
-// whatever the last candidate was, and a report counted before the commit is
-// counted against work that is not in it.
-const stepThree = () => shipStep("### 3.", "### 4.");
-
-test("step 3 records the round's report and its gate below the commit and the bind", () => {
-  const step = stepThree();
-  const commit = step.indexOf('git -C "$W" add -A');
-  const bind = step.indexOf('gates.mjs" bind "$S/<id>/state.json"');
-  const recorded = step.indexOf("record-round-report.mjs");
-  const gate = step.indexOf('gates.mjs" record "$S/<id>/state.json" report');
-  assert.ok(commit > -1, "step 3 no longer commits");
-  assert.ok(bind > -1, "step 3 no longer binds the candidate");
-  assert.ok(recorded > -1, "step 3 no longer records the round's report");
-  assert.ok(gate > -1, "step 3 no longer records the report gate");
-  assert.ok(commit < recorded, "step 3 records a report against a commit that does not exist yet");
-  assert.ok(bind < recorded, "step 3 records the report before the commit it describes is the candidate");
-  assert.ok(recorded < gate, "step 3 records the report gate before the report it reads");
-  // The gate is recorded against the commit just made, not against whatever
-  // `state.json` happened to be bound to before this step ran.
-  assert.match(step, /gates\.mjs" record "\$S\/<id>\/state\.json" report "\$OID" "\$S\/<id>\/rounds\/\$ROUND\/report\.json"/,
-    "step 3's report gate is not recorded for $OID from the round's own report.json");
+test("the fix step spends the budget before it dispatches, and hands the fixer only the gating record", () => {
+  const fix = driverFunction("fix");
+  const edge = fix.indexOf('transition(ctx, id, "fixing", { budgeted: true })');
+  const dispatch = fix.indexOf("fixerDispatch(");
+  assert.ok(edge > -1 && dispatch > -1 && edge < dispatch, "fix dispatches before it takes the budgeted edge");
+  assert.match(fix, /"to-fix\.json"/);
+  assert.match(fix, /"still-open\.json"/);
+  assert.doesNotMatch(fix, /"review\.json"/, "the fixer must never be handed review.json, which carries every severity");
 });
 
-test("the round report is recorded in exactly one step of the ship command", () => {
-  // A second invocation is a recording that runs somewhere before the commit —
-  // step 6 and step 8 both hand back before theirs exists — and a report counted
-  // there is counted against the commit before it.
-  const uses = [...read("commands", "ship.md").matchAll(/record-round-report\.mjs/g)];
-  assert.equal(uses.length, 1, `record-round-report.mjs appears ${uses.length} times in ship.md`);
+test("the commit chain in the driver runs guard-staged between add and commit", () => {
+  const snapshot = driverFunction("snapshot");
+  const add = snapshot.indexOf('["add", "-A"]');
+  const guard = snapshot.indexOf('node("guard-staged.mjs"');
+  const commit = snapshot.indexOf('["commit", "-m"');
+  assert.ok(add > -1 && guard > -1 && commit > -1, "the snapshot step lost part of its commit chain");
+  assert.ok(add < guard && guard < commit, "guard-staged does not sit between add and commit");
 });
 
-test("step 3 says what a non-zero exit from the recording lines means", () => {
-  // The recorder writes nothing when a report is malformed, so the gate line
-  // after it fails too — and the file stays at a path with no round number in it,
-  // where the next round reads it and refuses in the same place, before that
-  // round's own report is looked at. An orchestrator with no instruction here
-  // commits again and loses an account per round; the instruction is the only
-  // thing that stops it, because nothing later in the command clears the file.
-  const step = stepThree();
-  assert.match(step, /non-zero exit/, "step 3 does not say what a failing recording line means");
-  assert.match(step, /do not commit again/i, "step 3 lets the run carry a refused report into the next round");
-  // The two refusals need different handling — a schema failure records an
-  // absence once the file is moved aside; a refused `report.json` stands and the
-  // scratch copy is the evidence — and neither may dispatch an agent: the one
-  // that wrote the report is gone, a fresh one never did the work, and a
-  // code-writing agent sent into $W after the commit leaves edits step 4 would
-  // verify against a tree that is not the candidate.
-  assert.match(step, /refused different bytes/, "step 3 no longer tells the two recorder refusals apart");
-  assert.doesNotMatch(step, /[Rr]e-dispatch the reporting agent/,
-    "step 3 asks a fresh agent to rewrite a report whose work it never did");
-});
-
-test("step 3 has a resume branch for a commit that already exists", () => {
-  // Step 1 restarts interrupted specs here against work that is already
-  // committed, and a stop at the recording lines resumes here too — after the
-  // commit. Both arrive with a clean worktree, so the first line's `git commit`
-  // exits with "nothing to commit", and an orchestrator with no branch for that
-  // halts on the opening chain and never reaches the recording lines again.
-  const step = stepThree();
-  assert.match(step, /status --porcelain/, "step 3 gives no test for the nothing-to-commit resume");
-  assert.match(step, /skip the first line/i, "step 3 does not say to skip the commit when it already exists");
-});
-
-// A dispatch that does not name the path is an agent with nowhere to write, and
-// its round evaluates as one that accounted for nothing — silently, and for the
-// rest of the spec.
-test("every reporting dispatch names the path its agent must write", () => {
-  const cases = [
-    ["### 2.", "### 3.", "$S/<id>/implement-report.json"],
-    ["### 6.", "### 7.", "$S/<id>/fix-report.json"],
-    ["### 8.", "### 9.", "$S/<id>/fix-report.json"]
-  ];
-  for (const [heading, next, wanted] of cases) {
-    const step = shipStep(heading, next);
-    assert.ok(step.includes(wanted), `ship.md ${heading} dispatches a reporting agent without naming ${wanted}`);
+test("every dispatching step of the driver reads the resolver, and the driver names only jobs it emits", async () => {
+  const { resolveRoles } = await import("../scripts/gates.mjs");
+  const emitted = new Set(Object.keys(resolveRoles({ fixRoundsUsed: 0 }, JSON.parse(read("examples", "config.json"))).jobs));
+  for (const [, job] of shipDriver.matchAll(/jobs\["([a-z-]+)"\]/g)) {
+    assert.ok(emitted.has(job), `ship.mjs dispatches roles job ${job}, which gates.mjs roles does not emit`);
   }
-  // And no round number in either path: the recording happens after the
-  // re-snapshot has changed `$ROUND`, and on a `fixing` resume the old number is
-  // not recoverable from anything.
-  assert.doesNotMatch(read("commands", "ship.md"), /-report-\$ROUND\.json/,
-    "a reporting path in ship.md still carries the round it was dispatched out of");
+  for (const [, job] of shipDriver.matchAll(/jobs\.([a-z]+)\b/g)) {
+    assert.ok(emitted.has(job), `ship.mjs dispatches roles job ${job}, which gates.mjs roles does not emit`);
+  }
+  for (const step of ["begin", "panel", "fix", "recheck", "repair"]) {
+    assert.match(driverFunction(step), /roles\(ctx, id\)/, `${step} dispatches without reading the resolver`);
+  }
 });
 
-// A reason nobody translates reaches a person as a gate name, which is the one
-// thing both of these commands say not to do.
-test("work-not-accounted-for is rendered as a sentence in both commands that show it", () => {
+test("every reporting dispatch the driver prints names the path its agent must write, with no round number in it", () => {
+  assert.match(shipDriver, /"implement-report\.json"/);
+  assert.match(shipDriver, /"fix-report\.json"/);
+  assert.doesNotMatch(shipDriver, /-report-\$\{|report-\$ROUND/, "a reporting path carries the round it was dispatched out of");
+  for (const fn of ["implementerDispatch", "fixerDispatch", "repairDispatch"]) {
+    assert.match(driverFunction(fn), /Write your (?:fix )?report to:/, `${fn} does not tell its agent where to write its report`);
+  }
+});
+
+test("the gate names a person is shown are rendered as sentences by the driver and the status command", () => {
   const rendered = /(did not confirm|never confirmed) it finished/;
-  for (const file of ["ship.md", "status.md"]) {
-    const text = read("commands", file).replace(/\s+/g, " ");
-    const at = text.indexOf("work-not-accounted-for");
-    assert.ok(at > -1, `commands/${file} never names work-not-accounted-for`);
-    assert.match(text.slice(Math.max(0, at - 600), at + 600), rendered,
-      `commands/${file} names work-not-accounted-for without saying what it means`);
+  const status = read("commands", "status.md").replace(/\s+/g, " ");
+  const at = status.indexOf("work-not-accounted-for");
+  assert.ok(at > -1, "commands/status.md never names work-not-accounted-for");
+  assert.match(status.slice(Math.max(0, at - 600), at + 600), rendered);
+  assert.match(shipDriver, /"work-not-accounted-for": ".*never confirmed it finished/);
+  // Every reason `evaluate` can emit has a sentence in the driver.
+  const gates = read("scripts", "gates.mjs");
+  const reasons = [...gates.matchAll(/(?:blockers|approvals)\.push\((?:`review-\$\{[^}]+\}`|"([a-z-]+)")\)/g)].map(([, r]) => r).filter(Boolean);
+  assert.ok(reasons.length >= 8, "no gate reasons were found in gates.mjs");
+  for (const reason of [...reasons, "review-open", "review-incomplete"]) {
+    assert.match(shipDriver, new RegExp(`"${reason}": "`), `ship.mjs has no plain-English sentence for ${reason}`);
   }
 });
 
-// A brief that does not name its schema leaves the shape of the report to the
-// model, and a report that fails validation is refused after the work is done.
 test("every reporting brief names the schema its report is validated against", () => {
   const cases = [
     ["prompts/implement.md", "schemas/implement-report.schema.json"],
     ["agent-sources/implementer.md", "schemas/implement-report.schema.json"],
     ["prompts/fix.md", "schemas/fix-report.schema.json"],
-    ["agent-sources/fixer.md", "schemas/fix-report.schema.json"]
+    ["agent-sources/fixer.md", "schemas/fix-report.schema.json"],
+    ["prompts/plan-draft.md", "schemas/plan-response.schema.json"]
   ];
   for (const [file, schema] of cases) {
     assert.ok(read(...file.split("/")).includes(schema), `${file} does not name ${schema}`);
@@ -709,16 +453,11 @@ test("every reporting brief names the schema its report is validated against", (
   }
 });
 
-// One gate reads both reports, so the three fields it reads have to be the same
-// question in both schemas. `validate-json.mjs` refuses a non-local `$ref`, so
-// they are duplicated on purpose — and a description that drifts is a different
-// question asked of two agents whose answers are then compared.
 test("the fields the report gate reads are identical in both report schemas", () => {
   const implement = JSON.parse(read("schemas", "implement-report.schema.json"));
   const fix = JSON.parse(read("schemas", "fix-report.schema.json"));
   for (const field of ["status", "summary", "unfinished"]) {
-    assert.deepEqual(fix.properties[field], implement.properties[field],
-      `${field} differs between the two report schemas`);
+    assert.deepEqual(fix.properties[field], implement.properties[field], `${field} differs between the two report schemas`);
     for (const schema of [implement, fix]) {
       assert.ok(schema.required.includes(field), `${schema.title} does not require ${field}`);
     }
@@ -726,91 +465,66 @@ test("the fields the report gate reads are identical in both report schemas", ()
 });
 
 // A round number substituted by hand is prose counting, and it is exactly what
-// made a second round overwrite the first.
-test("no round path in the ship command is a number the orchestrator picks", () => {
+// made a second round overwrite the first. The command file now holds none.
+test("no command file substitutes a round number or a round path by hand", () => {
   const ship = read("commands", "ship.md");
-  assert.ok(!ship.includes("rounds/<n>"), "ship.md still substitutes <n> into a round path by hand");
-  assert.match(ship, /ROUND=\$\(node/, "ship.md never takes the round from the allocator");
+  for (const token of ["rounds/<n>", "$ROUND", "rounds/$", "<r>"]) {
+    assert.ok(!ship.includes(token), `ship.md still carries ${token}`);
+  }
+  assert.ok(!read("commands", "plan.md").includes("review/<n>"), "plan.md substitutes a review round by hand");
 });
 
-// `round.json` is the round store's reserved marker name: a file so named makes
-// the directory holding it read as a round, and an ownerless one refuses every
-// guarded write beneath it — which is how step 3's allocator record, once
-// redirected to `$S/<id>/round.json`, stopped step 6 from recording the first
-// fix report.
 test("no command puts a file at the round store's marker name", async () => {
   const { ROUND_MARKER } = await import("../scripts/lib/round-store.mjs");
   const reserved = new RegExp(`\\/${ROUND_MARKER.replaceAll(".", "\\.")}`);
   for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
     assert.doesNotMatch(text, reserved, `${file} places a file at the reserved marker name`);
   }
-  assert.match(read("commands", "ship.md"), /> "\$S\/<id>\/round-alloc\.json"/,
-    "ship.md does not route the allocator record to round-alloc.json");
+  // The driver writes its own notes beside the rounds, never at the marker name.
+  for (const [, name] of shipDriver.matchAll(/writeJson\([^,]*"([a-z-]+\.json)"\)/g)) {
+    assert.notEqual(name, ROUND_MARKER, "ship.mjs writes a file at the round marker's name");
+  }
 });
 
-// The plan review is a bounded loop now, and the bound is a refusal from the
-// allocator. A command file that counts rounds in its own head is a limit
-// nothing enforces — and every sentence promising exactly one round is one the
-// orchestrator will obey instead of the budget it was given.
-test("the plan command takes its review rounds from the allocator, not from prose", () => {
+// The plan is reviewed once and answered. A command file that still budgets
+// review rounds, or a brief that still promises re-review, is the loop coming
+// back through prose.
+test("the plan command reviews once, through the plan driver, and never budgets rounds", () => {
   const plan = read("commands", "plan.md");
-  assert.match(plan, /planReviewRounds/, "plan.md never names the limit its review loop is bounded by");
-  assert.match(plan, /scripts\/lib\/rounds\.mjs/, "plan.md no longer allocates its review round");
-  assert.match(plan, /ROUND=\$\(node/, "plan.md never takes the round number from the allocator");
-  assert.ok(!plan.includes("review/<n>"), "plan.md substitutes <n> into a review path by hand");
-
-  // The flags are the bound. Without `--complete-when` the allocator re-enters
-  // round 1 for ever, spends nothing and never refuses, so the review is a loop
-  // that cannot reach step 6 — and a flag that is *removed* is invisible to the
-  // flags test above, which only checks the flags that are there. Without the
-  // scope read out of the marker, the orchestrator is copying a hash by hand.
-  const invocation = plan.match(/scripts\/lib\/rounds\.mjs(?:\\\n|[^\n])*/)?.[0].replace(/\\\n\s*/g, " ");
-  assert.ok(invocation, "plan.md no longer runs the allocator");
-  for (const flag of [
-    "--complete-when outcome.json",
-    '--scope-file "$D/work/goal-approved"',
-    "--scope-field goalSha256",
-    "--exempt 0"
-  ]) {
-    assert.ok(invocation.includes(flag), `plan.md's allocation no longer passes ${flag}`);
+  assert.match(plan, /scripts\/plan\.mjs" collect/, "plan.md never folds the review through plan.mjs");
+  assert.match(plan, /scripts\/plan\.mjs" check/, "plan.md never checks that the findings were answered");
+  assert.match(plan, /scripts\/plan\.mjs" codex/, "plan.md never prepares the Codex review for the runner");
+  assert.match(plan, /response\.json/, "plan.md never names the drafter's response file");
+  for (const gone of ["planReviewRounds", "scripts/lib/rounds.mjs", "outcome.json", "Open the round", "next round"]) {
+    assert.ok(!plan.includes(gone), `plan.md still carries "${gone}"`);
   }
-  assert.doesNotMatch(invocation, /[0-9a-f]{64}/, "plan.md's allocation carries a literal hash instead of reading the marker");
-
-  // Flattened: a sentence someone re-wrapped is the same claim.
-  const flat = plan.replace(/\s+/g, " ");
-  for (const claim of [
-    "Review, exactly one round",
-    "There is no loop anywhere in them",
-    "That is the whole review",
-    "No second round"
-  ]) {
-    assert.ok(!flat.includes(claim), `plan.md still says "${claim}"`);
+  // The reference may say the key is gone; it may not define it, and init may
+  // not ask for it.
+  const limitsRow = skill.split("\n").find((line) => line.startsWith("| `limits` |")) ?? "";
+  assert.ok(limitsRow.includes("fixRounds") && !limitsRow.includes("planReviewRounds"), "SKILL.md's limits row still defines planReviewRounds");
+  const init = read("commands", "configure.md");
+  const asked = init.slice(init.indexOf("## Then ask"), init.indexOf("## Write"));
+  assert.ok(!asked.includes("planReviewRounds"), "configure.md still asks about planReviewRounds");
+  for (const file of ["prompts/plan-review.md", "prompts/codex/plan-review.md", "prompts/plan-adversary.md", "prompts/plan-draft.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.match(text, /reviewed once/, `${file} does not tell its reader the plan is reviewed once`);
+    assert.doesNotMatch(text, /review rounds? this plan gets/, `${file} still speaks of review rounds`);
   }
 });
 
 // "Stop asking about this" lasts for one command invocation and no longer. The
-// executable half of that promise is a line that clears the marker before any
-// work happens: an answer given about one version of Codex must not be inherited
-// by a run days later, and nothing on disk distinguishes a resumed run from a
-// fresh one.
-test("both commands clear the Codex routing acknowledgement before any work", () => {
-  const cases = [
-    { file: "ship.md", clear: 'rm -f "$S/codex-routing-ack"', first: "## Per spec, in order" },
-    { file: "plan.md", clear: 'rm -f "$D/work/codex-routing-ack"', first: "## 1 — Orient" }
-  ];
-  for (const { file, clear, first } of cases) {
-    const text = read("commands", file);
-    const at = text.indexOf(clear);
-    assert.ok(at > -1, `${file} never clears the acknowledgement with ${clear}`);
-    const heading = text.indexOf(first);
-    assert.ok(heading > -1, `${file} no longer has a ${first} heading to measure against`);
-    assert.ok(at < heading, `${file} clears the acknowledgement after ${first}, which is after work has started`);
-  }
+// executable half of that promise is the line that clears the marker before any
+// work happens.
+test("the routing acknowledgement is cleared before any work, in the plan command and in the ship driver", () => {
+  const plan = read("commands", "plan.md");
+  const clear = plan.indexOf('rm -f "$D/work/codex-routing-ack"');
+  const first = plan.indexOf("## 1 — Orient");
+  assert.ok(clear > -1 && first > -1 && clear < first, "plan.md does not clear the acknowledgement before its first step");
+  const start = driverFunction("start");
+  assert.match(start, /codex-routing-ack/, "ship.mjs start does not clear the acknowledgement");
+  assert.ok(start.indexOf("codex-routing-ack") < start.indexOf("specsInOrder(ctx)"), "ship.mjs clears the acknowledgement after work has started");
 });
 
-// A marker that outlives the invocation is the configuration key this design
-// rejected — an answer that silences every later run. A path that drifts to `$R`
-// or to a home directory is exactly how it would get one.
 test("neither command records the routing acknowledgement outside the directory that run works out of", () => {
   const cases = [
     { file: "ship.md", prefix: "$S/" },
@@ -827,169 +541,103 @@ test("neither command records the routing acknowledgement outside the directory 
   }
 });
 
-// The behaviour lives in one section per command so neither Codex step has to
-// repeat it — which only works if the steps that can trigger it point at it.
-test("both commands carry the unobserved-routing section and the ship steps point at it", () => {
+test("both commands carry the unobserved-routing section and point at it from the step that can trigger it", () => {
   const heading = "When Codex could not say how it ran";
   for (const file of ["ship.md", "plan.md"]) {
-    assert.match(read("commands", file), new RegExp(`## ${heading}`), `${file} has no ${heading} section`);
-  }
-  assert.ok(shipStep("### 5.", "### 6.").includes(heading), `ship.md step 5 does not point at ${heading}`);
-  assert.ok(stepSeven().includes(heading), `ship.md step 7 does not point at ${heading}`);
-});
-
-// The same false certainty, one file over: a reader told it has exactly one
-// revision is being calibrated against a number the repository did not choose.
-test("no plan review brief claims there is exactly one revision", () => {
-  for (const file of ["prompts/plan-review.md", "prompts/codex/plan-review.md"]) {
-    const text = read(...file.split("/")).replace(/\s+/g, " ");
-    assert.doesNotMatch(text, /exactly one (revision|round)/i, `${file} still promises exactly one revision`);
+    // Flattened: a pointer the author re-wrapped is the same pointer.
+    const text = read("commands", file).replace(/\s+/g, " ");
+    assert.match(text, new RegExp(`## ${heading}`), `${file} has no ${heading} section`);
+    assert.ok(text.indexOf(heading) < text.indexOf(`## ${heading}`), `${file} never points at ${heading} before the section itself`);
+    assert.match(text, /could not be confirmed/, `${file} does not name the runner line that triggers the question`);
   }
 });
 
 // The diagrams are the first thing anyone reads about how these cycles run, and
 // a drawn loop with no setting on it is a loop nobody can find the ceiling for.
-// Asserted inside the Mermaid blocks specifically: a limit named only in the
-// prose beside a diagram that still draws a straight line is the mismatch this
-// catches.
-test("both cycle diagrams name the settings that bound their loops", () => {
+test("the ship diagram names the settings that bound its loops, and the plan diagram draws no loop", () => {
   const diagrams = [...readme.matchAll(/```mermaid\n([\s\S]*?)```/g)].map(([, body]) => body);
-  assert.ok(diagrams.length >= 2, "the README no longer has cycle diagrams");
-  const drawn = diagrams.join("\n");
-  for (const limit of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
-    assert.ok(drawn.includes(limit), `no cycle diagram names ${limit}, so its loop is drawn without its ceiling`);
+  assert.ok(diagrams.length >= 3, "the README no longer has its cycle diagrams");
+  const ship = diagrams.find((body) => body.includes("title: The ship cycle"));
+  assert.ok(ship, "the README no longer has a ship cycle diagram");
+  for (const limit of ["fixRounds", "ciRepairs"]) {
+    assert.ok(ship.includes(limit), `the ship diagram does not name ${limit}, so its loop is drawn without its ceiling`);
   }
+  const plan = diagrams.find((body) => body.includes("title: The plan cycle"));
+  assert.ok(plan, "the README no longer has a plan cycle diagram");
+  assert.ok(!plan.includes("planReviewRounds"), "the plan diagram still draws a budgeted loop");
+  assert.match(plan, /answer/, "the plan diagram does not draw the answered review");
+  assert.doesNotMatch(plan, /--> draft\n[\s\S]*revise -->\|"[^"]*goes back/, "the plan diagram still routes a revision back into review");
 });
 
-// A diagram claims an order, not just a set of names. This one used to send
-// every fixed commit back through the whole panel, which is what `commands/ship.md`
-// refuses to do for the first fix of a cycle — the common case for every
-// repository that left `limits.fixRounds` at one. A reader who believes the
-// picture expects a full lens-plus-Codex re-review that never runs.
 test("the ship diagram draws the two routes a fixed commit actually takes", () => {
   const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
   assert.ok(ship, "the README no longer has a ship cycle diagram");
   assert.match(ship, /no second panel/, "the diagram does not draw the first fix skipping the panel");
-  assert.match(ship, /second or later fix round, or a CI repair/,
-    "the diagram does not draw the route that re-enters the whole panel");
-  for (const claim of ["the whole<br>panel again; every gate clears", "every lens plus Codex, every round"]) {
-    assert.ok(!ship.includes(claim), `the ship diagram still says "${claim}", which commands/ship.md does not do`);
-  }
-  // And what ship.md sends the first fix to instead: the adversary and the
-  // re-check, not the lenses.
+  assert.match(ship, /second or later fix round, or a CI repair/, "the diagram does not draw the route that re-enters the whole panel");
   assert.match(ship, /route -->\|"after the first fix of a cycle[^|]*\| adv/);
   assert.match(ship, /route -->\|"after the first fix of a cycle"\| recheck/);
-});
-
-// The panel is drawn once and entered three ways — first candidate, second or
-// later fix round, CI repair — so both the label on the box and the edge out of
-// it are claims about every entry. A label saying the panel reads every candidate
-// no lens has read contradicts the `route` edge four lines below it, which sends
-// the first fix past the panel; a single 'first fix round' exit sends a reader
-// leaving a re-run panel straight to a fixer, when ship.md settles that panel's
-// findings through the re-check first and fixes them out of `still-open.json`.
-test("the ship diagram's panel says what it reads and where a re-run panel goes", () => {
-  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
-  assert.ok(ship, "the README no longer has a ship cycle diagram");
-  const shipMd = commands.find((entry) => entry.file === "ship.md")?.text ?? "";
-  assert.match(shipMd, /on every round this step runs/, "commands/ship.md no longer says when the panel runs");
-  assert.match(ship, /subgraph panel\[[^\]]*on every round this step runs/,
-    "the panel subgraph does not say what commands/ship.md says it reads");
-  assert.ok(!ship.includes("candidate no lens has read"),
-    "the panel subgraph still claims it reads every unread candidate, which the first fix of a cycle skips");
-  assert.match(ship, /open -->\|"yes, and this is the cycle's first panel[^|]*\| fixer/,
-    "the panel's exit to a fixer is not limited to the panel that has one");
+  assert.match(ship, /open -->\|"yes, and this is the cycle's first panel[^|]*\| fixer/);
   for (const target of ["adv", "recheck"]) {
-    assert.match(ship, new RegExp(`open -->\\|"no[^|]*re-run[^|]*\\| ${target}`),
-      `a re-run panel is not drawn reaching ${target} before a fixer`);
+    assert.match(ship, new RegExp(`open -->\\|"no[^|]*re-run[^|]*\\| ${target}`), `a re-run panel is not drawn reaching ${target} before a fixer`);
   }
+  // And the driver agrees with the picture: after the first fix of a cycle the
+  // re-check judges the collecting round's open findings, and a later fix goes
+  // through the panel — which is the `collect`-then-`fix`-then-`snapshot` route
+  // whose next step after a fixed commit is `verify`, then `panel` only when the
+  // round before it was itself settled.
+  assert.match(driverFunction("recheck"), /fixedSince/);
 });
 
-// A reason renders as a sentence sending someone to a particular file, and
-// `rounds` and `counter` must never send anyone to `.tagteam/config.json`. So an
-// undocumented reason is a mis-diagnosis waiting to happen — and so is a count in
-// the prose that disagrees with the list under it, since a model that reads the
-// count rather than the list renders the wrong sentence.
 test("commands/status.md documents every reason a budget can be unknown", () => {
-  const whole = commands.find((entry) => entry.file === "status.md")?.text ?? "";
-  // Scoped to the text above the drift section, which documents its own reasons
-  // in this same bullet shape. Unscoped, this test reads both sets as one and
-  // fails on reasons that are correctly documented — and the index is asserted
-  // first so that a renamed heading fails saying so, rather than silently
-  // slicing one character off the end of the file and passing.
+  const whole = read("commands", "status.md");
   const at = whole.indexOf("## Which plugin is running");
   assert.ok(at > -1, "commands/status.md no longer has a Which plugin is running section to scope against");
   const statusMd = whole.slice(0, at);
   const inventory = read("scripts", "status.mjs");
   const documented = [...statusMd.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
-  assert.deepEqual([...documented].sort(), ["counter", "rounds", "settings"]);
+  assert.deepEqual([...documented].sort(), ["counter", "settings"]);
   for (const reason of documented) {
     assert.ok(inventory.includes(`"${reason}"`), `commands/status.md renders "${reason}", which status.mjs never emits`);
   }
-  const words = { one: 1, two: 2, three: 3, four: 4 };
-  const [, counted] = /the (one|two|three|four) reasons/.exec(statusMd) ?? [];
-  if (counted) {
-    assert.equal(words[counted], documented.length,
-      `commands/status.md says there are ${counted} reasons and then lists ${documented.length}`);
-  }
+  assert.match(statusMd, /`usage`/, "commands/status.md never says how to render what a spec cost");
 });
 
 // --- which plugin snapshot is running ---
-//
-// An edit to a script or a command file does nothing until the installed copy is
-// refreshed, and the copy is what runs. A command that never says which copy
-// that is leaves "why did my change do nothing" to be worked out from scratch
-// every time, by someone who has already lost an hour to it.
+
 test("every command that could be run from a stale snapshot says which one is running", () => {
   for (const file of ["status.md", "plan.md", "ship.md"]) {
     assert.match(read("commands", file), /scripts\/running-plugin\.mjs/,
       `commands/${file} never says which plugin snapshot is executing it`);
   }
+  assert.match(driverFunction("start"), /running-plugin\.mjs/, "ship.mjs start does not report the running snapshot");
 });
 
-// The rendering rules live in one place with two pointers at it, the arrangement
-// the Asking rule already has. Two copies of them in two command files is two
-// copies that drift, and the one that drifts is the one nobody re-reads.
 test("the running-snapshot rules have one home and both commands point at it", () => {
   assert.match(skill, /^## The running snapshot$/m, "SKILL.md has no running snapshot section for the commands to point at");
   for (const file of ["plan.md", "ship.md"]) {
-    assert.match(read("commands", file), /\*The running snapshot\* in the skill/,
+    assert.match(read("commands", file).replace(/\s+/g, " "), /\*The running snapshot\* in the skill/,
       `commands/${file} runs the snapshot check but never says how to render it`);
   }
 });
 
-// The sentence is load-bearing rather than decorative. In both preflight lists
-// every neighbouring item ends in "stop", so an orchestrator reading a new
-// neighbour among them treats a difference as another failed check — and
-// blocking here would lock the author of a one-character edit out of their own
-// repository until they reinstalled.
 test("the snapshot report never becomes a reason to stop", () => {
   const NEVER = "never stops anything";
   for (const file of ["plan.md", "ship.md"]) {
     const text = read("commands", file);
     const at = text.indexOf("scripts/running-plugin.mjs");
     assert.ok(at > -1, `commands/${file} does not run the snapshot check at all`);
-    // The item runs from the invocation to the next numbered item; its
-    // continuation lines are indented, so an unindented number ends it.
     const rest = text.slice(at);
-    const end = rest.search(/\n\d+\. /);
+    const end = rest.search(/\n(?:\d+\. |## )/);
     const item = end === -1 ? rest : rest.slice(0, end);
-    assert.ok(item.includes(NEVER),
-      `commands/${file} runs the snapshot check in a list of stop conditions without saying it ${NEVER}`);
+    assert.ok(item.includes(NEVER), `commands/${file} names the snapshot check without saying it ${NEVER}`);
   }
   const statusMd = read("commands", "status.md");
   const section = statusMd.slice(statusMd.indexOf("## Which plugin is running"));
   assert.ok(section.includes(NEVER), `commands/status.md's snapshot section does not say it ${NEVER}`);
   const rules = skill.slice(skill.indexOf("## The running snapshot"));
-  assert.ok(rules.slice(0, rules.indexOf("\n## ", 1)).includes(NEVER),
-    `SKILL.md's running snapshot section does not say it ${NEVER}`);
+  assert.ok(rules.slice(0, rules.indexOf("\n## ", 1)).includes(NEVER), `SKILL.md's running snapshot section does not say it ${NEVER}`);
 });
 
-// The same failure as the budget reasons above, one section down: each reason
-// means a different thing and sends a reader somewhere different, so an
-// undocumented one renders as whichever sentence is nearest. The expected set is
-// derived from the script rather than written here, because a fourth reason
-// added to the script is exactly the one that would arrive undocumented.
 test("commands/status.md documents every reason drift can be unknown", () => {
   const statusMd = read("commands", "status.md");
   const at = statusMd.indexOf("## Which plugin is running");
@@ -999,26 +647,13 @@ test("commands/status.md documents every reason drift can be unknown", () => {
   const emitted = new Set([...source.matchAll(/driftUnknown: "(\w+)"/g)].map(([, reason]) => reason));
   assert.ok(emitted.size > 0, "no drift reasons were found in running-plugin.mjs to check against");
   const documented = [...section.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
-  for (const reason of documented) {
-    assert.ok(emitted.has(reason), `commands/status.md renders "${reason}", which running-plugin.mjs never emits`);
-  }
-  for (const reason of emitted) {
-    assert.ok(documented.includes(reason), `running-plugin.mjs emits "${reason}", which commands/status.md never renders`);
-  }
+  for (const reason of documented) assert.ok(emitted.has(reason), `commands/status.md renders "${reason}", which running-plugin.mjs never emits`);
+  for (const reason of emitted) assert.ok(documented.includes(reason), `running-plugin.mjs emits "${reason}", which commands/status.md never renders`);
 });
 
-// The boundary of the comparison is the whole defence. An install is a copy of
-// the entire repository, so an unscoped comparison reports the machine state a
-// copy differs on by construction — 134 differences on a clean checkout, against
-// 0 for the directories a run actually executes out of.
 test("the compared set is exactly the directories the plugin reaches into", async () => {
   const { EXECUTED_ROOTS } = await import("../scripts/running-plugin.mjs");
   assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills"]);
-  // The other direction, and the one that earns its keep: a new plugin directory
-  // a command starts reading out of the snapshot mid-run is a directory this
-  // check would silently never compare, so a stale copy of it would never be
-  // reported. Classifying it is a decision, and this fails until someone makes
-  // it.
   const unclassified = [];
   for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
     for (const [, dir] of text.matchAll(/(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$P)\/([A-Za-z0-9._-]+)\//g)) {
@@ -1028,317 +663,81 @@ test("the compared set is exactly the directories the plugin reaches into", asyn
   assert.deepEqual(unclassified, [], unclassified.join("\n"));
 });
 
-// Every one of these sentences told a reader the cycle happens exactly once.
-// They are the claims the configured limits replaced, and one left behind is
-// documentation contradicting the code a person is about to run.
-test("nothing a person reads still says these cycles happen once", () => {
+test("nothing a person reads still says a fix cycle happens once", () => {
   for (const [file, text] of [["README.md", readme], ["skills/tagteam/SKILL.md", skill]]) {
     const flat = text.replace(/\s+/g, " ");
-    for (const claim of [
-      "reviewed once by three independent readers",
-      "no convergence loop",
-      "fix once",
-      "After the single fix round",
-      "the fix round always makes one",
-      "One review round — no convergence loop",
-      "one repair"
-    ]) {
+    for (const claim of ["fix once", "After the single fix round", "the fix round always makes one", "one repair"]) {
       assert.ok(!flat.includes(claim), `${file} still says "${claim}"`);
     }
   }
 });
 
-// --- which model each dispatch runs at ---
-//
-// Six assertions over prose, because the failure they catch is silent: a clause
-// naming a setting nothing defines dispatches a subagent with no model set, and
-// it inherits the session default. Nothing errors and the run looks normal. The
-// same goes for a clause that names the wrong one of two near-twin jobs — the
-// step-5 panel and the step-7 re-check, the step-6 fixer and the step-8 repair
-// fixer — where exactly one of each pair escalates.
+// --- which model and effort each dispatch runs at ---
 
-// The roles come from the schema, never from a list here: a role added to
-// `$defs/roleModels` and `$defs/roleEffort` is a role these files may name from
-// that moment on, and a second copy of the vocabulary is a copy that goes stale.
 const configSchema = JSON.parse(read("schemas", "config.schema.json"));
-const schemaRoles = new Set([
-  ...Object.keys(configSchema.$defs.roleModels.properties),
-  ...Object.keys(configSchema.$defs.roleEffort.properties)
-]);
-
-// A *bare* `models.<role>` / `effort.<role>` reference: the leading character
-// class refuses a preceding dot, so `plan.models.lead` is not one of these. That
-// distinction is load-bearing in the absence and mirror assertions below, where
-// the ordinary key and its override have to be told apart.
-const ROLE_REFERENCE = /(^|[^.\w])(models|effort)\.([a-z][a-z0-9-]*)/g;
-// The same reference with an optional `plan.` prefix, for the schema-role check
-// only. A typo'd role is just as dead inside an override as outside one —
-// `plan.models.leed` resolves to nothing and the subagent inherits the session
-// default — and the bare pattern cannot see it at all.
-const ANY_ROLE_REFERENCE = /(^|[^.\w])(?:plan\.)?(models|effort)\.([a-z][a-z0-9-]*)/g;
+const schemaKeys = {
+  models: new Set(Object.keys(configSchema.$defs.roleModels.properties)),
+  effort: new Set(Object.keys(configSchema.$defs.jobEffort.properties))
+};
+const ANY_ROLE_REFERENCE = /(^|[^.\w])(?:plan\.|escalation\.)?(models|effort)\.([a-z][a-z0-9-]*)/g;
 
 function markdownFiles(dir) {
   return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? markdownFiles(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
 }
 
-test("every model or effort reference names a role the schema defines", () => {
-  assert.ok(schemaRoles.size > 0, "the schema no longer defines any roles");
+test("every model or effort reference names a key the schema defines", () => {
   const failures = [];
-  for (const dir of ["commands", "skills", "prompts", "agents"]) {
-    for (const file of markdownFiles(dir)) {
+  for (const dir of ["commands", "skills", "prompts", "agents", "README.md"]) {
+    const files = dir.endsWith(".md") ? [dir] : markdownFiles(dir);
+    for (const file of files) {
       if (!file.endsWith(".md")) continue;
-      for (const [, , key, role] of fs.readFileSync(path.join(root, file), "utf8").matchAll(ANY_ROLE_REFERENCE)) {
-        if (!schemaRoles.has(role)) failures.push(`${file} names ${key}.${role}, which the schema declares no role for`);
+      for (const [, , map, key] of fs.readFileSync(path.join(root, file), "utf8").matchAll(ANY_ROLE_REFERENCE)) {
+        if (!schemaKeys[map].has(key)) failures.push(`${file} names ${map}.${key}, which the schema declares no key for`);
       }
     }
   }
   assert.deepEqual(failures, [], failures.join("\n"));
 });
 
-const shipText = () => read("commands", "ship.md");
-const planText = () => read("commands", "plan.md");
-
-// `roles` emits jobs and it emits `briefs`, and ship.md reads both off the same
-// call. A dispatch takes its model and effort off a job and its lens brief off
-// `briefs`, so the resolver's own top-level keys are as nameable as its jobs —
-// what must not appear is a job name the resolver has no entry for.
-const RESOLVER_KEYS = new Set(["briefs"]);
-
-test("every resolver job commands/ship.md names is one the resolver emits", async () => {
-  const { resolveRoles } = await import("../scripts/gates.mjs");
-  const resolved = resolveRoles({ fixRoundsUsed: 0 }, JSON.parse(read("examples", "config.json")));
-  const emitted = new Set(Object.keys(resolved.jobs));
-  for (const key of RESOLVER_KEYS) {
-    assert.ok(Object.hasOwn(resolved, key), `roles no longer emits ${key}, which ship.md reads off it`);
+// Neither command file resolves a dispatch's settings from the configuration any
+// more: the drivers do. A clause that names `models.worker` or `effort.reviewer`
+// is a clause resolving something by hand again.
+test("neither command file resolves a model or an effort from the configuration by hand", () => {
+  for (const file of ["ship.md", "plan.md"]) {
+    const found = [...read("commands", file).matchAll(/(^|[^.\w])(models|effort)\.([a-z][a-z0-9-]*)/g)].map(([, , map, key]) => `${map}.${key}`);
+    assert.deepEqual(found, [], `${file} still resolves a dispatch from the configuration: ${found.join(", ")}`);
   }
-  const named = [...shipText().matchAll(/`roles\.([a-z-]+)`/g)].map(([, job]) => job);
-  assert.ok(named.length > 0, "ship.md names no resolver job at all");
-  for (const job of named) {
-    if (RESOLVER_KEYS.has(job)) continue;
-    assert.ok(emitted.has(job), `ship.md dispatches roles.${job}, which gates.mjs roles does not emit`);
-  }
+  assert.doesNotMatch(read("commands", "plan.md"), /escalation\./, "plan.md names an escalation key");
+  assert.doesNotMatch(read("commands", "ship.md"), /plan\.(models|effort)/, "ship.md names a plan-side override");
 });
 
-// Absence, not just resolvability. The likeliest mistake is a rewiring that
-// leaves one clause reading `models.worker`: the assertion above passes
-// vacuously, because it quantifies over the jobs that are named rather than the
-// clauses that must name one, and that fixer then never escalates. There were
-// exactly seven such references before this rule and all seven were dispatch
-// clauses, so zero is a clean line. Scoped to `models.`/`effort.` and not to
-// config keys generally: ship.md must go on naming `limits.fixRounds` and
-// `limits.ciRepairs` where it describes its bounded loops, and the test above
-// requires it.
-test("commands/ship.md names no model or effort config key at all", () => {
-  const found = [...shipText().matchAll(ROLE_REFERENCE)].map(([, , key, role]) => `${key}.${role}`);
-  assert.deepEqual(found, [], `ship.md still resolves a dispatch from the configuration: ${found.join(", ")}`);
-});
-
-// References that resolve and are still wrong: `plan` never applies to a ship
-// cycle, and nothing in /tagteam:plan may escalate — it has no fixer, no finding
-// ids and nothing that verifies a repair, so a plan clause reading `escalation`
-// is reading a key about a loop it does not run.
-test("neither command file names the other's key", () => {
-  assert.doesNotMatch(shipText(), /plan\.(models|effort)/, "ship.md names a plan-side override");
-  assert.doesNotMatch(planText(), /escalation\./, "plan.md names an escalation key");
-});
-
-// The mapping, which the four assertions above do not check: they check
-// vocabulary. Within a step, each dispatch's agent token opens the span its job
-// name must fall in, and **a step's first span begins at the step heading** —
-// otherwise the settings line in step 6's announce paragraph, which precedes
-// step 6's only token, falls in no span at all. So k tokens give k spans.
-//
-// `ship.md:4`'s `allowed-tools` frontmatter names all four agent tokens and is
-// excluded because this is step-scoped and the frontmatter precedes every step
-// heading. That exclusion is load-bearing, not incidental: counted, every step
-// would hold four tokens more than it has dispatches.
-//
-// Rejected: anchoring on the artifact path each dispatch writes —
-// `recheck/<lens>.json` is already named in two different bullets of step 7.
-const SHIP_STEP_JOBS = [
-  ["### 2.", "### 3.", ["implement"]],
-  ["### 5.", "### 6.", ["review-lens", "review-codex"]],
-  ["### 6.", "### 7.", ["fix"]],
-  ["### 7.", "### 8.", ["adversary-fresh", "recheck-lens", "recheck-adversary", "recheck-codex"]],
-  ["### 8.", "### 9.", ["repair-fix"]]
-];
-const DISPATCH_TOKEN = /`(?:tagteam:(?:implementer|reviewer|adversary|fixer)-<effort>|codex\.mjs)`/g;
-
-test("each resolver job is named inside the step of ship.md that dispatches it", () => {
-  const allJobs = new Set(SHIP_STEP_JOBS.flatMap(([, , jobs]) => jobs));
-  for (const [heading, next, jobs] of SHIP_STEP_JOBS) {
-    const step = shipStep(heading, next);
-    const tokens = [...step.matchAll(DISPATCH_TOKEN)];
-    // A step holding fewer tokens than jobs is a step whose spans have silently
-    // widened — two bullets merged by a later re-wording, and a job name now free
-    // to sit in a clause that dispatches something else.
-    assert.equal(tokens.length, jobs.length,
-      `ship.md ${heading} holds ${tokens.length} dispatch tokens for ${jobs.length} jobs`);
-    const bounds = jobs.map((_, index) => [
-      index === 0 ? 0 : tokens[index].index,
-      index + 1 < tokens.length ? tokens[index + 1].index : step.length
-    ]);
-    for (const [index, job] of jobs.entries()) {
-      const [from, to] = bounds[index];
-      const occurrences = [...step.matchAll(new RegExp(`\`roles\\.${job}\``, "g"))].map((match) => match.index);
-      assert.ok(occurrences.length > 0, `ship.md ${heading} dispatches roles.${job} but never names it`);
-      for (const at of occurrences) {
-        assert.ok(at >= from && at < to,
-          `ship.md ${heading} names roles.${job} outside the dispatch it belongs to`);
-      }
-    }
-    // And nothing else's job, which no span of this step could hold. The
-    // resolver's non-job keys are exempt: `roles.briefs` is one map for every
-    // lens, read by whichever step is dispatching a lens reviewer, so it belongs
-    // to no single job's span.
-    for (const [, job] of step.matchAll(/`roles\.([a-z-]+)`/g)) {
-      if (RESOLVER_KEYS.has(job)) continue;
-      assert.ok(jobs.includes(job),
-        `ship.md ${heading} names roles.${job}, which another step dispatches`);
-      assert.ok(allJobs.has(job), `ship.md ${heading} names roles.${job}, which no step is mapped to`);
-    }
+test("the plan driver resolves every planning dispatch from the schema's roles and jobs", async () => {
+  const { PLAN_JOBS, resolvePlanRoles } = await import("../scripts/plan.mjs");
+  for (const [job, { role, effort }] of Object.entries(PLAN_JOBS)) {
+    assert.ok(schemaKeys.models.has(role), `plan job ${job} runs a model role the schema does not define: ${role}`);
+    assert.ok(schemaKeys.effort.has(effort), `plan job ${job} runs an effort key the schema does not define: ${effort}`);
   }
+  const example = JSON.parse(read("examples", "config.json"));
+  const base = resolvePlanRoles(example);
+  assert.equal(base.source, "base");
+  assert.deepEqual(base.jobs.draft, { model: "opus", effort: "high" });
+  const overridden = resolvePlanRoles({ ...example, plan: { models: { ...example.models, lead: "sonnet" }, effort: { ...example.effort, planner: "low" } } });
+  assert.equal(overridden.source, "plan");
+  assert.deepEqual(overridden.jobs["spec-write"], { model: "sonnet", effort: "low" });
+  assert.deepEqual(overridden.jobs["plan-adversary"], { model: "sonnet", effort: "high" }, "the adversary keeps its own effort key");
+  // And the command names every job the driver resolves, so a reader can match them up.
+  const plan = read("commands", "plan.md");
+  for (const job of Object.keys(PLAN_JOBS)) assert.ok(plan.includes(`\`${job}\``), `plan.md never names the ${job} job`);
 });
 
-// The reads the clauses above read from. Assertion five checks what each clause
-// names; nothing in it checks that the resolution is taken at all, or where —
-// and both failures are silent. A deleted read leaves the orchestrator
-// dispatching off whatever reading it last took; a read hoisted above the state
-// transition of step 6 or step 8 resolves from a counter that transition is
-// about to move, so escalation fires one round late (step 6, whose fixing edge
-// increments the fix counter) or the repair fixer starts at the raised settings
-// the published cycle had reached (step 8, whose repair edge resets it — the
-// exact reordering the D4 gates test proves matters and nothing here caught).
-// `:253` is the positional precedent: indexOf comparisons inside shipStep
-// output.
-const ROLES_READ = /gates\.mjs" roles "\$S\/<id>\/state\.json"/g;
-const SHIP_STEP_READS = [
-  ["### 2.", "### 3.", 1],
-  ["### 5.", "### 6.", 1],
-  ["### 6.", "### 7.", 2], // the fix dispatch, and the missing-lens re-dispatch
-  ["### 7.", "### 8.", 1],
-  ["### 8.", "### 9.", 1]
-];
-
-test("every dispatching step takes its own resolver read, below the edge that moves its counter", () => {
-  for (const [heading, next, count] of SHIP_STEP_READS) {
-    const step = shipStep(heading, next);
-    const reads = [...step.matchAll(ROLES_READ)];
-    assert.equal(reads.length, count,
-      `ship.md ${heading} holds ${reads.length} resolver reads for its ${count} dispatching messages`);
-    // Counting the reads says nothing about where they sit. A read that drifts
-    // below the step's first dispatch — into the bullets it is meant to settle,
-    // or the prose after them — leaves that dispatch running off whatever
-    // reading the orchestrator last took, silently, at the wrong settings.
-    const firstDispatch = step.search(DISPATCH_TOKEN);
-    assert.ok(firstDispatch > -1, `ship.md ${heading} lost its dispatch tokens`);
-    assert.ok(reads[0].index < firstDispatch,
-      `ship.md ${heading} dispatches before it reads the resolver`);
-  }
-
-  const six = stepSix();
-  const sixEdge = six.indexOf('gates.mjs" state "$S/<id>/state.json" fixing');
-  const sixRead = six.search(ROLES_READ);
-  const sixFixer = six.indexOf("tagteam:fixer");
-  assert.ok(sixEdge > -1 && sixRead > -1 && sixFixer > -1, "step 6 lost its edge, its read, or its fixer");
-  assert.ok(sixEdge < sixRead, "step 6 reads the resolver above the fixing edge, a round behind the counter");
-  assert.ok(sixRead < sixFixer, "step 6 dispatches the fixer before it reads the resolver");
-
-  const eight = shipStep("### 8.", "### 9.");
-  const repairEdge = eight.indexOf('gates.mjs" state "$S/<id>/state.json" reviewing');
-  const eightRead = eight.search(ROLES_READ);
-  const eightFixer = eight.indexOf("tagteam:fixer");
-  assert.ok(repairEdge > -1 && eightRead > -1 && eightFixer > -1, "step 8 lost its edge, its read, or its fixer");
-  assert.ok(repairEdge < eightRead,
-    "step 8 reads the resolver above the repair edge, so the repair fixer starts at the stale raised settings");
-  assert.ok(eightRead < eightFixer, "step 8 dispatches the repair fixer before it reads the resolver");
-});
-
-// The plan side has no absence rule to lean on — `models.lead` there is a legal
-// role reference — so six clauses gaining the override and one not would pass
-// everything above. The mirror is what catches the other way round: a clause
-// that *substitutes*, naming only `plan.models.lead`, names nothing at all in
-// every repository that has left `plan` null, and the subagent inherits the
-// session default.
-//
-// Both of those are driven by a line that already names a key, so a clause that
-// names *no* setting at all — plan.md:227 as it stood, the gap this deliverable
-// was bought for — matches neither and is invisible to both. The anchors below
-// close that: each dispatch's token opens the span its settings must fall in,
-// exactly as assertion five does for ship.md, and a span naming no role, or the
-// wrong one, fails. Unlike ship.md these tokens are not a per-step alphabet but
-// a fixed ordered list, because plan.md dispatches from prose rather than from
-// numbered steps and clauses share tokens: `plan-drafter` at :134 and :257, and
-// `spec-writer` twice in step 6 — the per-deliverable fan-out and the
-// re-dispatch of a rejected spec. The re-dispatch is its own entry because a
-// span may not vouch for another clause's: with one `spec-writer` span running
-// to end of file, either clause naming the keys satisfied both, and the other
-// could lose its settings silently. plan.md:4's `allowed-tools` frontmatter
-// names every agent too, and is excluded by the backticks — the frontmatter
-// writes them bare.
-const PLAN_CLAUSES = [
-  ["`tagteam:explorer-<effort>`", "lead"],
-  ["`tagteam:plan-drafter-<effort>`", "lead"],
-  ["`tagteam:plan-reviewer-<effort>`", "lead"],
-  ["`$P/prompts/codex/plan-review.md`", "codex"],
-  ["`tagteam:adversary-<effort>`", "lead"],
-  ["`tagteam:plan-drafter-<effort>`", "lead"],
-  ["`tagteam:spec-writer-<effort>`", "lead"],
-  ["`tagteam:spec-writer-<effort>`", "lead"]
-];
-const PLAN_DISPATCH_TOKEN =
-  /`(?:tagteam:(?:explorer|plan-drafter|plan-reviewer|adversary|spec-writer)-<effort>|\$P\/prompts\/codex\/plan-review\.md)`/g;
-
-test("every model or effort clause in commands/plan.md names the plan override too", () => {
-  const failures = [];
-  const plan = planText();
-  const tokens = [...plan.matchAll(PLAN_DISPATCH_TOKEN)];
-  // A clause that lost its token, or a new one that gained no entry here, leaves
-  // the spans below covering something other than the eight dispatches — so the
-  // shape is checked before it is relied on.
-  assert.deepEqual(tokens.map(([token]) => token), PLAN_CLAUSES.map(([token]) => token),
-    "plan.md no longer dispatches the eight clauses this assertion spans, in this order");
-  for (const [index, [token, role]] of PLAN_CLAUSES.entries()) {
-    const span = plan.slice(tokens[index].index,
-      index + 1 < tokens.length ? tokens[index + 1].index : plan.length);
-    for (const key of ["models", "effort"]) {
-      if (!new RegExp(`(^|[^.\\w])${key}\\.${role}(?![a-z0-9-])`).test(span)) {
-        failures.push(`plan.md dispatches ${token} without naming ${key}.${role}`);
-      }
-    }
-    // And no other role's, which nothing in this clause dispatches: a clause
-    // pointed at the wrong role resolves to a real setting and reads normally.
-    for (const [, , key, named] of span.matchAll(ROLE_REFERENCE)) {
-      if (named !== role) {
-        failures.push(`plan.md's ${token} dispatch names ${key}.${named}, not ${key}.${role}`);
-      }
-    }
-  }
-  for (const line of plan.split("\n")) {
-    // `ROLE_REFERENCE` refuses a `.` before the key, so `plan.models.lead` is not
-    // one of these: these are the ordinary keys, named without a prefix.
-    const bare = [...line.matchAll(ROLE_REFERENCE)];
-    // The override itself, per role named, not the substring `plan.`: plan.md is
-    // full of lines mentioning `$D/plan.md`, so a prefix test would be satisfied
-    // by the filename — and by a half-override, `plan.models.lead` named while
-    // `plan.effort.lead` is forgotten and the effort stays inherited.
-    for (const [, , key, role] of bare) {
-      if (!new RegExp(`plan\\.${key}\\.${role}(?![a-z0-9-])`).test(line)) {
-        failures.push(`plan.md names ${key}.${role} without plan.${key}.${role} beside it: ${line.trim()}`);
-      }
-    }
-    if (/plan\.(models|effort)\./.test(line) && bare.length === 0) {
-      failures.push(`plan.md substitutes a plan override for the key it overrides: ${line.trim()}`);
-    }
-  }
-  assert.deepEqual(failures, [], failures.join("\n"));
-});
-
-test("the commit chain always runs guard-staged between add and commit", () => {
+test("the ship command tells the orchestrator how to dispatch, and it is the driver's rule", () => {
   const ship = read("commands", "ship.md");
-  for (const [, chain] of ship.matchAll(/(git -C "\$W" add -A[^\n]*)/g)) {
-    assert.match(chain, /guard-staged\.mjs/, `a commit chain omits guard-staged: ${chain}`);
-    assert.match(chain, /add -A &&[^\n]*guard-staged[^\n]*&& git -C "\$W" commit/);
+  for (const file of [ship, read("commands", "plan.md"), skill]) {
+    const flat = file.replace(/\s+/g, " ");
+    assert.match(flat, /run_in_background: false/, "a command or the skill no longer says dispatches block");
+    assert.doesNotMatch(flat, /until \[ -f/, "a watcher loop is still described");
   }
+  assert.match(shipDriver, /run_in_background: false/, "the driver's howToDispatch lost the blocking rule");
+  assert.match(ship, /one message/i);
 });

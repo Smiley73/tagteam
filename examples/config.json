@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
@@ -9,8 +9,12 @@
     "codex": "gpt-5.6-sol"
   },
   "effort": {
-    "lead": "high",
-    "worker": "high",
+    "implementer": "high",
+    "fixer": "high",
+    "reviewer": "medium",
+    "recheck": "low",
+    "adversary": "high",
+    "planner": "high",
     "codex": "high"
   },
   "reviewers": {
@@ -54,8 +58,7 @@
   "maxConcurrentCodex": 3,
   "limits": {
     "fixRounds": 1,
-    "ciRepairs": 1,
-    "planReviewRounds": 1
+    "ciRepairs": 1
   },
   "escalation": null,
   "plan": null

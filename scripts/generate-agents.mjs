@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 /**
- * Generate `agents/` from `agent-sources/`, one variant per Claude effort level.
+ * Generate `agents/` from `agent-sources/`.
  *
  * The Agent tool has no `effort` parameter, so a dispatch cannot ask for an
  * effort the way it asks for a model. Agent frontmatter can: Claude Code parses
  * `effort` off an agent file and pins that agent's turns to it. Effort is
  * therefore static per agent file, and a configuration that resolves an effort
- * per role can only reach a dispatch by naming a variant that already carries
+ * per job can only reach a dispatch by naming a variant that already carries
  * it — `tagteam:fixer-xhigh` rather than `tagteam:fixer` plus an argument.
  *
- * So: one source per agent, one generated file per source × effort. The ladder
- * is read from `claudeEffort` in the config schema rather than written here,
- * because a level added to the configuration a user may set and not to the
- * agents on disk is exactly the silent hole this generator exists to close.
+ * So: one source per agent, one generated file per source × effort for every
+ * agent a configuration can set an effort for (`role: lead` or `role: worker`).
+ * The ladder is read from `claudeEffort` in the config schema rather than
+ * written here, because a level added to the configuration a user may set and
+ * not to the agents on disk is exactly the silent hole this generator exists to
+ * close.
+ *
+ * A `role: plumbing` source is the exception: it runs a command for the
+ * orchestrator and nothing a configuration decides applies to it, so it names
+ * its own `model` and `effort` and generates exactly one file, unsuffixed.
  *
  * Run `node scripts/generate-agents.mjs` after editing anything in
  * `agent-sources/`. `--check` exits 1 on drift instead of writing, which is what
@@ -27,7 +33,8 @@ const SOURCE_DIR = path.join(root, "agent-sources");
 const OUT_DIR = path.join(root, "agents");
 const SCHEMA = path.join(root, "schemas", "config.schema.json");
 
-const ROLES = new Set(["lead", "worker"]);
+const LADDERED_ROLES = new Set(["lead", "worker"]);
+export const PLUMBING_ROLE = "plumbing";
 
 export function efforts() {
   const schema = JSON.parse(fs.readFileSync(SCHEMA, "utf8"));
@@ -59,28 +66,46 @@ export function readSources() {
     for (const key of ["name", "role", "description", "tools"]) {
       if (!fields[key]) throw new Error(`agent-sources/${file}: missing required frontmatter key '${key}'`);
     }
-    // `effort` and `model` belong to the generated file, never the source: a
-    // source carrying either would produce five variants that disagree with
-    // their own names.
-    for (const key of ["effort", "model"]) {
-      if (fields[key] !== undefined) throw new Error(`agent-sources/${file}: '${key}' is the generator's to set, remove it`);
-    }
     if (fields.name !== path.basename(file, ".md")) {
       throw new Error(`agent-sources/${file}: name '${fields.name}' does not match the filename`);
     }
-    if (!ROLES.has(fields.role)) {
-      throw new Error(`agent-sources/${file}: role '${fields.role}' is not one of ${[...ROLES].join(", ")}`);
+    if (fields.role === PLUMBING_ROLE) {
+      // Plumbing names its own settings: nothing in the configuration reaches it.
+      for (const key of ["model", "effort"]) {
+        if (!fields[key]) throw new Error(`agent-sources/${file}: a ${PLUMBING_ROLE} agent must name its own '${key}'`);
+      }
+      if (!efforts().includes(fields.effort)) {
+        throw new Error(`agent-sources/${file}: effort '${fields.effort}' is not one Claude Code accepts`);
+      }
+    } else {
+      if (!LADDERED_ROLES.has(fields.role)) {
+        throw new Error(`agent-sources/${file}: role '${fields.role}' is not one of ${[...LADDERED_ROLES, PLUMBING_ROLE].join(", ")}`);
+      }
+      // `effort` and `model` belong to the generated file, never the source: a
+      // source carrying either would produce five variants that disagree with
+      // their own names.
+      for (const key of ["effort", "model"]) {
+        if (fields[key] !== undefined) throw new Error(`agent-sources/${file}: '${key}' is the generator's to set, remove it`);
+      }
     }
     return { file, ...fields, body };
   });
 }
 
+/** The plumbing agents: dispatched by their bare name, at a fixed model and effort. */
+export function plumbingAgents() {
+  return readSources().filter((source) => source.role === PLUMBING_ROLE).map((source) => source.name);
+}
+
 export function render(source, effort) {
+  const plumbing = source.role === PLUMBING_ROLE;
   return [
     "---",
-    `name: ${source.name}-${effort}`,
-    `description: ${source.description} Runs at ${effort} effort — dispatch the variant the resolver names.`,
-    "model: inherit",
+    `name: ${plumbing ? source.name : `${source.name}-${effort}`}`,
+    plumbing
+      ? `description: ${source.description}`
+      : `description: ${source.description} Runs at ${effort} effort — dispatch the variant the resolver names.`,
+    `model: ${plumbing ? source.model : "inherit"}`,
     `effort: ${effort}`,
     `tools: ${source.tools}`,
     "---",
@@ -96,6 +121,10 @@ export function render(source, effort) {
 export function plan() {
   const files = new Map();
   for (const source of readSources()) {
+    if (source.role === PLUMBING_ROLE) {
+      files.set(`${source.name}.md`, render(source, source.effort));
+      continue;
+    }
     for (const effort of efforts()) files.set(`${source.name}-${effort}.md`, render(source, effort));
   }
   return files;

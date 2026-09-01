@@ -32,12 +32,14 @@ const CONSUMED = [
   // resolves a dotted key through `?.` against `examples/config.json` and asserts
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
-  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]]
+  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec"]],
+  ["scripts/plan.mjs", ["models", "effort", "plan"]]
 ];
 
 // Keys older config shapes had and the current one does not. A key that comes
 // back — `limits` did — has to leave this list, or the guard below fails.
-const RETIRED = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "policyPaths"];
+const RETIRED = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "policyPaths", "limits.planReviewRounds"];
 
 const resolve = (object, dotted) => dotted.split(".").reduce((node, key) => node?.[key], object);
 
@@ -147,7 +149,7 @@ test("a git ref name Git itself would reject does not validate", async () => {
 // --- regressions from the third Codex round ---
 
 test("a version-5 configuration reports stale rather than invalid", async () => {
-  // Exit 3 is what tells a person to run /tagteam:init. Validating shape before
+  // Exit 3 is what tells a person to run /tagteam:configure. Validating shape before
   // version meant a real v5 file failed the v6 schema in a dozen places and
   // exited 1, so the only files that need exit 3 could never receive it.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v5-"));
@@ -163,16 +165,19 @@ test("a version-5 configuration reports stale rather than invalid", async () => 
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
-  assert.match(result.stdout, /run \/tagteam:init/);
+  assert.match(result.stdout, /run \/tagteam:configure/);
 });
 
-test("a version-8 configuration carrying the old four role keys is invalid", async () => {
+test("a version-9 configuration carrying the old role-keyed effort map is invalid", async () => {
+  // The version-8 shape keyed effort by role. A file that kept it under the new
+  // version has to fail on the old keys and on the missing new ones, or the
+  // resolver reads `effort.reviewer` as undefined and dispatches at nothing.
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 8,
+    version: 9,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
-    effort: { plan: "high", implement: "high", review: "high", codex: "high" }
+    effort: { lead: "high", worker: "high", codex: "high" }
   };
   const errors = validateJson(schema, stale);
   assert.ok(
@@ -181,7 +186,11 @@ test("a version-8 configuration carrying the old four role keys is invalid", asy
   );
   assert.ok(
     errors.some((error) => error.includes("effort.lead")),
-    `expected an error naming effort.lead (missing, since only the old keys were supplied), got: ${errors.join("; ")}`
+    `expected an error naming the leftover effort.lead, got: ${errors.join("; ")}`
+  );
+  assert.ok(
+    errors.some((error) => error.includes("effort.implementer")),
+    `expected an error naming the missing effort.implementer, got: ${errors.join("; ")}`
   );
 });
 
@@ -234,14 +243,15 @@ test("the Claude model enum exists once, referenced from both models.lead and mo
   );
 });
 
-test("effort.codex and effort.lead/worker keep their divergent vocabularies", async () => {
+test("effort is keyed by job, and effort.codex keeps its own ladder", async () => {
   const { validateJson } = await import("../scripts/validate-json.mjs");
   // The two ladders diverge on purpose and the hoist must not have merged them:
-  // `lead`/`worker` reach the Claude enum, which has `max`; `codex` carries its
-  // own inline enum, which does not.
-  const effortDef = schema.$defs?.roleEffort;
-  assert.equal(effortDef?.properties?.lead?.$ref, "#/$defs/claudeEffort");
-  assert.equal(effortDef?.properties?.worker?.$ref, "#/$defs/claudeEffort");
+  // every Claude job reaches the Claude enum, which has `max`; `codex` carries
+  // its own inline enum, which does not.
+  const effortDef = schema.$defs?.jobEffort;
+  const claudeJobs = ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner"];
+  assert.deepEqual(effortDef?.required, [...claudeJobs, "codex"]);
+  for (const job of claudeJobs) assert.equal(effortDef?.properties?.[job]?.$ref, "#/$defs/claudeEffort", job);
   assert.deepEqual(effortDef?.properties?.codex?.enum, ["low", "medium", "high", "xhigh"]);
 
   const codexMax = { ...example, effort: { ...example.effort, codex: "max" } };
@@ -251,9 +261,14 @@ test("effort.codex and effort.lead/worker keep their divergent vocabularies", as
     `expected effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
   );
 
-  const leadMax = { ...example, effort: { ...example.effort, lead: "max" } };
-  const leadErrors = validateJson(schema, leadMax).filter((error) => error.includes("effort.lead"));
-  assert.deepEqual(leadErrors, [], `expected effort.lead: "max" to validate, got: ${leadErrors.join("; ")}`);
+  const recheckMax = { ...example, effort: { ...example.effort, recheck: "max" } };
+  const recheckErrors = validateJson(schema, recheckMax).filter((error) => error.includes("effort.recheck"));
+  assert.deepEqual(recheckErrors, [], `expected effort.recheck: "max" to validate, got: ${recheckErrors.join("; ")}`);
+
+  // A job left out is a dispatch with no effort, and it is refused by name.
+  const { recheck, ...withoutRecheck } = example.effort;
+  const missing = validateJson(schema, { ...example, effort: withoutRecheck });
+  assert.ok(missing.some((error) => error.includes("effort.recheck")), `expected effort.recheck to be required, got: ${missing.join("; ")}`);
 });
 
 test("the deliverables table comes out as data, without reading the plan", async () => {
@@ -346,7 +361,7 @@ test("this repository's own configuration is valid against the current schema", 
   // file is a consumer like any other, and a schema bump has to carry it.
   const { validateJson, semanticErrors } = await import("../scripts/validate-json.mjs");
   const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
-  assert.deepEqual(validateJson(schema, own), [], "run /tagteam:init, or update .tagteam/config.json by hand");
+  assert.deepEqual(validateJson(schema, own), [], "run /tagteam:configure, or update .tagteam/config.json by hand");
   assert.deepEqual(semanticErrors("config.schema.json", own, {}), []);
   assert.equal(own.version, schema.properties.version.const);
 });
@@ -447,7 +462,7 @@ function repoCalibrating(...lenses) {
 
 test("a roster entry the repository calibrates is valid, and the same entry without the brief is not", async () => {
   // The whole point. `financial` and `math` were rostered in a real repository
-  // and had no brief in the plugin, so the only move /tagteam:init could offer
+  // and had no brief in the plugin, so the only move /tagteam:configure could offer
   // was to drop both — losing the readers most likely to catch a stale
   // contribution limit or a rounding mode that compounds across a projection.
   const { semanticErrors } = await import("../scripts/validate-json.mjs");
@@ -554,7 +569,7 @@ test("the cost note stays the last line printed even when a repository calibrate
 test("a version-6 configuration reports stale rather than invalid", () => {
   // The upgrade path every existing user takes. A v6 file is complete for v6 and
   // merely missing `limits`, so "invalid" would read as a broken file; exit 3 is
-  // what routes the person to /tagteam:init instead.
+  // what routes the person to /tagteam:configure instead.
   const { limits, ...withoutLimits } = example;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v6-"));
   const old = path.join(dir, "config.json");
@@ -564,7 +579,7 @@ test("a version-6 configuration reports stale rather than invalid", () => {
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
-  assert.match(result.stdout, /run \/tagteam:init/);
+  assert.match(result.stdout, /run \/tagteam:configure/);
 });
 
 test("a version-8 configuration without limits is invalid", async () => {
@@ -582,7 +597,7 @@ test("a version-8 configuration without limits is invalid", async () => {
 test("a limit below 1, a fractional limit, and an unknown limit key are all refused", async () => {
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const errorsFor = (limits) => validateJson(schema, { ...example, limits }).filter((error) => error.includes("limits"));
-  for (const key of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
+  for (const key of ["fixRounds", "ciRepairs"]) {
     assert.ok(errorsFor({ ...example.limits, [key]: 0 }).length > 0, `limits.${key}: 0 should be refused`);
     assert.ok(errorsFor({ ...example.limits, [key]: -1 }).length > 0, `limits.${key}: -1 should be refused`);
     assert.ok(errorsFor({ ...example.limits, [key]: 1.5 }).length > 0, `limits.${key}: 1.5 should be refused`);
@@ -603,8 +618,8 @@ test("a large limit validates and is warned about rather than refused", async ()
 test("limitNotices warns above 5 and not at 5, once per offending limit", async () => {
   const { limitNotices } = await import("../scripts/validate-json.mjs");
   const warnings = (limits) => limitNotices({ ...example, limits }).filter((line) => line.startsWith("warning:"));
-  assert.equal(warnings({ fixRounds: 8, ciRepairs: 9, planReviewRounds: 7 }).length, 3);
-  assert.deepEqual(warnings({ fixRounds: 5, ciRepairs: 5, planReviewRounds: 5 }), []);
+  assert.equal(warnings({ fixRounds: 8, ciRepairs: 9 }).length, 2);
+  assert.deepEqual(warnings({ fixRounds: 5, ciRepairs: 5 }), []);
 });
 
 test("the note reports the worst-case panel count as a product", async () => {
@@ -614,7 +629,7 @@ test("the note reports the worst-case panel count as a product", async () => {
   const { limitNotices } = await import("../scripts/validate-json.mjs");
   const note = (fixRounds, ciRepairs) => limitNotices({
     ...example,
-    limits: { fixRounds, ciRepairs, planReviewRounds: 1 }
+    limits: { fixRounds, ciRepairs }
   }).find((line) => line.startsWith("note:"));
   assert.match(note(1, 1), /\b4\b/);
   assert.match(note(2, 1), /\b6\b/);
@@ -630,7 +645,7 @@ test("limitNotices is safe on a document that has not passed shape validation", 
   // semanticErrors runs on those too, and the schema error is the better message
   // there — a throw here would replace it with a stack trace.
   const { limitNotices } = await import("../scripts/validate-json.mjs");
-  for (const candidate of [{}, { limits: null }, { limits: 3 }, { limits: [] }, { limits: { fixRounds: 1.5, ciRepairs: 1, planReviewRounds: 1 } }, { limits: { fixRounds: 1 } }]) {
+  for (const candidate of [{}, { limits: null }, { limits: 3 }, { limits: [] }, { limits: { fixRounds: 1.5, ciRepairs: 1 } }, { limits: { fixRounds: 1 } }]) {
     assert.deepEqual(limitNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notices`);
   }
   assert.deepEqual(limitNotices(undefined), []);
@@ -640,7 +655,7 @@ test("the cost notices never become validation errors", async () => {
   // They go to stderr and stay off the error list; a repository that chose
   // expensive limits still validates.
   const { semanticErrors } = await import("../scripts/validate-json.mjs");
-  const expensive = { ...example, limits: { fixRounds: 9, ciRepairs: 9, planReviewRounds: 9 } };
+  const expensive = { ...example, limits: { fixRounds: 9, ciRepairs: 9 } };
   assert.deepEqual(semanticErrors("config.schema.json", expensive, {}), []);
 });
 
@@ -648,7 +663,7 @@ test("validating the shipped configuration prints the cost note on stderr", () =
   // limitNotices returning the right strings is not the outcome; the outcome is
   // that running the validator shows them. Deleting the stderr write in
   // semanticErrors, or sending it to stdout, leaves every other test in this
-  // file green — and commands/init.md tells the model to show "the validator's
+  // file green — and commands/configure.md tells the model to show "the validator's
   // own line" rather than restate the arithmetic, so the line has to exist.
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"), "--repo", root,
@@ -660,7 +675,7 @@ test("validating the shipped configuration prints the cost note on stderr", () =
   const note = result.stderr.split("\n").find((line) => line.startsWith("note:"));
   assert.ok(note, `expected a note: line on stderr, got: ${JSON.stringify(result.stderr)}`);
   // The count itself belongs to whatever this repository's limits happen to be,
-  // and those are a live setting `/tagteam:init` asks about. Pinning the number
+  // and those are a live setting `/tagteam:configure` asks about. Pinning the number
   // here would make raising a limit fail a test about whether the line prints.
   assert.match(note, /\b\d+ full review panels\b/);
 });
@@ -675,7 +690,7 @@ test("validating expensive limits prints a warning line per limit and still exit
   fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
   fs.writeFileSync(configPath, JSON.stringify({
     ...example,
-    limits: { fixRounds: 9, ciRepairs: 9, planReviewRounds: 9 }
+    limits: { fixRounds: 9, ciRepairs: 9 }
   }));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
@@ -684,8 +699,8 @@ test("validating expensive limits prints a warning line per limit and still exit
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
   assert.match(result.stdout, /valid/);
   const warnings = result.stderr.split("\n").filter((line) => line.startsWith("warning:"));
-  assert.equal(warnings.length, 3, `expected three warnings, got: ${JSON.stringify(result.stderr)}`);
-  for (const key of ["fixRounds", "ciRepairs", "planReviewRounds"]) {
+  assert.equal(warnings.length, 2, `expected two warnings, got: ${JSON.stringify(result.stderr)}`);
+  for (const key of ["fixRounds", "ciRepairs"]) {
     assert.ok(warnings.some((line) => line.includes(key)), `expected a warning naming ${key}`);
   }
   assert.match(result.stderr, /^note:.*\b100\b/m);
@@ -829,7 +844,7 @@ test("validating a pointless escalation prints both warnings and still exits 0",
   fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
   const config = {
     ...example,
-    limits: { fixRounds: 2, ciRepairs: 2, planReviewRounds: 2 },
+    limits: { fixRounds: 2, ciRepairs: 2 },
     escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } }
   };
   assert.deepEqual(validateJson(schema, config), []);
@@ -860,9 +875,9 @@ test("the shipped example states today's behaviour", () => {
   // Raising this limit would change the cost of every repository that copies
   // this file, silently and at once. `.tagteam/config.json` is deliberately not
   // held to it: nobody copies this repository's own settings, and `limits` is a
-  // question `/tagteam:init` asks, so pinning the answer here would mean tagteam
+  // question `/tagteam:configure` asks, so pinning the answer here would mean tagteam
   // could not configure itself the way it offers to configure everyone else.
-  assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 }, "examples/config.json");
+  assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1 }, "examples/config.json");
 });
 
 test("the schema declares no default anywhere", () => {
@@ -888,7 +903,7 @@ test("the schema declares no default anywhere", () => {
 // A populated pair, used wherever a non-null `escalation`/`plan` is needed. Not
 // this repository's settings and not a recommendation — only a shape.
 const RAISED_MODELS = { lead: "opus", worker: "opus", codex: "gpt-5.6-sol" };
-const RAISED_EFFORT = { lead: "max", worker: "max", codex: "xhigh" };
+const RAISED_EFFORT = { implementer: "max", fixer: "max", reviewer: "max", recheck: "max", adversary: "max", planner: "max", codex: "xhigh" };
 const configured = (overrides) => ({
   ...example,
   escalation: { after: 1, models: RAISED_MODELS, effort: RAISED_EFFORT },
@@ -896,18 +911,18 @@ const configured = (overrides) => ({
   ...overrides
 });
 
-test("all six role-triple sites are $refs to the hoisted maps, with no inline copy", () => {
+test("all six settings sites are $refs to the hoisted maps, with no inline copy", () => {
   // The drift this prevents is a role added to one site and not the others,
   // which validates silently. A copy sitting beside the $ref would pass a
   // pointer-spelling check and reintroduce exactly that, so the absence of
   // `properties`/`required` at each site is half the assertion.
   const sites = [
     ["models", schema.properties.models, "#/$defs/roleModels"],
-    ["effort", schema.properties.effort, "#/$defs/roleEffort"],
+    ["effort", schema.properties.effort, "#/$defs/jobEffort"],
     ["escalation.models", schema.properties.escalation.properties.models, "#/$defs/roleModels"],
-    ["escalation.effort", schema.properties.escalation.properties.effort, "#/$defs/roleEffort"],
+    ["escalation.effort", schema.properties.escalation.properties.effort, "#/$defs/jobEffort"],
     ["plan.models", schema.properties.plan.properties.models, "#/$defs/roleModels"],
-    ["plan.effort", schema.properties.plan.properties.effort, "#/$defs/roleEffort"]
+    ["plan.effort", schema.properties.plan.properties.effort, "#/$defs/jobEffort"]
   ];
   for (const [label, site, pointer] of sites) {
     assert.equal(site.$ref, pointer, `${label} must $ref ${pointer}`);
@@ -937,8 +952,8 @@ test("the $refs validate, rather than merely spelling a pointer", async () => {
     `expected plan.effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
   );
 
-  const leadMax = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, lead: "max" } } });
-  assert.deepEqual(validateJson(schema, leadMax), [], 'plan.effort.lead: "max" must validate');
+  const plannerMax = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, planner: "max" } } });
+  assert.deepEqual(validateJson(schema, plannerMax), [], 'plan.effort.planner: "max" must validate');
 });
 
 test("escalation and plan are required keys, not optional ones", async () => {
@@ -1012,19 +1027,22 @@ test("the escalation and plan wrappers are closed and complete", async () => {
   }
 });
 
-test("a version-7 configuration reports stale rather than invalid", () => {
+test("a version-8 configuration reports stale rather than invalid", () => {
   // The upgrade path every existing user takes, and the whole user-visible claim
-  // of this version: a complete v7 file is merely old, and exit 3 is what routes
-  // the person to /tagteam:init instead of telling them their file is broken.
+  // of this version: a complete v8 file is merely old, and exit 3 is what routes
+  // the person to /tagteam:configure instead of telling them their file is broken.
   // Only a spawned run proves the exit code.
-  const { escalation, plan, ...withoutNewKeys } = example;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v7-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v8-"));
   const old = path.join(dir, "config.json");
-  fs.writeFileSync(old, JSON.stringify({ ...withoutNewKeys, version: 7 }));
+  fs.writeFileSync(old, JSON.stringify({
+    ...example, version: 8,
+    effort: { lead: "high", worker: "high", codex: "high" },
+    limits: { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 }
+  }));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
     path.join(root, "schemas", "config.schema.json"), old
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
-  assert.match(result.stdout, /run \/tagteam:init/);
+  assert.match(result.stdout, /run \/tagteam:configure/);
 });

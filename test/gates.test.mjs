@@ -610,9 +610,11 @@ test("a counter that is present but not a round count is refused, not read as un
 // invisible when it breaks: a repair fixer dispatched at the raised settings the
 // cycle before it had reached, with nothing erroring.
 
+// Effort is keyed by job: the readers run high here, the writers medium, so a
+// job wired to the wrong effort key shows up as the wrong word.
 const ORDINARY = {
   models: { lead: "opus", worker: "sonnet", codex: "gpt-5-codex" },
-  effort: { lead: "high", worker: "medium", codex: "medium" },
+  effort: { implementer: "medium", fixer: "medium", reviewer: "high", recheck: "high", adversary: "high", planner: "high", codex: "medium" },
   escalation: null
 };
 const RAISED = {
@@ -620,7 +622,7 @@ const RAISED = {
   escalation: {
     after: 1,
     models: { lead: "opus", worker: "opus", codex: "gpt-5-codex" },
-    effort: { lead: "max", worker: "high", codex: "high" }
+    effort: { implementer: "high", fixer: "high", reviewer: "max", recheck: "max", adversary: "max", planner: "max", codex: "high" }
   }
 };
 // The fixer and the three re-checks, plus the repair fixer — which is a fixer
@@ -736,7 +738,7 @@ test("gates.mjs state takes the budgeted edge through the CLI with the configure
   const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
   const stateFile = path.join(dir, "state.json");
   const configFile = path.join(dir, "config.json");
-  fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 } }));
+  fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1 } }));
   spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
 
   const to = (next) => spawnSync("node", [script, "state", stateFile, next, configFile], { encoding: "utf8" });
@@ -774,7 +776,7 @@ test("gates.mjs round reconciles, allocates and writes the state file in one cal
   const stateFile = path.join(dir, "state.json");
   const rounds = path.join(dir, "rounds");
   const configFile = path.join(dir, "config.json");
-  fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1, planReviewRounds: 1 } }));
+  fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1 } }));
   spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
 
   const round = (candidate, config = configFile) =>
@@ -798,7 +800,7 @@ test("gates.mjs round reconciles, allocates and writes the state file in one cal
   fsm.writeFileSync(stale, JSON.stringify({ version: 6 }));
   const without = round(A, stale);
   assert.notEqual(without.status, 0);
-  assert.match(without.stderr, /tagteam:init/);
+  assert.match(without.stderr, /tagteam:configure/);
 });
 
 test("a state file written before briefs were recorded gets them on resume, and nothing else", async () => {

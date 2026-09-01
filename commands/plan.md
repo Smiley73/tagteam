@@ -1,7 +1,7 @@
 ---
 description: Turn a goal into a reviewed plan and a set of implementable spec files
 argument-hint: <goal, however vague> [--resume <slug>]
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:explorer-low), Agent(tagteam:explorer-medium), Agent(tagteam:explorer-high), Agent(tagteam:explorer-xhigh), Agent(tagteam:explorer-max), Agent(tagteam:plan-drafter-low), Agent(tagteam:plan-drafter-medium), Agent(tagteam:plan-drafter-high), Agent(tagteam:plan-drafter-xhigh), Agent(tagteam:plan-drafter-max), Agent(tagteam:plan-reviewer-low), Agent(tagteam:plan-reviewer-medium), Agent(tagteam:plan-reviewer-high), Agent(tagteam:plan-reviewer-xhigh), Agent(tagteam:plan-reviewer-max), Agent(tagteam:adversary-low), Agent(tagteam:adversary-medium), Agent(tagteam:adversary-high), Agent(tagteam:adversary-xhigh), Agent(tagteam:adversary-max), Agent(tagteam:spec-writer-low), Agent(tagteam:spec-writer-medium), Agent(tagteam:spec-writer-high), Agent(tagteam:spec-writer-xhigh), Agent(tagteam:spec-writer-max)
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:explorer-low), Agent(tagteam:explorer-medium), Agent(tagteam:explorer-high), Agent(tagteam:explorer-xhigh), Agent(tagteam:explorer-max), Agent(tagteam:plan-drafter-low), Agent(tagteam:plan-drafter-medium), Agent(tagteam:plan-drafter-high), Agent(tagteam:plan-drafter-xhigh), Agent(tagteam:plan-drafter-max), Agent(tagteam:plan-reviewer-low), Agent(tagteam:plan-reviewer-medium), Agent(tagteam:plan-reviewer-high), Agent(tagteam:plan-reviewer-xhigh), Agent(tagteam:plan-reviewer-max), Agent(tagteam:adversary-low), Agent(tagteam:adversary-medium), Agent(tagteam:adversary-high), Agent(tagteam:adversary-xhigh), Agent(tagteam:adversary-max), Agent(tagteam:spec-writer-low), Agent(tagteam:spec-writer-medium), Agent(tagteam:spec-writer-high), Agent(tagteam:spec-writer-xhigh), Agent(tagteam:spec-writer-max), Agent(tagteam:codex-runner)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
@@ -11,70 +11,63 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
 You are the orchestrator. You run the scripts and hold the sequence; subagents do
 the model work and write their own files.
 
-**How a resolved effort reaches a dispatch.** Every clause below names a model
-and an effort, and the two are applied differently. The model is an argument:
-pass it to the Agent tool. The effort is not — the Agent tool has no effort
-parameter, so it is carried by *which agent you name*. Every tagteam agent ships
-as one variant per effort, named `tagteam:<agent>-<effort>`: at a resolved lead
-effort of xhigh the drafter is tagteam:plan-drafter-xhigh, and at high it is
-tagteam:plan-drafter-high. **No unsuffixed agent name exists** — a bare name is a
-dispatch that does not exist, not a shortcut. So `tagteam:<agent>-<effort>` below
-means: substitute the effort that clause resolved. Codex is the exception and
-takes its effort as a real argument, as `SKILL.md` shows.
+**Dispatching.** Every agent below is dispatched with `run_in_background:
+false`. When several are dispatched together, they go in one message and run at
+the same time; the message returns when all of them have finished. Never
+dispatch in the background, never start a watcher, never run a command only to
+pass the time.
+
+**Settings.** Run once, at the start:
+
+```bash
+node "$P/scripts/plan.mjs" roles "$R/.tagteam/config.json"
+```
+
+It prints the model and effort of every planning dispatch — `explore`, `draft`,
+`plan-review`, `plan-adversary`, `plan-codex`, `spec-write` — with the `plan`
+override already applied when the configuration has one. The model is an
+argument: pass it to the Agent tool. The effort is carried by the agent's name:
+every tagteam agent ships as one variant per effort, `tagteam:<agent>-<effort>`,
+so `tagteam:plan-drafter-<effort>` below means the drafter variant at the effort
+`roles` printed for `draft`. No unsuffixed agent name exists. The one exception
+is `tagteam:codex-runner`, dispatched by that bare name with no model, which runs
+a prepared Codex command for you.
 
 ## Before anything
 
 1. `git -C "$R" rev-parse --show-toplevel`. Not a repository: say so and stop.
 2. `node "$P/scripts/running-plugin.mjs" "$R"` — which installed snapshot is
-   running this, and, when this repository is a checkout of that same plugin,
-   which of the files it actually executes differ from the working tree. Render
-   it as *The running snapshot* in the skill says, identity line first.
-
-   **This never stops anything, whatever it says.** Print it and carry on to the
-   next item — a difference is not a failure, and it is never a reason to refuse
-   a plan or to offer to reinstall. Every other item in this list ends in "stop";
-   this one does not.
-3. Validate the config. Exit 3 means an older plugin wrote it — tell them to run
-   `/tagteam:init` and stop. No config at all: same. Show any `note:` or
-   `warning:` line it prints about lens briefs as the validator wrote it: a lens
-   this repository calibrates itself is one a plan may assign like any other, and
-   a brief that replaces one the plugin ships changes what that reviewer reads
-   without changing its name anywhere else. Carry `limits.planReviewRounds`
-   from it with the other settings you take from here — it is how many review
-   rounds step 5 may run against one goal approval, and you pass it to the
-   allocator rather than counting rounds yourself.
+   running this. Render it as *The running snapshot* in the skill says, identity
+   line first. **This never stops anything, whatever it says.** Print it and
+   carry on — a difference is never a reason to refuse a plan or to offer to
+   reinstall. Every other item in this list ends in "stop"; this one does not.
+3. Validate the config:
+   `node "$P/scripts/validate-json.mjs" --repo "$R" "$P/schemas/config.schema.json" "$R/.tagteam/config.json"`.
+   Exit 3 means an older plugin wrote it — tell them to run `/tagteam:configure` and
+   stop. No config at all: same. Show any `note:` or `warning:` line about lens
+   briefs as the validator wrote it.
 4. `codex --version`. It fails: stop and say Codex is required.
 5. `--resume <slug>`: pick up at the first step below whose output is missing.
    **`$D/goal.md` existing is not enough to skip step 3** — a session that
    stopped while you were waiting for the owner to read it leaves exactly that
-   file behind, and drafting from an unapproved goal makes decisions binding that
-   nobody agreed to. Step 3 writes `$D/work/goal-approved` when they say so, and
-   only that file lets you skip it. Otherwise derive a slug from the goal —
-   lowercase, hyphenated, three or four words — and create `$D/work/`.
+   file behind, and only `$D/work/goal-approved` lets you skip it. Otherwise
+   derive a slug from the goal — lowercase, hyphenated, three or four words —
+   and create `$D/work/`.
 
    Either way, `rm -f "$D/work/codex-routing-ack"` as you enter. An answer
    someone gave about one version of Codex must not be inherited by a session
-   resumed days later, and nothing on disk distinguishes a resumed plan from a
-   fresh one, so the start of the command is the only honest place to reset it.
-   What it is for is *When Codex could not say how it ran*, below.
+   resumed days later. What it is for is *When Codex could not say how it ran*.
 
-   A resumed session that stopped inside step 5 does not start a review round: the
-   allocator hands back the round that never recorded its outcome, empties it, and
-   spends nothing. So resuming there means running step 5 again from the top, not
-   working out how far the interrupted round got.
-
-Seven steps. Exactly one of them loops — step 5's review, bounded by
-`limits.planReviewRounds` and stopped by the allocator, not by you.
+Seven steps, and none of them loops.
 
 ## 1 — Orient
 
-Dispatch one `tagteam:explorer-<effort>` subagent at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null: how the areas this goal touches are built today,
-which modules own them, what patterns the repository already uses, and where the
-tests for them live. Ask for the conclusion, not the file contents.
-
-Dispatch it with `run_in_background: false` so the call blocks until it reports.
-It writes no file to watch for, and its conclusion is what tells you which
-questions are worth asking.
+Dispatch one `tagteam:explorer-<effort>` at `explore`'s model: how the areas
+this goal touches are built today, which modules own them, what patterns the
+repository already uses, and where the tests for them live. Tell it to write its
+conclusion to `$D/work/exploration.md` and return one line. That file is read by
+the drafter and by every spec writer, so it stays out of your context: read its
+first thirty lines to know which questions are worth asking, and no more.
 
 Read `conventionsPath` if the config names one. Read nothing else yourself —
 what you load here you carry through the whole interview.
@@ -96,18 +89,15 @@ asking, and it is almost never what the question should say. "If someone mistype
 their address, should they be able to start over straight away or wait out the
 cooldown?" is answerable on the spot. "Should `requestRecovery` clear
 `attemptsRemaining` when `emailVerified` is false?" is the same decision written
-as a diff — they have to reconstruct what it means for a person using the thing
-before they can have an opinion, and the answer is worse for it. Symbols, paths
-and line numbers belong in your own notes and in `goal.md`'s reasoning, not in
-what you put on the screen. See *Asking* in the skill.
+as a diff. Symbols, paths and line numbers belong in your own notes and in
+`goal.md`'s reasoning, not on the screen. See *Asking* in the skill.
 
 **Product and interface decisions are always theirs.** Never decide what
 something looks like, what it is called, or how a person moves through it.
 
 For a wide set — interface choices, scope boundaries — scan then drill: one
 multi-select over chunks of three to find which ones they have opinions about,
-then a single-select on each of those. That is the difference between six
-questions and thirty.
+then a single-select on each of those.
 
 What to keep asking until you have it: what "done" means observably; the failure
 they would consider unacceptable; what is explicitly *not* in scope; every
@@ -157,268 +147,130 @@ document in this cycle that is not yours.
 node "$P/scripts/goal-gate.mjs" verify "$D"
 ```
 
-Run this before **every** step from here on — draft, revise, expand, approve. It
-is one command and it is the only thing standing between "the plan was built from
-what you approved" and a claim nobody checked.
+Run this before **every** step from here on. It is one command and it is the
+only thing standing between "the plan was built from what you approved" and a
+claim nobody checked.
 
-Dispatch `tagteam:plan-drafter-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null. Give it `$D/goal.md`,
-the exploration summary, and `$D/plan.md` to write. It returns a path and a byte
-count — do not read the plan. `run_in_background: false`, so the call blocks: the
-three readers in step 5 are pointed at `$D/plan.md` on disk, and a reviewer
-handed a file that is not written yet reviews nothing.
+Dispatch `tagteam:plan-drafter-<effort>` at `draft`'s model. Give it
+`$D/goal.md`, `$D/work/exploration.md`, and `$D/plan.md` to write. It returns a
+path and a byte count — do not read the plan. A plan is an index with an 8 KB
+target and a 12 KB ceiling that step 6 enforces; if the byte count it returns is
+over 12,000, re-dispatch it now to cut, before anyone reviews it.
 
-## 5 — Review, in rounds
-
-One round is three readers and one revision. How many rounds a goal approval gets
-is `limits.planReviewRounds`, which you carried from the config: at 1 — every
-repository that has not raised it — this is one round and then step 6.
-
-### Open the round
+## 5 — Review, once
 
 ```bash
-node "$P/scripts/goal-gate.mjs" verify "$D" || exit $?
-node "$P/scripts/lib/rounds.mjs" "$D/work/review" \
-  --candidate-file "$D/work/goal-approved" --candidate-field goalSha256 \
-  --scope-file "$D/work/goal-approved" --scope-field goalSha256 \
-  --limit <limits.planReviewRounds> --limit-name limits.planReviewRounds \
-  --exempt 0 --complete-when outcome.json > "$D/work/plan-round.next.json" \
-  || { status=$?; rm -f "$D/work/plan-round.next.json"; exit $status; }
-mv "$D/work/plan-round.next.json" "$D/work/plan-round.json"
-cat "$D/work/plan-round.json"
-ROUND=$(node -pe 'JSON.parse(fs.readFileSync(process.argv[1], "utf8")).round' "$D/work/plan-round.json")
+node "$P/scripts/goal-gate.mjs" verify "$D"
+mkdir -p "$D/work/review"
+node "$P/scripts/plan.mjs" codex --dir "$D/work/review" --goal "$D/goal.md" --plan "$D/plan.md" \
+  --cd "$R" --model <plan-codex model> --effort <plan-codex effort> --max-concurrent <maxConcurrentCodex>
 ```
 
-Only `--limit` is substituted — the number from the config. The allocator reads
-both identities out of `$D/work/goal-approved` itself, which `verify` has just
-proved current — the `|| exit $?` is what makes that true, since without it a
-goal edited and never re-approved fails the gate on stdout and the block
-allocates a round against the stale approval anyway. Exit 1 here is that
-refusal: get the goal re-approved at step 3 and open the round again.
-**Do not copy the hash out of anything into this command.** A
-hash that arrives one character wrong names a budget nothing else is counted in,
-so the rounds silently start over and nothing on screen says they did.
+The second command prepares the Codex plan review and prints the runner dispatch:
+an `agent`, a `description` and a `prompt`. Then dispatch, **in one message**:
 
-The allocation lands on a temporary path and is moved into place only once it
-has succeeded, so the block exits with the allocator's own status and a refusal
-leaves the last round's record where it was. Redirecting straight onto
-`plan-round.json` truncates it before the allocator runs, so a refusal would
-leave an empty file, the read below would die parsing it, and what reached you
-would be a Node stack trace and exit 1 rather than the exit 4 the paragraph
-below is about.
+- `tagteam:plan-reviewer-<effort>` at `plan-review`'s model, given the goal, the
+  plan and the exploration, writing `$D/work/review/claude.json`
+- `tagteam:adversary-<effort>` at `plan-adversary`'s model, pointed at
+  `prompts/plan-adversary.md`, given the same, writing
+  `$D/work/review/adversary.json`
+- `tagteam:codex-runner` with the printed prompt, no model
 
-**The round number is the allocator's to give**, once per round, here. `$ROUND`
-is the round for every path below, the ones you write into a subagent's brief
-included. Never substitute a number of your own and never count rounds in your
-head: two rounds that agree on a number means the second round's readers write
-over the first round's findings, and the allocator exists so that cannot happen.
-Lost `$ROUND`? Read it back out of `$D/work/plan-round.json`, which the
-allocation above already wrote. **Do not run the allocator again to remind
-yourself.** Part-way through a round it re-enters the round you are in and
-empties the directory, so readers that have already reported lose their
-findings and the watcher below waits for files nothing will write again.
-Re-allocating is safe only before any reader has written — and if it has come to
-that, the resume path is running step 5 again from the top, not the command
-above on its own.
-
-**Announce the round before you dispatch anything**, in one plain line: where
-this round sits in the budget, and where its findings are being written. Both
-come out of `$D/work/plan-round.json` — the budget position is `spent` of
-`limit`, the directory is `round`. "Review round 2 of 2 for this goal approval,
-three readers on the plan, writing to review/3/." Do not pair `$ROUND` with the
-limit: the number is global to the plan directory and the budget is counted per
-goal approval, so after a re-approval that reads "round 3 of 2" and tells them
-the review is past a budget it has in fact just started over.
-
-**Exit 4 means no further round is available**, and it was refused before
-anything was created. Ordinarily that is the budget, and stderr names it. Say
-only what is known here: no further review round was available under
-`planReviewRounds` in `.tagteam/config.json`, so the rounds stopped there rather
-than because the plan was finished. **Do not say what the last round found**
-unless you have just read its `outcome.json`: the refusal is what a resumed
-session gets after a clean round too, and telling them their review was cut off
-mid-argument when it in fact passed is worse than saying nothing about it. The
-other exit 4 is a round that was entered several times and never closed out,
-which stderr says plainly; what is left in that round's directory is whatever
-its last attempt wrote before it stopped, and it may be partial. Report that as
-it is rather than as a spent budget. **Do not present a round's findings as
-still open** once a revision has run against them. Nothing has read the revised
-plan, so which of them the revision closed is not something you or anything on
-disk knows, and a list of problems the plan may no longer have is worse than no
-list.
-Then **go on to step 6**. A spent review budget does not end the run:
-they approve at step 7 either way, and that is where they get to say the plan is
-not ready.
-
-### Run the round
-
-Three readers, dispatched in a single message so they run concurrently:
-
-- `tagteam:plan-reviewer-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, writing `$D/work/review/$ROUND/claude.json`
-- Codex, via `$P/prompts/codex/plan-review.md`, at `models.codex` / `effort.codex`, or `plan.models.codex` / `plan.effort.codex` when `plan` is not null, fencing `GOAL` and `PLAN` from
-  disk, writing `$D/work/review/$ROUND/codex.json`
-- `tagteam:adversary-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, pointed at `prompts/plan-adversary.md`,
-  writing `$D/work/review/$ROUND/adversary.json`
-
-Run the Codex call with `run_in_background` — it outlives what the Bash tool will
-hold in the foreground — and read its result when it returns, because a failed
-Codex call writes no artifact for anything to wait on. If that result says Codex
-ran but could not say how it routed, take *When Codex could not say how it ran*
-before you go on.
-
-**All three must have reported before you read anything.** Dispatch returns
-immediately; the files do not exist yet. Wait with one background watcher over
-the three paths, per *Dispatching and waiting* in the skill:
+When the message returns:
 
 ```bash
-until [ -f "$D/work/review/$ROUND/claude.json" ] && [ -f "$D/work/review/$ROUND/codex.json" ] && [ -f "$D/work/review/$ROUND/adversary.json" ]; do sleep 5; done
+node "$P/scripts/plan.mjs" collect --dir "$D/work/review"
 ```
 
-One watcher, one notification. Not repeated directory listings, and never a
-command run only to pass the time.
+It folds the three files into `findings.json` and `brief.md`, assigns an id to
+every finding, and prints one line per finding. Exit 1 means a reader produced
+no usable file: it names which. Re-dispatch exactly that reader once, blocking,
+and run `collect` again; still missing, carry on and say so at step 7.
 
-Then read the three files — they are small.
+**`clean` — nothing blocking or major: go to step 6.** Otherwise dispatch one
+`tagteam:plan-drafter-<effort>` at `draft`'s model, blocking, given the goal,
+the plan, the exploration, `$D/work/review/brief.md`, and
+`$D/work/review/response.json` to write. It revises `plan.md` for the findings
+it accepts and answers every finding in the brief by id — applied, rejected with
+a reason, or handed to the owner. Then:
 
-**Nothing ranked `blocking` or `major`: the review is done.** Close the round out
-and go to step 6. That is the whole stopping condition. Do not diff this round
-against the last one, do not judge whether the rounds are converging, and do not
-run another round because one feels warranted — the ceiling is the repository's
-and the floor is this rule.
+```bash
+node "$P/scripts/plan.mjs" check --dir "$D/work/review"
+```
 
-Otherwise, a finding against the *goal* rather than the plan goes through the
-section below first, inside this round. Then pass every `blocking` and `major`
-finding to one `tagteam:plan-drafter-<effort>` revision at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null.
-That one blocks too — `run_in_background: false`. It rewrites a `plan.md` that
-already exists, so there is nothing a watcher could wait for, and
-`deliverables.mjs` in step 6 would happily return the rows the revision is in the
-middle of changing.
+Exit 1 means a blocking or major finding has no answer: it names which.
+Re-dispatch the drafter once for exactly those; still unanswered, stop and show
+what it printed. Its output lists the rejections and the questions for the owner.
 
-### Close the round out
-
-Write `$D/work/review/$ROUND/outcome.json` yourself — `{"round", "closedAt",
-"blockingOrMajor": <count>, "revised": true|false}`. What follows it is the
-count, not a judgement:
-
-- **`blockingOrMajor` is 0**: write the file now, with `"revised": false` —
-  no revision ran on this path — and **go to step 6**. Do not open another
-  round; there is nothing left for one to do, whatever the budget still allows.
-- **Otherwise**: write the file once the revision has returned, never before it,
-  with `"revised": true`, and start the next round at *Open the round*.
-
-That file is what makes the round finished, and writing it is not optional in
-either branch. Until it is there the allocator treats the round as interrupted:
-the next allocation hands back the same number, empties the directory and
-re-runs the readers, which is exactly what a resumed session needs and exactly
-wrong for a round that is over. It is also not something that can go on: once a
-round has been entered three times without this file, the next allocation
-refuses with exit 4, because a round re-entered and re-entered is a loop that
-spends no budget and loses its findings every pass.
-
-### When a finding is against the goal, not the plan
-
-This happens, and it is the most valuable thing the review round produces: a
-reviewer establishes that the *outcome* is underspecified, or that a decision the
-owner settled cannot hold. A revision cannot fix that, because the goal is not
-yours to revise.
-
-**Ask.** One `AskUserQuestion` naming what the reviewer found, what it means for
-the goal, and the options — put as the hole it is, in your own words: what the
-outcome does not settle, and what turns on settling it either way. Which of the
-three readers raised it, at what severity, against which deliverable number is
-how it reached you, and none of it helps them answer. Do not decide it yourself
-and do not record your decision in `goal.md` — a hole a reviewer found is exactly the kind of thing the
-owner would have answered differently, which is why it reached them as a question
-in the first place rather than as a fact.
+**A finding for the owner** is the most valuable thing the review produces: a
+reader established that the *outcome* is underspecified, or that a decision the
+owner settled cannot hold. Ask now, one `AskUserQuestion`, in your own words:
+what the outcome does not settle and what turns on settling it either way. Which
+reader raised it, and its id, is how it reached you and helps nobody answer. Do
+not decide it yourself.
 
 If their answer changes the goal, they edit `goal.md` or tell you what to write.
-Then show them the changed file and run `goal-gate.mjs approve` again. The gate
-re-opens and re-closes, the marker records the new hash, and the plan is revised
-against a goal they read.
+Show them the changed file and run `goal-gate.mjs approve` again — the marker
+records the new hash. Then dispatch the drafter once more, blocking, with the
+answers, to revise the plan against the goal they read. Nothing is re-reviewed:
+the answers are the owner's, and a second panel over them would be spending
+three readers to check the person's own decision. If their answer does not
+change the goal — the reader was wrong, or the point belongs in a spec — tell
+the drafter that in the same brief.
 
-**Finish the round you are in.** Their answer goes into this round's revision
-brief with the rest of the `blocking` and `major` findings, and then this round
-is closed out normally. Do not abandon the round's directory, do not re-run its
-readers under the new approval, and do not renumber anything: the findings on
-disk were made against the goal that was approved at the time, which is what a
-record is for. The next allocation reads the new hash out of the marker, so the
-next round starts a fresh budget and takes the next number.
-
-If their answer does not change the goal — the reviewer was wrong, or the point
-belongs in a spec — say so in the revision brief and leave `goal.md` alone.
-
-The gate is not a freeze. It is a rule that the goal cannot change without the
-owner seeing the change, which is why `verify` compares bytes rather than
-trusting that nobody touched it.
+There is no second round. Across every plan this plugin has reviewed, no round
+of three readers has ever closed with nothing blocking or major, so a loop that
+runs until one does runs to its budget every time and finds new things in each
+revision. The answered round is the review.
 
 ## 6 — Specs
 
 ```bash
+node "$P/scripts/goal-gate.mjs" verify "$D"
 node "$P/scripts/deliverables.mjs" "$D/plan.md"
 ```
 
 That returns one object per deliverable — id, what it delivers, dependencies,
 user-visibility, and the row verbatim. It is how you dispatch without reading
-`plan.md`: the rows come out as data, the plan body stays out of your context.
+`plan.md`. It refuses a plan over the 12 KB ceiling, naming the size: re-dispatch
+the drafter, blocking, to cut it to the target, and run it again.
 
-Dispatch one `tagteam:spec-writer-<effort>` per deliverable, **all in one message**, each
-at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null, and each writing exactly `$D/specs/<id>.md`. Give each one the
-goal path, the plan path, its own row, and the configured default lens set so it
-knows what it is naming exceptions to.
+Dispatch one `tagteam:spec-writer-<effort>` per deliverable at `spec-write`'s
+model, **all in one message**, each writing exactly `$D/specs/<id>.md`. Give
+each one the goal path, the plan path, the exploration path, its own row, and
+the configured default lens set so it knows what it is naming exceptions to.
+The message returns when every writer has.
 
-**Then wait for every writer**, with one background watcher over the spec paths
-you assigned — one `-f` per deliverable, however many there are:
-
-```bash
-until [ -f "$D/specs/<id>.md" ] && [ -f "$D/specs/<id>.md" ]; do sleep 5; done
-```
-
-This one has no backstop, which is why it matters more than it looks.
-`specs.mjs` reads the directory rather than the deliverables list, so a spec
-whose writer has not finished yet is not an error — it is simply absent from a
-shorter `order`, reported as `ok`. Step 7 then shows a deliverable list with one
-quietly missing, and `approved.json` records it that way.
-
-Then validate: `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json"`. It
-checks front matter, resolves each spec's lenses against the default set, and
-returns dependency order. Fix what it reports by re-dispatching that spec's
-`tagteam:spec-writer-<effort>` at `models.lead` / `effort.lead`, or `plan.models.lead` / `plan.effort.lead` when `plan` is not null — **with `run_in_background: false`,
-not behind a watcher.** A spec it rejected is a spec that exists, so `[ -f ]` on
-the path the writer is rewriting returns having waited for nothing, and
-`specs.mjs` re-runs against the file that already failed.
+Then validate:
+`node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json" --enforce-size`. It
+checks front matter, refuses a spec over the 18 KB ceiling by name, resolves each
+spec's lenses against the default set, and returns dependency order. Fix what it
+reports by re-dispatching that spec's writer, blocking, with what it said.
 
 **The reviewer selection lives in the spec front matter**, because that is what
-`specs.mjs` and shipping actually read. There is no separate manifest to edit: a
-second copy of this that nothing consumed would be a control that appears to work
-and does not.
+`specs.mjs` and shipping actually read. There is no separate manifest to edit.
 
 ## 7 — Approve
 
 Show: the deliverables in dependency order, the lenses `specs.mjs` resolved for
-each one, the note that Codex and the adversary run on every spec regardless, and
-the count of anything left unanswered. Say that the lens selection lives in each
-spec's front matter and is editable there, the way `goal.md` was.
+each one, the note that Codex and the adversary run on every spec regardless,
+which specs will stop for them because they are user-visible, and **the review
+findings the drafter rejected, with its reasons** — `plan.mjs check` printed
+them, and this is where the person sees what was declined on their behalf. Say
+that the lens selection lives in each spec's front matter and is editable there,
+the way `goal.md` was.
 
 A lens this repository calibrates itself has its brief at
 `$R/.tagteam/lenses/<lens>.md`, and that file is the only place its description
-can come from — the plugin has nothing to say about a `financial` reviewer this
-project defined. Read it to describe the lens; do not infer what it reads for
-from its name.
+can come from. Read it to describe the lens; do not infer what it reads for from
+its name. Give each lens as what it reads for *and* by name — "a reader checking
+that the system behaves under conditions the spec doesn't enumerate
+(`resilience`)".
 
-Give each lens as what it reads for *and* by name — "a reader checking that the
-system behaves under conditions the spec doesn't enumerate (`resilience`)".
-The description is what makes the choice decidable here; the name is what they
-will search the front matter for when they change it later, so dropping either
-one costs them something.
+Say nothing about how large anything is: the ceilings are enforced in code, and
+by the time a person is deciding whether to approve, a byte count is noise.
 
-**Say nothing about how large anything is.** There is no size check, and there is
-not meant to be one. Plan size is shaped where it is written — the drafting brief
-and the spec brief each state a target, and the plan reviewer may report a plan
-for saying too much. By the time a person is deciding whether to approve, a byte
-count is either noise or a nudge toward compressing something that was fine, and
-the compression ratchet is what this design exists to remove.
-
-Run `node "$P/scripts/goal-gate.mjs" verify "$D"` one last time before asking. A
-failure here means the goal drifted somewhere in steps 4–6 without the owner
-seeing it, and that has to be resolved before anything is committed.
+Run `node "$P/scripts/goal-gate.mjs" verify "$D"` one last time before asking.
 
 Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.json`
 (`{"approvedAt", "slug", "specs": [...], "goalSha256", "planSha256"}`), commit
@@ -428,10 +280,9 @@ shipping does not need.
 
 ## When Codex could not say how it ran
 
-The `codex.mjs` call reports how the run it made was routed. **The trigger is
-what that result says**: it says Codex ran, and it says the routing could not be
-observed. Read it off the result, not off a guess about the text on stderr, and
-not off a failed call.
+The runner's one line carries how the Codex run was routed. **The trigger is
+that line**: it says Codex ran, and that how it routed could not be confirmed.
+A failed call is a failed call and is reported as one, not as this.
 
 `$D/work/codex-routing-ack` exists: say nothing about it and carry on.
 
@@ -441,27 +292,22 @@ told to think, and that the likeliest cause is a newer Codex recording a run
 differently than this version of tagteam knows how to read. Three options: carry
 on; carry on and stop asking for the rest of this run; stop here.
 
-Only the middle one writes anything: `printf '' > "$D/work/codex-routing-ack"`,
-which is what "the rest of this run" means — step 4 cleared it, so the next
-`/tagteam:plan` asks again. Do not describe that to them as a file, a path or a
-setting; it is not one.
+Only the middle one writes anything: `printf '' > "$D/work/codex-routing-ack"`.
+Do not describe that to them as a file, a path or a setting; it is not one.
 
-An unconfirmed routing blocks nothing on its own: no gate changes, the review
-counts exactly as it did, and nothing is held for it. **And it is not the other
-thing** — a Codex call that reports it ran at a different effort than it was
-asked for **failed**, wrote nothing, and is reported the way any failed Codex
-call in that step is.
+An unconfirmed routing blocks nothing on its own: the review counts exactly as
+it did. A Codex call that ran at a different effort than it was asked for
+**failed**, wrote nothing, and is reported the way any failed Codex call is.
 
 ## Discipline
 
-Do not read `plan.md` or any spec body into your own context. You do not need
-them and you will need the room.
+Do not read `plan.md`, `exploration.md` beyond its opening, or any spec body
+into your own context. You do not need them and you will need the room.
 
 Do not run a script over files the agents you dispatched have not written yet.
-Dispatch returns before they do, and none of these scripts wait: one background
-watcher over the paths of a fan-out, a blocking dispatch for everything else,
-never repeated checks and never a command run to pass the time.
+Every dispatch here blocks, so when the message returns the files exist; a
+missing one is a reader that failed, which `collect` and `specs.mjs` report.
 
 Do not add a review log, a changelog, or a record of what a reviewer asked to any
 committed file. The plan states the current shape of the work; the review record
-is in `work/` for anyone who wants it.
+is in `work/review/` for anyone who wants it.

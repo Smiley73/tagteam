@@ -1,7 +1,9 @@
 # Implementing a spec
 
 Read the spec at the path you are given. It is self-contained by design: it tells
-you what the repository cannot. Read the repository for everything else.
+you what the repository cannot, and it deliberately does not list every file you
+will touch — you read the repository for that, with the call graph where one is
+indexed. Read the repository for everything else.
 
 Then read the project's conventions document if the run named one, and match the
 code around what you are changing — its naming, its error handling, its comment

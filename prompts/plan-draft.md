@@ -3,7 +3,8 @@
 You are writing `plan.md` for a goal a person has already settled. Read `goal.md`
 first and treat it as binding: it holds the outcome, the decisions taken, and
 what is explicitly out of scope. A decision recorded there is not yours to
-revisit.
+revisit. Read the exploration the run points you at: it says how the areas this
+goal touches are built today.
 
 ## What a plan is
 
@@ -51,28 +52,51 @@ If a goal genuinely needs more than about eight, say so in the Order section:
 that is usually two plans, and it is better to say it now than to discover it
 during shipping.
 
-Mark a deliverable **user-visible** when a person using the product would notice
-it. Being unsure counts as yes: shipping stops for those and waits, and a
-wrongly-stopped merge costs a moment, while a wrongly-merged interface change
-costs a revert.
+Mark a deliverable **user-visible** only when you are sure a person using the
+product will see or do something different once it lands: a screen, a message,
+a flow, a document they read. A user-visible deliverable always stops for the
+owner before it merges, so marking one you are unsure about is not caution — it
+is a stop nobody asked for. When you are unsure, mark it no and name the doubt
+in Risks, where the spec writer will see it.
 
 ## Size
 
-Around 8 KB is the target, and it is a target rather than a limit — nothing will
-compress this for you, and nothing will ask you to try again. A plan that runs
-long is almost never one that needs shorter sentences; it is one carrying
-material that belongs in a spec, or one describing more than a single goal.
+Around 8 KB is the target, and 12 KB is a ceiling the run enforces: a plan over
+it is refused before anything is written from it and comes back to you to cut. A
+plan that runs long is almost never one that needs shorter sentences; it is one
+carrying material that belongs in a spec, or one describing more than a single
+goal.
 
 The specific way this goes wrong: writing out file lists, function signatures,
 and code sketches in the index. An implementer never reads this file. Every line
 of that is paid for twice and read once.
 
-## Revising
+## Answering the review
 
-When you are given critiques, apply them and return the same file. Revision is
-subtractive as often as additive: a critique saying the plan says too much is
-resolved by saying less, not by adding a justification for having said it.
+The plan is reviewed once, by three readers at the same time, and their
+blocking and major findings reach you as one brief with an id on each. There is
+no second review: what you do with each finding is what stands, and the person
+approving the plan reads your answers.
+
+Revise the plan for the findings you accept, then write the response file at the
+path you are given, matching `schemas/plan-response.schema.json` — exactly one
+entry per id in the brief, each one of:
+
+- `applied` — the plan changed for it; one line on what changed.
+- `rejected` — the finding is wrong, or it is about how a deliverable is built
+  and belongs in that deliverable's spec; one line on why. Rejecting is
+  legitimate and expected, and a rejection with a real reason is worth more than
+  a change that satisfies the sentence and weakens the plan.
+- `needs-owner` — the finding is against the goal, not the plan: the outcome
+  does not settle something, or a settled decision cannot hold. Say what has to
+  be decided. The run asks the owner, and you revise once more with their answer.
+
+Revision is subtractive as often as additive: a finding that the plan says too
+much is applied by saying less, not by adding a justification for having said it.
 
 Do not add a changelog, a revision history, or a record of what a reviewer
 asked. The plan states the current shape of the work. The review record lives
 beside it, in files nobody has to read to implement.
+
+Return one line: the plan path and its byte count, and the response path when
+you wrote one.

@@ -7,11 +7,11 @@ OpenAI plan the work, implement it, and cross-review every diff, with an
 adversarial AI code review on both the plan and the code.
 
 You describe what you want, however roughly. Tagteam interviews you until the
-outcome is concrete, writes a plan, has it reviewed by three independent readers
-for as many rounds as you allow, and breaks it into spec files. Then it implements those specs one at a
-time — each in its own branch, each reviewed by a cross-engine panel, each
-verified — and merges the ones that need no judgement from you. The ones that do
-stop and wait.
+outcome is concrete, writes a plan, has it read once by three independent
+reviewers whose findings the drafter answers in writing, and breaks it into spec
+files. Then it implements those specs one at a time — each in its own branch,
+each reviewed by a cross-engine panel, each verified — and merges the ones that
+need no judgement from you. The ones that do stop and wait.
 
 It is for changes big enough that you want them delegated and not so opaque that
 you cannot check them. Every decision you make is written to a file you can edit.
@@ -49,12 +49,12 @@ agent tagteam dispatches can use it: one query returns a symbol's source
 together with its callers, so a reviewer sees a diff's blast radius — and an
 implementer the code around its change — without spending context on search.
 Without the index the agents read files instead; with `codegraph` on your
-PATH, `/tagteam:init` offers to build one.
+PATH, `/tagteam:configure` offers to build one.
 
 ## Use
 
 ```text
-/tagteam:init
+/tagteam:configure
 /tagteam:plan Add account recovery with auditable security events
 /tagteam:ship .tagteam/plans/add-account-recovery
 /tagteam:status
@@ -71,21 +71,22 @@ that runs out.
 title: The plan cycle
 ---
 flowchart TD
-    orient["Orient — an explorer agent reads the repository first"]
+    orient["Orient — an explorer agent reads the repository and writes what it found"]
     interview["Interview — batched questions until nothing material is ambiguous"]
     goal["Goal gate — you read goal.md, edit it if it is wrong, approve it"]
-    draft["Draft — one plan-drafter writes plan.md"]
+    draft["Draft — one plan-drafter writes plan.md, an index under 12 KB"]
     claude["Claude reviewer"]
     codex["Codex reviewer"]
     adversary["Adversary"]
-    revise["Revise — the blocking and major findings folded in"]
-    specs["Specs — one spec-writer per deliverable, in parallel"]
-    approve["Approve — one question: Approve / Adjust / Stop"]
+    answer["Answer — the drafter applies each blocking or major finding<br>or rejects it with a reason you read at approval"]
+    owner["A finding against the goal itself: you answer,<br>goal.md changes, the gate re-closes, the plan is revised once more"]
+    specs["Specs — one spec-writer per deliverable, in parallel, each under 18 KB"]
+    approve["Approve — deliverables, lenses, the rejected findings, one question"]
 
     orient --> interview
     interview --> goal
     goal --> draft
-    subgraph review["A review round — three readers, then a revision"]
+    subgraph review["One review — three readers at once, then the answer"]
         claude
         codex
         adversary
@@ -93,12 +94,12 @@ flowchart TD
     draft --> claude
     draft --> codex
     draft --> adversary
-    claude --> revise
-    codex --> revise
-    adversary --> revise
-    revise -->|"something blocking or major:<br>the revised plan goes back to all three,<br>up to limits.planReviewRounds rounds"| review
-    revise -. "a finding against the goal itself: you answer,<br>goal.md changes, the gate re-opens and re-closes —<br>and a re-approved goal starts the review budget over" .-> goal
-    revise -->|"a round that raises nothing blocking<br>or major, or the rounds this repository<br>allows are spent"| specs
+    claude --> answer
+    codex --> answer
+    adversary --> answer
+    answer -. "only when a reader found a hole in the goal" .-> owner
+    owner --> specs
+    answer --> specs
     specs --> approve
 ```
 
@@ -112,21 +113,25 @@ flowchart TD
    wrong, and everything downstream binds to the file rather than to the
    conversation.
 3. **Draft and review.** One drafter writes a plan. A Claude reviewer, a Codex
-   reviewer, and an adversary read it in parallel; a revision folds their
-   blocking and major findings in, and the revised plan goes back to all three
-   for another round. `limits.planReviewRounds` is how many rounds one approved
-   goal gets — a round that raises nothing blocking or major ends it earlier, and
-   re-approving a changed goal starts the count again.
+   reviewer, and an adversary read it at the same time. The drafter then answers
+   every blocking and major finding by id: it applies the ones it accepts and
+   writes one line on why for each one it rejects, and you read the rejections
+   when you approve. There is no second review round. Across every plan this
+   plugin had reviewed, no round of three readers ever closed with nothing
+   blocking or major, so a loop that ran until one did ran to its budget every
+   time, finding new things in each revision.
 4. **Specs.** One file per deliverable, written in parallel, each self-contained
-   for the implementer that will receive it.
-5. **Approve.** Sizes reported once, reviewer selection shown as a default set
-   plus named exceptions, and one question.
+   for the implementer that will receive it. A plan is an index and a spec says
+   what the repository cannot; both have a size the run enforces.
+5. **Approve.** Deliverables in dependency order, the lenses each will get, the
+   findings the drafter declined and why, and one question.
 
 ### Shipping
 
 Per spec, in dependency order: branch, implement, verify, review, fix, re-check,
 publish, merge — with the fix and the review repeating for as many rounds as you
-allow.
+allow. A driver script sequences every step and prints every dispatch; the
+orchestrating agent runs it, dispatches what it prints, and talks to you.
 
 ```mermaid
 ---
@@ -151,7 +156,7 @@ flowchart TD
     branch --> implement
     implement --> snapshot
     snapshot --> verify
-    subgraph panel["Review panel, in parallel — every lens plus Codex,<br>on every round this step runs"]
+    subgraph panel["Review panel, one message of blocking agents — every lens plus Codex,<br>on every round this step runs"]
         lenses
         codexr
     end
@@ -186,11 +191,18 @@ reviewer the plugin could never have written, and a brief named after one the
 plugin ships replaces it. A rostered lens with a brief in neither place is
 refused rather than reviewed on improvisation.
 
-The review panel is the spec's lenses plus a Codex cross-review. After a fix
-round, each reviewer that raised a finding re-checks its own findings against the
-new code, and an adversary reads the fixed diff fresh. Anything still open starts
-another round, for as many rounds as `limits.fixRounds` allows; when they run out
-the pull request stops with the findings on it and says so.
+The review panel is the spec's lenses plus a Codex cross-review, dispatched as
+one message of blocking agents that run at the same time. Codex is told which
+lenses are reading beside it and hunts for what falls between them. After a fix
+round, each reviewer that raised a finding re-checks its own findings against
+the new code, and an adversary reads the fixed diff fresh. Anything still open
+starts another round, for as many rounds as `limits.fixRounds` allows; when they
+run out the pull request stops with the findings on it and says so.
+
+Each job thinks as hard as its work needs: the implementer, the fixer and the
+adversary at high effort by default, lens reviewers at medium, and re-checks —
+which only have to say whether one fix landed — at low. Every one of those is a
+setting in `.tagteam/config.json`.
 
 A pull request merges unattended unless: the spec is marked user-visible,
 verification failed or CI proved nothing, a finding is still open, **a reviewer
@@ -219,16 +231,25 @@ flowchart TD
     evaluate -->|"the agent that wrote it never confirmed it finished"| wait
 ```
 
+After each spec, `/tagteam:status` can say what it cost: tagteam reads the
+session transcripts Claude Code keeps and reports the spend as input-token
+equivalents, split between the orchestrating agent and the agents it dispatched.
+
 ## How it is built
 
-The orchestrator is the main Claude Code agent following the command files. It
-runs git, Codex, and this plugin's scripts directly, and dispatches subagents only
-for model work. Subagents write their own outputs; the orchestrator reads them.
-Nothing large is ever moved between steps by passing it through a model.
+The orchestrator is the main Claude Code agent following the command files. In a
+ship it runs `scripts/ship.mjs` once per step; the driver runs git, Codex and
+the other scripts, decides the round, the route and every model and effort, and
+prints the agents to dispatch with their prompts written out. The orchestrator
+dispatches them as one blocking message, relays what happened in plain English,
+writes the pull request body, and asks the questions only a person can answer.
+Subagents write their own outputs; scripts read them. Nothing large is ever
+moved between steps by passing it through a model.
 
 Decisions that are silent when wrong are code, not prose: which commit gets
-merged, whether the gates are satisfied, and how CI checks classify. Everything
-else is the command file.
+merged, whether the gates are satisfied, how CI checks classify, which round a
+commit belongs to, and which settings a dispatch runs at. What is left in the
+command files is what a person has to be told and asked.
 
 State is files on disk. There are no fingerprints, reuse ledgers, or invocation
 records — a re-run looks at what exists and continues from the first thing that
@@ -252,7 +273,7 @@ does not.
 ## Reference
 
 [skills/tagteam/SKILL.md](skills/tagteam/SKILL.md) — configuration, artifact
-layout, the Git protocol, the Codex bridge, and recovery.
+layout, dispatching, the Codex bridge, the Git protocol, the gates and recovery.
 [examples/config.json](examples/config.json) — a complete configuration.
 
 ## Development
@@ -267,24 +288,18 @@ The diagrams in this file are Mermaid source. GitHub renders them, and changing
 one is a text edit here, with no image files to regenerate.
 
 A repository that calibrates its own lenses needs plugin 0.8.2 or newer
-**everywhere it is run**. The configuration version did not change, so an older
-snapshot validates the file, reaches a roster entry it cannot find a brief for
-inside itself, and refuses it — telling whoever ran it to drop the lens. Commit
-the brief and the roster entry that names it in the same commit, and refresh the
-plugin below.
+**everywhere it is run**, and one configured at version 9 needs 0.9.0 or newer.
+Commit a brief and the roster entry that names it in the same commit, and
+refresh the plugin below.
 
 This repository self-hosts tagteam. Unless you start Claude Code with
 `--plugin-dir`, it runs the installed plugin snapshot rather than this working
 tree: `.tagteam/config.json` is read live from the repository, but the scripts
 and command files reading it belong to the snapshot. A change to a plugin file
-does nothing here until the snapshot is refreshed; a change to that file's
-`version` does worse, because the snapshot's validator compares it against its
-own and exits 3, stopping `/tagteam:plan` and `/tagteam:ship` with an
-instruction to run the old snapshot's `/tagteam:init` — which would rewrite the
-config back. `/tagteam:status`, `/tagteam:plan` and `/tagteam:ship` each say
-which snapshot is running them and, in a checkout of the plugin itself, name the
-files that actually execute whose installed copy differs from the working tree —
-so this is something you are told rather than something you have to remember.
+does nothing here until the snapshot is refreshed. `/tagteam:status`,
+`/tagteam:plan` and `/tagteam:ship` each say which snapshot is running them
+and, in a checkout of the plugin itself, name the files that actually execute
+whose installed copy differs from the working tree.
 
 Which refresh applies depends on which version moved. If the package version in
 `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` was raised,
@@ -295,11 +310,9 @@ claude plugin marketplace update tagteam
 claude plugin update tagteam@tagteam
 ```
 
-For every other change — including a `.tagteam/config.json` version bump at an
-unchanged package version, the usual case while developing — `update` reports
-there is nothing to do. Run `claude plugin uninstall tagteam@tagteam` and
-install again with the [Install](#install) command. Restart the session either
-way.
+For every other change, `update` reports there is nothing to do. Run
+`claude plugin uninstall tagteam@tagteam` and install again with the
+[Install](#install) command. Restart the session either way.
 
 ## License
 

@@ -4,7 +4,7 @@
 // reviewer is one file: the brief the reviewer is told to read. Until version
 // 0.8.2 that file could only be `prompts/lenses/<lens>.md` inside the plugin, so
 // a repository whose roster named a lens the plugin does not ship had no way to
-// supply one — `/tagteam:init` said the roster was closed, and the only move was
+// supply one — `/tagteam:configure` said the roster was closed, and the only move was
 // to drop the lens. A repository that wants a `financial` reviewer wants it
 // because its own code has tax years and contribution limits in it, which is
 // exactly the case the plugin cannot ship a brief for.

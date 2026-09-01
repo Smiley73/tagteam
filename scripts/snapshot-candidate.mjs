@@ -106,6 +106,28 @@ export function primaryStatus(output) {
     .join("\n");
 }
 
+// `src/auth/recovery.ts` becomes `03-src__auth__recovery.ts.diff`: readable,
+// unique within the round, and safe on every filesystem. The index file maps
+// each one back to the path it came from.
+export const perFileDiffName = (index, file) =>
+  `${String(index + 1).padStart(2, "0")}-${normalizeRepoPath(file).replace(/\//g, "__").replace(/[^A-Za-z0-9._-]/g, "-")}.diff`;
+
+function writePerFileDiffs(worktree, dir, baseOid, candidateOid, entries, isExcluded) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const index = [];
+  let position = 0;
+  for (const entry of entries) {
+    const destination = normalizeRepoPath(entry.paths[entry.paths.length - 1]);
+    if (isExcluded(destination)) continue;
+    const name = perFileDiffName(position, destination);
+    position += 1;
+    const text = git(worktree, ["diff", "--no-ext-diff", "-M", `${baseOid}..${candidateOid}`, "--", ...entry.paths]).stdout;
+    writeRoundFile(path.join(dir, name), text);
+    index.push(`${name}\t${destination}`);
+  }
+  writeRoundFile(path.join(dir, "index.txt"), `${index.join("\n")}\n`);
+}
+
 function blobAt(cwd, oid, file) {
   const result = git(cwd, ["rev-parse", `${oid}:${file}`], { allowFailure: true });
   return result.status === 0 ? result.stdout.trim() : null;
@@ -229,6 +251,12 @@ export function snapshotCandidate(options) {
   const round = enterRound(outDir, { owner: candidateOid });
   const reviewDiffPath = path.join(outDir, "review.diff");
   writeRoundFile(reviewDiffPath, reviewDiff);
+  // The same change one file at a time, beside the whole diff. A reviewer's Read
+  // shows at most 2000 lines, and half the diffs this plugin has reviewed were
+  // longer than that; a re-check that read the first 2000 and stopped judged a
+  // truncated change. Per-file diffs let a lens read the files it cares about
+  // whole, and let every reader know where the change ends.
+  writePerFileDiffs(worktree, path.join(outDir, "review.diff.d"), baseOid, candidateOid, parseNameStatus(nameStatusBuffer.toString("utf8")), isExcluded);
   // The same list candidate.json carries, alone in a file the bridge can fence
   // directly. candidate.json cannot serve that purpose: it also holds
   // addedLines, so fencing it would put the whole change into the prompt a
