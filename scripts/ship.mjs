@@ -820,18 +820,61 @@ const REASONS = {
   "auto-merge-disabled": "auto-merge is off in this repository's configuration"
 };
 
+// What moves a blocker: the step that records it, run again against this commit,
+// or a new commit, which every fix round makes. Named in the ask so the person
+// is told what would clear it instead of being offered an approval that
+// `evaluate` would not honour.
+const CLEARS = {
+  "review-not-recorded": "recheck, then settle",
+  "review-open": "fix",
+  "review-incomplete": "the step whose reader wrote nothing usable (recheck, then settle, when that was a re-check)",
+  "verification-not-recorded": "verify",
+  "verification-failed": "fix, then verify",
+  "continuous-integration-failed": "repair",
+  "continuous-integration-not-recorded": "publish"
+};
+
+const sentence = (reason) => REASONS[reason] ?? reason;
+
+// The question `finish` asks when it stops. `evaluate` honours a person's
+// approval for everything in its `approvals` and for nothing in its `blockers`,
+// so approving is offered only when it would change the verdict. Offered for a
+// blocker, it was taken: the approval was recorded, printed as "Approved by",
+// and `finish` asked again with the same reasons.
+function stopAsk(id, { blockers, approvals }) {
+  const text = [`${id} stops and waits.`];
+  if (blockers.length > 0) {
+    text.push(`Blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by running ${CLEARS[reason] ?? "the step that records it"} again, or by a new commit; no approval clears it)`).join("; ")}.`);
+    if (approvals.length > 0) text.push(`Also waiting on you: ${approvals.map(sentence).join("; ")}; approval would clear only this part, so it is not offered until nothing is blocked.`);
+    text.push("Offer: leave it open and continue (run next), or stop the train (run end).");
+  } else {
+    text.push(`Reasons: ${approvals.map(sentence).join("; ")}.`);
+    text.push("Offer: approve and merge (rerun finish with --approve <email>), leave it open and continue (run next), or stop the train (run end).");
+  }
+  return text.join(" ");
+}
+
 function finish(options) {
   const ctx = context(options);
   const id = options.spec;
   let state = readState(ctx, id);
   const say = [];
+  const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
+  let verdict = evaluateGates();
   if (options.approve) {
-    const gate = path.join(specDir(ctx, id), "human.json");
-    writeJson(gate, { approved: true, approvedBy: options.approve, approvedAt: new Date().toISOString(), note: "approved in the ship session" });
-    record(ctx, id, "human", state.candidateOid, gate);
-    say.push(`Approved by ${options.approve} at ${state.candidateOid.slice(0, 12)}.`);
+    // An approval given while a blocker is open would change nothing now and
+    // would still be on disk, bound to this commit, when the blocker clears —
+    // merging unattended what nobody looked at again. It is not recorded.
+    if (verdict.blockers.length > 0) {
+      say.push(`Not recording ${options.approve}'s approval: ${verdict.blockers.map(sentence).join("; ")}. No approval clears a blocker.`);
+    } else {
+      const gate = path.join(specDir(ctx, id), "human.json");
+      writeJson(gate, { approved: true, approvedBy: options.approve, approvedAt: new Date().toISOString(), note: "approved in the ship session" });
+      record(ctx, id, "human", state.candidateOid, gate);
+      say.push(`Approved by ${options.approve} at ${state.candidateOid.slice(0, 12)}.`);
+      verdict = evaluateGates();
+    }
   }
-  const verdict = lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   if (verdict.ready) {
     const merged = lastJson(node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath]).stdout);
     if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
@@ -856,8 +899,8 @@ function finish(options) {
   const following = nextSpecAfter(ctx, id);
   emit({
     say,
-    ask: `${id} stops and waits. Reasons: ${reasons.map((reason) => REASONS[reason] ?? reason).join("; ")}. Offer: approve and merge (rerun finish with --approve <email>), leave it open and continue (run next), or stop the train (run end).`,
-    reasons, pullRequest: state.pr, openFindings: open, unaccounted: reports,
+    ask: stopAsk(id, verdict),
+    reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: following ? nextCommand(ctx, "begin", following) : nextCommand(ctx, "end", null)
   });
 }

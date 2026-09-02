@@ -213,6 +213,12 @@ That fourth one matters more than it sounds: an absent or malformed findings fil
 yields an empty finding set, and an empty finding set otherwise reads as a clean
 review.
 
+A person can approve past some of those stops and not others. User-visible, a
+workflow change, and an unconfirmed account are theirs to accept; a failed
+verification, an open finding, and a reviewer that produced no usable evidence
+are cleared only by new evidence, and `finish` offers approval only when it
+would count.
+
 ```mermaid
 ---
 title: Merge or stop

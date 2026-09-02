@@ -150,16 +150,31 @@ verdict, for a spec of this plan. Not `gh pr merge` by hand, not merging when
 base, a protection rule, a failing check — is a stop: say what it said.
 
 When the gates are not satisfied, `finish` puts the spec in `awaiting-approval`,
-sends a desktop notification, and returns `ask` with `reasons`, the pull request,
-`openFindings` (each open finding's detail, as the reviewer wrote it) and
-`unaccounted` (what an agent left undone, in its own words). Say all of it in
-plain English: what this spec set out to deliver, why it stopped, and one
-sentence per open finding on what goes wrong and for whom — see *Asking* in the
-skill. Then ask one question with three answers:
+sends a desktop notification, and returns `ask` with `reasons` — the same list
+split into `blockers` and `approvals` — the pull request, `openFindings` (each
+open finding's detail, as the reviewer wrote it) and `unaccounted` (what an agent
+left undone, in its own words). Say all of it in plain English: what this spec set
+out to deliver, why it stopped, and one sentence per open finding on what goes
+wrong and for whom — see *Asking* in the skill. Then ask one question, with the
+answers `ask` offers.
 
-- **Approve and merge** — run `finish` again with `--approve <their email>`.
-- **Leave it open and continue** — run `next`.
-- **Stop the train** — run `end`.
+The two halves take different answers. A person's approval is what `evaluate`
+honours for `approvals` — user-visible, a workflow change, a round nobody
+accounted for, nothing executable having run, inconclusive checks, auto-merge
+off — and for nothing in `blockers`: a reviewer that produced no usable
+evidence, a finding still open, a verification or check that failed or never
+ran. **No approval clears a blocker.** `finish --approve` given while one is
+open records nothing and says so; what clears it is the step that records it,
+run again against this commit — `recheck` then `settle` for a re-check that
+wrote nothing usable, `verify`, `repair` — or a new commit. So:
+
+- **Nothing blocked** — three answers: **approve and merge** (run `finish`
+  again with `--approve <their email>`), **leave it open and continue** (run
+  `next`), or **stop the train** (run `end`).
+- **Something blocked** — two answers, leave it open or stop the train, and
+  before asking say what would clear it, in behaviour terms: which reader wrote
+  nothing usable, which check failed. Do not offer approval; it would not be
+  recorded, and it would not have merged.
 
 When a budget is what stopped it, say that too: it used every fix round or every
 CI repair this repository allows, what is still open in behaviour terms, and
