@@ -256,9 +256,9 @@ test("an approval given while a reviewer wrote nothing usable is not recorded, a
   assert.equal(state().gates.human, null, "the approval is not recorded against a blocked commit");
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "human.json")), "and nothing is left on disk to be honoured later");
   assert.match(approved.json.ask, /no usable evidence.*no approval clears it/);
-  assert.match(approved.json.ask, /recheck, then settle/, "the ask names what would clear it");
+  assert.match(approved.json.ask, /revisit — the reader that wrote nothing usable reads again/, "the ask names what would clear it");
   assert.doesNotMatch(approved.json.ask, /--approve/, "approving is not offered for a blocker");
-  assert.match(approved.json.ask, /leave it open and continue \(run next\), or stop the train \(run end\)/);
+  assert.match(approved.json.ask, /leave it open and continue \(run next\), stop the train \(run end\), or .*\(run revisit/);
 
   const again = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
   assert.equal(again.status, 0, again.stderr);
@@ -398,4 +398,103 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   assert.equal(finish.json.unaccounted.length, 1);
   assert.match(finish.json.unaccounted[0], /wrote no report/);
   assert.equal(state().state, "verifying", "a finish that stops before publish leaves the state where it was");
+});
+
+// The case that opened this: a spec waited on a finding a person had already
+// resolved by editing the pull request body, and the only exit from waiting was
+// `repair`, which spends a CI repair and tells a fixer it is fixing a red check.
+// `revisit` is the other exit — the same commit through the cycle again, with
+// nothing spent by looking.
+test("a spec waiting on an open finding is revisited through the cycle again without spending a fix round or a CI repair", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  // One fix round, so the finding the fixer does not resolve leaves the spec waiting.
+  const configPath = path.join(repo, ".tagteam", "config.json");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.limits = { fixRounds: 1, ciRepairs: 1 };
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const first = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  ship("collect", plan, ["--spec", "01-a"]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: []
+  });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.json.review, "open");
+  const spent = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(spent.json.budget, "spent");
+  assert.match(spent.json.next, /publish/);
+  assert.equal(state().fixRoundsUsed, 1);
+  // `publish` needs GitHub; the states it leaves behind do not.
+  const gates = (next) => spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "state", path.join(shipDir, "01-a", "state.json"), next], { encoding: "utf8" });
+  assert.equal(gates("publishing").status, 0);
+  assert.equal(gates("awaiting-approval").status, 0);
+  const stopped = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.deepEqual(stopped.json.blockers, ["review-open"]);
+  assert.match(stopped.json.ask, /revisit once what it found is no longer there/, "the ask names the door out of waiting");
+
+  // Nothing that reads, fixes or commits runs against a spec that is waiting,
+  // and none of it spends anything by being tried.
+  for (const step of ["fix", "recheck", "settle", "panel", "snapshot"]) {
+    const refused = ship(step, plan, ["--spec", "01-a"]);
+    assert.notEqual(refused.status, 0, step);
+    assert.match(refused.stderr, /waiting for a person.*Run revisit/, step);
+  }
+  assert.equal(state().state, "awaiting-approval");
+  assert.equal(state().ciRepairsUsed, 0, "no refused step spent a repair on its way to a panel");
+
+  const revisit = ship("revisit", plan, ["--spec", "01-a"]);
+  assert.equal(revisit.status, 0, revisit.stderr);
+  assert.equal(state().state, "verifying");
+  assert.equal(state().candidateOid, second, "the same commit");
+  assert.equal(state().fixRoundsUsed, 1, "this cycle's fix budget is what it was");
+  assert.equal(state().ciRepairsUsed, 0, "looking again is not a CI repair");
+  assert.match(revisit.json.say[0], /no fix round and no CI repair/);
+  assert.match(revisit.json.next, /snapshot/);
+
+  const reentered = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(reentered.status, 0, reentered.stderr);
+  assert.equal(reentered.json.round, 2, "the round the commit already owns, rebuilt");
+  assert.match(reentered.json.say.join("\n"), /re-entering/);
+  const verified = ship("verify", plan, ["--spec", "01-a"]);
+  assert.equal(verified.json.verify, "passed");
+  assert.match(verified.json.next, /recheck/, "the first fix of the cycle still goes to the re-check");
+  const again = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual(again.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary-high", "tagteam:reviewer-low"]);
+  assert.doesNotMatch(again.json.dispatch[1].prompt, /Pull request #/, "no pull request is recorded here, so none is handed over");
+  write(outputOf(again.json.dispatch[0]), findings("adversary", second));
+  write(outputOf(again.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "resolved outside the diff" }] });
+  const settled = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settled.status, 0, settled.stderr);
+  assert.equal(settled.json.review, "clean");
+  assert.match(settled.json.next, /publish/);
+  assert.equal(state().gates.review.status, "clean", "the review gate is new evidence against the same commit");
+  assert.equal(state().fixRoundsUsed, 1);
+  assert.equal(state().ciRepairsUsed, 0);
+
+  const notWaiting = ship("revisit", plan, ["--spec", "01-a"]);
+  assert.notEqual(notWaiting.status, 0);
+  assert.match(notWaiting.stderr, /not awaiting-approval/);
 });

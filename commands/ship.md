@@ -67,12 +67,17 @@ The driver walks each spec through: `begin` (branch, dispatch the implementer),
 when something blocking or major is open and a fix round is left, `recheck`
 (the adversary's fresh pass and each reader's re-check of what it raised),
 `settle`, `publish`, `repair` when CI is red and a repair is left, and `finish`.
-You do not choose the route; `next` does. What is yours at each point:
+You do not choose the route; `next` does. One step `next` never prints:
+`revisit`, which looks at a spec that stopped for a person again, and only a
+person decides that — see *Looking again* below. What is yours at each point:
 
 - **After `begin`, `fix` and `repair`**: say the announcement in `say` — what is
   starting, which round of how many, and at what model and effort. Say it every
   time, so a round that runs at raised settings looks different on screen from
   one that did not.
+- **After `revisit`**: say what `say` says — that the same commit is being looked
+  at again, that looking spends nothing, and where the pull request as it stands
+  was recorded — then run `next`.
 - **After `collect` and `settle`**: say the finding summary in `say` as
   behaviour — what goes wrong and for whom — never as ids or file coordinates.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
@@ -128,6 +133,12 @@ Two things do carry over from the run, because they are about the software:
 
 `## Risk` says "nothing known" when there is nothing, rather than being dropped.
 
+When the pull request already exists — after a CI repair, or after a revisit —
+`publish` replaces its body with what you give it. After a revisit, start from
+the body as it stands: `revisit`'s `say` names the file holding it, and a person
+may have edited it by hand. Keep what they wrote and change only what the run
+changed, `## Risk` above all.
+
 The title is at most 70 characters of letters, digits, spaces and `. _ : -`.
 
 ## Merge or stop
@@ -165,22 +176,50 @@ off — and for nothing in `blockers`: a reviewer that produced no usable
 evidence, a finding still open, a verification or check that failed or never
 ran. **No approval clears a blocker.** `finish --approve` given while one is
 open records nothing and says so; what clears it is the step that records it,
-run again against this commit — `recheck` then `settle` for a re-check that
-wrote nothing usable, `verify`, `repair` — or a new commit. So:
+run again against this commit, or a new commit. Once the spec is waiting those
+steps run again only through `revisit` — `repair` for a red check — and `ask`
+names which. So:
 
 - **Nothing blocked** — three answers: **approve and merge** (run `finish`
   again with `--approve <their email>`), **leave it open and continue** (run
   `next`), or **stop the train** (run `end`).
-- **Something blocked** — two answers, leave it open or stop the train, and
-  before asking say what would clear it, in behaviour terms: which reader wrote
-  nothing usable, which check failed. Do not offer approval; it would not be
-  recorded, and it would not have merged.
+- **Something blocked** — three answers: leave it open, stop the train, or
+  look at it again (`revisit`, below) once they have put right what blocked it
+  without a new commit. Before asking say what would clear it, in behaviour
+  terms: which reader wrote nothing usable, which check failed, what a reader
+  still sees. Do not offer approval; it would not be recorded, and it would not
+  have merged.
 
 When a budget is what stopped it, say that too: it used every fix round or every
 CI repair this repository allows, what is still open in behaviour terms, and
 that `limits.fixRounds` or `limits.ciRepairs` in `.tagteam/config.json` is what
 a person would raise to let it try again. The setting is an aside for someone
 who wants it; the behaviour is the explanation.
+
+## Looking again
+
+A spec that stopped is waiting on evidence about one commit, and that evidence
+can go stale without the commit changing: the person edits the pull request
+body a finding was about, puts right what made a verify command fail, or wants
+the review run again. `fix`, `recheck`, `settle`, `panel` and `snapshot` all
+refuse a waiting spec — run there they would either die on the state machine or
+spend a CI repair on the way to a panel — and `repair` is for a red check only:
+it spends a CI repair and tells the fixer it is fixing one.
+
+When the person says they have dealt with what stopped it, run
+
+```bash
+node "$P/scripts/ship.mjs" revisit --plan "$D" --spec <id>
+```
+
+It puts the worktree back at the reviewed commit, records the pull request as
+it stands now for the readers, and re-enters the commit's round, so that `next`
+walks the same commit through verify, review, settle and publish again. Looking
+spends no fix round and no CI repair; a fix round it reaches comes out of this
+cycle's budget, which a spec that stopped on an open finding has usually spent
+— so a finding the readers still see leaves the spec waiting again, with the
+same offer. A commit the person added by hand is not a revisit: `revisit`
+refuses it and says so.
 
 ## Stopping between specs
 

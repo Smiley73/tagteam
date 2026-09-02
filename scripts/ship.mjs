@@ -203,7 +203,7 @@ function implementerDispatch(ctx, spec, job) {
   };
 }
 
-function reviewerDispatch(ctx, spec, round, oid, lens, brief, job) {
+function reviewerDispatch(ctx, spec, round, oid, lens, brief, job, pullRequest = []) {
   const dir = roundDir(ctx, spec.id, round);
   return {
     agent: agent("reviewer", job.effort),
@@ -215,6 +215,7 @@ function reviewerDispatch(ctx, spec, round, oid, lens, brief, job) {
       `Lens brief (read this first, after prompts/review.md): ${brief}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       `Spec: ${spec.path}`,
+      ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${path.join(dir, "findings", `${lens}.json`)}`
     ].join("\n")
@@ -239,7 +240,7 @@ function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
   return runnerDispatch({ description: `Codex review of ${spec.id}`, ...prepared });
 }
 
-function adversaryDispatch(ctx, spec, round, oid, job) {
+function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = []) {
   const dir = roundDir(ctx, spec.id, round);
   return {
     agent: agent("adversary", job.effort),
@@ -250,13 +251,14 @@ function adversaryDispatch(ctx, spec, round, oid, job) {
       `Brief: ${path.join(PLUGIN, "prompts", "code-adversary.md")} — you are judging a diff fresh, not re-checking`,
       `Spec: ${spec.path}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${path.join(dir, "findings", "adversary.json")}`
     ].join("\n")
   };
 }
 
-function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job) {
+function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = []) {
   const dir = roundDir(ctx, spec.id, round);
   const base = lens === "adversary" ? "adversary" : "reviewer";
   return {
@@ -269,6 +271,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job) {
       ...(brief ? [`Lens brief the findings were raised through: ${brief}`] : []),
       `Findings to judge, with their ids (judge every id in every file listed): ${inputs.join(" and ")}`,
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
       `Write your verdicts to: ${path.join(dir, "recheck", `${lens}.json`)}`
     ].join("\n")
@@ -291,6 +294,51 @@ function codexRecheckDispatch(ctx, spec, round, oid, input, job) {
     maxConcurrent: ctx.config.maxConcurrentCodex
   });
   return runnerDispatch({ description: `Codex re-check of ${spec.id}`, ...prepared });
+}
+
+// The pull request as it is published right now — title and body — written
+// where a reader with no shell can open it. A finding can be about the pull
+// request itself, and the pull request is the one thing about a candidate that
+// changes without the commit changing: a reader judging such a finding from the
+// diff alone can only find it still open, which is what left a spec waiting on
+// a body a person had already put right. Read fresh at every dispatch that
+// hands it over, never once and kept, so it is never a body a person has since
+// edited. No path when there is no pull request; when there is one and it could
+// not be read, no path and the reason.
+function pullRequestRecord(ctx, id, state) {
+  if (!state.pr?.number) return { path: null, error: null };
+  const result = gh(ctx.repo, ["pr", "view", String(state.pr.number), "--json", "title,body,url"], { allowFailure: true });
+  if (result.status !== 0) return { path: null, error: (result.stderr || result.stdout || "gh pr view failed").trim().split("\n")[0] };
+  let view;
+  try { view = JSON.parse(result.stdout); } catch (error) { return { path: null, error: `gh pr view printed no document: ${error.message}` }; }
+  const file = path.join(specDir(ctx, id), "pull-request.md");
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `# Pull request #${state.pr.number}: ${view.title ?? ""}\n\n${view.url ?? state.pr.url ?? ""}\n\n${view.body ?? ""}\n`, { mode: 0o600 });
+  return { path: file, error: null };
+}
+
+// What a reading dispatch gets about the pull request, and what the person is
+// told when it gets nothing it should have had.
+function pullRequestLines(ctx, id, state) {
+  const record = pullRequestRecord(ctx, id, state);
+  if (record.path) {
+    return {
+      lines: [`Pull request #${state.pr.number} as published now (title and body): ${record.path} — a finding about the pull request itself is judged against this, not against the diff`],
+      say: []
+    };
+  }
+  return { lines: [], say: record.error ? [`Pull request #${state.pr.number} could not be read (${record.error}); the readers judge the diff alone.`] : [] };
+}
+
+// A spec that stopped for a person stays exactly as it stopped until a person
+// says otherwise. Two doors lead out of waiting — `repair` for a red check and
+// `revisit` for everything else — and a step refused here would either die on
+// the state machine or, worse, take the repair edge on its way to a panel and
+// spend a CI repair nobody asked for.
+function refuseWhileWaiting(id, state, step) {
+  if (state.state !== "awaiting-approval") return;
+  throw new Stop(`${id} is waiting for a person, and ${step} does not run against a spec that is waiting. `
+    + "Run revisit to look at the reviewed commit again — it spends no fix round and no CI repair — or repair when a check is red.");
 }
 
 function fixerDispatch(ctx, spec, recordPath, job) {
@@ -492,7 +540,7 @@ function snapshot(options) {
   const say = [];
   // Read before anything is committed: a spec that was never begun has no state
   // file, and nothing may be committed on its behalf.
-  readState(ctx, id);
+  refuseWhileWaiting(id, readState(ctx, id), "snapshot");
   const pending = readJson(fixPendingPath(ctx, id), null);
   const dirty = git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "";
   const head = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
@@ -596,16 +644,18 @@ function panel(options) {
   const id = options.spec;
   const spec = specById(ctx, id);
   let state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "panel");
   if (state.state !== "reviewing") transition(ctx, id, "reviewing");
   state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}; run snapshot first`);
   const resolved = roles(ctx, id);
   const lenses = state.reviewers;
-  const dispatch = lenses.map((lens) => reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"]));
+  const pr = pullRequestLines(ctx, id, state);
+  const dispatch = lenses.map((lens) => reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines));
   dispatch.push(codexReviewDispatch(ctx, spec, round.round, state.candidateOid, lenses, resolved.jobs["review-codex"]));
   emit({
-    say: [`Review panel on round ${round.round}: ${lenses.join(", ")} (${settings(resolved.jobs["review-lens"])}) plus Codex (${settings(resolved.jobs["review-codex"])}).`],
+    say: [`Review panel on round ${round.round}: ${lenses.join(", ")} (${settings(resolved.jobs["review-lens"])}) plus Codex (${settings(resolved.jobs["review-codex"])}).`, ...pr.say],
     dispatch,
     next: nextCommand(ctx, "collect", id)
   });
@@ -632,8 +682,10 @@ function collect(options) {
     if (!exists(marker)) {
       writeJson(marker, { round: round.round, lenses: missing, at: new Date().toISOString() });
       const resolved = roles(ctx, id);
+      const pr = pullRequestLines(ctx, id, state);
       const dispatch = missing.filter((lens) => lens !== "codex")
-        .map((lens) => reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"]));
+        .map((lens) => reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines));
+      say.push(...pr.say);
       if (missing.includes("codex")) dispatch.push(codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, resolved.jobs["review-codex"]));
       say.push(`${missing.join(", ")} produced no usable evidence; re-dispatching exactly those, once.`);
       return emit({ say, dispatch, next: nextCommand(ctx, "collect", id) });
@@ -652,6 +704,7 @@ function fix(options) {
   const id = options.spec;
   const spec = specById(ctx, id);
   const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "fix");
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
   const settled = exists(path.join(round.dir, "recheck.json"));
@@ -681,6 +734,7 @@ function recheck(options) {
   const id = options.spec;
   const spec = specById(ctx, id);
   const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "recheck");
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
   const collected = collectionRound(ctx, id, round.round);
@@ -701,7 +755,8 @@ function recheck(options) {
     for (const lens of [...state.reviewers, "codex", "adversary"]) addInput(lens, path.join(roundDir(ctx, id, carry.round), "still-open", `${lens}.json`));
   }
 
-  const dispatch = [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"])];
+  const pr = pullRequestLines(ctx, id, state);
+  const dispatch = [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"], pr.lines)];
   for (const [lens, files] of inputs) {
     if (lens === "codex") {
       let input = files[0];
@@ -713,9 +768,9 @@ function recheck(options) {
       }
       dispatch.push(codexRecheckDispatch(ctx, spec, round.round, state.candidateOid, input, resolved.jobs["recheck-codex"]));
     } else if (lens === "adversary") {
-      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, "adversary", files, null, resolved.jobs["recheck-adversary"]));
+      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, "adversary", files, null, resolved.jobs["recheck-adversary"], pr.lines));
     } else {
-      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, lens, files, resolved.briefs[lens], resolved.jobs["recheck-lens"]));
+      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, lens, files, resolved.briefs[lens], resolved.jobs["recheck-lens"], pr.lines));
     }
   }
   writeJson(path.join(specDir(ctx, id), "recheck-plan.json"), {
@@ -725,6 +780,7 @@ function recheck(options) {
   const say = [`Fresh adversary pass on round ${round.round} (${settings(resolved.jobs["adversary-fresh"])})`];
   if (inputs.size > 0) say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged"}).`);
   else say.push("Nothing to re-check: no earlier finding is open and no fixer has run since the panel.");
+  say.push(...pr.say);
   emit({ say, dispatch, next: nextCommand(ctx, "settle", id) });
 }
 
@@ -732,6 +788,7 @@ function settle(options) {
   const ctx = context(options);
   const id = options.spec;
   const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "settle");
   const plan = readJson(path.join(specDir(ctx, id), "recheck-plan.json"), null);
   if (!plan || plan.candidate !== state.candidateOid) throw new Stop(`no recheck plan for ${state.candidateOid}; run recheck first`);
   const dir = roundDir(ctx, id, plan.round);
@@ -744,7 +801,9 @@ function settle(options) {
   const result = node("recheck.mjs", args, { allow: [1] });
   const settledReview = readJson(path.join(dir, "recheck.json"));
   record(ctx, id, "review", state.candidateOid, path.join(dir, "recheck.json"));
-  transition(ctx, id, "verifying");
+  // Already there after a revisit, whose re-check reaches here without a fixer
+  // or a panel in between.
+  if (state.state !== "verifying") transition(ctx, id, "verifying");
   const say = result.stdout.trim().split("\n");
   const gatingOpen = (settledReview.open ?? []).length > 0;
   if (gatingOpen) {
@@ -804,6 +863,59 @@ function repair(options) {
   });
 }
 
+// The same commit, looked at again. A spec waits in `awaiting-approval` on
+// evidence bound to one commit, and that evidence can go stale without the
+// commit changing: a person edits the pull request body a finding was about, or
+// puts right whatever made a verify command fail. Until this the only exit from
+// waiting was `repair`, which spends a CI repair and tells a fixer it is fixing
+// a red check. This takes the edge that spends nothing, puts the worktree back
+// at the reviewed commit, and re-enters its round through `snapshot` — so
+// verify, the panel or the re-check, settle and publish run again against the
+// same candidate with their records rebuilt, and this cycle's fix budget is
+// exactly what it was.
+function revisit(options) {
+  const ctx = context(options);
+  const id = options.spec;
+  const state = readState(ctx, id);
+  if (state.state !== "awaiting-approval") {
+    throw new Stop(`${id} is ${state.state}, not awaiting-approval; revisit is for a spec that stopped for a person. `
+      + "A spec that is mid-cycle resumes through begin.");
+  }
+  if (!state.candidateOid) throw new Stop(`${id} has no reviewed commit to revisit`);
+  if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") {
+    throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work; snapshot or finish the spec that owns it before revisiting ${id}`);
+  }
+  // One worktree serves the whole train, so another spec can be part-way
+  // through it. Switching that spec's branch away from under it, and pointing
+  // the train's base at this spec's, would corrupt its next snapshot.
+  const current = git(ctx.worktree, ["branch", "--show-current"]).stdout.trim();
+  if (current && current !== state.branch) {
+    const other = specsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
+    const otherState = other && exists(statePath(ctx, other.id)) ? readJson(statePath(ctx, other.id)).state : null;
+    if (["implementing", "reviewing", "fixing", "verifying"].includes(otherState)) {
+      throw new Stop(`the worktree is on ${current}, and ${other.id} is still ${otherState} there; bring that spec to a stop before revisiting ${id}`);
+    }
+  }
+  // The reviewed commit comes from the state file, as everywhere; the branch is
+  // checked against it, never the other way round. A tip that has moved on is a
+  // commit nobody here reviewed.
+  const tip = git(ctx.worktree, ["rev-parse", "--verify", `refs/heads/${state.branch}`]).stdout.trim();
+  if (tip !== state.candidateOid) {
+    throw new Stop(`${state.branch} is at ${tip.slice(0, 12)}, not at the reviewed commit ${state.candidateOid.slice(0, 12)}. `
+      + "A revisit looks at the reviewed commit again and nothing else; a commit added by hand is not reviewed by revisiting it.");
+  }
+  git(ctx.worktree, ["switch", state.branch]);
+  // The round is rebuilt against the base the review was bound to, not the base
+  // the train has moved on to since: the diff has to be the one that was reviewed.
+  writeJson(ctx.trainPath, { ...ctx.train, baseOid: state.baseOid });
+  transition(ctx, id, "verifying");
+  const say = [`Revisiting ${id} at ${state.candidateOid.slice(0, 12)}: the same commit goes through verify, review and settle again. Looking again spends no fix round and no CI repair; a fix round it reaches comes out of this cycle's budget as before.`];
+  const pr = pullRequestRecord(ctx, id, state);
+  if (pr.path) say.push(`Pull request #${state.pr.number} as it stands now — title and body — is at ${pr.path}; the readers get it, and it is what to start from when the body is written again.`);
+  else if (pr.error) say.push(`Pull request #${state.pr.number} could not be read (${pr.error}); the readers judge the diff alone.`);
+  emit({ say, next: nextCommand(ctx, "snapshot", id) });
+}
+
 const REASONS = {
   "review-not-recorded": "no review was recorded against this commit",
   "review-open": "a reviewer found something that is still there",
@@ -821,17 +933,19 @@ const REASONS = {
 };
 
 // What moves a blocker: the step that records it, run again against this commit,
-// or a new commit, which every fix round makes. Named in the ask so the person
-// is told what would clear it instead of being offered an approval that
+// or a new commit, which every fix round makes. Once the spec is waiting those
+// steps run again only through `revisit`, which re-enters the round and spends
+// nothing — except a red check, whose door is `repair`. Named in the ask so the
+// person is told what would clear it instead of being offered an approval that
 // `evaluate` would not honour.
 const CLEARS = {
-  "review-not-recorded": "recheck, then settle",
-  "review-open": "fix",
-  "review-incomplete": "the step whose reader wrote nothing usable (recheck, then settle, when that was a re-check)",
-  "verification-not-recorded": "verify",
-  "verification-failed": "fix, then verify",
+  "review-not-recorded": "revisit — the review runs again against this commit",
+  "review-open": "revisit once what it found is no longer there — the reader that raised it judges it again, and a fix round follows if one is left",
+  "review-incomplete": "revisit — the reader that wrote nothing usable reads again",
+  "verification-not-recorded": "revisit — the verify commands run again",
+  "verification-failed": "revisit once what fails is put right",
   "continuous-integration-failed": "repair",
-  "continuous-integration-not-recorded": "publish"
+  "continuous-integration-not-recorded": "revisit — publish records the checks again"
 };
 
 const sentence = (reason) => REASONS[reason] ?? reason;
@@ -844,9 +958,9 @@ const sentence = (reason) => REASONS[reason] ?? reason;
 function stopAsk(id, { blockers, approvals }) {
   const text = [`${id} stops and waits.`];
   if (blockers.length > 0) {
-    text.push(`Blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by running ${CLEARS[reason] ?? "the step that records it"} again, or by a new commit; no approval clears it)`).join("; ")}.`);
+    text.push(`Blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by ${CLEARS[reason] ?? "revisit"}, or by a new commit; no approval clears it)`).join("; ")}.`);
     if (approvals.length > 0) text.push(`Also waiting on you: ${approvals.map(sentence).join("; ")}; approval would clear only this part, so it is not offered until nothing is blocked.`);
-    text.push("Offer: leave it open and continue (run next), or stop the train (run end).");
+    text.push("Offer: leave it open and continue (run next), stop the train (run end), or — when they have put right what blocked it without a new commit — look at it again (run revisit, which spends no budget).");
   } else {
     text.push(`Reasons: ${approvals.map(sentence).join("; ")}.`);
     text.push("Offer: approve and merge (rerun finish with --approve <email>), leave it open and continue (run next), or stop the train (run end).");
@@ -945,7 +1059,7 @@ function end(options) {
 
 // --- entry -----------------------------------------------------------------
 
-const SUBCOMMANDS = { start, begin, snapshot, verify, panel, collect, fix, recheck, settle, publish, repair, finish, end };
+const SUBCOMMANDS = { start, begin, snapshot, verify, panel, collect, fix, recheck, settle, publish, repair, revisit, finish, end };
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
@@ -959,6 +1073,7 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   settle  --spec <id>                 settle the round; decides fix or publish
   publish --spec <id> --title <t> --body <file>
   repair  --spec <id>                 spend a CI repair and dispatch the fixer
+  revisit --spec <id>                 from awaiting-approval: the reviewed commit through the cycle again, spending nothing
   finish  --spec <id> [--approve <email>]   merge when ready, otherwise stop for a person
   end                                 release the lock and remove the worktree
 `;

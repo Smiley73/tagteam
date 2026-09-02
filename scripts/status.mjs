@@ -91,11 +91,13 @@ function counterOf(state, counter) {
 
 // The states from which a continuation's fix budget comes out of the CI-repair
 // edge rather than out of what the last cycle spent. `gates.mjs` has no edge from
-// `awaiting-approval` or `publishing` to `fixing` at all: the only route back to
-// fixing is `-> reviewing`, the CI-repair edge, and that edge resets the fix
-// counter to zero. So for one of these specs the setting that actually bounds the
-// fix budget is `limits.ciRepairs` — reporting `limit - used` here would tell
-// someone to raise the wrong one.
+// `awaiting-approval` or `publishing` to `fixing` at all. A revisit
+// (`awaiting-approval -> verifying`) reaches fixing again on this cycle's
+// remainder, and a spec that stopped on an open finding has spent that; the
+// route that grants rounds is `-> reviewing`, the CI-repair edge, and that edge
+// resets the fix counter to zero. So for one of these specs the setting that
+// actually bounds the fix budget is `limits.ciRepairs` — reporting `limit - used`
+// here would tell someone to raise the wrong one.
 //
 // The restart is only worth reporting if the edge that grants it can still be
 // taken: a spec that has spent its repairs is refused that transition, so it gets

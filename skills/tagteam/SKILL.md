@@ -260,6 +260,9 @@ indistinguishable from a clean review. `collect-findings.mjs` reports it as
 open finding, an incomplete review, a failed or unrecorded verification or check
 are cleared only by new evidence against the commit, or by a new commit. `finish`
 offers approval only when nothing is blocked, and records none while something is.
+`ship.mjs revisit` is how new evidence is gathered against a commit that is
+waiting: it re-enters the round and runs the cycle again, spending no fix round
+and no CI repair. `repair` is the door for a red check, and for nothing else.
 
 The last one is the round's own account of its work. Each round that writes code
 ends with its agent's report — `rounds/<n>/report.json` — and an absent report
@@ -273,7 +276,7 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
-| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `recheck`, `settle`, `publish`, `repair`, `finish`, `end`. Sequences the scripts below and prints every dispatch |
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch |
 | `plan.mjs` | The plan side: `roles`, `codex` (prepare the Codex plan review for the runner), `collect` (fold the three readers into a brief), `check` (every gating finding answered) |
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
@@ -407,6 +410,11 @@ mid-train is the failure this design exists to avoid. Three rules:
   whatever is committed on its branch.
 - **A stale worktree**: `git -C "$R" worktree remove` it (never `--force`), then
   re-run. Committed work is on its branch.
+- **Something resolved without a new commit** — a pull request body edited by
+  hand, a verify command whose environment was put right: `ship.mjs revisit
+  --spec <id>` from `awaiting-approval`, then follow `next`. It re-enters the
+  reviewed commit's round and spends nothing. Never `repair` for this: a repair
+  is a CI repair, spends one, and tells the fixer a check is red.
 - **Codex quota**: the bridge waits, in slices, to a four-hour ceiling, then
   fails. The runner waits with it. Nothing else needs doing.
 - **A model Codex cannot use**: the bridge refuses on the first attempt, naming

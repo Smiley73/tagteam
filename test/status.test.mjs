@@ -70,11 +70,12 @@ test("a spec that has spent its whole budget reports nothing left, never a negat
 });
 
 // `gates.mjs` has no edge from `awaiting-approval` (or `publishing`) to
-// `fixing`. The only route back to fixing is the CI-repair edge into
-// `reviewing`, which resets the fix counter — so a spec that spent every fix
-// round and stopped for a person is not one finding away from stopping again,
-// and telling someone to raise `limits.fixRounds` would be sending them to the
-// wrong setting. What bounds it is `limits.ciRepairs`.
+// `fixing`. A revisit gets back to fixing only on this cycle's remainder, which
+// a spec that stopped on an open finding has spent; the route that grants rounds
+// is the CI-repair edge into `reviewing`, which resets the fix counter — so a
+// spec that spent every fix round and stopped for a person is not one finding
+// away from stopping again, and telling someone to raise `limits.fixRounds`
+// would be sending them to the wrong setting. What bounds it is `limits.ciRepairs`.
 test("a spec waiting for a person reports the fix budget a continuation actually gets", () => {
   const repo = repository();
   ship(repo, "01-a", { state: "awaiting-approval", fixRoundsUsed: 3, ciRepairsUsed: 1 });
