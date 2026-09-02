@@ -54,12 +54,22 @@ function node(script, args, { cwd, allow = [] } = {}) {
   return result;
 }
 
-const lastJson = (stdout) => {
+// The one JSON document a sequenced script prints, out of everything on its
+// stdout: the longest tail of the output that parses as a document. Every
+// script here prints its document last, most of them pretty-printed over many
+// lines, so the whole output is tried first and then the output from each later
+// line on, which steps over a note printed before the document. It is never
+// looked for one line at a time. A line of a pretty-printed string array — the
+// `    "work-not-accounted-for"` in what `gates.mjs evaluate` prints — is a
+// document on its own, and a line scan that took it handed `finish` a string
+// where it expected the verdict, after `finish` had moved a published spec to
+// awaiting-approval and before it said why. Exported for its test.
+export const lastJson = (stdout) => {
   const lines = String(stdout).trim().split("\n");
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    try { return JSON.parse(lines[index]); } catch {}
+  for (let index = 0; index < lines.length; index += 1) {
+    try { return JSON.parse(lines.slice(index).join("\n")); } catch {}
   }
-  try { return JSON.parse(stdout); } catch { return null; }
+  return null;
 };
 
 function git(cwd, args, { allowFailure = false } = {}) {
@@ -333,6 +343,16 @@ function emit(payload) {
 // snapshot can tell "the fixer changed nothing" from "a resumed run reached the
 // commit step with a clean tree": both arrive with nothing to commit, and only
 // one of them may re-enter the round HEAD already owns.
+//
+// It names the commit the fixer was dispatched from, and that — not the state
+// file's candidate — is what the snapshot compares HEAD against. `bind` moves
+// the state's candidate to the fix commit before the round's report is
+// recorded, so the snapshot rerun that a refused report asks for (move the file
+// aside, rerun) finds HEAD equal to the state's candidate with the marker still
+// on disk. Read that way, a committed fix looked like a fixer that changed
+// nothing: the round was never recorded, the marker was consumed, and the
+// commit that went on to be reviewed and published was never verified — so
+// `finish` stopped it for verification-not-recorded.
 const fixPendingPath = (ctx, id) => path.join(specDir(ctx, id), "fix-pending.json");
 
 // --- subcommands -----------------------------------------------------------
@@ -470,14 +490,18 @@ function snapshot(options) {
   const id = options.spec;
   const spec = specById(ctx, id);
   const say = [];
-  let state = readState(ctx, id);
+  // Read before anything is committed: a spec that was never begun has no state
+  // file, and nothing may be committed on its behalf.
+  readState(ctx, id);
   const pending = readJson(fixPendingPath(ctx, id), null);
   const dirty = git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "";
   const head = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
 
   // A fixer that changed nothing does not make a round. Its report is carried
   // by this output, then moved aside so no later round adopts it as its own.
-  if (pending && !dirty && head === state.candidateOid) {
+  // "Changed nothing" means HEAD is still the commit the fixer was dispatched
+  // from — the marker's candidate, not the state's; `fixPendingPath` says why.
+  if (pending && !dirty && head === pending.candidate) {
     const reportPath = path.join(specDir(ctx, id), "fix-report.json");
     const report = readJson(reportPath, null);
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -522,7 +546,6 @@ function snapshot(options) {
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
-  state = readState(ctx, id);
 
   say.push(`Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}; ${allocation.spent} of ${allocation.limit} fix rounds spent in this cycle.`);
   say.push(...recorded.stdout.trim().split("\n"));
