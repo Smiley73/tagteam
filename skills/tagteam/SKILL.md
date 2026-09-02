@@ -255,6 +255,12 @@ findings file yields an empty finding set, and an empty finding set is
 indistinguishable from a clean review. `collect-findings.mjs` reports it as
 `incomplete`, which is not `clean`.
 
+`evaluate` returns those stops in two lists. A person's approval — `finish
+--approve` — satisfies everything in `approvals` and nothing in `blockers`: an
+open finding, an incomplete review, a failed or unrecorded verification or check
+are cleared only by new evidence against the commit, or by a new commit. `finish`
+offers approval only when nothing is blocked, and records none while something is.
+
 The last one is the round's own account of its work. Each round that writes code
 ends with its agent's report — `rounds/<n>/report.json` — and an absent report
 and one that says `unfinished` are the same answer to the only question that gate

@@ -211,6 +211,61 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   assert.match(settle.json.next, /publish/);
 });
 
+test("an approval given while a reviewer wrote nothing usable is not recorded, and finish stops offering one", () => {
+  // `evaluate` honours a person's approval for its approvals and never for a
+  // blocker. `finish` used to offer "--approve" for both, record the approval,
+  // print "Approved by", and ask again with the same reasons.
+  const { dir, plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const first = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  ship("collect", plan, ["--spec", "01-a"]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
+  });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  // The adversary reports; the lens that owes a verdict writes nothing.
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.equal(settle.json.review, "incomplete");
+
+  const approved = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], { PATH: quietPath(dir) });
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.deepEqual(approved.json.blockers, ["review-incomplete"]);
+  assert.ok(approved.json.reasons.includes("review-incomplete"));
+  assert.match(approved.json.say.join("\n"), /Not recording owner@example\.com's approval/);
+  assert.doesNotMatch(approved.json.say.join("\n"), /Approved by/);
+  assert.equal(state().gates.human, null, "the approval is not recorded against a blocked commit");
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "human.json")), "and nothing is left on disk to be honoured later");
+  assert.match(approved.json.ask, /no usable evidence.*no approval clears it/);
+  assert.match(approved.json.ask, /recheck, then settle/, "the ask names what would clear it");
+  assert.doesNotMatch(approved.json.ask, /--approve/, "approving is not offered for a blocker");
+  assert.match(approved.json.ask, /leave it open and continue \(run next\), or stop the train \(run end\)/);
+
+  const again = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.equal(again.status, 0, again.stderr);
+  assert.doesNotMatch(again.json.ask, /--approve/);
+  assert.equal(state().gates.human, null);
+});
+
 test("a fixer that changes nothing makes no round and the spec goes on to the adversary", () => {
   const { plan, shipDir } = stage();
   ship("start", plan);
@@ -337,7 +392,9 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
   assert.equal(finish.status, 0, finish.stderr);
   assert.deepEqual(finish.json.reasons, ["work-not-accounted-for"], "the only reason to stop is the account the fixer never gave");
+  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["work-not-accounted-for"]]);
   assert.match(finish.json.ask, /never confirmed it finished/);
+  assert.match(finish.json.ask, /--approve/, "nothing is blocked, so approving is offered: evaluate honours it");
   assert.equal(finish.json.unaccounted.length, 1);
   assert.match(finish.json.unaccounted[0], /wrote no report/);
   assert.equal(state().state, "verifying", "a finish that stops before publish leaves the state where it was");

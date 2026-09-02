@@ -439,6 +439,14 @@ test("the gate names a person is shown are rendered as sentences by the driver a
   }
 });
 
+test("the ship command file and the driver agree that an approval clears an approval and never a blocker", () => {
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  assert.match(ship, /no approval clears/i, "commands/ship.md never says that a blocker is not approvable");
+  assert.match(ship, /`blockers`/, "commands/ship.md never names the blockers half of the verdict");
+  assert.match(shipDriver, /No approval clears a blocker/);
+  assert.match(shipDriver, /verdict\.blockers\.length > 0\) \{\n\s+say\.push\(`Not recording/, "finish records an approval given while a blocker is open");
+});
+
 test("every reporting brief names the schema its report is validated against", () => {
   const cases = [
     ["prompts/implement.md", "schemas/implement-report.schema.json"],
