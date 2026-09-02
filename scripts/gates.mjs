@@ -60,6 +60,17 @@ function counterOf(state, counter) {
 //
 // `publishing -> reviewing` is the CI repair: a red check produces a new
 // candidate, and a new candidate has to be reviewed like any other.
+//
+// `awaiting-approval -> verifying` is a revisit: the same commit looked at
+// again, because something the evidence was about changed without the code
+// changing — a pull request body a person edited, a check put right on the CI
+// side. Nothing is dispatched to change the code and no new candidate appears,
+// so it is the one exit from waiting that spends nothing. `ship.mjs revisit`
+// takes it and re-enters the round; everything after — verify, the panel or the
+// re-check, settle, publish — is the ordinary cycle against the same commit, and
+// a fix round it reaches is paid for out of this cycle's fix budget, as it
+// always was. The other exit stays what it was: `-> reviewing` is a CI repair
+// and is budgeted as one.
 const TRANSITIONS = {
   pending: ["implementing", "failed"],
   implementing: ["verifying", "reviewing", "failed"],
@@ -67,7 +78,7 @@ const TRANSITIONS = {
   fixing: ["reviewing", "verifying", "failed"],
   verifying: ["reviewing", "publishing", "failed"],
   publishing: ["awaiting-approval", "reviewing", "merged", "failed"],
-  "awaiting-approval": ["publishing", "reviewing", "merged", "failed"],
+  "awaiting-approval": ["publishing", "reviewing", "verifying", "merged", "failed"],
   merged: [],
   failed: ["pending"]
 };
@@ -118,7 +129,8 @@ export function initState({ spec, slug, branch, base, userVisible, reviewers, br
 // `publishing -> reviewing`, arriving after the spec waited for a person. Both
 // count and both reset, or `ciRepairs` is bounded on one route and unbounded on
 // the other. Entering `reviewing` from `implementing` or `verifying` is not a
-// repair and moves nothing.
+// repair and moves nothing — and `verifying` is where a revisit re-enters, so a
+// revisited spec that goes back through the panel spends no repair by doing so.
 const budgetedEdge = (from, next) => {
   if (next === "fixing") {
     return { counter: FIX_COUNTER, limitName: "limits.fixRounds", limitKey: "fixRounds", resets: null };
@@ -512,7 +524,8 @@ const USAGE = `usage:
   \`state\` needs the configuration for the budgeted edges — entering fixing, and
   entering reviewing from publishing or awaiting-approval — and refuses them
   without it. On one of those edges it prints a \`budget\` object: which round or
-  repair this is (\`ordinal\`), out of how many (\`limit\`).
+  repair this is (\`ordinal\`), out of how many (\`limit\`). Entering verifying
+  from awaiting-approval is a revisit of the same commit and spends nothing.
 
   \`init\` needs the repository to resolve each lens's brief, and refuses a lens
   nothing calibrates rather than letting a reviewer invent one in step 5.

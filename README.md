@@ -182,6 +182,7 @@ flowchart TD
     settle -->|"nothing open, or the fix rounds<br>this repository allows are spent"| publish
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
     publish --> outcome
+    outcome -. "something resolved without a new commit — revisit:<br>the same commit through verify, review and settle again, spending nothing" .-> snapshot
 ```
 
 Each lens is calibrated by a brief: the plugin ships eight, and a repository

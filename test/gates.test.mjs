@@ -838,3 +838,25 @@ test("a state file written before briefs were recorded gets them on resume, and 
   assert.equal(JSON.parse(again.stdout).briefsRecorded, undefined);
   assert.deepEqual(JSON.parse(fsm.readFileSync(stateFile, "utf8")), after);
 });
+
+test("a revisit leaves waiting without spending anything, and what follows it is the ordinary cycle", () => {
+  // A finding resolved without a new commit — a pull request body a person
+  // edited — used to have one exit from waiting: the CI-repair edge, which
+  // spends a repair and hands out a fresh fix budget. `awaiting-approval ->
+  // verifying` is the exit that spends nothing and resets nothing.
+  const waiting = at("awaiting-approval", { fixRoundsUsed: 1, ciRepairsUsed: 0 });
+  const revisited = step(waiting, "verifying");
+  assert.equal(revisited.state, "verifying");
+  assert.equal(revisited.fixRoundsUsed, 1, "this cycle's fix budget is what it was");
+  assert.equal(revisited.ciRepairsUsed, 0, "looking again is not a repair");
+  assert.equal(budgetTaken(waiting, revisited, { limits: LIMITS }), null, "nothing was bought");
+  // From there the panel is not a repair either, and a fix round is refused by
+  // the same limit that refused it before the spec stopped.
+  const reviewing = step(revisited, "reviewing");
+  assert.equal(reviewing.ciRepairsUsed, 0);
+  assert.equal(reviewing.fixRoundsUsed, 1);
+  assert.throws(() => step(reviewing, "fixing"), /limits\.fixRounds/);
+  assert.equal(step(revisited, "publishing").state, "publishing");
+  // The repair edge out of waiting is untouched by the new one beside it.
+  assert.equal(step(waiting, "reviewing").ciRepairsUsed, 1);
+});
