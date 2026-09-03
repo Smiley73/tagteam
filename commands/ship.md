@@ -67,6 +67,9 @@ The driver walks each spec through: `begin` (branch, dispatch the implementer),
 when something blocking or major is open and a fix round is left, `recheck`
 (the adversary's fresh pass and each reader's re-check of what it raised),
 `settle`, `publish`, `repair` when CI is red and a repair is left, and `finish`.
+A fixer that declines every finding and changes nothing makes no round and
+skips `verify`, but not `recheck`: the lenses that raised what it declined read
+its reasons and either withdraw the finding or keep it open.
 You do not choose the route; `next` does. One step `next` never prints:
 `revisit`, which looks at a spec that stopped for a person again, and only a
 person decides that — see *Looking again* below. What is yours at each point:

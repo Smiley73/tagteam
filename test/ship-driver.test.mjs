@@ -266,7 +266,7 @@ test("an approval given while a reviewer wrote nothing usable is not recorded, a
   assert.equal(state().gates.human, null);
 });
 
-test("a fixer that changes nothing makes no round and the spec goes on to the adversary", () => {
+test("a fixer that declines every finding makes no round, and the lens that raised them judges them against its reasons", () => {
   const { plan, shipDir } = stage();
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
@@ -296,6 +296,99 @@ test("a fixer that changes nothing makes no round and the spec goes on to the ad
   assert.equal(fs.readdirSync(path.join(shipDir, "01-a", "declined")).length, 1);
   assert.equal(fs.readdirSync(path.join(shipDir, "01-a", "rounds")).filter((n) => /^\d+$/.test(n)).length, 1, "no new round");
   assert.equal(state().candidateOid, oid);
+  const marker = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-declined.json"), "utf8"));
+  assert.equal(marker.candidate, oid);
+  assert.ok(fs.existsSync(marker.report), "the marker names the kept report");
+
+  // The lens that raised the declined finding is asked about it, and told why
+  // the fixer declined; nothing was fixed, so no other lens is.
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.equal(recheck.status, 0, recheck.stderr);
+  const correctness = recheck.json.dispatch.find((dispatch) => /^Re-check 01-a: correctness$/.test(dispatch.description));
+  assert.ok(correctness, `the correctness lens re-checks; got ${recheck.json.dispatch.map((d) => d.description).join(", ")}`);
+  assert.match(correctness.prompt, /declined these findings/);
+  assert.ok(correctness.prompt.includes(marker.report), "the re-check is pointed at the fixer's reasons");
+  assert.match(recheck.json.say.join("\n"), /declined them without changing the code/);
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  write(outputOf(correctness), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "withdrawn: negatives are handled at the call site" }] });
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.equal(settle.json.review, "clean", "a withdrawn finding closes; it is not left open for ever");
+  assert.match(settle.json.next, /publish/);
+  assert.equal(state().fixRoundsUsed, 1);
+});
+
+// The case that used to have no way out: a fix that changed the code, a
+// re-check that kept the finding open, and a second fixer that declined it. The
+// snapshot went straight to `publish`, the lens was never asked again, and the
+// finding stayed open through every fix round the budget allowed.
+test("a fixer that declines after a settled round goes back through the re-check, not straight to publish", () => {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const first = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  ship("collect", plan, ["--spec", "01-a"]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: []
+  });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
+  const settled = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settled.json.review, "open");
+  assert.match(settled.json.next, /fix/);
+
+  const again = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-declined.json")), "no decline is on record before the fixer answers");
+  write(outputOf(again.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "sub is meant to add; the spec says so" }], notes: "", status: "complete", summary: "declined", unfinished: []
+  });
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.match(snapshot.json.say.join("\n"), /changed nothing/);
+  assert.match(snapshot.json.next, /recheck/, "a decline after a settled round is re-judged, not published around");
+  assert.doesNotMatch(snapshot.json.next, /publish/);
+  assert.equal(state().state, "fixing", "the snapshot leaves the transition to settle, as it does after a panel");
+  assert.equal(state().candidateOid, second, "nothing new was committed");
+
+  const rejudge = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.equal(rejudge.status, 0, rejudge.stderr);
+  const correctness = rejudge.json.dispatch.find((dispatch) => /^Re-check 01-a: correctness$/.test(dispatch.description));
+  assert.ok(correctness, "the lens that raised the declined finding is asked again");
+  assert.match(correctness.prompt, /declined these findings/);
+  // The round's first re-check is settled and sealed, so this one writes beside
+  // it rather than over it.
+  assert.match(outputOf(correctness), /rounds\/2\/recheck-declined-\d{8}T\d{6}Z\/correctness\.json$/);
+  assert.match(outputOf(rejudge.json.dispatch[0]), /rounds\/2\/findings-declined-\d{8}T\d{6}Z\/adversary\.json$/);
+  const plan2 = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "recheck-plan.json"), "utf8"));
+  assert.equal(path.basename(plan2.declined), "fix-declined.json", "settle passes the decline on to recheck.mjs");
+  write(outputOf(rejudge.json.dispatch[0]), findings("adversary", second));
+  write(outputOf(correctness), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "withdrawn: the spec does say sub adds" }] });
+  const closed = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(closed.status, 0, closed.stderr);
+  assert.equal(closed.json.review, "clean");
+  assert.match(closed.json.next, /publish/);
+  assert.equal(state().state, "verifying");
+  assert.equal(state().fixRoundsUsed, 2);
+  assert.ok(fs.existsSync(path.join(shipDir, "01-a", "rounds", "2", "recheck.json")), "the round's settlement is re-derived in place");
 });
 
 test("start refuses without an approved plan, and a spent fix budget routes to the re-check rather than failing", () => {

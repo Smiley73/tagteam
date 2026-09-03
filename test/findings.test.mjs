@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { collect, findingId, parseRound, roundDirectoryFor } from "../scripts/collect-findings.mjs";
-import { settle, resolveCarry, resolveReview, summaryLines } from "../scripts/recheck.mjs";
+import { settle, resolveCarry, resolveDeclined, resolveReview, summaryLines } from "../scripts/recheck.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const FINDINGS_SCHEMA = path.join(root, "schemas", "findings.schema.json");
@@ -175,6 +175,40 @@ test("every finding resolved by its own reviewer clears the review", () => {
   const result = settle({ review, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, ...adversary([]) });
   assert.equal(result.status, "clean");
   assert.equal(result.open.length, 0);
+});
+
+// A finding raised at the round being settled is not put to its lens: no fixer
+// has seen it. Unless one has, and declined it — then the lens is asked, and a
+// resolved verdict is the lens withdrawing what it raised.
+test("a fixer's decline puts the round's own findings to their lenses, and nothing else does", () => {
+  const own = { status: "open", candidate: OID, counts: { major: 1 }, open: [
+    { id: "2.correctness.1", lens: "correctness", severity: "major", file: "src/a.ts", line: 1, title: "wrong", detail: "d" }
+  ] };
+  const withdrawn = () => dir({
+    "correctness.json": verdictFile("correctness", [{ id: "2.correctness.1", resolved: true, evidence: "withdrawn: the guard is on the caller" }])
+  });
+  const unasked = settle({ review: own, dir: withdrawn(), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, ...adversary([]) });
+  assert.equal(unasked.status, "open", "a verdict nobody asked for does not close the round's own finding");
+  assert.deepEqual(unasked.expected, ["adversary"]);
+  const declined = settle({ review: own, dir: withdrawn(), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, declined: true, ...adversary([]) });
+  assert.equal(declined.status, "clean", "after a decline the lens is asked, and may withdraw");
+  assert.deepEqual(declined.expected.sort(), ["adversary", "correctness"]);
+  const kept = settle({
+    review: own, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, declined: true, ...adversary([]),
+    dir: dir({ "correctness.json": verdictFile("correctness", [{ id: "2.correctness.1", resolved: false, evidence: "the reason is wrong: the caller has no guard" }]) })
+  });
+  assert.deepEqual(kept.open.map((entry) => entry.id), ["2.correctness.1"], "a finding the lens keeps stays open");
+  const silent = settle({ review: own, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, declined: true, ...adversary([]) });
+  assert.equal(silent.status, "incomplete", "asked and silent is a lens that failed to run, as always");
+});
+
+test("the declined marker must be readable and must name the candidate being settled", () => {
+  assert.equal(resolveDeclined(undefined, NEW_OID), false);
+  const target = dir({ "fix-declined.json": { round: 2, candidate: NEW_OID, report: null }, "stale.json": { round: 1, candidate: OID }, "bad.json": "{" });
+  assert.equal(resolveDeclined(path.join(target, "fix-declined.json"), NEW_OID), true);
+  assert.throws(() => resolveDeclined(path.join(target, "stale.json"), NEW_OID), /names aaaaaaaaaaaa, not bbbbbbbbbbbb/);
+  assert.throws(() => resolveDeclined(path.join(target, "bad.json"), NEW_OID), /unreadable/);
+  assert.throws(() => resolveDeclined(path.join(target, "missing.json"), NEW_OID), /unreadable/);
 });
 
 test("a finding with no verdict stays open — silence is never clearance", () => {
