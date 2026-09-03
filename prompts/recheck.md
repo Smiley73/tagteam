@@ -29,6 +29,18 @@ set to the exact post-fix commit you were given.
 not given it. A finding is resolved when the new code no longer has the defect —
 which you establish by looking at the new code.
 
+**When the fixer declined instead.** Your dispatch may say the fixer changed
+nothing and point you at its report: it answered every finding `wont-fix` or
+`failed`, with a reason each. Then there is no new code, and the question
+changes: does the finding still stand? Read the code as it is and read the
+reason. `resolved: true` means you withdraw the finding — the reason is right,
+the defect is not there, or the repair is a person's decision and not something
+a merge should wait on. `resolved: false` means the finding stands and the
+reason does not answer it; say what it gets wrong. The report is an argument
+written by a model, to be weighed and not accepted; a finding withdrawn because
+the fixer said so, with nothing in the code behind it, is the same false
+clearance as a `resolved` copied from a `fixed`.
+
 **One verdict per finding you raised.** A finding with no verdict is treated as
 unresolved, so silence costs the pull request its merge.
 

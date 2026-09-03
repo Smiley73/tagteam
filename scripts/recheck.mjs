@@ -12,7 +12,9 @@
 // approved everything.
 //
 // The fixer's own report is deliberately not consulted. It is bookkeeping: it
-// says what was attempted, and the reviewer says what is true.
+// says what was attempted, and the reviewer says what is true. The one thing a
+// report decides here is scope: `--declined` says the fixer changed nothing, and
+// then the findings raised at this very round are put to their lenses too.
 //
 // A round can also inherit. `--carry` is an earlier round's `still-open.json`,
 // settled by id exactly like the findings this round's own review raised, and
@@ -141,6 +143,31 @@ export function resolveCarry(roundDir, round, carry) {
 }
 
 /**
+ * Whether a fixer declined this candidate's findings without changing the code,
+ * from the marker `ship.mjs snapshot` wrote at `file`; false when no `--declined`
+ * was given.
+ *
+ * The marker has to be readable and has to name this candidate. A flag alone
+ * would do to widen `asked`, but a stale marker from an earlier candidate would
+ * then let a lens close findings this round's own panel raised minutes ago,
+ * against a diff no fixer has seen — the exact thing `asked` exists to prevent.
+ */
+export function resolveDeclined(file, candidate) {
+  if (!file) return false;
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+  } catch (error) {
+    throw new Error(`the declined marker at ${file} is unreadable (${error.message}); nothing was settled`);
+  }
+  if (marker?.candidate !== candidate) {
+    throw new Error(`the declined marker at ${file} names ${String(marker?.candidate).slice(0, 12)}, not ${candidate.slice(0, 12)}; `
+      + "a fixer declining an earlier candidate says nothing about this one, and nothing was settled");
+  }
+  return true;
+}
+
+/**
  * The collection this run settles, read from `reviewFile` and checked the way
  * every other hand-substituted round path here is checked.
  *
@@ -245,7 +272,7 @@ function clearDerived(roundDir, out, candidate) {
 
 export function settle({
   review, dir, candidate, schemaPath, round, reviewRound = round, carried = [], carriedRound = null,
-  adversary = null, adversarySchemaPath = null
+  adversary = null, adversarySchemaPath = null, declined = false
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   // Everything the adversary contributes is re-derived from its own file on
@@ -295,7 +322,16 @@ export function settle({
   // nothing repaired; taken out but still expected, the lens with nothing to
   // re-check would be recorded as a lens that produced no evidence. It stays
   // outstanding, and this round's `still-open.json` hands it to the next fixer.
-  const asked = (finding) => findingRound(finding.id) !== round;
+  //
+  // Unless a fixer declined them. `declined` says a fixer was handed this
+  // round's findings and changed nothing — every one answered `wont-fix` or
+  // `failed` — and then a lens that raised a finding at this round *has* been
+  // asked, against the fixer's reasons rather than against new code. A verdict
+  // of resolved there is the lens withdrawing its finding. Without this, a
+  // declined finding raised at the round being settled could never close: the
+  // lens was never asked, no verdict was expected, and no fix round could end
+  // it because the next fixer only ever got to decline it again.
+  const asked = (finding) => declined || findingRound(finding.id) !== round;
   const judged = outstanding.filter(asked);
   const lenses = [...new Set(judged.map((finding) => finding.lens))];
   const verdicts = new Map();
@@ -561,6 +597,7 @@ async function main() {
     const roundDir = roundDirectoryFor(options.dir, round);
     roundDirectoryFor(path.dirname(path.resolve(options.adversary)), round, "--adversary");
     const carry = resolveCarry(roundDir, round, options.carry);
+    const declined = resolveDeclined(options.declined, options.candidate);
     // Checked before anything is settled, for the same reason the paths above
     // are: the collection is the input that decides which findings exist at all.
     const { review, collected } = resolveReview(roundDir, round, options.review);
@@ -578,7 +615,8 @@ async function main() {
       // see `settle`.
       carriedRound: carry === null ? null : Number(path.basename(path.dirname(carry))),
       adversary: options.adversary ?? null,
-      adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json")
+      adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json"),
+      declined
     });
     // Everything below is this run's own derivation, so the previous one is
     // cleared first — see `clearDerived`. Nothing is removed until the round's

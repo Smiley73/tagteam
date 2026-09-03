@@ -45,7 +45,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  to-fix.json, open/, still-open.json, still-open/, report.json  ignored
     implement-report.json  fix-report.json  what the round's agent said about its
                  own work, written outside every round and recorded into one  ignored
-    fix-pending.json  recheck-plan.json  the driver's notes between two steps  ignored
+    fix-pending.json  fix-declined.json  recheck-plan.json  the driver's notes
+                 between two steps                                          ignored
+    declined/    the reports of fixers that changed nothing                 ignored
     pr-body.md  ci.json  usage.json                                          ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```

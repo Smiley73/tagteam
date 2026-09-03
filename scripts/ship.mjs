@@ -240,7 +240,7 @@ function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
   return runnerDispatch({ description: `Codex review of ${spec.id}`, ...prepared });
 }
 
-function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = []) {
+function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null) {
   const dir = roundDir(ctx, spec.id, round);
   return {
     agent: agent("adversary", job.effort),
@@ -253,12 +253,12 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = []) {
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
-      `Write your findings to: ${path.join(dir, "findings", "adversary.json")}`
+      `Write your findings to: ${out ?? path.join(dir, "findings", "adversary.json")}`
     ].join("\n")
   };
 }
 
-function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = []) {
+function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = [], outDir = null) {
   const dir = roundDir(ctx, spec.id, round);
   const base = lens === "adversary" ? "adversary" : "reviewer";
   return {
@@ -273,20 +273,25 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
-      `Write your verdicts to: ${path.join(dir, "recheck", `${lens}.json`)}`
+      `Write your verdicts to: ${path.join(outDir ?? path.join(dir, "recheck"), `${lens}.json`)}`
     ].join("\n")
   };
 }
 
-function codexRecheckDispatch(ctx, spec, round, oid, input, job) {
+function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null } = {}) {
   const dir = roundDir(ctx, spec.id, round);
+  const diff = path.join(dir, "review.diff");
+  // Two templates, one per question. After a fix Codex reads new code; after a
+  // decline there is none, and it weighs the fixer's reasons instead.
+  const request = declinedReport
+    ? { template: "recheck-declined.md", fences: { FINDINGS: input, DIFF: diff, DECLINED: declinedReport } }
+    : { template: "recheck.md", fences: { FINDINGS: input, DIFF: diff } };
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
-    template: "recheck.md",
+    ...request,
     vars: { CANDIDATE: oid },
-    fences: { FINDINGS: input, DIFF: path.join(dir, "review.diff") },
     schema: "recheck.schema.json",
-    out: path.join(dir, "recheck", "codex.json"),
+    out: path.join(outDir ?? path.join(dir, "recheck"), "codex.json"),
     model: job.model,
     effort: job.effort,
     cd: ctx.worktree,
@@ -402,6 +407,17 @@ function emit(payload) {
 // commit that went on to be reviewed and published was never verified — so
 // `finish` stopped it for verification-not-recorded.
 const fixPendingPath = (ctx, id) => path.join(specDir(ctx, id), "fix-pending.json");
+
+// Written by `snapshot` when a fixer was handed findings and changed nothing —
+// every one of them answered `wont-fix` or `failed`. It names the candidate the
+// fixer declined against and where its report was kept, and it is what lets
+// `recheck` ask the lenses that raised those findings to judge them again, this
+// time against the fixer's reasons. Without it a declined round routed around
+// the re-check: the lens was never asked, no verdict ever closed the finding, and
+// it stayed open through every fix round the budget allowed. Removed by `fix`
+// when the next fixer is dispatched, and ignored when its candidate is not the
+// state's, so a fix that did change the code is never read as a decline.
+const fixDeclinedPath = (ctx, id) => path.join(specDir(ctx, id), "fix-declined.json");
 
 // --- subcommands -----------------------------------------------------------
 
@@ -553,19 +569,38 @@ function snapshot(options) {
     const reportPath = path.join(specDir(ctx, id), "fix-report.json");
     const report = readJson(reportPath, null);
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    let kept = null;
     if (report) {
       fs.mkdirSync(path.join(specDir(ctx, id), "declined"), { recursive: true, mode: 0o700 });
-      const kept = path.join(specDir(ctx, id), "declined", `round-${pending.round}-${stamp}.json`);
+      kept = path.join(specDir(ctx, id), "declined", `round-${pending.round}-${stamp}.json`);
       fs.renameSync(reportPath, kept);
       say.push(`The fixer changed nothing. What it said about each finding (kept at ${kept}):`, ...fixReportLines(report));
     } else {
       say.push("The fixer changed nothing and wrote no report.");
     }
     fs.unlinkSync(fixPendingPath(ctx, id));
-    if (pending.from === "settle" || pending.from === "repair") {
+    // A CI repair is handed a failing check and no findings, so there is nothing
+    // for a lens to re-judge; the spec publishes and the check speaks.
+    if (pending.from === "repair") {
       transition(ctx, id, "verifying");
       return emit({ say, next: nextCommand(ctx, "publish", id) });
     }
+    // Whether the fixer came from the panel or from a settled re-check, the
+    // findings it declined are re-judged by the lenses that raised them. This
+    // is the one route by which a `wont-fix` can close a finding: the lens reads
+    // the fixer's reasons and either withdraws the finding or keeps it open. The
+    // former shortcut from a settled round straight to `publish` left the
+    // finding open for ever, through every fix round the budget allowed.
+    // `attempt` names where this re-check's evidence goes inside the round. A
+    // round the fixer was dispatched from after a settle already holds a sealed
+    // re-check, and the round store refuses a second write at the same path —
+    // so each decline's verdicts and adversary pass get directories of their own.
+    writeJson(fixDeclinedPath(ctx, id), {
+      round: pending.round, candidate: pending.candidate, from: pending.from,
+      report: kept, attempt: `declined-${stamp}`,
+      at: new Date().toISOString()
+    });
+    say.push("The lenses that raised what it declined re-judge those findings against its reasons.");
     return emit({ say, next: nextCommand(ctx, "recheck", id) });
   }
 
@@ -721,6 +756,7 @@ function fix(options) {
   const job = resolved.jobs.fix;
   const recordPath = settled ? path.join(round.dir, "still-open.json") : path.join(round.dir, "to-fix.json");
   writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", at: new Date().toISOString() });
+  fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
   const budget = edge.output?.budget ?? {};
   emit({
     say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings, from ${recordPath}.`],
@@ -742,13 +778,18 @@ function recheck(options) {
   const resolved = roles(ctx, id);
   const carry = carryFrom(ctx, id, round.round);
   const fixedSince = collected < round.round;
+  // A fixer that was handed this candidate's findings and changed nothing. Its
+  // report is what the lenses judge their findings against, since there is no
+  // new code to read; see `fixDeclinedPath`.
+  const declinedMarker = readJson(fixDeclinedPath(ctx, id), null);
+  const declined = declinedMarker && declinedMarker.candidate === state.candidateOid ? declinedMarker : null;
 
   // Which findings each reader must judge: this round's panel findings when a
-  // fixer has changed the diff since they were raised, plus whatever an earlier
-  // round left open.
+  // fixer has changed the diff since they were raised — or declined them without
+  // changing it — plus whatever an earlier round left open.
   const inputs = new Map();
   const addInput = (lens, file) => { if (exists(file)) inputs.set(lens, [...(inputs.get(lens) ?? []), file]); };
-  if (fixedSince) {
+  if (fixedSince || declined) {
     for (const lens of [...state.reviewers, "codex"]) addInput(lens, path.join(roundDir(ctx, id, collected), "open", `${lens}.json`));
   }
   if (carry && carry.count > 0) {
@@ -756,30 +797,46 @@ function recheck(options) {
   }
 
   const pr = pullRequestLines(ctx, id, state);
-  const dispatch = [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"], pr.lines)];
+  // What each reader is told about the fixer: nothing, unless it declined.
+  const declinedLines = declined?.report
+    ? [`The fixer changed nothing: it declined these findings, and its reasons are at ${declined.report}. There is no new code to read — judge each finding against the code as it stands and against those reasons; resolved means you withdraw it`]
+    : declined ? ["The fixer changed nothing and wrote no report. There is no new code to read — judge each finding against the code as it stands; resolved means you withdraw it"] : [];
+  const declinedFresh = declined
+    ? [`The fixer changed nothing since this diff was last read: it declined what was open${declined.report ? `, with its reasons at ${declined.report}` : ""}. Raise again only what still stands`]
+    : [];
+  // Where this re-check's evidence goes. The round's own `recheck/` and
+  // `findings/adversary.json` are the first re-check's, and once settled they
+  // are sealed; a decline's re-check writes beside them, under its attempt.
+  const verdictsDir = declined ? path.join(round.dir, `recheck-${declined.attempt}`) : path.join(round.dir, "recheck");
+  const adversaryFile = declined ? path.join(round.dir, `findings-${declined.attempt}`, "adversary.json") : path.join(round.dir, "findings", "adversary.json");
+  const dispatch = [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...declinedFresh], adversaryFile)];
   for (const [lens, files] of inputs) {
     if (lens === "codex") {
       let input = files[0];
       if (files.length > 1) {
         // One fence, so two records become one file the bridge can fence.
         const merged = { lens: "codex", candidate: state.candidateOid, findings: files.flatMap((file) => readJson(file).findings ?? []) };
-        input = path.join(round.dir, "recheck", "codex-input.json");
+        input = path.join(verdictsDir, "codex-input.json");
         writeJson(input, merged);
       }
-      dispatch.push(codexRecheckDispatch(ctx, spec, round.round, state.candidateOid, input, resolved.jobs["recheck-codex"]));
+      dispatch.push(codexRecheckDispatch(ctx, spec, round.round, state.candidateOid, input, resolved.jobs["recheck-codex"], { declinedReport: declined?.report ?? null, outDir: verdictsDir }));
     } else if (lens === "adversary") {
-      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, "adversary", files, null, resolved.jobs["recheck-adversary"], pr.lines));
+      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, "adversary", files, null, resolved.jobs["recheck-adversary"], [...pr.lines, ...declinedLines], verdictsDir));
     } else {
-      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, lens, files, resolved.briefs[lens], resolved.jobs["recheck-lens"], pr.lines));
+      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, lens, files, resolved.briefs[lens], resolved.jobs["recheck-lens"], [...pr.lines, ...declinedLines], verdictsDir));
     }
   }
   writeJson(path.join(specDir(ctx, id), "recheck-plan.json"), {
     round: round.round, candidate: state.candidateOid, collectionRound: collected, carry: carry?.count > 0 ? carry.file : null,
+    declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
     lenses: [...inputs.keys()], at: new Date().toISOString()
   });
   const say = [`Fresh adversary pass on round ${round.round} (${settings(resolved.jobs["adversary-fresh"])})`];
-  if (inputs.size > 0) say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged"}).`);
-  else say.push("Nothing to re-check: no earlier finding is open and no fixer has run since the panel.");
+  if (inputs.size > 0) {
+    const because = declined ? "; the fixer declined them without changing the code, so they are judged against its reasons"
+      : fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged";
+    say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${because}).`);
+  } else say.push("Nothing to re-check: no earlier finding is open and no fixer has run since the panel.");
   say.push(...pr.say);
   emit({ say, dispatch, next: nextCommand(ctx, "settle", id) });
 }
@@ -794,10 +851,11 @@ function settle(options) {
   const dir = roundDir(ctx, id, plan.round);
   const args = [
     "--review", path.join(roundDir(ctx, id, plan.collectionRound), "review.json"), "--round", String(plan.round),
-    "--dir", path.join(dir, "recheck"), "--adversary", path.join(dir, "findings", "adversary.json"),
+    "--dir", plan.dir ?? path.join(dir, "recheck"), "--adversary", plan.adversary ?? path.join(dir, "findings", "adversary.json"),
     "--candidate", state.candidateOid, "--out", path.join(dir, "recheck.json")
   ];
   if (plan.carry) args.push("--carry", plan.carry);
+  if (plan.declined) args.push("--declined", plan.declined);
   const result = node("recheck.mjs", args, { allow: [1] });
   const settledReview = readJson(path.join(dir, "recheck.json"));
   record(ctx, id, "review", state.candidateOid, path.join(dir, "recheck.json"));
