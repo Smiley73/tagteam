@@ -78,6 +78,27 @@ export const findingRound = (id) => {
   return named === undefined ? null : Number(named);
 };
 
+// The two files a pull request's text lives in on the ship side: the body the
+// orchestrator writes for `publish`, and the record of what is published now.
+export const PULL_REQUEST_FILES = new Set(["pull-request.md", "pr-body.md"]);
+
+/**
+ * Whether a finding is about the pull request rather than about the code: it
+ * names one of the pull request files, or it names no file at all — the shape
+ * `findings.schema.json` reserves for a finding about the change as a whole,
+ * which is where a reader puts "the pull request does not say".
+ *
+ * A fixer works beneath the worktree and cannot reach either file, and a finding
+ * it cannot reach is one it can only decline. Handing it one spent a fix round
+ * and a full re-check to arrive at that answer, three times over on one spec,
+ * before the person wrote the body the finding asked for. What answers such a
+ * finding is a body written by the orchestrator and judged by the reader that
+ * raised it, and `ship.mjs` routes it there instead. Exported so the driver and
+ * the re-check agree on the rule.
+ */
+export const isPullRequestFinding = (finding) =>
+  finding?.file == null || PULL_REQUEST_FILES.has(path.basename(String(finding.file)));
+
 /**
  * `--round` as an integer: a bare decimal of at least 1. `<n>` is substituted by
  * hand in `ship.md`, and a `01` or a `2/` would mint ids that no later round can

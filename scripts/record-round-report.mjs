@@ -190,6 +190,18 @@ export function recordRoundReport({ dir, out, schemaDir }) {
       continue;
     }
     considered.push(`${file} (new)`);
+    // A fix report whose only defect is a missing `notes` is recorded with an
+    // empty one, and the wrapper says so. `notes` is optional in every sense but
+    // the schema's — "anything the re-checker needs that the diff does not say",
+    // and usually nothing — and this refusal arrives after the fix is committed
+    // and bound, so the round it stops is one whose work is already done. The
+    // schema keeps the key required because every schema here is held to strict
+    // structured output, where an optional property is a shape nothing requires.
+    const filled = [];
+    if (candidate.kind === "fix" && parsed && typeof parsed === "object" && !Array.isArray(parsed) && !Object.hasOwn(parsed, "notes")) {
+      parsed = { ...parsed, notes: "" };
+      filled.push("notes");
+    }
     // Validated here, before anything is counted, and not after one report has
     // been singled out. Two new reports are recorded as an absence below, and an
     // absence is approvable — so validating only the singled-out one would let a
@@ -203,7 +215,7 @@ export function recordRoundReport({ dir, out, schemaDir }) {
         + `${candidate.schema.replace(/\.schema\.json$/, "")} schema:\n`
         + `${errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n")}\n${CORRECT_IT_NOW}`);
     }
-    found.push({ ...candidate, file, parsed });
+    found.push({ ...candidate, file, parsed, filled });
   }
 
   // No new report, and the round already holds its account — a re-entered round
@@ -230,14 +242,14 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     return record;
   }
 
-  const [{ kind, file, parsed }] = found;
+  const [{ kind, file, parsed, filled }] = found;
 
   // A document that says `complete` while listing unfinished work contradicts
   // itself, and neither refusing it nor believing it is right: the gate reads
   // the wrapper, so the contradiction is recorded as `unfinished` and said out
   // loud in the summary, where a person can see which of the two the agent meant.
   const status = parsed.status === "complete" && parsed.unfinished.length === 0 ? "complete" : "unfinished";
-  const record = { status, kind, source: file, reason: null, report: parsed };
+  const record = { status, kind, source: file, reason: null, report: parsed, ...(filled.length > 0 ? { filled } : {}) };
   writeRoundFile(target, serialize(record));
   return record;
 }
@@ -266,6 +278,7 @@ export function summaryLines(record, file) {
       : `${record.kind} report: ${record.status} — recorded at ${file}`,
     ...outcomes.map((entry) => `  ${entry.id.padEnd(22)} ${entry.outcome.padEnd(column)} ${entry.note}`),
     `  ${report.summary}`,
+    ...(record.filled ?? []).map((field) => `  the report had no \`${field}\`; recorded as empty`),
     ...(report.status === "complete" && record.status === "unfinished"
       ? ["  this report claims complete and lists unfinished work; it is recorded as unfinished"]
       : []),

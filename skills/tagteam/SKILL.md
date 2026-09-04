@@ -42,7 +42,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     rounds/<n>/  round.json (the commit that owns this round), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
                  recheck/, verify/, candidate.json, review.json, recheck.json,
-                 to-fix.json, open/, still-open.json, still-open/, report.json  ignored
+                 to-fix.json, open/, still-open.json, still-open/, report.json,
+                 to-fix.code.json / still-open.code.json (the fixer's brief when
+                 a finding about the pull request was kept out of it)          ignored
     implement-report.json  fix-report.json  what the round's agent said about its
                  own work, written outside every round and recorded into one  ignored
     fix-pending.json  fix-declined.json  recheck-plan.json  the driver's notes

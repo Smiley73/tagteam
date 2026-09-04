@@ -22,6 +22,22 @@ function resolveRef(root, reference) {
   return reference.slice(2).split("/").reduce((node, key) => node[key.replaceAll("~1", "/").replaceAll("~0", "~")], root);
 }
 
+// What a field is, in a parenthesis a person or a model can act on: `(a
+// boolean)`, `(a string; empty is fine)`, `(one of fixed, wont-fix)`. Nothing for
+// a field the schema says nothing typed about.
+function describeField(rule, root) {
+  if (!rule || typeof rule !== "object") return "";
+  const resolved = rule.$ref ? resolveRef(root, rule.$ref) : rule;
+  if (resolved.enum) return ` (one of ${resolved.enum.map((entry) => JSON.stringify(entry)).join(", ")})`;
+  const types = resolved.type ? (Array.isArray(resolved.type) ? resolved.type : [resolved.type]) : [];
+  if (types.length === 0) return "";
+  const article = (type) => (type === "integer" || type === "array" || type === "object" ? `an ${type}` : `a ${type}`);
+  if (types.length === 1 && types[0] === "string") {
+    return resolved.minLength > 0 ? " (a non-empty string)" : " (a string; empty is fine)";
+  }
+  return ` (${types.map(article).join(" or ")})`;
+}
+
 export function validateJson(schema, value) {
   const errors = [];
 
@@ -78,13 +94,22 @@ export function validateJson(schema, value) {
       if (rule.minProperties !== undefined && Object.keys(current).length < rule.minProperties) {
         errors.push(`${location}: needs at least ${rule.minProperties} field(s)`);
       }
-      for (const key of rule.required ?? []) {
-        if (!Object.hasOwn(current, key)) errors.push(`${location}.${key}: is required`);
-      }
+      // A required key that is absent and an unknown key that is present are
+      // usually one mistake — `status: "resolved"` where `resolved: true` was
+      // wanted — and a reader given two unconnected lines had to work that out.
+      // Each line says what the field is, and the unknown key names the missing
+      // ones, so the correction is in the message rather than in the schema file.
+      const missing = (rule.required ?? []).filter((key) => !Object.hasOwn(current, key));
+      for (const key of missing) errors.push(`${location}.${key}: is required${describeField(rule.properties?.[key], schema)}`);
       for (const [key, item] of Object.entries(current)) {
         if (rule.properties?.[key]) visit(rule.properties[key], item, `${location}.${key}`);
-        else if (rule.additionalProperties === false) errors.push(`${location}.${key}: is not allowed`);
-        else if (rule.additionalProperties && typeof rule.additionalProperties === "object") {
+        else if (rule.additionalProperties === false) {
+          const known = Object.keys(rule.properties ?? {});
+          const hint = missing.length > 0
+            ? `; the missing ${missing.length === 1 ? "field" : "fields"} ${missing.map((name) => `\`${name}\``).join(", ")} may be what this was meant to be`
+            : "";
+          errors.push(`${location}.${key}: is not allowed${hint}${known.length > 0 ? ` — the fields here are ${known.join(", ")}` : ""}`);
+        } else if (rule.additionalProperties && typeof rule.additionalProperties === "object") {
           visit(rule.additionalProperties, item, `${location}.${key}`);
         }
       }

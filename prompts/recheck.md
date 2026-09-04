@@ -23,6 +23,24 @@ line 2000 is invisible to a re-check that stopped there. Write your verdicts to
 the path you are given, matching `schemas/recheck.schema.json`, with `candidate`
 set to the exact post-fix commit you were given.
 
+The file has exactly this shape, and no other key anywhere in it:
+
+```json
+{
+  "lens": "<the lens you were dispatched on>",
+  "candidate": "<the post-fix commit, exactly as given>",
+  "verdicts": [
+    { "id": "<copied from your input>", "resolved": true, "evidence": "<what settles it>" }
+  ]
+}
+```
+
+`resolved` is a boolean — `true` or `false` — never a word, and never a `status`
+key. A file with a key the schema does not name, or with a verdict missing
+`resolved`, is refused whole: every finding you raised stays open, the round is
+recorded as one where your lens produced no usable evidence, and nothing asks
+you again.
+
 ## Rules
 
 **Read the code.** You cannot answer this from the fixer's report, and you are
