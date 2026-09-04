@@ -616,14 +616,42 @@ async function main() {
     // the rounds on disk contradict is exactly the disagreement this exists to
     // prevent.
     writeJson(stateFile, reconciled);
-    const round = await allocateRound(roundsRoot, {
-      candidate,
-      scope,
-      limit: limits.fixRounds,
-      limitName: "limits.fixRounds",
-      exempt: EXEMPT_ROUNDS_PER_SCOPE
-    });
-    process.stdout.write(`${JSON.stringify({ ok: true, spec: reconciled.spec, state: reconciled.state, reconciled: changed, ...round }, null, 2)}\n`);
+    let round;
+    try {
+      round = await allocateRound(roundsRoot, {
+        candidate,
+        scope,
+        limit: limits.fixRounds,
+        limitName: "limits.fixRounds",
+        exempt: EXEMPT_ROUNDS_PER_SCOPE
+      });
+    } catch (error) {
+      // The allocator counts rounds on disk and the `fixing` edge counts the
+      // state file, and a refusal here is the one that arrives *after* a fixer
+      // has done its work. Naming which count refused, and what the other one
+      // says, is what tells a reader whether the two have drifted apart —
+      // which is the only way this refusal can follow a `fix` that was allowed.
+      if (error instanceof RoundBudgetExhausted) {
+        error.message = `${reconciled.spec} has spent its ${error.limitName} budget: ${error.spent} of ${error.limit} `
+          + `round(s) used, counted from the rounds on disk in ${scope} (the state file counts `
+          + `${counterOf(reconciled, FIX_COUNTER)}), so nothing further will be attempted — raise ${error.limitName} in `
+          + "this repository's tagteam configuration and run the command again, or finish what is left by hand";
+      }
+      throw error;
+    }
+    // Reconciled again now that the round just allocated is on disk. The first
+    // reconciliation cannot see it, so a round that arrived without a `fixing`
+    // edge — a commit made outside a fix dispatch — left the counter one behind
+    // the disk for the rest of the cycle: every later `fix` passed on the
+    // counter, and every snapshot after it refused on the disk. After this the
+    // two agree at the end of every snapshot, so a spent budget is refused at
+    // `fix`, before a fixer is dispatched, and never at the snapshot that would
+    // land its work.
+    const settled = reconcileBudgets(reconciled, listRounds(roundsRoot));
+    writeJson(stateFile, settled.state);
+    process.stdout.write(`${JSON.stringify({
+      ok: true, spec: settled.state.spec, state: settled.state.state, reconciled: [...changed, ...settled.changed], ...round
+    }, null, 2)}\n`);
     return;
   }
   let next;

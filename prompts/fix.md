@@ -37,13 +37,21 @@ and states what is actually true. A false `fixed` does not get the pull request
 merged; it gets it stopped one step later, having spent a round of a budget this
 change may have no more of.
 
-Beside the outcomes, three fields say whether you finished at all: `status` —
-`complete` only when you did everything you were handed and `unfinished` is
-empty; `summary` — one or two sentences on what you changed; and `unfinished` —
-every part of the work you were asked for and did not do, with the reason.
+The report has exactly these five top-level keys, every one of them present, and
+no others:
 
-**All three are about the findings, or the failing check, you were given, and
-nothing else.** You were not given the spec this change implements, nobody
+- `outcomes` — the entries above, each exactly `{"id", "outcome", "note"}`.
+- `notes` — a string: anything the reviewer re-checking this work needs and
+  cannot read from the diff. `""` when there is nothing, and the key is still
+  written.
+- `status` — `complete` only when you did everything you were handed and
+  `unfinished` is empty; `unfinished` otherwise.
+- `summary` — one or two sentences on what you changed.
+- `unfinished` — every part of the work you were asked for and did not do, each
+  `{"part", "reason"}`; `[]` when nothing was left.
+
+**`status`, `summary` and `unfinished` are about the findings, or the failing
+check, you were given, and nothing else.** You were not given the spec this change implements, nobody
 expects you to answer for it, and a `status` reaching for the change as a whole
 claims something you have no way to know. A finding you answered `wont-fix` or
 `failed` is accounted for by that outcome and is not unfinished work; work you

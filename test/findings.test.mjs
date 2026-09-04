@@ -202,6 +202,25 @@ test("a fixer's decline puts the round's own findings to their lenses, and nothi
   assert.equal(silent.status, "incomplete", "asked and silent is a lens that failed to run, as always");
 });
 
+test("a verdict written as status: resolved is refused with the correction in the message", () => {
+  // The shape two lenses actually wrote: a `status` word where the schema wants
+  // a `resolved` boolean. The file is still refused — the schema is Codex-bound
+  // and stays strict — but the reason now says which field was meant, so the
+  // orchestrator can tell a wrong key from a broken file without opening it.
+  const review = { status: "open", candidate: OID, counts: { major: 1 }, open: [
+    { id: "1.resilience.1", lens: "resilience", severity: "major", file: "src/a.ts", line: 1, title: "wrong", detail: "d" }
+  ] };
+  const result = settle({
+    review, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, ...adversary([]),
+    dir: dir({ "resilience.json": verdictFile("resilience", [{ id: "1.resilience.1", status: "resolved", evidence: "fixed" }]) })
+  });
+  assert.equal(result.status, "incomplete");
+  const gap = result.missing.find((entry) => entry.lens === "resilience");
+  assert.match(gap.reason, /\$\.verdicts\[0\]\.resolved: is required \(a boolean\)/);
+  assert.match(gap.reason, /\$\.verdicts\[0\]\.status: is not allowed; the missing field `resolved` may be what this was meant to be — the fields here are id, resolved, evidence/);
+  assert.deepEqual(result.open.map((entry) => entry.id), ["1.resilience.1"], "the finding stays open: silence and a wrong shape are the same answer");
+});
+
 test("the declined marker must be readable and must name the candidate being settled", () => {
   assert.equal(resolveDeclined(undefined, NEW_OID), false);
   const target = dir({ "fix-declined.json": { round: 2, candidate: NEW_OID, report: null }, "stale.json": { round: 1, candidate: OID }, "bad.json": "{" });

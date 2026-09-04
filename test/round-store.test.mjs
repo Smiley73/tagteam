@@ -596,6 +596,37 @@ test("an invalid report is refused before the round holds it", () => {
   assert.equal(fs.existsSync(reportPath(ship, 1)), false);
 });
 
+test("a fix report missing only its notes is recorded with empty notes, and says so", () => {
+  // `notes` is the one key the fixer's brief never named, and the refusal for
+  // it arrives after the fix is committed and bound — twice on one plan, each
+  // time a person hand-edited the file to add `"notes": ""` and reran. The
+  // schema keeps the key required (every schema here is held to strict
+  // structured output); the recorder fills the one field that means "nothing".
+  const ship = shipAt();
+  roundIn(ship, 1);
+  fs.writeFileSync(path.join(ship, "fix-report.json"), JSON.stringify({
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }],
+    status: "complete", summary: "fixed sub", unfinished: []
+  }));
+  const result = record(ship, reportPath(ship, 1));
+  assert.equal(result.status, 0, result.stderr);
+  const wrapper = readWrapper(reportPath(ship, 1));
+  assert.equal(wrapper.status, "complete");
+  assert.equal(wrapper.report.notes, "");
+  assert.deepEqual(wrapper.filled, ["notes"]);
+  assert.match(result.stdout, /had no `notes`; recorded as empty/);
+
+  // Any other defect is still refused: the tolerance is for the one field.
+  const other = shipAt();
+  roundIn(other, 1);
+  fs.writeFileSync(path.join(other, "fix-report.json"), JSON.stringify({
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], status: "complete", summary: "s"
+  }));
+  const refused = record(other, reportPath(other, 1));
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /\$\.unfinished: is required \(an array\)/);
+});
+
 test("an implement report missing its own account is refused too", () => {
   const ship = shipAt();
   roundIn(ship, 1);

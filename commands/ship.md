@@ -70,6 +70,12 @@ when something blocking or major is open and a fix round is left, `recheck`
 A fixer that declines every finding and changes nothing makes no round and
 skips `verify`, but not `recheck`: the lenses that raised what it declined read
 its reasons and either withdraw the finding or keep it open.
+A finding about the pull request itself — one naming no file, or naming the
+pull request body — never reaches a fixer, which could only decline it. `fix`
+and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
+that it says what they ask for; the readers that raised them judge that body at
+the next re-check, before it is published, and `publish` sends it. When nothing
+else is open, no fix round is spent on them.
 You do not choose the route; `next` does. One step `next` never prints:
 `revisit`, which looks at a spec that stopped for a person again, and only a
 person decides that — see *Looking again* below. What is yours at each point:
@@ -83,6 +89,16 @@ person decides that — see *Looking again* below. What is yours at each point:
   was recorded — then run `next`.
 - **After `collect` and `settle`**: say the finding summary in `say` as
   behaviour — what goes wrong and for whom — never as ids or file coordinates.
+  A line beginning *Recurring:* is a signal of its own and is relayed whole: the
+  same file has drawn a new blocking or major finding in three or more rounds of
+  this cycle, and the driver is saying that another fix round there is likely to
+  open the next case rather than close the last. It stops nothing; it is for the
+  person to decide whether the area wants a redesign instead.
+- **Never dispatch a fixer of your own.** A commit that reaches `snapshot`
+  without `fix` having dispatched it is committed and counted as a fix round
+  all the same — `snapshot` says so — but it was never announced, and it is not
+  the way round a spent budget: raising `limits.fixRounds` is, and only a person
+  does that.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
   returned. If it contains *how it routed could not be confirmed*, take *When
   Codex could not say how it ran* below before running `next`. A non-zero exit

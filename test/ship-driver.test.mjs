@@ -391,6 +391,177 @@ test("a fixer that declines after a settled round goes back through the re-check
   assert.ok(fs.existsSync(path.join(shipDir, "01-a", "rounds", "2", "recheck.json")), "the round's settlement is re-derived in place");
 });
 
+// The trap a plan of fourteen rounds fell into. After `fix` was refused, the
+// orchestrator dispatched a fixer of its own and ran `snapshot`: the commit
+// became a round on disk that no `fixing` edge had counted, and from then on
+// every `fix` passed on the state file's counter while every snapshot after it
+// refused on the rounds on disk — raise the limit by one, land the work, repeat.
+test("a commit made outside a fix round is counted and announced, and the budget is refused at fix rather than at the snapshot after it", () => {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const roundsOnDisk = () => fs.readdirSync(path.join(shipDir, "01-a", "rounds")).filter((n) => /^\d+$/.test(n)).length;
+  const reviewOpen = (round) => {
+    const panel = ship("panel", plan, ["--spec", "01-a"]);
+    assert.equal(panel.status, 0, panel.stderr);
+    const oid = state().candidateOid;
+    for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+      const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+      write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("app.js")] : []));
+    }
+    write(path.join(shipDir, "01-a", "rounds", String(round), "findings", "codex.json"), findings("codex", oid));
+    const collect = ship("collect", plan, ["--spec", "01-a"]);
+    assert.equal(collect.json.review, "open");
+  };
+  reviewOpen(1);
+
+  // Instead of `fix`, a change made by hand and snapshotted.
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  const amended = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(amended.status, 0, amended.stderr);
+  assert.equal(amended.json.round, 2);
+  assert.match(amended.json.say.join("\n"), /not dispatched by fix[\s\S]*counted as one — 1 of 2 left/);
+  assert.equal(state().fixRoundsUsed, 1, "counted the moment it is on disk");
+  assert.equal(git(worktree, "log", "-1", "--format=%s"), "Amend 01-a");
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
+  assert.equal(ship("settle", plan, ["--spec", "01-a"]).json.review, "open");
+
+  // The one fix round left is announced as the second of two, not the first.
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.match(fix.json.say[0], /Fix round 2 of the 2/);
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
+  });
+  const landed = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(landed.status, 0, `the snapshot that lands an allowed fix round is never the step that refuses it: ${landed.stderr}`);
+  assert.equal(landed.json.round, 3);
+  assert.equal(state().fixRoundsUsed, 2);
+  assert.equal(roundsOnDisk() - 1, state().fixRoundsUsed, "the counter and the rounds on disk agree after every snapshot");
+
+  // Nothing is left, and it is `fix` that says so — before a fixer is dispatched.
+  ship("verify", plan, ["--spec", "01-a"]);
+  reviewOpen(3);
+  const spent = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(spent.status, 0, spent.stderr);
+  assert.equal(spent.json.budget, "spent");
+  assert.equal(spent.json.dispatch, undefined);
+  assert.equal(state().fixRoundsUsed, 2);
+});
+
+// A finding about the pull request is answered by a body, and the fixer could
+// only ever decline it: on one spec that cost three full laps — fixer, decline,
+// re-check, settle, publish, revisit — for one sentence the body did not say.
+test("a finding about the pull request never reaches the fixer, spends no fix round, and is judged against the body about to be published", () => {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const oid = state().candidateOid;
+  const aboutPr = { severity: "major", file: null, line: null, title: "the pull request does not say sub was added", detail: "a reader of the body cannot tell", fix: null };
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [aboutPr] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
+
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.equal(fix.json.dispatch, undefined, "no fixer is dispatched for a finding it cannot reach");
+  assert.equal(state().fixRoundsUsed, 0, "and no fix round is spent");
+  assert.match(fix.json.say[0], /1 finding\(s\) are about the pull request itself[\s\S]*1\.correctness\.1 \(the pull request does not say sub was added\)[\s\S]*Write .*pr-body\.md/);
+  assert.match(fix.json.next, /recheck/);
+  const marker = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-declined.json"), "utf8"));
+  assert.equal(marker.kind, "pull-request");
+
+  // The orchestrator writes the body, and the re-check hands it to the lens.
+  const body = path.join(shipDir, "01-a", "pr-body.md");
+  write(body, "## Summary\n\nAdds sub.\n");
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.equal(recheck.status, 0, recheck.stderr);
+  assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer-low"], "the raising lens alone: no fresh adversary pass over an unchanged diff");
+  assert.match(recheck.json.dispatch[0].prompt, /No fixer ran: these findings are about the pull request/);
+  assert.match(recheck.json.dispatch[0].prompt, /Pull request body about to be published, which replaces the live body at the next publish: \S*01-a\/pr-body\.md/);
+  assert.match(recheck.json.say.join("\n"), /No fresh adversary pass[\s\S]*judged against its body/);
+  write(outputOf(recheck.json.dispatch[0]), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "the body about to be published says sub was added" }] });
+
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.equal(settle.json.review, "clean");
+  assert.match(settle.json.next, /publish/);
+  assert.equal(state().fixRoundsUsed, 0);
+  assert.equal(state().gates.review.status, "clean");
+});
+
+test("a fixer handed a mixed round gets the code findings only, and a settled round left with pull request findings alone publishes", () => {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const first = state().candidateOid;
+  const aboutPr = { severity: "major", file: ".tagteam/ships/demo/01-a/pull-request.md", line: null, title: "the body claims nothing changed", detail: "it did", fix: null };
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js"), aboutPr] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  ship("collect", plan, ["--spec", "01-a"]);
+
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.equal(state().fixRoundsUsed, 1);
+  const brief = /Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1];
+  assert.match(brief, /to-fix\.code\.json$/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(brief, "utf8")).findings.map((entry) => entry.id), ["1.correctness.1"], "the pull request finding is kept out of the brief");
+  assert.match(fix.json.say[1], /1 finding\(s\) are about the pull request itself/);
+
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
+  });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  // The code finding is resolved; the body was not written, so the other stands.
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [
+    { id: "1.correctness.1", resolved: true, evidence: "sub subtracts now" },
+    { id: "1.correctness.2", resolved: false, evidence: "the body still claims nothing changed" }
+  ] });
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.equal(settle.json.review, "open");
+  assert.match(settle.json.next, /publish/, "nothing open is for a fixer, so the spec publishes with the body the orchestrator writes");
+  assert.match(settle.json.say.join("\n"), /1 finding\(s\) are about the pull request itself[\s\S]*no fix round is spent/);
+  assert.equal(state().state, "verifying");
+  assert.equal(state().fixRoundsUsed, 1);
+});
+
 test("start refuses without an approved plan, and a spent fix budget routes to the re-check rather than failing", () => {
   const { plan, shipDir } = stage();
   fs.unlinkSync(path.join(plan, "approved.json"));

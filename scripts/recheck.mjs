@@ -45,8 +45,13 @@ function parseArgs(argv) {
   // `--print` re-renders a settled review and settles nothing, so none of the
   // inputs settling needs are required with it.
   if (options.print) return options;
-  for (const required of ["review", "dir", "candidate", "out", "adversary", "round"]) {
-    if (!options[required]) throw new Error(`--${required} is required`);
+  // `--adversary` may be left out only after a decline: nothing changed, so a
+  // fresh pass over the same diff would read what it read last time. Every
+  // other settlement needs the adversary's evidence, and its absence is refused
+  // rather than settled as clean.
+  const required = ["review", "dir", "candidate", "out", "round", ...(options.declined ? [] : ["adversary"])];
+  for (const name of required) {
+    if (!options[name]) throw new Error(`--${name} is required`);
   }
   return options;
 }
@@ -595,7 +600,7 @@ async function main() {
     // adversary's round is not necessarily the round whose panel findings this
     // same re-check is settling, so it is checked on its own path.
     const roundDir = roundDirectoryFor(options.dir, round);
-    roundDirectoryFor(path.dirname(path.resolve(options.adversary)), round, "--adversary");
+    if (options.adversary) roundDirectoryFor(path.dirname(path.resolve(options.adversary)), round, "--adversary");
     const carry = resolveCarry(roundDir, round, options.carry);
     const declined = resolveDeclined(options.declined, options.candidate);
     // Checked before anything is settled, for the same reason the paths above
@@ -665,7 +670,7 @@ async function main() {
       if (!failed.has(path.resolve(file))) sealRoundRecord(file);
     };
     for (const lens of result.expected) seal(path.join(path.resolve(options.dir), `${lens}.json`));
-    seal(options.adversary);
+    if (options.adversary) seal(options.adversary);
 
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
     if (list.count > 0) {

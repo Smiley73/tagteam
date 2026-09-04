@@ -787,10 +787,18 @@ test("gates.mjs round reconciles, allocates and writes the state file in one cal
   assert.equal(JSON.parse(first.stdout).round, 1);
   assert.equal(JSON.parse(first.stdout).scope, "repair:0");
   assert.equal(JSON.parse(round(B).stdout).round, 2, "a second candidate gets the fix round");
+  // Counted the moment it is on disk, not at the next snapshot. A round that
+  // arrived without a `fixing` edge left the counter one behind the disk for
+  // the rest of the cycle: every `fix` passed on the counter and every snapshot
+  // after it refused on the disk, and the only way on was raising the limit by
+  // one per round.
+  assert.equal(JSON.parse(fsm.readFileSync(stateFile, "utf8")).fixRoundsUsed, 1, "the round just allocated is already counted");
 
   const refused = round("c".repeat(40));
   assert.equal(refused.status, 4, `expected exit 4, got ${refused.status}: ${refused.stderr}`);
   assert.match(refused.stderr, /limits\.fixRounds/);
+  assert.match(refused.stderr, /^01-x has spent/, "the allocator's refusal names the spec, as the state edge's does");
+  assert.match(refused.stderr, /counted from the rounds on disk in repair:0 \(the state file counts 1\)/, "and says which count refused");
 
   // The state file now records what the rounds on disk prove.
   assert.equal(JSON.parse(fsm.readFileSync(stateFile, "utf8")).fixRoundsUsed, 1);

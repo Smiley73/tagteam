@@ -29,6 +29,8 @@ import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
 import { repairScope } from "./gates.mjs";
+import { isPullRequestFinding } from "./collect-findings.mjs";
+import { churnLines, churnSignal } from "./lib/churn.mjs";
 import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 
@@ -311,28 +313,59 @@ function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedRepor
 // edited. No path when there is no pull request; when there is one and it could
 // not be read, no path and the reason.
 function pullRequestRecord(ctx, id, state) {
-  if (!state.pr?.number) return { path: null, error: null };
+  if (!state.pr?.number) return { path: null, error: null, body: null };
   const result = gh(ctx.repo, ["pr", "view", String(state.pr.number), "--json", "title,body,url"], { allowFailure: true });
-  if (result.status !== 0) return { path: null, error: (result.stderr || result.stdout || "gh pr view failed").trim().split("\n")[0] };
+  if (result.status !== 0) return { path: null, error: (result.stderr || result.stdout || "gh pr view failed").trim().split("\n")[0], body: null };
   let view;
-  try { view = JSON.parse(result.stdout); } catch (error) { return { path: null, error: `gh pr view printed no document: ${error.message}` }; }
+  try { view = JSON.parse(result.stdout); } catch (error) { return { path: null, error: `gh pr view printed no document: ${error.message}`, body: null }; }
   const file = path.join(specDir(ctx, id), "pull-request.md");
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, `# Pull request #${state.pr.number}: ${view.title ?? ""}\n\n${view.url ?? state.pr.url ?? ""}\n\n${view.body ?? ""}\n`, { mode: 0o600 });
-  return { path: file, error: null };
+  return { path: file, error: null, body: view.body ?? "" };
 }
+
+// The body the orchestrator writes for `publish`. It is the one file about a
+// candidate that the orchestrator changes between two steps, and the one a
+// finding about the pull request is answered by.
+const prBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.md");
 
 // What a reading dispatch gets about the pull request, and what the person is
 // told when it gets nothing it should have had.
+//
+// Two bodies can be handed over. The live one is what is published now. The
+// draft at `pr-body.md` is what the next `publish` sends, and it is handed over
+// only while it differs from the live one — or before any pull request exists —
+// because a finding about the pull request used to clear only after a full
+// publish-then-revisit lap: the body was rewritten, the next dispatch re-read
+// GitHub, and the reader found the old text still open. A reader judging the
+// draft judges text not yet on GitHub, and `publish` sends exactly that file.
 function pullRequestLines(ctx, id, state) {
   const record = pullRequestRecord(ctx, id, state);
+  const lines = [];
+  const say = [];
   if (record.path) {
-    return {
-      lines: [`Pull request #${state.pr.number} as published now (title and body): ${record.path} — a finding about the pull request itself is judged against this, not against the diff`],
-      say: []
-    };
+    lines.push(`Pull request #${state.pr.number} as published now (title and body): ${record.path} — a finding about the pull request itself is judged against this, not against the diff`);
+  } else if (record.error) {
+    say.push(`Pull request #${state.pr.number} could not be read (${record.error}); the readers judge the diff alone.`);
   }
-  return { lines: [], say: record.error ? [`Pull request #${state.pr.number} could not be read (${record.error}); the readers judge the diff alone.`] : [] };
+  const draft = prBodyPath(ctx, id);
+  if (exists(draft)) {
+    const text = fs.readFileSync(draft, "utf8");
+    if (record.body === null || text.trim() !== record.body.trim()) {
+      lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
+      say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
+    }
+  }
+  return { lines, say };
+}
+
+// What the orchestrator is told about findings no fixer can reach, wherever
+// they turn up: at `fix`, where they are kept out of the fixer's brief, and at
+// `settle`, where they may be all that is left open.
+function pullRequestFindingsLine(ctx, id, findings) {
+  const named = findings.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
+  return `${findings.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named}. `
+    + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
 }
 
 // A spec that stopped for a person stays exactly as it stopped until a person
@@ -556,10 +589,19 @@ function snapshot(options) {
   const say = [];
   // Read before anything is committed: a spec that was never begun has no state
   // file, and nothing may be committed on its behalf.
-  refuseWhileWaiting(id, readState(ctx, id), "snapshot");
+  const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "snapshot");
   const pending = readJson(fixPendingPath(ctx, id), null);
   const dirty = git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "";
   const head = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
+  // Work in the tree that no dispatch of this run asked for: the spec is past
+  // its implementation and no fixer is pending. It is committed like anything
+  // else — the run records what is there, not what it expected — but it is a
+  // fix round of this cycle, and one that `fix` never announced, so it is said
+  // here. Left unsaid, it was a round on disk the state file's counter had not
+  // seen, and every fix round after it was refused at the snapshot that would
+  // have landed its work.
+  const outOfBand = dirty && !pending && state.state !== "implementing";
 
   // A fixer that changed nothing does not make a round. Its report is carried
   // by this output, then moved aside so no later round adopts it as its own.
@@ -596,8 +638,8 @@ function snapshot(options) {
     // re-check, and the round store refuses a second write at the same path —
     // so each decline's verdicts and adversary pass get directories of their own.
     writeJson(fixDeclinedPath(ctx, id), {
-      round: pending.round, candidate: pending.candidate, from: pending.from,
-      report: kept, attempt: `declined-${stamp}`,
+      kind: "declined", round: pending.round, candidate: pending.candidate, from: pending.from,
+      record: pending.record ?? null, report: kept, attempt: `declined-${stamp}`,
       at: new Date().toISOString()
     });
     say.push("The lenses that raised what it declined re-judge those findings against its reasons.");
@@ -606,7 +648,7 @@ function snapshot(options) {
 
   if (dirty) {
     const message = options.message
-      ?? (pending?.from === "repair" ? `Repair CI for ${id}` : pending ? `Address review findings on ${id}` : `Implement ${id}`);
+      ?? (pending?.from === "repair" ? `Repair CI for ${id}` : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : `Implement ${id}`);
     git(ctx.worktree, ["add", "-A"]);
     node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
     git(ctx.worktree, ["commit", "-m", message]);
@@ -631,6 +673,9 @@ function snapshot(options) {
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
 
   say.push(`Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}; ${allocation.spent} of ${allocation.limit} fix rounds spent in this cycle.`);
+  if (outOfBand) {
+    say.push(`This commit was not dispatched by fix: nothing in this run asked for it. It is a fix round of this cycle all the same and is counted as one — ${allocation.remaining} of ${allocation.limit} left.`);
+  }
   say.push(...recorded.stdout.trim().split("\n"));
   emit({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
@@ -728,8 +773,10 @@ function collect(options) {
     say.push(`${missing.join(", ")} produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended.`);
     return emit({ say, review: review.status, next: nextCommand(ctx, "recheck", id) });
   }
+  const signal = churnLines(churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round: round.round }));
+  say.push(...signal);
   emit({
-    say, review: review.status,
+    say, review: review.status, ...(signal.length > 0 ? { signal } : {}),
     next: nextCommand(ctx, review.status === "open" ? "fix" : "recheck", id)
   });
 }
@@ -743,6 +790,34 @@ function fix(options) {
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
   const settled = exists(path.join(round.dir, "recheck.json"));
+  const recordPath = settled ? path.join(round.dir, "still-open.json") : path.join(round.dir, "to-fix.json");
+  // What is open, split by who can answer it. A finding about the pull request
+  // is answered by a body, not by a fixer — see `isPullRequestFinding` — so it
+  // never reaches the fixer's brief, and a round with nothing else open spends
+  // no fix round at all.
+  const record = readJson(recordPath, { findings: [] });
+  const aboutPr = (record.findings ?? []).filter(isPullRequestFinding);
+  const forFixer = (record.findings ?? []).filter((finding) => !isPullRequestFinding(finding));
+  const prSay = aboutPr.length > 0 ? [pullRequestFindingsLine(ctx, id, aboutPr)] : [];
+  if (forFixer.length === 0 && aboutPr.length > 0) {
+    if (settled) {
+      // The readers have judged these once already, against the body as it was.
+      // The body is rewritten, published, and judged again on a revisit.
+      transition(ctx, id, "verifying");
+      return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again."], next: nextCommand(ctx, "publish", id) });
+    }
+    // Not yet judged by anyone but the panel that raised them. The re-check
+    // asks the raising lenses to judge the body — the draft, once it is
+    // written — with no fixer and no fresh adversary pass in between: nothing
+    // about the code changed. The marker is what tells `recheck` and `settle`
+    // that this round's own findings are being asked about.
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    writeJson(fixDeclinedPath(ctx, id), {
+      kind: "pull-request", round: round.round, candidate: state.candidateOid, from: "panel",
+      record: recordPath, report: null, attempt: `pull-request-${stamp}`, at: new Date().toISOString()
+    });
+    return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent. Write the body now, then run next: the readers that raised these judge it."], next: nextCommand(ctx, "recheck", id) });
+  }
   const edge = transition(ctx, id, "fixing", { budgeted: true });
   if (edge.refused) {
     const say = [`No fix round is left for this cycle (${edge.reason.split("\n")[0]}). The spec still publishes and a person decides.`];
@@ -754,13 +829,19 @@ function fix(options) {
   }
   const resolved = roles(ctx, id);
   const job = resolved.jobs.fix;
-  const recordPath = settled ? path.join(round.dir, "still-open.json") : path.join(round.dir, "to-fix.json");
-  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", at: new Date().toISOString() });
+  // The fixer's brief is the record itself unless something in it is not the
+  // fixer's, in which case it is the record with those taken out, beside it.
+  let briefPath = recordPath;
+  if (aboutPr.length > 0) {
+    briefPath = path.join(round.dir, settled ? "still-open.code.json" : "to-fix.code.json");
+    writeJson(briefPath, { ...record, findings: forFixer });
+  }
+  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", record: briefPath, at: new Date().toISOString() });
   fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
   const budget = edge.output?.budget ?? {};
   emit({
-    say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings, from ${recordPath}.`],
-    dispatch: [fixerDispatch(ctx, spec, recordPath, job)],
+    say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings about the code, from ${briefPath}.`, ...prSay],
+    dispatch: [fixerDispatch(ctx, spec, briefPath, job)],
     next: nextCommand(ctx, "snapshot", id)
   });
 }
@@ -783,6 +864,10 @@ function recheck(options) {
   // new code to read; see `fixDeclinedPath`.
   const declinedMarker = readJson(fixDeclinedPath(ctx, id), null);
   const declined = declinedMarker && declinedMarker.candidate === state.candidateOid ? declinedMarker : null;
+  // No fixer ran at all: what was open is about the pull request, and the body
+  // is what the readers judge. The adversary's fresh pass is skipped — the diff
+  // it would read is the one it read when these findings were raised.
+  const aboutPr = declined?.kind === "pull-request";
 
   // Which findings each reader must judge: this round's panel findings when a
   // fixer has changed the diff since they were raised — or declined them without
@@ -797,10 +882,13 @@ function recheck(options) {
   }
 
   const pr = pullRequestLines(ctx, id, state);
-  // What each reader is told about the fixer: nothing, unless it declined.
-  const declinedLines = declined?.report
-    ? [`The fixer changed nothing: it declined these findings, and its reasons are at ${declined.report}. There is no new code to read — judge each finding against the code as it stands and against those reasons; resolved means you withdraw it`]
-    : declined ? ["The fixer changed nothing and wrote no report. There is no new code to read — judge each finding against the code as it stands; resolved means you withdraw it"] : [];
+  // What each reader is told about the fixer: nothing, unless it declined — or
+  // unless none was dispatched because nothing open was for one.
+  const declinedLines = aboutPr
+    ? ["No fixer ran: these findings are about the pull request, which no fixer can reach, and nothing about the code changed. Judge each against the pull request body you are given — the one about to be published, where there is one — and against the code as it stands; resolved means the body now says what the finding asked for, or that you withdraw it"]
+    : declined?.report
+      ? [`The fixer changed nothing: it declined these findings, and its reasons are at ${declined.report}. There is no new code to read — judge each finding against the code as it stands and against those reasons; resolved means you withdraw it`]
+      : declined ? ["The fixer changed nothing and wrote no report. There is no new code to read — judge each finding against the code as it stands; resolved means you withdraw it"] : [];
   const declinedFresh = declined
     ? [`The fixer changed nothing since this diff was last read: it declined what was open${declined.report ? `, with its reasons at ${declined.report}` : ""}. Raise again only what still stands`]
     : [];
@@ -808,8 +896,11 @@ function recheck(options) {
   // `findings/adversary.json` are the first re-check's, and once settled they
   // are sealed; a decline's re-check writes beside them, under its attempt.
   const verdictsDir = declined ? path.join(round.dir, `recheck-${declined.attempt}`) : path.join(round.dir, "recheck");
-  const adversaryFile = declined ? path.join(round.dir, `findings-${declined.attempt}`, "adversary.json") : path.join(round.dir, "findings", "adversary.json");
-  const dispatch = [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...declinedFresh], adversaryFile)];
+  const adversaryFile = aboutPr ? null
+    : declined ? path.join(round.dir, `findings-${declined.attempt}`, "adversary.json") : path.join(round.dir, "findings", "adversary.json");
+  const dispatch = adversaryFile
+    ? [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...declinedFresh], adversaryFile)]
+    : [];
   for (const [lens, files] of inputs) {
     if (lens === "codex") {
       let input = files[0];
@@ -831,10 +922,13 @@ function recheck(options) {
     declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
     lenses: [...inputs.keys()], at: new Date().toISOString()
   });
-  const say = [`Fresh adversary pass on round ${round.round} (${settings(resolved.jobs["adversary-fresh"])})`];
+  const say = [adversaryFile
+    ? `Fresh adversary pass on round ${round.round} (${settings(resolved.jobs["adversary-fresh"])})`
+    : `No fresh adversary pass on round ${round.round}: nothing about the code changed, and what is open is about the pull request.`];
   if (inputs.size > 0) {
-    const because = declined ? "; the fixer declined them without changing the code, so they are judged against its reasons"
-      : fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged";
+    const because = aboutPr ? "; they are about the pull request, and are judged against its body"
+      : declined ? "; the fixer declined them without changing the code, so they are judged against its reasons"
+        : fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged";
     say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${because}).`);
   } else say.push("Nothing to re-check: no earlier finding is open and no fixer has run since the panel.");
   say.push(...pr.say);
@@ -851,9 +945,12 @@ function settle(options) {
   const dir = roundDir(ctx, id, plan.round);
   const args = [
     "--review", path.join(roundDir(ctx, id, plan.collectionRound), "review.json"), "--round", String(plan.round),
-    "--dir", plan.dir ?? path.join(dir, "recheck"), "--adversary", plan.adversary ?? path.join(dir, "findings", "adversary.json"),
+    "--dir", plan.dir ?? path.join(dir, "recheck"),
     "--candidate", state.candidateOid, "--out", path.join(dir, "recheck.json")
   ];
+  // `adversary: null` in the plan is a re-check that dispatched no fresh pass —
+  // see `recheck` — and `recheck.mjs` allows that only beside `--declined`.
+  if (!Object.hasOwn(plan, "adversary") || plan.adversary) args.push("--adversary", plan.adversary ?? path.join(dir, "findings", "adversary.json"));
   if (plan.carry) args.push("--carry", plan.carry);
   if (plan.declined) args.push("--declined", plan.declined);
   const result = node("recheck.mjs", args, { allow: [1] });
@@ -863,13 +960,22 @@ function settle(options) {
   // or a panel in between.
   if (state.state !== "verifying") transition(ctx, id, "verifying");
   const say = result.stdout.trim().split("\n");
-  const gatingOpen = (settledReview.open ?? []).length > 0;
-  if (gatingOpen) {
+  const signal = churnLines(churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round: plan.round }));
+  say.push(...signal);
+  const open = settledReview.open ?? [];
+  if (open.length > 0) {
+    // Everything still open is about the pull request: no fixer can reach it,
+    // so no fix round is spent on it. The spec publishes with the body the
+    // orchestrator writes, and a revisit puts that body to the readers.
+    if (open.every(isPullRequestFinding)) {
+      say.push(pullRequestFindingsLine(ctx, id, open), "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again.");
+      return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
+    }
     transition(ctx, id, "reviewing");
     say.push("Something blocking or major is still open, so another fix round follows if the budget allows one.");
-    return emit({ say, review: settledReview.status, next: nextCommand(ctx, "fix", id) });
+    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "fix", id) });
   }
-  emit({ say, review: settledReview.status, next: nextCommand(ctx, "publish", id) });
+  emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
 }
 
 function publish(options) {

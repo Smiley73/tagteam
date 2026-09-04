@@ -30,7 +30,7 @@
     },
     "notes": {
       "type": "string",
-      "description": "Anything the reviewer re-checking this work needs and cannot read from the diff."
+      "description": "Anything the reviewer re-checking this work needs and cannot read from the diff. An empty string when there is nothing; the key is still written."
     },
     "status": {
       "type": "string",

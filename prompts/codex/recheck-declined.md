@@ -2,8 +2,10 @@ A fixer was given the findings you returned earlier for this change and changed
 nothing: it declined every one of them. You are being asked one question per
 finding: does it still stand?
 
-Return only JSON matching the schema you were given. Set `lens` to "codex" and
-set `candidate` to exactly this commit:
+Return only JSON matching the schema you were given: `lens`, `candidate`, and
+`verdicts`, where every verdict is exactly `{"id", "resolved", "evidence"}` —
+`resolved` a boolean, `true` or `false`, never a word and never a `status` key.
+Set `lens` to "codex" and set `candidate` to exactly this commit:
 
 {{CANDIDATE}}
 
