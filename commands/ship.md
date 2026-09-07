@@ -76,9 +76,11 @@ and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
 that it says what they ask for; the readers that raised them judge that body at
 the next re-check, before it is published, and `publish` sends it. When nothing
 else is open, no fix round is spent on them.
-You do not choose the route; `next` does. One step `next` never prints:
-`revisit`, which looks at a spec that stopped for a person again, and only a
-person decides that — see *Looking again* below. What is yours at each point:
+You do not choose the route; `next` does. Three steps `next` never prints,
+because only a person decides them: `revisit`, which looks at a spec that
+stopped for a person again — see *Looking again* below — and `redesign` and
+`accept`, the two answers to the *Recurring* question that are not "fix it
+again" — see *After `collect` and `settle`* below. What is yours at each point:
 
 - **After `begin`, `fix` and `repair`**: say the announcement in `say` — what is
   starting, which round of how many, and at what model and effort. Say it every
@@ -92,13 +94,44 @@ person decides that — see *Looking again* below. What is yours at each point:
   A line beginning *Recurring:* is a signal of its own and is relayed whole: the
   same file has drawn a new blocking or major finding in three or more rounds of
   this cycle, and the driver is saying that another fix round there is likely to
-  open the next case rather than close the last. It stops nothing; it is for the
-  person to decide whether the area wants a redesign instead.
-- **Never dispatch a fixer of your own.** A commit that reaches `snapshot`
-  without `fix` having dispatched it is committed and counted as a fix round
-  all the same — `snapshot` says so — but it was never announced, and it is not
-  the way round a spent budget: raising `limits.fixRounds` is, and only a person
-  does that.
+  open the next case rather than close the last. It stops nothing on its own.
+  When the output also carries `ask`, a fix round is still available and the
+  decision is the person's: ask it as written, with its four answers, each one
+  command. **Fix it once more** is `next`. **Redesign** is
+
+  ```bash
+  node "$P/scripts/ship.mjs" redesign --plan "$D" --spec <id>
+  ```
+
+  with `--file a,b` added only when the person names files of their own — those
+  are added to the recurring file, never put in its place; it spends a fix round
+  on a fresh implementer working from a brief of everything raised on those
+  files this cycle. **Accept** is
+
+  ```bash
+  node "$P/scripts/ship.mjs" accept --plan "$D" --spec <id>
+  ```
+
+  which spends nothing and publishes the change as it is, with what is open
+  disclosed — it will not merge unattended, `finish` cannot approve past an open
+  finding, and merging it is the person's to do on GitHub. **Stop the train**
+  is `end`. The `ask` says all of this; do not paraphrase the commands away.
+- **After `redesign`**: say the announcement in `say` — which files, which fix
+  round of how many, at what model and effort, that escalation never raises an
+  implementer, and which review the rewrite gets: answered after `collect`, the
+  readers judge their earlier findings against it and the adversary reads it
+  fresh; answered after `settle`, the whole panel reads it. Then dispatch and
+  run `next`.
+- **After `snapshot` when it returns `ask`**: the redesign implementer changed
+  nothing. Its report is kept aside, the fix round it spent stays spent, and the
+  same question is asked again with the same four answers.
+- **Never dispatch a fixer of your own, and never run `redesign` or `accept`
+  on your own judgement.** A commit that reaches `snapshot` without `fix` having
+  dispatched it is committed and counted as a fix round all the same —
+  `snapshot` says so — but it was never announced, and it is not the way round
+  a spent budget: raising `limits.fixRounds` is, and only a person does that.
+  `redesign` and `accept` are answers to a question, and only the person
+  answers it.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
   returned. If it contains *how it routed could not be confirmed*, take *When
   Codex could not say how it ran* below before running `next`. A non-zero exit
@@ -145,7 +178,9 @@ Two things do carry over from the run, because they are about the software:
 
 - **A finding still open goes under `## Risk`**, said as what goes wrong and for
   whom, in the same plain English you use for a person. `settle`'s `say` gives
-  you each one.
+  you each one. A finding the person accepted — they answered the *Recurring*
+  question with `accept` — goes there the same way: it is still open, and the
+  body is where it is disclosed.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
   to let it try again.
@@ -214,6 +249,14 @@ CI repair this repository allows, what is still open in behaviour terms, and
 that `limits.fixRounds` or `limits.ciRepairs` in `.tagteam/config.json` is what
 a person would raise to let it try again. The setting is an aside for someone
 who wants it; the behaviour is the explanation.
+
+When the person accepted it — they answered the *Recurring* question with
+`accept` — `ask` says so first: the spec stops here by their own decision, with
+the open finding disclosed in the pull request, and it waits to be merged by
+hand on GitHub. Do not offer approval and do not treat the stop as a failure;
+say what is open, in behaviour terms, and that a `revisit` is the door back
+should a reader later withdraw it. `begin` records a merge made by hand and
+moves on.
 
 ## Looking again
 

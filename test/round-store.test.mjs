@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   ROUND_MARKER,
+  ROUND_REDESIGN,
   createRoundStream,
   enterRound,
   readRoundMarker,
@@ -907,4 +908,25 @@ test("re-entering a round a real pass filled empties it, read-only records and a
     assert.ok(fs.existsSync(file), `the re-entered round has no ${name}`);
     assert.equal(fs.statSync(file).mode & 0o777, 0o400, `${name} is not a sealed record`);
   }
+});
+
+// The third record that belongs to the commit rather than to the attempt: which
+// files the commit was a redesign of. Cleared on re-entry, the churn reset it
+// carries would vanish on the first revisit; refused as a plain record, a
+// differing write would send its reader to re-enter, destroy the review
+// evidence, and refuse again.
+test("a redesign record survives re-entry, replays identical bytes, and refuses different ones by name", () => {
+  const dir = roundAt(OID);
+  const record = `${JSON.stringify({ requested: ["a.ts", "b.ts"], files: ["a.ts"], brief: "/ship/x/redesign-briefs/round-3-stamp.md", fromRound: 3 }, null, 2)}\n`;
+  writeRoundFile(path.join(dir, ROUND_REDESIGN), record);
+  const evidence = plant(dir, "findings/correctness.json");
+  const entered = enterRound(dir, { owner: OID });
+  assert.equal(entered.reentered, true);
+  assert.equal(fs.existsSync(evidence), false, "the attempt's evidence is cleared");
+  assert.equal(fs.readFileSync(path.join(dir, ROUND_REDESIGN), "utf8"), record, "the commit's redesign record is kept");
+  writeRoundFile(path.join(dir, ROUND_REDESIGN), record);
+  const different = `${JSON.stringify({ requested: ["a.ts", "b.ts"], files: ["a.ts", "b.ts"], brief: null, fromRound: 3 }, null, 2)}\n`;
+  assert.throws(() => writeRoundFile(path.join(dir, ROUND_REDESIGN), different),
+    /Re-entering the round does not clear this one: it records which files the commit/);
+  assert.equal(fs.readFileSync(path.join(dir, ROUND_REDESIGN), "utf8"), record, "the held record stands");
 });
