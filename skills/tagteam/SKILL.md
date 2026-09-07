@@ -43,13 +43,20 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  review.diff.d/ (the same change one file at a time), findings/,
                  recheck/, verify/, candidate.json, review.json, recheck.json,
                  to-fix.json, open/, still-open.json, still-open/, report.json,
+                 redesign.json (which files this round's commit was a redesign
+                 of; kept on re-entry like the report),
                  to-fix.code.json / still-open.code.json (the fixer's brief when
                  a finding about the pull request was kept out of it)          ignored
     implement-report.json  fix-report.json  what the round's agent said about its
                  own work, written outside every round and recorded into one  ignored
     fix-pending.json  fix-declined.json  recheck-plan.json  the driver's notes
                  between two steps                                          ignored
-    declined/    the reports of fixers that changed nothing                 ignored
+    accepted.json  a person's answer to the Recurring question: publish it as
+                 it is, with the ids they accepted                          ignored
+    redesign-briefs/  round-<n>-<stamp>.md, the brief a redesign implementer
+                 read, kept outside every round                             ignored
+    declined/    the reports of fixers and redesign implementers that changed
+                 nothing                                                    ignored
     pr-body.md  ci.json  usage.json                                          ignored
 .tagteam/worktrees/  .tagteam/locks/                                        ignored
 ```
@@ -71,9 +78,28 @@ round that raised them — `2.correctness.1` — so nothing one round settled ca
 overwritten or cleared by another. A round is a record: once `round.json` names
 the commit that owns it, every file tagteam writes beneath it is written once,
 and re-snapshotting that same commit re-enters the round — empties it back to
-the marker and the round's report and rebuilds it — while a different commit is
-refused. Codex's own output is the exception, replaced in place when a Codex
+the marker, the round's report and its redesign record, and rebuilds it — while
+a different commit is refused. Codex's own output is the exception, replaced in place when a Codex
 lens that produced nothing usable is re-dispatched.
+
+The rounds also carry a signal no single round can see. When one file draws a
+new blocking or major finding in three or more rounds of a single repair cycle,
+the current round among them, `collect` and `settle` say so — a line beginning
+*Recurring:* — because each repair there is opening the next case rather than
+closing the last. While a fix round is still available they also ask, and the
+question has two answers besides "fix it again" and "stop" that `next` never
+prints: `redesign`, which spends a fix round on a fresh implementer working
+from a brief of every finding the rounds record on those files and how each was
+answered, and `accept`, which spends nothing and publishes the change as it is
+with what is open disclosed — an open finding is a blocker no approval clears,
+so the spec then waits at `finish` to be merged by hand. A redesign's commit
+gets `redesign.json` in its round naming the requested files it actually
+changed; the signal restarts those files' count at that round and leaves a file
+the rewrite never touched counting as before. The reset is about counting only:
+a finding still open on a rewritten file is carried and re-judged by the lens
+that raised it, exactly as before. The route a rewrite takes is the one any
+commit takes from where it was chosen — after `collect`, the re-check; after
+`settle`, the whole panel.
 
 ## Configuration
 
@@ -211,6 +237,7 @@ git -C "$R" rev-parse origin/<base>
 git -C "$R" worktree add --detach "$R/.tagteam/worktrees/<slug>" <baseOid>
 git -C "$W" switch -c "<branchPrefix><slug>/<spec-id>"
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "<message>"
+git -C "$W" diff --name-only -z <commit> <commit>  # read-only: which requested files a redesign commit changed
 git -C "$W" push -u origin "<branch>"
 git -C "$R" worktree remove "$R/.tagteam/worktrees/<slug>"
 ```
@@ -280,7 +307,7 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
-| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch |
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints |
 | `plan.mjs` | The plan side: `roles`, `codex` (prepare the Codex plan review for the runner), `collect` (fold the three readers into a brief), `check` (every gating finding answered) |
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |

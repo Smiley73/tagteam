@@ -146,6 +146,7 @@ flowchart TD
     codexr["Codex cross-review"]
     open{"Anything blocking or major open?"}
     fixer["Fix — a fixer gets the blocking and major findings, nothing else"]
+    redesign["Redesign — a fresh implementer rewrites the area from a brief of everything raised on it"]
     route{"Which review does the fixed commit get?"}
     adv["Adversary — reads the final diff fresh"]
     recheck["Re-check — each reviewer that raised a finding judges its own against the new code"]
@@ -180,6 +181,9 @@ flowchart TD
     recheck --> settle
     settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
     settle -->|"nothing open, or the fix rounds<br>this repository allows are spent"| publish
+    settle -. "the same file keeps failing, round after round — a person answers:<br>fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop" .-> redesign
+    open -. "the same question, asked here too — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
+    redesign --> snapshot
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
     publish --> outcome
     outcome -. "something resolved without a new commit — revisit:<br>the same commit through verify, review and settle again, spending nothing" .-> snapshot
@@ -199,6 +203,14 @@ round, each reviewer that raised a finding re-checks its own findings against
 the new code, and an adversary reads the fixed diff fresh. Anything still open
 starts another round, for as many rounds as `limits.fixRounds` allows; when they
 run out the pull request stops with the findings on it and says so.
+
+The rounds also watch for the pattern no single round can see: the same file
+drawing a new blocking or major finding three or more rounds running, each
+repair opening the next case. When that happens and a fix round is still left,
+the run stops to ask, with four answers: fix it once more; redesign — a fresh
+implementer rewrites the area from a brief of everything raised on it this
+cycle, spending a fix round, and the rewrite starts a fresh count; accept —
+publish it as it is with what is open disclosed, to be merged by hand; or stop.
 
 Each job thinks as hard as its work needs: the implementer, the fixer and the
 adversary at high effort by default, lens reviewers at medium, and re-checks —

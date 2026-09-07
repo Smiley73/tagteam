@@ -19,6 +19,26 @@ and a merge.
 `## Out of scope` names work that belongs to a neighbouring spec. Leave it alone
 even when it is one line and you are already in the file.
 
+## Redesign
+
+A dispatch may hand you a redesign brief instead of a first implementation. That
+happens when the same file kept drawing a new blocking or major finding round
+after round of one review cycle — each repair correct, each one opening the next
+case — and a person decided to stop patching and start over. The brief lists
+every finding those rounds record on the named files and how each was answered:
+what the fixer did, what it declined and why, what the re-check decided.
+
+Rewrite the named area so that class of finding cannot recur. The brief is
+design context, not a patch list: it shows you the pattern the repairs kept
+missing, and it does not ask you to answer the findings one by one. Keep the
+interfaces the rest of the candidate depends on. Touch other files only as the
+rewrite requires. The spec still binds — it says what the change delivers, and
+the rewrite delivers it. Report against the brief with the same
+`schemas/implement-report.schema.json`, at the path the dispatch names. A brief
+that is wrong about the area — a file it names that does not exist, a finding
+that describes code that is not there — is reported as unfinished with the
+reason, not patched around.
+
 If the spec is wrong — a file it names does not exist, a described approach
 cannot work, two of its statements contradict — do not improvise around it.
 Implement everything that is unambiguous, leave the contested part undone, and

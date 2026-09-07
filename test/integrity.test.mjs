@@ -409,7 +409,7 @@ test("every dispatching step of the driver reads the resolver, and the driver na
   for (const [, job] of shipDriver.matchAll(/jobs\.([a-z]+)\b/g)) {
     assert.ok(emitted.has(job), `ship.mjs dispatches roles job ${job}, which gates.mjs roles does not emit`);
   }
-  for (const step of ["begin", "panel", "fix", "recheck", "repair"]) {
+  for (const step of ["begin", "panel", "fix", "redesign", "recheck", "repair"]) {
     assert.match(driverFunction(step), /roles\(ctx, id\)/, `${step} dispatches without reading the resolver`);
   }
 });
@@ -418,9 +418,29 @@ test("every reporting dispatch the driver prints names the path its agent must w
   assert.match(shipDriver, /"implement-report\.json"/);
   assert.match(shipDriver, /"fix-report\.json"/);
   assert.doesNotMatch(shipDriver, /-report-\$\{|report-\$ROUND/, "a reporting path carries the round it was dispatched out of");
-  for (const fn of ["implementerDispatch", "fixerDispatch", "repairDispatch"]) {
+  for (const fn of ["implementerDispatch", "redesignDispatch", "fixerDispatch", "repairDispatch"]) {
     assert.match(driverFunction(fn), /Write your (?:fix )?report to:/, `${fn} does not tell its agent where to write its report`);
   }
+});
+
+// The two answers to the Recurring question are a person's, like `revisit`:
+// `next` never prints them. A redesign is budgeted like a fix and dispatched
+// after the edge, and its question carries none of the run's vocabulary.
+test("redesign and accept are person-only doors, budgeted before dispatch, and the ask names no severity", () => {
+  for (const door of ["redesign", "accept", "revisit"]) {
+    assert.doesNotMatch(shipDriver, new RegExp(`nextCommand\\(ctx, "${door}"`), `next prints ${door}, which only a person decides`);
+  }
+  const redesign = driverFunction("redesign");
+  const edge = redesign.indexOf('transition(ctx, id, "fixing", { budgeted: true })');
+  const dispatch = redesign.indexOf("redesignDispatch(");
+  assert.ok(edge > -1 && dispatch > -1 && edge < dispatch, "redesign dispatches before it takes the budgeted edge");
+  assert.match(redesign, /jobs\.implement\b/, "a redesign is an implementer, never a fixer");
+  const module = read("scripts", "lib", "redesign.mjs");
+  const ask = module.slice(module.indexOf("export function redesignAsk("));
+  assert.ok(ask.length > 0, "redesign.mjs has no redesignAsk");
+  assert.doesNotMatch(ask, /\b(blocking|major|minor)\b/, "the ask carries a severity word, which is the run's vocabulary");
+  const ship = read("commands", "ship.md").replace(/\s+/g, " ");
+  for (const door of ["redesign", "accept"]) assert.ok(ship.includes(`ship.mjs" ${door} --plan`), `commands/ship.md never tells the orchestrator how to run ${door}`);
 });
 
 test("the gate names a person is shown are rendered as sentences by the driver and the status command", () => {

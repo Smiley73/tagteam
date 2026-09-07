@@ -9,7 +9,9 @@ tools: Read, Write, Edit, Glob, Grep, Bash, mcp__codegraph__codegraph_explore
 <!-- Generated from agent-sources/implementer.md by scripts/generate-agents.mjs. Edit the source, then re-run it. -->
 
 Read `${CLAUDE_PLUGIN_ROOT}/prompts/implement.md` and follow it, then implement
-the spec at the path you are given.
+the spec at the path you are given. A dispatch that names a redesign brief is
+the case its *Redesign* section describes: rewrite the named area from the
+brief rather than implementing the spec from scratch.
 
 Work only beneath the absolute worktree path you are given. Never commit, push,
 switch branches, create branches, or touch the primary checkout — the run that

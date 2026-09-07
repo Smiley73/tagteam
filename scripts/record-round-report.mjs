@@ -42,7 +42,7 @@
 // refuses to count one report twice. An agent that returned without writing
 // anything leaves the previous round's file sitting there, and counting it would
 // record a report against a commit it does not describe. Re-entry does not undo
-// that: the round's copy is one of the two records `clearRound` keeps, so a
+// that: the round's copy is one of the records `clearRound` keeps, so a
 // re-entered round can only be recorded again by the same report, byte for byte,
 // and a later agent's file cannot become the account of a commit it did not make.
 //
@@ -65,7 +65,9 @@ import { isMain } from "./lib/is-main.mjs";
 
 // The two reports a round can carry, and the schema each is validated against.
 // Both are considered every time: which one a round holds is a fact about the
-// dispatch that produced it, and the orchestrator is not asked to know it.
+// dispatch that produced it, and the orchestrator is not asked to know it. A
+// redesign round records an implement report like the first round does; the
+// round's `redesign.json` is what tells the two apart, not a third kind here.
 const KINDS = [
   { kind: "implement", file: "implement-report.json", schema: "implement-report.schema.json" },
   { kind: "fix", file: "fix-report.json", schema: "fix-report.schema.json" }
@@ -130,6 +132,17 @@ function recordedElsewhere(roundsRoot, ownRound) {
     if (!held.has(serialize(recorded.report))) held.set(serialize(recorded.report), entry.name);
   }
   return held;
+}
+
+/**
+ * The round under `roundsRoot` that already records `document` as its report,
+ * by name, or null when none does. The same canonical form the recording uses,
+ * so a caller deciding whether a scratch report is new — the ship's snapshot
+ * step, meeting a redesign implementer's report beside the first round's — asks
+ * the one place that knows rather than re-serializing on its own.
+ */
+export function recordedIn(roundsRoot, document) {
+  return recordedElsewhere(path.resolve(roundsRoot), null).get(serialize(document)) ?? null;
 }
 
 // The wrapper the round already holds at `out`, or null when there is none or

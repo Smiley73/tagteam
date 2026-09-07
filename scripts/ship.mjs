@@ -31,6 +31,9 @@ import { listRounds } from "./lib/rounds.mjs";
 import { repairScope } from "./gates.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
 import { churnLines, churnSignal } from "./lib/churn.mjs";
+import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
+import { ROUND_REDESIGN, writeRoundFile } from "./lib/round-store.mjs";
+import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 
@@ -205,6 +208,29 @@ function implementerDispatch(ctx, spec, job) {
   };
 }
 
+// A redesign is a fresh implementer, not a fixer: it reads prompts/implement.md
+// and its Redesign section, then a brief of everything the rounds record on the
+// named files, and rewrites the area rather than answering the last finding. It
+// reports as the first implementer did, to the same path — the round's record
+// tells a redesign round from the first by its `redesign.json`.
+function redesignDispatch(ctx, spec, briefPath, files, job) {
+  return {
+    agent: agent("implementer", job.effort),
+    model: job.model,
+    description: `Redesign ${spec.id}: ${files.join(", ")}`,
+    prompt: [
+      `Job: implementer`,
+      `This is a redesign, not a first implementation: read prompts/implement.md, then its Redesign section, then the brief below.`,
+      `Redesign brief: ${briefPath}`,
+      `Files to redesign: ${files.join(", ")}`,
+      `Spec: ${spec.path}`,
+      `Worktree (work only beneath this path): ${ctx.worktree}`,
+      `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
+    ].join("\n")
+  };
+}
+
 function reviewerDispatch(ctx, spec, round, oid, lens, brief, job, pullRequest = []) {
   const dir = roundDir(ctx, spec.id, round);
   return {
@@ -368,6 +394,22 @@ function pullRequestFindingsLine(ctx, id, findings) {
     + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
 }
 
+// The Recurring signal and, when a person can still answer it, the question.
+// The signal is what `churn.mjs` reports at `round`; the ask is offered only
+// when something open is for a fixer — a pull request finding spends nothing
+// and has its own route — and a fix round is still available, since the four
+// answers all suppose one: with the budget spent the loop behaves as it always
+// did and the spent branch of `fix` routes to publish. An absent counter reads
+// as zero, as `counterOf` in gates.mjs reads it.
+function churnAsk(ctx, id, state, round, { openForFixer, atCollect }) {
+  const signals = churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round });
+  const signal = churnLines(signals);
+  const spent = state.fixRoundsUsed ?? 0;
+  const limit = ctx.config.limits.fixRounds;
+  const ask = signals.length > 0 && openForFixer && spent < limit ? redesignAsk(signals, { spent, limit, atCollect }) : null;
+  return { signal, signals, ask };
+}
+
 // A spec that stopped for a person stays exactly as it stopped until a person
 // says otherwise. Two doors lead out of waiting — `repair` for a red check and
 // `revisit` for everything else — and a step refused here would either die on
@@ -451,6 +493,19 @@ const fixPendingPath = (ctx, id) => path.join(specDir(ctx, id), "fix-pending.jso
 // when the next fixer is dispatched, and ignored when its candidate is not the
 // state's, so a fix that did change the code is never read as a decline.
 const fixDeclinedPath = (ctx, id) => path.join(specDir(ctx, id), "fix-declined.json");
+
+// Written by `accept`: a person's answer to the Recurring question, "publish it
+// as it is with what is open disclosed". It names the round, the candidate and
+// the ids of everything that was open when they said so. An accept given at
+// collect reaches `settle` through a re-check that fixed nothing, and `settle`
+// must not ask again about the findings the person already accepted — but must
+// ask about any it has not seen, which is why the ids are recorded and not the
+// candidate alone: a fresh adversary finding raised after the accept is asked
+// about, never published unseen. Honoured only when candidate and round match
+// and the ids cover everything open; removed by `fix`, `redesign` and `revisit`,
+// so a spec revisited to spend a fix round is not short-circuited to publish,
+// and kept otherwise so that `finish` can say the person accepted this.
+const acceptedPath = (ctx, id) => path.join(specDir(ctx, id), "accepted.json");
 
 // --- subcommands -----------------------------------------------------------
 
@@ -608,9 +663,36 @@ function snapshot(options) {
   // "Changed nothing" means HEAD is still the commit the fixer was dispatched
   // from — the marker's candidate, not the state's; `fixPendingPath` says why.
   if (pending && !dirty && head === pending.candidate) {
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    // A redesign implementer that changed nothing. Its report is new when no
+    // round already records it — the first round's implementer wrote to the
+    // same path, and a redesign that returned without writing leaves that one
+    // there. Nothing is declined here: no finding was handed to it, so no lens
+    // has reasons to re-judge, and the Recurring question is simply asked again.
+    if (pending.from === "redesign") {
+      const reportPath = path.join(specDir(ctx, id), "implement-report.json");
+      const report = readJson(reportPath, null);
+      if (report && recordedIn(roundsRoot(ctx, id), report) === null) {
+        fs.mkdirSync(path.join(specDir(ctx, id), "declined"), { recursive: true, mode: 0o700 });
+        const kept = path.join(specDir(ctx, id), "declined", `redesign-round-${pending.round}-${stamp}.json`);
+        fs.renameSync(reportPath, kept);
+        say.push(`The redesign implementer changed nothing (its report is kept at ${kept}): ${report.summary ?? ""}`);
+        for (const part of report.unfinished ?? []) say.push(`  left undone: ${part.part} — ${part.reason}`);
+      } else {
+        say.push("The redesign implementer changed nothing and wrote no report.");
+      }
+      fs.unlinkSync(fixPendingPath(ctx, id));
+      if (state.state === "fixing") transition(ctx, id, "reviewing");
+      const settled = exists(path.join(roundDir(ctx, id, pending.round), "recheck.json"));
+      const churn = churnAsk(ctx, id, state, pending.round, { openForFixer: true, atCollect: !settled });
+      say.push(...churn.signal);
+      if (churn.ask) say.push("The fix round it spent is gone; what was open is still open, and the question stands.");
+      else if ((state.fixRoundsUsed ?? 0) >= ctx.config.limits.fixRounds) say.push("The fix round it spent was the last of this cycle.");
+      else say.push("The fix round it spent is gone; what was open is still open, and another fix round follows if one is left.");
+      return emit({ say, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, "fix", id) });
+    }
     const reportPath = path.join(specDir(ctx, id), "fix-report.json");
     const report = readJson(reportPath, null);
-    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
     let kept = null;
     if (report) {
       fs.mkdirSync(path.join(specDir(ctx, id), "declined"), { recursive: true, mode: 0o700 });
@@ -648,7 +730,9 @@ function snapshot(options) {
 
   if (dirty) {
     const message = options.message
-      ?? (pending?.from === "repair" ? `Repair CI for ${id}` : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : `Implement ${id}`);
+      ?? (pending?.from === "repair" ? `Repair CI for ${id}`
+        : pending?.from === "redesign" ? `Redesign ${id}: ${(pending.files ?? []).join(", ")}`
+          : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : `Implement ${id}`);
     git(ctx.worktree, ["add", "-A"]);
     node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
     git(ctx.worktree, ["commit", "-m", message]);
@@ -657,6 +741,13 @@ function snapshot(options) {
   }
   const oid = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
 
+  // Every snapshot rebuilds a review — a new commit's, or a re-entered round's
+  // — and an accept was about the review as it stood when it was given. A
+  // resumed run that re-enters the round would otherwise carry the accept into
+  // a rebuilt review whose readers mint the same positional ids for whatever
+  // they find this time, and `settle` would publish a finding nobody accepted.
+  fs.rmSync(acceptedPath(ctx, id), { force: true });
+
   const allocation = lastJson(node("gates.mjs", ["round", statePath(ctx, id), roundsRoot(ctx, id), oid, ctx.configPath]).stdout);
   const round = allocation.round;
   const dir = roundDir(ctx, id, round);
@@ -664,6 +755,21 @@ function snapshot(options) {
     "--primary", ctx.repo, "--worktree", ctx.worktree, "--base", ctx.baseOid, "--candidate", oid,
     "--out-dir", dir, "--config", ctx.configPath
   ]);
+  // A redesign round records which of the requested files the rewrite changed:
+  // the delta from the commit the implementer started at to this one, cut down
+  // to the requested set. The churn signal restarts those files' counts at this
+  // round; a requested file the rewrite never touched keeps its count. Written
+  // without a timestamp — the delta is a function of two commits — so the rerun
+  // a refused report asks for rewrites identical bytes into the re-entered round.
+  let redesigned = null;
+  if (pending?.from === "redesign") {
+    // NUL-delimited, so a path git would otherwise quote and escape — one with
+    // a space or a non-ASCII letter — is the same string the findings name.
+    const changed = new Set(git(ctx.worktree, ["diff", "--name-only", "-z", pending.candidate, oid]).stdout.split("\0").filter(Boolean));
+    const requested = pending.files ?? [];
+    redesigned = { requested, files: requested.filter((file) => changed.has(file)), brief: pending.record ?? null, fromRound: pending.round };
+    writeRoundFile(path.join(dir, ROUND_REDESIGN), `${JSON.stringify(redesigned, null, 2)}\n`);
+  }
   node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "changed-paths.json")]);
   const recorded = node("record-round-report.mjs", ["--dir", specDir(ctx, id), "--out", path.join(dir, "report.json")], { allow: [2] });
   if (recorded.status === 2) {
@@ -675,6 +781,12 @@ function snapshot(options) {
   say.push(`Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}; ${allocation.spent} of ${allocation.limit} fix rounds spent in this cycle.`);
   if (outOfBand) {
     say.push(`This commit was not dispatched by fix: nothing in this run asked for it. It is a fix round of this cycle all the same and is counted as one — ${allocation.remaining} of ${allocation.limit} left.`);
+  }
+  if (redesigned) {
+    if (redesigned.files.length > 0) say.push(`This round is a redesign of ${redesigned.files.join(", ")}: findings on those files start a fresh count.`);
+    for (const file of redesigned.requested.filter((file) => !redesigned.files.includes(file))) {
+      say.push(`${file} was to be redesigned and was not changed; its count is not reset.`);
+    }
   }
   say.push(...recorded.stdout.trim().split("\n"));
   emit({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
@@ -773,10 +885,11 @@ function collect(options) {
     say.push(`${missing.join(", ")} produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended.`);
     return emit({ say, review: review.status, next: nextCommand(ctx, "recheck", id) });
   }
-  const signal = churnLines(churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round: round.round }));
-  say.push(...signal);
+  const openForFixer = review.status === "open" && (review.open ?? []).some((finding) => !isPullRequestFinding(finding));
+  const churn = churnAsk(ctx, id, state, round.round, { openForFixer, atCollect: true });
+  say.push(...churn.signal);
   emit({
-    say, review: review.status, ...(signal.length > 0 ? { signal } : {}),
+    say, review: review.status, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}),
     next: nextCommand(ctx, review.status === "open" ? "fix" : "recheck", id)
   });
 }
@@ -838,12 +951,120 @@ function fix(options) {
   }
   writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", record: briefPath, at: new Date().toISOString() });
   fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
+  // A fix is the person choosing to fix over an accept they may have given.
+  fs.rmSync(acceptedPath(ctx, id), { force: true });
   const budget = edge.output?.budget ?? {};
   emit({
     say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings about the code, from ${briefPath}.`, ...prSay],
     dispatch: [fixerDispatch(ctx, spec, briefPath, job)],
     next: nextCommand(ctx, "snapshot", id)
   });
+}
+
+// A person's answer to the Recurring question: stop patching the last finding
+// and have a fresh implementer rewrite the area. `next` never prints this; the
+// ask names it. It spends a fix round exactly as `fix` does, and the churn count
+// for the files the rewrite changes restarts at the round that snapshots it.
+// The route the rewrite takes is unchanged: chosen at collect, its round's
+// predecessor is collected but unsettled, so the re-check judges the earlier
+// findings against it and the adversary reads it fresh; chosen at settle, the
+// whole panel reads it. Routing a collect-time redesign to the panel is not an
+// option — the collection would never be settled or carried.
+function redesign(options) {
+  const ctx = context(options);
+  const id = options.spec;
+  const spec = specById(ctx, id);
+  const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "redesign");
+  // Before anything is built or spent: a pending fixer's marker would be
+  // overwritten, and its work would land as a redesign at the next snapshot.
+  if (exists(fixPendingPath(ctx, id))) throw new Stop(`a fixer is pending on ${id}; run snapshot first, then answer the question it asks`);
+  if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; redesign answers the question collect and settle ask when the same file keeps failing`);
+  const round = currentRound(ctx, id, state);
+  if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
+  const scope = repairScope(state.ciRepairsUsed ?? 0);
+  const signals = churnSignal(roundsRoot(ctx, id), { scope, round: round.round });
+  const files = redesignFiles(signals, options.file);
+  if (files.length === 0) throw new Stop(`nothing is recurring on ${id} at round ${round.round} and --file named no file; a redesign answers the Recurring question`);
+  const history = fileHistory(roundsRoot(ctx, id), { files, scope, round: round.round, declinedDir: path.join(specDir(ctx, id), "declined") });
+  const reportPath = path.join(specDir(ctx, id), "implement-report.json");
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  const briefPath = path.join(specDir(ctx, id), REDESIGN_BRIEFS, `round-${round.round}-${stamp}.md`);
+  const brief = renderBrief({ spec, round: round.round, files, history, signals, reportPath });
+  const settled = exists(path.join(round.dir, "recheck.json"));
+  const edge = transition(ctx, id, "fixing", { budgeted: true });
+  if (edge.refused) {
+    const say = [`No fix round is left for this cycle (${edge.reason.split("\n")[0]}), and a redesign spends one. The spec still publishes and a person decides.`];
+    if (settled) {
+      transition(ctx, id, "verifying");
+      return emit({ say, budget: "spent", next: nextCommand(ctx, "publish", id) });
+    }
+    return emit({ say, budget: "spent", next: nextCommand(ctx, "recheck", id) });
+  }
+  fs.mkdirSync(path.dirname(briefPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(briefPath, brief, { mode: 0o600 });
+  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: "redesign", record: briefPath, files, at: new Date().toISOString() });
+  fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
+  fs.rmSync(acceptedPath(ctx, id), { force: true });
+  const resolved = roles(ctx, id);
+  const job = resolved.jobs.implement;
+  const budget = edge.output?.budget ?? {};
+  const collected = exists(path.join(round.dir, "review.json"));
+  const route = collected && !settled ? "recheck" : "panel";
+  const escalation = ctx.config.escalation;
+  const say = [
+    `Redesign of ${files.join(", ")} on ${id}: fix round ${budget.ordinal} of the ${budget.limit} this repository allows, spent on a fresh implementer ${settings(job)}. `
+      + "Escalation never raises an implementer, only fixers and re-checks"
+      + (escalation ? `; this round moved the counter, so the re-checks of this round and any later fixer run raised once it passes ${escalation.after}.` : "."),
+    `The brief at ${briefPath} holds every finding these rounds record on those files and how each was answered — design context, not a patch list. Findings on the files the rewrite changes start a fresh count.`,
+    route === "recheck"
+      ? "The rewrite goes to the re-check: each reader judges its earlier findings against it and the adversary reads it fresh. A redesign answered after the re-check settles gets the whole panel instead."
+      : "The whole panel reads the rewrite."
+  ];
+  emit({ say, files, brief: briefPath, dispatch: [redesignDispatch(ctx, spec, briefPath, files, job)], next: nextCommand(ctx, "snapshot", id) });
+}
+
+// A person's other answer to the Recurring question: publish it as it is, with
+// what is open disclosed. `next` never prints this either. It spends nothing and
+// approves nothing: an open finding is a blocker no approval clears, so the spec
+// stops at `finish` exactly as it does when the budget runs out, and the pull
+// request is merged by hand on GitHub — `begin` adopts a hand merge — or
+// revisited once a reader withdraws the finding. Accept answers the Recurring
+// question and nothing else: a spec that simply ran out of fix rounds publishes
+// on its own through the spent branch of `fix`.
+function accept(options) {
+  const ctx = context(options);
+  const id = options.spec;
+  const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "accept");
+  if (exists(fixPendingPath(ctx, id))) throw new Stop(`a fixer is pending on ${id}; run snapshot first, then answer the question it asks`);
+  if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; accept answers the question collect and settle ask when the same file keeps failing`);
+  const round = currentRound(ctx, id, state);
+  if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
+  const signals = churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round: round.round });
+  if (signals.length === 0) throw new Stop(`nothing is recurring on ${id} at round ${round.round}; accept answers the Recurring question and nothing else — a spec that ran out of fix rounds publishes on its own`);
+  if ((state.fixRoundsUsed ?? 0) >= ctx.config.limits.fixRounds) throw new Stop(`no fix round is left on ${id}, so the question was not asked; the spec publishes on its own through fix, with what is open disclosed`);
+  const settled = exists(path.join(round.dir, "recheck.json"));
+  const recordPath = settled ? path.join(round.dir, "still-open.json") : path.join(round.dir, "to-fix.json");
+  const record = readJson(recordPath, { findings: [] });
+  const forFixer = (record.findings ?? []).filter((finding) => !isPullRequestFinding(finding));
+  if (forFixer.length === 0) throw new Stop(`nothing open on ${id} is for a fixer, so there is nothing to accept; a round left with pull request findings alone publishes on its own`);
+  // Everything open: the record's findings and, before the round is settled,
+  // whatever the newest settled round carried forward — open without being in
+  // `to-fix.json`, and exactly what the settle after this accept will find.
+  const ids = new Set((record.findings ?? []).map((finding) => finding.id));
+  if (!settled) {
+    const carry = carryFrom(ctx, id, round.round);
+    if (carry) for (const finding of readJson(carry.file, { findings: [] }).findings ?? []) ids.add(finding.id);
+  }
+  writeJson(acceptedPath(ctx, id), { round: round.round, candidate: state.candidateOid, ids: [...ids], at: new Date().toISOString() });
+  const say = [`Accepted as it is at round ${round.round}: what is open is disclosed in the pull request under Risk. It will not merge unattended and finish cannot approve past an open finding, so merging it is yours to do on GitHub — or revisit once a reader withdraws what it found.`];
+  if (settled) {
+    transition(ctx, id, "verifying");
+    return emit({ say, accepted: [...ids], next: nextCommand(ctx, "publish", id) });
+  }
+  say.push("The re-check settles this round first; anything a reader raises that you have not seen is asked about before it publishes.");
+  emit({ say, accepted: [...ids], next: nextCommand(ctx, "recheck", id) });
 }
 
 function recheck(options) {
@@ -960,9 +1181,11 @@ function settle(options) {
   // or a panel in between.
   if (state.state !== "verifying") transition(ctx, id, "verifying");
   const say = result.stdout.trim().split("\n");
-  const signal = churnLines(churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round: plan.round }));
-  say.push(...signal);
   const open = settledReview.open ?? [];
+  const openForFixer = open.some((finding) => !isPullRequestFinding(finding));
+  const churn = churnAsk(ctx, id, state, plan.round, { openForFixer, atCollect: false });
+  const signal = churn.signal;
+  say.push(...signal);
   if (open.length > 0) {
     // Everything still open is about the pull request: no fixer can reach it,
     // so no fix round is spent on it. The spec publishes with the body the
@@ -971,9 +1194,20 @@ function settle(options) {
       say.push(pullRequestFindingsLine(ctx, id, open), "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again.");
       return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
     }
+    // A person accepted this candidate as it is, and nothing is open that they
+    // did not see: it publishes with what is open disclosed. Anything open they
+    // have not seen — a fresh adversary finding after an accept given at collect
+    // — is asked about; see `acceptedPath`.
+    const accepted = readJson(acceptedPath(ctx, id), null);
+    const acceptedIds = new Set(Array.isArray(accepted?.ids) ? accepted.ids : []);
+    if (accepted && accepted.candidate === state.candidateOid && accepted.round === plan.round && open.every((finding) => acceptedIds.has(finding.id))) {
+      say.push(`Publishing as it is, as you decided at round ${accepted.round}: what is open goes into the pull request under Risk, it will not merge unattended, and finish cannot approve past an open finding — merging it is yours to do on GitHub.`);
+      return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), accepted: true, next: nextCommand(ctx, "publish", id) });
+    }
+    fs.rmSync(acceptedPath(ctx, id), { force: true });
     transition(ctx, id, "reviewing");
     say.push("Something blocking or major is still open, so another fix round follows if the budget allows one.");
-    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "fix", id) });
+    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, "fix", id) });
   }
   emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
 }
@@ -1072,6 +1306,10 @@ function revisit(options) {
   // The round is rebuilt against the base the review was bound to, not the base
   // the train has moved on to since: the diff has to be the one that was reviewed.
   writeJson(ctx.trainPath, { ...ctx.train, baseOid: state.baseOid });
+  // An accept was about the commit as it was settled; a revisit settles it
+  // again, and the next settle asks or fixes as usual rather than publishing
+  // straight past what the readers now see.
+  fs.rmSync(acceptedPath(ctx, id), { force: true });
   transition(ctx, id, "verifying");
   const say = [`Revisiting ${id} at ${state.candidateOid.slice(0, 12)}: the same commit goes through verify, review and settle again. Looking again spends no fix round and no CI repair; a fix round it reaches comes out of this cycle's budget as before.`];
   const pr = pullRequestRecord(ctx, id, state);
@@ -1119,8 +1357,11 @@ const sentence = (reason) => REASONS[reason] ?? reason;
 // so approving is offered only when it would change the verdict. Offered for a
 // blocker, it was taken: the approval was recorded, printed as "Approved by",
 // and `finish` asked again with the same reasons.
-function stopAsk(id, { blockers, approvals }) {
+function stopAsk(id, { blockers, approvals }, accepted = null) {
   const text = [`${id} stops and waits.`];
+  if (accepted && blockers.length > 0) {
+    text.push(`You accepted this at round ${accepted.round} with what was open disclosed, so it waits for you to merge it on GitHub — or to look at it again once a reader would withdraw what it found.`);
+  }
   if (blockers.length > 0) {
     text.push(`Blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by ${CLEARS[reason] ?? "revisit"}, or by a new commit; no approval clears it)`).join("; ")}.`);
     if (approvals.length > 0) text.push(`Also waiting on you: ${approvals.map(sentence).join("; ")}; approval would clear only this part, so it is not offered until nothing is blocked.`);
@@ -1175,9 +1416,10 @@ function finish(options) {
     .map((report) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part) => `left undone: ${part.part} — ${part.reason}`).join("; ")}`);
   say.push(...usageLines(ctx, id));
   const following = nextSpecAfter(ctx, id);
+  const accepted = readJson(acceptedPath(ctx, id), null);
   emit({
     say,
-    ask: stopAsk(id, verdict),
+    ask: stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: following ? nextCommand(ctx, "begin", following) : nextCommand(ctx, "end", null)
   });
@@ -1223,7 +1465,7 @@ function end(options) {
 
 // --- entry -----------------------------------------------------------------
 
-const SUBCOMMANDS = { start, begin, snapshot, verify, panel, collect, fix, recheck, settle, publish, repair, revisit, finish, end };
+const SUBCOMMANDS = { start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, repair, revisit, finish, end };
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
@@ -1233,6 +1475,8 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   panel   --spec <id>                 dispatch every lens plus Codex
   collect --spec <id>                 collect the panel; decides fix or recheck
   fix     --spec <id>                 spend a fix round and dispatch the fixer
+  redesign --spec <id> [--file a,b]   a person's answer to the Recurring question, never printed by next: spend a fix round on a fresh implementer with a brief of everything raised on the recurring files
+  accept  --spec <id>                 a person's other answer to it, never printed by next: publish as it is with what is open disclosed; it then waits to be merged by hand
   recheck --spec <id>                 dispatch the adversary and the re-checks
   settle  --spec <id>                 settle the round; decides fix or publish
   publish --spec <id> --title <t> --body <file>

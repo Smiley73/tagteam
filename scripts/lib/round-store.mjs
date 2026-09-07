@@ -10,9 +10,9 @@
 // That is only survivable because a round belongs to exactly one candidate
 // commit. `round.json` records the owner, and re-running the snapshot against
 // that same owner **re-enters** the round: everything the previous attempt at
-// reviewing that commit produced is cleared and rebuilt, and the two records
-// that belong to the commit rather than to the attempt — the marker and the
-// round's report — are kept. A different owner is refused and nothing is removed.
+// reviewing that commit produced is cleared and rebuilt, and the records that
+// belong to the commit rather than to the attempt — the marker, the round's
+// report and its redesign record — are kept. A different owner is refused and nothing is removed.
 // Re-entry is the only thing that empties a round, which is what keeps the
 // documented resume path — restart at the commit-and-snapshot step against
 // whatever is committed in the worktree — working without a fresh round number.
@@ -58,18 +58,26 @@ export const ROUND_MARKER = "round.json";
 // the comment there for why re-entry leaves it alone.
 export const ROUND_REPORT = "report.json";
 
+// Which files the commit that owns the round was a redesign of, written by the
+// ship's snapshot step when the commit came from a redesign implementer:
+// `{requested, files, brief, fromRound}`, where `files` is the requested set the
+// commit actually changed. The churn signal reads it to restart a file's count
+// at this round. It is about the commit, not about the attempt to review it, so
+// `clearRound` keeps it — see there — and a re-entry is not a second redesign.
+export const ROUND_REDESIGN = "redesign.json";
+
 // The reader of this message is usually an autonomous agent that acts on what a
 // tool prints, so the recovery has to carry its price with it. Re-entry is the
 // only way to rebuild a round, and it empties the round first — safe at the
 // snapshot step, where the round holds nothing yet, and destructive at any later
 // one, where it deletes evidence a model wrote and cannot be asked for again.
 //
-// The round's report is the one path where that recovery is not the recovery at
-// all: `clearRound` keeps it, so re-entering the round rebuilds everything around
-// it and leaves this refusal standing. An agent told to re-enter would pay the
-// price — the round's findings, recheck and verify evidence — and arrive back at
-// the identical message, so this refusal says what is actually true of the file
-// it names.
+// The round's report and its redesign record are the two paths where that
+// recovery is not the recovery at all: `clearRound` keeps both, so re-entering
+// the round rebuilds everything around them and leaves this refusal standing. An
+// agent told to re-enter would pay the price — the round's findings, recheck and
+// verify evidence — and arrive back at the identical message, so this refusal
+// says what is actually true of the file it names.
 const refuse = (file, reason) =>
   new Error(`the round already records ${reason}: ${file} — a round record is written once. `
     + (path.basename(file) === ROUND_REPORT
@@ -80,9 +88,14 @@ const refuse = (file, reason) =>
         + "thing to work out before anything else. The held account stands: once that is worked out, move "
         + "the scratch file aside rather than writing over it, and re-run the recording — it then finds "
         + "the round already accounted for and passes"
-      : "Re-entering the round (re-running the snapshot against the same commit) rebuilds it, but empties it "
-        + "first: every findings, recheck and verify file in it is deleted. That is only safe before the "
-        + "review has run; later, work out why this path is being written twice instead"));
+      : path.basename(file) === ROUND_REDESIGN
+        ? "Re-entering the round does not clear this one: it records which files the commit that owns this "
+          + "round was a redesign of, which is a fact about the commit rather than about the attempt to review "
+          + "it, so re-running the snapshot keeps it and refuses here again. A redesign of a different set of "
+          + "files is a different commit and a different round; the record held here stands"
+        : "Re-entering the round (re-running the snapshot against the same commit) rebuilds it, but empties it "
+          + "first: every findings, recheck and verify file in it is deleted. That is only safe before the "
+          + "review has run; later, work out why this path is being written twice instead"));
 
 const unreadableMarker = (markerPath) =>
   new Error(`the round marker at ${markerPath} is unreadable; a round with an unknown owner is neither `
@@ -181,14 +194,18 @@ function discardMarkerTemporaries(dir, entries) {
 }
 
 // Re-entry clears what the *attempt* produced and keeps what belongs to the
-// *owner*, and the round has exactly two of the second kind. The marker is one:
-// it names the commit, and `enterRound` refuses a different one, so re-entry
-// never changes whose round this is. The report is the other, and for the same
-// reason — it is the account of the work in that one commit, so a second attempt
-// at reviewing that commit does not make it untrue, and re-entry is not a
-// re-dispatch of the agent that wrote it.
+// *owner*, and the round has exactly three of the second kind. The marker is
+// one: it names the commit, and `enterRound` refuses a different one, so
+// re-entry never changes whose round this is. The report is another, and for
+// the same reason — it is the account of the work in that one commit, so a
+// second attempt at reviewing that commit does not make it untrue, and re-entry
+// is not a re-dispatch of the agent that wrote it. The redesign record is the
+// third: it says which files that commit was a redesign of, the churn signal
+// reads it to restart their count, and re-entering the round is not a second
+// redesign — cleared, the reset would vanish on the first revisit and every
+// finding the rewrite replaced would count against it again.
 //
-// Clearing it is not a smaller loss than clearing the marker would be. It is the
+// Clearing the report is not a smaller loss than clearing the marker would be. It is the
 // only durable copy: the gate's copy is rebuilt all-null by the next
 // `bindCandidate`, and the agent's own scratch file is at a stable path that the
 // next agent of the same kind overwrites. Cleared here, the round's account of
@@ -199,7 +216,7 @@ function discardMarkerTemporaries(dir, entries) {
 // report and refuses it by name, with the first still on disk to compare it to.
 function clearRound(roundDir) {
   for (const entry of fs.readdirSync(roundDir)) {
-    if (entry === ROUND_MARKER || entry === ROUND_REPORT) continue;
+    if (entry === ROUND_MARKER || entry === ROUND_REPORT || entry === ROUND_REDESIGN) continue;
     fs.rmSync(path.join(roundDir, entry), { recursive: true, force: true });
   }
 }
@@ -217,9 +234,9 @@ function reenter(roundDir, marker) {
 /**
  * Claim `roundDir` for `owner` — an opaque non-empty string; the ship side
  * passes the candidate OID. A fresh directory is created and marked. The same
- * owner re-enters: the round is emptied back to its marker and its report — the
- * two records that belong to the owning commit — and rebuilt. A different owner
- * throws, having removed nothing.
+ * owner re-enters: the round is emptied back to its marker, its report and its
+ * redesign record — the records that belong to the owning commit — and rebuilt.
+ * A different owner throws, having removed nothing.
  */
 export function enterRound(roundDir, { owner } = {}) {
   if (typeof owner !== "string" || owner === "") throw new Error("a round needs a non-empty owner");

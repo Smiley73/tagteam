@@ -126,6 +126,17 @@ function lastRecorded(rounds, round) {
  * exactly like a round that inherited nothing, and the findings that round could
  * not close disappear into a merge.
  */
+// The evidence a settlement writes when no reader gave any: a finding this
+// round's own panel raised and no fixer has seen, a fresh adversary finding, a
+// verdict nobody returned. None of these is a reader's answer, and a consumer
+// that reads settlements for answers — the redesign brief — skips exactly these.
+export const PLACEHOLDER_EVIDENCE = Object.freeze({
+  unjudged: "raised by this round's own panel; no fixer has seen it yet",
+  noVerdict: "no verdict was returned for this finding",
+  adversaryFresh: "raised by the adversary against the fixed change",
+  adversaryNotGating: "raised by the adversary; not gating at this severity"
+});
+
 export function resolveCarry(roundDir, round, carry) {
   const rounds = path.dirname(path.resolve(roundDir));
   const resolved = carry ? path.resolve(carry) : null;
@@ -394,13 +405,13 @@ export function settle({
     // Nobody was asked, so "no verdict was returned" would read as a reviewer
     // that failed to answer, in the record the next fixer is handed.
     if (!asked(finding)) {
-      return { ...finding, resolved: false, evidence: finding.evidence ?? "raised by this round's own panel; no fixer has seen it yet" };
+      return { ...finding, resolved: false, evidence: finding.evidence ?? PLACEHOLDER_EVIDENCE.unjudged };
     }
     const verdict = verdicts.get(finding.id);
     return {
       ...finding,
       resolved: verdict?.resolved === true,
-      evidence: verdict?.evidence ?? finding.evidence ?? "no verdict was returned for this finding"
+      evidence: verdict?.evidence ?? finding.evidence ?? PLACEHOLDER_EVIDENCE.noVerdict
     };
   });
 
@@ -447,9 +458,9 @@ export function settle({
           // minter, so a verdict from another round binds to nothing here.
           const entry = { ...finding, id: findingId(round, "adversary", index), lens: "adversary", resolved: false };
           if (finding.severity === "blocking" || finding.severity === "major") {
-            fresh.push({ ...entry, evidence: "raised by the adversary against the fixed change" });
+            fresh.push({ ...entry, evidence: PLACEHOLDER_EVIDENCE.adversaryFresh });
           } else {
-            recorded.push({ ...entry, gating: false, evidence: "raised by the adversary; not gating at this severity" });
+            recorded.push({ ...entry, gating: false, evidence: PLACEHOLDER_EVIDENCE.adversaryNotGating });
           }
         });
       }
