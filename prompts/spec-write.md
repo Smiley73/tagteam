@@ -71,6 +71,11 @@ Do include anything the repository cannot tell it: why this approach rather than
 the obvious one, which existing helper to reuse instead of writing a new one,
 what a passing test would fail to catch.
 
+Before writing Changes and Tests, ask of each item "what already serves this
+purpose?" and cut what the repository, plan, or Done when checks already cover,
+or what serves a decision the goal excludes or defers. After cutting, re-read
+once for orphaned exceptions, tests, diagnostics, and ordering constraints.
+
 Around 12 KB is the target, and 18 KB is a ceiling the run enforces: a spec over
 it is refused and comes back to you to cut. A spec that runs long is a
 deliverable that should have been two — say so in `## Out of scope` rather than

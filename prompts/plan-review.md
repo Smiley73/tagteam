@@ -33,7 +33,20 @@ it. A plan is an index with an 8 KB target; the detail belongs in per-deliverabl
 spec files written later. File lists, function signatures, code sketches, and
 step-by-step instructions in the index are all over-specification. Report them as
 `major` with a remedy that says what to cut. Do not soften this: every review lens
-naturally pushes a document to grow, and this is the only one pushing back.
+naturally pushes a document to grow, and this check pushes back.
+
+**Does it do work the repository already does?** This too is a real finding
+you are expected to report as `major`, with a remedy: "cut X; Y already serves
+it", naming Y. Check deliverables and supporting items only for work already
+covered by the repository (e.g. a record or identifier), this plan, or acceptance
+checks (including goal.md's done criteria), work for excluded or deferred decisions, or guards
+whose protection an existing deadline or cap already supplies. For excluded or
+deferred work, name the later decision it belongs to and move it to Out of scope.
+Cut a redundant rule that forces exceptions to the plan's invariant only if the
+goal still holds without it. Re-read once for exceptions,
+tests, diagnostics, or ordering constraints left serving only something cut;
+report those orphans with the cut they follow. This checks redundant work that
+serves the goal, not design preferences; unrelated deliverables remain blocking.
 
 **Does it say too little to be actionable?** The opposite failure. A deliverable
 whose row does not make clear what would exist afterwards cannot be turned into

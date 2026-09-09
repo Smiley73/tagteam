@@ -34,6 +34,16 @@ What to look for:
   Report them as major, with a remedy naming what to cut. You are explicitly
   expected to report a plan for saying too much — every other pressure on this
   document pushes it to grow.
+- Redundant work, including supporting items: its purpose is already served by
+  the repository, another planned item, or acceptance checks (including the goal's
+  done criteria); it informs an excluded or deferred decision; or it adds a guard
+  whose protection an existing deadline or cap already supplies. Report as major:
+  "cut X; Y already serves it", naming Y; for excluded or deferred work, name the
+  later decision it belongs to in Out of scope. Cut a redundant rule that forces
+  exceptions to the plan's invariant only if the goal still holds without it.
+  Re-read once for exceptions, tests, diagnostics, or ordering constraints serving
+  only something cut; report those orphans with the cut they follow. This checks
+  redundancy, not design preferences; unrelated deliverables remain blocking.
 - A deliverable row that does not make clear what would exist afterwards.
 
 Ground every finding in the goal or in a file you read. A critique citing

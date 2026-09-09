@@ -37,6 +37,10 @@ restating it.>
 
 <Each risk on one line, naming the deliverable that addresses it. Omit the
 section when there are none worth naming.>
+
+## Out of scope
+
+<Cut work belonging to excluded or deferred decisions. Omit when there is none.>
 ```
 
 ## Choosing deliverables
@@ -58,6 +62,15 @@ a flow, a document they read. A user-visible deliverable always stops for the
 owner before it merges, so marking one you are unsure about is not caution — it
 is a stop nobody asked for. When you are unsure, mark it no and name the doubt
 in Risks, where the spec writer will see it.
+
+Before writing, ask of every deliverable and supporting item — metric, alarm,
+guard, record field, version bump, harness, flag — **what already serves this purpose?**
+Name the record or identifier, deadline or cap, another planned item, or acceptance
+check (including goal.md's done criteria) that does; if one does, cut the item.
+Cut work informing excluded or deferred decisions; name its later work in Out of scope.
+Cut redundant rules that force exceptions to the plan's invariant only if the goal still holds.
+After any cut, including review revisions, re-read once for orphaned exceptions,
+tests, diagnostics, or ordering constraints that existed only for something cut.
 
 ## Size
 
