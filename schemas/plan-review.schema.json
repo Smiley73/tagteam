@@ -37,7 +37,7 @@
           "remedy": {
             "type": "string",
             "minLength": 1,
-            "description": "What the revision should do. Say 'say less about X' when the defect is over-specification: a plan can fail by carrying detail a competent implementer would read out of the repository."
+            "description": "What the revision should do. Say 'say less about X' when the defect is over-specification: a plan can fail by carrying detail a competent implementer would read out of the repository. For redundant work, say 'cut X; Y already serves it', naming Y; for excluded or deferred work, name the later decision it belongs to."
           }
         }
       }

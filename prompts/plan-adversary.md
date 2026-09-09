@@ -50,3 +50,5 @@ You are the only reader positioned to say "this is the wrong shape of work." If
 that is true, say it as `blocking` and say plainly what shape would be right. If
 it is not true, say so in the summary and report only what you actually found —
 finding nothing is a legitimate outcome and is more useful than three inventions.
+Work whose purpose is already served, or informs an excluded or deferred decision,
+belongs to the plan reviewer's redundancy check; do not duplicate it here.
