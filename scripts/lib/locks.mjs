@@ -238,6 +238,40 @@ export async function acquireLock(root, name, { label = name } = {}) {
   }
 }
 
+/**
+ * Run one git operation on a primary checkout while holding that checkout's
+ * mutex, and release it however the operation ends.
+ *
+ * Two ships in one repository fetch, add a worktree and remove a worktree in the
+ * same git directory, and doing any two of those at once fails on each other
+ * with a transient ref-lock error. Both callers — the ship driver and
+ * `merge.mjs` — come through here, so the root and the name cannot drift apart
+ * and one ship's fetch excludes another ship's merge rather than only ships
+ * excluding ships. The wait is `WAIT_TIMEOUT_MS`, as for every lock in this
+ * file: a fetch that waits on another ship's fetch is the intended outcome.
+ *
+ * This covers the operations that observably collide, not every write into the
+ * shared ref store. `publish` pushes a spec branch from a worktree and `finish`
+ * deletes the remote one; agents commit in the worktrees whenever they like. No
+ * mutex serialises that store completely, and this does not pretend to.
+ *
+ * Held around the git invocation and nothing else, deliberately. `finish` spawns
+ * `merge.mjs`, which takes this same mutex; a caller still holding it there
+ * would wait out the whole timeout behind itself. Everything else the driver
+ * spawns — `worktree-setup.mjs` and this repository's own setup commands among
+ * them — runs long enough that holding it across them would stop every other
+ * ship here for as long as they take.
+ */
+export async function withPrimaryGitLock(repo, operation) {
+  const root = path.resolve(repo);
+  const held = await acquireLock(path.join(root, ".tagteam", "locks"), "primary-git.lock", { label: `git in ${root}` });
+  try {
+    return await operation();
+  } finally {
+    held.release();
+  }
+}
+
 /** Acquire any one of `maximum` numbered slots under `root`. Bounds concurrency. */
 export async function acquireSlot(root, maximum) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });

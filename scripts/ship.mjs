@@ -41,6 +41,7 @@ import { ROUND_REDESIGN, writeRoundFile } from "./lib/round-store.mjs";
 import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
+import { withPrimaryGitLock } from "./lib/locks.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -128,6 +129,12 @@ function context(options, { requireTrain = true } = {}) {
   const config = readJson(configPath);
   return {
     repo, plan, slug, shipDir, configPath, config, trainPath, train,
+    // Where Codex execution slots and quota state live: one root for the whole
+    // repository, so `maxConcurrentCodex` bounds concurrent Codex calls across
+    // every ship here rather than allowing that many per plan, and one account's
+    // quota backoff is visible to every ship. Not under `.tagteam/ships/`:
+    // `status.mjs` reads that directory's entries as ship slugs.
+    codexRoot: path.join(repo, ".tagteam"),
     worktree: train?.worktree ?? path.join(repo, ".tagteam", "worktrees", slug),
     baseOid: train?.baseOid ?? null
   };
@@ -267,7 +274,7 @@ function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
     model: job.model,
     effort: job.effort,
     cd: ctx.worktree,
-    slots: ctx.shipDir,
+    slots: ctx.codexRoot,
     maxConcurrent: ctx.config.maxConcurrentCodex
   });
   return runnerDispatch({ description: `Codex review of ${spec.id}`, ...prepared });
@@ -328,7 +335,7 @@ function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedRepor
     model: job.model,
     effort: job.effort,
     cd: ctx.worktree,
-    slots: ctx.shipDir,
+    slots: ctx.codexRoot,
     maxConcurrent: ctx.config.maxConcurrentCodex
   });
   return runnerDispatch({ description: `Codex re-check of ${spec.id}`, ...prepared });
@@ -543,7 +550,7 @@ const acceptedPath = (ctx, id) => path.join(specDir(ctx, id), "accepted.json");
 
 // --- subcommands -----------------------------------------------------------
 
-function start(options) {
+async function start(options) {
   const ctx = context(options, { requireTrain: false });
   const say = [];
   if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`${ctx.plan} has no approved.json; run /tagteam:plan first`);
@@ -583,7 +590,7 @@ function start(options) {
   const lockResult = lastJson(lock.stdout) ?? {};
   if (!lockResult.acquired) {
     emit({
-      ask: `Another ship holds this repository's lock: ${lockResult.reason ?? "unknown holder"}. Only a person can tell a live run from one that was killed. If they confirm the other run is gone, rerun this command with --reclaim.`,
+      ask: `${lockResult.reason ?? `${ctx.slug} is already being shipped from this checkout`}. Only a person can tell a live run from one that was killed. If they confirm the other run is gone, rerun this command with --reclaim.`,
       lock: lockResult, snapshot, say
     });
     return;
@@ -592,18 +599,24 @@ function start(options) {
   try { fs.unlinkSync(path.join(ctx.shipDir, "codex-routing-ack")); } catch {}
 
   const order = specsInOrder(ctx);
-  git(ctx.repo, ["fetch", "origin", "--prune"]);
+  // Every git call that writes in the primary checkout's git directory is one
+  // another ship in this repository may be making at the same moment, so each
+  // one is held apart from the others; see `withPrimaryGitLock`.
+  await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["fetch", "origin", "--prune"]));
   const baseOid = git(ctx.repo, ["rev-parse", `origin/${ctx.config.base}`]).stdout.trim();
   const worktree = path.join(ctx.repo, ".tagteam", "worktrees", ctx.slug);
   if (exists(worktree)) {
-    const registered = git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout.includes(`worktree ${fs.realpathSync(worktree)}`)
-      || git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout.includes(`worktree ${worktree}`);
+    const listed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout);
+    const registered = listed.includes(`worktree ${fs.realpathSync(worktree)}`) || listed.includes(`worktree ${worktree}`);
     if (!registered) throw new Stop(`${worktree} exists but is not a worktree of this repository; move it aside and rerun`);
     if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`${worktree} is dirty; a worktree that will not come clean is holding something — look before removing it`);
     say.push(`Reusing the existing worktree at ${worktree}.`);
   } else {
-    git(ctx.repo, ["worktree", "add", "--detach", worktree, baseOid]);
+    await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "add", "--detach", worktree, baseOid]));
   }
+  // Outside the mutex on purpose: setup runs this repository's own commands and
+  // can take minutes, and the mutex is held around a git invocation and nothing
+  // longer — every other ship here waits behind whatever holds it.
   node("worktree-setup.mjs", ["--primary", ctx.repo, "--worktree", worktree, "--config", ctx.configPath]);
 
   writeJson(ctx.trainPath, { repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid, configPath: ctx.configPath, plugin: PLUGIN, startedAt: new Date().toISOString() });
@@ -620,7 +633,7 @@ function start(options) {
   });
 }
 
-function begin(options) {
+async function begin(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -644,8 +657,10 @@ function begin(options) {
       + `leaves it; it is back on ${branch}.`);
   }
 
-  git(ctx.repo, ["fetch", "origin", "--prune"]);
-  const baseOid = git(ctx.repo, ["rev-parse", `origin/${ctx.config.base}`]).stdout.trim();
+  const baseOid = await withPrimaryGitLock(ctx.repo, () => {
+    git(ctx.repo, ["fetch", "origin", "--prune"]);
+    return git(ctx.repo, ["rev-parse", `origin/${ctx.config.base}`]).stdout.trim();
+  });
   writeJson(ctx.trainPath, { ...ctx.train, baseOid });
   ctx.baseOid = baseOid;
 
@@ -1654,16 +1669,16 @@ function usageLines(ctx, id) {
   }
 }
 
-function end(options) {
+async function end(options) {
   const ctx = context(options);
   const say = [];
   const tokenPath = path.join(ctx.shipDir, "lock-token");
   if (exists(tokenPath)) {
-    const released = node("ship-lock.mjs", ["release", ctx.repo, fs.readFileSync(tokenPath, "utf8").trim()], { allow: [1] });
-    say.push(lastJson(released.stdout)?.released ? "Released the ship lock." : `The lock was not released: ${released.stdout.trim()}`);
+    const released = node("ship-lock.mjs", ["release", ctx.repo, ctx.slug, fs.readFileSync(tokenPath, "utf8").trim()], { allow: [1] });
+    say.push(lastJson(released.stdout)?.released ? `Released ${ctx.slug}'s ship lock.` : `The lock was not released: ${released.stdout.trim()}`);
   }
   if (exists(ctx.worktree)) {
-    const removed = git(ctx.repo, ["worktree", "remove", ctx.worktree], { allowFailure: true });
+    const removed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "remove", ctx.worktree], { allowFailure: true }));
     say.push(removed.status === 0 ? "Removed the worktree." : `The worktree would not come out cleanly and was left in place: ${removed.stderr.trim()}`);
   }
   const summary = specsInOrder(ctx).map((spec) => ({ id: spec.id, state: exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "not started" }));

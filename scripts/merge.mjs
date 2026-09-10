@@ -26,6 +26,7 @@ import { spawnSync } from "node:child_process";
 import { evaluate } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { withPrimaryGitLock } from "./lib/locks.mjs";
 
 // The base is neither the reviewed base nor a base this candidate's landing
 // check cleared. Its own code because the caller retries exactly this one and
@@ -33,7 +34,7 @@ import { isMain } from "./lib/is-main.mjs";
 // and 1 the rest, by the driver's conventions.
 export const BASE_NOT_ACCEPTED = 5;
 
-export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
+export async function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
   const resolved = path.resolve(statePath);
   const state = JSON.parse(fs.readFileSync(resolved, "utf8"));
   const { candidateOid, branch, pr } = state;
@@ -73,7 +74,13 @@ export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) 
   // Fetched first, because the local remote-tracking ref is a memory of the last
   // fetch: without this the comparison passes on a base that has already moved
   // on GitHub, which is the exact case it exists to catch.
-  const fetched = spawnSync("git", ["-C", repo, "fetch", "origin", "--prune"], { encoding: "utf8", shell: false });
+  //
+  // Under the primary checkout's mutex, and under the same one the ship driver
+  // takes: another ship in this repository fetching or adding a worktree at this
+  // moment is fetching into this git directory, and two of them at once fail on
+  // each other with a transient ref-lock error.
+  const fetched = await withPrimaryGitLock(repo, () =>
+    spawnSync("git", ["-C", repo, "fetch", "origin", "--prune"], { encoding: "utf8", shell: false }));
   if (fetched.status !== 0) throw new Error(`could not fetch origin: ${(fetched.stderr || "").trim()}`);
 
   const current = spawnSync("git", ["-C", repo, "rev-parse", `origin/${state.base}`], { encoding: "utf8", shell: false });
@@ -154,7 +161,7 @@ async function main() {
     return;
   }
   try {
-    process.stdout.write(`${JSON.stringify(mergeSpec(statePath, { repo, configPath, dryRun }))}\n`);
+    process.stdout.write(`${JSON.stringify(await mergeSpec(statePath, { repo, configPath, dryRun }))}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = error.exitCode ?? 1;

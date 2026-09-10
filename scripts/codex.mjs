@@ -519,8 +519,10 @@ async function dispatch(options, artifact, requestPath) {
 
   const slotsRoot = path.resolve(options.slots);
   // Slot bookkeeping goes under `.codex-slots/` so the managed .gitignore
-  // pattern `.tagteam/**/.codex-slots/` covers it: the --slots root is a plan or
-  // ship directory, where a bare `slot-N` would be untracked and unignored.
+  // pattern `.tagteam/**/.codex-slots/` covers it: the --slots root is a
+  // directory inside `.tagteam/` — the repository's own `.tagteam/` for a ship,
+  // whose slots bound Codex across every ship here, a plan directory for a plan
+  // review — where a bare `slot-N` would be untracked and unignored.
   const slot = await acquireSlot(path.join(slotsRoot, ".codex-slots"), options.maxConcurrent);
   // Two calls must never write one artifact path concurrently.
   const artifactLock = await acquireLock(
