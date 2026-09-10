@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { globToRegExp, normalizeRepoPath } from "./lib/matcher.mjs";
+import { normalizeRepoPath, pathExclusions } from "./lib/matcher.mjs";
 import { enterRound, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
@@ -191,9 +191,9 @@ export function snapshotCandidate(options) {
   const changedBuffer = git(worktree, ["diff", "--name-only", "-M", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
   const changedPaths = changedBuffer.toString("utf8").split("\0").filter(Boolean).map(normalizeRepoPath);
   const config = readConfig(options.config);
-  const exclusions = config?.reviewExclude ?? [];
-  const exclusionMatchers = exclusions.map((glob) => ({ glob, expression: globToRegExp(glob) }));
-  const isExcluded = (file) => exclusionMatchers.some(({ expression }) => expression.test(file));
+  // Shared with the landing check, which has to exclude the same set against the
+  // same rename rule — see `pathExclusions`.
+  const { excludes: isExcluded, excludesEntry } = pathExclusions(config?.reviewExclude);
   const fullDiff = git(worktree, ["diff", "--no-ext-diff", "--binary", `${baseOid}..${candidateOid}`]).stdout;
   const textualDiff = git(worktree, ["diff", "--no-ext-diff", "--no-color", `${baseOid}..${candidateOid}`]).stdout;
   // Both listings ask for rename detection explicitly rather than inheriting
@@ -205,7 +205,7 @@ export function snapshotCandidate(options) {
     // The last path is the destination, which is the one `--name-only` reports
     // and the one `reviewExclude` is written against; for anything but a rename
     // it is the only path there is.
-    if (isExcluded(normalizeRepoPath(entry.paths[entry.paths.length - 1]))) continue;
+    if (excludesEntry(entry.paths)) continue;
     // A rename is diffed against *both* of its paths. Restricted to the
     // destination alone, git cannot see the source's deletion to pair it with,
     // so it renders a renamed-and-edited file as a brand-new addition and the

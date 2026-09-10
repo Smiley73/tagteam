@@ -1142,6 +1142,191 @@ test("an accept given at collect is honoured by settle only for what the person 
   assert.equal(b.state().state, "reviewing");
 });
 
+// --- the base moving under a reviewed candidate ------------------------------
+
+const GATES = path.join(root, "scripts", "gates.mjs");
+
+// Everything up to the point where the gates are satisfied: one clean round, no
+// findings anywhere. `publish` needs `gh` and this suite has no stub for one, so
+// the two state edges it would take are taken through `gates.mjs` itself —
+// nothing else about the spec differs from a published one, and `finish` reads
+// the gates rather than the state.
+function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
+  const { repo, plan, shipDir } = staged;
+  if (verifyCommand) {
+    const configPath = path.join(repo, ".tagteam", "config.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    config.verify = [{ command: verifyCommand, when: { globs: [], keywords: [] }, timeoutSec: 120 }];
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  }
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  ship("collect", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  ship("settle", plan, ["--spec", "01-a"]);
+  for (const next of ["publishing", "awaiting-approval"]) {
+    const moved = spawnSync(process.execPath, [GATES, "state", path.join(shipDir, "01-a", "state.json"), next], { encoding: "utf8" });
+    assert.equal(moved.status, 0, moved.stderr);
+  }
+  return { worktree, state, oid };
+}
+
+// Somebody else's push landing on the base while this spec was being reviewed.
+function pushToBase(repo, name, contents) {
+  fs.writeFileSync(path.join(repo, name), contents);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", `someone else: ${name}`);
+  git(repo, "push", "origin", "main");
+  return git(repo, "rev-parse", "HEAD");
+}
+
+test("a change that passes alone and fails on the base as it now stands stops, cannot be approved past, and repairs against the base rather than a red check", () => {
+  const staged = stage();
+  const { dir, repo, plan, shipDir } = staged;
+  // Passes on the candidate and fails the moment the base's file is merged in.
+  const { worktree, state } = driveToReadyAndWaiting(staged, {
+    verifyCommand: 'node -e "process.exit(require(\'node:fs\').existsSync(\'flag.txt\') ? 1 : 0)"'
+  });
+  const moved = pushToBase(repo, "flag.txt", "bad\n");
+
+  const stopped = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.json.ask, /fails this repository's verify commands/);
+  assert.match(stopped.json.ask, /a repair round/);
+  assert.match(stopped.json.ask, /merge you make yourself/);
+  assert.equal(stopped.json.landing.status, "failed");
+  assert.equal(stopped.json.landing.baseOid, moved);
+  assert.equal(state().landing.candidateOid, state().candidateOid, "the record is not bound to the candidate it is about");
+  assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a", "the worktree was left on the throwaway merge");
+  const attempt = path.join(shipDir, "01-a", "rounds", "1", "landing", moved.slice(0, 12));
+  assert.ok(fs.existsSync(path.join(attempt, "verify.json")), "the landing verify wrote no result under the round");
+  assert.ok(fs.existsSync(path.join(attempt, "verify", "1.log")), "the landing verify wrote no log under the round");
+
+  // No approval reaches past it: the check runs after the verdict an approval
+  // changes, so approving records the gate and arrives at the same stop.
+  const approved = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], { PATH: quietPath(dir) });
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.match(approved.json.ask, /fails this repository's verify commands/);
+  assert.equal(approved.json.landing.status, "failed");
+  assert.equal(state().state, "awaiting-approval");
+  // And the same stop was repeated rather than re-run: one attempt directory.
+  assert.deepEqual(fs.readdirSync(path.join(shipDir, "01-a", "rounds", "1", "landing")), [moved.slice(0, 12)]);
+
+  const repair = ship("repair", plan, ["--spec", "01-a"]);
+  assert.equal(repair.status, 0, repair.stderr);
+  assert.match(repair.json.say[0], /Landing repair 1 of the 1/);
+  assert.match(repair.json.dispatch[0].prompt, /This is a landing repair, not a CI repair/);
+  assert.match(repair.json.dispatch[0].prompt, /fails this repository's verify commands once it is merged onto main/);
+  assert.doesNotMatch(repair.json.dispatch[0].prompt, /a failing check/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a base that moved with something unrelated costs no round: finish merges the reviewed commit with the base re-verified under it", () => {
+  const staged = stage();
+  const { dir, repo, plan, shipDir } = staged;
+  const { worktree, state } = driveToReadyAndWaiting(staged);
+  const before = state().candidateOid;
+  const moved = pushToBase(repo, "other.js", "export const other = 1;\n");
+
+  // No `gh` here, so the merge itself refuses — but everything up to it has run:
+  // the check passed, said so in one line, and recorded the base it cleared.
+  const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.equal(finish.status, 1, "the merge should be what fails, with no gh on PATH");
+  assert.match(finish.stderr, /merge\.mjs/);
+  assert.doesNotMatch(finish.stderr, /rebase and re-review/, "the landing check refused a base it had cleared");
+  const record = state().landing;
+  assert.equal(record.status, "passed");
+  assert.equal(record.baseOid, moved);
+  assert.equal(record.verify.status, "passed");
+  assert.equal(state().candidateOid, before, "something rebased or re-committed the candidate");
+  assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), before, "the worktree did not come back to the reviewed commit");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a base that already carries part of the change stops with rebase-and-re-review, and nothing is recorded as landed", () => {
+  const staged = stage();
+  const { dir, repo, plan } = staged;
+  const { state } = driveToReadyAndWaiting(staged);
+  // The candidate's exact line, pushed to the base by somebody else. It merges
+  // cleanly and lands as less than what the readers were given.
+  fs.appendFileSync(path.join(repo, "app.js"), "export const sub = (a, b) => a - b;\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "someone else added sub");
+  git(repo, "push", "origin", "main");
+
+  const stopped = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.json.ask, /[Rr]ebase and re-review, or merge it yourself/);
+  assert.equal(stopped.json.landing.status, "differs");
+  assert.equal(state().landing.status, "differs", "a record that did not pass is still recorded, so the stop repeats");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a ship resumed after an interrupted landing check finds the worktree detached and puts it back", () => {
+  const { dir, plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"]);
+
+  // Where an interrupted landing check leaves it: detached on a commit that is
+  // not the branch tip.
+  const tip = git(worktree, "rev-parse", "HEAD");
+  git(worktree, "checkout", "--detach", tip + "^");
+  assert.equal(git(worktree, "branch", "--show-current"), "");
+
+  const resumed = ship("begin", plan, ["--spec", "01-a"]);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.json.say.join("\n"), /The worktree was detached at .*it is back on tagteam\/demo\/01-a/);
+  assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("start refuses a git that predates the landing check's merge-tree, and passes on the one this machine has", () => {
+  const { dir, plan } = stage();
+  const real = spawnSync("sh", ["-lc", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(real, "no git on PATH to delegate to");
+  const stubs = (version) => {
+    const bin = path.join(dir, `bin-${version.replace(/\./g, "-")}`);
+    fs.mkdirSync(bin, { recursive: true });
+    // Everything but `--version` is the real git: the check is about the version
+    // this machine reports and nothing else about the run may change.
+    fs.writeFileSync(path.join(bin, "git"),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version ${version}"; exit 0; fi\nexec ${real} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "osascript"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    return `${bin}${path.delimiter}${process.env.PATH}`;
+  };
+
+  const old = ship("start", plan, [], { PATH: stubs("2.37.9"), TAGTEAM_SKIP_TOOL_CHECKS: "" });
+  assert.equal(old.status, 1, old.stdout);
+  assert.match(old.stderr, /git 2\.38 or newer is required and this machine has 2\.37/);
+  assert.match(old.stderr, /merge-tree --write-tree/, "the refusal does not say what needs it");
+
+  const current = ship("start", plan, [], { PATH: stubs("2.38.0"), TAGTEAM_SKIP_TOOL_CHECKS: "" });
+  assert.equal(current.status, 0, current.stderr);
+  assert.match(current.json.next, /begin --plan .* --spec 01-a$/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a redesign answered at settle goes to the whole panel", () => {
   const staged = stage();
   const { state, app, run } = driveToSettleAsk(staged);
