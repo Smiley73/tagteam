@@ -260,7 +260,10 @@ export async function acquireLock(root, name, { label = name } = {}) {
  * would wait out the whole timeout behind itself. Everything else the driver
  * spawns — `worktree-setup.mjs` and this repository's own setup commands among
  * them — runs long enough that holding it across them would stop every other
- * ship here for as long as they take.
+ * ship here for as long as they take. The one thing held alongside a git call is
+ * `end`'s release of its plan's ship lock: releasing it and removing the worktree
+ * have to be one critical section, and the release is a local file operation that
+ * takes no lock of its own.
  */
 export async function withPrimaryGitLock(repo, operation) {
   const root = path.resolve(repo);

@@ -1506,11 +1506,15 @@ const landingPath = (ctx, id) => path.join(specDir(ctx, id), "landing.json");
  * The record is written before `merge.mjs` runs, because `merge.mjs` re-reads
  * the state file and does not take its caller's word for which base was checked.
  */
-function landingCheck(ctx, id, state, say) {
+async function landingCheck(ctx, id, state, say) {
   // Fetched every time round the loop: the local remote-tracking ref is a memory
   // of the last fetch, and the case this whole check exists for is a base that
-  // moved a moment ago.
-  git(ctx.repo, ["fetch", "origin", "--prune"]);
+  // moved a moment ago. Under the primary checkout's mutex like every other write
+  // into that git directory — another ship's `merge.mjs` fetches the same
+  // directory, and two fetches at once fail on each other's ref locks. Held
+  // around the fetch alone: `checkLanding` below runs this repository's verify
+  // commands, and `merge.mjs` takes this same mutex itself.
+  await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["fetch", "origin", "--prune"]));
   const baseOid = git(ctx.repo, ["rev-parse", `origin/${state.base}`]).stdout.trim();
   if (baseOid === state.baseOid) return null;
   const facts = { spec: id, base: state.base, repair: nextCommand(ctx, "repair", id) };
@@ -1580,7 +1584,7 @@ function landAndMerge(ctx, id, state, say) {
   });
 }
 
-function finish(options) {
+async function finish(options) {
   const ctx = context(options);
   const id = options.spec;
   let state = readState(ctx, id);
@@ -1602,7 +1606,7 @@ function finish(options) {
     }
   }
   if (verdict.ready) {
-    const landed = landAndMerge(ctx, id, state, say);
+    const landed = await landAndMerge(ctx, id, state, say);
     if (landed.merged) {
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
@@ -1669,18 +1673,48 @@ function usageLines(ctx, id) {
   }
 }
 
+// Give up this plan's ship lock, and say whether the worktree is this run's to
+// remove. True only when nothing live is holding the plan: this token released
+// the lock, or there was no lock at all. A token a later run of the same plan
+// reclaimed releases nothing — that run is the live one, and the worktree it is
+// working in is not this one's to take away. So is a ship directory with no
+// token: a `start` that was refused the lock leaves exactly that, and the run
+// that refused it is in the worktree right now.
+function releaseShipLock(ctx, tokenPath, say) {
+  if (!exists(tokenPath)) {
+    const status = lastJson(node("ship-lock.mjs", ["status", ctx.repo, ctx.slug]).stdout) ?? {};
+    if (status.held) say.push(`This run holds no ship lock for ${ctx.slug} and another run of it does; nothing was released.`);
+    return !status.held;
+  }
+  const released = node("ship-lock.mjs", ["release", ctx.repo, ctx.slug, fs.readFileSync(tokenPath, "utf8").trim()], { allow: [1] });
+  const result = lastJson(released.stdout) ?? {};
+  say.push(result.released ? `Released ${ctx.slug}'s ship lock.` : `The lock was not released: ${released.stdout.trim()}`);
+  return result.released === true;
+}
+
 async function end(options) {
   const ctx = context(options);
   const say = [];
   const tokenPath = path.join(ctx.shipDir, "lock-token");
-  if (exists(tokenPath)) {
-    const released = node("ship-lock.mjs", ["release", ctx.repo, ctx.slug, fs.readFileSync(tokenPath, "utf8").trim()], { allow: [1] });
-    say.push(lastJson(released.stdout)?.released ? `Released ${ctx.slug}'s ship lock.` : `The lock was not released: ${released.stdout.trim()}`);
-  }
-  if (exists(ctx.worktree)) {
-    const removed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "remove", ctx.worktree], { allowFailure: true }));
+  // The release and the removal are one critical section, under the primary
+  // checkout's mutex. Released first and removed afterwards, they are two, and a
+  // fresh `start` for this plan can take the lock in between and settle into the
+  // worktree this removal then pulls out from under it. `start` takes this same
+  // mutex before it touches the worktree at all, so a run that wins the lock here
+  // waits outside the removal and then finds no worktree to reuse. The mutex is
+  // held across `ship-lock.mjs` as well as the git call — it is a local file
+  // operation that takes no lock of its own, and it is the answer the removal
+  // turns on.
+  await withPrimaryGitLock(ctx.repo, () => {
+    const owned = releaseShipLock(ctx, tokenPath, say);
+    if (!exists(ctx.worktree)) return;
+    if (!owned) {
+      say.push(`The worktree was left in place: ${ctx.slug} is being shipped by a run this one is not, and that run is working in it.`);
+      return;
+    }
+    const removed = git(ctx.repo, ["worktree", "remove", ctx.worktree], { allowFailure: true });
     say.push(removed.status === 0 ? "Removed the worktree." : `The worktree would not come out cleanly and was left in place: ${removed.stderr.trim()}`);
-  }
+  });
   const summary = specsInOrder(ctx).map((spec) => ({ id: spec.id, state: exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "not started" }));
   emit({ say, specs: summary });
 }

@@ -398,12 +398,16 @@ export function checkLanding({
  * passed in, so this loop's accounting is testable without git, `gh`, or a
  * second pusher: what it must never do is try for ever, and what it must never
  * do twice is a merge that was refused for any other reason.
+ *
+ * Both are awaited: the check fetches the primary checkout under that checkout's
+ * mutex, and a mutex cannot be taken without waiting. A callback that returns a
+ * plain value is awaited just the same.
  */
-export function mergeWithLanding({ check, merge, attempts = LANDING_ATTEMPTS }) {
+export async function mergeWithLanding({ check, merge, attempts = LANDING_ATTEMPTS }) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const checked = check(attempt);
+    const checked = await check(attempt);
     if (checked?.stop) return { ...checked, attempt };
-    const result = merge(attempt);
+    const result = await merge(attempt);
     if (result?.merged) return { merged: result.merged, attempt };
   }
   return {
