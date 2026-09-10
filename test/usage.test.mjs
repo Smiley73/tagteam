@@ -11,7 +11,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { classifyAgent, projectDirectoryFor, report, resolveSession, summaryLines, RATIOS } from "../scripts/usage.mjs";
+
+const USAGE = path.join(import.meta.dirname, "..", "scripts", "usage.mjs");
 
 const line = (entry) => `${JSON.stringify(entry)}\n`;
 const usage = (uncached, cacheWrite, cacheRead, output) => ({
@@ -166,6 +169,38 @@ test("a session id that names no transcript is absent, and a recorded one that h
   assert.equal(fellBack.summary.scope, "repository");
   assert.ok(fellBack.summary.equivalentTokens > 0, "a missing transcript reported zero instead of widening");
   assert.match(summaryLines(fellBack)[0], /may include other ships/);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+// Everything above this line calls `report` in this process, and `ship.mjs`
+// calls none of it: it spawns this file with a flag and reads the first line
+// back. So the flag name, the option the command parses, and the narrowing are
+// three separate hops, and the whole suite stays green if any of them drifts
+// while every ship quietly reverts to a repository-wide number. This is the one
+// test that runs the command a ship actually runs.
+test("the report command narrows to the session its flag names, both on the line it prints and in the file it writes", () => {
+  const fixture = twoShips();
+  const out = path.join(fixture.home, "reports", "usage.json");
+  const run = (extra) => spawnSync(process.execPath, [
+    USAGE, "report", "--repo", fixture.repo, "--since", WINDOW.since, "--until", WINDOW.until, ...extra
+  ], { encoding: "utf8", env: { ...process.env, HOME: fixture.home } });
+
+  const scoped = run(["--session", "mine", "--out", out]);
+  assert.equal(scoped.status, 0, scoped.stderr);
+  assert.match(scoped.stdout.split("\n")[0], /this ship's own session/);
+  const written = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(written.summary.scope, "session");
+  assert.equal(written.summary.session, "mine");
+  assert.equal(written.sessions, 1);
+  assert.deepEqual(Object.keys(written.agents.byType), ["reviewer"], "the other ship's agents were counted as this one's");
+  assert.equal(written.summary.equivalentTokens, reportFor(fixture, "mine").summary.equivalentTokens);
+
+  // And the same command without the flag is the wide number, said to be wide:
+  // the flag is what makes the difference, not the fixture.
+  const wide = run([]);
+  assert.equal(wide.status, 0, wide.stderr);
+  assert.match(wide.stdout.split("\n")[0], /may include other ships/);
+  assert.ok(reportFor(fixture).summary.equivalentTokens > written.summary.equivalentTokens);
   fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 

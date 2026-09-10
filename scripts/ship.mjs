@@ -563,14 +563,21 @@ const acceptedPath = (ctx, id) => path.join(specDir(ctx, id), "accepted.json");
 // transcript nobody asked about is noise a person learns to skip past, which is
 // the same reason the snapshot section gives for staying quiet.
 //
-// A session already on the train survives an environment that stops exposing
-// one, so a ship resumed where the id is not visible keeps the scope it had
-// rather than falling back to counting every ship in the checkout.
+// Decided once, when the train is created, and never revisited: a train already
+// carrying a scope keeps it, whatever the environment of the run that resumes it
+// says. A plan picked up from a second Claude Code session would otherwise be
+// rebound to that session's transcript, and `finish` would then drop everything
+// the first session spent on this ship while billing it for whatever else the
+// second session did inside the reporting window — the misattribution the
+// scoping exists to prevent, arriving from the other direction. A recorded
+// `null` is a recorded answer and stays one; only a train written before this
+// key existed asks the environment again.
 function sessionOf(ctx) {
+  if (ctx.train && "session" in ctx.train) return ctx.train.session ?? null;
   try {
-    return resolveSession(process.env, projectDirectoryFor(ctx.repo)) ?? ctx.train?.session ?? null;
+    return resolveSession(process.env, projectDirectoryFor(ctx.repo)) ?? null;
   } catch {
-    return ctx.train?.session ?? null;
+    return null;
   }
 }
 

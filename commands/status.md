@@ -82,10 +82,24 @@ had moved on since the review, and only for the change that spec is on right
 now. A `status` of `"passed"` is the good news and is one clause: this one's base
 moved while it was in review, and the change was checked against the new base —
 it still merges cleanly, it still lands as the same change, and this repository's
-verify commands still pass on it — before anything merged. Any other `status` is
-why that spec is waiting: the change no longer lands as what was read, or it does
-not work where it would land, and a person decides what happens next. Say nothing
-for a spec with no entry — the ordinary case is a base that never moved.
+verify commands still pass on it — before anything merged. Say nothing for a spec
+with no entry — the ordinary case is a base that never moved.
+
+The other three values are each why a spec is waiting, and each sends a person to
+a different thing to do, so say the one you were given rather than that something
+about the base went wrong:
+
+- `"conflict"` — "the base moved, and the reviewed change no longer merges into
+  it cleanly". The two ways on are a rebase and a second review, or a merge they
+  make themselves.
+- `"differs"` — "the base moved, and the change still merges cleanly, but what
+  would land on it is not the change that was read — part of it is already there,
+  or the merge resolved it into something else". Same two ways on.
+- `"failed"` — "the base moved, and the change merges cleanly and lands as the
+  same change, but it fails this repository's verify commands once it is on that
+  base". This one takes a repair round or a merge they make themselves; say
+  plainly that approving it is not one of the options, because the check ran
+  after the verdict an approval changes and no approval reaches past it.
 
 ## Which plugin is running
 

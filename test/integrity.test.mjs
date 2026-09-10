@@ -622,7 +622,10 @@ test("commands/status.md documents every reason a budget can be unknown", () => 
   assert.ok(at > -1, "commands/status.md no longer has a Which plugin is running section to scope against");
   const statusMd = whole.slice(0, at);
   const inventory = read("scripts", "status.mjs");
-  const documented = [...statusMd.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
+  // The budget section only: the landing section below it spells its own values
+  // out in the same bullet shape, and they are not reasons a budget is unknown.
+  const budgets = statusMd.slice(0, statusMd.indexOf("**What each spec cost**"));
+  const documented = [...budgets.matchAll(/^- `"(\w+)"` —/gm)].map(([, reason]) => reason);
   assert.deepEqual([...documented].sort(), ["counter", "settings"]);
   for (const reason of documented) {
     assert.ok(inventory.includes(`"${reason}"`), `commands/status.md renders "${reason}", which status.mjs never emits`);
@@ -635,6 +638,15 @@ test("commands/status.md documents every reason a budget can be unknown", () => 
     "commands/status.md names the landing record without saying what it means to a person");
   assert.match(inventory, /\blanding\b/, "status.mjs no longer reports the landing record status.md renders");
   assert.match(statusMd, /`scope`/, "commands/status.md never says whose spend a cost number is");
+  // And a line each for the outcomes that stop a spec. They send a person to
+  // different things — a rebase and a second review, or a repair round nothing
+  // approves past — so an "or" spanning them is rendered by guess, and the guess
+  // is what they act on.
+  const statuses = JSON.parse(/const LANDING_STATUSES = (\[[^\]]*\]);/.exec(read("scripts", "gates.mjs"))[1]);
+  for (const value of statuses.filter((status) => status !== "passed")) {
+    assert.match(statusMd, new RegExp(`^- \`"${value}"\` —`, "m"),
+      `commands/status.md leaves a landing ${value} to be rendered by guess`);
+  }
 });
 
 // Two claims the landing check and the per-plan lock made false. Both are the
