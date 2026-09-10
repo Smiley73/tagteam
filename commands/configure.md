@@ -17,11 +17,18 @@ command.
 | Check | Required |
 |---|---|
 | `git -C "$R" rev-parse --show-toplevel` | yes |
+| `git --version` is 2.38 or newer | yes |
 | `git -C "$R" status --porcelain` is empty | no — warn |
 | `codex --version` | yes |
 | `gh auth status` and `gh repo view --json defaultBranchRef` | yes |
 | a live `codex exec --ephemeral --sandbox read-only -c 'approval_policy="never"' --output-schema` probe in a temp directory | yes |
 | `codegraph` on PATH and `.codegraph/` present | no |
+
+The git version matters for the same reason: when the base branch moves under a
+reviewed change, a ship tests that the same change still lands on the new base
+with `git merge-tree --write-tree`, which arrived in 2.38, and `ship.mjs start`
+stops without it. Checked here, a machine that cannot merge says so before
+anyone plans anything on it.
 
 The Codex probe matters: a Codex that runs but cannot honour `--output-schema`
 fails on every review, and finding that out here costs one call instead of a
@@ -153,6 +160,12 @@ names, internal ids. See *Asking* in the skill.
 Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
 `examples/config.json`.
+
+`maxConcurrentCodex` is the one of those worth a sentence when you show the file:
+it caps Codex calls for the whole repository, and that cap now spans every ship
+running in it rather than giving each of them its own — two plans shipping from
+this checkout at once share those three slots and each waits on the other's
+reviews. Someone who ships more than one plan at a time should raise it.
 
 **The roster is closed to names nothing calibrates.** Every lens in it must have
 a brief — the file that tells the reviewer dispatched on that lens what to look

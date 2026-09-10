@@ -45,19 +45,23 @@ prints where the spec goes instead and says so in `say`.
 node "$P/scripts/ship.mjs" start --plan "$D"
 ```
 
-It checks `approved.json`, validates the configuration, checks `codex` and
-`gh`, takes the ship lock, creates or reuses the worktree, and prints the specs
-in dependency order with what state each is in. Its `snapshot` key is what
-`scripts/running-plugin.mjs` reported: render it first, as *The running
+It checks `approved.json`, validates the configuration, checks `git`, `codex`
+and `gh`, takes this plan's ship lock, creates or reuses the worktree, and prints
+the specs in dependency order with what state each is in. Its `snapshot` key is
+what `scripts/running-plugin.mjs` reported: render it first, as *The running
 snapshot* in the skill says. It never stops anything, whatever it says — a
 difference is not a failure, and it is never a reason to refuse a ship or to
 offer to reinstall. Its `say` carries the validator's `note:` and `warning:`
 lines about lens briefs and cost; show them as written.
 
-If it returns `ask` because another ship holds the lock, ask: a session that was
-killed leaves the lock behind and a live one looks identical from outside. Only
-if the person confirms the other run is gone, rerun with `--reclaim`. Never
-reclaim on your own judgement.
+If it returns `ask`, the lock is held — and the lock is per plan, so what is
+holding it is another run of **this** plan, not a ship of something else. Two
+plans ship from one checkout at the same time and neither refuses the other. Ask
+about the run the refusal names: a session that was killed leaves the lock behind
+and a live one looks identical from outside, so say when it was last seen and ask
+whether they still have a `/tagteam:ship` of this plan running anywhere. Only if
+they confirm that run is gone, rerun with `--reclaim`. Never reclaim on your own
+judgement — reclaiming a lock a live run holds puts two of them in one worktree.
 
 ## Per spec
 
@@ -211,8 +215,17 @@ gates say so — that is what they are for.
 
 That authorizes exactly one thing: `merge.mjs`, through `finish`, on a `ready`
 verdict, for a spec of this plan. Not `gh pr merge` by hand, not merging when
-`merge.mjs` refuses, not loosening a gate that fired. A refused merge — a moved
-base, a protection rule, a failing check — is a stop: say what it said.
+`merge.mjs` refuses, not loosening a gate that fired. A refused merge — a
+protection rule, a failing check, a change that no longer lands as what was
+reviewed — is a stop: say what it said.
+
+A base branch that moved is not one of those refusals. `finish` checks the
+reviewed change against the base as it now stands and merges the reviewed commit
+when the check passes, and its `say` then carries one line about it: relay it —
+the base moved, and this was re-checked against the new base before it merged, so
+what merged is still the commit the readers saw. When the check does not pass,
+`ask` says what it found and what the ways on are; say it as it was written, and
+do not offer approval — none reaches a change that fails where it would land.
 
 When the gates are not satisfied, `finish` puts the spec in `awaiting-approval`,
 sends a desktop notification, and returns `ask` with `reasons` — the same list
@@ -296,9 +309,12 @@ Stopping early is free; running out mid-merge is not.
 node "$P/scripts/ship.mjs" end --plan "$D"
 ```
 
-releases the lock and removes the worktree (never with `--force`; a worktree
-that will not come out is holding something, and `end` says so). Summarise:
-what merged, what waits, what stopped and why.
+releases this plan's ship lock and removes the worktree (never with `--force`; a
+worktree that will not come out is holding something, and `end` says so). Any
+other plan being shipped from this checkout is untouched — its lock is its own.
+When a later run of this plan took the lock over, `end` releases nothing and says
+so, and the worktree stays where it is, because that run is working in it.
+Summarise: what merged, what waits, what stopped and why.
 
 ## When Codex could not say how it ran
 

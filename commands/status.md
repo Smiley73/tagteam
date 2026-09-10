@@ -67,6 +67,26 @@ it ran. Give it as one line per spec — "about 14M input-token equivalents over
 two hours, 19 agents, a third of it the orchestrator itself" — and say nothing
 for a spec with no entry: absent is unknown, not free.
 
+**Say whose spend that is.** `scope` beside it is `"session"` when the ship knew
+which Claude Code session it was running in, and the number then covers that
+session and the agents it dispatched. It is `"repository"` when the ship could
+not tell, and the number then covers every session that ran in this checkout —
+say so in the same breath, because another ship running here at the same time is
+counted in it: "about 14M input-token equivalents, though that is everything this
+checkout spent in the window and another ship was running". Never present a
+repository-wide number as this spec's bill.
+
+**A landing record is a base that moved**, under `landing` on the ship, keyed by
+spec. It is there only for a spec whose reviewed change met a base branch that
+had moved on since the review, and only for the change that spec is on right
+now. A `status` of `"passed"` is the good news and is one clause: this one's base
+moved while it was in review, and the change was checked against the new base —
+it still merges cleanly, it still lands as the same change, and this repository's
+verify commands still pass on it — before anything merged. Any other `status` is
+why that spec is waiting: the change no longer lands as what was read, or it does
+not work where it would land, and a person decides what happens next. Say nothing
+for a spec with no entry — the ordinary case is a base that never moved.
+
 ## Which plugin is running
 
 Claude Code runs an installed *copy* of this plugin, not the working tree it was

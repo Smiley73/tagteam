@@ -1,15 +1,17 @@
 // What a run cost, read off transcripts shaped the way Claude Code writes them.
 //
-// The one thing that matters here is the de-duplication: a transcript logs one
-// assistant response as several lines that repeat its usage, and a reader that
-// sums lines reports about three times the real spend. The fixture below writes
-// that shape on purpose.
+// Two things matter here. The de-duplication: a transcript logs one assistant
+// response as several lines that repeat its usage, and a reader that sums lines
+// reports about three times the real spend. And whose spend the number is: one
+// project directory holds every session that ran in the repository, so two ships
+// in one checkout are two transcripts side by side, and a report that sums both
+// hands each ship the other's bill under its own name.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { classifyAgent, projectDirectoryFor, report, RATIOS } from "../scripts/usage.mjs";
+import { classifyAgent, projectDirectoryFor, report, resolveSession, summaryLines, RATIOS } from "../scripts/usage.mjs";
 
 const line = (entry) => `${JSON.stringify(entry)}\n`;
 const usage = (uncached, cacheWrite, cacheRead, output) => ({
@@ -62,6 +64,109 @@ test("usage is counted once per message id, split between the orchestrator and t
   const missing = report({ repo: path.join(home, "nowhere"), since: "2026-09-01T09:30:00Z", projectDir: path.join(home, "no-such-dir") });
   assert.equal(missing.readable, false);
   assert.equal(missing.summary, null);
+});
+
+// --- whose spend the number is ----------------------------------------------
+
+const WINDOW = { since: "2026-09-01T09:30:00Z", until: "2026-09-01T11:00:00Z" };
+
+// One project directory with two ships' sessions in it, which is what two
+// `/tagteam:ship` runs in one checkout leave behind. The other ship's transcript
+// is written last and is much the larger of the two, so a reader that reaches
+// for the newest file, or that sums the directory, is caught by the numbers.
+function twoShips() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-usage-scope-"));
+  const repo = path.join(home, "Code", "my.app");
+  fs.mkdirSync(repo, { recursive: true });
+  const projectDir = projectDirectoryFor(repo, home);
+  for (const session of ["mine", "theirs"]) fs.mkdirSync(path.join(projectDir, session, "subagents"), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "mine.jsonl"),
+    line({ timestamp: "2026-09-01T10:00:00Z", message: { role: "user", content: "ship my plan" } })
+    + assistant("m1", "2026-09-01T10:00:01Z", usage(0, 0, 10000, 100), [{ type: "text", text: "ok" }]));
+  fs.writeFileSync(path.join(projectDir, "mine", "subagents", "agent-1.jsonl"),
+    line({ timestamp: "2026-09-01T10:01:00Z", message: { role: "user", content: "Job: reviewer\nLens: correctness" } })
+    + assistant("a1", "2026-09-01T10:01:01Z", usage(0, 0, 1000, 10), [{ type: "text", text: "x" }]));
+  fs.writeFileSync(path.join(projectDir, "theirs.jsonl"),
+    line({ timestamp: "2026-09-01T10:00:00Z", message: { role: "user", content: "ship the other plan" } })
+    + assistant("t1", "2026-09-01T10:02:01Z", usage(0, 0, 500000, 5000), [{ type: "text", text: "ok" }]));
+  fs.writeFileSync(path.join(projectDir, "theirs", "subagents", "agent-9.jsonl"),
+    line({ timestamp: "2026-09-01T10:03:00Z", message: { role: "user", content: "Job: implementer" } })
+    + assistant("a9", "2026-09-01T10:03:01Z", usage(0, 0, 90000, 900), [{ type: "text", text: "y" }]));
+  return { home, repo, projectDir };
+}
+
+const reportFor = (fixture, session = null) => report({ repo: fixture.repo, ...WINDOW, projectDir: fixture.projectDir, session });
+
+test("a scoped report counts one ship's session, an unscoped one counts the checkout, and each says which it was", () => {
+  const fixture = twoShips();
+  const mine = reportFor(fixture, "mine");
+  assert.equal(mine.sessions, 1);
+  assert.equal(mine.scope.kind, "session");
+  assert.equal(mine.summary.scope, "session");
+  assert.equal(mine.summary.session, "mine");
+  assert.deepEqual(Object.keys(mine.agents.byType), ["reviewer"], "the other ship's agents were counted as this one's");
+
+  const all = reportFor(fixture);
+  assert.equal(all.sessions, 2);
+  assert.equal(all.summary.scope, "repository");
+  assert.equal(all.summary.session, null);
+  assert.ok(all.summary.equivalentTokens > mine.summary.equivalentTokens);
+
+  // Two ships, two numbers: neither report contains the other's spend, and the
+  // two together are the repository-wide total.
+  const theirs = reportFor(fixture, "theirs");
+  assert.equal(theirs.summary.session, "theirs");
+  assert.equal(mine.summary.equivalentTokens + theirs.summary.equivalentTokens, all.summary.equivalentTokens);
+
+  // The label rides on the first line, which is the only line `finish` prints.
+  assert.match(summaryLines(mine)[0], /this ship's own session/);
+  assert.match(summaryLines(all)[0], /may include other ships/);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+// The failure `goal.md` forbids by name. With two ships running, the newest
+// transcript in the directory is the other ship's, so a report with no session
+// recorded must widen to the whole checkout and say so — never narrow to
+// whichever file was written last.
+test("a report with no session recorded never narrows to the newest transcript", () => {
+  const fixture = twoShips();
+  const now = Date.now();
+  fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), now / 1000 - 600, now / 1000 - 600);
+  fs.utimesSync(path.join(fixture.projectDir, "theirs.jsonl"), now / 1000, now / 1000);
+  const all = reportFor(fixture);
+  assert.equal(all.sessions, 2, "a report with no scope read fewer transcripts than the directory holds");
+  assert.equal(all.summary.scope, "repository");
+  assert.deepEqual(Object.keys(all.agents.byType).sort(), ["implementer", "reviewer"]);
+  // And nothing in the environment is consulted beyond the names, so a directory
+  // full of transcripts still resolves to no session at all.
+  assert.equal(resolveSession({}, fixture.projectDir), null);
+  assert.equal(resolveSession({ CLAUDE_SESSION_ID: "" }, fixture.projectDir), null);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("a session id that names no transcript is absent, and a recorded one that has been deleted reports repository-wide rather than zero", () => {
+  const fixture = twoShips();
+  // Absent: an id for a session that ran somewhere else, and a path that points
+  // out of the project directory, are both no scope at all.
+  assert.equal(resolveSession({ CLAUDE_SESSION_ID: "somewhere-else" }, fixture.projectDir), null);
+  assert.equal(resolveSession({ CLAUDE_SESSION_ID: path.join(fixture.home, "elsewhere.jsonl") }, fixture.projectDir), null);
+  assert.equal(resolveSession({ CLAUDE_SESSION_ID: "../../escape" }, fixture.projectDir), null);
+  // Present: a bare id, an absolute path to the transcript, and the override
+  // ahead of both.
+  assert.equal(resolveSession({ CLAUDE_CODE_SESSION_ID: "mine" }, fixture.projectDir), "mine");
+  assert.equal(resolveSession({ CLAUDE_SESSION_ID: path.join(fixture.projectDir, "mine.jsonl") }, fixture.projectDir), "mine");
+  assert.equal(resolveSession({ TAGTEAM_SESSION_ID: "theirs", CLAUDE_SESSION_ID: "mine" }, fixture.projectDir), "theirs");
+
+  // A ship whose recorded transcript is gone by the time it reports falls back
+  // to the whole checkout *with that label* — the number is imprecise, not zero.
+  fs.rmSync(path.join(fixture.projectDir, "mine.jsonl"));
+  const fellBack = reportFor(fixture, "mine");
+  assert.equal(fellBack.scope.kind, "repository");
+  assert.equal(fellBack.scope.requested, "mine");
+  assert.equal(fellBack.summary.scope, "repository");
+  assert.ok(fellBack.summary.equivalentTokens > 0, "a missing transcript reported zero instead of widening");
+  assert.match(summaryLines(fellBack)[0], /may include other ships/);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
 test("the agent classifier reads the job line first and falls back to what old prompts said", () => {

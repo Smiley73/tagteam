@@ -282,9 +282,13 @@ does not.
   tool contract cannot enforce a response schema.
 - Every gate binds to one commit; a new commit clears all of them, and every fix
   round makes one.
-- Merges use `--match-head-commit`, and refuse outright if the base branch moved
-  since the review — the reviewed diff would be going into something else. Any
-  merge failure stops and reports rather than rebasing.
+- Merges use `--match-head-commit`, so what merges is the commit that was
+  reviewed. When the base branch has moved since the review, the merge is not
+  taken on trust: the reviewed change is checked against the base as it now
+  stands — it has to merge cleanly, land as the same change, and pass this
+  repository's verify commands there — and only a check that passes lets the
+  reviewed commit merge. Nothing is ever rebased, amended or re-committed; a
+  check that does not pass, and any other merge failure, stops and reports.
 - A commit is only made through `git add -A && guard-staged && git commit`, which
   refuses to commit a copied ignored file.
 - User-visible changes always wait.

@@ -36,15 +36,23 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   work/review/     the one review: claude.json, codex.json (and its sidecars),
                    adversary.json, findings.json, brief.md, response.json   ignored
 .tagteam/ships/<slug>/
-  train.json       the train: repository, worktree, base commit             ignored
+  train.json       the train: repository, worktree, base commit, and the
+                   Claude Code session the cost report scopes to            ignored
+  lock-token       this run's claim on the plan's ship lock, given back by
+                   `end`                                                    ignored
   <spec-id>/
-    state.json     the state machine, the reviewed commit, the gates        ignored
+    state.json     the state machine, the reviewed commit, the gates, and the
+                   landing check bound to the current candidate             ignored
+    landing.json   what the last landing check found, as it was recorded    ignored
     rounds/<n>/  round.json (the commit that owns this round), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
                  recheck/, verify/, candidate.json, review.json, recheck.json,
                  to-fix.json, open/, still-open.json, still-open/, report.json,
                  redesign.json (which files this round's commit was a redesign
                  of; kept on re-entry like the report),
+                 landing/<new-base>/ (one directory per base this round's
+                 commit was checked against: verify.json and verify/, plus
+                 reviewed.diff and landing.diff when the two differed),
                  to-fix.code.json / still-open.code.json (the fixer's brief when
                  a finding about the pull request was kept out of it)          ignored
     implement-report.json  fix-report.json  what the round's agent said about its
@@ -58,7 +66,11 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     declined/    the reports of fixers and redesign implementers that changed
                  nothing                                                    ignored
     pr-body.md  ci.json  usage.json                                          ignored
-.tagteam/worktrees/  .tagteam/locks/                                        ignored
+.tagteam/worktrees/                                                         ignored
+.tagteam/locks/  <plan>-<digest>.lock/, one per plan being shipped — the same
+                 plan twice is refused, two plans are not; and
+                 primary-git.lock, held for the moment a ship runs git in
+                 the primary checkout                                       ignored
 ```
 
 `/tagteam:configure` can move two of the `committed` groups above — the config, and
@@ -126,7 +138,7 @@ upgradable.
 | `autoMerge` | False makes every pull request wait |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
-| `maxConcurrentCodex` | Concurrent Codex calls across this repository |
+| `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
 | `limits` | `fixRounds` (fix rounds per spec per cycle), `ciRepairs` (repairs of a red pull request). Each at least 1 |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
@@ -242,9 +254,26 @@ git -C "$W" push -u origin "<branch>"
 git -C "$R" worktree remove "$R/.tagteam/worktrees/<slug>"
 ```
 
+and, when the base branch moved under a reviewed change, the landing check's own
+four:
+
+```bash
+git -C "$R" merge-tree --write-tree <newBaseOid> <candidateOid>
+git -C "$R" commit-tree <mergedTree> -p <newBaseOid> -p <candidateOid> -m "<message>"
+git -C "$W" checkout --detach <mergedCommit>
+git -C "$W" switch --discard-changes "<branch>"
+```
+
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —
 the reason a `.env.test` copied into a worktree does not end up in history.
+
+The landing check's four are read this way: the first two write objects and move
+no ref, no index and no working tree — the merge commit they build is a throwaway
+that exists to be verified and is never pushed — and the last two are the ship's
+one worktree lent to the check and given back. The discard is what the verify
+commands wrote while the worktree sat on that throwaway commit, proved clean
+before the check began, and nothing else.
 
 **Never:** amend, interactive-rebase, `push --force` without a lease,
 `reset --hard` over committed work, commit or check out in the primary checkout,
@@ -265,9 +294,21 @@ condition they attached. When a person really should decide, `evaluate` returns
 `needsHuman` and names why.
 
 **It authorizes `merge.mjs`, and nothing else.** `merge.mjs` re-fetches,
-compares `origin/<base>` against the base OID the review was bound to, and
-re-reads the live pull request's target and head before it merges. A hand-rolled
-`gh pr merge` skips all three.
+compares `origin/<base>` against the base the review was bound to, and re-reads
+the live pull request's target and head before it merges. A hand-rolled `gh pr
+merge` skips all three.
+
+A base that has moved is not a refusal on its own. The base `merge.mjs` accepts
+is the reviewed one *or* a base a landing check cleared for this exact candidate:
+`finish` fetches, and where the base moved it tests the reviewed commit against
+it — merges cleanly, lands as the same change once both diffs are normalized to
+file headers and added and removed lines, and passes this repository's verify
+commands on the merged tree. Only a check that passed authorizes the merge, and
+what merges is still the reviewed commit. A record is bound to one candidate and
+one base, and `bind` clears it with every gate when a new commit appears, so a
+check of an earlier commit never speaks for a later one. A conflict, a change
+that would land as something else, and a failure on the new base are all stops
+for a person, and no approval reaches the last of them.
 
 A pull request stops and waits when: the spec is marked user-visible;
 verification failed, or CI failed or proved nothing; a finding is still open
@@ -314,7 +355,7 @@ a new commit appears — and every fix round makes one.
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
-| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json` |
+| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
@@ -324,8 +365,8 @@ a new commit appears — and every fix round makes one.
 | `deliverables.mjs` | Extract the plan's deliverables table as data, refusing a plan over its ceiling |
 | `goal-gate.mjs` | Record and verify the hash of the goal a person approved |
 | `validate-json.mjs` | Schema validation and config checks |
-| `usage.mjs` | What a window of a run cost, from the session transcripts |
-| `ship-lock.mjs` | The repository-wide ship lock |
+| `usage.mjs` | What a window of a run cost, from the session transcripts — scoped to one session when the ship recorded which one it runs in, and labelled repository-wide when it did not |
+| `ship-lock.mjs` | One ship lock per plan: `acquire`, `heartbeat`, `release`, `status`. Two plans ship from one checkout at once; the same plan twice is refused |
 | `ensure-gitignore.mjs` | Maintain the managed `.gitignore` block |
 | `notify.mjs` | Desktop notification when a run needs a person |
 | `status.mjs` | Inventory for `/tagteam:status` |

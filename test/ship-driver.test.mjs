@@ -14,6 +14,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { lastJson } from "../scripts/ship.mjs";
+import { projectDirectoryFor } from "../scripts/usage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SHIP = path.join(root, "scripts", "ship.mjs");
@@ -1350,6 +1351,37 @@ test("start refuses a git that predates the landing check's merge-tree, and pass
   assert.equal(current.status, 0, current.stderr);
   assert.match(current.json.next, /begin --plan .* --spec 01-a$/);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The cost report is scoped to one session so that two ships in one checkout do
+// not each report the other's spend, and the only place that identity can come
+// from is the environment `start` was handed: nothing in this repository records
+// a session id, and the newest transcript in the project directory is, with two
+// ships running, the other ship's. What `start` writes down is therefore either
+// an environment value that names a transcript that is really there, or nothing.
+test("start records the session the environment names, and nothing at all when it names no transcript", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "this-session.jsonl"), "");
+  const train = () => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  const named = ship("start", plan, [], { ...environment, CLAUDE_SESSION_ID: "this-session" });
+  assert.equal(named.status, 0, named.stderr);
+  assert.equal(train().session, "this-session");
+  // And it is silent about it: a line on every run in every repository about a
+  // transcript nobody asked about is noise a person learns to skip past.
+  assert.doesNotMatch(named.json.say.join("\n"), /session|transcript/i);
+
+  const other = stage();
+  const missing = ship("start", other.plan, [], { ...environment, TAGTEAM_SESSION_ID: "a-session-that-ran-elsewhere" });
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(other.shipDir, "train.json"), "utf8")).session, null,
+    "start recorded a session id that names no transcript, which is a scope nothing can be attributed to");
+  assert.match(missing.json.next, /begin --plan .* --spec 01-a$/);
+  for (const staged of [dir, other.dir]) fs.rmSync(staged, { recursive: true, force: true });
 });
 
 test("a redesign answered at settle goes to the whole panel", () => {

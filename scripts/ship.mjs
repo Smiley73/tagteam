@@ -42,6 +42,7 @@ import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
+import { projectDirectoryFor, resolveSession } from "./usage.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -550,6 +551,29 @@ const acceptedPath = (ctx, id) => path.join(specDir(ctx, id), "accepted.json");
 
 // --- subcommands -----------------------------------------------------------
 
+// Which Claude Code session this ship is running in, for the cost report to
+// scope itself to. Taken from the environment `start` was given and verified
+// against this repository's project directory — nothing here records a session
+// id anywhere, and a transcript guessed from file recency would, with two ships
+// running, be the other ship's.
+//
+// Best effort in every direction: absent is the ordinary answer, and the report
+// then labels its number repository-wide. Nothing here may stop `start`, and
+// nothing here reaches `say` — a line on every run in every repository about a
+// transcript nobody asked about is noise a person learns to skip past, which is
+// the same reason the snapshot section gives for staying quiet.
+//
+// A session already on the train survives an environment that stops exposing
+// one, so a ship resumed where the id is not visible keeps the scope it had
+// rather than falling back to counting every ship in the checkout.
+function sessionOf(ctx) {
+  try {
+    return resolveSession(process.env, projectDirectoryFor(ctx.repo)) ?? ctx.train?.session ?? null;
+  } catch {
+    return ctx.train?.session ?? null;
+  }
+}
+
 async function start(options) {
   const ctx = context(options, { requireTrain: false });
   const say = [];
@@ -619,7 +643,10 @@ async function start(options) {
   // longer — every other ship here waits behind whatever holds it.
   node("worktree-setup.mjs", ["--primary", ctx.repo, "--worktree", worktree, "--config", ctx.configPath]);
 
-  writeJson(ctx.trainPath, { repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid, configPath: ctx.configPath, plugin: PLUGIN, startedAt: new Date().toISOString() });
+  writeJson(ctx.trainPath, {
+    repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid,
+    configPath: ctx.configPath, plugin: PLUGIN, session: sessionOf(ctx), startedAt: new Date().toISOString()
+  });
 
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
@@ -1658,6 +1685,9 @@ function nextSpecAfter(ctx, id) {
 }
 
 // Best effort, never a stop: what this spec cost, from the session transcripts.
+// Scoped to the session `start` recorded when it could record one, so that two
+// ships in one checkout do not each report the other's spend as their own; the
+// report says which scope its number came from either way.
 function usageLines(ctx, id) {
   try {
     const state = readState(ctx, id);
@@ -1665,6 +1695,7 @@ function usageLines(ctx, id) {
     if (!since) return [];
     const result = spawnSync(process.execPath, [
       path.join(SCRIPTS, "usage.mjs"), "report", "--repo", ctx.repo, "--since", since, "--until", new Date().toISOString(),
+      ...(ctx.train?.session ? ["--session", ctx.train.session] : []),
       "--out", path.join(specDir(ctx, id), "usage.json")
     ], { encoding: "utf8" });
     return result.status === 0 ? result.stdout.trim().split("\n").slice(0, 1) : [];

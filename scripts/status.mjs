@@ -128,6 +128,33 @@ function fixBudget(limits, spec, ciRemaining, ciUnknown) {
   return restarted.fixRoundsRemaining === null ? restarted : { ...restarted, fixBudgetRestarts: true };
 }
 
+// What the landing check found for one spec, or null. A person reading later
+// should not have to open `state.json` to learn that the base moved under a
+// reviewed change and that the change was re-checked against it.
+//
+// The binding is applied here rather than trusted: a record is about exactly one
+// candidate, and one left behind by an earlier candidate would make this the one
+// place in the plugin where a check of some older commit speaks for the commit
+// that is about to merge. `gates.mjs bind` clears the record and `merge.mjs`
+// compares the OID too; this compares it a third time because the file it reads
+// may have been written by a run that died between the two.
+//
+// Every read is tolerant, like every other read in this file: a `landing` that is
+// a string, an array, or a half-written object is absence, never a throw.
+function landingOf(state) {
+  const record = state?.landing;
+  if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+  if (typeof record.candidateOid !== "string" || record.candidateOid !== state.candidateOid) return null;
+  if (typeof record.baseOid !== "string" || record.baseOid === "") return null;
+  return {
+    status: typeof record.status === "string" ? record.status : null,
+    baseOid: record.baseOid,
+    reviewedBaseOid: typeof record.reviewedBaseOid === "string" ? record.reviewedBaseOid : null,
+    verify: typeof record.verify?.status === "string" ? record.verify.status : null,
+    at: typeof record.at === "string" ? record.at : null
+  };
+}
+
 /**
  * Everything `/tagteam:status` renders: the plans, the ships, and how much
  * iteration budget each thing still in flight has left before it stops.
@@ -166,6 +193,11 @@ export function inventory(repoRoot) {
     const usage = Object.fromEntries(directories(root)
       .map((spec) => [spec, json(path.join(root, spec, "usage.json"))?.summary ?? null])
       .filter(([, summary]) => summary !== null));
+    // The landing checks that ran on this ship's specs, keyed the same way, and
+    // only the ones bound to the candidate their spec is on now.
+    const landing = Object.fromEntries(directories(root)
+      .map((spec) => [spec, landingOf(json(path.join(root, spec, "state.json")))])
+      .filter(([, record]) => record !== null));
     const waiting = specs.filter((spec) => spec.state === "awaiting-approval");
     const merged = specs.filter((spec) => spec.state === "merged");
     const failed = specs.filter((spec) => spec.state === "failed");
@@ -180,6 +212,7 @@ export function inventory(repoRoot) {
       waitingOn: waiting.map((spec) => ({ spec: spec.spec, pr: spec.pr?.number ?? null, branch: spec.branch })),
       stoppedOn: failed.map((spec) => ({ spec: spec.spec, branch: spec.branch })),
       usage,
+      landing,
       // One entry per spec that could still spend something. A merged or failed
       // spec has no budget, so it has no entry — and a spec waiting for a person
       // does have one, because sending it back spends a CI repair and hands it a

@@ -204,6 +204,66 @@ test("what a spec cost is reported when its ship recorded it, and absent otherwi
   assert.equal(reported.usage["01-a"].equivalentTokens, 1200000);
 });
 
+// A landing record says the base moved under a reviewed change and that the
+// change was re-checked against it. It is bound to one candidate, and honouring
+// one bound to an earlier candidate here would make `/tagteam:status` the single
+// place in the plugin where a check of an older commit speaks for the one about
+// to merge — the thing `goal.md` names as "not done".
+test("a landing record is reported for the candidate it was checked on, and never for a later one", () => {
+  const repo = repository();
+  const candidate = "a".repeat(40);
+  const base = "b".repeat(40);
+  ship(repo, "01-a", {
+    state: "publishing", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: candidate, baseOid: "c".repeat(40),
+    landing: {
+      status: "passed", candidateOid: candidate, baseOid: base, reviewedBaseOid: "c".repeat(40),
+      verify: { status: "passed" }, at: "2026-09-01T10:00:00Z"
+    }
+  });
+  // The same record, left behind by a candidate that has since been replaced.
+  ship(repo, "02-b", {
+    state: "publishing", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: "d".repeat(40), baseOid: "c".repeat(40),
+    landing: { status: "passed", candidateOid: candidate, baseOid: base, verify: { status: "passed" } }
+  });
+  // And a spec whose base never moved at all.
+  ship(repo, "03-c", { state: "reviewing", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: candidate });
+  const [reported] = inventory(repo).ships;
+  assert.deepEqual(Object.keys(reported.landing), ["01-a"]);
+  assert.deepEqual(reported.landing["01-a"], {
+    status: "passed", baseOid: base, reviewedBaseOid: "c".repeat(40), verify: "passed", at: "2026-09-01T10:00:00Z"
+  });
+});
+
+// A record that did not pass is why that spec is waiting, and it is reported
+// with the status it has: the render contract turns the status into the
+// sentence, and hiding everything but `passed` would leave the person reading
+// the list with a spec that stopped for no visible reason.
+test("a landing record that did not pass is reported with its status", () => {
+  const repo = repository();
+  const candidate = "a".repeat(40);
+  ship(repo, "01-a", {
+    state: "awaiting-approval", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: candidate,
+    landing: { status: "failed", candidateOid: candidate, baseOid: "b".repeat(40), verify: { status: "failed" } }
+  });
+  const [reported] = inventory(repo).ships;
+  assert.equal(reported.landing["01-a"].status, "failed");
+  assert.equal(reported.landing["01-a"].verify, "failed");
+});
+
+// Status must never be the thing that throws, and a record half-written by a run
+// that was killed mid-check is exactly what it would throw on.
+test("a malformed landing record is an absence, and the rest of the inventory still comes out", () => {
+  const repo = repository();
+  const candidate = "a".repeat(40);
+  ship(repo, "01-a", { state: "reviewing", fixRoundsUsed: 1, ciRepairsUsed: 0, candidateOid: candidate, landing: "passed" });
+  ship(repo, "02-b", { state: "reviewing", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: candidate, landing: [] });
+  ship(repo, "03-c", { state: "reviewing", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: candidate, landing: { status: "passed" } });
+  ship(repo, "04-d", { state: "reviewing", fixRoundsUsed: 0, ciRepairsUsed: 0, candidateOid: candidate, landing: { candidateOid: candidate } });
+  const [reported] = inventory(repo).ships;
+  assert.deepEqual(reported.landing, {});
+  assert.equal(budgetFor(inventory(repo), "01-a").fixRoundsRemaining, 2);
+});
+
 // `existsSync` says yes to a path nothing may read and to a file where a
 // directory belongs; the read after it is what throws. Status has one job it may
 // never fail at.
