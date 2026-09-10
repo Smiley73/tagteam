@@ -21,6 +21,25 @@ const GATES = ["review", "verify", "ci", "report", "human"];
 // comment there.
 const UNACCOUNTED = "unaccountedCandidates";
 
+// What the landing check found the last time `origin/<base>` had moved under this
+// candidate: which base it was checked against, the tree the merge produced, and
+// how this repository's verify commands answered on it.
+//
+// A top-level key rather than a sixth gate, deliberately. `GATES` is enumerated
+// by `evaluate`, `bindCandidate`, `recordGate` and `adoptMerge`, and a sixth
+// member changes what all four of them do — and a gate is something a person's
+// approval can be weighed against, which this must never be: a change that
+// passes alone and fails on the base it would land on is a fact about the code.
+// It is `unaccountedCandidates`'s shape, with the opposite lifetime: that one
+// survives a bind because it is not about the current commit, and this one is
+// cleared by a bind because it is about exactly one commit and one base.
+const LANDING = "landing";
+
+// What a landing check can conclude. `passed` is the only one that lets anything
+// merge, and `merge.mjs` re-reads the record rather than taking a caller's word
+// for which one it was.
+const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
+
 // How much of this attempt's budget has been spent. Counters rather than a
 // derivation from disk alone, because they are the resume mechanism: a fixer
 // that was dispatched and produced no commit leaves no round directory, and a
@@ -113,6 +132,7 @@ export function initState({ spec, slug, branch, base, userVisible, reviewers, br
     [FIX_COUNTER]: 0,
     [REPAIR_COUNTER]: 0,
     [UNACCOUNTED]: [],
+    [LANDING]: null,
     history: []
   };
 }
@@ -336,6 +356,13 @@ export function reconcileBudgets(state, rounds) {
 // nothing — the recording that follows re-entry records the gate again. Nothing
 // removes an entry: a spec that lost a round's account waits for a person on
 // every candidate after it, which is the point.
+//
+// The landing record is cleared explicitly, and has to be: this function spreads
+// `...state`, so a top-level key survives a bind untouched unless something says
+// otherwise, and a record reading "this merges onto the moved base and passes
+// there" would then sit on the state describing a commit that is no longer the
+// candidate. `landingDecision` compares the candidate OID as well, so neither
+// half of that is load-bearing on its own.
 export function bindCandidate(state, candidateOid, baseOid, changedPaths = null) {
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) throw new Error(`candidate OID is required, got: ${candidateOid}`);
   if (!/^[0-9a-f]{40,64}$/.test(baseOid ?? "")) throw new Error(`base OID is required, got: ${baseOid}`);
@@ -350,8 +377,31 @@ export function bindCandidate(state, candidateOid, baseOid, changedPaths = null)
     changedPaths: changedPaths ?? state.changedPaths,
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
     [UNACCOUNTED]: outgoing !== null && outgoing !== candidateOid && !accounted ? [...carried, outgoing] : carried,
+    [LANDING]: null,
     history: [...state.history, { candidateOid, baseOid, at: new Date().toISOString() }]
   };
+}
+
+/**
+ * Record what the landing check found, bound to the candidate it was about.
+ *
+ * The binding is the whole safety of it, and it is checked here as well as
+ * everywhere the record is read: a record written for one candidate must never
+ * speak for a later one, and the caller is the actor most likely to hand this
+ * the wrong one — `finish` reads the state, runs a check that takes minutes, and
+ * writes the answer back.
+ */
+export function recordLanding(state, candidateOid, record) {
+  if (state.candidateOid !== candidateOid) {
+    throw new Error(`cannot record a landing check for ${candidateOid}: the current candidate is ${state.candidateOid}`);
+  }
+  if (!LANDING_STATUSES.includes(record?.status)) {
+    throw new Error(`a landing check is ${LANDING_STATUSES.join(", ")}, not ${JSON.stringify(record?.status ?? null)}`);
+  }
+  if (!/^[0-9a-f]{40,64}$/.test(record?.baseOid ?? "")) {
+    throw new Error(`a landing check records the base it ran against, got: ${record?.baseOid}`);
+  }
+  return { ...state, [LANDING]: { ...record, candidateOid, at: record.at ?? new Date().toISOString() } };
 }
 
 // The pull request is recorded through here rather than by editing the state
@@ -516,6 +566,7 @@ const USAGE = `usage:
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs bind     <state.json> <candidateOid> <baseOid> [changed-paths.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
+  gates.mjs landing  <state.json> <candidateOid> <record.json>
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
   gates.mjs roles    <state.json> <config.json>
@@ -529,6 +580,13 @@ const USAGE = `usage:
 
   \`init\` needs the repository to resolve each lens's brief, and refuses a lens
   nothing calibrates rather than letting a reviewer invent one in step 5.
+
+  \`landing\` records what the landing check found when \`origin/<base>\` had moved
+  under the reviewed candidate: \`{status, baseOid, mergedTree, mergedCommit,
+  verify, ...}\`, bound to the candidate it was about. It is not a gate — no
+  approval is weighed against it and \`evaluate\` never reads it — and only a
+  \`passed\` record lets \`merge.mjs\` accept a base other than the reviewed one.
+  Binding a new candidate clears it.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -723,6 +781,8 @@ async function main() {
     next = bindCandidate(readJson(values[0]), values[1], values[2], Array.isArray(changed) ? changed : changed?.changedPaths ?? null);
   } else if (action === "record") {
     next = recordGate(readJson(values[0]), values[1], values[2], readJson(values[3]));
+  } else if (action === "landing") {
+    next = recordLanding(readJson(values[0]), values[1], readJson(values[2]));
   } else if (action === "pr") {
     next = recordPr(readJson(values[0]), { number: values[1], url: values[2], headOid: values[3] });
   } else {

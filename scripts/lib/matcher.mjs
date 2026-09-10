@@ -57,6 +57,28 @@ export function globToRegExp(pattern) {
   return new RegExp(`^(?:${alternatives.join("|")})$`.replace(alternatives.join("|"), sources.join("|")));
 }
 
+/**
+ * The predicate `reviewExclude` names, and the rule about which of a rename's
+ * paths it is asked about.
+ *
+ * It is here rather than beside either caller because there are two of them now
+ * — the snapshot that builds the diff the reviewers read, and the landing check
+ * that compares that diff against the one that would land — and the two have to
+ * exclude exactly the same set or the comparison stops a merge over a generated
+ * file. The rename rule is the part that would drift silently: `--name-status`
+ * lists a rename's source first and its destination last, and `reviewExclude` is
+ * written against where the file ends up, which is also the path `--name-only`
+ * reports.
+ *
+ * Takes the globs rather than the configuration, so this stays a question about
+ * paths and each caller keeps its own config read.
+ */
+export function pathExclusions(globs) {
+  const expressions = (globs ?? []).map((glob) => globToRegExp(glob));
+  const excludes = (file) => expressions.some((expression) => expression.test(normalizeRepoPath(file)));
+  return { excludes, excludesEntry: (paths) => excludes(paths[paths.length - 1]) };
+}
+
 export function matchWhen(when, changedPaths, addedLines) {
   if (!when) return { matched: true, errors: [] };
   // No condition at all means unconditional. The schema documents empty globs

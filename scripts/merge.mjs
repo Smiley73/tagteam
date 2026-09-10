@@ -10,11 +10,28 @@
 // `--match-head-commit` is what makes "you merged what you reviewed" true. It is
 // part of the merge, not a check bolted on beside it: GitHub refuses the merge
 // if the branch head has moved since.
+//
+// Two bases can be merged into, and no third. One is the base the review was
+// bound to. The other is a base that moved since, *and* that this exact
+// candidate's landing check found the change merges into cleanly, lands on
+// unchanged, and passes this repository's verify commands on — the record on the
+// state file, re-read here rather than taken from the caller. Everything else
+// refuses, and it refuses with an exit code of its own so that a caller can tell
+// "the base moved again while I was checking" from every other reason a merge
+// does not happen. Nothing in here rebases, amends or re-commits anything: what
+// merges is the reviewed commit and only ever the reviewed commit.
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { evaluate } from "./gates.mjs";
+import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
+
+// The base is neither the reviewed base nor a base this candidate's landing
+// check cleared. Its own code because the caller retries exactly this one and
+// stops on everything else: 4 is a spent budget, 3 stale configuration, 2 usage
+// and 1 the rest, by the driver's conventions.
+export const BASE_NOT_ACCEPTED = 5;
 
 export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
   const resolved = path.resolve(statePath);
@@ -45,9 +62,12 @@ export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) 
 
   // --match-head-commit pins what is merged; it says nothing about what it is
   // merged *into*. A base that moved since the review — an earlier spec landing,
-  // or a push from outside — means the result is a combination nobody looked at.
-  // Stopping is the whole policy here: there is no automatic rebase, because a
-  // rebase produces a new commit and every gate was bound to the old one.
+  // or a push from outside — means the result is a combination nobody looked at,
+  // unless something looked at that combination: the landing record below is a
+  // check that did, for this candidate and for one named base. There is still no
+  // automatic rebase, because a rebase produces a new commit and every gate was
+  // bound to the old one; what the record buys is permission to merge the
+  // *reviewed* commit into a base it was re-verified against.
   if (!state.base) throw new Error(`${resolved} records no base branch; nothing was merged`);
 
   // Fetched first, because the local remote-tracking ref is a memory of the last
@@ -61,11 +81,21 @@ export function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) 
   if (current.status !== 0 || !baseOid) {
     throw new Error(`could not read origin/${state.base}: ${(current.stderr || "").trim()}`);
   }
-  if (baseOid !== state.baseOid) {
-    throw new Error(
-      `origin/${state.base} moved from ${state.baseOid.slice(0, 12)} to ${baseOid.slice(0, 12)} since this candidate was reviewed;`
+  // The record is judged by the same function the driver judges it by, and the
+  // candidate OID is compared inside it: a record bound to an earlier candidate
+  // is not evidence about this one, and `bindCandidate` clearing it is the other
+  // half of the same rule rather than a substitute for this one.
+  if (baseOid !== state.baseOid && landingDecision(state.landing, { candidateOid, baseOid }) !== "merge") {
+    const checked = state.landing?.candidateOid === candidateOid ? state.landing : null;
+    const error = new Error(
+      `origin/${state.base} moved from ${state.baseOid.slice(0, 12)} to ${baseOid.slice(0, 12)} since this candidate was reviewed,`
+      + (checked
+        ? ` and the landing check for this candidate is about ${checked.baseOid?.slice(0, 12) ?? "no base it recorded"} (${checked.status});`
+        : " and no landing check cleared this candidate against it;")
       + " rebase and re-review, or merge it yourself. Nothing was merged."
     );
+    error.exitCode = BASE_NOT_ACCEPTED;
+    throw error;
   }
 
   // And the pull request has to be aimed where the review assumed. A branch with
@@ -127,7 +157,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify(mergeSpec(statePath, { repo, configPath, dryRun }))}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
+    process.exitCode = error.exitCode ?? 1;
   }
 }
 

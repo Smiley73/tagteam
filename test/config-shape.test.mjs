@@ -27,6 +27,9 @@ const CONSUMED = [
   ["scripts/verify-run.mjs", ["verify"]],
   ["scripts/guard-staged.mjs", ["worktree.copyUntracked"]],
   ["scripts/snapshot-candidate.mjs", ["reviewExclude", "verify"]],
+  // The landing check compares the diff that would land against the diff that
+  // was reviewed, and has to leave out exactly what the review left out.
+  ["scripts/lib/landing.mjs", ["reviewExclude"]],
   ["scripts/specs.mjs", ["reviewers.roster", "reviewers.default"]],
   // `models`, `effort` and `escalation` as top-level keys only: the guard below
   // resolves a dotted key through `?.` against `examples/config.json` and asserts

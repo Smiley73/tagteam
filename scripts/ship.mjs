@@ -29,6 +29,11 @@ import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
 import { repairScope } from "./gates.mjs";
+import { BASE_NOT_ACCEPTED } from "./merge.mjs";
+import {
+  GIT_MINIMUM, checkLanding, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
+  restoreWorktree
+} from "./lib/landing.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
 import { churnLines, churnSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
@@ -435,7 +440,36 @@ function fixerDispatch(ctx, spec, recordPath, job) {
   };
 }
 
+// A landing failure this candidate is recorded to have, or null. The candidate
+// comparison is `currentGate`'s discipline: a record left by an earlier commit
+// describes a change that is no longer the one being merged.
+const landingFailure = (state) =>
+  state?.landing?.candidateOid === state?.candidateOid && state?.landing?.status === "failed" ? state.landing : null;
+
 function repairDispatch(ctx, spec, state, job) {
+  // The other door out of a landing stop. A fixer told it is fixing a red check
+  // would go and read a check that is green: what is wrong is that the change
+  // passes on its own and fails once it is merged onto the base as it now
+  // stands, and nothing else in this dispatch would say so.
+  const landing = landingFailure(state);
+  if (landing) {
+    return {
+      agent: agent("fixer", job.effort),
+      model: job.model,
+      description: `Repair ${spec.id} against the current ${state.base}`,
+      prompt: [
+        `Job: fixer`,
+        "This is a landing repair, not a CI repair: the checks on the pull request are not what stopped this. "
+          + `${state.base} moved to ${landing.baseOid.slice(0, 12)} since this change was reviewed. The change passes `
+          + `on its own and fails this repository's verify commands once it is merged onto ${state.base} as it is now, `
+          + "and that is what to fix.",
+        `What failed and its log: ${landing.resultPath ?? landing.dir}. Read it before changing anything; the commands `
+          + "there are this repository's own, and they ran against the merged tree.",
+        `Worktree (work only beneath this path): ${ctx.worktree}`,
+        `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
+      ].join("\n")
+    };
+  }
   return {
     agent: agent("fixer", job.effort),
     model: job.model,
@@ -522,6 +556,20 @@ function start(options) {
   // The tests stage trains in repositories with no GitHub remote and no Codex
   // account; the checks are for a person's machine, and the variable is for them.
   if (process.env.TAGTEAM_SKIP_TOOL_CHECKS !== "1") {
+    // Checked here, before a single spec is built, because the step that needs it
+    // is the last one: `finish` tests the merge onto a base that moved with
+    // `git merge-tree --write-tree`, which arrived in git 2.38. Found out there,
+    // it costs the whole train. This judges the machine, which is why it stands
+    // beside the other two tool checks rather than in the configuration
+    // validator, which judges the repository.
+    const version = spawnSync("git", ["--version"], { encoding: "utf8", shell: false });
+    const found = parseGitVersion(version.stdout);
+    if (!gitIsAtLeast(found, GIT_MINIMUM)) {
+      throw new Stop(`git ${GIT_MINIMUM.join(".")} or newer is required and this machine has `
+        + `${found ? found.join(".") : `no version \`git --version\` could be read from (${JSON.stringify((version.stdout || version.stderr || "").trim())})`}. `
+        + "When the base branch moves under a reviewed change, the ship checks that the same change still lands on "
+        + "the new base with `git merge-tree --write-tree`, and older git has no such thing. Upgrade git and run this again.");
+    }
     const codex = spawnSync("codex", ["--version"], { encoding: "utf8", shell: false });
     if (codex.status !== 0) throw new Stop("Codex is required and `codex --version` failed");
     const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf8", shell: false });
@@ -577,13 +625,30 @@ function begin(options) {
   const id = options.spec;
   const spec = specById(ctx, id);
   const say = [];
+  const branch = branchOf(ctx, id);
+
+  // A detached worktree is where an interrupted landing check leaves it: `finish`
+  // checks the merged tree out to verify it and switches back, and a run that
+  // died in between left the ship's one worktree pointing at a throwaway commit.
+  // Put it back before anything else, because everything after this works on
+  // whatever is checked out — and the routes out of `begin` that return early,
+  // an already-published spec among them, would leave it detached for the next
+  // step to trip over. Only a detached head is touched: a worktree sitting on
+  // another spec's branch is that spec's business, and the branches below deal
+  // with it as they always have.
+  if (exists(ctx.worktree)
+    && git(ctx.worktree, ["branch", "--show-current"]).stdout.trim() === ""
+    && git(ctx.worktree, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { allowFailure: true }).status === 0) {
+    const restored = restoreWorktree(ctx.worktree, branch);
+    say.push(`The worktree was detached at ${restored.from.slice(0, 12)}, which is where an interrupted landing check `
+      + `leaves it; it is back on ${branch}.`);
+  }
 
   git(ctx.repo, ["fetch", "origin", "--prune"]);
   const baseOid = git(ctx.repo, ["rev-parse", `origin/${ctx.config.base}`]).stdout.trim();
   writeJson(ctx.trainPath, { ...ctx.train, baseOid });
   ctx.baseOid = baseOid;
 
-  const branch = branchOf(ctx, id);
   const init = lastJson(node("gates.mjs", [
     "init", statePath(ctx, id), id, ctx.slug, branch, ctx.config.base, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
   ]).stdout);
@@ -1247,15 +1312,18 @@ function repair(options) {
   const id = options.spec;
   const spec = specById(ctx, id);
   const state = readState(ctx, id);
+  const landing = landingFailure(state);
   const edge = transition(ctx, id, "reviewing", { budgeted: true });
   if (edge.refused) {
-    return emit({ say: [`CI is red and no repair is left (${edge.reason.split("\n")[0]}); the pull request stays open for a person.`], budget: "spent", next: nextCommand(ctx, "finish", id) });
+    return emit({ say: [`${landing ? `${id} fails on ${state.base} as it now stands` : "CI is red"} and no repair is left (${edge.reason.split("\n")[0]}); the pull request stays open for a person.`], budget: "spent", next: nextCommand(ctx, "finish", id) });
   }
   const job = roles(ctx, id).jobs["repair-fix"];
   const budget = edge.output?.budget ?? {};
   writeJson(fixPendingPath(ctx, id), { round: currentRound(ctx, id, state)?.round ?? null, candidate: state.candidateOid, from: "repair", at: new Date().toISOString() });
   emit({
-    say: [`CI repair ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. The repaired commit is a new candidate and goes through the whole review again with a fresh fix budget.`],
+    say: [`${landing
+      ? `Landing repair ${budget.ordinal} of the ${budget.limit} repairs this repository allows: the change passes alone and fails merged onto ${state.base} at ${landing.baseOid.slice(0, 12)}`
+      : `CI repair ${budget.ordinal} of the ${budget.limit} this repository allows`}; fixer ${settings(job)}. The repaired commit is a new candidate and goes through the whole review again with a fresh fix budget.`],
     dispatch: [repairDispatch(ctx, spec, state, job)],
     next: nextCommand(ctx, "snapshot", id)
   });
@@ -1373,6 +1441,130 @@ function stopAsk(id, { blockers, approvals }, accepted = null) {
   return text.join(" ");
 }
 
+// The landing check borrows the ship's one worktree to check a throwaway merge
+// commit out in, and this decides what it may borrow and what branch it owes
+// back. Nothing uncommitted in it, first of all. A worktree on another spec's
+// branch is that spec's while that spec is mid-cycle — `revisit` refuses the
+// same thing for the same reason — and taking it would corrupt its next
+// snapshot; a spec that is only waiting can lend it, and gets it back on the
+// branch it lent it on, because `repair` and `fix` switch no branches and would
+// otherwise commit that spec's next fix onto this one's branch. So the branch
+// returned is the one the worktree is on, and the only branch this switches to
+// is this spec's, when it finds no branch at all — a detached head is where an
+// interrupted check left it, and there is nothing there to give back.
+function borrowWorktree(ctx, id, state) {
+  if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") {
+    throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the landing check for ${id} has to check `
+      + "the merged tree out there; commit it through snapshot or clear it, then run finish again");
+  }
+  const current = git(ctx.worktree, ["branch", "--show-current"]).stdout.trim();
+  if (current === state.branch) return state.branch;
+  if (current === "") {
+    git(ctx.worktree, ["switch", state.branch]);
+    return state.branch;
+  }
+  const other = specsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
+  const otherState = other && exists(statePath(ctx, other.id)) ? readJson(statePath(ctx, other.id)).state : null;
+  if (["implementing", "reviewing", "fixing", "verifying"].includes(otherState)) {
+    throw new Stop(`the worktree is on ${current}, and ${other.id} is still ${otherState} there; ${state.base} moved `
+      + `since ${id} was reviewed, so merging it needs the worktree to check what would land — bring that spec to a `
+      + "stop, then run finish again");
+  }
+  return current;
+}
+
+const landingPath = (ctx, id) => path.join(specDir(ctx, id), "landing.json");
+
+/**
+ * Between the verdict and the merge: has `origin/<base>` moved, and if it has,
+ * is the change that would land the change that was reviewed?
+ *
+ * Returns null when there is nothing in the way — the base has not moved, or a
+ * check already cleared this candidate against exactly this base — and `{stop}`
+ * when a person has to decide. It sits here, after `evaluate` and before
+ * `merge.mjs`, and that placement is the whole reason a landing failure cannot
+ * be approved past: `finish --approve` records the human gate and re-evaluates,
+ * and then arrives here again. Making landing a sixth gate would have made it
+ * approvable, which is exactly what a change that fails on the base it would
+ * land on must not be.
+ *
+ * The record is written before `merge.mjs` runs, because `merge.mjs` re-reads
+ * the state file and does not take its caller's word for which base was checked.
+ */
+function landingCheck(ctx, id, state, say) {
+  // Fetched every time round the loop: the local remote-tracking ref is a memory
+  // of the last fetch, and the case this whole check exists for is a base that
+  // moved a moment ago.
+  git(ctx.repo, ["fetch", "origin", "--prune"]);
+  const baseOid = git(ctx.repo, ["rev-parse", `origin/${state.base}`]).stdout.trim();
+  if (baseOid === state.baseOid) return null;
+  const facts = { spec: id, base: state.base, repair: nextCommand(ctx, "repair", id) };
+
+  const recorded = readState(ctx, id).landing ?? null;
+  const decision = landingDecision(recorded, { candidateOid: state.candidateOid, baseOid });
+  // The same candidate against the same base was already answered. Re-running
+  // the verify commands would spend minutes to print the same sentence.
+  if (decision === "merge") {
+    say.push(landingMessage(recorded, facts));
+    return null;
+  }
+  if (decision === "stop") return { stop: landingMessage(recorded, facts), landing: recorded };
+
+  const round = currentRound(ctx, id, state);
+  if (!round) {
+    throw new Stop(`${state.base} moved since ${id} was reviewed, and ${id} has no round for `
+      + `${state.candidateOid.slice(0, 12)} to verify the merged change against; nothing was merged`);
+  }
+  const borrowed = borrowWorktree(ctx, id, state);
+  const outcome = checkLanding({
+    repo: ctx.repo, worktree: ctx.worktree, branch: borrowed,
+    config: ctx.config, configPath: ctx.configPath,
+    baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
+    candidatePath: path.join(round.dir, "candidate.json"),
+    landingDir: path.join(round.dir, "landing")
+  });
+  const record = {
+    status: outcome.status,
+    baseOid: outcome.baseOid,
+    reviewedBaseOid: outcome.reviewedBaseOid,
+    mergedTree: outcome.mergedTree ?? null,
+    mergedCommit: outcome.mergedCommit ?? null,
+    conflicts: outcome.conflicts ?? null,
+    verify: outcome.verify ?? null,
+    resultPath: outcome.resultPath ?? null,
+    dir: outcome.dir ?? null,
+    round: round.round,
+    at: new Date().toISOString()
+  };
+  writeJson(landingPath(ctx, id), record);
+  node("gates.mjs", ["landing", statePath(ctx, id), state.candidateOid, landingPath(ctx, id)]);
+  const message = landingMessage(record, facts);
+  if (outcome.status === "passed") {
+    say.push(message);
+    return null;
+  }
+  return { stop: message, landing: record };
+}
+
+// The merge, with the check in front of it. `merge.mjs` refuses a base it was
+// not cleared for with an exit code of its own, and that refusal — and only that
+// refusal — is worth another go: it means someone pushed between the check and
+// the merge. Everything else `merge.mjs` says, a `gh` refusal included, is a
+// stop. The loop is bounded by `mergeWithLanding`, which owns the accounting.
+function landAndMerge(ctx, id, state, say) {
+  return mergeWithLanding({
+    check: () => landingCheck(ctx, id, state, say),
+    merge: () => {
+      const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath],
+        { allow: [BASE_NOT_ACCEPTED] });
+      if (result.status === 0) return { merged: lastJson(result.stdout) };
+      say.push(`${state.base} moved again between the check and the merge, so the merge was refused: `
+        + `${result.stderr.trim().split("\n")[0]}. Checking the change against the base as it now stands.`);
+      return {};
+    }
+  });
+}
+
 function finish(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -1395,12 +1587,27 @@ function finish(options) {
     }
   }
   if (verdict.ready) {
-    const merged = lastJson(node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath]).stdout);
-    if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
-    git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
-    say.push(`Merged ${id} at ${merged.candidateOid.slice(0, 12)} through pull request #${merged.pr}.`);
+    const landed = landAndMerge(ctx, id, state, say);
+    if (landed.merged) {
+      if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
+      git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
+      say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
+      say.push(...usageLines(ctx, id));
+      return finishNext(ctx, id, say);
+    }
+    // The gates are satisfied and the change still cannot be merged: it does not
+    // land as what was reviewed, or it does not work where it would land. The
+    // spec waits like any other stop — and unlike any other stop, no approval
+    // reaches this, because this ran after the verdict that an approval changes.
+    state = readState(ctx, id);
+    if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
+    spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "the base moved"], { stdio: "ignore" });
     say.push(...usageLines(ctx, id));
-    return finishNext(ctx, id, say);
+    const following = nextSpecAfter(ctx, id);
+    return emit({
+      say, ask: landed.stop, landing: landed.landing ?? null, pullRequest: state.pr,
+      next: following ? nextCommand(ctx, "begin", following) : nextCommand(ctx, "end", null)
+    });
   }
   state = readState(ctx, id);
   if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
