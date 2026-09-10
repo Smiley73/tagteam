@@ -29,6 +29,11 @@ const BRANCH = "tagteam/demo/01-a";
 const PASSING = 'node -e "process.exit(0)"';
 // Passes on the candidate alone and fails once the base's flag file is merged in.
 const FLAG_SENSITIVE = 'node -e "process.exit(require(\'node:fs\').existsSync(\'flag.txt\') ? 1 : 0)"';
+// Passes, and writes into two tracked files on the way — an install step, a
+// formatter, a codegen step. `app.js` is one the base moved and `lock.txt` is
+// one it did not, which are the two ways the restore afterwards can go wrong.
+const WRITES_INTO_THE_TREE = 'node -e "const fs=require(\'node:fs\');'
+  + "fs.writeFileSync('app.js','clobbered\\n');fs.writeFileSync('lock.txt','clobbered\\n')\"";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -41,7 +46,7 @@ const lines = (count, replacements = {}) =>
 
 // A repository whose main branch is the reviewed base, with the ship's worktree
 // on a spec branch beside it — the shape `start` leaves behind.
-function stage({ reviewExclude = [], command = PASSING } = {}) {
+function stage({ reviewExclude = [], command = PASSING, extra = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-landing-"));
   const repo = path.join(dir, "repo");
   fs.mkdirSync(repo, { recursive: true });
@@ -50,6 +55,8 @@ function stage({ reviewExclude = [], command = PASSING } = {}) {
   git(repo, "config", "user.name", "t");
   fs.writeFileSync(path.join(repo, "app.js"), lines(20));
   fs.writeFileSync(path.join(repo, "lock.txt"), lines(4));
+  // Anything else the reviewed base has to carry — a `.gitattributes` among it.
+  for (const [name, text] of Object.entries(extra)) fs.writeFileSync(path.join(repo, name), text);
   git(repo, "add", "-A");
   git(repo, "commit", "-qm", "base");
   const baseOid = git(repo, "rev-parse", "HEAD");
@@ -187,6 +194,35 @@ test("a base that already contains part of the candidate's change merges cleanly
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
+test("a path the checkout's attributes call non-diffable is compared by what is in it, not by the one header git prints for it", () => {
+  // The reviewed base marks `data.txt` `-diff`, and the primary checkout — where
+  // both sides of the comparison are rendered — stays on that base. Under those
+  // attributes every change to the file, however large, renders as the same
+  // single `Binary files ... differ` line.
+  const staged = stage({ extra: { ".gitattributes": "data.txt -diff\n", "data.txt": lines(6) } });
+  const candidate = commitCandidate(staged, (tree) => {
+    write(path.join(tree, "data.txt"), lines(6, { 2: "CANDIDATE-2", 5: "CANDIDATE-5" }));
+    fs.rmSync(path.join(tree, ".gitattributes"));
+  });
+  // One of the candidate's two edits, made independently on the base: it merges
+  // cleanly, and only the other edit actually lands.
+  const newBase = moveBase(staged, (tree) => write(path.join(tree, "data.txt"), lines(6, { 2: "CANDIDATE-2" })));
+
+  const rendered = git(staged.repo, "diff", "--no-ext-diff", `${staged.baseOid}..${candidate.candidateOid}`, "--", "data.txt");
+  assert.match(rendered, /Binary files/, "the staged case no longer marks data.txt non-diffable, so it proves nothing");
+
+  const outcome = check(staged, candidate, newBase);
+  assert.equal(outcome.status, "differs", "two unequal changes to a -diff path passed for the same change");
+  const reviewed = fs.readFileSync(path.join(outcome.dir, "reviewed.diff"), "utf8");
+  const landing = fs.readFileSync(path.join(outcome.dir, "landing.diff"), "utf8");
+  assert.doesNotMatch(reviewed, /Binary files/, "the comparison still rests on a header that says nothing about the content");
+  assert.match(reviewed, /^\+CANDIDATE-2$/m);
+  assert.doesNotMatch(landing, /^\+CANDIDATE-2$/m, "the landing diff still carries an edit the base already has");
+  assert.match(landing, /^\+CANDIDATE-5$/m, "the edit that does land is not in the landing diff");
+  assert.equal(onBranch(staged), BRANCH);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
 // --- the exclusions, on both sides -------------------------------------------
 
 test("reviewExclude is applied to both diffs: an excluded file the base already changed does not stop the merge, and an unexcluded one does", () => {
@@ -230,6 +266,27 @@ test("a change that passes alone and fails on the current base stops, and the wo
   assert.match(message, /no approval\s+reaches past it|no approval reaches past it/);
   assert.match(message, /a repair round/);
   assert.match(message, /merge you make yourself/);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a landing verify that writes into the tree still comes back to a clean spec branch, and carries nothing onto it", () => {
+  // The base moves `app.js` around without touching the candidate's hunk, so the
+  // merged commit and the branch tip hold different `app.js` content: a plain
+  // `git switch` back onto the branch aborts on a locally modified `app.js`
+  // rather than carrying it over, and the ship is left detached and dirty.
+  const staged = stage({ command: WRITES_INTO_THE_TREE });
+  const candidate = commitCandidate(staged, (tree) => write(path.join(tree, "app.js"), lines(20, { 15: "CANDIDATE" })));
+  const newBase = moveBase(staged, (tree) =>
+    write(path.join(tree, "app.js"), `moved1\nmoved2\nmoved3\nmoved4\nmoved5\n${lines(20)}`));
+
+  const outcome = check(staged, candidate, newBase);
+  assert.equal(outcome.status, "passed");
+  assert.equal(onBranch(staged), BRANCH, "the landing verify's leftovers stranded the worktree off its branch");
+  assert.equal(git(staged.worktree, "status", "--porcelain"), "",
+    "the landing verify's leftovers came back onto the spec branch, and the next snapshot would commit them");
+  assert.equal(fs.readFileSync(path.join(staged.worktree, "app.js"), "utf8"), lines(20, { 15: "CANDIDATE" }));
+  assert.equal(fs.readFileSync(path.join(staged.worktree, "lock.txt"), "utf8"), lines(4));
+  assert.equal(git(staged.worktree, "rev-parse", "HEAD"), candidate.candidateOid);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 

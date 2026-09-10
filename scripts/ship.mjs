@@ -1441,18 +1441,28 @@ function stopAsk(id, { blockers, approvals }, accepted = null) {
   return text.join(" ");
 }
 
-// The landing check needs the ship's one worktree, and puts it back where it
-// found it. This is what it may take it from: its own spec's branch, with
-// nothing uncommitted in it. A worktree on another spec's branch is that spec's
-// while that spec is mid-cycle — `revisit` refuses the same thing for the same
-// reason — and taking it would corrupt its next snapshot.
-function onSpecBranch(ctx, id, state) {
+// The landing check borrows the ship's one worktree to check a throwaway merge
+// commit out in, and this decides what it may borrow and what branch it owes
+// back. Nothing uncommitted in it, first of all. A worktree on another spec's
+// branch is that spec's while that spec is mid-cycle — `revisit` refuses the
+// same thing for the same reason — and taking it would corrupt its next
+// snapshot; a spec that is only waiting can lend it, and gets it back on the
+// branch it lent it on, because `repair` and `fix` switch no branches and would
+// otherwise commit that spec's next fix onto this one's branch. So the branch
+// returned is the one the worktree is on, and the only branch this switches to
+// is this spec's, when it finds no branch at all — a detached head is where an
+// interrupted check left it, and there is nothing there to give back.
+function borrowWorktree(ctx, id, state) {
   if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") {
     throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the landing check for ${id} has to check `
       + "the merged tree out there; commit it through snapshot or clear it, then run finish again");
   }
   const current = git(ctx.worktree, ["branch", "--show-current"]).stdout.trim();
-  if (current === state.branch) return;
+  if (current === state.branch) return state.branch;
+  if (current === "") {
+    git(ctx.worktree, ["switch", state.branch]);
+    return state.branch;
+  }
   const other = specsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
   const otherState = other && exists(statePath(ctx, other.id)) ? readJson(statePath(ctx, other.id)).state : null;
   if (["implementing", "reviewing", "fixing", "verifying"].includes(otherState)) {
@@ -1460,7 +1470,7 @@ function onSpecBranch(ctx, id, state) {
       + `since ${id} was reviewed, so merging it needs the worktree to check what would land — bring that spec to a `
       + "stop, then run finish again");
   }
-  git(ctx.worktree, ["switch", state.branch]);
+  return current;
 }
 
 const landingPath = (ctx, id) => path.join(specDir(ctx, id), "landing.json");
@@ -1505,9 +1515,9 @@ function landingCheck(ctx, id, state, say) {
     throw new Stop(`${state.base} moved since ${id} was reviewed, and ${id} has no round for `
       + `${state.candidateOid.slice(0, 12)} to verify the merged change against; nothing was merged`);
   }
-  onSpecBranch(ctx, id, state);
+  const borrowed = borrowWorktree(ctx, id, state);
   const outcome = checkLanding({
-    repo: ctx.repo, worktree: ctx.worktree, branch: state.branch,
+    repo: ctx.repo, worktree: ctx.worktree, branch: borrowed,
     config: ctx.config, configPath: ctx.configPath,
     baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
     candidatePath: path.join(round.dir, "candidate.json"),

@@ -1257,6 +1257,30 @@ test("a base that moved with something unrelated costs no round: finish merges t
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a landing check borrows the worktree from a waiting spec and gives it back on the branch it was on", () => {
+  const staged = stage();
+  const { dir, repo, plan } = staged;
+  const { worktree, state } = driveToReadyAndWaiting(staged);
+  // The ordinary train shape: 01-a stopped and waited, the person moved on to
+  // the next spec, and the ship's one worktree is on that spec's branch when
+  // 01-a's base moves under it. Nothing switches the worktree back on that
+  // spec's behalf — `repair` and `fix` do not — so a landing check that keeps
+  // what it borrowed puts that spec's next commit on this spec's branch.
+  const parked = "tagteam/demo/02-b";
+  git(worktree, "switch", "-c", parked);
+  const tip = git(worktree, "rev-parse", "HEAD");
+  pushToBase(repo, "other.js", "export const other = 1;\n");
+
+  const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.equal(finish.status, 1, "the merge should be what fails, with no gh on PATH");
+  assert.equal(state().landing.status, "passed", "the check never ran, so the worktree proves nothing");
+  assert.equal(git(worktree, "branch", "--show-current"), parked,
+    "the landing check kept the worktree it borrowed, and the spec waiting on it would commit onto 01-a's branch");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+  assert.equal(git(worktree, "status", "--porcelain"), "");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a base that already carries part of the change stops with rebase-and-re-review, and nothing is recorded as landed", () => {
   const staged = stage();
   const { dir, repo, plan } = staged;

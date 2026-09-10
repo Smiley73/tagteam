@@ -220,12 +220,26 @@ export function landingMessage(outcome, { spec, base, repair } = {}) {
 /**
  * Put `worktree` back on `branch`. Returns what it was on, so the caller can say
  * whether it found a check that had been interrupted.
+ *
+ * `discard` throws away uncommitted changes to tracked files instead of
+ * refusing, and it is for `checkLanding`'s own restore and nothing else. The
+ * commands it runs are this repository's verify commands, run with the worktree
+ * on a throwaway merge commit, and installing, formatting or generating into the
+ * tree is ordinary behaviour for them. A plain `git switch` then aborts on
+ * exactly the file the new base changed — which is the case this whole check
+ * exists for — and leaves the ship detached, dirty, and stuck by hand; where it
+ * does not abort it carries the leftovers onto the spec branch, and the next
+ * `snapshot` commits them with `git add -A`. Nothing is lost by discarding:
+ * the caller proved the worktree clean before the check, so everything thrown
+ * away here was made by the check. `begin`'s restore keeps the plain switch,
+ * because a worktree left detached by an interrupted run may hold a person's own
+ * uncommitted work and must go on refusing to say so.
  */
-export function restoreWorktree(worktree, branch) {
+export function restoreWorktree(worktree, branch, { discard = false } = {}) {
   const current = git(worktree, ["branch", "--show-current"]).stdout.trim();
   if (current === branch) return { restored: false, detached: false, from: current };
   const from = current || git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
-  git(worktree, ["switch", branch]);
+  git(worktree, ["switch", ...(discard ? ["--discard-changes"] : []), branch]);
   return { restored: true, detached: current === "", from };
 }
 
@@ -234,6 +248,20 @@ export function restoreWorktree(worktree, branch) {
 // dropped from both sides rather than summarized: a summary of a generated file
 // is not something a reviewer judged, and comparing two of them would stop a
 // merge over a lock file's line count.
+//
+// `--text` and `--no-textconv`, beside the `--no-ext-diff` that was always here,
+// are what keep this comparison about content. Both sides are rendered under the
+// primary checkout's `.gitattributes` — git reads attributes from a working tree
+// and not from the commits being diffed — so a path that checkout marks `-diff`
+// comes out as `Binary files a/x and b/x differ` on both sides whatever is
+// inside it, and `index` lines, the only other thing that would tell them apart,
+// are dropped by `normalizeDiff` for a reason of their own. Two unequal changes
+// to that path then normalize to the same single line, and the merge is
+// authorized on a header that says nothing about the content. Diffed as text the
+// difference is there to be seen. The price is that a genuinely binary file
+// appears in these diffs as its bytes, which is loud and right rather than quiet
+// and wrong — and one a reviewer never read belongs in `reviewExclude`, which is
+// applied above.
 function changeBetween(repo, from, to, exclusions) {
   const listing = git(repo, ["diff", "--no-ext-diff", "--name-status", "-M", "-z", `${from}..${to}`], { encoding: "buffer" })
     .stdout.toString("utf8");
@@ -243,7 +271,9 @@ function changeBetween(repo, from, to, exclusions) {
     // Both of a rename's paths, for the reason `snapshot-candidate.mjs` gives:
     // restricted to the destination git cannot pair the deletion with it and
     // renders the whole file as an addition.
-    text += git(repo, ["diff", "--no-ext-diff", "--no-color", "-M", `${from}..${to}`, "--", ...entry.paths]).stdout;
+    text += git(repo, [
+      "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--text", "-M", `${from}..${to}`, "--", ...entry.paths
+    ]).stdout;
   }
   return text;
 }
@@ -270,6 +300,11 @@ function conflictPaths(stdout) {
  * decides what to do about it; the driver does that. A conflict is not a tool
  * failure and is not thrown: it is the existing stop, reached with the existing
  * words.
+ *
+ * `branch` is where the worktree goes back to, which is where the caller found
+ * it and not necessarily this spec's own branch: the check borrows the ship's
+ * one worktree to check a throwaway merge commit out in, and a worktree lent by
+ * a spec that is waiting has to be given back on the branch it was lent on.
  *
  * The verify run is handed the round's *own* `candidate.json` and the round's
  * own `baseOid` and `candidateOid`, while the worktree sits on the throwaway
@@ -341,7 +376,9 @@ export function checkLanding({
     failure = error;
   }
   try {
-    restoreWorktree(worktree, branch);
+    // With a discard: the verify commands just ran here, and what they wrote is
+    // the check's own leftovers rather than anyone's work.
+    restoreWorktree(worktree, branch, { discard: true });
   } catch (error) {
     if (failure) failure.message += ` — and the worktree could not be put back on ${branch}: ${error.message}`;
     else failure = error;
