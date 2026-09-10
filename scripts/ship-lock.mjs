@@ -1,6 +1,15 @@
 #!/usr/bin/env node
-// The repository-wide ship lock. Two `/tagteam:ship` runs against one checkout
-// would share a worktree and a base branch, so only one may hold this.
+// One ship lock per plan, so that shipping one plan refuses only the same plan.
+// Everything a `/tagteam:ship` run owns is per plan already — its directory
+// under `.tagteam/ships/`, its worktree, its branch prefix — and two plans
+// shipping from one checkout share none of it.
+//
+// The lock was repository-wide until the landing check arrived, and the reason
+// was the base branch: a merge refused any base that had moved, so each ship's
+// merge moved the base out from under the other and two ships would have taken
+// turns in the manual path rather than running at once. A reviewed change whose
+// base moved is now re-checked against the base it would land on, which leaves
+// this with one thing to protect a plan from — a second run of itself.
 //
 // The holder is an orchestrator spanning many separate `node` invocations, not a
 // live process, so staleness cannot be decided by process identity the way the
@@ -13,13 +22,25 @@
 // ignored state by hand.
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isMain } from "./lib/is-main.mjs";
 
-const NAME = "ship.lock";
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 
-const lockPathFor = (repo) => path.join(path.resolve(repo), ".tagteam", "locks", NAME);
+// The lock's name embeds the plan's slug, which reaches this as a
+// `path.basename` and is therefore one path segment — but not one this takes on
+// trust: every character outside a conservative set becomes `-` and leading dots
+// go, so no slug can name a path outside `.tagteam/locks/`. A digest of the slug
+// as it was given goes on the end, so two slugs that flatten to the same letters
+// still get two locks instead of one refusing the other.
+function lockNameFor(slug) {
+  const plan = String(slug ?? "");
+  if (plan === "") throw new Error("a ship lock is named after the plan it belongs to, and no plan was named");
+  const safe = plan.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 64) || "plan";
+  return `${safe}-${createHash("sha256").update(plan).digest("hex").slice(0, 12)}.lock`;
+}
+
+const lockPathFor = (repo, slug) => path.join(path.resolve(repo), ".tagteam", "locks", lockNameFor(slug));
 
 function readOwner(lockPath) {
   try {
@@ -50,20 +71,20 @@ function publish(lockPath, record) {
   }
 }
 
-// Each acquisition gets a token, and releasing requires it. The ship id alone is
+// Each acquisition gets a token, and releasing requires it. The plan alone is
 // not enough: a run that crashed, was reclaimed six hours later by a second run
-// of the same plan, and then came back would match on ship id and delete the
+// of the same plan, and then came back would match on the plan and delete the
 // lock the live run is holding.
 const record = (shipId) => {
   const now = new Date().toISOString();
   return { shipId: shipId ?? null, token: randomUUID(), pid: process.pid, at: now, heartbeatAt: now };
 };
 
-function acquire(repo, shipId, { force = false } = {}) {
-  const lockPath = lockPathFor(repo);
+function acquire(repo, slug, { force = false } = {}) {
+  const lockPath = lockPathFor(repo, slug);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  const mine = record(shipId);
-  if (publish(lockPath, mine)) return { acquired: true, shipId: shipId ?? null, token: mine.token };
+  const mine = record(slug);
+  if (publish(lockPath, mine)) return { acquired: true, shipId: slug, token: mine.token };
 
   const owner = readOwner(lockPath);
   const age = ageMs(owner);
@@ -73,7 +94,8 @@ function acquire(repo, shipId, { force = false } = {}) {
       acquired: false,
       stale: false,
       owner,
-      reason: `a ship is already running here (${owner?.shipId ?? "unknown"}, last seen ${Math.round(age / 60_000)} minutes ago)`
+      reason: `${slug} is already being shipped from this checkout (last seen ${Math.round(age / 60_000)} minutes ago); `
+        + "another plan can be shipped from it at the same time"
     };
   }
   // Quarantine rather than delete: whatever that run left behind stays readable.
@@ -83,19 +105,19 @@ function acquire(repo, shipId, { force = false } = {}) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  const reclaimed = record(shipId);
+  const reclaimed = record(slug);
   if (publish(lockPath, reclaimed)) {
-    return { acquired: true, shipId: shipId ?? null, token: reclaimed.token, reclaimedFrom: owner, quarantined };
+    return { acquired: true, shipId: slug, token: reclaimed.token, reclaimedFrom: owner, quarantined };
   }
-  return { acquired: false, stale, owner: readOwner(lockPath), reason: "another run took the lock first" };
+  return { acquired: false, stale, owner: readOwner(lockPath), reason: `another run of ${slug} took its lock first` };
 }
 
-function heartbeat(repo, shipId) {
-  const lockPath = lockPathFor(repo);
+function heartbeat(repo, slug) {
+  const lockPath = lockPathFor(repo, slug);
   const owner = readOwner(lockPath);
-  if (!owner) return { ok: false, reason: "the ship lock is not held" };
-  if (shipId && owner.shipId && owner.shipId !== shipId) {
-    return { ok: false, reason: `the ship lock belongs to ${owner.shipId}, not ${shipId}` };
+  if (!owner) return { ok: false, reason: `${slug} holds no ship lock here` };
+  if (slug && owner.shipId && owner.shipId !== slug) {
+    return { ok: false, reason: `this lock belongs to ${owner.shipId}, not ${slug}` };
   }
   fs.writeFileSync(
     path.join(lockPath, "owner.json"),
@@ -111,8 +133,8 @@ function heartbeat(repo, shipId) {
 // a lock that is live. Renaming is atomic, so whatever this ends up holding is a
 // single generation nobody else can still be using — and if it turns out not to
 // be ours, it goes straight back.
-function release(repo, token) {
-  const lockPath = lockPathFor(repo);
+function release(repo, slug, token) {
+  const lockPath = lockPathFor(repo, slug);
   if (!fs.existsSync(lockPath)) return { released: true, wasHeld: false };
   const claimed = `${lockPath}.releasing-${randomUUID()}`;
   try {
@@ -133,34 +155,36 @@ function release(repo, token) {
     }
     return {
       released: false,
-      reason: `the ship lock was taken over by ${owner.shipId ?? "another run"} and is no longer yours to release`
+      reason: `${owner.shipId ?? slug}'s ship lock was taken over by another run of it and is no longer yours to release`
     };
   }
   fs.rmSync(claimed, { recursive: true, force: true });
   return { released: true, wasHeld: true };
 }
 
+// Every verb names the plan whose lock it acts on: there is one lock per plan,
+// so a verb that took only the repository could not say which of them it meant.
 async function main() {
   const argv = process.argv.slice(2);
   const force = argv.includes("--force");
-  const [action, repo, third] = argv.filter((entry) => !entry.startsWith("--"));
-  if (!action || !repo) {
+  const [action, repo, slug, fourth] = argv.filter((entry) => !entry.startsWith("--"));
+  if (!action || !repo || !slug) {
     process.stderr.write(
-      "usage: ship-lock.mjs acquire <repo> <ship-id> [--force]\n"
-      + "       ship-lock.mjs heartbeat <repo> <ship-id>\n"
-      + "       ship-lock.mjs release <repo> <token>\n"
-      + "       ship-lock.mjs status <repo>\n"
+      "usage: ship-lock.mjs acquire <repo> <plan-slug> [--force]\n"
+      + "       ship-lock.mjs heartbeat <repo> <plan-slug>\n"
+      + "       ship-lock.mjs release <repo> <plan-slug> <token>\n"
+      + "       ship-lock.mjs status <repo> <plan-slug>\n"
     );
     process.exitCode = 2;
     return;
   }
   try {
     let result;
-    if (action === "acquire") result = acquire(repo, third, { force });
-    else if (action === "heartbeat") result = heartbeat(repo, third);
-    else if (action === "release") result = release(repo, third);
+    if (action === "acquire") result = acquire(repo, slug, { force });
+    else if (action === "heartbeat") result = heartbeat(repo, slug);
+    else if (action === "release") result = release(repo, slug, fourth);
     else if (action === "status") {
-      const owner = readOwner(lockPathFor(repo));
+      const owner = readOwner(lockPathFor(repo, slug));
       result = owner ? { held: true, owner, staleAfterMinutes: STALE_AFTER_MS / 60_000 } : { held: false };
     } else {
       process.stderr.write(`unknown action: ${action}\n`);

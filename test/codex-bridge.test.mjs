@@ -489,41 +489,46 @@ test("a quota that never clears takes the earlier run's artifact and sidecar wit
     "the abort does not say what became of what was at --out");
 });
 
-// The --slots root is a plan or ship directory, which a project commits from,
-// so everything a run leaves there has to be covered by the managed .gitignore
-// block. This is checked against Git rather than against a path string, because
-// a path-shape assertion is the same kind of claim the stale probe already made.
-test("a run leaves nothing untracked-and-unignored under a plan-shaped slots root", () => {
-  const space = workspace();
-  const repo = path.join(space.dir, "repo");
-  const slots = path.join(repo, ".tagteam", "plans", "slug");
-  fs.mkdirSync(slots, { recursive: true });
-  assert.deepEqual(ensureGitignore(repo).notIgnored, []);
+// The --slots root is a directory inside `.tagteam/`, which a project commits
+// from, so everything a run leaves there has to be covered by the managed
+// .gitignore block. This is checked against Git rather than against a path
+// string, because a path-shape assertion is the same kind of claim the stale
+// probe already made. Both roots the plugin passes are checked: a plan directory
+// for a plan review, and the repository's own `.tagteam/` for a ship, whose
+// slots bound Codex across every ship in the repository at once.
+for (const root of [".tagteam/plans/slug", ".tagteam"]) {
+  test(`a run leaves nothing untracked-and-unignored under a slots root at ${root}`, () => {
+    const space = workspace();
+    const repo = path.join(space.dir, "repo");
+    const slots = path.join(repo, root);
+    fs.mkdirSync(slots, { recursive: true });
+    assert.deepEqual(ensureGitignore(repo).notIgnored, []);
 
-  // --out stays in the workspace outside the repository, so what remains under
-  // the slots root is bookkeeping only.
-  const result = run(space, ["--slots", slots]);
-  assert.equal(result.status, 0, result.stderr);
+    // --out stays in the workspace outside the repository, so what remains under
+    // the slots root is bookkeeping only.
+    const result = run(space, ["--slots", slots]);
+    assert.equal(result.status, 0, result.stderr);
 
-  const left = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      left.push(path.relative(repo, full) + (entry.isDirectory() ? "/" : ""));
-      if (entry.isDirectory()) walk(full);
-    }
-  };
-  walk(slots);
-  assert.ok(left.length > 0, "the run should have left bookkeeping behind");
-  const check = spawnSync("git", ["-C", repo, "check-ignore", "--no-index", "--", ...left], { encoding: "utf8" });
-  const ignored = new Set(check.stdout.split("\n").map((line) => line.trim()).filter(Boolean));
-  assert.deepEqual(left.filter((entry) => !ignored.has(entry)), [], "every path the run left must be ignored");
+    const left = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        left.push(path.relative(repo, full) + (entry.isDirectory() ? "/" : ""));
+        if (entry.isDirectory()) walk(full);
+      }
+    };
+    walk(slots);
+    assert.ok(left.length > 0, "the run should have left bookkeeping behind");
+    const check = spawnSync("git", ["-C", repo, "check-ignore", "--no-index", "--", ...left], { encoding: "utf8" });
+    const ignored = new Set(check.stdout.split("\n").map((line) => line.trim()).filter(Boolean));
+    assert.deepEqual(left.filter((entry) => !ignored.has(entry)), [], "every path the run left must be ignored");
 
-  // A successful run releases its slot, so the surviving evidence is the
-  // `.codex-slots/` directory itself rather than a slot inside it.
-  assert.equal(fs.existsSync(path.join(slots, ".codex-slots")), true);
-  assert.deepEqual(fs.readdirSync(slots).filter((entry) => entry.startsWith("slot-")), []);
-});
+    // A successful run releases its slot, so the surviving evidence is the
+    // `.codex-slots/` directory itself rather than a slot inside it.
+    assert.equal(fs.existsSync(path.join(slots, ".codex-slots")), true);
+    assert.deepEqual(fs.readdirSync(slots).filter((entry) => entry.startsWith("slot-")), []);
+  });
+}
 
 test("a hung Codex is killed at the timeout, and the timeout is terminal", () => {
   const space = workspace();

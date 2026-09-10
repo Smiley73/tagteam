@@ -373,10 +373,10 @@ test("a second landing check in one round gets a path of its own", () => {
   assert.equal(landingAttemptName("f".repeat(40), ["abcdef012345"]), "ffffffffffff");
 });
 
-test("the merge loop tries a base that keeps moving three times and then stops", () => {
+test("the merge loop tries a base that keeps moving three times and then stops", async () => {
   let checks = 0;
   let merges = 0;
-  const result = mergeWithLanding({
+  const result = await mergeWithLanding({
     check: () => { checks += 1; return null; },
     merge: () => { merges += 1; return {}; }
   });
@@ -386,9 +386,9 @@ test("the merge loop tries a base that keeps moving three times and then stops",
   assert.equal(result.exhausted, true);
 });
 
-test("the merge loop stops at the first check that says stop, and merges nothing", () => {
+test("the merge loop stops at the first check that says stop, and merges nothing", async () => {
   let merges = 0;
-  const result = mergeWithLanding({
+  const result = await mergeWithLanding({
     check: () => ({ stop: "someone has to look at this", landing: { status: "failed" } }),
     merge: () => { merges += 1; return { merged: {} }; }
   });
@@ -397,9 +397,9 @@ test("the merge loop stops at the first check that says stop, and merges nothing
   assert.equal(result.attempt, 1);
 });
 
-test("the merge loop returns as soon as the merge goes through", () => {
+test("the merge loop returns as soon as the merge goes through", async () => {
   let attempts = 0;
-  const result = mergeWithLanding({
+  const result = await mergeWithLanding({
     check: () => null,
     merge: () => { attempts += 1; return attempts === 2 ? { merged: { pr: 7 } } : {}; }
   });

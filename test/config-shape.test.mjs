@@ -132,9 +132,9 @@ test("the ship lock cannot be released by a holder it was taken from", async () 
   assert.notEqual(second.token, first.token);
 
   // The run it was taken from must not be able to delete the live lock — the
-  // ship id alone matches, which is why the token exists.
-  assert.equal(release(repo, first.token).released, false);
-  assert.equal(release(repo, second.token).released, true);
+  // plan alone matches, which is why the token exists.
+  assert.equal(release(repo, "the-plan", first.token).released, false);
+  assert.equal(release(repo, "the-plan", second.token).released, true);
 });
 
 test("a git ref name Git itself would reject does not validate", async () => {

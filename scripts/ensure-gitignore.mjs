@@ -32,7 +32,9 @@ const isBegin = (line) => line === BEGIN || LEGACY_BEGINS.includes(line);
 export const MANAGED_ENTRIES = [
   { pattern: ".tagteam/ships/", probe: ".tagteam/ships/slug/01-spec/state.json" },
   { pattern: ".tagteam/worktrees/", probe: ".tagteam/worktrees/slug/file.txt" },
-  { pattern: ".tagteam/locks/", probe: ".tagteam/locks/ship.lock" },
+  // A stand-in lock name, not one anything writes: `scripts/ship-lock.mjs` locks
+  // one path per plan, named after the plan's slug and a digest of it.
+  { pattern: ".tagteam/locks/", probe: ".tagteam/locks/slug-0123456789ab.lock" },
   { pattern: ".tagteam/plans/*/work/", probe: ".tagteam/plans/slug/work/review/codex.json" },
   { pattern: ".tagteam/**/.codex-slots/", probe: ".tagteam/plans/slug/.codex-slots/slot-0/owner.json" },
   { pattern: ".tagteam/**/.codex-artifact-locks/", probe: ".tagteam/plans/slug/work/.codex-artifact-locks/a/owner.json" },

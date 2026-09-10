@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { lastJson } from "../scripts/ship.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -1401,4 +1402,380 @@ test("a redesign that never touched the requested file resets nothing, and the s
   assert.equal(settle.json.review, "open");
   assert.match(settle.json.signal[0], /^Recurring: 4 rounds of this cycle \(1, 2, 3, 4\) each raised a new blocking or major finding on app\.js/);
   assert.match(settle.json.ask, /in 4 rounds of this cycle/);
+});
+
+// --- two ships in one repository ---------------------------------------------
+
+// A second approved plan in a repository `stage()` already staged. Everything a
+// ship owns is per plan — its directory under `.tagteam/ships/`, its worktree,
+// its branch prefix — so a second plan directory is the whole of a second train.
+function addPlan(repo, slug, id, outcome) {
+  const plan = path.join(repo, ".tagteam", "plans", slug);
+  fs.mkdirSync(path.join(plan, "specs"), { recursive: true });
+  fs.writeFileSync(path.join(plan, "specs", `${id}.md`),
+    `---\nid: ${id}\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
+  fs.writeFileSync(path.join(plan, "approved.json"),
+    JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug, specs: [id] }));
+  return { slug, plan, shipDir: path.join(repo, ".tagteam", "ships", slug) };
+}
+
+test("a ship.lock an older plugin left behind stops nothing and is left exactly where it is", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  // Live-looking: an owner record written a minute ago, at the repository-wide
+  // path the lock used to have.
+  const stale = path.join(repo, ".tagteam", "locks", "ship.lock");
+  fs.mkdirSync(stale, { recursive: true });
+  const owner = { shipId: "an-older-run", token: "0000", pid: 1, at: new Date().toISOString(), heartbeatAt: new Date().toISOString() };
+  fs.writeFileSync(path.join(stale, "owner.json"), JSON.stringify(owner));
+
+  const start = ship("start", plan);
+  assert.equal(start.status, 0, start.stderr);
+  assert.equal(start.json.ask, undefined, "the old repository-wide lock refused a ship");
+  assert.ok(fs.existsSync(path.join(shipDir, "lock-token")), "start took this plan's lock");
+
+  const end = ship("end", plan);
+  assert.equal(end.status, 0, end.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stale, "owner.json"), "utf8")), owner,
+    "something read, moved or deleted a lock file nothing writes any more");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("two plans hold their locks at once, and a second run of one of them is refused by name", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const second = addPlan(repo, "demo-b", "01-b", "b works.");
+
+  const first = ship("start", plan);
+  assert.equal(first.status, 0, first.stderr);
+  const other = ship("start", second.plan);
+  assert.equal(other.status, 0, other.stderr);
+  assert.equal(other.json.ask, undefined, "a second plan was refused the lock the first holds");
+  assert.ok(fs.existsSync(path.join(shipDir, "lock-token")));
+  assert.ok(fs.existsSync(path.join(second.shipDir, "lock-token")), "both ships must hold a lock at the same moment");
+  assert.equal(fs.readdirSync(path.join(repo, ".tagteam", "locks")).filter((entry) => entry.endsWith(".lock")).length, 2);
+
+  const rerun = ship("start", plan);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.json.ask, /demo is already being shipped/);
+  assert.doesNotMatch(rerun.json.ask, /demo-b/);
+  assert.match(rerun.json.ask, /rerun this command with --reclaim/);
+  assert.equal(rerun.json.lock.acquired, false);
+
+  // And the door out is the one the refusal names.
+  const reclaimed = ship("start", plan, ["--reclaim"]);
+  assert.equal(reclaimed.status, 0, reclaimed.stderr);
+  assert.equal(reclaimed.json.ask, undefined);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("end removes the worktree only when this plan's lock was still this run's to release", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const first = ship("start", plan);
+  assert.equal(first.status, 0, first.stderr);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  const stale = fs.readFileSync(path.join(shipDir, "lock-token"), "utf8");
+
+  // A person said the first run was gone and a second run of the plan took the
+  // lock — and the first run was not gone. It reaches `end` holding the token it
+  // was given, while the live run works in the worktree they share.
+  assert.equal(ship("start", plan, ["--reclaim"]).status, 0);
+  const live = fs.readFileSync(path.join(shipDir, "lock-token"), "utf8");
+  fs.writeFileSync(path.join(shipDir, "lock-token"), stale);
+  const ended = ship("end", plan);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.match(ended.json.say.join("\n"), /The worktree was left in place/);
+  assert.ok(fs.existsSync(worktree), "end took the worktree away from the run that holds the lock");
+  assert.equal(fs.readdirSync(path.join(repo, ".tagteam", "locks")).filter((entry) => entry.endsWith(".lock")).length, 1,
+    "the live run's lock did not survive the other run's end");
+
+  // The same holds with no token at all, which is what a `start` that was refused
+  // the lock leaves behind: nothing here says this run ever held it.
+  fs.rmSync(path.join(shipDir, "lock-token"));
+  const again = ship("end", plan);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.json.say.join("\n"), /holds no ship lock for demo/);
+  assert.ok(fs.existsSync(worktree), "end took the worktree away on the strength of no evidence at all");
+
+  // The live run ends, and its own worktree comes out.
+  fs.writeFileSync(path.join(shipDir, "lock-token"), live);
+  const last = ship("end", plan);
+  assert.equal(last.status, 0, last.stderr);
+  assert.match(last.json.say.join("\n"), /Removed the worktree/);
+  assert.ok(!fs.existsSync(worktree));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A `gh` that really merges. Anything that only reported success would leave
+// `origin/<base>` where it was, and the second ship would meet a base that never
+// moved — which is the whole of what these tests are about.
+const MERGING_GH = `#!/usr/bin/env node
+// pr create and pr edit record a pull request beside the bare origin; pr view
+// answers from that record and from origin's own refs; pr merge squashes the
+// reviewed commit onto the base branch there, as the real one does.
+import fs from "node:fs";
+import { execFileSync } from "node:child_process";
+
+const origin = process.env.GH_STUB_ORIGIN;
+const statePath = process.env.GH_STUB_STATE;
+const git = (...args) => execFileSync("git", ["-C", origin, ...args], { encoding: "utf8" }).trim();
+const load = () => { try { return JSON.parse(fs.readFileSync(statePath, "utf8")); } catch { return { pulls: [] }; } };
+const save = (state) => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+const flag = (argv, name) => { const at = argv.indexOf(name); return at === -1 ? null : argv[at + 1]; };
+const die = (message) => { process.stderr.write(message + "\\n"); process.exit(1); };
+
+const argv = process.argv.slice(2);
+if (argv[0] === "auth") process.exit(0);
+if (argv[0] !== "pr") die("gh stub: unsupported command " + argv.join(" "));
+const state = load();
+const find = (selector) => state.pulls.find((pull) => pull.branch === selector || String(pull.number) === String(selector))
+  ?? die("gh stub: no pull request for " + selector);
+
+if (argv[1] === "create") {
+  const pull = {
+    number: state.pulls.length + 1, branch: flag(argv, "--head"), base: flag(argv, "--base"),
+    title: flag(argv, "--title"), body: fs.readFileSync(flag(argv, "--body-file"), "utf8"), state: "OPEN"
+  };
+  pull.url = "https://example.invalid/pull/" + pull.number;
+  state.pulls.push(pull);
+  save(state);
+  process.stdout.write(pull.url + "\\n");
+} else if (argv[1] === "edit") {
+  const pull = find(argv[2]);
+  pull.title = flag(argv, "--title") ?? pull.title;
+  const body = flag(argv, "--body-file");
+  if (body) pull.body = fs.readFileSync(body, "utf8");
+  save(state);
+} else if (argv[1] === "view") {
+  const pull = find(argv[2]);
+  const everything = {
+    number: pull.number, url: pull.url, title: pull.title, body: pull.body,
+    baseRefName: pull.base, state: pull.state, headRefOid: git("rev-parse", "refs/heads/" + pull.branch)
+  };
+  const asked = (flag(argv, "--json") ?? "").split(",").filter(Boolean);
+  process.stdout.write(JSON.stringify(Object.fromEntries(asked.map((field) => [field, everything[field]]))) + "\\n");
+} else if (argv[1] === "merge") {
+  const pull = find(argv[2]);
+  const head = git("rev-parse", "refs/heads/" + pull.branch);
+  const asked = flag(argv, "--match-head-commit");
+  if (asked && asked !== head) die("gh stub: " + pull.branch + " heads at " + head + ", not " + asked);
+  // A squash merge: one commit on the base carrying the merged tree, so a base
+  // that has already taken another ship's change keeps it.
+  const base = git("rev-parse", "refs/heads/" + pull.base);
+  const tree = git("merge-tree", "--write-tree", base, head);
+  const merged = execFileSync("git", ["-C", origin, "commit-tree", tree, "-p", base, "-m", pull.title], {
+    encoding: "utf8",
+    env: {
+      ...process.env, GIT_AUTHOR_NAME: "gh", GIT_AUTHOR_EMAIL: "gh@example.com",
+      GIT_COMMITTER_NAME: "gh", GIT_COMMITTER_EMAIL: "gh@example.com"
+    }
+  }).trim();
+  git("update-ref", "refs/heads/" + pull.base, merged);
+  pull.state = "MERGED";
+  save(state);
+  process.stdout.write("Merged pull request #" + pull.number + "\\n");
+} else die("gh stub: unsupported command " + argv.join(" "));
+`;
+
+// `quietPath`'s bin directory with that `gh` in it, and the environment the two
+// of them read.
+function mergingEnv(dir) {
+  const PATH = quietPath(dir);
+  const script = path.join(dir, "gh-stub.mjs");
+  fs.writeFileSync(script, MERGING_GH, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, "bin", "gh"),
+    `#!/bin/sh\nexec ${process.execPath} ${JSON.stringify(script)} "$@"\n`, { mode: 0o755 });
+  return { PATH, GH_STUB_ORIGIN: path.join(dir, "origin.git"), GH_STUB_STATE: path.join(dir, "pulls.json") };
+}
+
+// One spec of one plan, from `begin` to the point where its gates are satisfied
+// and the pull request is the only thing left. No findings anywhere, so it takes
+// the shortest route a real spec takes.
+function driveToPublishable({ plan, shipDir }, id, file, contents) {
+  const begin = ship("begin", plan, ["--spec", id]);
+  assert.equal(begin.status, 0, begin.stderr);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.writeFileSync(path.join(worktree, file), contents);
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${file}`, unfinished: [] });
+  ship("snapshot", plan, ["--spec", id]);
+  ship("verify", plan, ["--spec", id]);
+  const panel = ship("panel", plan, ["--spec", id]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, id, "state.json"), "utf8"));
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+  }
+  write(path.join(shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  ship("collect", plan, ["--spec", id]);
+  const recheck = ship("recheck", plan, ["--spec", id]);
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  const settled = ship("settle", plan, ["--spec", id]);
+  assert.equal(settled.json.review, "clean", settled.stderr);
+  return { worktree, state };
+}
+
+// The demonstration this whole change is for: two trains in one repository, both
+// to their merge. Ship A merges; ship B's already-reviewed commit then merges on
+// a base that moved under it, with no new review round, no new commit and no
+// person.
+test("two ships in one repository both merge, and the second spends no round on the base the first moved", () => {
+  const staged = stage();
+  const { dir, repo, plan } = staged;
+  const second = addPlan(repo, "demo-b", "01-b", "b works.");
+  const env = mergingEnv(dir);
+  const body = path.join(dir, "body.md");
+  fs.writeFileSync(body, "What this changes.\n");
+  const rounds = (ship) => fs.readdirSync(path.join(ship.shipDir, ship.id, "rounds")).sort();
+  const origin = path.join(dir, "origin.git");
+  const show = (file) => spawnSync("git", ["-C", origin, "show", `main:${file}`], { encoding: "utf8" }).stdout;
+
+  // Both locks are held before either ship writes a commit: a run of these two
+  // trains one after the other would pass every assertion below while the lock
+  // was still repository-wide.
+  assert.equal(ship("start", plan).status, 0);
+  assert.equal(ship("start", second.plan).status, 0);
+  assert.ok(fs.existsSync(path.join(staged.shipDir, "lock-token")));
+  assert.ok(fs.existsSync(path.join(second.shipDir, "lock-token")));
+
+  const a = driveToPublishable(staged, "01-a", "app.js", "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  const b = driveToPublishable(second, "01-b", "b.js", "export const twice = (n) => n * 2;\n");
+  assert.notEqual(a.worktree, b.worktree, "the two ships shared a worktree");
+
+  // B is published and reviewed before A merges: what it is holding when its
+  // turn comes is a commit that was reviewed against a base that has since moved.
+  for (const [train, id] of [[staged, "01-a"], [second, "01-b"]]) {
+    const published = ship("publish", train.plan, ["--spec", id, "--title", `Ship ${id}`, "--body", body], env);
+    assert.equal(published.status, 0, published.stderr);
+    assert.match(published.json.say[0], /Pull request #\d+/);
+  }
+
+  const before = { candidate: b.state().candidateOid, rounds: rounds({ ...second, id: "01-b" }), tip: git(b.worktree, "rev-parse", "HEAD") };
+  const mergedA = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(mergedA.status, 0, mergedA.stderr);
+  assert.equal(mergedA.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(mergedA.json.ask ?? "")}`);
+  assert.equal(a.state().state, "merged");
+  assert.match(show("app.js"), /export const sub/, "the base did not take A's change");
+
+  const mergedB = ship("finish", second.plan, ["--spec", "01-b"], env);
+  assert.equal(mergedB.status, 0, mergedB.stderr);
+  assert.equal(mergedB.json.ask, undefined, `01-b stopped for a person: ${JSON.stringify(mergedB.json.ask ?? "")}`);
+  assert.equal(b.state().state, "merged");
+  // Without a new round means exactly this: the same commit, the same rounds,
+  // the same branch tip, and a landing check that cleared the base A moved.
+  assert.equal(b.state().candidateOid, before.candidate, "B merged something other than the commit that was reviewed");
+  assert.deepEqual(rounds({ ...second, id: "01-b" }), before.rounds, "B spent a round on the base A moved");
+  assert.equal(git(b.worktree, "rev-parse", "HEAD"), before.tip, "B's branch moved between its review and its merge");
+  assert.equal(b.state().landing.status, "passed");
+  assert.equal(b.state().landing.candidateOid, before.candidate);
+  assert.equal(b.state().fixRoundsUsed ?? 0, 0);
+
+  // And the base carries both changes, which is the only proof that the two
+  // merges were merges.
+  assert.match(show("app.js"), /export const sub/);
+  assert.match(show("b.js"), /export const twice/);
+
+  for (const train of [staged, second]) assert.equal(ship("end", train.plan, [], env).status, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The collision this covers is a race — two fetches of one git directory landing
+// on each other's ref locks — so it is staged rather than raced: the mutex is
+// held here, standing in for the other ship's `merge.mjs`, and what is asserted
+// is that the landing check's fetch waits for it instead of running beside it.
+test("the landing check's fetch waits on the primary checkout's mutex rather than racing another ship's merge", async () => {
+  const { acquireLock } = await import("../scripts/lib/locks.mjs");
+  const staged = stage();
+  const { dir, repo, plan } = staged;
+  const env = mergingEnv(dir);
+  const body = path.join(dir, "body.md");
+  fs.writeFileSync(body, "What this changes.\n");
+  assert.equal(ship("start", plan).status, 0);
+  const a = driveToPublishable(staged, "01-a", "app.js", "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  const published = ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", body], env);
+  assert.equal(published.status, 0, published.stderr);
+
+  // `withPrimaryGitLock` resolves the repository the way `repoOf` does, so this
+  // is the same lock path the driver and `merge.mjs` take.
+  const held = await acquireLock(path.join(fs.realpathSync(repo), ".tagteam", "locks"), "primary-git.lock");
+  const blocked = ship("finish", plan, ["--spec", "01-a"], { ...env, TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1500" });
+  held.release();
+  assert.notEqual(blocked.status, 0, "finish fetched the primary checkout while another ship held its mutex");
+  assert.match(blocked.stderr, /timed out waiting .*for lock git in/);
+  assert.doesNotMatch(blocked.stderr, /merge\.mjs/, "the landing check's fetch went through and it was the merge that waited");
+  assert.notEqual(a.state().state, "merged");
+
+  // Nothing is spent by the wait: with the mutex free, the same finish merges.
+  const merged = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(merged.status, 0, merged.stderr);
+  assert.equal(merged.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(merged.json.ask ?? "")}`);
+  assert.equal(a.state().state, "merged");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The slot root a Codex dispatch was prepared with, out of the command file its
+// prompt names.
+const slotsOf = (dispatch) =>
+  /'--slots' '([^']+)'/.exec(fs.readFileSync(/Command file: (.*)$/m.exec(dispatch.prompt)[1], "utf8"))[1];
+
+test("both ships' Codex calls queue on one execution slot root for the whole repository", async () => {
+  const { acquireSlot } = await import("../scripts/lib/locks.mjs");
+  const staged = stage();
+  const { dir, repo, plan } = staged;
+  const second = addPlan(repo, "demo-b", "01-b", "b works.");
+  ship("start", plan);
+  ship("start", second.plan);
+  // Every Codex dispatch either ship makes, review and re-check both: a re-check
+  // runs once per fix round, which is when two ships are likeliest to be calling
+  // Codex at the same moment.
+  const roots = [];
+  for (const [train, id, file] of [[staged, "01-a", "app.js"], [second, "01-b", "b.js"]]) {
+    const begin = ship("begin", train.plan, ["--spec", id]);
+    const worktree = JSON.parse(fs.readFileSync(path.join(train.shipDir, "train.json"), "utf8")).worktree;
+    fs.writeFileSync(path.join(worktree, file), "export const value = 1;\n");
+    write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "wrote it", unfinished: [] });
+    ship("snapshot", train.plan, ["--spec", id]);
+    ship("verify", train.plan, ["--spec", id]);
+    const panel = ship("panel", train.plan, ["--spec", id]);
+    roots.push(slotsOf(panel.json.dispatch[2]));
+
+    // Codex raises something, so the fix round it costs puts a Codex re-check on
+    // the other side of it.
+    const oid = JSON.parse(fs.readFileSync(path.join(train.shipDir, id, "state.json"), "utf8")).candidateOid;
+    for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+      write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+    }
+    write(path.join(train.shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid, [major(file)]));
+    const collect = ship("collect", train.plan, ["--spec", id]);
+    assert.equal(collect.json.review, "open", collect.stderr);
+    const fix = ship("fix", train.plan, ["--spec", id]);
+    assert.equal(fix.status, 0, fix.stderr);
+    fs.writeFileSync(path.join(worktree, file), "export const value = 2;\n");
+    const toFix = JSON.parse(fs.readFileSync(/Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1], "utf8"));
+    write(outputOf(fix.json.dispatch[0]), {
+      outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "the value is right now" })),
+      notes: "", status: "complete", summary: "fixed it", unfinished: []
+    });
+    ship("snapshot", train.plan, ["--spec", id]);
+    ship("verify", train.plan, ["--spec", id]);
+    const recheck = ship("recheck", train.plan, ["--spec", id]);
+    const codex = recheck.json.dispatch.find((dispatch) => dispatch.description === `Codex re-check of ${id}`);
+    assert.ok(codex, `no Codex re-check to read a slot root from; got ${recheck.json.dispatch.map((entry) => entry.description).join(", ")}`);
+    roots.push(slotsOf(codex));
+  }
+  // `repoOf` takes the repository from `git rev-parse --show-toplevel`, which
+  // resolves the temporary directory's symlink, so the expected root is resolved
+  // the same way rather than joined onto the path this test made.
+  const expected = path.join(fs.realpathSync(repo), ".tagteam");
+  assert.deepEqual(roots, [expected, expected, expected, expected],
+    "a ship bounded Codex under its own root, so the repository would run maxConcurrentCodex calls per plan");
+  assert.ok(!roots[0].includes(`${path.sep}ships${path.sep}`), "status.mjs reads .tagteam/ships entries as ship slugs");
+
+  // One root means one set of slots: with room for a single call, the second
+  // ship's waits for the first ship's rather than running beside it.
+  const held = await acquireSlot(path.join(roots[0], ".codex-slots"), 1);
+  let took = false;
+  const contender = acquireSlot(path.join(roots.at(-1), ".codex-slots"), 1).then((slot) => { took = true; return slot; });
+  assert.equal(await Promise.race([contender, delay(400).then(() => "waiting")]), "waiting");
+  assert.equal(took, false);
+  held.release();
+  (await contender).release();
+  fs.rmSync(dir, { recursive: true, force: true });
 });
