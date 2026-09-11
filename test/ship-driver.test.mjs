@@ -1473,6 +1473,39 @@ test("TAGTEAM_SESSION_ID corrects a recorded scope, a gone transcript is resolve
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// `start` reads the train before it holds the lock and writes it after. Between
+// the two, the previous cycle's `end` can release the lock and forget its
+// session — that is the ordering `end` relies on, since the lock it gives up is
+// the one this `start` takes — and a `start` that then wrote the session it read
+// at the top would carry the finished cycle's scope into the new one, which is
+// the inheritance `end` forgets the session to prevent. The window is real:
+// the preflight checks and the worktree setup run between the read and the
+// write and take seconds. The setup command stands in for `end` landing there.
+test("start does not carry a session it read before the lock into a train the previous cycle's end has since cleared", () => {
+  const { dir, repo, plan, shipDir, config } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  for (const session of ["finished", "fresh"]) fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "");
+  const train = () => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  assert.equal(ship("start", plan, [], { ...environment, CLAUDE_SESSION_ID: "finished" }).status, 0);
+  assert.equal(train().session, "finished");
+
+  // What `end` does to the train, done after this `start` has read it and
+  // before it writes: the recorded session goes, the rest stays.
+  const trainPath = path.join(shipDir, "train.json");
+  const forget = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+    `const fs=require("node:fs");const t=JSON.parse(fs.readFileSync(${JSON.stringify(trainPath)},"utf8"));delete t.session;fs.writeFileSync(${JSON.stringify(trainPath)},JSON.stringify(t));`
+  )}`;
+  fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), JSON.stringify({ ...config, worktree: { ...config.worktree, setup: [forget] } }, null, 2));
+  const next = ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "fresh" });
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(train().session, "fresh", "start wrote the session it read before the lock, over an end that had since forgotten it");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // The other end of that scope, through the process a person actually runs.
 // `test/usage.test.mjs` proves the report narrows when it is told to, but
 // nothing there spawns what `finish` spawns: the flag `usageLines` writes, the

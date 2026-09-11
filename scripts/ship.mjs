@@ -672,6 +672,15 @@ async function start(options) {
   // longer — every other ship here waits behind whatever holds it.
   node("worktree-setup.mjs", ["--primary", ctx.repo, "--worktree", worktree, "--config", ctx.configPath]);
 
+  // The train `context` read is from before this run held the lock, and the
+  // session on it decides what `sessionOf` keeps. The previous cycle's `end`
+  // gives up the lock and forgets its session inside one mutex section, and this
+  // run has been through that mutex since it took the lock, so what is on disk
+  // now is what `end` left — but what was read at the top may still carry the
+  // session `end` has since forgotten, and writing that back would hand the
+  // finished cycle's scope to this one. Read it again, here, past the mutex.
+  ctx.train = exists(ctx.trainPath) ? readJson(ctx.trainPath) : null;
+
   writeJson(ctx.trainPath, {
     repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid,
     configPath: ctx.configPath, plugin: PLUGIN, session: sessionOf(ctx), startedAt: new Date().toISOString()
@@ -1775,7 +1784,9 @@ async function end(options) {
     // forgets it: a stale `end` must not take the live run's scope away. Done
     // here, inside the mutex, because a `start` that takes the lock the release
     // above gave up waits on this same mutex before it writes its own train,
-    // so this write cannot land on top of that one.
+    // so this write cannot land on top of that one — and `start` reads the
+    // train again after that wait, so the session forgotten here is not one it
+    // read earlier and writes back.
     if (owned && ctx.train && "session" in ctx.train) {
       const train = { ...ctx.train };
       delete train.session;
