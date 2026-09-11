@@ -161,15 +161,62 @@ export function readTranscript(file, { since, until }) {
   return { usage, prompt: prompt ?? "", first, last };
 }
 
+// One pass over a list of transcript filenames in `projectDir`: what they and
+// the subagents beside them say was spent in the window. Kept apart from
+// `report` because a scoped pass that finds nothing is run a second time over
+// the whole directory, and a pass that accumulated into the result in place
+// could not be.
+function tally(projectDir, names, { from, to }) {
+  const totals = {
+    sessions: 0,
+    orchestrator: zero(),
+    agents: { count: 0, ...zero(), byType: {} }
+  };
+  for (const name of names) {
+    const file = path.join(projectDir, name);
+    // A session that ended before the window opened has nothing in it to read.
+    if (fs.statSync(file).mtimeMs < from) continue;
+    const main = readTranscript(file, { since: from, until: to });
+    if (!main || main.usage.turns === 0) continue;
+    totals.sessions += 1;
+    for (const key of Object.keys(zero())) totals.orchestrator[key] += main.usage[key];
+    const subagents = path.join(projectDir, name.replace(/\.jsonl$/, ""), "subagents");
+    if (!fs.existsSync(subagents)) continue;
+    for (const agentFile of fs.readdirSync(subagents).filter((entry) => entry.startsWith("agent-") && entry.endsWith(".jsonl"))) {
+      const agent = readTranscript(path.join(subagents, agentFile), { since: from, until: to });
+      if (!agent || agent.usage.turns === 0) continue;
+      const type = classifyAgent(agent.prompt);
+      const bucket = totals.agents.byType[type] ??= { count: 0, ...zero(), equiv: 0 };
+      bucket.count += 1;
+      totals.agents.count += 1;
+      for (const key of Object.keys(zero())) {
+        bucket[key] += agent.usage[key];
+        totals.agents[key] += agent.usage[key];
+      }
+      bucket.equiv = Math.round(equivOf(bucket));
+    }
+  }
+  return totals;
+}
+
 /**
  * Everything the transcripts under `projectDir` say was spent between `since`
  * and `until`: the orchestrator's own turns, and every subagent's.
  *
  * `session` narrows that to one transcript and the subagents beside it. A
- * session whose transcript is not there at report time — deleted, or recorded in
- * another checkout — falls back to the whole directory *with the repository-wide
- * label*, never to zero: the same rule the unreadable-directory line follows,
- * because a number nobody can attribute is still worth more than a wrong one.
+ * scoped read that comes back with nothing falls back to the whole directory
+ * *with the repository-wide label*, never to zero: the same rule the
+ * unreadable-directory line follows, because a number nobody can attribute is
+ * still worth more than a wrong one.
+ *
+ * Two different absences take that path. The transcript may not be there at all
+ * — deleted, or recorded in another checkout. Or it may be there and have no
+ * turns inside the window, which is the ordinary shape of a plan picked up
+ * again later: the session recorded at a spec's first `start` is permanent for
+ * that plan, while the window opens when the spec was bound, so a spec whose
+ * work happens in a second Claude Code session is scoped to a transcript that
+ * fell silent before the window opened. Reporting that as zero would tell a
+ * person this spec was free.
  */
 export function report({ repo, since, until = null, projectDir = projectDirectoryFor(repo), session = null }) {
   const from = Date.parse(since);
@@ -192,33 +239,17 @@ export function report({ repo, since, until = null, projectDir = projectDirector
     summary: null
   };
   if (!result.readable) return result;
-  const transcripts = scoped
-    ? [path.basename(scoped.file)]
-    : fs.readdirSync(projectDir).filter((entry) => entry.endsWith(".jsonl"));
-  for (const name of transcripts) {
-    const file = path.join(projectDir, name);
-    // A session that ended before the window opened has nothing in it to read.
-    if (fs.statSync(file).mtimeMs < from) continue;
-    const main = readTranscript(file, { since: from, until: to });
-    if (!main || main.usage.turns === 0) continue;
-    result.sessions += 1;
-    for (const key of Object.keys(zero())) result.orchestrator[key] += main.usage[key];
-    const subagents = path.join(projectDir, name.replace(/\.jsonl$/, ""), "subagents");
-    if (!fs.existsSync(subagents)) continue;
-    for (const agentFile of fs.readdirSync(subagents).filter((entry) => entry.startsWith("agent-") && entry.endsWith(".jsonl"))) {
-      const agent = readTranscript(path.join(subagents, agentFile), { since: from, until: to });
-      if (!agent || agent.usage.turns === 0) continue;
-      const type = classifyAgent(agent.prompt);
-      const bucket = result.agents.byType[type] ??= { count: 0, ...zero(), equiv: 0 };
-      bucket.count += 1;
-      result.agents.count += 1;
-      for (const key of Object.keys(zero())) {
-        bucket[key] += agent.usage[key];
-        result.agents[key] += agent.usage[key];
-      }
-      bucket.equiv = Math.round(equivOf(bucket));
-    }
+  const everything = () => fs.readdirSync(projectDir).filter((entry) => entry.endsWith(".jsonl"));
+  let totals = tally(projectDir, scoped ? [path.basename(scoped.file)] : everything(), { from, to });
+  if (scoped && totals.sessions === 0) {
+    result.scope.kind = "repository";
+    result.scope.session = null;
+    result.scope.reason = "the recorded session has no turns in this window";
+    totals = tally(projectDir, everything(), { from, to });
   }
+  result.sessions = totals.sessions;
+  Object.assign(result.orchestrator, totals.orchestrator);
+  Object.assign(result.agents, totals.agents);
   result.orchestrator.equiv = Math.round(equivOf(result.orchestrator));
   result.agents.equiv = Math.round(equivOf(result.agents));
   result.summary = {

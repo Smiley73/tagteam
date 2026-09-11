@@ -172,6 +172,43 @@ test("a session id that names no transcript is absent, and a recorded one that h
   fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
+// The same widening, for the absence that is not a missing file. A plan picked
+// up again from a second Claude Code session keeps the session recorded at its
+// first `start`, while the reporting window opens when the spec was bound — so
+// the scoped transcript is right there and has nothing in the window. Reporting
+// that as zero would tell a person this spec was free, under the label that says
+// the number is this ship's own.
+test("a scoped read that finds nothing in the window widens to the checkout rather than reporting a labelled zero", () => {
+  const fixture = twoShips();
+  // `mine` last spoke at 10:01; this window holds only the other ship's turns.
+  const later = { since: "2026-09-01T10:01:30Z", until: "2026-09-01T11:00:00Z" };
+  const scopedLater = (session) => report({ repo: fixture.repo, ...later, projectDir: fixture.projectDir, session });
+  const widened = scopedLater("mine");
+  assert.equal(widened.scope.kind, "repository");
+  assert.equal(widened.scope.requested, "mine", "the session that was asked for was forgotten");
+  assert.equal(widened.summary.scope, "repository");
+  assert.equal(widened.summary.session, null);
+  assert.ok(widened.summary.equivalentTokens > 0, "a silent scoped transcript reported zero instead of widening");
+  assert.equal(widened.summary.equivalentTokens, scopedLater(null).summary.equivalentTokens,
+    "the widened number is not the repository-wide one");
+  assert.deepEqual(Object.keys(widened.agents.byType), ["implementer"]);
+  assert.match(summaryLines(widened)[0], /may include other ships/);
+
+  // A transcript older than the window is skipped before it is read at all, and
+  // takes the same path rather than a different one.
+  const stale = Date.parse("2026-08-01T00:00:00Z") / 1000;
+  fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), stale, stale);
+  assert.equal(reportFor(fixture, "mine").summary.scope, "repository");
+  assert.ok(reportFor(fixture, "mine").summary.equivalentTokens > 0);
+
+  // And a scoped read that does find turns is still the narrow number: the
+  // widening is the empty pass, not every scoped pass.
+  const now = Date.now() / 1000;
+  fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), now, now);
+  assert.equal(reportFor(fixture, "mine").summary.scope, "session");
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
 // Everything above this line calls `report` in this process, and `ship.mjs`
 // calls none of it: it spawns this file with a flag and reads the first line
 // back. So the flag name, the option the command parses, and the narrowing are
