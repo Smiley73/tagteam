@@ -42,6 +42,7 @@ import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
+import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -550,6 +551,58 @@ const acceptedPath = (ctx, id) => path.join(specDir(ctx, id), "accepted.json");
 
 // --- subcommands -----------------------------------------------------------
 
+// Which Claude Code session this ship is running in, for the cost report to
+// scope itself to. Taken from the environment `start` was given and verified
+// against this repository's project directory — nothing here records a session
+// id anywhere, and a transcript guessed from file recency would, with two ships
+// running, be the other ship's.
+//
+// Best effort in every direction: absent is the ordinary answer, and the report
+// then labels its number repository-wide. Nothing here may stop `start`, and
+// nothing here reaches `say` — a line on every run in every repository about a
+// transcript nobody asked about is noise a person learns to skip past, which is
+// the same reason the snapshot section gives for staying quiet.
+//
+// Decided when a cycle's train is created, and kept for the cycle: a train
+// already carrying a scope keeps it, whatever Claude Code's own variables say
+// on the run that resumes it. A plan picked up from a second Claude Code session
+// would otherwise be rebound to that session's transcript, and `finish` would
+// then drop everything the first session spent on this ship while billing it
+// for whatever else the second session did inside the reporting window — the
+// misattribution the scoping exists to prevent, arriving from the other
+// direction. A recorded `null` is a recorded answer and stays one.
+//
+// Three things do move it. `TAGTEAM_SESSION_ID`, when it names a transcript
+// that is there, wins over whatever was recorded: it is the escape hatch for a
+// person who knows their own session, and an escape hatch that only works before
+// the first `start` is not one — a scope recorded as `null`, or as the wrong
+// session, is exactly what a person reaches for it to correct. A recorded id
+// whose transcript is no longer in this repository's project directory is
+// resolved again: there is nothing left to keep a number bound to, and the
+// report would only widen to the whole checkout anyway. And `end` forgets the
+// session, so the next `start` of the same plan — a new cycle, not a resume —
+// asks the environment again rather than inheriting a session that finished
+// days ago and has nothing to say about any spec this cycle runs.
+function sessionOf(ctx) {
+  let projectDir;
+  try {
+    projectDir = projectDirectoryFor(ctx.repo);
+  } catch {
+    return ctx.train?.session ?? null;
+  }
+  const override = transcriptFor(projectDir, process.env.TAGTEAM_SESSION_ID);
+  if (override) return override.session;
+  if (ctx.train && "session" in ctx.train) {
+    const recorded = ctx.train.session ?? null;
+    if (recorded === null || transcriptFor(projectDir, recorded)) return recorded;
+  }
+  try {
+    return resolveSession(process.env, projectDir) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function start(options) {
   const ctx = context(options, { requireTrain: false });
   const say = [];
@@ -619,7 +672,19 @@ async function start(options) {
   // longer — every other ship here waits behind whatever holds it.
   node("worktree-setup.mjs", ["--primary", ctx.repo, "--worktree", worktree, "--config", ctx.configPath]);
 
-  writeJson(ctx.trainPath, { repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid, configPath: ctx.configPath, plugin: PLUGIN, startedAt: new Date().toISOString() });
+  // The train `context` read is from before this run held the lock, and the
+  // session on it decides what `sessionOf` keeps. The previous cycle's `end`
+  // gives up the lock and forgets its session inside one mutex section, and this
+  // run has been through that mutex since it took the lock, so what is on disk
+  // now is what `end` left — but what was read at the top may still carry the
+  // session `end` has since forgotten, and writing that back would hand the
+  // finished cycle's scope to this one. Read it again, here, past the mutex.
+  ctx.train = exists(ctx.trainPath) ? readJson(ctx.trainPath) : null;
+
+  writeJson(ctx.trainPath, {
+    repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid,
+    configPath: ctx.configPath, plugin: PLUGIN, session: sessionOf(ctx), startedAt: new Date().toISOString()
+  });
 
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
@@ -1658,6 +1723,9 @@ function nextSpecAfter(ctx, id) {
 }
 
 // Best effort, never a stop: what this spec cost, from the session transcripts.
+// Scoped to the session `start` recorded when it could record one, so that two
+// ships in one checkout do not each report the other's spend as their own; the
+// report says which scope its number came from either way.
 function usageLines(ctx, id) {
   try {
     const state = readState(ctx, id);
@@ -1665,6 +1733,7 @@ function usageLines(ctx, id) {
     if (!since) return [];
     const result = spawnSync(process.execPath, [
       path.join(SCRIPTS, "usage.mjs"), "report", "--repo", ctx.repo, "--since", since, "--until", new Date().toISOString(),
+      ...(ctx.train?.session ? ["--session", ctx.train.session] : []),
       "--out", path.join(specDir(ctx, id), "usage.json")
     ], { encoding: "utf8" });
     return result.status === 0 ? result.stdout.trim().split("\n").slice(0, 1) : [];
@@ -1707,6 +1776,22 @@ async function end(options) {
   // turns on.
   await withPrimaryGitLock(ctx.repo, () => {
     const owned = releaseShipLock(ctx, tokenPath, say);
+    // The session this cycle's costs were scoped to ends with the cycle. Left
+    // on the train, the next `start` of this plan would keep it — `sessionOf`
+    // keeps a recorded scope on purpose so a resume cannot rebind one — and
+    // every spec of the next cycle would be reported against a transcript that
+    // fell silent before any of them began. Only the run that owned the lock
+    // forgets it: a stale `end` must not take the live run's scope away. Done
+    // here, inside the mutex, because a `start` that takes the lock the release
+    // above gave up waits on this same mutex before it writes its own train,
+    // so this write cannot land on top of that one — and `start` reads the
+    // train again after that wait, so the session forgotten here is not one it
+    // read earlier and writes back.
+    if (owned && ctx.train && "session" in ctx.train) {
+      const train = { ...ctx.train };
+      delete train.session;
+      writeJson(ctx.trainPath, train);
+    }
     if (!exists(ctx.worktree)) return;
     if (!owned) {
       say.push(`The worktree was left in place: ${ctx.slug} is being shipped by a run this one is not, and that run is working in it.`);

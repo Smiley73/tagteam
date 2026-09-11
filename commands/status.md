@@ -67,6 +67,40 @@ it ran. Give it as one line per spec — "about 14M input-token equivalents over
 two hours, 19 agents, a third of it the orchestrator itself" — and say nothing
 for a spec with no entry: absent is unknown, not free.
 
+**Say whose spend that is.** `scope` beside it is `"session"` when the ship knew
+which Claude Code session it was running in, and the number then covers that
+session and the agents it dispatched. It is `"repository"` when the ship could
+not tell, and the number then covers every session that ran in this checkout —
+say so in the same breath, because another ship running here at the same time is
+counted in it: "about 14M input-token equivalents, though that is everything this
+checkout spent in the window and another ship was running". Never present a
+repository-wide number as this spec's bill.
+
+**A landing record is a base that moved**, under `landing` on the ship, keyed by
+spec. It is there only for a spec whose reviewed change met a base branch that
+had moved on since the review, and only for the change that spec is on right
+now. A `status` of `"passed"` is the good news and is one clause: this one's base
+moved while it was in review, and the change was checked against the new base —
+it still merges cleanly, it still lands as the same change, and this repository's
+verify commands still pass on it — before anything merged. Say nothing for a spec
+with no entry — the ordinary case is a base that never moved.
+
+The other three values are each why a spec is waiting, and each sends a person to
+a different thing to do, so say the one you were given rather than that something
+about the base went wrong:
+
+- `"conflict"` — "the base moved, and the reviewed change no longer merges into
+  it cleanly". The two ways on are a rebase and a second review, or a merge they
+  make themselves.
+- `"differs"` — "the base moved, and the change still merges cleanly, but what
+  would land on it is not the change that was read — part of it is already there,
+  or the merge resolved it into something else". Same two ways on.
+- `"failed"` — "the base moved, and the change merges cleanly and lands as the
+  same change, but it fails this repository's verify commands once it is on that
+  base". This one takes a repair round or a merge they make themselves; say
+  plainly that approving it is not one of the options, because the check ran
+  after the verdict an approval changes and no approval reaches past it.
+
 ## Which plugin is running
 
 Claude Code runs an installed *copy* of this plugin, not the working tree it was

@@ -112,7 +112,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 16,
-      "description": "How many Codex calls may run at once across this repository."
+      "description": "How many Codex calls may run at once across this repository. The cap spans every ship running here rather than allowing this many per ship, so raise it if you ship several plans at the same time."
     },
     "limits": {
       "type": "object",

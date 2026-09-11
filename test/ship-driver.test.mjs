@@ -14,6 +14,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { lastJson } from "../scripts/ship.mjs";
+import { projectDirectoryFor } from "../scripts/usage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SHIP = path.join(root, "scripts", "ship.mjs");
@@ -1349,6 +1350,223 @@ test("start refuses a git that predates the landing check's merge-tree, and pass
   const current = ship("start", plan, [], { PATH: stubs("2.38.0"), TAGTEAM_SKIP_TOOL_CHECKS: "" });
   assert.equal(current.status, 0, current.stderr);
   assert.match(current.json.next, /begin --plan .* --spec 01-a$/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The cost report is scoped to one session so that two ships in one checkout do
+// not each report the other's spend, and the only place that identity can come
+// from is the environment `start` was handed: nothing in this repository records
+// a session id, and the newest transcript in the project directory is, with two
+// ships running, the other ship's. What `start` writes down is therefore either
+// an environment value that names a transcript that is really there, or nothing.
+// It is written once, too: a plan resumed from a second session keeps the scope
+// its costs are already bound to.
+test("start records the session the environment names, nothing at all when it names no transcript, and never rebinds either on a resume", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "this-session.jsonl"), "");
+  const train = () => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  const named = ship("start", plan, [], { ...environment, CLAUDE_SESSION_ID: "this-session" });
+  assert.equal(named.status, 0, named.stderr);
+  assert.equal(train().session, "this-session");
+  // And it is silent about it: a line on every run in every repository about a
+  // transcript nobody asked about is noise a person learns to skip past.
+  assert.doesNotMatch(named.json.say.join("\n"), /session|transcript/i);
+
+  // Resumed from a second Claude session whose own transcript is right there:
+  // the train keeps the first one. Rebinding here would drop everything the
+  // first session spent on this ship and bill it for whatever else the second
+  // session did inside the reporting window.
+  fs.writeFileSync(path.join(projectDir, "a-later-session.jsonl"), "");
+  const resumed = ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "a-later-session" });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(train().session, "this-session",
+    "resuming rebound this ship's costs to the session that happened to resume it");
+
+  const other = stage();
+  const otherTrain = () => JSON.parse(fs.readFileSync(path.join(other.shipDir, "train.json"), "utf8"));
+  const missing = ship("start", other.plan, [], { ...environment, TAGTEAM_SESSION_ID: "a-session-that-ran-elsewhere" });
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.equal(otherTrain().session, null,
+    "start recorded a session id that names no transcript, which is a scope nothing can be attributed to");
+  assert.match(missing.json.next, /begin --plan .* --spec 01-a$/);
+
+  // A recorded absence is a recorded answer as much as an id is: that ship's
+  // number covers the whole checkout and says so, and a resume does not quietly
+  // narrow it to a session that saw none of the work.
+  const otherProject = projectDirectoryFor(other.repo, home);
+  fs.mkdirSync(otherProject, { recursive: true });
+  fs.writeFileSync(path.join(otherProject, "a-later-session.jsonl"), "");
+  const widened = ship("start", other.plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "a-later-session" });
+  assert.equal(widened.status, 0, widened.stderr);
+  assert.equal(otherTrain().session, null, "a resume narrowed a repository-wide scope to the session that resumed it");
+  for (const staged of [dir, other.dir]) fs.rmSync(staged, { recursive: true, force: true });
+});
+
+// The scope is kept for a cycle, not for the life of the plan. Three things
+// move it, and each is a person's or a cycle's doing rather than the resuming
+// session's: `TAGTEAM_SESSION_ID` naming a real transcript corrects whatever was
+// recorded, a recorded session whose transcript is gone is resolved again, and
+// `end` forgets the session so the next `start` of the plan is a new cycle that
+// asks the environment afresh. Without these, a plan whose first `start` could
+// not name its session, or one shipped again days later from a new session, is
+// scoped to nothing or to a transcript that fell silent before the cycle began,
+// and every spec of it reports a scoped zero with no way to correct it short of
+// editing `train.json` by hand.
+test("TAGTEAM_SESSION_ID corrects a recorded scope, a gone transcript is resolved again, and end forgets the session so the next cycle starts afresh", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  for (const session of ["first", "known", "later", "next-cycle"]) fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "");
+  const train = () => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  // A first `start` that could name no session records null; the person then
+  // learns their session id and says so. That is the escape hatch working after
+  // the first `start`, which is the only time it is needed.
+  assert.equal(ship("start", plan, [], environment).status, 0);
+  assert.equal(train().session, null);
+  const corrected = ship("start", plan, ["--reclaim"], { ...environment, TAGTEAM_SESSION_ID: "known" });
+  assert.equal(corrected.status, 0, corrected.stderr);
+  assert.equal(train().session, "known", "TAGTEAM_SESSION_ID was consulted only before the first start");
+
+  // The override also wins over a recorded id — a person correcting a wrong
+  // scope — while Claude Code's own variables still do not move one.
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, TAGTEAM_SESSION_ID: "first" }).status, 0);
+  assert.equal(train().session, "first");
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "later" }).status, 0);
+  assert.equal(train().session, "first", "a resume rebound the scope to the session that resumed it");
+  // And an override that names no transcript is absent, exactly as at a first
+  // start: it corrects nothing and the recorded scope stays.
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, TAGTEAM_SESSION_ID: "ran-elsewhere" }).status, 0);
+  assert.equal(train().session, "first", "an override that names no transcript replaced a real scope");
+
+  // The recorded transcript is gone: nothing is left to keep a number bound to,
+  // so the resuming session's own transcript is the scope now.
+  fs.rmSync(path.join(projectDir, "first.jsonl"));
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "later" }).status, 0);
+  assert.equal(train().session, "later", "a session whose transcript is gone was kept as the scope");
+
+  // A stale `end` — one that no longer holds this plan's lock — leaves the live
+  // run's scope alone, the way it leaves the live run's worktree alone.
+  const live = fs.readFileSync(path.join(shipDir, "lock-token"), "utf8");
+  fs.writeFileSync(path.join(shipDir, "lock-token"), "not-this-runs-token");
+  const stale = ship("end", plan, [], environment);
+  assert.equal(stale.status, 0, stale.stderr);
+  assert.match(stale.json.say.join("\n"), /The lock was not released/);
+  assert.equal(train().session, "later", "an end that released nothing took the live run's scope away");
+
+  // The cycle ends, and its session with it: the next `start` is a new cycle
+  // and records the session it is actually running in.
+  fs.writeFileSync(path.join(shipDir, "lock-token"), live);
+  const ended = ship("end", plan, [], environment);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.ok(!("session" in train()), "end left the finished cycle's session on the train");
+  const next = ship("start", plan, [], { ...environment, CLAUDE_SESSION_ID: "next-cycle" });
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(train().session, "next-cycle", "a new cycle inherited the session of the one that ended");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// `start` reads the train before it holds the lock and writes it after. Between
+// the two, the previous cycle's `end` can release the lock and forget its
+// session — that is the ordering `end` relies on, since the lock it gives up is
+// the one this `start` takes — and a `start` that then wrote the session it read
+// at the top would carry the finished cycle's scope into the new one, which is
+// the inheritance `end` forgets the session to prevent. The window is real:
+// the preflight checks and the worktree setup run between the read and the
+// write and take seconds. The setup command stands in for `end` landing there.
+test("start does not carry a session it read before the lock into a train the previous cycle's end has since cleared", () => {
+  const { dir, repo, plan, shipDir, config } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  for (const session of ["finished", "fresh"]) fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "");
+  const train = () => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  assert.equal(ship("start", plan, [], { ...environment, CLAUDE_SESSION_ID: "finished" }).status, 0);
+  assert.equal(train().session, "finished");
+
+  // What `end` does to the train, done after this `start` has read it and
+  // before it writes: the recorded session goes, the rest stays.
+  const trainPath = path.join(shipDir, "train.json");
+  const forget = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+    `const fs=require("node:fs");const t=JSON.parse(fs.readFileSync(${JSON.stringify(trainPath)},"utf8"));delete t.session;fs.writeFileSync(${JSON.stringify(trainPath)},JSON.stringify(t));`
+  )}`;
+  fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), JSON.stringify({ ...config, worktree: { ...config.worktree, setup: [forget] } }, null, 2));
+  const next = ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "fresh" });
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(train().session, "fresh", "start wrote the session it read before the lock, over an end that had since forgotten it");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The other end of that scope, through the process a person actually runs.
+// `test/usage.test.mjs` proves the report narrows when it is told to, but
+// nothing there spawns what `finish` spawns: the flag `usageLines` writes, the
+// session key it reads off the train, and the option `usage.mjs` parses are
+// three separate names, and any two of them drifting apart leaves every test
+// green while every ship goes back to reporting the whole checkout.
+test("the cost line finish prints, and the usage.json status reads, cover this ship's session and not the ship beside it", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(path.join(projectDir, "mine", "subagents"), { recursive: true });
+  fs.mkdirSync(path.join(projectDir, "theirs", "subagents"), { recursive: true });
+  // Empty for now: `start` records a session only when the transcript is there,
+  // and what is in it has to be timestamped inside the window this spec opens.
+  fs.writeFileSync(path.join(projectDir, "mine.jsonl"), "");
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "mine", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  ship("start", plan, [], environment);
+  const begin = ship("begin", plan, ["--spec", "01-a"], environment);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  ship("snapshot", plan, ["--spec", "01-a"], environment);
+  ship("verify", plan, ["--spec", "01-a"], environment);
+  const panel = ship("panel", plan, ["--spec", "01-a"], environment);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("app.js")] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  ship("collect", plan, ["--spec", "01-a"], environment);
+
+  // Two ships' transcripts side by side in one project directory, which is what
+  // two `/tagteam:ship` runs in one checkout leave behind. The other one is by
+  // far the larger, and its subagents are of a kind this ship dispatched none of.
+  const at = new Date().toISOString();
+  const turn = (id, cacheRead, output) => JSON.stringify({
+    timestamp: at,
+    message: { id, role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: cacheRead, output_tokens: output } }
+  });
+  const transcript = (file, prompt, entry) => fs.writeFileSync(file,
+    `${JSON.stringify({ timestamp: at, message: { role: "user", content: prompt } })}\n${entry}\n`);
+  transcript(path.join(projectDir, "mine.jsonl"), "ship my plan", turn("m1", 10_000, 100));
+  transcript(path.join(projectDir, "mine", "subagents", "agent-1.jsonl"), "Job: reviewer\nLens: correctness", turn("a1", 1_000, 10));
+  transcript(path.join(projectDir, "theirs.jsonl"), "ship the other plan", turn("t1", 5_000_000, 50_000));
+  transcript(path.join(projectDir, "theirs", "subagents", "agent-9.jsonl"), "Job: implementer", turn("a9", 900_000, 9_000));
+
+  const finish = ship("finish", plan, ["--spec", "01-a"], { ...environment, PATH: quietPath(dir) });
+  assert.equal(finish.status, 0, finish.stderr);
+  const cost = finish.json.say.find((entry) => entry.startsWith("usage:"));
+  assert.ok(cost, "finish said nothing at all about what this spec cost");
+  assert.match(cost, /this ship's own session and the agents it dispatched/);
+  assert.doesNotMatch(cost, /may include other ships/);
+
+  const written = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "usage.json"), "utf8"));
+  assert.equal(written.summary.scope, "session");
+  assert.equal(written.summary.session, "mine", "the session start recorded never reached the report");
+  assert.equal(written.sessions, 1);
+  assert.deepEqual(Object.keys(written.agents.byType), ["reviewer"], "the other ship's agents were billed to this one");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
