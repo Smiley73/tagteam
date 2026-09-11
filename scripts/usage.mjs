@@ -163,12 +163,15 @@ export function readTranscript(file, { since, until }) {
 
 // One pass over a list of transcript filenames in `projectDir`: what they and
 // the subagents beside them say was spent in the window. Kept apart from
-// `report` because a scoped pass that finds nothing is run a second time over
-// the whole directory, and a pass that accumulated into the result in place
-// could not be.
+// `report` because a scoped pass over a transcript that cannot be read is run
+// a second time over the whole directory, and a pass that accumulated into the
+// result in place could not be. `unreadable` counts the transcripts named here
+// that could not be read at all, which `report` needs to tell apart from one
+// that was read and had nothing in the window.
 function tally(projectDir, names, { from, to }) {
   const totals = {
     sessions: 0,
+    unreadable: 0,
     orchestrator: zero(),
     agents: { count: 0, ...zero(), byType: {} }
   };
@@ -177,7 +180,11 @@ function tally(projectDir, names, { from, to }) {
     // A session that ended before the window opened has nothing in it to read.
     if (fs.statSync(file).mtimeMs < from) continue;
     const main = readTranscript(file, { since: from, until: to });
-    if (!main || main.usage.turns === 0) continue;
+    if (!main) {
+      totals.unreadable += 1;
+      continue;
+    }
+    if (main.usage.turns === 0) continue;
     totals.sessions += 1;
     for (const key of Object.keys(zero())) totals.orchestrator[key] += main.usage[key];
     const subagents = path.join(projectDir, name.replace(/\.jsonl$/, ""), "subagents");
@@ -204,19 +211,23 @@ function tally(projectDir, names, { from, to }) {
  * and `until`: the orchestrator's own turns, and every subagent's.
  *
  * `session` narrows that to one transcript and the subagents beside it. A
- * scoped read that comes back with nothing falls back to the whole directory
- * *with the repository-wide label*, never to zero: the same rule the
- * unreadable-directory line follows, because a number nobody can attribute is
- * still worth more than a wrong one.
+ * recorded session whose transcript cannot be read — not in this directory at
+ * all, or there and unreadable — falls back to the whole directory *with the
+ * repository-wide label*, never to zero: the same rule the unreadable-directory
+ * line follows, because a number nobody can attribute is still worth more than
+ * a wrong one.
  *
- * Two different absences take that path. The transcript may not be there at all
- * — deleted, or recorded in another checkout. Or it may be there and have no
- * turns inside the window, which is the ordinary shape of a plan picked up
- * again later: the session recorded at a spec's first `start` is permanent for
- * that plan, while the window opens when the spec was bound, so a spec whose
- * work happens in a second Claude Code session is scoped to a transcript that
- * fell silent before the window opened. Reporting that as zero would tell a
- * person this spec was free.
+ * A transcript that is there and readable but has no turns inside the window is
+ * a different thing, and keeps the session scope. That transcript is this
+ * ship's, and a session that said nothing in the window spent nothing in it;
+ * the number is low, and may be zero, when a plan is picked up again from a
+ * second Claude Code session and the spec's window opens after the recorded
+ * session fell silent. That undercount is the trade the scoping makes on
+ * purpose. Widening here instead would bill this ship for every other session
+ * that ran in the checkout during the window — with two ships running, the
+ * other ship's spend — which is the misattribution the scope exists to prevent,
+ * and it would do so under the label that says the number is repository-wide,
+ * so nothing reading it could tell.
  */
 export function report({ repo, since, until = null, projectDir = projectDirectoryFor(repo), session = null }) {
   const from = Date.parse(since);
@@ -241,10 +252,10 @@ export function report({ repo, since, until = null, projectDir = projectDirector
   if (!result.readable) return result;
   const everything = () => fs.readdirSync(projectDir).filter((entry) => entry.endsWith(".jsonl"));
   let totals = tally(projectDir, scoped ? [path.basename(scoped.file)] : everything(), { from, to });
-  if (scoped && totals.sessions === 0) {
+  if (scoped && totals.unreadable > 0) {
     result.scope.kind = "repository";
     result.scope.session = null;
-    result.scope.reason = "the recorded session has no turns in this window";
+    result.scope.reason = "the recorded session's transcript could not be read";
     totals = tally(projectDir, everything(), { from, to });
   }
   result.sessions = totals.sessions;

@@ -1407,6 +1407,72 @@ test("start records the session the environment names, nothing at all when it na
   for (const staged of [dir, other.dir]) fs.rmSync(staged, { recursive: true, force: true });
 });
 
+// The scope is kept for a cycle, not for the life of the plan. Three things
+// move it, and each is a person's or a cycle's doing rather than the resuming
+// session's: `TAGTEAM_SESSION_ID` naming a real transcript corrects whatever was
+// recorded, a recorded session whose transcript is gone is resolved again, and
+// `end` forgets the session so the next `start` of the plan is a new cycle that
+// asks the environment afresh. Without these, a plan whose first `start` could
+// not name its session, or one shipped again days later from a new session, is
+// scoped to nothing or to a transcript that fell silent before the cycle began,
+// and every spec of it reports a scoped zero with no way to correct it short of
+// editing `train.json` by hand.
+test("TAGTEAM_SESSION_ID corrects a recorded scope, a gone transcript is resolved again, and end forgets the session so the next cycle starts afresh", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  for (const session of ["first", "known", "later", "next-cycle"]) fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "");
+  const train = () => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+  const environment = { HOME: home, TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+
+  // A first `start` that could name no session records null; the person then
+  // learns their session id and says so. That is the escape hatch working after
+  // the first `start`, which is the only time it is needed.
+  assert.equal(ship("start", plan, [], environment).status, 0);
+  assert.equal(train().session, null);
+  const corrected = ship("start", plan, ["--reclaim"], { ...environment, TAGTEAM_SESSION_ID: "known" });
+  assert.equal(corrected.status, 0, corrected.stderr);
+  assert.equal(train().session, "known", "TAGTEAM_SESSION_ID was consulted only before the first start");
+
+  // The override also wins over a recorded id — a person correcting a wrong
+  // scope — while Claude Code's own variables still do not move one.
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, TAGTEAM_SESSION_ID: "first" }).status, 0);
+  assert.equal(train().session, "first");
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "later" }).status, 0);
+  assert.equal(train().session, "first", "a resume rebound the scope to the session that resumed it");
+  // And an override that names no transcript is absent, exactly as at a first
+  // start: it corrects nothing and the recorded scope stays.
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, TAGTEAM_SESSION_ID: "ran-elsewhere" }).status, 0);
+  assert.equal(train().session, "first", "an override that names no transcript replaced a real scope");
+
+  // The recorded transcript is gone: nothing is left to keep a number bound to,
+  // so the resuming session's own transcript is the scope now.
+  fs.rmSync(path.join(projectDir, "first.jsonl"));
+  assert.equal(ship("start", plan, ["--reclaim"], { ...environment, CLAUDE_SESSION_ID: "later" }).status, 0);
+  assert.equal(train().session, "later", "a session whose transcript is gone was kept as the scope");
+
+  // A stale `end` — one that no longer holds this plan's lock — leaves the live
+  // run's scope alone, the way it leaves the live run's worktree alone.
+  const live = fs.readFileSync(path.join(shipDir, "lock-token"), "utf8");
+  fs.writeFileSync(path.join(shipDir, "lock-token"), "not-this-runs-token");
+  const stale = ship("end", plan, [], environment);
+  assert.equal(stale.status, 0, stale.stderr);
+  assert.match(stale.json.say.join("\n"), /The lock was not released/);
+  assert.equal(train().session, "later", "an end that released nothing took the live run's scope away");
+
+  // The cycle ends, and its session with it: the next `start` is a new cycle
+  // and records the session it is actually running in.
+  fs.writeFileSync(path.join(shipDir, "lock-token"), live);
+  const ended = ship("end", plan, [], environment);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.ok(!("session" in train()), "end left the finished cycle's session on the train");
+  const next = ship("start", plan, [], { ...environment, CLAUDE_SESSION_ID: "next-cycle" });
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(train().session, "next-cycle", "a new cycle inherited the session of the one that ended");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // The other end of that scope, through the process a person actually runs.
 // `test/usage.test.mjs` proves the report narrows when it is told to, but
 // nothing there spawns what `finish` spawns: the flag `usageLines` writes, the

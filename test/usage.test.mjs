@@ -172,40 +172,69 @@ test("a session id that names no transcript is absent, and a recorded one that h
   fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
-// The same widening, for the absence that is not a missing file. A plan picked
+// The absence that is not a missing file is not an absence at all. A plan picked
 // up again from a second Claude Code session keeps the session recorded at its
 // first `start`, while the reporting window opens when the spec was bound — so
-// the scoped transcript is right there and has nothing in the window. Reporting
-// that as zero would tell a person this spec was free, under the label that says
-// the number is this ship's own.
-test("a scoped read that finds nothing in the window widens to the checkout rather than reporting a labelled zero", () => {
+// the scoped transcript is right there and has nothing in the window. That is
+// this ship's transcript saying it spent nothing in the window, and the number
+// stays scoped and low. Widening it to the checkout instead would bill this
+// ship for the other ship's spend under the repository-wide label, which is the
+// misattribution the scope exists to prevent; undercounting after a resume is
+// the trade the spec makes on purpose.
+test("a scoped read of a readable transcript that is silent in the window stays scoped and never picks up the other ship's spend", () => {
   const fixture = twoShips();
   // `mine` last spoke at 10:01; this window holds only the other ship's turns.
   const later = { since: "2026-09-01T10:01:30Z", until: "2026-09-01T11:00:00Z" };
   const scopedLater = (session) => report({ repo: fixture.repo, ...later, projectDir: fixture.projectDir, session });
-  const widened = scopedLater("mine");
-  assert.equal(widened.scope.kind, "repository");
-  assert.equal(widened.scope.requested, "mine", "the session that was asked for was forgotten");
-  assert.equal(widened.summary.scope, "repository");
-  assert.equal(widened.summary.session, null);
-  assert.ok(widened.summary.equivalentTokens > 0, "a silent scoped transcript reported zero instead of widening");
-  assert.equal(widened.summary.equivalentTokens, scopedLater(null).summary.equivalentTokens,
-    "the widened number is not the repository-wide one");
-  assert.deepEqual(Object.keys(widened.agents.byType), ["implementer"]);
-  assert.match(summaryLines(widened)[0], /may include other ships/);
+  const silent = scopedLater("mine");
+  assert.equal(silent.scope.kind, "session");
+  assert.equal(silent.scope.session, "mine");
+  assert.equal(silent.scope.reason, undefined, "a transcript that was read and found silent was reported as unreadable");
+  assert.equal(silent.summary.scope, "session");
+  assert.equal(silent.summary.session, "mine");
+  assert.equal(silent.sessions, 0);
+  assert.equal(silent.summary.equivalentTokens, 0, "a silent scoped transcript reported spend that is not this ship's");
+  assert.deepEqual(Object.keys(silent.agents.byType), [], "the other ship's agents were billed to this one");
+  assert.ok(scopedLater(null).summary.equivalentTokens > 0, "the fixture holds nothing in this window, so the test proves nothing");
+  assert.match(summaryLines(silent)[0], /this ship's own session/);
+  assert.doesNotMatch(summaryLines(silent)[0], /may include other ships/);
 
   // A transcript older than the window is skipped before it is read at all, and
-  // takes the same path rather than a different one.
+  // is the same silence rather than a different one.
   const stale = Date.parse("2026-08-01T00:00:00Z") / 1000;
   fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), stale, stale);
-  assert.equal(reportFor(fixture, "mine").summary.scope, "repository");
-  assert.ok(reportFor(fixture, "mine").summary.equivalentTokens > 0);
+  assert.equal(reportFor(fixture, "mine").summary.scope, "session");
+  assert.equal(reportFor(fixture, "mine").summary.equivalentTokens, 0);
 
-  // And a scoped read that does find turns is still the narrow number: the
-  // widening is the empty pass, not every scoped pass.
+  // And a scoped read that does find turns is the narrow number, as before.
   const now = Date.now() / 1000;
   fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), now, now);
   assert.equal(reportFor(fixture, "mine").summary.scope, "session");
+  assert.ok(reportFor(fixture, "mine").summary.equivalentTokens > 0);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+// The one absence besides a missing file that does widen: the transcript is
+// there and cannot be read. Nothing can be attributed to it, so the number is
+// the checkout's, said to be the checkout's. Root reads everything, so a process
+// running as root has no way to stage this and skips it.
+test("a recorded transcript that is there but unreadable reports repository-wide with its label, not zero", { skip: process.getuid?.() === 0 }, () => {
+  const fixture = twoShips();
+  const mine = path.join(fixture.projectDir, "mine.jsonl");
+  fs.chmodSync(mine, 0o000);
+  try {
+    const widened = reportFor(fixture, "mine");
+    assert.equal(widened.scope.kind, "repository");
+    assert.equal(widened.scope.requested, "mine", "the session that was asked for was forgotten");
+    assert.equal(widened.scope.reason, "the recorded session's transcript could not be read");
+    assert.equal(widened.summary.scope, "repository");
+    assert.equal(widened.summary.session, null);
+    assert.equal(widened.summary.equivalentTokens, reportFor(fixture, "theirs").summary.equivalentTokens,
+      "the widened number is not what the readable transcripts in the checkout add up to");
+    assert.match(summaryLines(widened)[0], /may include other ships/);
+  } finally {
+    fs.chmodSync(mine, 0o600);
+  }
   fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
