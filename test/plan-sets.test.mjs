@@ -206,6 +206,25 @@ test("a reader that arrives with an invalid file is missing, gets one re-send se
   const again = recordPlanSet(ws, "review-resend", [["Codex plan review", path.join(ws.review, "codex.json")]]);
   assert.equal(again.status, 2);
   assert.match(again.stderr, /one re-send/);
+  // Recording the readers again as a fresh review set does not start the count over.
+  const fresh = recordPlanSet(ws, "review", PLAN_READERS(ws));
+  assert.equal(fresh.status, 2, "a second review set was accepted after the re-send was spent");
+  assert.match(fresh.stderr, /reviewed once/);
+  assert.match(fresh.stderr, /one re-send/);
+});
+
+test("a second review set is refused before the re-send too, naming the re-send kind", () => {
+  const ws = stagePlanWorkspace();
+  const readers = reviewOut(ws);
+  write(path.join(ws.review, "claude.json"), review("claude"));
+  write(path.join(ws.review, "adversary.json"), review("adversary"));
+  arriveInto(ws, readers, labels(ws));
+  assert.equal(collect(ws).status, 1);
+  const fresh = recordPlanSet(ws, "review", PLAN_READERS(ws));
+  assert.equal(fresh.status, 2, "a second review set was accepted");
+  assert.match(fresh.stderr, /reviewed once/);
+  assert.match(fresh.stderr, /`review-resend`/);
+  assert.deepEqual(fs.readdirSync(setsDir(ws)).filter((name) => name.endsWith("-review.json")).length, 1);
 });
 
 test("a reader still missing after its re-send is carried on, as before", () => {
@@ -242,6 +261,11 @@ test("the drafter answering the brief gets one re-send after check, and a second
   write(response, { responses: [] });
   assert.equal(arriveInto(ws, drafter, ["Answer the plan review"]).json.say, "The drafter is in. Checking the answers now.");
   assert.equal(check(ws).status, 1);
+  // A second response set in place of the re-send is refused, naming the re-send kind.
+  const second = recordPlanSet(ws, "response", [["Answer the plan review again", response]]);
+  assert.equal(second.status, 2, "a second response set was accepted");
+  assert.match(second.stderr, /already answered this review/);
+  assert.match(second.stderr, /`response-resend`/);
   const resend = recordPlanSet(ws, "response-resend", [["Answer the plan review again", response]]);
   assert.equal(resend.status, 0, resend.stderr);
   write(response, { responses: [{ id: "claude.1", action: "applied", note: "done" }] });
@@ -250,6 +274,10 @@ test("the drafter answering the brief gets one re-send after check, and a second
   const again = recordPlanSet(ws, "response-resend", [["Answer the plan review a third time", response]]);
   assert.equal(again.status, 2);
   assert.match(again.stderr, /one re-send/);
+  // Nor does a fresh response set start the count over once the re-send is spent.
+  const fresh = recordPlanSet(ws, "response", [["Answer the plan review a third time", response]]);
+  assert.equal(fresh.status, 2, "a second response set was accepted after the re-send was spent");
+  assert.match(fresh.stderr, /one re-send/);
 });
 
 // --- the spec writers -----------------------------------------------------------
@@ -374,4 +402,33 @@ test("with no session identified the resume asks, a no keeps the set open, and a
   const nothing = resume(ws, null);
   assert.equal(nothing.status, 0);
   assert.match(nothing.json.say.join("\n"), /No set is still waiting on anyone/);
+});
+
+test("a resume after a set came in but before its step ran names that step, not the first missing output", () => {
+  const ws = stagePlanWorkspace();
+  stageExplored(ws);
+  const plan = path.join(ws.D, "plan.md");
+  const drafter = recordPlanSet(ws, "draft", [["Draft the plan", plan]]);
+  write(plan, PLAN);
+  arriveInto(ws, drafter, ["Draft the plan"]);
+  assert.equal(deliverables(ws).status, 0);
+  const a = path.join(ws.D, "specs", "01-a.md");
+  const b = path.join(ws.D, "specs", "01-b.md");
+  const writers = recordPlanSet(ws, "spec-writers", [["Write spec 01-a", a], ["Write spec 01-b", b]]);
+  write(a, spec("01-a"));
+  write(b, "no front matter at all");
+  arriveInto(ws, writers, ["Write spec 01-a", "Write spec 01-b"]);
+  // The session stopped here, before running what the last arrival printed.
+
+  const resumed = resume(ws, null);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.json.say.join("\n"), /specs\.mjs has not judged it yet/);
+  assert.match(resumed.json.next, /specs\.mjs" .* --enforce-size/);
+  assert.equal(resumed.json.ask, undefined);
+  assert.equal(specs(ws).status, 1, "the specs the resume pointed at were not the ones validated");
+
+  // Once judged, nothing is pending and the resume says so.
+  const after = resume(ws, null);
+  assert.equal(after.json.next, undefined);
+  assert.match(after.json.say.join("\n"), /pick up at the first step whose output is missing/);
 });

@@ -92,8 +92,9 @@ a prepared Codex command for you.
    node "$P/scripts/plan.mjs" resume --plan "$D"
    ```
 
-   - **Nothing open**: pick up at the first step below whose output is
-     missing.
+   - **Nothing open**: run `next` when it is printed — a set came in and the
+     step that judges it never ran — and otherwise pick up at the first step
+     below whose output is missing.
    - **`set` with `howToWait`**: those agents were sent out from this same
      session and may still be working. Dispatch nothing; end your turn and
      record each finished notice as *Dispatching* says.

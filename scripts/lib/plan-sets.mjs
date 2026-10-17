@@ -244,6 +244,16 @@ function refuseOrder(kind, sets) {
     const index = sets.findLastIndex((set) => set.kind === family);
     return index === -1 ? null : sets.slice(index + 1);
   };
+  // The plan is reviewed once and the brief answered once; each has one re-send
+  // of its own kind. A second `review` or `response` set would start the count
+  // over, so it is refused here rather than left to the kind the record names.
+  if (kind === "review" && sets.some((set) => set.kind === "review")) {
+    const spent = after("review").some((set) => set.kind === "review-resend");
+    refuse("nothing was recorded: the plan is reviewed once, and a review set is already on record. "
+      + (spent
+        ? "This review has had its one re-send. A reader still missing is carried to approval and said at step 7."
+        : "A reader collect named as missing is re-sent alone, under the same label, as a `review-resend` set."));
+  }
   if (kind === "review-resend") {
     const since = after("review");
     if (since === null) refuse("nothing was recorded: there is no review set to re-send a reader of.");
@@ -254,6 +264,13 @@ function refuseOrder(kind, sets) {
   }
   if (kind === "response") {
     if (!sets.some((set) => set.kind === "review")) refuse("nothing was recorded: no review set is on record, so there is no brief to answer.");
+    const answered = after("review").filter((set) => FAMILY.response.includes(set.kind));
+    if (answered.length) {
+      refuse(`nothing was recorded: the drafter has already answered this review (set ${answered[0].id}), and the brief is answered once. `
+        + (answered.some((set) => set.kind === "response-resend")
+          ? "The drafter has had its one re-send to answer the brief. Stop and show what check printed."
+          : "If check named findings with no answer, re-send the drafter once for exactly those as a `response-resend` set."));
+    }
   }
   if (kind === "response-resend") {
     const since = after("response");
@@ -301,12 +318,25 @@ export async function recordPlanSet({ planDir, kind, agents, repo, env = process
  * an agent. `runGone` is the person's yes to the question it asks when no
  * session can be identified, and `runLive` their no.
  */
+// Nothing is out. A set that came in and was never judged still has its step to
+// run: every output it names may be on disk, so picking up at the first missing
+// output would walk past the step that validates them.
+function nothingOut(sets) {
+  const unjudged = sets.filter((set) => set.state === "in" && familyOf(set.kind)).at(-1);
+  if (unjudged) {
+    return {
+      outcome: "unjudged",
+      say: [`No set is still waiting on anyone, but set ${unjudged.id} is in and ${JUDGED_BY[familyOf(unjudged.kind)]} has not judged it yet: run next.`],
+      next: unjudged.record.next
+    };
+  }
+  return { outcome: "nothing-open", say: ["No set is still waiting on anyone; pick up at the first step whose output is missing."] };
+}
+
 export async function resumePlanSets({ planDir, runGone = false, runLive = false, repo, env = process.env }) {
   const dir = setsDir(planDir);
   const before = listSets(planDir);
-  if (!before.some((set) => set.state === "out")) {
-    return { outcome: "nothing-open", say: ["No set is still waiting on anyone; pick up at the first step whose output is missing."] };
-  }
+  if (!before.some((set) => set.state === "out")) return nothingOut(before);
   const outcome = await restart({ dir, repo: repo ?? repoFor(planDir), confirmed: runGone, env });
   const byId = new Map(before.map((set) => [set.id, set]));
   // What the restart said about the sets it released or kept waiting; the
@@ -343,9 +373,7 @@ export async function resumePlanSets({ planDir, runGone = false, runLive = false
   // have no such step, so the first step whose output is missing is where to go.
   // Nothing released means the last notice was recorded between the listing and
   // the restart, and nothing is open any more.
-  if (outcome.released.length === 0) {
-    return { outcome: "nothing-open", say: ["No set is still waiting on anyone; pick up at the first step whose output is missing."] };
-  }
+  if (outcome.released.length === 0) return nothingOut(listSets(planDir));
   const released = byId.get(outcome.released.at(-1).set);
   if (familyOf(released.kind)) return { outcome: "released", say, next: released.record.next };
   say.push("Pick up at the first step whose output is missing.");
