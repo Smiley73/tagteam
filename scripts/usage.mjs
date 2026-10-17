@@ -10,11 +10,18 @@
 // and sums them.
 //
 // Two things about the transcripts decide the shape of this file. A transcript
-// logs one assistant response as several lines that repeat the same `usage`, one
-// per content block, so usage is counted once per `message.id` or every total is
-// about three times too high. And the project directory is named for the
-// repository path with every separator turned into a dash, which is how the
-// repository this ran in is found.
+// logs one assistant response as several lines, one per content block, and the
+// two kinds of transcript fill in their `usage` differently. A main session
+// repeats the message's final usage on every line. A subagent transcript starts
+// with a streaming-start output count, a few tokens, and logs the real total on
+// a later line — or, for a good share of messages, never logs it at all. So each
+// message is counted once, at the largest value any of its lines records for
+// each figure: summing the lines makes every total about three times too high,
+// and keeping the first line counts an agent's output as almost nothing. Where
+// the total was never logged, the largest recorded value is still the
+// streaming-start count, so the agents' figures are a floor. And the project
+// directory is named for the repository path with every separator turned into a
+// dash, which is how the repository this ran in is found.
 //
 // That directory holds *every* session that ran in this repository, which is why
 // a report says which scope produced its number. Two ships in one checkout are
@@ -118,11 +125,16 @@ export function classifyAgent(prompt) {
   return "other";
 }
 
-// One transcript, summed over the window: usage once per message id, and the
-// first user message kept so the agent can be classified.
+// One transcript, summed over the window: each message once, at the largest
+// value its in-window lines record for each of the four figures, and the first
+// user message kept so the agent can be classified. Lines are grouped by message
+// id across the whole file, not by adjacency, because tool results can sit
+// between two lines of one message. The window is applied to each line before
+// the merge, so a message whose lines straddle a window edge counts in both
+// windows, each at what its own lines record.
 export function readTranscript(file, { since, until }) {
   const usage = zero();
-  const seen = new Set();
+  const messages = new Map();
   let prompt = null;
   let first = null;
   let last = null;
@@ -145,18 +157,21 @@ export function readTranscript(file, { since, until }) {
     const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
     if (Number.isFinite(at) && ((since && at < since) || (until && at > until))) continue;
     const id = message.id ?? entry.uuid;
-    if (seen.has(id)) continue;
-    seen.add(id);
     const u = message.usage ?? {};
-    usage.turns += 1;
-    usage.uncached += u.input_tokens ?? 0;
-    usage.cacheWrite += u.cache_creation_input_tokens ?? 0;
-    usage.cacheRead += u.cache_read_input_tokens ?? 0;
-    usage.output += u.output_tokens ?? 0;
+    const largest = messages.get(id) ?? { uncached: 0, cacheWrite: 0, cacheRead: 0, output: 0 };
+    largest.uncached = Math.max(largest.uncached, u.input_tokens ?? 0);
+    largest.cacheWrite = Math.max(largest.cacheWrite, u.cache_creation_input_tokens ?? 0);
+    largest.cacheRead = Math.max(largest.cacheRead, u.cache_read_input_tokens ?? 0);
+    largest.output = Math.max(largest.output, u.output_tokens ?? 0);
+    messages.set(id, largest);
     if (Number.isFinite(at)) {
       first = first === null ? at : Math.min(first, at);
       last = last === null ? at : Math.max(last, at);
     }
+  }
+  for (const largest of messages.values()) {
+    usage.turns += 1;
+    for (const key of Object.keys(largest)) usage[key] += largest[key];
   }
   return { usage, prompt: prompt ?? "", first, last };
 }

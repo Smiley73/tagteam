@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2
+
+- Count each agent message in the cost report at the largest output its transcript records, instead of the few tokens logged as it started, so agents' output figures rise.
+- Cost figures written by earlier versions undercount agents' output, and are left as they were.
+- For agent messages Claude Code never finished logging, the report still counts only what was recorded, so agents' figures remain a lower bound.
+
 ## 0.10.1
 
 - Ship one agent per role instead of a separate copy of each role for every effort level; which model and how hard it thinks are now chosen on each call.

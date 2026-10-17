@@ -1,8 +1,14 @@
 // What a run cost, read off transcripts shaped the way Claude Code writes them.
 //
-// Two things matter here. The de-duplication: a transcript logs one assistant
-// response as several lines that repeat its usage, and a reader that sums lines
-// reports about three times the real spend. And whose spend the number is: one
+// Two things matter here. How a message is counted: a transcript logs one
+// assistant response as several lines, and the two kinds fill them differently.
+// A main session repeats the final usage on every line, so a reader that sums
+// lines reports about three times the real spend. A subagent transcript starts
+// with a streaming-start output and logs the total on a later line, so a reader
+// that keeps the first line counts an agent's output as almost nothing. The
+// report takes each figure's largest value per message, once, which is right for
+// both — and, where the total was never logged, still a floor. And whose spend
+// the number is: one
 // project directory holds every session that ran in the repository, so two ships
 // in one checkout are two transcripts side by side, and a report that sums both
 // hands each ship the other's bill under its own name.
@@ -22,9 +28,43 @@ const usage = (uncached, cacheWrite, cacheRead, output) => ({
 });
 
 function assistant(id, at, u, blocks) {
-  // One response, three lines, same id, same usage — the shape that double counts.
+  // One response, several lines, same id, same usage — the main-session shape,
+  // which a reader that sums lines overcounts.
   return blocks.map((block) => line({ timestamp: at, message: { id, role: "assistant", usage: u, content: [block] } })).join("");
 }
+
+// One response whose lines differ — the subagent shape, where the first line
+// carries a streaming-start output and a later one the total, which a reader
+// that keeps the first line undercounts. Each step is `[timestamp, usage]`.
+function streamed(id, steps) {
+  return steps.map(([at, u], index) => line({ timestamp: at, message: { id, role: "assistant", usage: u, content: [{ type: "text", text: `part ${index}` }] } })).join("");
+}
+
+// A tool result, which Claude Code writes between two lines of one assistant
+// message as often as not.
+const toolResult = (at) => line({ timestamp: at, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } });
+
+// A project directory holding one session, with one subagent transcript beside it.
+function oneAgent(agentLines) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-usage-merge-"));
+  const repo = path.join(home, "Code", "my.app");
+  fs.mkdirSync(repo, { recursive: true });
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(path.join(projectDir, "s", "subagents"), { recursive: true });
+  // The session speaks early and late, so that every window the tests below use
+  // finds it there and goes on to read the agent beside it.
+  fs.writeFileSync(path.join(projectDir, "s.jsonl"),
+    line({ timestamp: "2026-09-01T10:00:00Z", message: { role: "user", content: "go" } })
+    + assistant("o1", "2026-09-01T10:00:01Z", usage(0, 0, 100, 1), [{ type: "text", text: "ok" }])
+    + assistant("o2", "2026-09-01T10:30:00Z", usage(0, 0, 100, 1), [{ type: "text", text: "ok" }]));
+  fs.writeFileSync(path.join(projectDir, "s", "subagents", "agent-1.jsonl"),
+    line({ timestamp: "2026-09-01T10:00:30Z", message: { role: "user", content: "Job: implementer" } }) + agentLines);
+  return { home, repo, projectDir };
+}
+
+const figures = (bucket) => ({
+  turns: bucket.turns, uncached: bucket.uncached, cacheWrite: bucket.cacheWrite, cacheRead: bucket.cacheRead, output: bucket.output
+});
 
 test("usage is counted once per message id, split between the orchestrator and the agents, and classified by the dispatch's first line", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-usage-"));
@@ -67,6 +107,81 @@ test("usage is counted once per message id, split between the orchestrator and t
   const missing = report({ repo: path.join(home, "nowhere"), since: "2026-09-01T09:30:00Z", projectDir: path.join(home, "no-such-dir") });
   assert.equal(missing.readable, false);
   assert.equal(missing.summary, null);
+});
+
+// --- how a message is counted -----------------------------------------------
+
+const MERGE_WINDOW = { since: "2026-09-01T09:30:00Z", until: "2026-09-01T11:00:00Z" };
+const agentsIn = (fixture, window = MERGE_WINDOW) => report({ repo: fixture.repo, ...window, projectDir: fixture.projectDir }).agents;
+
+test("an agent message whose output grows across its lines counts once, at its largest output, and per message rather than per file", () => {
+  // Summing the lines would give output 915, keeping the first line 36, and a
+  // file-wide maximum 500 over one turn; each message's largest gives 863.
+  const fixture = oneAgent(
+    streamed("a1", [
+      ["2026-09-01T10:01:01Z", usage(3, 2000, 40000, 16)],
+      ["2026-09-01T10:01:02Z", usage(3, 2000, 40000, 16)],
+      ["2026-09-01T10:01:03Z", usage(3, 2000, 40000, 363)]
+    ])
+    + streamed("a2", [
+      ["2026-09-01T10:02:01Z", usage(1, 300, 41000, 20)],
+      ["2026-09-01T10:02:02Z", usage(1, 300, 41000, 500)]
+    ]));
+  const agents = agentsIn(fixture);
+  assert.deepEqual(figures(agents), { turns: 2, uncached: 4, cacheWrite: 2300, cacheRead: 81000, output: 863 });
+  assert.deepEqual(figures(agents.byType.implementer), figures(agents));
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+// In every real transcript a message's output only grows, so its last line is
+// its largest; this is the one case that tells a reader keeping the last line
+// apart from one keeping the largest.
+test("a message is counted at its largest output even when that is not on its last line", () => {
+  const fixture = oneAgent(streamed("a1", [
+    ["2026-09-01T10:01:01Z", usage(2, 50, 9000, 5)],
+    ["2026-09-01T10:01:02Z", usage(2, 50, 9000, 700)],
+    ["2026-09-01T10:01:03Z", usage(2, 50, 9000, 40)]
+  ]));
+  assert.deepEqual(figures(agentsIn(fixture)), { turns: 1, uncached: 2, cacheWrite: 50, cacheRead: 9000, output: 700 });
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("messages whose lines all repeat the same usage count exactly one line's usage each", () => {
+  const fixture = oneAgent(
+    assistant("a1", "2026-09-01T10:01:01Z", usage(7, 1100, 30000, 210), [{ type: "thinking", thinking: "…" }, { type: "text", text: "a" }, { type: "tool_use", name: "Read", input: {} }])
+    + assistant("a2", "2026-09-01T10:02:01Z", usage(4, 900, 31000, 90), [{ type: "text", text: "b" }, { type: "tool_use", name: "Bash", input: {} }])
+    + assistant("a3", "2026-09-01T10:03:01Z", usage(2, 60, 32000, 15), [{ type: "text", text: "c" }]));
+  assert.deepEqual(figures(agentsIn(fixture)), { turns: 3, uncached: 13, cacheWrite: 2060, cacheRead: 93000, output: 315 });
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("the lines of one message are merged when tool results sit between them", () => {
+  const fixture = oneAgent(
+    streamed("a1", [["2026-09-01T10:01:01Z", usage(1, 400, 8000, 10)]])
+    + toolResult("2026-09-01T10:01:02Z")
+    + streamed("a1", [["2026-09-01T10:01:03Z", usage(1, 400, 8000, 10)]])
+    + toolResult("2026-09-01T10:01:04Z")
+    + streamed("a1", [["2026-09-01T10:01:05Z", usage(1, 400, 8000, 250)]]));
+  assert.deepEqual(figures(agentsIn(fixture)), { turns: 1, uncached: 1, cacheWrite: 400, cacheRead: 8000, output: 250 });
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+// Lines are dropped by the window before anything is merged. A message that
+// straddles the edge therefore counts in each window holding one of its lines,
+// and the earlier window gets only what its own lines record — for an agent,
+// often the streaming-start output. That is the accepted behaviour, not a bug:
+// the windows are a spec's span, so the split falls at a spec boundary.
+test("a message split by a window edge counts in each window, at what that window's lines record", () => {
+  const fixture = oneAgent(streamed("a1", [
+    ["2026-09-01T10:00:50Z", usage(3, 500, 12000, 12)],
+    ["2026-09-01T10:01:10Z", usage(3, 500, 12000, 400)]
+  ]));
+  const edge = "2026-09-01T10:01:00Z";
+  const before = agentsIn(fixture, { since: MERGE_WINDOW.since, until: edge });
+  const after = agentsIn(fixture, { since: edge, until: MERGE_WINDOW.until });
+  assert.deepEqual(figures(before), { turns: 1, uncached: 3, cacheWrite: 500, cacheRead: 12000, output: 12 });
+  assert.deepEqual(figures(after), { turns: 1, uncached: 3, cacheWrite: 500, cacheRead: 12000, output: 400 });
+  fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
 // --- whose spend the number is ----------------------------------------------
