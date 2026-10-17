@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { HOW_TO_DISPATCH, NOT_IN_YET, REVIEW_SET_DISPATCH, REVIEW_SET_WAIT, lastJson } from "../scripts/ship.mjs";
+import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET, lastJson } from "../scripts/ship.mjs";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -75,12 +75,13 @@ const write = (file, value) => {
 // exactly where the real one would.
 const outputOf = (dispatch) => /Write your (?:findings|verdicts|report|fix report) to: (.*)$/m.exec(dispatch.prompt)[1].trim();
 
-// A review is a set, judged only once every agent in it has been recorded as
-// arrived. This runs the arrival command a payload printed, exactly as printed,
+// Every dispatch is a set — a review, or the one implementer or fixer whose
+// work `snapshot` reads — judged only once every agent in it has been recorded
+// as arrived. This runs the arrival command a payload printed, exactly as printed,
 // with the labels appended the way the instruction says: each in double quotes,
 // spaces and colons included.
 function arrive(result, labels, env = {}) {
-  assert.ok(result.json?.set, `the payload carries no review set: ${result.stderr || result.stdout}`);
+  assert.ok(result.json?.set, `the payload carries no set: ${result.stderr || result.stdout}`);
   const command = `${result.json.set.arrive} ${labels.map((label) => JSON.stringify(label)).join(" ")}`;
   const ran = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: { ...process.env, ...env } });
   let json = null;
@@ -131,6 +132,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
   write(outputOf(implementer), { status: "complete", summary: "added sub", unfinished: [] });
 
+  arriveAll(begin);
   const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(snapshot.status, 0, snapshot.stderr);
   assert.equal(snapshot.json.round, 1);
@@ -187,6 +189,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -216,6 +219,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
   });
+  arriveAll(fix);
   const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(snapshot.status, 0, snapshot.stderr);
   assert.equal(snapshot.json.round, 2, "the fix commit gets the next round");
@@ -250,6 +254,7 @@ test("an approval given while a reviewer wrote nothing usable is not recorded, a
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -267,6 +272,7 @@ test("an approval given while a reviewer wrote nothing usable is not recorded, a
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
   });
+  arriveAll(fix);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -309,6 +315,7 @@ test("a fixer that declines every finding makes no round, and the lens that rais
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -325,6 +332,7 @@ test("a fixer that declines every finding makes no round, and the lens that rais
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "the finding is wrong" }], notes: "", status: "complete", summary: "declined", unfinished: []
   });
+  arriveAll(fix);
   const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(snapshot.status, 0, snapshot.stderr);
   assert.match(snapshot.json.say.join("\n"), /changed nothing/);
@@ -367,6 +375,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -384,6 +393,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: []
   });
+  arriveAll(fix);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -401,6 +411,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   write(outputOf(again.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "sub is meant to add; the spec says so" }], notes: "", status: "complete", summary: "declined", unfinished: []
   });
+  arriveAll(again);
   const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(snapshot.status, 0, snapshot.stderr);
   assert.match(snapshot.json.say.join("\n"), /changed nothing/);
@@ -444,6 +455,7 @@ test("a commit made outside a fix round is counted and announced, and the budget
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
@@ -487,6 +499,7 @@ test("a commit made outside a fix round is counted and announced, and the budget
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
   });
+  arriveAll(fix);
   const landed = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(landed.status, 0, `the snapshot that lands an allowed fix round is never the step that refuses it: ${landed.stderr}`);
   assert.equal(landed.json.round, 3);
@@ -513,6 +526,7 @@ test("a finding about the pull request never reaches the fixer, spends no fix ro
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -563,6 +577,7 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -589,6 +604,7 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
   });
+  arriveAll(fix);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -642,6 +658,7 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -660,6 +677,7 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
   const reportPath = outputOf(fix.json.dispatch[0]);
   write(reportPath, { outcomes: "fixed it", status: "complete", summary: "fixed sub" });
+  arriveAll(fix);
   const refused = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(refused.status, 2, refused.stderr);
   assert.match(refused.stderr, /could not be recorded[\s\S]*Move the refused file aside/);
@@ -730,6 +748,7 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -748,6 +767,7 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: []
   });
+  arriveAll(fix);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -852,6 +872,7 @@ function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5 } = {}) {
   };
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   run("snapshot");
   run("verify");
   const first = panelRaises(1, "sub adds instead of subtracting");
@@ -859,6 +880,7 @@ function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5 } = {}) {
   const fix1 = run("fix");
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => Math.abs(a - b);\n");
   write(outputOf(fix1.json.dispatch[0]), { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "swapped the operator" }], notes: "", status: "complete", summary: "fixed sub", unfinished: [] });
+  arriveAll(fix1);
   run("snapshot");
   run("verify");
   const recheck2 = run("recheck");
@@ -872,6 +894,7 @@ function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5 } = {}) {
   const fix2 = run("fix");
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => (a - b) | 0;\n");
   write(outputOf(fix2.json.dispatch[0]), { outcomes: [{ id: "2.adversary.1", outcome: "fixed", note: "dropped the absolute value" }], notes: "", status: "complete", summary: "kept the sign", unfinished: [] });
+  arriveAll(fix2);
   run("snapshot");
   assert.match(run("verify").json.next, /panel/, "a second fix goes to the whole panel");
   const collect = panelRaises(3, "sub truncates large results");
@@ -886,6 +909,7 @@ function driveToSettleAsk(staged) {
   const fix = run("fix");
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => Number(a - b);\n");
   write(outputOf(fix.json.dispatch[0]), { outcomes: [{ id: "3.correctness.1", outcome: "fixed", note: "no truncation" }], notes: "", status: "complete", summary: "fixed", unfinished: [] });
+  arriveAll(fix);
   run("snapshot");
   run("verify");
   const recheck = run("recheck");
@@ -939,6 +963,7 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   // interrupted here resumes through begin, which lands on the same snapshot.
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
   write(outputOf(implementer), { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [] });
+  arriveAll(redesign);
   const resumed = run("begin");
   assert.match(resumed.json.say.join("\n"), /interrupted while fixing/);
   assert.match(resumed.json.next, /snapshot --plan/);
@@ -978,6 +1003,7 @@ test("a redesign implementer that changes nothing makes no round, keeps its repo
   const { state, run } = driveToRecurrence(staged);
   const redesign = run("redesign");
   write(outputOf(redesign.json.dispatch[0]), { status: "unfinished", summary: "the area does not need a rewrite", unfinished: [{ part: "rewrite", reason: "nothing in app.js warrants one" }] });
+  arriveAll(redesign);
   const snapshot = run("snapshot");
   assert.match(snapshot.json.say.join("\n"), /The redesign implementer changed nothing[\s\S]*the area does not need a rewrite[\s\S]*left undone: rewrite/);
   assert.match(snapshot.json.ask, /The same place keeps failing/);
@@ -1022,6 +1048,7 @@ test("redesign and accept refuse a spent budget, a spec with nothing recurring, 
   const worktree = JSON.parse(fs.readFileSync(path.join(quiet.shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", quiet.plan, ["--spec", "01-a"]);
   ship("verify", quiet.plan, ["--spec", "01-a"]);
   const panel = ship("panel", quiet.plan, ["--spec", "01-a"]);
@@ -1044,7 +1071,7 @@ test("redesign and accept refuse a spent budget, a spec with nothing recurring, 
   // A pending fixer: the person answered fix, and the answer is not taken back.
   const pending = stage();
   const driven = driveToRecurrence(pending);
-  driven.run("fix");
+  const pendingFix = driven.run("fix");
   assert.equal(driven.state().fixRoundsUsed, 3);
   for (const step of ["redesign", "accept"]) {
     const blocked = ship(step, pending.plan, ["--spec", "01-a", ...(step === "redesign" ? ["--file", "app.js"] : [])]);
@@ -1059,6 +1086,7 @@ test("redesign and accept refuse a spent budget, a spec with nothing recurring, 
   // state is fixing until the re-check settles it. Neither door opens there.
   fs.appendFileSync(path.join(driven.worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
   write(path.join(pending.shipDir, "01-a", "fix-report.json"), { outcomes: [{ id: "3.correctness.1", outcome: "fixed", note: "n" }], notes: "", status: "complete", summary: "s", unfinished: [] });
+  arriveAll(pendingFix);
   driven.run("snapshot");
   assert.equal(driven.state().state, "fixing");
   for (const step of ["redesign", "accept"]) {
@@ -1226,6 +1254,7 @@ function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
@@ -1371,6 +1400,7 @@ test("a ship resumed after an interrupted landing check finds the worktree detac
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"]);
 
   // Where an interrupted landing check leaves it: detached on a commit that is
@@ -1590,6 +1620,7 @@ test("the cost line finish prints, and the usage.json status reads, cover this s
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", "01-a"], environment);
   ship("verify", plan, ["--spec", "01-a"], environment);
   const panel = ship("panel", plan, ["--spec", "01-a"], environment);
@@ -1642,6 +1673,7 @@ test("a redesign answered at settle goes to the whole panel", () => {
   assert.doesNotMatch(redesign.json.say.join("\n"), /goes to the re-check/);
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
   write(outputOf(redesign.json.dispatch[0]), { status: "complete", summary: "rewrote sub", unfinished: [] });
+  arriveAll(redesign);
   assert.equal(run("snapshot").json.round, 5);
   assert.match(run("verify").json.next, /panel/, "round 4 is settled, so the rewrite gets the whole panel");
   const panel = run("panel");
@@ -1660,6 +1692,7 @@ test("a redesign that never touched the requested file resets nothing, and the s
   // and writes the same record again, byte for byte.
   const reportPath = outputOf(redesign.json.dispatch[0]);
   write(reportPath, { status: "complete", unfinished: [] });
+  arriveAll(redesign);
   const refused = ship("snapshot", staged.plan, ["--spec", "01-a"]);
   assert.equal(refused.status, 2, refused.stderr);
   const recordPath = path.join(shipDir, "01-a", "rounds", "4", "redesign.json");
@@ -1877,6 +1910,7 @@ function driveToPublishable({ plan, shipDir }, id, file, contents) {
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.writeFileSync(path.join(worktree, file), contents);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${file}`, unfinished: [] });
+  arriveAll(begin);
   ship("snapshot", plan, ["--spec", id]);
   ship("verify", plan, ["--spec", id]);
   const panel = ship("panel", plan, ["--spec", id]);
@@ -2015,6 +2049,7 @@ test("both ships' Codex calls queue on one execution slot root for the whole rep
     const worktree = JSON.parse(fs.readFileSync(path.join(train.shipDir, "train.json"), "utf8")).worktree;
     fs.writeFileSync(path.join(worktree, file), "export const value = 1;\n");
     write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "wrote it", unfinished: [] });
+    arriveAll(begin);
     ship("snapshot", train.plan, ["--spec", id]);
     ship("verify", train.plan, ["--spec", id]);
     const panel = ship("panel", train.plan, ["--spec", id]);
@@ -2038,6 +2073,7 @@ test("both ships' Codex calls queue on one execution slot root for the whole rep
       outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "the value is right now" })),
       notes: "", status: "complete", summary: "fixed it", unfinished: []
     });
+    arriveAll(fix);
     ship("snapshot", train.plan, ["--spec", id]);
     ship("verify", train.plan, ["--spec", id]);
     const recheck = ship("recheck", train.plan, ["--spec", id]);
@@ -2090,6 +2126,7 @@ function toPanel(staged, env = {}) {
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
   assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).status, 0);
   assert.equal(ship("verify", plan, ["--spec", "01-a"], env).status, 0);
   const panel = ship("panel", plan, ["--spec", "01-a"], env);
@@ -2177,7 +2214,7 @@ test("a reader that fails at collect is re-sent as its own set, waited on, and a
   assert.equal(resend.status, 0, resend.stderr);
   assert.deepEqual(labelsOf(resend), ["Codex review of 01-a"]);
   assert.equal(resultOf(resend.json.dispatch[0]), resultOf(codex), "into the file it failed to write");
-  assert.equal(resend.json.howToDispatch, REVIEW_SET_DISPATCH);
+  assert.equal(resend.json.howToDispatch, HOW_TO_DISPATCH);
   assert.equal(setRecord(shipDir, panel.json.set.id).closed.reason, "judged", "the panel's set is judged and closed");
   const late = arrive(panel, ["Codex review of 01-a"]);
   assert.notEqual(late.status, 0, "a late notice from the panel's set lands nowhere");
@@ -2222,6 +2259,7 @@ test("a lens re-check, the fresh adversary pass and the Codex re-check that come
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "n" })), notes: "", status: "complete", summary: "fixed", unfinished: []
   });
+  arriveAll(fix);
   assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).json.round, 2);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -2287,6 +2325,7 @@ test("a Codex answer refused for its candidate is re-sent to run Codex again, no
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "n" })), notes: "", status: "complete", summary: "fixed", unfinished: []
   });
+  arriveAll(fix);
   assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).json.round, 2);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -2320,6 +2359,7 @@ test("a reader that fails in a declined attempt is re-sent into that attempt's d
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "the finding is wrong" }], notes: "", status: "complete", summary: "declined", unfinished: []
   });
+  arriveAll(fix);
   assert.match(ship("snapshot", plan, ["--spec", "01-a"]).json.next, /recheck/);
   const marker = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-declined.json"), "utf8"));
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
@@ -2394,7 +2434,7 @@ test("a ship restarted from the same session while its panel is out keeps waitin
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.match(resumed.json.next, /collect --plan .* --spec 01-a$/, "next is the judging step");
   assert.deepEqual(resumed.json.set.labels, [quality, codex]);
-  assert.equal(resumed.json.howToWait, REVIEW_SET_WAIT);
+  assert.equal(resumed.json.howToWait, HOW_TO_WAIT);
   assert.equal(resumed.json.dispatch, undefined, "nothing is sent out a second time");
   assert.match(resumed.json.say.join("\n"), /still waiting on the code-quality reviewer and Codex/);
   assert.ok(fs.existsSync(resultOf(byLabel(panel, correctness))), "findings already written survive");
@@ -2467,27 +2507,361 @@ test("a restart that cannot tell which session it is asks once; no keeps waiting
   assert.equal(setRecord(shipDir, panel.json.set.id).closed.reason, "released");
 });
 
-test("a review payload carries the review-set instruction; begin's and fix's carry today's", () => {
-  const staged = stage();
+// --- single-agent sets: snapshot waits for the agent whose work it reads -------
+
+// Up to a fixer that has been sent out and has not reported: the panel raised
+// one major, through the correctness lens.
+function toFix(staged, env = {}) {
   const { plan } = staged;
-  const { panel, oid } = toPanel(staged);
-  assert.equal(panel.json.howToDispatch, REVIEW_SET_DISPATCH);
-  assert.match(REVIEW_SET_DISPATCH, /run_in_background: false where the call allows it/);
-  assert.match(REVIEW_SET_DISPATCH, /set\.arrive/);
-  assert.match(REVIEW_SET_DISPATCH, /end your turn/);
-  assert.match(REVIEW_SET_DISPATCH, /Never sleep, never poll, never watch/);
-  assert.match(panel.json.set.arrive, /dispatch-set\.mjs" arrive --dir ".*" --set "panel-r1-[^"]+"$/, "the set is named; only the label is left to append");
+  const reached = toPanel(staged, env);
+  for (const dispatch of reached.panel.json.dispatch) {
+    report(dispatch, reached.oid, dispatch.description === "Review 01-a: correctness" ? [major("app.js")] : []);
+  }
+  arriveAll(reached.panel, env);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"], env).json.review, "open");
+  const fix = ship("fix", plan, ["--spec", "01-a"], env);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.deepEqual(labelsOf(fix), ["Fix 01-a"]);
+  return { ...reached, fix };
+}
 
-  const fresh = stage();
-  ship("start", fresh.plan);
-  const first = ship("begin", fresh.plan, ["--spec", "01-a"]);
-  assert.equal(first.json.howToDispatch, HOW_TO_DISPATCH);
-  assert.equal(first.json.set, undefined);
+const fixed = { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: [] };
 
+// Everything a refused snapshot must leave as it found it: the commit, the
+// worktree, the fixer's marker, the absence of a decline, the state and the rounds.
+function snapshotOfDisk({ shipDir }, worktree) {
+  const spec = path.join(shipDir, "01-a");
+  const listing = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).sort();
+  return {
+    head: git(worktree, "rev-parse", "HEAD"),
+    status: git(worktree, "status", "--porcelain"),
+    pending: fs.existsSync(path.join(spec, "fix-pending.json")) ? fs.readFileSync(path.join(spec, "fix-pending.json"), "utf8") : null,
+    declined: fs.existsSync(path.join(spec, "fix-declined.json")),
+    state: fs.readFileSync(path.join(spec, "state.json"), "utf8"),
+    rounds: listing(path.join(spec, "rounds"))
+  };
+}
+
+const roundCount = (shipDir) => fs.readdirSync(path.join(shipDir, "01-a", "rounds")).filter((name) => /^\d+$/.test(name)).length;
+
+test("a fixer still working with the tree clean is never read as having changed nothing, and its late edits land as the one fix round", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const { fix, state, worktree } = toFix(staged);
+  assert.deepEqual(fix.json.set.labels, ["Fix 01-a"]);
+  const before = snapshotOfDisk(staged, worktree);
+  assert.equal(before.status, "", "the fixer has not touched the tree yet");
+  assert.ok(before.pending, "the marker is down");
+
+  const early = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(early.status, NOT_IN_YET, `refused as a wait, not a stop: ${early.stderr}`);
+  assert.match(early.stderr, /still waiting on Fix 01-a/);
+  assert.match(early.stderr, /Nothing was read and nothing changed/);
+  assert.deepEqual(snapshotOfDisk(staged, worktree), before, "a refused snapshot changed something");
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "declined")), "no report was moved aside as a decline");
+
+  // Only now does the fixer's work land, then its notice.
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  write(outputOf(fix.json.dispatch[0]), fixed);
+  const arrived = arrive(fix, ["Fix 01-a"]);
+  assert.equal(arrived.status, 0, arrived.stderr);
+  assert.equal(arrived.json.say, "Fix 01-a is in. Taking the snapshot now.");
+  assert.match(arrived.json.next, /ship\.mjs" snapshot --plan .* --spec 01-a$/);
+
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.equal(snapshot.json.round, 2);
+  assert.equal(git(worktree, "log", "-1", "--format=%s"), "Address review findings on 01-a");
+  assert.doesNotMatch(snapshot.json.say.join("\n"), /not dispatched by fix/, "the fixer's own work is not out-of-band");
+  assert.match(snapshot.json.say.join("\n"), /fix report: complete/);
+  assert.equal(state().fixRoundsUsed, 1, "the counter moved once, at fix");
+  assert.equal(roundCount(shipDir), 2);
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")), "the marker is consumed by the snapshot that judged the fixer");
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-declined.json")));
+  assert.equal(setRecord(shipDir, fix.json.set.id).closed.reason, "judged");
+});
+
+test("a fixer still working with half-written edits has nothing committed", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const { fix, state, worktree } = toFix(staged);
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) =>\n");
+  const before = snapshotOfDisk(staged, worktree);
+  assert.notEqual(before.status, "");
+
+  const early = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(early.status, NOT_IN_YET, early.stderr);
+  assert.match(early.stderr, /still waiting on Fix 01-a/);
+  assert.deepEqual(snapshotOfDisk(staged, worktree), before, "half-written edits were committed or the marker touched");
+
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n");
+  write(outputOf(fix.json.dispatch[0]), fixed);
+  arriveAll(fix);
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.equal(git(worktree, "show", "HEAD:app.js").trim().split("\n").at(-1), "export const mul = (a, b) => a * b;", "the finished edits, not the half-written ones");
+  assert.equal(state().fixRoundsUsed, 1);
+  assert.equal(roundCount(shipDir), 2);
+});
+
+test("snapshot waits the same way for the first implementer, a redesign implementer, and the CI and landing repairs", async () => {
+  // The first implementer.
+  const first = stage();
+  ship("start", first.plan);
+  const begin = ship("begin", first.plan, ["--spec", "01-a"]);
+  assert.deepEqual(begin.json.set.labels, ["Implement 01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(first.shipDir, "train.json"), "utf8")).worktree;
+  const head = git(worktree, "rev-parse", "HEAD");
+  const early = ship("snapshot", first.plan, ["--spec", "01-a"]);
+  assert.equal(early.status, NOT_IN_YET, early.stderr);
+  assert.match(early.stderr, /still waiting on Implement 01-a/);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+  assert.ok(!fs.existsSync(path.join(first.shipDir, "01-a", "rounds")), "no round was allocated");
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  assert.equal(arriveAll(begin).json.say, "Implement 01-a is in. Taking the snapshot now.");
+  const committed = ship("snapshot", first.plan, ["--spec", "01-a"]);
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(git(worktree, "log", "-1", "--format=%s"), "Implement 01-a");
+
+  // A redesign implementer.
+  const again = stage();
+  const { run, state } = driveToRecurrence(again);
+  const redesign = run("redesign");
+  assert.deepEqual(redesign.json.set.labels, ["Redesign 01-a: app.js"]);
+  const refused = ship("snapshot", again.plan, ["--spec", "01-a"]);
+  assert.equal(refused.status, NOT_IN_YET, refused.stderr);
+  assert.match(refused.stderr, /still waiting on Redesign 01-a: app\.js/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(again.shipDir, "01-a", "fix-pending.json"), "utf8")).from, "redesign");
+  assert.equal(state().state, "fixing");
+
+  // A CI repair that comes back having changed nothing publishes, as it always
+  // did — but only once it has reported.
+  const red = stage();
+  const { panel, statePath, oid } = toPanel(red);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid);
+  arriveAll(panel);
+  assert.equal(ship("collect", red.plan, ["--spec", "01-a"]).json.review, "clean");
+  const recheck = ship("recheck", red.plan, ["--spec", "01-a"]);
+  report(recheck.json.dispatch[0], oid);
+  arriveAll(recheck);
+  assert.match(ship("settle", red.plan, ["--spec", "01-a"]).json.next, /publish/);
+  assert.equal(spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "state", statePath, "publishing"], { encoding: "utf8" }).status, 0);
+  const repair = ship("repair", red.plan, ["--spec", "01-a"]);
+  assert.equal(repair.status, 0, repair.stderr);
+  assert.deepEqual(repair.json.set.labels, ["Repair CI for 01-a"]);
+  const waiting = ship("snapshot", red.plan, ["--spec", "01-a"]);
+  assert.equal(waiting.status, NOT_IN_YET, waiting.stderr);
+  assert.match(waiting.stderr, /still waiting on Repair CI for 01-a/);
+  assert.ok(fs.existsSync(path.join(red.shipDir, "01-a", "fix-pending.json")), "the repair's marker is not consumed");
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).state, "reviewing");
+  write(outputOf(repair.json.dispatch[0]), { outcomes: [], notes: "", status: "complete", summary: "the check is flaky; nothing to change", unfinished: [] });
+  arriveAll(repair);
+  const published = ship("snapshot", red.plan, ["--spec", "01-a"]);
+  assert.equal(published.status, 0, published.stderr);
+  assert.match(published.json.say.join("\n"), /The fixer changed nothing/);
+  assert.match(published.json.next, /publish --plan/);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).state, "verifying");
+
+  // A landing repair.
+  const landing = stage();
+  const { worktree: landingTree } = driveToReadyAndWaiting(landing, { verifyCommand: "node -e \"process.exit(require('fs').existsSync('stop.txt') ? 1 : 0)\"" });
+  pushToBase(landing.repo, "stop.txt", "the base now carries this\n");
+  const stopped = ship("finish", landing.plan, ["--spec", "01-a"], { PATH: quietPath(landing.dir) });
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(stopped.json.landing?.status, "failed", stopped.stdout);
+  const landingRepair = ship("repair", landing.plan, ["--spec", "01-a"]);
+  assert.equal(landingRepair.status, 0, landingRepair.stderr);
+  assert.deepEqual(landingRepair.json.set.labels, ["Repair 01-a against the current main"]);
+  const landingHead = git(landingTree, "rev-parse", "HEAD");
+  const notYet = ship("snapshot", landing.plan, ["--spec", "01-a"]);
+  assert.equal(notYet.status, NOT_IN_YET, notYet.stderr);
+  assert.match(notYet.stderr, /still waiting on Repair 01-a against the current main/);
+  assert.equal(git(landingTree, "rev-parse", "HEAD"), landingHead);
+});
+
+test("a fixer that reported having changed nothing is judged as today, with nothing sent again", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const { fix, state, oid } = toFix(staged);
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "the finding is wrong" }], notes: "", status: "complete", summary: "declined", unfinished: [] });
+  arriveAll(fix);
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.match(snapshot.json.say.join("\n"), /The fixer changed nothing/);
+  assert.equal(snapshot.json.dispatch, undefined, "no fixer is sent again");
+  assert.equal(snapshot.json.set, undefined);
+  assert.match(snapshot.json.next, /recheck --plan/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-declined.json"), "utf8")).candidate, oid);
+  assert.equal(state().fixRoundsUsed, 1);
+  assert.equal(roundCount(shipDir), 1);
+});
+
+test("a ship restarted from the same session while its fixer is out keeps waiting, and the fixer's arrival is an ordinary fix round", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const sessions = sessionsFor(staged);
+  sessions.transcript("A");
+  const A = sessions.as("A");
+  const { fix, state, worktree } = toFix(staged, A);
+
+  const resumed = ship("begin", plan, ["--spec", "01-a"], A);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(resumed.json.ask, undefined);
+  assert.equal(resumed.json.dispatch, undefined, "no second fixer");
+  assert.deepEqual(resumed.json.set.labels, ["Fix 01-a"]);
+  assert.equal(resumed.json.howToWait, HOW_TO_WAIT);
+  assert.match(resumed.json.next, /snapshot --plan .* --spec 01-a$/);
+  assert.match(resumed.json.say.join("\n"), /interrupted while fixing, and Fix 01-a has not reported yet; nothing was committed/);
+  assert.ok(fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")));
+
+  const early = ship("snapshot", plan, ["--spec", "01-a"], A);
+  assert.equal(early.status, NOT_IN_YET, early.stderr);
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-declined.json")));
+
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  write(outputOf(fix.json.dispatch[0]), fixed);
+  const arrived = arrive(resumed, ["Fix 01-a"], A);
+  assert.equal(arrived.json.say, "Fix 01-a is in. Taking the snapshot now.");
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"], A);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.equal(snapshot.json.round, 2);
+  assert.equal(git(worktree, "log", "-1", "--format=%s"), "Address review findings on 01-a");
+  assert.doesNotMatch(snapshot.json.say.join("\n"), /not dispatched by fix/);
+  assert.equal(state().fixRoundsUsed, 1);
+});
+
+test("a ship restarted from another identified session releases its fixer, and disk decides: a clean tree changed nothing, a dirty one is the fix", () => {
+  for (const edited of [false, true]) {
+    const staged = stage();
+    const { plan, shipDir } = staged;
+    const sessions = sessionsFor(staged);
+    sessions.transcript("A");
+    sessions.transcript("B");
+    const { fix, state, worktree } = toFix(staged, sessions.as("A"));
+    if (edited) fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+
+    const resumed = ship("begin", plan, ["--spec", "01-a"], sessions.as("B"));
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(resumed.json.set, undefined);
+    assert.match(resumed.json.say.join("\n"), /another session, which is gone; released it/);
+    assert.match(resumed.json.next, /snapshot --plan/);
+    assert.equal(setRecord(shipDir, fix.json.set.id).closed.reason, "released");
+
+    const snapshot = ship("snapshot", plan, ["--spec", "01-a"], sessions.as("B"));
+    assert.equal(snapshot.status, 0, snapshot.stderr);
+    if (edited) {
+      assert.equal(snapshot.json.round, 2);
+      assert.equal(git(worktree, "log", "-1", "--format=%s"), "Address review findings on 01-a");
+      assert.match(snapshot.json.say.join("\n"), /report: missing/);
+    } else {
+      assert.match(snapshot.json.say.join("\n"), /The fixer changed nothing and wrote no report/);
+      assert.match(snapshot.json.next, /recheck --plan/);
+      assert.ok(fs.existsSync(path.join(shipDir, "01-a", "fix-declined.json")));
+      assert.equal(roundCount(shipDir), 1);
+    }
+    assert.equal(state().fixRoundsUsed, 1);
+  }
+});
+
+test("a restart that cannot tell which session it is asks about the fixer; no keeps snapshot waiting, and yes releases it", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const none = sessionsFor(staged).as(null);
+  const { fix, worktree } = toFix(staged, none);
+
+  const asked = ship("begin", plan, ["--spec", "01-a"], none);
+  assert.equal(asked.status, 0, asked.stderr);
+  assert.match(asked.json.ask, /still waiting on Fix 01-a[\s\S]*Is that earlier run gone\?/);
+  assert.equal(setRecord(shipDir, fix.json.set.id).closed, null, "asking changes nothing");
+
+  const no = ship("begin", plan, ["--spec", "01-a", "--run-live"], none);
+  assert.equal(no.status, 0, no.stderr);
+  assert.deepEqual(no.json.set.labels, ["Fix 01-a"]);
+  assert.match(no.json.next, /snapshot --plan/);
+  const before = snapshotOfDisk(staged, worktree);
+  const refused = ship("snapshot", plan, ["--spec", "01-a"], none);
+  assert.equal(refused.status, NOT_IN_YET, refused.stderr);
+  assert.deepEqual(snapshotOfDisk(staged, worktree), before);
+
+  const yes = ship("begin", plan, ["--spec", "01-a", "--run-gone"], none);
+  assert.equal(yes.status, 0, yes.stderr);
+  assert.match(yes.json.say.join("\n"), /on your word that the earlier run is gone/);
+  assert.equal(setRecord(shipDir, fix.json.set.id).closed.reason, "released");
+  const judged = ship("snapshot", plan, ["--spec", "01-a"], none);
+  assert.equal(judged.status, 0, judged.stderr);
+  assert.match(judged.json.say.join("\n"), /The fixer changed nothing/);
+});
+
+test("snapshot refuses only an open set: a commit nobody dispatched, the rerun after a refused report and a marker with no set all go through", () => {
+  // A commit nobody dispatched, once the implementer's set has been judged.
+  const loose = stage();
+  const { panel, state, worktree, oid } = toPanel(loose);
   for (const dispatch of panel.json.dispatch) report(dispatch, oid, dispatch.description === "Review 01-a: correctness" ? [major("app.js")] : []);
   arriveAll(panel);
-  ship("collect", plan, ["--spec", "01-a"]);
-  const fix = ship("fix", plan, ["--spec", "01-a"]);
-  assert.equal(fix.json.howToDispatch, HOW_TO_DISPATCH);
-  assert.equal(fix.json.set, undefined);
+  ship("collect", loose.plan, ["--spec", "01-a"]);
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  const amended = ship("snapshot", loose.plan, ["--spec", "01-a"]);
+  assert.equal(amended.status, 0, amended.stderr);
+  assert.match(amended.json.say.join("\n"), /not dispatched by fix/);
+  assert.equal(git(worktree, "log", "-1", "--format=%s"), "Amend 01-a");
+  assert.equal(state().fixRoundsUsed, 1);
+
+  // The rerun a refused report asks for, with the fixer's set in but not yet
+  // judged when the report was refused.
+  const rerun = stage();
+  const { fix, worktree: rerunTree } = toFix(rerun);
+  fs.appendFileSync(path.join(rerunTree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  const reportPath = outputOf(fix.json.dispatch[0]);
+  write(reportPath, { outcomes: "fixed it", status: "complete", summary: "fixed" });
+  arriveAll(fix);
+  const refused = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.equal(setRecord(rerun.shipDir, fix.json.set.id).closed, null, "a snapshot that stopped judged nothing");
+  fs.renameSync(reportPath, `${reportPath}.refused`);
+  const retried = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(retried.json.round, 2);
+  assert.equal(setRecord(rerun.shipDir, fix.json.set.id).closed.reason, "judged");
+  const again = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
+  assert.equal(again.status, 0, `a judged set is never waited on again: ${again.stderr}`);
+
+  // A train begun on an older plugin: a fixer's marker and no set on record.
+  const older = stage();
+  const { fix: olderFix, worktree: olderTree } = toFix(older);
+  fs.rmSync(path.join(older.shipDir, "01-a", "snapshot-set.json"));
+  fs.appendFileSync(path.join(olderTree, "app.js"), "export const mul = (a, b) => a * b;\n");
+  write(outputOf(olderFix.json.dispatch[0]), fixed);
+  const unrecorded = ship("snapshot", older.plan, ["--spec", "01-a"]);
+  assert.equal(unrecorded.status, 0, unrecorded.stderr);
+  assert.equal(git(olderTree, "log", "-1", "--format=%s"), "Address review findings on 01-a");
+});
+
+test("every dispatch carries the one instruction and its set: the arrival step, the foreground asked for and never depended on", () => {
+  const staged = stage();
+  const { plan } = staged;
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  assert.equal(begin.json.howToDispatch, HOW_TO_DISPATCH);
+  assert.match(begin.json.set.arrive, /dispatch-set\.mjs" arrive --dir ".*" --set "implement-[^"]+"$/, "the set is named; only the label is left to append");
+
+  const other = stage();
+  const { panel, oid } = toPanel(other);
+  assert.equal(panel.json.howToDispatch, HOW_TO_DISPATCH);
+  assert.match(panel.json.set.arrive, /--set "panel-r1-[^"]+"$/);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid, dispatch.description === "Review 01-a: correctness" ? [major("app.js")] : []);
+  arriveAll(panel);
+  ship("collect", other.plan, ["--spec", "01-a"]);
+  const fix = ship("fix", other.plan, ["--spec", "01-a"]);
+  assert.equal(fix.json.howToDispatch, HOW_TO_DISPATCH, "a single agent gets the same instruction as a panel");
+  assert.match(fix.json.set.arrive, /--set "fix-r1-[^"]+"$/);
+
+  assert.match(HOW_TO_DISPATCH, /run_in_background: false where the call allows it/);
+  assert.match(HOW_TO_DISPATCH, /set\.arrive/);
+  assert.match(HOW_TO_DISPATCH, /relay the line it prints/);
+  assert.match(HOW_TO_DISPATCH, /end your turn/);
+  assert.match(HOW_TO_DISPATCH, /prints `next`: run it/);
+  assert.match(HOW_TO_DISPATCH, /Never sleep, never poll, never watch, never schedule a wake-up/);
+  assert.doesNotMatch(HOW_TO_DISPATCH, /returns when all of them have finished/);
+  assert.doesNotMatch(HOW_TO_DISPATCH, /Never background/i);
 });

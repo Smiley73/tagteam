@@ -22,41 +22,45 @@ Run the command the previous step printed as `next`. It prints one JSON object:
   in plain English, briefly, the way *Asking* in the skill says. Never paste the
   JSON and never paste a finding id, a commit oid or a gate name.
 - **`dispatch`** — the agents to run. Put every entry into **one message**, each
-  as an Agent call with `run_in_background: false`, `subagent_type` set to the
-  entry's `agent`, `model` set to its `model` when that is not null and omitted
-  when it is null, `description` as given, and `prompt` verbatim. A single
-  agent — the implementer, a fixer, a redesign implementer, a repair — returns
-  when it has finished. When the output also carries `set`, the entries are a
-  review: the message is not to be relied on to return only once all of them
-  have finished, and *Review sets* below says what to do instead. Never dispatch
-  in the background, never start a watcher, and never run a command only to
-  pass the time: every such turn re-reads your whole context for nothing, and
-  this is where a third of past runs' cost went.
-- **`set`** — present when `dispatch` is a review, and when a resumed spec is
-  still waiting on one. Its `arrive` is the command that records an agent as
-  having reported; see *Review sets*.
+  as an Agent call with `run_in_background: false` where the call allows it,
+  `subagent_type` set to the entry's `agent`, `model` set to its `model` when
+  that is not null and omitted when it is null, `description` as given, and
+  `prompt` verbatim. The foreground is asked for because one return is cheaper
+  than one wake-up per agent, and nothing depends on getting it: Claude Code may
+  run the agents in the background whatever the call asks for. Every `dispatch`
+  comes with a `set`, and *Sets* below says what to do with it. Never start a
+  watcher, and never run a command only to pass the time: every such turn
+  re-reads your whole context for nothing, and this is where a third of past
+  runs' cost went. Waiting costs no turns — the only thing that wakes you is a
+  finished agent's own notice, and that wake-up carries one quick call.
+- **`set`** — present with every `dispatch`, and when a resumed spec is still
+  waiting on agents an earlier run sent out. Its `arrive` is the command that
+  records an agent as having reported; see *Sets*.
 - **`ask`** — a decision only a person can make. Ask it the way *Asking* says,
   then run what their answer calls for.
-- **`next`** — the command to run once the dispatches have returned — for a
-  review set, once the last arrival says every agent is in. Run it as printed.
+- **`next`** — the command to run. With a `set`, run it once the last arrival
+  says the set is complete; that arrival prints it too. Run it as printed.
 
 A non-zero exit is a stop. Say what stderr says, in plain words, and stop —
 except exit 3, which means the configuration is older than this plugin: tell
 them to run `/tagteam:configure` and stop; and exit 5, which is not a stop at
-all: `collect` or `settle` refused because the review it judges is not all in
-yet — see *Review sets*. A spent budget never exits: the driver prints where the
+all: `collect`, `settle` or `snapshot` refused because the set it judges is not
+all in yet — see *Sets*. A spent budget never exits: the driver prints where the
 spec goes instead and says so in `say`.
 
-## Review sets
+## Sets
 
-Every review the driver sends out is a set: the panel, the re-send of a reader
-that produced nothing usable, the re-check, and the re-send of a re-check reader.
-The driver judges a set only from its own record of which agents have reported,
-never from what is on disk, because a reader still working and a reader that
-failed leave the same nothing behind. You keep that record by telling the driver
-each time an agent reports. An agent's label is its `description`, exactly as
-printed — it is also the name Claude Code uses in the notice it posts when that
-agent finishes.
+Every dispatch the driver prints is a set. A review is one: the panel, the
+re-send of a reader that produced nothing usable, the re-check, and the re-send
+of a re-check reader. So is each agent that works in the worktree — the
+implementer, a fixer, a redesign implementer, a repair — a set of one, whose work
+`snapshot` commits. The driver judges a set only from its own record of which
+agents have reported, never from what is on disk: a reader still working and a
+reader that failed leave the same nothing behind, and a fixer still working
+looks exactly like a fixer that changed nothing. You keep that record by telling
+the driver each time an agent reports. An agent's label is its `description`,
+exactly as printed — it is also the name Claude Code uses in the notice it posts
+when that agent finishes.
 
 - Put every entry of `dispatch` into one message, asking for the foreground as
   above. `howToDispatch` says the same.
@@ -67,32 +71,39 @@ agent finishes.
   nothing else. It prints one line — "The correctness reviewer is in (1 of 3)" —
   and you relay it as written. Run nothing else on that wake-up: not `next`, not
   a check, not a status. The last arrival prints "All 3 are in. Judging the
-  review now." with `next`, and then you run it.
+  review now." — or, for a set of one, "Fix 01-a is in. Taking the snapshot
+  now." — with `next`, and then you run it.
 - **Never sleep, poll or watch** for a set to finish. A finished agent's own
   notice is the only thing that wakes you, and waiting costs no turns.
 - **When you are unsure whether you recorded one** — after a long conversation
   was compressed, say — record it anyway. A label that is already in is refused
   by name and changes nothing. A label refused as not in the set was copied
   wrong; the refusal lists the labels still out, so correct it in the same turn.
-- **`collect` or `settle` exiting 5** says "Not judged yet: still waiting on the
-  security reviewer and Codex". It is not a stop and nothing changed: tell the
-  person who is still out, end the turn, and keep waiting for their notices.
+- **`collect`, `settle` or `snapshot` exiting 5** says "Not judged yet: still
+  waiting on the security reviewer and Codex", or "still waiting on Fix 01-a".
+  It is not a stop and nothing changed — nothing was committed and no fix round
+  was lost: tell the person who is still out, end the turn, and keep waiting for
+  their notices.
 - **`settle` can print a set of its own.** A re-check reader that came back with
   nothing usable is re-dispatched once, and `settle` runs again once that set is
   in; a reader that fails a second time leaves the review incomplete, and it
   never merges unattended. Handle it exactly as above.
 
-### When a ship restarts while a review is out
+### When a ship restarts while agents are out
 
-`begin` on a spec that was interrupted mid-review first looks for a review set
-still waiting on agents, and decides by which Claude Code session sent it out:
+`begin` on a spec that was interrupted part-way first looks for a set still
+waiting on agents — a review, or the implementer, fixer, redesign implementer or
+repair whose work `snapshot` would commit — and decides by which Claude Code
+session sent it out:
 
 - **From this same session**: its agents may still be working. `begin` prints
-  `set` with the labels still out, `howToWait`, and `next` naming `collect` or
-  `settle`. Dispatch nothing. End your turn and record each finished notice as
-  above.
+  `set` with the labels still out, `howToWait`, and `next` naming `collect`,
+  `settle` or `snapshot`. Dispatch nothing. End your turn and record each
+  finished notice as above.
 - **From another session**: that run is gone. `begin` says the set was released
-  and resumes as it always has, from what is on disk; relay what `say` says.
+  and resumes as it always has, from what is on disk; relay what `say` says. A
+  fixer released this way that left nothing in the worktree is then read as
+  having changed nothing, as it always was.
 - **No session can be identified**: `begin` returns `ask`. Ask the person once,
   the way *Asking* says, whether an earlier run of this ship is still going
   anywhere. If they say it is gone, run `answers.gone`:
@@ -108,11 +119,13 @@ still waiting on agents, and decides by which Claude Code session sent it out:
   node "$P/scripts/ship.mjs" begin --plan "$D" --spec <id> --run-live
   ```
 
-A set whose finished notice never comes stays open; nothing times it out. The
-way out is to start `/tagteam:ship` again from a new Claude Code session, which
-releases it — or, when `begin` asks, to answer that the earlier run is gone.
-Either way the spec then resumes as an interrupted spec always has, from what is
-committed on its branch.
+A set whose finished notice never comes stays open, whether it is a review, the
+implementer or a fixer; nothing times it out, and a restart from the same session
+keeps waiting on it. The way out is to start `/tagteam:ship` again from a new
+Claude Code session, which releases it — or, when `begin` asks, to answer that
+the earlier run is gone. Either way the spec then resumes as an interrupted spec
+always has, from what is on disk: what is committed on its branch, and for a
+fixer or implementer whatever it left in the worktree.
 
 ## Start
 
@@ -199,8 +212,8 @@ again" — see *After `collect` and `settle`* below. What is yours at each point
   round of how many, at what model and effort, that escalation never raises an
   implementer, and which review the rewrite gets: answered after `collect`, the
   readers judge their earlier findings against it and the adversary reads it
-  fresh; answered after `settle`, the whole panel reads it. Then dispatch and
-  run `next`.
+  fresh; answered after `settle`, the whole panel reads it. Then dispatch it as
+  a set, as every dispatch is.
 - **After `snapshot` when it returns `ask`**: the redesign implementer changed
   nothing. Its report is kept aside, the fix round it spent stays spent, and the
   same question is asked again with the same four answers.
@@ -212,7 +225,7 @@ again" — see *After `collect` and `settle`* below. What is yours at each point
   `redesign` and `accept` are answers to a question, and only the person
   answers it.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
-  returned — in a review set, the line its finished notice carries. If it
+  returned, or the line its finished notice carries. If it
   contains *how it routed could not be confirmed*, take *When Codex could not
   say how it ran* below before running `next`. A non-zero exit
   code on that line is a failed Codex call; `collect` or `settle` will report the
@@ -423,5 +436,7 @@ reported the way any failed Codex call is.
 Never read a diff, a findings file or a spec. Never run git or `gh` by hand
 inside a train; the driver runs them. Never merge without `finish`. Never put a
 finding id, a commit oid, a gate name or a file-and-line coordinate into a
-question or the text around one. Never dispatch in the background and never run
-a command to pass the time.
+question or the text around one. Never run a command to pass the time, and never
+sleep, poll, watch or schedule a wake-up for an agent: its own finished notice is
+what wakes you, and the one arrival call is all that wake-up runs until the set
+is complete.

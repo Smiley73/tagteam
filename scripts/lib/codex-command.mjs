@@ -4,7 +4,7 @@
 // any single Bash call a Claude Code agent may make — the bridge allows itself
 // 900 seconds and waits out a quota in slices. So the orchestrator never runs it
 // in the foreground. Instead it dispatches `tagteam:codex-runner`, a small
-// plumbing agent, in the same blocking message as the reviewers: the runner
+// plumbing agent, in the same message as the reviewers: the runner
 // starts the command detached, polls for a status file, and returns one line.
 //
 // What the runner starts is a shell script this module writes, so that nothing

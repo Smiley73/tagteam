@@ -13,15 +13,16 @@
 //
 // Every subcommand prints one JSON object:
 //   say       lines for the person, in the run's own words, to relay in plain English
-//   dispatch  agents to run — all of them in ONE message
-//   set       for a review, the set those agents form: the run judges it only once
-//             every label in it has been recorded as arrived, through `set.arrive`
+//   dispatch  agents to run — all of them in ONE message, asking for the foreground
+//             where the call allows it and never depending on getting it
+//   set       the set those agents form: the run judges their work only once every
+//             label in it has been recorded as arrived, through `set.arrive`
 //   ask       a decision only a person can make (the orchestrator asks, then re-runs)
-//   next      the command to run once the dispatches have returned, or for a review
-//             set once the last arrival says it is in
+//   next      the command to run once the set is in, which the last arrival names
+//             too; with no set, the command to run now
 // and exits 0. A refusal exits non-zero with the reason on stderr; a spent budget
-// exits 4, as every budgeted script here does, and a judging step whose review set
-// is not in yet exits NOT_IN_YET, which is a wait and not a stop.
+// exits 4, as every budgeted script here does, and a judging step whose set is not
+// in yet exits NOT_IN_YET, which is a wait and not a stop.
 //
 // The scripts this sequences are spawned rather than imported wherever they own a
 // guard — the round store, the state machine, the gates — so the invariants their
@@ -504,55 +505,58 @@ function repairDispatch(ctx, spec, state, job) {
   };
 }
 
-// The instruction that rides along with every dispatch list that is not a review
-// set — the single implementer, fixer, redesign implementer and repair. Stated
-// once here rather than in prose so it cannot drift. A review set carries
-// REVIEW_SET_DISPATCH instead.
-export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with run_in_background: false, "
-  + "subagent_type set to `agent`, `model` passed when it is not null and omitted when it is, `description` as given and "
-  + "`prompt` verbatim. The message returns when all of them have finished; then run `next`. Never background, never watch, never poll.";
-
-// The instruction for a review, which is a set: several agents whose results are
-// judged together, and only once every one of them has reported. Claude Code may
-// run them in the background whatever the call asks for, so the message cannot be
-// relied on to return when they have finished; what the judging step reads is the
-// run's own record of who has arrived, kept by `dispatch-set.mjs`. The foreground
+// The one instruction that rides along with every dispatch list, stated here
+// rather than in prose so it cannot drift. Every dispatch is a set — a review
+// panel, a re-check, or the one implementer, fixer, redesign implementer or
+// repair whose work `snapshot` reads — and the step that judges it works from the
+// run's own record of who has arrived, kept by `dispatch-set.mjs`. Claude Code may
+// run the agents in the background whatever the call asks for, so nothing here
+// depends on the message returning only once they have finished. The foreground
 // is still asked for, because one return is cheaper than one wake-up per agent.
-export const REVIEW_SET_DISPATCH = "This is a review set. Put every entry of `dispatch` into ONE message, each as an Agent call with "
+export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
   + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed when it is not null and "
-  + "omitted when it is, `description` as given and `prompt` verbatim. Each agent's label is its `description`, exactly as "
-  + "Claude Code names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in "
-  + "double quotes. If the message returns with every agent finished, run `set.arrive` once with every label, then run `next`. "
-  + "If it returns before they have finished, end your turn; on each finished notice run `set.arrive` with that one label and "
-  + "nothing else, and relay the line it prints. When it says all are in, run `next`. If you are unsure whether you recorded "
-  + "one, record it again: a repeat is refused and changes nothing. Never sleep, never poll, never watch.";
+  + "omitted when it is, `description` as given and `prompt` verbatim. The agents form a set, and the run judges their work "
+  + "only once every one of them has been recorded as arrived. Each agent's label is its `description`, exactly as Claude Code "
+  + "names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in double "
+  + "quotes; relay the line it prints. If the message returns with every agent finished, run `set.arrive` once with every "
+  + "label. If it returns before they have finished, end your turn; on each finished notice run `set.arrive` with that one "
+  + "label and nothing else. When an arrival says the set is complete it prints `next`: run it. If you are unsure whether you "
+  + "recorded one, record it again: a repeat is refused and changes nothing. Never sleep, never poll, never watch, never "
+  + "schedule a wake-up.";
 
-// The same set, already sent out by an earlier run in this session and not all in.
-export const REVIEW_SET_WAIT = "A review set is still out, and nothing is to be dispatched. End your turn. On each finished notice "
-  + "for one of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the "
-  + "line it prints. When it says all are in, run `next`. A label recorded twice is refused and changes nothing. "
-  + "Never sleep, never poll, never watch.";
+// A set already sent out by an earlier run in this session and not all in.
+export const HOW_TO_WAIT = "A set is still out, and nothing is to be dispatched. End your turn. On each finished notice for one "
+  + "of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the line it "
+  + "prints. When an arrival says the set is complete it prints `next`: run it. A label recorded twice is refused and changes "
+  + "nothing. Never sleep, never poll, never watch, never schedule a wake-up.";
 
 function nextCommand(ctx, sub, id, extra = "") {
   return `node ${q(path.join(SCRIPTS, "ship.mjs"))} ${sub} --plan ${q(ctx.plan)}${id ? ` --spec ${id}` : ""}${extra}`;
 }
 
 function instructionFor(payload) {
-  if (payload.set) return payload.dispatch?.length ? { howToDispatch: REVIEW_SET_DISPATCH } : { howToWait: REVIEW_SET_WAIT };
-  return payload.dispatch?.length ? { howToDispatch: HOW_TO_DISPATCH } : {};
+  if (payload.dispatch?.length) return { howToDispatch: HOW_TO_DISPATCH };
+  return payload.set ? { howToWait: HOW_TO_WAIT } : {};
 }
 
 function emit(payload) {
+  // Every agent this driver sends out is waited on through a set; a dispatch
+  // printed without one would be read from disk while it is still working.
+  if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
   process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...instructionFor(payload) }, null, 2)}\n`);
 }
 
-// --- review sets -------------------------------------------------------------
+// --- dispatched sets ---------------------------------------------------------
 
-// Every review this driver sends out — the panel, `collect`'s re-send, the
-// re-check, `settle`'s re-send — is recorded as a set before it is printed, and
-// the step that judges it asks the record whether it is in before anything else
-// happens. A reviewer still running and a reviewer that failed look the same on
-// disk; only the record tells them apart.
+// Every agent this driver sends out is recorded as a set before it is printed,
+// and the step that judges it asks the record whether it is in before anything
+// else happens. A reviewer still running and a reviewer that failed look the
+// same on disk, and so do a fixer still working and a fixer that changed
+// nothing; only the record tells them apart. The review sets are the panel,
+// `collect`'s re-send, the re-check and `settle`'s re-send. The single-agent
+// sets are the implementer from `begin`, the fixer from `fix`, the redesign
+// implementer and the CI or landing fixer from `repair`, each of one agent,
+// judged by `snapshot`.
 //
 // Each set lives in a directory of its own under the spec's `sets/`, never
 // inside a round: re-entering a round empties it, and a set's record is rewritten
@@ -563,10 +567,11 @@ function emit(payload) {
 //
 // Which set a judging step judges is named in one place per step, and nowhere
 // else: `collect-set.json` for `collect`, bound to the round and the candidate,
-// and `recheck-plan.json` for `settle`, which every `recheck` rewrites. A set id
-// is never reused, so an earlier round's set, the panel's after its re-send
-// replaced it, or a first re-check's after a declined attempt in the same round
-// can never be the one a step finds.
+// `recheck-plan.json` for `settle`, which every `recheck` rewrites, and
+// `snapshot-set.json` for `snapshot`, which every single-agent dispatch rewrites.
+// A set id is never reused, so an earlier round's set, the panel's after its
+// re-send replaced it, or a first re-check's after a declined attempt in the same
+// round can never be the one a step finds.
 
 // A judging step refused because its set is not in yet. It is a wait, not a
 // stop, and must be told apart from both: 1 is a stop, 2 a refused input, 3 an
@@ -576,33 +581,49 @@ export const NOT_IN_YET = 5;
 const setDir = (ctx, id, set) => path.join(specDir(ctx, id), "sets", set);
 const collectSetPath = (ctx, id) => path.join(specDir(ctx, id), "collect-set.json");
 const recheckPlanPath = (ctx, id) => path.join(specDir(ctx, id), "recheck-plan.json");
+const snapshotSetPath = (ctx, id) => path.join(specDir(ctx, id), "snapshot-set.json");
 const stampNow = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 
-// The file an agent of a review set is told to write, read off its own prompt so
-// that the set names exactly what the agent was told. A Codex runner is told its
-// command file, which sits beside the artifact it produces.
+// The file an agent of a set is told to write, read off its own prompt so that
+// the set names exactly what the agent was told. A Codex runner is told its
+// command file, which sits beside the artifact it produces. A repair's report
+// line carries a note after the path, which is not part of it.
 function expectedOutput(dispatch) {
-  const written = /^Write your (?:findings|verdicts) to: (.*)$/m.exec(dispatch.prompt);
+  const written = /^Write your (?:findings|verdicts|report|fix report) to: (.*?)(?: — .*)?$/m.exec(dispatch.prompt);
   if (written) return written[1].trim();
   const runner = /^Command file: (.*)\.cmd\.sh$/m.exec(dispatch.prompt);
   if (runner) return runner[1].trim();
-  throw new Stop(`the dispatch ${q(dispatch.description)} names no output for its review set to expect`);
+  throw new Stop(`the dispatch ${q(dispatch.description)} names no output for its set to expect`);
 }
 
 /**
- * Record a review set before it is printed. `agents` is `{ dispatch, name }`,
- * where the label is the dispatch's `description` — the name Claude Code prints
- * in the agent's finished notice — and `name` is how the person hears of it.
- * `step` is the judging step the last arrival names.
+ * Record a set before it is printed. `agents` is `{ dispatch, name? }`, where
+ * the label is the dispatch's `description` — the name Claude Code prints in the
+ * agent's finished notice — and `name` is how the person hears of it, the label
+ * itself when it is not given. `step` is the judging step the last arrival
+ * names, and `closing` the phrase that completes the line it prints. `round` is
+ * left out of the id when there is none yet, as for the first implementer.
  */
-async function sendSet(ctx, id, { kind, round, agents, step }) {
-  const set = `${kind}-r${round}-${stampNow()}-${randomBytes(3).toString("hex")}`;
+async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "Judging the review now." }) {
+  const set = `${kind}${round === null ? "" : `-r${round}`}-${stampNow()}-${randomBytes(3).toString("hex")}`;
   const dir = setDir(ctx, id, set);
   await recordSet({
-    dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing: "Judging the review now.",
+    dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing,
     agents: agents.map(({ dispatch, name }) => ({ label: dispatch.description, name, output: expectedOutput(dispatch) }))
   });
   return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description) };
+}
+
+/**
+ * Record the one agent a step sends out to work in the worktree — the
+ * implementer, a fixer, a redesign implementer, a repair — as a set of its own,
+ * and point `snapshot` at it. Its label is its `description`, which already says
+ * which of them it is, and is how the person hears of it too: "Fix 01-a is in".
+ */
+async function sendForSnapshot(ctx, id, { kind, round = null, dispatch }) {
+  const sent = await sendSet(ctx, id, { kind, round, agents: [{ dispatch }], step: "snapshot", closing: "Taking the snapshot now." });
+  writeJson(snapshotSetPath(ctx, id), { set: sent.id, kind, label: dispatch.description, at: new Date().toISOString() });
+  return setPayload(sent);
 }
 
 // What a payload carries about its set: the labels, and the arrival command with
@@ -616,7 +637,7 @@ const setPayload = ({ id, dir, labels }) => ({ id, labels, arrive: arriveCommand
  */
 function requireSetIn(ctx, id, set, step) {
   const dir = setDir(ctx, id, set);
-  if (!readSet(dir, set)) throw new Stop(`the review set ${set} that ${step} judges for ${id} is not on disk`);
+  if (!readSet(dir, set)) throw new Stop(`the set ${set} that ${step} judges for ${id} is not on disk`);
   const answer = readiness({ dir, id: set });
   if (answer.answer !== "refused") return answer;
   throw new Stop(`Not judged yet: ${answer.reason}. Nothing was read and nothing changed. This is not a stop: end the turn and `
@@ -625,6 +646,21 @@ function requireSetIn(ctx, id, set, step) {
 }
 
 const closeReviewSet = (ctx, id, set) => closeSet({ dir: setDir(ctx, id, set), id: set });
+
+/**
+ * The barrier in front of `snapshot`: refuse, changing nothing, while the one
+ * agent whose work it would read has not reported. Returns the set to close once
+ * the snapshot has judged it, or null when there is nothing to wait for — no
+ * single-agent dispatch on record (a train begun on an older plugin, a commit
+ * nobody dispatched) — and a set already judged or released by a restart passes,
+ * so the rerun a refused report asks for always goes through.
+ */
+function requireSnapshotSetIn(ctx, id) {
+  const pointer = readJson(snapshotSetPath(ctx, id), null);
+  if (!pointer?.set) return null;
+  requireSetIn(ctx, id, pointer.set, "snapshot");
+  return pointer.set;
+}
 
 // "a", "a and b", "a, b and c".
 function listOf(words) {
@@ -879,18 +915,21 @@ async function begin(options) {
   if (["implementing", "reviewing", "fixing", "verifying"].includes(state.state) && init.existing) {
     git(ctx.worktree, ["switch", branch]);
     // Before the route below, which re-enters the candidate's round and so
-    // empties it: a review set this spec sent out may still have agents working
-    // into that round. See `reviewSetsOnRestart`.
-    const review = await reviewSetsOnRestart(ctx, id, state, options);
-    say.push(...review.say);
-    if (review.ask) {
-      return emit({ say, ask: review.ask, answers: review.answers, state: state.state });
+    // empties it — a review set this spec sent out may still have agents working
+    // into that round — and which sends to `snapshot`, which would read a fixer
+    // still working as one that changed nothing. See `setsOnRestart`.
+    const restarted = await setsOnRestart(ctx, id, state, options);
+    say.push(...restarted.say);
+    if (restarted.ask) {
+      return emit({ say, ask: restarted.ask, answers: restarted.answers, state: state.state });
     }
-    if (review.waiting) {
-      const { set, step, missing } = review.waiting;
+    if (restarted.waiting) {
+      const { set, step, missing } = restarted.waiting;
+      const why = step === "snapshot"
+        ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was committed, and snapshot takes its work once it has.`
+        : `the review it sent out is still running; nothing was rebuilt, and ${step} judges it once the rest are in.`;
       return emit({
-        say: [...say, `${id} was interrupted while ${state.state}, and the review it sent out is still running; nothing was `
-          + `rebuilt, and ${step} judges it once the rest are in.`],
+        say: [...say, `${id} was interrupted while ${state.state}, and ${why}`],
         set: { id: set, labels: missing.map((agent) => agent.label), arrive: arriveCommand(setDir(ctx, id, set), set) },
         next: nextCommand(ctx, step, id)
       });
@@ -907,29 +946,36 @@ async function begin(options) {
   transition(ctx, id, "implementing");
   const job = roles(ctx, id).jobs.implement;
   say.push(`Starting ${id} on ${branch} from ${ctx.config.base} at ${baseOid.slice(0, 12)}; implementer ${settings(job)}.`);
-  emit({ say, dispatch: [implementerDispatch(ctx, spec, job)], next: nextCommand(ctx, "snapshot", id) });
+  const dispatch = implementerDispatch(ctx, spec, job);
+  const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch });
+  emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
 }
 
 /**
- * The restart rule, applied to the review sets a resumed spec's judging steps
- * point at: `settle`'s set, then `collect`'s, each only when it was sent out for
- * the candidate the spec is on. A set the restart closes is judged from disk by
- * today's route; one sent out from this same session is waited on; and when no
- * session can be identified the person is asked once, and only their yes
- * (`--run-gone`) closes it — `--run-live` is the no, and waits.
+ * The restart rule, applied to the sets a resumed spec's judging steps point
+ * at: `settle`'s set, then `collect`'s, each only when it was sent out for the
+ * candidate the spec is on, then the single agent `snapshot` would read. A set
+ * the restart closes is judged from disk by today's route; one sent out from
+ * this same session is waited on; and when no session can be identified the
+ * person is asked once, and only their yes (`--run-gone`) closes it —
+ * `--run-live` is the no, and waits. A single-agent set needs no candidate
+ * check: once `snapshot` has judged it, it is closed, and the restart rule
+ * passes over a closed set.
  *
  * The session compared is the one identified from the environment when the set
  * was sent and now, inside `dispatch-set.mjs`. Never `sessionOf`: that keeps the
  * session `train.json` recorded while its transcript exists, so a restart from a
  * new session would read as the old one and wait for ever.
  */
-async function reviewSetsOnRestart(ctx, id, state, options) {
+async function setsOnRestart(ctx, id, state, options) {
   const pointed = [];
   const plan = readJson(recheckPlanPath(ctx, id), null);
   const recheckSet = plan?.resend?.set ?? plan?.set ?? null;
   if (plan && plan.candidate === state.candidateOid && recheckSet) pointed.push({ set: recheckSet, step: "settle" });
   const collected = readJson(collectSetPath(ctx, id), null);
   if (collected && collected.candidate === state.candidateOid && collected.set) pointed.push({ set: collected.set, step: "collect" });
+  const single = readJson(snapshotSetPath(ctx, id), null);
+  if (single?.set) pointed.push({ set: single.set, step: "snapshot" });
 
   const result = { say: [], ask: null, answers: null, waiting: null };
   const waiting = [];
@@ -976,7 +1022,7 @@ function fixReportLines(report) {
   return lines;
 }
 
-function snapshot(options) {
+async function snapshot(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -985,6 +1031,17 @@ function snapshot(options) {
   // file, and nothing may be committed on its behalf.
   const state = readState(ctx, id);
   refuseWhileWaiting(id, state, "snapshot");
+  // The barrier, before the marker, the tree or HEAD is read. Without it a fixer
+  // still working was read as having changed nothing — the marker consumed, the
+  // decline recorded and the fix round gone — and a half-written tree was
+  // committed as its work, with whatever landed after counted as out-of-band.
+  const judged = requireSnapshotSetIn(ctx, id);
+  // The set is closed once judged, then the result printed. A snapshot that
+  // stops on the way leaves it as it was, and its rerun passes the barrier.
+  const done = async (payload) => {
+    if (judged) await closeSet({ dir: setDir(ctx, id, judged), id: judged });
+    emit(payload);
+  };
   const pending = readJson(fixPendingPath(ctx, id), null);
   const dirty = git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "";
   const head = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
@@ -1028,7 +1085,7 @@ function snapshot(options) {
       if (churn.ask) say.push("The fix round it spent is gone; what was open is still open, and the question stands.");
       else if ((state.fixRoundsUsed ?? 0) >= ctx.config.limits.fixRounds) say.push("The fix round it spent was the last of this cycle.");
       else say.push("The fix round it spent is gone; what was open is still open, and another fix round follows if one is left.");
-      return emit({ say, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, "fix", id) });
+      return done({ say, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, "fix", id) });
     }
     const reportPath = path.join(specDir(ctx, id), "fix-report.json");
     const report = readJson(reportPath, null);
@@ -1046,7 +1103,7 @@ function snapshot(options) {
     // for a lens to re-judge; the spec publishes and the check speaks.
     if (pending.from === "repair") {
       transition(ctx, id, "verifying");
-      return emit({ say, next: nextCommand(ctx, "publish", id) });
+      return done({ say, next: nextCommand(ctx, "publish", id) });
     }
     // Whether the fixer came from the panel or from a settled re-check, the
     // findings it declined are re-judged by the lenses that raised them. This
@@ -1064,7 +1121,7 @@ function snapshot(options) {
       at: new Date().toISOString()
     });
     say.push("The lenses that raised what it declined re-judge those findings against its reasons.");
-    return emit({ say, next: nextCommand(ctx, "recheck", id) });
+    return done({ say, next: nextCommand(ctx, "recheck", id) });
   }
 
   if (dirty) {
@@ -1128,7 +1185,7 @@ function snapshot(options) {
     }
   }
   say.push(...recorded.stdout.trim().split("\n"));
-  emit({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
+  await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
 function verify(options) {
@@ -1262,7 +1319,7 @@ async function collect(options) {
   });
 }
 
-function fix(options) {
+async function fix(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -1322,9 +1379,12 @@ function fix(options) {
   // A fix is the person choosing to fix over an accept they may have given.
   fs.rmSync(acceptedPath(ctx, id), { force: true });
   const budget = edge.output?.budget ?? {};
+  const dispatch = fixerDispatch(ctx, spec, briefPath, job);
+  const set = await sendForSnapshot(ctx, id, { kind: "fix", round: round.round, dispatch });
   emit({
     say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings about the code, from ${briefPath}.`, ...prSay],
-    dispatch: [fixerDispatch(ctx, spec, briefPath, job)],
+    dispatch: [dispatch],
+    set,
     next: nextCommand(ctx, "snapshot", id)
   });
 }
@@ -1338,7 +1398,7 @@ function fix(options) {
 // findings against it and the adversary reads it fresh; chosen at settle, the
 // whole panel reads it. Routing a collect-time redesign to the panel is not an
 // option — the collection would never be settled or carried.
-function redesign(options) {
+async function redesign(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -1389,7 +1449,9 @@ function redesign(options) {
       ? "The rewrite goes to the re-check: each reader judges its earlier findings against it and the adversary reads it fresh. A redesign answered after the re-check settles gets the whole panel instead."
       : "The whole panel reads the rewrite."
   ];
-  emit({ say, files, brief: briefPath, dispatch: [redesignDispatch(ctx, spec, briefPath, files, job)], next: nextCommand(ctx, "snapshot", id) });
+  const dispatch = redesignDispatch(ctx, spec, briefPath, files, job);
+  const set = await sendForSnapshot(ctx, id, { kind: "redesign", round: round.round, dispatch });
+  emit({ say, files, brief: briefPath, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
 }
 
 // A person's other answer to the Recurring question: publish it as it is, with
@@ -1694,7 +1756,7 @@ function publish(options) {
   emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
 }
 
-function repair(options) {
+async function repair(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -1706,12 +1768,16 @@ function repair(options) {
   }
   const job = roles(ctx, id).jobs["repair-fix"];
   const budget = edge.output?.budget ?? {};
-  writeJson(fixPendingPath(ctx, id), { round: currentRound(ctx, id, state)?.round ?? null, candidate: state.candidateOid, from: "repair", at: new Date().toISOString() });
+  const round = currentRound(ctx, id, state)?.round ?? null;
+  writeJson(fixPendingPath(ctx, id), { round, candidate: state.candidateOid, from: "repair", at: new Date().toISOString() });
+  const dispatch = repairDispatch(ctx, spec, state, job);
+  const set = await sendForSnapshot(ctx, id, { kind: landing ? "landing-repair" : "ci-repair", round, dispatch });
   emit({
     say: [`${landing
       ? `Landing repair ${budget.ordinal} of the ${budget.limit} repairs this repository allows: the change passes alone and fails merged onto ${state.base} at ${landing.baseOid.slice(0, 12)}`
       : `CI repair ${budget.ordinal} of the ${budget.limit} this repository allows`}; fixer ${settings(job)}. The repaired commit is a new candidate and goes through the whole review again with a fresh fix budget.`],
-    dispatch: [repairDispatch(ctx, spec, state, job)],
+    dispatch: [dispatch],
+    set,
     next: nextCommand(ctx, "snapshot", id)
   });
 }
@@ -2119,7 +2185,7 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
   begin   --spec <id> [--run-gone | --run-live]
                                       branch and dispatch the implementer, or resume; the flags answer
-                                      the question a resume asks about a review an earlier run sent out
+                                      the question a resume asks about agents an earlier run sent out
   snapshot --spec <id> [--message m]  commit, allocate the round, snapshot, bind, record the report
   verify  --spec <id>                 run the verify commands against the candidate
   panel   --spec <id>                 dispatch every lens plus Codex
