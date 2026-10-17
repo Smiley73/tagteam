@@ -25,12 +25,31 @@ const everything = [...commands.map((entry) => entry.text), skill].join("\n");
 
 const agentNames = fs.readdirSync(path.join(root, "agents")).map((file) => file.replace(/\.md$/, ""));
 const EFFORTS = JSON.parse(read("schemas", "config.schema.json")).$defs.claudeEffort.enum;
-const dispatchedAgents = (text) =>
-  [...text.matchAll(/`tagteam:([a-z-]+)-<effort>`/g)].map(([, name]) => name);
+// The plan command's Claude calls are printed by the plan driver, so the agents
+// it dispatches are the ones the driver prints, less the effort each passes.
+const { PLAN_STEPS, planCalls } = await import("../scripts/plan.mjs");
+const PLAN_SELECTIONS = {
+  draft: [{ purpose: "draft" }, { purpose: "cut" }, { purpose: "revise" }],
+  "review-resend": [{ readers: ["claude"] }, { readers: ["adversary"] }],
+  "spec-writers": [{ specs: ["01-a"] }],
+  "spec-writers-resend": [{ specs: ["01-a"] }]
+};
+const planDriverBases = [...new Set(Object.keys(PLAN_STEPS)
+  .flatMap((kind) => (PLAN_SELECTIONS[kind] ?? [{}]).flatMap((selection) => planCalls(JSON.parse(read("examples", "config.json")), kind, selection)))
+  .map((call) => call.agent.replace(/^tagteam:/, "").slice(0, -(call.effort.length + 1))))];
+const dispatchedAgents = (text, file) => [
+  ...[...text.matchAll(/`tagteam:([a-z-]+)-<effort>`/g)].map(([, name]) => name),
+  ...(file === "plan.md" ? planDriverBases : [])
+];
+
+test("the plan command's dispatched agents are learned from the plan driver: all five of them", () => {
+  assert.deepEqual([...dispatchedAgents(read("commands", "plan.md"), "plan.md")].sort(),
+    ["adversary", "explorer", "plan-drafter", "plan-reviewer", "spec-writer"]);
+});
 
 test("every agent a command dispatches exists, at every effort it may resolve to", () => {
   for (const { file, text } of commands) {
-    for (const name of dispatchedAgents(text)) {
+    for (const name of dispatchedAgents(text, file)) {
       for (const effort of EFFORTS) {
         assert.ok(agentNames.includes(`${name}-${effort}`),
           `${file} dispatches tagteam:${name}, which has no agent file at ${effort} effort`);
@@ -42,7 +61,7 @@ test("every agent a command dispatches exists, at every effort it may resolve to
 test("every agent is declared in the allowed-tools of a command that uses it", () => {
   for (const { file, text } of commands) {
     const allowed = /allowed-tools:(.*)/.exec(text)?.[1] ?? "";
-    for (const name of dispatchedAgents(text)) {
+    for (const name of dispatchedAgents(text, file)) {
       for (const effort of EFFORTS) {
         assert.ok(
           allowed.includes(`Agent(tagteam:${name}-${effort})`),
@@ -811,10 +830,9 @@ test("the plan driver resolves every planning dispatch from the schema's roles a
 // The same guard holds the effort: an effort left off the Agent call does not
 // fail, the agent silently runs at the session's, and the Agent tool sets one
 // only when told to. So the ship command, the skill and the driver must each
-// say to pass it, and none of the four may say the call has no such parameter.
-// `plan.md` is not yet held to the first: its Claude dispatches still select the
-// effort by the agent's name.
-function dispatchRuleProblems(name, text, { effortPassed = true } = {}) {
+// say to pass it, and none of them may say the call has no such parameter. The
+// plan command is held to both now that its Claude calls are printed with one.
+function dispatchRuleProblems(name, text) {
   const problems = [];
   const flat = text.replace(/\s+/g, " ").replace(/" \+ "/g, "");
   const must = (pattern, why) => { if (!pattern.test(flat)) problems.push(`${name} ${why}`); };
@@ -830,7 +848,7 @@ function dispatchRuleProblems(name, text, { effortPassed = true } = {}) {
   never(/returns when every (?:writer|reader|agent) has/i, "still says a message returns when every agent has finished");
   never(/never (?:dispatch in the )?background/i, "still forbids the background");
   never(/no `?effort`? parameter/i, "still says the Agent call has no effort parameter");
-  if (effortPassed) must(/\bpass(?:es)? `effort` on every call\b/, "never says to pass `effort` on the call");
+  must(/\bpass(?:es)? `effort` on every call\b/, "never says to pass `effort` on the call");
   return problems;
 }
 
@@ -838,8 +856,8 @@ test("both commands tell the orchestrator how to dispatch, and it is the driver'
   const ship = read("commands", "ship.md");
   const plan = read("commands", "plan.md");
   const problems = [
-    ["commands/ship.md", ship], ["commands/plan.md", plan, { effortPassed: false }], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
-  ].flatMap(([name, text, options]) => dispatchRuleProblems(name, text, options));
+    ["commands/ship.md", ship], ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
+  ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
   assert.deepEqual(problems, [], problems.join("\n"));
   assert.match(ship, /one message/i);
   assert.match(plan, /one message/i);
@@ -877,7 +895,9 @@ test("the effort guard fails on the driver's instruction and the skill as they r
   const problems = dispatchRuleProblems("SKILL.md", skillBefore + elsewhere);
   assert.ok(problems.some((problem) => /has no effort parameter/.test(problem)), problems.join("\n"));
   assert.ok(problems.some((problem) => /never says to pass `effort`/.test(problem)), problems.join("\n"));
-  // And the plan command, not yet held to passing it, is still held to the second.
-  assert.ok(dispatchRuleProblems("plan.md", "It has no `effort` parameter.", { effortPassed: false })
-    .some((problem) => /has no effort parameter/.test(problem)));
+  // And the plan command as it read before its calls were printed: the effort
+  // carried by the agent's name alone, and never passed.
+  const planBefore = "The model is an argument: pass it to the Agent tool. The effort is carried by the agent's name: "
+    + "every tagteam agent ships as one variant per effort, `tagteam:<agent>-<effort>`.";
+  assert.ok(dispatchRuleProblems("plan.md", planBefore + elsewhere).some((problem) => /never says to pass `effort`/.test(problem)));
 });

@@ -62,16 +62,32 @@ only thing that wakes you, and waiting costs no turns.
 node "$P/scripts/plan.mjs" roles "$R/.tagteam/config.json"
 ```
 
-It prints the model and effort of every planning dispatch — `explore`, `draft`,
+It prints the model and effort of every planning job — `explore`, `draft`,
 `plan-review`, `plan-adversary`, `plan-codex`, `spec-write` — with the `plan`
-override already applied when the configuration has one. The model is an
-argument: pass it to the Agent tool. The effort is carried by the agent's name:
-every tagteam agent ships as one variant per effort, `tagteam:<agent>-<effort>`,
-so `tagteam:plan-drafter-<effort>` below means the drafter variant at the effort
-`roles` printed for `draft`. No unsuffixed agent name exists. The one exception
-is `tagteam:codex-runner`, which runs a prepared Codex command for you: dispatch
-it by that bare name, and pass the `agent`, `model` and `effort` that
-`plan.mjs codex` prints for it, exactly as printed.
+override already applied when the configuration has one. You use it for one
+thing: the `plan-codex` model and effort that step 5's Codex command takes.
+
+Every Claude call is printed for you instead. Before each Claude dispatch, run
+the command for that step, with the kind of set it is recorded as:
+
+```bash
+node "$P/scripts/plan.mjs" dispatch "$R/.tagteam/config.json" --kind <kind> [selector]
+```
+
+It prints `dispatch`, one entry per Agent call, each with an `agent`, a `model`,
+an `effort` and a `description`, and no prompt: what each agent is given is
+written in the step below. Make one Agent call per entry, with `subagent_type`
+set to `agent`, `model` passed when it is not null and omitted when it is,
+`description` as printed, and pass `effort` on every call, exactly as printed.
+Then record the set with the printed descriptions as its labels. A command
+that exits 1 has printed nothing: it names the job whose effort is missing or
+not on the ladder. That is a stop to report, with what it said, and never one
+to work around by choosing an effort yourself.
+
+The one Claude call it does not print is `tagteam:codex-runner`, which runs a
+prepared Codex command for you: dispatch it by that bare name, and pass the
+`agent`, `model` and `effort` that `plan.mjs codex` prints for it, exactly as
+printed.
 
 ## Before anything
 
@@ -128,11 +144,12 @@ Seven steps, and none of them loops.
 
 ## 1 — Orient
 
-Dispatch one `tagteam:explorer-<effort>` at `explore`'s model: how the areas
-this goal touches are built today, which modules own them, what patterns the
-repository already uses, and where the tests for them live. Tell it to write its
-conclusion to `$D/work/exploration.md` and return one line. Label it `Explore
-the repository` and record it as an `explore` set with that file as its output.
+Dispatch the explorer, which runs at the `explore` job's settings, as
+`plan.mjs dispatch … --kind explore` prints it: how the areas this goal touches
+are built today, which modules own them, what patterns the repository already
+uses, and where the tests for them live. Tell it to write its conclusion to
+`$D/work/exploration.md` and return one line. Its printed label is `Explore the
+repository`; record it as an `explore` set with that file as its output.
 That file is read by the drafter and by every spec writer, so it stays out of
 your context: the explorer's arrival prints the command that shows its first
 thirty lines, which is enough to know which questions are worth asking. Read no
@@ -220,13 +237,15 @@ Run this before **every** step from here on. It is one command and it is the
 only thing standing between "the plan was built from what you approved" and a
 claim nobody checked.
 
-Dispatch `tagteam:plan-drafter-<effort>` at `draft`'s model, labelled `Draft
+Dispatch the drafter, which runs at the `draft` job's settings, as
+`plan.mjs dispatch … --kind draft --purpose draft` prints it, labelled `Draft
 the plan`. Give it `$D/goal.md`, `$D/work/exploration.md`, and `$D/plan.md` to
 write, and record it as a `draft` set with `$D/plan.md` as its output; the run
 refuses that record until the explorer's set is in. It returns a path and a byte
 count — do not read the plan. A plan is an index with an 8 KB target and a 12 KB
 ceiling that step 6 enforces; if the byte count it returns is over 12,000,
-re-dispatch it now to cut, before anyone reviews it, as another `draft` set.
+re-dispatch it now to cut, before anyone reviews it, as printed by
+`--kind draft --purpose cut` (labelled `Cut the plan`), as another `draft` set.
 
 ## 5 — Review, once
 
@@ -235,18 +254,20 @@ node "$P/scripts/goal-gate.mjs" verify "$D"
 mkdir -p "$D/work/review"
 node "$P/scripts/plan.mjs" codex --dir "$D/work/review" --goal "$D/goal.md" --plan "$D/plan.md" \
   --cd "$R" --model <plan-codex model> --effort <plan-codex effort> --max-concurrent <maxConcurrentCodex>
+node "$P/scripts/plan.mjs" dispatch "$R/.tagteam/config.json" --kind review
 ```
 
 The second command prepares the Codex plan review and prints the runner dispatch:
-an `agent`, a `model`, an `effort`, a `description` and a `prompt`. Then
-dispatch, **in one message**:
+an `agent`, a `model`, an `effort`, a `description` and a `prompt`. The third
+prints the two Claude readers, the plan reviewer at the `plan-review` job's
+settings and the adversary at the `plan-adversary` job's. Then dispatch, **in
+one message**:
 
-- `tagteam:plan-reviewer-<effort>` at `plan-review`'s model, labelled `Plan
-  review: Claude`, given the goal, the plan and the exploration, writing
-  `$D/work/review/claude.json`
-- `tagteam:adversary-<effort>` at `plan-adversary`'s model, labelled `Plan
-  review: adversary`, pointed at `prompts/plan-adversary.md`, given the same,
-  writing `$D/work/review/adversary.json`
+- the plan reviewer, labelled `Plan review: Claude`, given the goal, the plan
+  and the exploration, writing `$D/work/review/claude.json`
+- the adversary, labelled `Plan review: adversary`, pointed at
+  `prompts/plan-adversary.md`, given the same, writing
+  `$D/work/review/adversary.json`
 - `tagteam:codex-runner` with the printed prompt and `description`, passing the
   printed `agent`, `model` and `effort` as given; it writes
   `$D/work/review/codex.json`
@@ -271,12 +292,15 @@ It refuses until the review set is in. Then it folds the three files into
 line per finding. Exit 1 means a reader produced no usable file — one that
 reported and left nothing counts the same: it names which. Re-dispatch exactly
 that reader once, under the same label, record it alone as a `review-resend`
-set, and run `collect` again when its arrival names it. The run refuses a second
-re-send. Still missing, carry on and say so at step 7.
+set, and run `collect` again when its arrival names it. A Claude reader is
+re-sent as `plan.mjs dispatch … --kind review-resend --reader claude` (or
+`--reader adversary`) prints it, which keeps its label; Codex by running the
+`codex` command above again. The run refuses a second re-send. Still missing,
+carry on and say so at step 7.
 
-**`clean` — nothing blocking or major: go to step 6.** Otherwise dispatch one
-`tagteam:plan-drafter-<effort>` at `draft`'s model, labelled `Answer the plan
-review`, given the goal, the plan, the exploration, `$D/work/review/brief.md`,
+**`clean` — nothing blocking or major: go to step 6.** Otherwise dispatch the
+drafter as `plan.mjs dispatch … --kind response` prints it, labelled `Answer
+the plan review`, given the goal, the plan, the exploration, `$D/work/review/brief.md`,
 and `$D/work/review/response.json` to write, and record it as a `response` set
 with `$D/work/review/response.json` as its output. It revises `plan.md` for the
 findings it accepts and answers every finding in the brief by id — applied,
@@ -288,9 +312,10 @@ node "$P/scripts/plan.mjs" check --dir "$D/work/review"
 
 It refuses until the response set is in. Exit 1 means a blocking or major
 finding has no answer: it names which. Re-dispatch the drafter once for exactly
-those, labelled `Answer the plan review again`, as a `response-resend` set; the
-run refuses a second. Still unanswered, stop and show what it printed. Its
-output lists the rejections and the questions for the owner.
+those, as `--kind response-resend` prints it, labelled `Answer the plan review
+again`, as a `response-resend` set; the run refuses a second. Still unanswered,
+stop and show what it printed. Its output lists the rejections and the
+questions for the owner.
 
 **A finding for the owner** is the most valuable thing the review produces: a
 reader established that the *outcome* is underspecified, or that a decision the
@@ -301,8 +326,9 @@ not decide it yourself.
 
 If their answer changes the goal, they edit `goal.md` or tell you what to write.
 Show them the changed file and run `goal-gate.mjs approve` again — the marker
-records the new hash. Then dispatch the drafter once more with the answers,
-labelled `Revise the plan`, to revise the plan against the goal they read, and
+records the new hash. Then dispatch the drafter once more with the answers, as
+`--kind draft --purpose revise` prints it, labelled `Revise the plan`, to
+revise the plan against the goal they read, and
 record it as a `draft` set with `$D/plan.md` as its output; its arrival names
 step 6. Nothing is re-reviewed:
 the answers are the owner's, and a second panel over them would be spending
@@ -326,11 +352,13 @@ That returns one object per deliverable — id, what it delivers, dependencies,
 user-visibility, and the row verbatim. It is how you dispatch without reading
 `plan.md`. It refuses while any set is still out. It refuses a plan over the
 12 KB ceiling, naming the size: re-dispatch the drafter to cut it to the target,
-labelled `Cut the plan`, as a `draft` set; its arrival runs this again.
+as `--kind draft --purpose cut` prints it, labelled `Cut the plan`, as a `draft`
+set; its arrival runs this again.
 
-Dispatch one `tagteam:spec-writer-<effort>` per deliverable at `spec-write`'s
-model, **all in one message**, each labelled `Write spec <id>` and writing
-exactly `$D/specs/<id>.md`. Give each one the goal path, the plan path, the
+Dispatch one spec writer per deliverable, at the `spec-write` job's settings,
+**all in one message**, as `plan.mjs dispatch … --kind spec-writers` prints
+them with one `--spec <id>` per deliverable: each labelled `Write spec <id>` and
+writing exactly `$D/specs/<id>.md`. Give each one the goal path, the plan path, the
 exploration path, its own row, and the configured default lens set so it knows
 what it is naming exceptions to. Record them all as one `spec-writers` set, one
 `--agent "Write spec <id>" "$D/specs/<id>.md"` each.
@@ -340,8 +368,9 @@ The last arrival names the validation:
 refuses until the spec writers' set is in. Then it checks front matter, refuses
 a spec over the 18 KB ceiling by name, resolves each spec's lenses against the
 default set, and returns dependency order. Fix what it reports by re-dispatching
-that spec's writer with what it said, labelled `Write spec <id> again`, as a
-`spec-writers-resend` set of its own; its arrival runs the validation again.
+that spec's writer with what it said, as `--kind spec-writers-resend --spec <id>`
+prints it, labelled `Write spec <id> again`, as a `spec-writers-resend` set of
+its own; its arrival runs the validation again.
 
 **The reviewer selection lives in the spec front matter**, because that is what
 `specs.mjs` and shipping actually read. There is no separate manifest to edit.

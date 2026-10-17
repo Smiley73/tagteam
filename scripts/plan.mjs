@@ -20,6 +20,16 @@
 // revision brief by hand, which moved tens of kilobytes through the one context
 // the whole run has to fit in.
 //
+// Every Claude call the plan sends out is printed here too (`dispatch`): agent,
+// model, effort and label, for the step about to be dispatched, keyed on the
+// kind of set it is recorded as. The wording of each prompt stays in
+// `commands/plan.md`; what the call runs at does not, because a model left to
+// compose an agent name and an effort from printed settings sent a share of
+// them out with none. A missing or misspelled effort is refused when the call is
+// printed, by the job's name, with the check the ship driver uses: the
+// configuration is validated once, at the start, and a plan resumed later
+// re-reads a file that may have been edited since.
+//
 // Every agent the plan sends out is recorded as a set (`record`, through
 // `lib/plan-sets.mjs`), each arrival goes through the same arrival command the
 // ship prints, and `collect` and `check` refuse, changing nothing, until the set
@@ -32,6 +42,7 @@ import { validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { arriveCommand } from "./dispatch-set.mjs";
+import { effortRefusal } from "./lib/effort-ladder.mjs";
 import {
   HOW_TO_RECORD,
   HOW_TO_WAIT,
@@ -80,6 +91,121 @@ export function resolvePlanRoles(config) {
     };
   }
   return { source: config?.plan ? "plan" : "base", jobs };
+}
+
+// A Claude call's agent, model and effort, all three off the one job, composed
+// as `ship.mjs` composes them: the variant the name selects and the effort
+// passed on the call cannot disagree.
+const agent = (base, job) => ({ agent: `tagteam:${base}-${job.effort}`, model: job.model, effort: job.effort });
+
+// What the drafter is sent for under a `draft` set, and the label of each. A
+// cut is the same job whether step 4 or step 6 asks for it, so it has one label.
+export const DRAFTER_PURPOSES = { draft: "Draft the plan", cut: "Cut the plan", revise: "Revise the plan" };
+
+// The review's two Claude readers. Codex, the third, is prepared and printed by
+// `codex`, which a re-send of it runs again.
+const CLAUDE_READERS = {
+  claude: { base: "plan-reviewer", job: "plan-review", description: "Plan review: Claude" },
+  adversary: { base: "adversary", job: "plan-adversary", description: "Plan review: adversary" }
+};
+
+const drafter = (description) => [{ base: "plan-drafter", job: "draft", description }];
+const writers = (specs, suffix) => specs.map((id) => ({ base: "spec-writer", job: "spec-write", description: `Write spec ${id}${suffix}` }));
+
+// The Claude calls each kind of set sends, and the one selector a kind takes to
+// choose among them. The kinds are `KINDS`, so the step a call is printed for
+// and the set it is recorded as are named alike. Every label maps back to one
+// kind and one job: a reader re-sent keeps its own label, and a spec writer's
+// re-send says `again`.
+export const PLAN_STEPS = {
+  explore: { calls: () => [{ base: "explorer", job: "explore", description: "Explore the repository" }] },
+  draft: { takes: "purpose", calls: ({ purpose }) => drafter(DRAFTER_PURPOSES[purpose]) },
+  review: { calls: () => Object.values(CLAUDE_READERS) },
+  "review-resend": { takes: "readers", calls: ({ readers }) => readers.map((reader) => CLAUDE_READERS[reader]) },
+  response: { calls: () => drafter("Answer the plan review") },
+  "response-resend": { calls: () => drafter("Answer the plan review again") },
+  "spec-writers": { takes: "specs", calls: ({ specs }) => writers(specs, "") },
+  "spec-writers-resend": { takes: "specs", calls: ({ specs }) => writers(specs, " again") }
+};
+
+const SPEC_ID = /^[0-9]{2}-[a-z0-9][a-z0-9-]*$/;
+
+/** Why `selection` does not choose calls of `kind`, or null when it does. */
+function selectionProblem(kind, { purpose, readers = [], specs = [] } = {}) {
+  const step = PLAN_STEPS[kind];
+  if (!step) return `--kind must be one of ${Object.keys(PLAN_STEPS).join(", ")}; got ${JSON.stringify(kind)}`;
+  const given = { purpose: purpose !== undefined, readers: readers.length > 0, specs: specs.length > 0 };
+  const flag = { purpose: "--purpose", readers: "--reader", specs: "--spec" };
+  for (const [key, present] of Object.entries(given)) {
+    if (present && step.takes !== key) return `a ${kind} step does not take ${flag[key]}`;
+  }
+  if (step.takes === "purpose" && !Object.hasOwn(DRAFTER_PURPOSES, purpose ?? "")) {
+    return `a draft step needs --purpose, one of ${Object.keys(DRAFTER_PURPOSES).join(", ")}`;
+  }
+  if (step.takes === "readers") {
+    if (readers.length === 0) return "a review-resend step needs --reader, once per reader re-sent";
+    if (readers.includes("codex")) return "Codex is re-sent by running `plan.mjs codex` again, which prints its runner; --reader takes claude or adversary";
+    const unknown = readers.find((reader) => !Object.hasOwn(CLAUDE_READERS, reader));
+    if (unknown) return `--reader takes claude or adversary; got ${JSON.stringify(unknown)}`;
+    if (new Set(readers).size !== readers.length) return "a review-resend step names the same reader twice";
+  }
+  if (step.takes === "specs") {
+    if (specs.length === 0) return `a ${kind} step needs --spec, once per spec id`;
+    const bad = specs.find((id) => !SPEC_ID.test(id));
+    if (bad) return `--spec takes an NN-slug spec id; got ${JSON.stringify(bad)}`;
+    if (new Set(specs).size !== specs.length) return `a ${kind} step names the same spec twice`;
+  }
+  return null;
+}
+
+/**
+ * The Claude calls one step of a plan sends, each with the job it runs under,
+ * its agent, model, effort and label, resolved from `config` alone and in the
+ * order the selection gives them. Nothing is refused here: `planDispatch` is
+ * what refuses an effort, and this is what a recorded label is resolved back
+ * through.
+ */
+export function planCalls(config, kind, selection = {}) {
+  const problem = selectionProblem(kind, selection);
+  if (problem) throw new Error(problem);
+  const { jobs } = resolvePlanRoles(config);
+  return PLAN_STEPS[kind].calls({ readers: [], specs: [], ...selection })
+    .map(({ base, job, description }) => ({ job, ...agent(base, jobs[job]), description }));
+}
+
+/**
+ * The one Claude call a label recorded under `kind` was sent as, or null when
+ * no Claude call of that kind carries it — the Codex runner's label among them.
+ */
+export function planCallForLabel(config, kind, label) {
+  const step = PLAN_STEPS[kind];
+  if (!step) return null;
+  const selections = {
+    purpose: () => Object.keys(DRAFTER_PURPOSES).map((purpose) => ({ purpose })),
+    readers: () => Object.keys(CLAUDE_READERS).map((reader) => ({ readers: [reader] })),
+    specs: () => {
+      const id = /^Write spec (\S+?)(?: again)?$/.exec(label)?.[1];
+      return id && SPEC_ID.test(id) ? [{ specs: [id] }] : [];
+    }
+  };
+  for (const selection of step.takes ? selections[step.takes]() : [{}]) {
+    const found = planCalls(config, kind, selection).find((call) => call.description === label);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * The calls `dispatch` prints for one step: agent, model, effort and label, and
+ * no prompt. Every call is checked before any is returned, so a step with one
+ * effort missing prints nothing and no half of a review goes out. A refusal
+ * exits 1 and names the job, as the ship driver's does.
+ */
+export function planDispatch(config, kind, selection = {}) {
+  const calls = planCalls(config, kind, selection);
+  const refusals = calls.map((call) => effortRefusal(call, call.job)).filter(Boolean);
+  if (refusals.length > 0) throw new Error(refusals.join("\n"));
+  return calls.map(({ job, ...call }) => call);
 }
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
@@ -203,16 +329,23 @@ export function checkResponse({ findings, response, schemaPath = path.join(SCHEM
 }
 
 const USAGE = `usage:
-  plan.mjs roles   <config.json>
-  plan.mjs codex   --plugin <root> --dir <work/review> --goal <goal.md> --plan <plan.md> --cd <repo>
-                   --model <codex model> --effort <codex effort> --max-concurrent <n>
-  plan.mjs record  --plan <plan-dir> --kind <kind> --agent <label> <output> [--agent <label> <output>]...
-  plan.mjs resume  --plan <plan-dir> [--run-gone | --run-live]
-  plan.mjs collect --dir <work/review>
-  plan.mjs check   --dir <work/review>
+  plan.mjs roles    <config.json>
+  plan.mjs dispatch <config.json> --kind <kind> [--purpose ${Object.keys(DRAFTER_PURPOSES).join("|")}]
+                    [--reader claude|adversary]... [--spec <id>]...
+  plan.mjs codex    --plugin <root> --dir <work/review> --goal <goal.md> --plan <plan.md> --cd <repo>
+                    --model <codex model> --effort <codex effort> --max-concurrent <n>
+  plan.mjs record   --plan <plan-dir> --kind <kind> --agent <label> <output> [--agent <label> <output>]...
+  plan.mjs resume   --plan <plan-dir> [--run-gone | --run-live]
+  plan.mjs collect  --dir <work/review>
+  plan.mjs check    --dir <work/review>
 
   \`roles\` prints the model and effort of every planning dispatch, with the plan
-  override applied when there is one. \`codex\` writes the Codex plan review as a
+  override applied when there is one; the Codex command takes its pair from it.
+  \`dispatch\` prints the Claude calls of one step — agent, model, effort and
+  label — for the kind of set they are recorded as: --purpose chooses what a
+  draft is for, --reader which reader a review-resend re-sends, --spec each spec
+  a spec-writers or spec-writers-resend step writes. It exits 1, printing
+  nothing, when an effort is missing or not on the ladder. \`codex\` writes the Codex plan review as a
   command for the codex-runner agent and prints the dispatch. \`record\` records
   the set just dispatched — kind is one of ${KINDS.join(", ")} —
   and prints the command that records each arrival. \`resume\` applies the
@@ -255,6 +388,25 @@ function recordFlags(argv) {
     options[key.slice(2)] = value;
   }
   if (!options.plan || !options.kind) throw new PlanSetError(`record needs --plan and --kind\n${USAGE}`);
+  return options;
+}
+
+// `dispatch` takes the configuration the way `roles` does, then the step: a
+// kind, and the selector that kind takes. --reader and --spec repeat.
+function dispatchFlags(argv) {
+  const [config, ...rest] = argv;
+  if (!config || config.startsWith("--")) throw new Error(`dispatch needs the configuration path first\n${USAGE}`);
+  const options = { config, readers: [], specs: [] };
+  for (let index = 0; index < rest.length; index += 1) {
+    const key = rest[index];
+    const value = rest[++index];
+    if (!["--kind", "--purpose", "--reader", "--spec"].includes(key)) throw new Error(`dispatch does not take ${key}\n${USAGE}`);
+    if (value === undefined) throw new Error(`${key} requires a value\n${USAGE}`);
+    if (key === "--reader") options.readers.push(value);
+    else if (key === "--spec") options.specs.push(value);
+    else options[key.slice(2)] = value;
+  }
+  if (!options.kind) throw new Error(`dispatch needs --kind\n${USAGE}`);
   return options;
 }
 
@@ -303,6 +455,11 @@ async function main() {
     if (action === "roles") {
       if (!rest[0]) throw new Error(USAGE);
       process.stdout.write(`${JSON.stringify(resolvePlanRoles(readJson(rest[0])), null, 2)}\n`);
+      return;
+    }
+    if (action === "dispatch") {
+      const { config, kind, ...selection } = dispatchFlags(rest);
+      print({ kind, dispatch: planDispatch(readJson(config), kind, selection) });
       return;
     }
     if (action === "codex") {
