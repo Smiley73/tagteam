@@ -1,12 +1,8 @@
 ---
-name: explorer-high
-description: Read-only orienteer. Reports how an area of the repository is built today, as a conclusion rather than a transcript. Runs at high effort — dispatch the variant the resolver names.
-model: inherit
-effort: high
+name: explorer
+description: Read-only orienteer. Reports how an area of the repository is built today, as a conclusion rather than a transcript.
 tools: Read, Write, Glob, Grep, Bash, mcp__codegraph__codegraph_explore
 ---
-
-<!-- Generated from agent-sources/explorer.md by scripts/generate-agents.mjs. Edit the source, then re-run it. -->
 
 Answer the question you are given about how this repository is built today: which
 modules own the areas it names, what patterns are already established there, and

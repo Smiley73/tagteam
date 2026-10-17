@@ -24,9 +24,9 @@ const planDriver = read("scripts", "plan.mjs");
 const everything = [...commands.map((entry) => entry.text), skill].join("\n");
 
 const agentNames = fs.readdirSync(path.join(root, "agents")).map((file) => file.replace(/\.md$/, ""));
-const EFFORTS = JSON.parse(read("schemas", "config.schema.json")).$defs.claudeEffort.enum;
 // The plan command's Claude calls are printed by the plan driver, so the agents
-// it dispatches are the ones the driver prints, less the effort each passes.
+// it dispatches are the ones the driver prints. Which agents each command may
+// dispatch, and that each is granted, is `role-agents.test.mjs`.
 const { PLAN_STEPS, planCalls } = await import("../scripts/plan.mjs");
 const PLAN_SELECTIONS = {
   draft: [{ purpose: "draft" }, { purpose: "cut" }, { purpose: "revise" }],
@@ -34,42 +34,12 @@ const PLAN_SELECTIONS = {
   "spec-writers": [{ specs: ["01-a"] }],
   "spec-writers-resend": [{ specs: ["01-a"] }]
 };
-const planDriverBases = [...new Set(Object.keys(PLAN_STEPS)
+const planDriverAgents = [...new Set(Object.keys(PLAN_STEPS)
   .flatMap((kind) => (PLAN_SELECTIONS[kind] ?? [{}]).flatMap((selection) => planCalls(JSON.parse(read("examples", "config.json")), kind, selection)))
-  .map((call) => call.agent.replace(/^tagteam:/, "").slice(0, -(call.effort.length + 1))))];
-const dispatchedAgents = (text, file) => [
-  ...[...text.matchAll(/`tagteam:([a-z-]+)-<effort>`/g)].map(([, name]) => name),
-  ...(file === "plan.md" ? planDriverBases : [])
-];
+  .map((call) => call.agent.replace(/^tagteam:/, "")))];
 
 test("the plan command's dispatched agents are learned from the plan driver: all five of them", () => {
-  assert.deepEqual([...dispatchedAgents(read("commands", "plan.md"), "plan.md")].sort(),
-    ["adversary", "explorer", "plan-drafter", "plan-reviewer", "spec-writer"]);
-});
-
-test("every agent a command dispatches exists, at every effort it may resolve to", () => {
-  for (const { file, text } of commands) {
-    for (const name of dispatchedAgents(text, file)) {
-      for (const effort of EFFORTS) {
-        assert.ok(agentNames.includes(`${name}-${effort}`),
-          `${file} dispatches tagteam:${name}, which has no agent file at ${effort} effort`);
-      }
-    }
-  }
-});
-
-test("every agent is declared in the allowed-tools of a command that uses it", () => {
-  for (const { file, text } of commands) {
-    const allowed = /allowed-tools:(.*)/.exec(text)?.[1] ?? "";
-    for (const name of dispatchedAgents(text, file)) {
-      for (const effort of EFFORTS) {
-        assert.ok(
-          allowed.includes(`Agent(tagteam:${name}-${effort})`),
-          `${file} dispatches tagteam:${name} but does not allow Agent(tagteam:${name}-${effort}) — the dispatch would be refused mid-run`
-        );
-      }
-    }
-  }
+  assert.deepEqual([...planDriverAgents].sort(), ["adversary", "explorer", "plan-drafter", "plan-reviewer", "spec-writer"]);
 });
 
 test("every agent's frontmatter name matches its file name", () => {
@@ -86,6 +56,11 @@ test("every prompt an agent, a command or a driver points at exists", () => {
     { file: "scripts/ship.mjs", text: shipDriver },
     { file: "scripts/plan.mjs", text: planDriver }
   ];
+  // One file per role, and every role whose brief is a prompt file names it:
+  // a walk that missed an agent would pass on the prompts it never read.
+  const pointing = agentNames.filter((name) => /prompts\/[a-z0-9/-]+\.md/.test(read("agents", `${name}.md`)));
+  assert.deepEqual(pointing.sort(), ["adversary", "fixer", "implementer", "plan-drafter", "plan-reviewer", "reviewer", "spec-writer"],
+    "the agents that point at a prompt are not the roles that have one");
   for (const { file, text } of sources) {
     for (const [, prompt] of text.matchAll(/prompts\/([a-z0-9/-]+\.md)/g)) {
       if (prompt.includes("<lens>")) continue;
@@ -133,7 +108,7 @@ test("the repository brief directory is spelled the same in every file that name
   const { REPO_LENS_DIR } = await import("../scripts/lib/lenses.mjs");
   assert.equal(REPO_LENS_DIR, ".tagteam/lenses");
   const naming = [
-    ["agent-sources", "reviewer.md"],
+    ["agents", "reviewer.md"],
     ["commands", "configure.md"],
     ["commands", "plan.md"],
     ["skills", "tagteam", "SKILL.md"],
@@ -336,7 +311,7 @@ test("only the driver's snapshot step reads HEAD, and no command file does", () 
 // told there is exactly one rations its findings against a number nobody chose.
 test("no brief describing a fix round claims there is only one", () => {
   const singular = /\b(the|one|a single) fix round\b/i;
-  for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agent-sources/fixer.md"]) {
+  for (const file of ["prompts/fix.md", "prompts/review.md", "prompts/codex/review.md", "agents/fixer.md"]) {
     const text = read(...file.split("/")).replace(/\s+/g, " ");
     assert.doesNotMatch(text, singular, `${file} still tells a model there is exactly one fix round`);
   }
@@ -494,9 +469,9 @@ test("the ship command file and the driver agree that an approval clears an appr
 test("every reporting brief names the schema its report is validated against", () => {
   const cases = [
     ["prompts/implement.md", "schemas/implement-report.schema.json"],
-    ["agent-sources/implementer.md", "schemas/implement-report.schema.json"],
+    ["agents/implementer.md", "schemas/implement-report.schema.json"],
     ["prompts/fix.md", "schemas/fix-report.schema.json"],
-    ["agent-sources/fixer.md", "schemas/fix-report.schema.json"],
+    ["agents/fixer.md", "schemas/fix-report.schema.json"],
     ["prompts/plan-draft.md", "schemas/plan-response.schema.json"]
   ];
   for (const [file, schema] of cases) {
@@ -891,13 +866,13 @@ test("the effort guard fails on the driver's instruction and the skill as they r
   assert.ok(driverProblems.some((problem) => /never says to pass `effort`/.test(problem)), driverProblems.join("\n"));
   const skillBefore = "**The model is an argument; the effort is a name.** The Agent tool takes a\n`model` parameter, so a resolved "
     + "model is passed to it directly. It has no\n`effort` parameter, so a resolved effort is carried by agent frontmatter, and the\n"
-    + "plugin ships every agent once per level of the ladder, named for it:\n`tagteam:fixer-low` through `tagteam:fixer-max`.";
+    + "plugin ships every agent once per level of the ladder, named for it.";
   const problems = dispatchRuleProblems("SKILL.md", skillBefore + elsewhere);
   assert.ok(problems.some((problem) => /has no effort parameter/.test(problem)), problems.join("\n"));
   assert.ok(problems.some((problem) => /never says to pass `effort`/.test(problem)), problems.join("\n"));
   // And the plan command as it read before its calls were printed: the effort
   // carried by the agent's name alone, and never passed.
   const planBefore = "The model is an argument: pass it to the Agent tool. The effort is carried by the agent's name: "
-    + "every tagteam agent ships as one variant per effort, `tagteam:<agent>-<effort>`.";
+    + "every tagteam agent ships as one variant per effort.";
   assert.ok(dispatchRuleProblems("plan.md", planBefore + elsewhere).some((problem) => /never says to pass `effort`/.test(problem)));
 });

@@ -215,11 +215,11 @@ const record = (ctx, id, gate, oid, file) => node("gates.mjs", ["record", stateP
 
 // --- dispatch builders -----------------------------------------------------
 
-// A Claude entry's agent, model and effort, all three off the one job, so the
-// variant the name selects and the effort passed on the call cannot disagree.
+// A Claude entry's agent, model and effort. There is one agent per role, and no
+// agent file pins a model or an effort, so both travel on the call, off the job.
 // Two jobs can share an agent — the fresh adversary and the adversary's
 // re-check — and each entry takes its effort from its own job, never the agent.
-const agent = (base, job) => ({ agent: `tagteam:${base}-${job.effort}`, model: job.model, effort: job.effort });
+const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effort: job.effort });
 const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ? " (raised: escalation is in force)" : ""}`;
 
 function implementerDispatch(ctx, spec, job) {

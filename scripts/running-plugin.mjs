@@ -50,13 +50,11 @@ const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 //
 // Out, and meant to stay out: `.claude-plugin/` — identity, reported as a
 // version on its own line rather than as a differing file, so a version bump
-// does not appear twice. `test/`, `examples/`, `agent-sources/`, `README.md`,
-// `package.json`, `LICENSE` — shipped in the copy and never executed by a run,
-// and `agent-sources/` in particular generates `agents/`, which is the copy that
-// executes. `.tagteam/`, `.codegraph/`, `.claude/`, `.plan/`, `.in_use`,
-// `.git/`, `node_modules/` — machine state a copy-based install carries by
-// construction and differs on against every working tree, whatever anyone
-// edited.
+// does not appear twice. `test/`, `examples/`, `README.md`, `package.json`,
+// `LICENSE` — shipped in the copy and never executed by a run. `.tagteam/`,
+// `.codegraph/`, `.claude/`, `.plan/`, `.in_use`, `.git/`, `node_modules/` —
+// machine state a copy-based install carries by construction and differs on
+// against every working tree, whatever anyone edited.
 export const EXECUTED_ROOTS = ["agents", "commands", "prompts", "schemas", "scripts", "skills"];
 
 // A `.claude-plugin/plugin.json`, and — when there is none to be had — whether

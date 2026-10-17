@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET, lastJson } from "../scripts/ship.mjs";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
+import { EFFORT_LADDER } from "../scripts/lib/effort-ladder.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SHIP = path.join(root, "scripts", "ship.mjs");
@@ -99,17 +100,17 @@ function arriveAll(result, env = {}) {
   return recorded;
 }
 
-// The effort an entry is printed with and, on a Claude entry, that the variant
-// its name selects is the same one, so the name and the passed effort agree.
-// The runner carries its own pair, which no configuration reaches.
+// The effort an entry is printed with. There is one agent per role, so the
+// effort travels on the call alone: a name carrying one would be an agent that
+// does not exist. The runner carries its own pair, which no configuration reaches.
 function assertEffort(entry, effort, why) {
   assert.equal(entry.effort, effort, `${entry.description}: ${why}`);
   if (entry.agent === "tagteam:codex-runner") {
     assert.deepEqual([entry.model, entry.effort], ["haiku", "low"], `${entry.description}: the runner runs at its own pair`);
     return;
   }
-  assert.equal(entry.agent.slice(entry.agent.lastIndexOf("-") + 1), entry.effort,
-    `${entry.description}: ${entry.agent} names a different effort than the ${entry.effort} it passes`);
+  assert.ok(!EFFORT_LADDER.some((level) => entry.agent.endsWith(`-${level}`)),
+    `${entry.description}: ${entry.agent} names an effort; the effort is passed on the call`);
 }
 
 const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
@@ -135,7 +136,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   const begin = ship("begin", plan, ["--spec", "01-a"]);
   assert.equal(begin.status, 0, begin.stderr);
   const [implementer] = begin.json.dispatch;
-  assert.equal(implementer.agent, "tagteam:implementer-high", "the implementer runs at effort.implementer");
+  assert.equal(implementer.agent, "tagteam:implementer", "the implementer is the implementer agent");
   assert.equal(implementer.model, "sonnet", "the implementer runs the worker model");
   assertEffort(implementer, "high", "the implementer passes effort.implementer");
   assert.match(implementer.prompt, /^Job: implementer/);
@@ -162,8 +163,8 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   const panel = ship("panel", plan, ["--spec", "01-a"]);
   assert.equal(panel.status, 0, panel.stderr);
   const agents = panel.json.dispatch.map((entry) => entry.agent);
-  assert.deepEqual(agents, ["tagteam:reviewer-medium", "tagteam:reviewer-medium", "tagteam:codex-runner"],
-    "one reviewer per default lens at effort.reviewer, plus the Codex runner");
+  assert.deepEqual(agents, ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"],
+    "one reviewer per default lens, plus the Codex runner");
   assert.equal(panel.json.dispatch[2].model, "haiku", "the runner's model is its own, not the configured Codex model");
   assert.equal(panel.json.dispatch[2].effort, "low", "the runner's effort is its own, not the configured Codex effort");
   for (const reviewer of panel.json.dispatch.slice(0, 2)) assertEffort(reviewer, "medium", "a reviewer passes effort.reviewer");
@@ -187,7 +188,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   assert.match(collect.json.next, /recheck/);
 
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
-  assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary-high"], "nothing to re-check: the adversary alone");
+  assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary"], "nothing to re-check: the adversary alone");
   assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
 
@@ -226,7 +227,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
 
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   assert.equal(fix.status, 0, fix.stderr);
-  assert.equal(fix.json.dispatch[0].agent, "tagteam:fixer-high");
+  assert.equal(fix.json.dispatch[0].agent, "tagteam:fixer");
   assertEffort(fix.json.dispatch[0], "high", "the fixer passes effort.fixer");
   assert.match(fix.json.dispatch[0].prompt, /to-fix\.json/, "the first fix of a cycle gets the panel's brief");
   assert.match(fix.json.say[0], /Fix round 1 of the 2/);
@@ -249,7 +250,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
   assert.equal(recheck.status, 0, recheck.stderr);
   const dispatched = recheck.json.dispatch.map((entry) => entry.agent);
-  assert.deepEqual(dispatched, ["tagteam:adversary-high", "tagteam:reviewer-low"],
+  assert.deepEqual(dispatched, ["tagteam:adversary", "tagteam:reviewer"],
     "after the first fix: the fresh adversary and a re-check by the one lens that raised something, at effort.recheck — no panel");
   assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
   assertEffort(recheck.json.dispatch[1], "low", "a lens re-check passes effort.recheck");
@@ -590,7 +591,8 @@ test("a finding about the pull request never reaches the fixer, spends no fix ro
   write(body, "## Summary\n\nAdds sub.\n");
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
   assert.equal(recheck.status, 0, recheck.stderr);
-  assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer-low"], "the raising lens alone: no fresh adversary pass over an unchanged diff");
+  assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer"], "the raising lens alone: no fresh adversary pass over an unchanged diff");
+  assertEffort(recheck.json.dispatch[0], "low", "a lens re-check passes effort.recheck");
   assert.match(recheck.json.dispatch[0].prompt, /No fixer ran: these findings are about the pull request/);
   assert.match(recheck.json.dispatch[0].prompt, /Pull request body about to be published, which replaces the live body at the next publish: \S*01-a\/pr-body\.md/);
   assert.match(recheck.json.say.join("\n"), /No fresh adversary pass[\s\S]*judged against its body/);
@@ -852,7 +854,9 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
   assert.match(verified.json.next, /recheck/, "the first fix of the cycle still goes to the re-check");
   const again = ship("recheck", plan, ["--spec", "01-a"]);
   assert.equal(again.status, 0, again.stderr);
-  assert.deepEqual(again.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary-high", "tagteam:reviewer-low"]);
+  assert.deepEqual(again.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary", "tagteam:reviewer"]);
+  assertEffort(again.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
+  assertEffort(again.json.dispatch[1], "low", "a lens re-check passes effort.recheck");
   assert.doesNotMatch(again.json.dispatch[1].prompt, /Pull request #/, "no pull request is recorded here, so none is handed over");
   write(outputOf(again.json.dispatch[0]), findings("adversary", second));
   write(outputOf(again.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "resolved outside the diff" }] });
@@ -973,7 +977,8 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   const redesign = run("redesign");
   assert.equal(redesign.json.dispatch.length, 1);
   const [implementer] = redesign.json.dispatch;
-  assert.equal(implementer.agent, "tagteam:implementer-high", "a redesign is an implementer at effort.implementer");
+  assert.equal(implementer.agent, "tagteam:implementer", "a redesign is an implementer");
+  assertEffort(implementer, "high", "a redesign passes effort.implementer");
   assert.equal(implementer.model, "sonnet");
   assert.match(implementer.prompt, /^Job: implementer\n/);
   assert.match(implementer.prompt, /This is a redesign/);
@@ -1712,7 +1717,8 @@ test("a redesign answered at settle goes to the whole panel", () => {
   assert.equal(run("snapshot").json.round, 5);
   assert.match(run("verify").json.next, /panel/, "round 4 is settled, so the rewrite gets the whole panel");
   const panel = run("panel");
-  assert.deepEqual(panel.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer-medium", "tagteam:reviewer-medium", "tagteam:codex-runner"]);
+  assert.deepEqual(panel.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"]);
+  for (const reviewer of panel.json.dispatch.slice(0, 2)) assertEffort(reviewer, "medium", "a reviewer passes effort.reviewer");
   assert.equal(state().fixRoundsUsed, 4);
 });
 

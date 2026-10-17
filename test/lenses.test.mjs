@@ -69,7 +69,7 @@ test("a lens nothing calibrates resolves to nothing rather than to a guess", () 
 });
 
 test("every brief path is absolute, because the reviewer reads it with a tool that requires one", () => {
-  // `agent-sources/reviewer.md` grants Read, Write, Glob and Grep and no Bash,
+  // `agents/reviewer.md` grants Read, Write, Glob and Grep and no Bash,
   // and Read takes an absolute path. A repository-relative brief path would be
   // unreadable by the one agent that needs it.
   const repo = repoWith({ "financial.md": brief("financial") });
@@ -159,7 +159,7 @@ test("a name no roster could hold is passed over, and a reserved role is named",
 test("the lens name pattern comes from the schema rather than a copy of it", () => {
   // A fifth copy of this regex is a fifth place to update. The schema already
   // decides what a roster may hold, and this is the same idiom
-  // generate-agents.mjs uses to read the effort ladder out of it.
+  // effort-ladder.mjs uses to read the effort ladder out of it.
   const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.schema.json"), "utf8"));
   assert.equal(LENS_NAME.source, schema.properties.reviewers.properties.roster.items.pattern);
 });

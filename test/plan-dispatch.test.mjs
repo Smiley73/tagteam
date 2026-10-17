@@ -45,7 +45,7 @@ function dispatch(config, ...args) {
   return { ...result, json };
 }
 
-const call = (base, model, effort, description) => ({ agent: `tagteam:${base}-${effort}`, model, effort, description });
+const call = (base, model, effort, description) => ({ agent: `tagteam:${base}`, model, effort, description });
 
 // Every step, its selector, and the calls it prints at `planner`/`adversary`.
 function expected(model, planner, adversary) {
@@ -182,7 +182,8 @@ test("plan.md points every Claude dispatch at the command and composes no name o
       }
     }
   }
-  for (const gone of ["carried by the agent's name", "`tagteam:<agent>-<effort>`", "-<effort>`"]) {
+  // A per-effort placeholder anywhere is `role-agents.test.mjs`'s scan.
+  for (const gone of ["carried by the agent's name"]) {
     assert.ok(!plan.includes(gone), `plan.md still composes an agent name from an effort: ${gone}`);
   }
   assert.match(flat, /pass `effort` on every call, exactly as printed/);
