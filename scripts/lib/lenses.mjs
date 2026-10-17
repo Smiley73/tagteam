@@ -50,7 +50,7 @@ export const RESERVED_ROLES = ["adversary", "codex"];
 
 // The shape a lens name may take, read out of the schema that already decides
 // it rather than written here a second time — the same reason
-// `generate-agents.mjs` reads the effort ladder out of the schema. A name this
+// `effort-ladder.mjs` reads the effort ladder out of the schema. A name this
 // rejects could not have reached a roster, so a file carrying one is not a lens
 // anybody could select and is passed over in silence.
 function lensNamePattern() {

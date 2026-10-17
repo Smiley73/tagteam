@@ -93,10 +93,10 @@ export function resolvePlanRoles(config) {
   return { source: config?.plan ? "plan" : "base", jobs };
 }
 
-// A Claude call's agent, model and effort, all three off the one job, composed
-// as `ship.mjs` composes them: the variant the name selects and the effort
-// passed on the call cannot disagree.
-const agent = (base, job) => ({ agent: `tagteam:${base}-${job.effort}`, model: job.model, effort: job.effort });
+// A Claude call's agent, model and effort, composed as `ship.mjs` composes
+// them: one agent per role, with the model and the effort off the job and both
+// passed on the call.
+const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effort: job.effort });
 
 // What the drafter is sent for under a `draft` set, and the label of each. A
 // cut is the same job whether step 4 or step 6 asks for it, so it has one label.

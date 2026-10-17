@@ -1,7 +1,7 @@
 ---
 description: Turn a goal into a reviewed plan and a set of implementable spec files
 argument-hint: <goal, however vague> [--resume <slug>]
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:explorer-low), Agent(tagteam:explorer-medium), Agent(tagteam:explorer-high), Agent(tagteam:explorer-xhigh), Agent(tagteam:explorer-max), Agent(tagteam:plan-drafter-low), Agent(tagteam:plan-drafter-medium), Agent(tagteam:plan-drafter-high), Agent(tagteam:plan-drafter-xhigh), Agent(tagteam:plan-drafter-max), Agent(tagteam:plan-reviewer-low), Agent(tagteam:plan-reviewer-medium), Agent(tagteam:plan-reviewer-high), Agent(tagteam:plan-reviewer-xhigh), Agent(tagteam:plan-reviewer-max), Agent(tagteam:adversary-low), Agent(tagteam:adversary-medium), Agent(tagteam:adversary-high), Agent(tagteam:adversary-xhigh), Agent(tagteam:adversary-max), Agent(tagteam:spec-writer-low), Agent(tagteam:spec-writer-medium), Agent(tagteam:spec-writer-high), Agent(tagteam:spec-writer-xhigh), Agent(tagteam:spec-writer-max), Agent(tagteam:codex-runner)
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:explorer), Agent(tagteam:plan-drafter), Agent(tagteam:plan-reviewer), Agent(tagteam:adversary), Agent(tagteam:spec-writer), Agent(tagteam:codex-runner)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is

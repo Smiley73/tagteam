@@ -1,7 +1,7 @@
 ---
 description: Implement, review, and merge an approved plan one spec at a time
 argument-hint: <plan-dir>
-allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:implementer-low), Agent(tagteam:implementer-medium), Agent(tagteam:implementer-high), Agent(tagteam:implementer-xhigh), Agent(tagteam:implementer-max), Agent(tagteam:reviewer-low), Agent(tagteam:reviewer-medium), Agent(tagteam:reviewer-high), Agent(tagteam:reviewer-xhigh), Agent(tagteam:reviewer-max), Agent(tagteam:adversary-low), Agent(tagteam:adversary-medium), Agent(tagteam:adversary-high), Agent(tagteam:adversary-xhigh), Agent(tagteam:adversary-max), Agent(tagteam:fixer-low), Agent(tagteam:fixer-medium), Agent(tagteam:fixer-high), Agent(tagteam:fixer-xhigh), Agent(tagteam:fixer-max), Agent(tagteam:codex-runner)
+allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer), Agent(tagteam:codex-runner)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is

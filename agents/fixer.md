@@ -1,12 +1,8 @@
 ---
-name: fixer-max
-description: Applies a supplied set of findings inside an isolated worktree, and nothing else. Runs at max effort — dispatch the variant the resolver names.
-model: inherit
-effort: max
+name: fixer
+description: Applies a supplied set of findings inside an isolated worktree, and nothing else.
 tools: Read, Write, Edit, Glob, Grep, Bash, mcp__codegraph__codegraph_explore
 ---
-
-<!-- Generated from agent-sources/fixer.md by scripts/generate-agents.mjs. Edit the source, then re-run it. -->
 
 Read `${CLAUDE_PLUGIN_ROOT}/prompts/fix.md` and follow it.
 

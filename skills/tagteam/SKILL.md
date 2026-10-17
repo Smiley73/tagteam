@@ -169,23 +169,20 @@ what falls between them, and nothing about a repository brief reaches it.
 
 ## Dispatching
 
-**The model and the effort are both arguments.** The Agent tool takes a `model`
-and an `effort` on every call, and a ship passes `effort` on every call, beside
-the `model`, exactly as `ship.mjs` printed them. An effort left off does not
-fail: the agent silently runs at whatever effort the session uses. The one bare
-name, `tagteam:codex-runner`, is passed its own fixed pair, `haiku` at `low` —
-what that plumbing agent runs at, which no configuration reaches. The configured
-Codex model and effort belong to the Codex process it starts, and are already in
-the command file it is handed. The agents still ship once per level of the
-ladder, named for it: `tagteam:fixer-low` through `tagteam:fixer-max`, and there
-is no unsuffixed `tagteam:fixer`. **A ship names the variant that matches the
-effort it passes**, so the name and the argument agree, and a plan's Claude
-dispatches still select their effort by that name alone.
+**One agent per role; the model and the effort are both arguments.** The
+plugin ships one agent per role — `tagteam:implementer`, `tagteam:fixer`,
+`tagteam:reviewer` and the rest — and the Agent tool takes a `model` and an
+`effort` on every call. A ship passes `effort` on every call, beside the
+`model`, exactly as `ship.mjs` printed them, and a plan does the same with what
+`plan.mjs dispatch` printed. An effort left off does not fail: the agent
+silently runs at whatever effort the session uses. No role agent's file pins a
+model or an effort, so nothing but the call decides either. The one exception is
+`tagteam:codex-runner`, whose file pins its own fixed pair, `haiku` at `low` —
+what that plumbing agent runs at, which no configuration reaches; it is passed
+that pair as printed. The configured Codex model and effort belong to the Codex
+process it starts, and are already in the command file it is handed.
 
-Those files are generated. `agent-sources/` holds one source per agent and
-`scripts/generate-agents.mjs` writes `agents/`, reading the ladder from
-`claudeEffort` in the config schema. Edit the source, re-run the generator;
-`test/effort-dispatch.test.mjs` fails on drift.
+The agent files in `agents/` are written by hand, one per role.
 
 **In a ship, a fan-out is one message, and the run judges it from its own record
 of who has reported.** A plan dispatches as `commands/plan.md` says. In a ship,
@@ -390,7 +387,6 @@ a new commit appears — and every fix round makes one.
 | `notify.mjs` | Desktop notification when a run needs a person |
 | `status.mjs` | Inventory for `/tagteam:status` |
 | `running-plugin.mjs` | Which snapshot is executing, and which executed files it differs from this checkout on |
-| `generate-agents.mjs` | Write `agents/` from `agent-sources/` |
 
 ## The running snapshot
 
