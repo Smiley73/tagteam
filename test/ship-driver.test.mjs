@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { lastJson } from "../scripts/ship.mjs";
+import { HOW_TO_DISPATCH, NOT_IN_YET, REVIEW_SET_DISPATCH, REVIEW_SET_WAIT, lastJson } from "../scripts/ship.mjs";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -74,6 +74,29 @@ const write = (file, value) => {
 // What a dispatch's prompt names as the file to write, so the fake agent writes
 // exactly where the real one would.
 const outputOf = (dispatch) => /Write your (?:findings|verdicts|report|fix report) to: (.*)$/m.exec(dispatch.prompt)[1].trim();
+
+// A review is a set, judged only once every agent in it has been recorded as
+// arrived. This runs the arrival command a payload printed, exactly as printed,
+// with the labels appended the way the instruction says: each in double quotes,
+// spaces and colons included.
+function arrive(result, labels, env = {}) {
+  assert.ok(result.json?.set, `the payload carries no review set: ${result.stderr || result.stdout}`);
+  const command = `${result.json.set.arrive} ${labels.map((label) => JSON.stringify(label)).join(" ")}`;
+  const ran = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: { ...process.env, ...env } });
+  let json = null;
+  try { json = JSON.parse(ran.stdout); } catch {}
+  return { status: ran.status, stdout: ran.stdout, stderr: ran.stderr, json };
+}
+
+// What the main agent does when the dispatch message returns with every agent
+// finished: one arrival call with every label of the set, taken from the
+// printed dispatch entries.
+function arriveAll(result, env = {}) {
+  const labels = result.json?.dispatch?.map((entry) => entry.description) ?? result.json?.set?.labels ?? [];
+  const recorded = arrive(result, labels, env);
+  assert.equal(recorded.status, 0, `the arrivals were refused: ${recorded.stderr}`);
+  return recorded;
+}
 
 const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
 const major = (file) => ({ severity: "major", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
@@ -139,6 +162,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
 
+  arriveAll(panel);
   const collect = ship("collect", plan, ["--spec", "01-a"]);
   assert.equal(collect.json.review, "clean");
   assert.match(collect.json.next, /recheck/);
@@ -147,6 +171,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary-high"], "nothing to re-check: the adversary alone");
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
 
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "clean");
@@ -173,6 +198,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
 
+  arriveAll(panel);
   const collect = ship("collect", plan, ["--spec", "01-a"]);
   assert.equal(collect.json.review, "open");
   assert.match(collect.json.next, /fix/);
@@ -207,6 +233,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "sub subtracts now" }] });
 
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "clean");
@@ -233,6 +260,7 @@ test("an approval given while a reviewer wrote nothing usable is not recorded, a
     write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
@@ -245,6 +273,12 @@ test("an approval given while a reviewer wrote nothing usable is not recorded, a
   const second = state().candidateOid;
   // The adversary reports; the lens that owes a verdict writes nothing.
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  arriveAll(recheck);
+  // It is re-sent once, and writes nothing again.
+  const resent = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.deepEqual(resent.json.dispatch.map((entry) => entry.description), ["Re-check 01-a: correctness"]);
+  arriveAll(resent);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "incomplete");
@@ -285,6 +319,7 @@ test("a fixer that declines every finding makes no round, and the lens that rais
     write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   write(outputOf(fix.json.dispatch[0]), {
@@ -313,6 +348,7 @@ test("a fixer that declines every finding makes no round, and the lens that rais
   assert.match(recheck.json.say.join("\n"), /declined them without changing the code/);
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
   write(outputOf(correctness), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "withdrawn: negatives are handled at the call site" }] });
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "clean", "a withdrawn finding closes; it is not left open for ever");
@@ -341,6 +377,7 @@ test("a fixer that declines after a settled round goes back through the re-check
     write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
@@ -353,6 +390,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   const second = state().candidateOid;
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
+  arriveAll(recheck);
   const settled = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settled.json.review, "open");
   assert.match(settled.json.next, /fix/);
@@ -384,6 +422,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   assert.equal(path.basename(plan2.declined), "fix-declined.json", "settle passes the decline on to recheck.mjs");
   write(outputOf(rejudge.json.dispatch[0]), findings("adversary", second));
   write(outputOf(correctness), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "withdrawn: the spec does say sub adds" }] });
+  arriveAll(rejudge);
   const closed = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(closed.status, 0, closed.stderr);
   assert.equal(closed.json.review, "clean");
@@ -418,6 +457,7 @@ test("a commit made outside a fix round is counted and announced, and the budget
       write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("app.js")] : []));
     }
     write(path.join(shipDir, "01-a", "rounds", String(round), "findings", "codex.json"), findings("codex", oid));
+    arriveAll(panel);
     const collect = ship("collect", plan, ["--spec", "01-a"]);
     assert.equal(collect.json.review, "open");
   };
@@ -436,6 +476,7 @@ test("a commit made outside a fix round is counted and announced, and the budget
   const second = state().candidateOid;
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
+  arriveAll(recheck);
   assert.equal(ship("settle", plan, ["--spec", "01-a"]).json.review, "open");
 
   // The one fix round left is announced as the second of two, not the first.
@@ -483,6 +524,7 @@ test("a finding about the pull request never reaches the fixer, spends no fix ro
     write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [aboutPr] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
   assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
 
   const fix = ship("fix", plan, ["--spec", "01-a"]);
@@ -505,6 +547,7 @@ test("a finding about the pull request never reaches the fixer, spends no fix ro
   assert.match(recheck.json.say.join("\n"), /No fresh adversary pass[\s\S]*judged against its body/);
   write(outputOf(recheck.json.dispatch[0]), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "the body about to be published says sub was added" }] });
 
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "clean");
@@ -531,6 +574,7 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
     write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js"), aboutPr] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
 
   const fix = ship("fix", plan, ["--spec", "01-a"]);
@@ -555,6 +599,7 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
     { id: "1.correctness.1", resolved: true, evidence: "sub subtracts now" },
     { id: "1.correctness.2", resolved: false, evidence: "the body still claims nothing changed" }
   ] });
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "open");
@@ -607,6 +652,7 @@ test("a fix round whose report is refused reruns into the same round, is verifie
     write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
 
@@ -647,6 +693,7 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   assert.equal(recheck.status, 0, recheck.stderr);
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "sub subtracts now" }] });
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.status, 0, settle.stderr);
   assert.equal(settle.json.review, "clean");
@@ -693,6 +740,7 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
     write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   assert.equal(fix.status, 0, fix.stderr);
@@ -706,6 +754,7 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
   const second = state().candidateOid;
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
+  arriveAll(recheck);
   const settle = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settle.json.review, "open");
   const spent = ship("fix", plan, ["--spec", "01-a"]);
@@ -752,6 +801,7 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
   assert.doesNotMatch(again.json.dispatch[1].prompt, /Pull request #/, "no pull request is recorded here, so none is handed over");
   write(outputOf(again.json.dispatch[0]), findings("adversary", second));
   write(outputOf(again.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "resolved outside the diff" }] });
+  arriveAll(again);
   const settled = ship("settle", plan, ["--spec", "01-a"]);
   assert.equal(settled.status, 0, settled.stderr);
   assert.equal(settled.json.review, "clean");
@@ -795,6 +845,7 @@ function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5 } = {}) {
       write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [{ ...major("app.js"), title }] : []));
     }
     write(path.join(shipDir, "01-a", "rounds", String(round), "findings", "codex.json"), findings("codex", oid));
+    arriveAll(panel);
     const collect = run("collect");
     assert.equal(collect.json.review, "open");
     return collect;
@@ -814,6 +865,7 @@ function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5 } = {}) {
   const second = state().candidateOid;
   write(outputOf(recheck2.json.dispatch[0]), findings("adversary", second, [{ ...major("app.js"), title: "sub loses the sign of a negative result" }]));
   write(outputOf(recheck2.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "subtracts now" }] });
+  arriveAll(recheck2);
   const settle2 = run("settle");
   assert.equal(settle2.json.review, "open");
   assert.equal(settle2.json.ask, undefined, "two rounds is not a pattern");
@@ -841,6 +893,7 @@ function driveToSettleAsk(staged) {
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", fourth, [{ ...major("app.js"), title: "sub coerces strings silently" }]));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: fourth, verdicts: [{ id: "3.correctness.1", resolved: true, evidence: "fixed" }] });
   write(outputOf(recheck.json.dispatch[2]), { lens: "adversary", candidate: fourth, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "sign kept" }] });
+  arriveAll(recheck);
   const settle = run("settle");
   assert.equal(settle.json.review, "open");
   return { ...drive, settle, fourth };
@@ -910,6 +963,7 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", fourth, [{ ...major("app.js"), title: "sub returns NaN for a missing argument" }]));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: fourth, verdicts: [{ id: "3.correctness.1", resolved: true, evidence: "no truncation" }] });
   write(outputOf(recheck.json.dispatch[2]), { lens: "adversary", candidate: fourth, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "sign kept" }] });
+  arriveAll(recheck);
   const settle = run("settle");
   assert.equal(settle.json.review, "open");
   assert.match(settle.json.next, /fix --plan/);
@@ -977,6 +1031,7 @@ test("redesign and accept refuse a spent budget, a spec with nothing recurring, 
     write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(quiet.shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
   assert.equal(ship("collect", quiet.plan, ["--spec", "01-a"]).json.ask, undefined);
   const nothing = ship("redesign", quiet.plan, ["--spec", "01-a"]);
   assert.notEqual(nothing.status, 0);
@@ -1038,12 +1093,14 @@ test("a resume that rebuilds the round withdraws an accept given against the rev
     write(outputOf(dispatch), findings(lens, third, lens === "correctness" ? [{ ...major("other.js"), title: "a different defect entirely" }] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "3", "findings", "codex.json"), findings("codex", third));
+  arriveAll(panel);
   const collect = run("collect");
   assert.equal(collect.json.review, "open");
   assert.match(collect.json.next, /fix --plan/);
   const recheck = run("recheck");
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", third));
   write(outputOf(recheck.json.dispatch[1]), { lens: "adversary", candidate: third, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "gone" }] });
+  arriveAll(recheck);
   const settle = run("settle");
   assert.equal(settle.json.review, "open");
   assert.equal(settle.json.accepted, undefined, "nothing is published as decided: the person never saw this finding");
@@ -1096,6 +1153,7 @@ test("an accept given at collect is honoured by settle only for what the person 
   const third = state().candidateOid;
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", third));
   write(outputOf(recheck.json.dispatch[1]), { lens: "adversary", candidate: third, verdicts: [{ id: "2.adversary.1", resolved: false, evidence: "still there" }] });
+  arriveAll(recheck);
   const settle = run("settle");
   assert.equal(settle.json.review, "open");
   assert.match(settle.json.say.join("\n"), /Publishing as it is, as you decided at round 3/);
@@ -1121,6 +1179,7 @@ test("an accept given at collect is honoured by settle only for what the person 
     write(outputOf(dispatch), findings(lens, third, lens === "correctness" ? [{ ...major("app.js"), title: "sub truncates large results" }] : []));
   }
   write(path.join(clean.shipDir, "01-a", "rounds", "3", "findings", "codex.json"), findings("codex", third));
+  arriveAll(panel);
   const again = run("collect");
   assert.equal(again.json.review, "open");
   assert.match(again.json.ask, /The same place keeps failing/, "the next settle asks or fixes as usual, not straight to publish");
@@ -1134,6 +1193,7 @@ test("an accept given at collect is honoured by settle only for what the person 
   const thirdB = b.state().candidateOid;
   write(outputOf(recheckB.json.dispatch[0]), findings("adversary", thirdB, [{ ...major("app.js"), title: "sub throws on undefined" }]));
   write(outputOf(recheckB.json.dispatch[1]), { lens: "adversary", candidate: thirdB, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "gone" }] });
+  arriveAll(recheckB);
   const settleB = b.run("settle");
   assert.equal(settleB.json.review, "open");
   assert.doesNotMatch(settleB.json.say.join("\n"), /as you decided/);
@@ -1175,9 +1235,11 @@ function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
     write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  arriveAll(recheck);
   ship("settle", plan, ["--spec", "01-a"]);
   for (const next of ["publishing", "awaiting-approval"]) {
     const moved = spawnSync(process.execPath, [GATES, "state", path.join(shipDir, "01-a", "state.json"), next], { encoding: "utf8" });
@@ -1538,6 +1600,7 @@ test("the cost line finish prints, and the usage.json status reads, cover this s
     write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("app.js")] : []));
   }
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel, environment);
   ship("collect", plan, ["--spec", "01-a"], environment);
 
   // Two ships' transcripts side by side in one project directory, which is what
@@ -1616,6 +1679,7 @@ test("a redesign that never touched the requested file resets nothing, and the s
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", fourth, [{ ...major("app.js"), title: "sub still truncates" }]));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: fourth, verdicts: [{ id: "3.correctness.1", resolved: false, evidence: "untouched" }] });
   write(outputOf(recheck.json.dispatch[2]), { lens: "adversary", candidate: fourth, verdicts: [{ id: "2.adversary.1", resolved: false, evidence: "untouched" }] });
+  arriveAll(recheck);
   const settle = run("settle");
   assert.equal(settle.json.review, "open");
   assert.match(settle.json.signal[0], /^Recurring: 4 rounds of this cycle \(1, 2, 3, 4\) each raised a new blocking or major finding on app\.js/);
@@ -1822,9 +1886,11 @@ function driveToPublishable({ plan, shipDir }, id, file, contents) {
     write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
   }
   write(path.join(shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
   ship("collect", plan, ["--spec", id]);
   const recheck = ship("recheck", plan, ["--spec", id]);
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  arriveAll(recheck);
   const settled = ship("settle", plan, ["--spec", id]);
   assert.equal(settled.json.review, "clean", settled.stderr);
   return { worktree, state };
@@ -1961,6 +2027,7 @@ test("both ships' Codex calls queue on one execution slot root for the whole rep
       write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
     }
     write(path.join(train.shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid, [major(file)]));
+    arriveAll(panel);
     const collect = ship("collect", train.plan, ["--spec", id]);
     assert.equal(collect.json.review, "open", collect.stderr);
     const fix = ship("fix", train.plan, ["--spec", id]);
@@ -1996,4 +2063,431 @@ test("both ships' Codex calls queue on one execution slot root for the whole rep
   held.release();
   (await contender).release();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- review sets: the record decides when a review is judged ------------------
+
+// Where an agent of a review set writes: the file its prompt names, or for the
+// Codex runner the artifact beside the command file it is told to run.
+const resultOf = (dispatch) => /^Command file: (.*)\.cmd\.sh$/m.exec(dispatch.prompt)?.[1] ?? outputOf(dispatch);
+
+// A fake reviewer, Codex or adversary: findings, in the file it was told to write.
+function report(dispatch, candidate, list = []) {
+  const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)?.[1] ?? (dispatch.agent === "tagteam:codex-runner" ? "codex" : "adversary");
+  write(resultOf(dispatch), findings(lens, candidate, list));
+}
+
+const byLabel = (result, label) => result.json.dispatch.find((entry) => entry.description === label);
+const labelsOf = (result) => result.json.dispatch.map((entry) => entry.description);
+const PANEL_LABELS = ["Review 01-a: code-quality", "Review 01-a: correctness", "Codex review of 01-a"];
+
+// Up to a panel that has been sent out and not yet collected.
+function toPanel(staged, env = {}) {
+  const { plan, shipDir } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const begin = ship("begin", plan, ["--spec", "01-a"], env);
+  assert.equal(begin.status, 0, begin.stderr);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).status, 0);
+  assert.equal(ship("verify", plan, ["--spec", "01-a"], env).status, 0);
+  const panel = ship("panel", plan, ["--spec", "01-a"], env);
+  assert.equal(panel.status, 0, panel.stderr);
+  assert.deepEqual(labelsOf(panel), PANEL_LABELS);
+  const statePath = path.join(shipDir, "01-a", "state.json");
+  const state = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
+  return { panel, state, statePath, oid: state().candidateOid, worktree, round: path.join(shipDir, "01-a", "rounds", "1") };
+}
+
+const setRecord = (shipDir, set) => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "sets", set, `${set}.json`), "utf8"));
+
+test("collect judges from the record of who has arrived: every file valid with two labels out is refused, and an arrived label with no file is a failure", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const { panel, statePath, oid, round } = toPanel(staged);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid);
+  const before = fs.readFileSync(statePath, "utf8");
+  const one = arrive(panel, ["Review 01-a: correctness"]);
+  assert.equal(one.status, 0, one.stderr);
+
+  const early = ship("collect", plan, ["--spec", "01-a"]);
+  assert.equal(early.status, NOT_IN_YET, `refused as a wait, not a stop: ${early.stderr}`);
+  assert.ok(![1, 2, 3, 4].includes(NOT_IN_YET), "the wait collides with an exit that already means something");
+  assert.match(early.stderr, /still waiting on the code-quality reviewer and Codex/);
+  assert.doesNotMatch(early.stderr, /correctness reviewer/, "only who is still out is named");
+  assert.ok(!fs.existsSync(path.join(round, "review.json")), "nothing was collected");
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "redispatched-1.json")), "no re-send was marked");
+  for (const dispatch of panel.json.dispatch) {
+    assert.ok(fs.statSync(resultOf(dispatch)).mode & 0o200, `${dispatch.description}'s findings were sealed by a refused collect`);
+  }
+  assert.equal(fs.readFileSync(statePath, "utf8"), before, "the state is unchanged");
+
+  // The converse: every label is in, and one reader left nothing behind.
+  const other = stage();
+  const b = toPanel(other);
+  for (const dispatch of b.panel.json.dispatch) if (dispatch.description !== "Review 01-a: code-quality") report(dispatch, b.oid);
+  arriveAll(b.panel);
+  const collected = ship("collect", other.plan, ["--spec", "01-a"]);
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.match(collected.json.say.join("\n"), /code-quality produced no usable evidence; re-dispatching exactly those, once/);
+  assert.deepEqual(labelsOf(collected), ["Review 01-a: code-quality"]);
+  assert.deepEqual(collected.json.set.labels, ["Review 01-a: code-quality"]);
+  assert.notEqual(collected.json.set.id, b.panel.json.set.id, "the re-send is a set of its own");
+  assert.match(collected.json.next, /collect --plan/);
+});
+
+test("arrivals out of order say who is in, k of N, and the last names collect; one call with every label does the same", () => {
+  const staged = stage();
+  const { panel, oid } = toPanel(staged);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid);
+  const [quality, correctness, codex] = labelsOf(panel);
+  const first = arrive(panel, [codex]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.json.say, "Codex is in (1 of 3)");
+  assert.equal(first.json.next, undefined, "nothing runs on a wake-up that is not the last");
+  assert.equal(arrive(panel, [quality]).json.say, "The code-quality reviewer is in (2 of 3)");
+  const repeated = arrive(panel, [quality]);
+  assert.notEqual(repeated.status, 0);
+  assert.match(repeated.stderr, /already in/);
+  const last = arrive(panel, [correctness]);
+  assert.equal(last.json.say, "All 3 are in. Judging the review now.");
+  assert.match(last.json.next, /ship\.mjs" collect --plan .* --spec 01-a$/);
+  const judged = spawnSync("/bin/sh", ["-c", last.json.next], { encoding: "utf8" });
+  assert.equal(judged.status, 0, judged.stderr);
+  assert.equal(JSON.parse(judged.stdout).review, "clean");
+
+  const together = stage();
+  const t = toPanel(together);
+  for (const dispatch of t.panel.json.dispatch) report(dispatch, t.oid);
+  const all = arriveAll(t.panel);
+  assert.equal(all.json.say, "All 3 are in. Judging the review now.");
+  assert.match(all.json.next, /ship\.mjs" collect --plan .* --spec 01-a$/);
+  assert.equal(ship("collect", together.plan, ["--spec", "01-a"]).json.review, "clean");
+});
+
+test("a reader that fails at collect is re-sent as its own set, waited on, and a second failure is carried forward incomplete and never re-sent at settle", () => {
+  const staged = stage();
+  const { dir, plan, shipDir } = staged;
+  const { panel, state, oid } = toPanel(staged);
+  const codex = byLabel(panel, "Codex review of 01-a");
+  for (const dispatch of panel.json.dispatch) if (dispatch !== codex) report(dispatch, oid);
+  arriveAll(panel);
+  const resend = ship("collect", plan, ["--spec", "01-a"]);
+  assert.equal(resend.status, 0, resend.stderr);
+  assert.deepEqual(labelsOf(resend), ["Codex review of 01-a"]);
+  assert.equal(resultOf(resend.json.dispatch[0]), resultOf(codex), "into the file it failed to write");
+  assert.equal(resend.json.howToDispatch, REVIEW_SET_DISPATCH);
+  assert.equal(setRecord(shipDir, panel.json.set.id).closed.reason, "judged", "the panel's set is judged and closed");
+  const late = arrive(panel, ["Codex review of 01-a"]);
+  assert.notEqual(late.status, 0, "a late notice from the panel's set lands nowhere");
+
+  const waiting = ship("collect", plan, ["--spec", "01-a"]);
+  assert.equal(waiting.status, NOT_IN_YET, waiting.stderr);
+  assert.match(waiting.stderr, /still waiting on Codex/);
+
+  // Codex reports again, and again writes nothing.
+  arriveAll(resend);
+  const carried = ship("collect", plan, ["--spec", "01-a"]);
+  assert.equal(carried.status, 0, carried.stderr);
+  assert.equal(carried.json.review, "incomplete");
+  assert.equal(carried.json.dispatch, undefined, "once");
+  assert.match(carried.json.say.join("\n"), /codex produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended/);
+  assert.match(carried.json.next, /recheck --plan/);
+
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.deepEqual(labelsOf(recheck), ["Adversary on 01-a"]);
+  report(recheck.json.dispatch[0], oid);
+  arriveAll(recheck);
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.equal(settle.json.dispatch, undefined, "a gap inherited from the collected review was re-sent at collect already");
+  assert.equal(settle.json.review, "incomplete");
+  assert.equal(state().gates.review.status, "incomplete");
+  const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.ok(finish.json.blockers.includes("review-incomplete"), "it never merges unattended");
+});
+
+test("a lens re-check, the fresh adversary pass and the Codex re-check that come back unusable are re-sent once, with nothing recorded until the re-send is judged", () => {
+  const staged = stage();
+  const { plan } = staged;
+  const { panel, state, statePath, oid, worktree } = toPanel(staged);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid, dispatch.description === "Review 01-a: code-quality" ? [] : [major("app.js")]);
+  arriveAll(panel);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  const toFix = JSON.parse(fs.readFileSync(/Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1], "utf8"));
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => b - a + 2 * (a - b);\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "n" })), notes: "", status: "complete", summary: "fixed", unfinished: []
+  });
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).json.round, 2);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.deepEqual(labelsOf(recheck), ["Adversary on 01-a", "Re-check 01-a: correctness", "Codex re-check of 01-a"]);
+  const second = state().candidateOid;
+  // The adversary read the wrong commit; the other two wrote nothing.
+  report(byLabel(recheck, "Adversary on 01-a"), oid);
+  arriveAll(recheck);
+  const before = fs.readFileSync(statePath, "utf8");
+
+  const resent = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.deepEqual(labelsOf(resent), labelsOf(recheck));
+  for (const dispatch of resent.json.dispatch) {
+    assert.equal(resultOf(dispatch), resultOf(byLabel(recheck, dispatch.description)), `${dispatch.description} is re-sent into the file it was given`);
+  }
+  assert.match(resultOf(byLabel(resent, "Adversary on 01-a")), /rounds\/2\/findings\/adversary\.json$/);
+  assert.match(resultOf(byLabel(resent, "Re-check 01-a: correctness")), /rounds\/2\/recheck\/correctness\.json$/);
+  assert.match(resultOf(byLabel(resent, "Codex re-check of 01-a")), /rounds\/2\/recheck\/codex\.json$/);
+  assert.match(resent.json.say.join("\n"), /the adversary, the correctness reviewer's re-check and Codex's re-check produced no usable evidence; re-dispatching exactly those, once/);
+  assert.equal(resent.json.review, undefined, "the review is not judged on the pass that re-sends");
+  assert.equal(fs.readFileSync(statePath, "utf8"), before, "no gate recorded and no transition on the re-send pass");
+
+  const early = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(early.status, NOT_IN_YET, early.stderr);
+  assert.match(early.stderr, /still waiting on the adversary, the correctness reviewer's re-check and Codex's re-check/);
+
+  // Two come back usable; Codex fails a second time.
+  report(byLabel(resent, "Adversary on 01-a"), second);
+  write(outputOf(byLabel(resent, "Re-check 01-a: correctness")), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "subtracts now" }] });
+  arriveAll(resent);
+  const settled = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settled.status, 0, settled.stderr);
+  assert.equal(settled.json.dispatch, undefined, "once");
+  assert.equal(settled.json.review, "incomplete");
+  assert.match(settled.json.say.join("\n"), /Codex's re-check produced no usable evidence twice; carrying the incomplete review forward/);
+  assert.equal(state().gates.review.status, "incomplete");
+  assert.equal(state().gates.review.candidateOid, second);
+});
+
+test("a Codex answer refused for its candidate is re-sent to run Codex again, not to reuse the refused artifact", () => {
+  const commandOf = (dispatch) => fs.readFileSync(`${resultOf(dispatch)}.cmd.sh`, "utf8");
+  const staged = stage();
+  const { plan } = staged;
+  const { panel, state, oid, worktree } = toPanel(staged);
+  const codex = byLabel(panel, "Codex review of 01-a");
+  assert.match(commandOf(codex), /'--reuse'/, "a first send reuses, so a resumed step never buys a review twice");
+  // Schema-valid, and about the wrong commit: the request it answers is this one.
+  for (const dispatch of panel.json.dispatch) report(dispatch, dispatch === codex ? "0".repeat(40) : oid, dispatch === codex ? [] : [major("app.js")]);
+  arriveAll(panel);
+  const resend = ship("collect", plan, ["--spec", "01-a"]);
+  assert.equal(resend.status, 0, resend.stderr);
+  assert.deepEqual(labelsOf(resend), ["Codex review of 01-a"]);
+  assert.doesNotMatch(commandOf(resend.json.dispatch[0]), /'--reuse'/, "the re-send would hand back the refused artifact without running Codex");
+
+  // The same at settle, for the Codex re-check.
+  report(resend.json.dispatch[0], oid, [major("app.js")]);
+  arriveAll(resend);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  const toFix = JSON.parse(fs.readFileSync(/Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1], "utf8"));
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => b - a + 2 * (a - b);\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "n" })), notes: "", status: "complete", summary: "fixed", unfinished: []
+  });
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).json.round, 2);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const codexRecheck = byLabel(recheck, "Codex re-check of 01-a");
+  assert.match(commandOf(codexRecheck), /'--reuse'/);
+  const second = state().candidateOid;
+  for (const dispatch of recheck.json.dispatch) {
+    if (dispatch === codexRecheck) {
+      write(resultOf(dispatch), { lens: "codex", candidate: oid, verdicts: toFix.findings.filter((finding) => finding.lens === "codex").map((finding) => ({ id: finding.id, resolved: true, evidence: "e" })) });
+    } else if (dispatch.description === "Adversary on 01-a") report(dispatch, second);
+    else {
+      const lens = /^Re-check 01-a: (.*)$/.exec(dispatch.description)[1];
+      write(outputOf(dispatch), { lens, candidate: second, verdicts: toFix.findings.filter((finding) => finding.lens === lens).map((finding) => ({ id: finding.id, resolved: true, evidence: "e" })) });
+    }
+  }
+  arriveAll(recheck);
+  const resent = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.deepEqual(labelsOf(resent), ["Codex re-check of 01-a"]);
+  assert.doesNotMatch(commandOf(resent.json.dispatch[0]), /'--reuse'/, "the re-send would hand back the refused artifact without running Codex");
+});
+
+test("a reader that fails in a declined attempt is re-sent into that attempt's directory and told what it was told the first time", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const { panel, oid } = toPanel(staged);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid, dispatch.description === "Review 01-a: correctness" ? [major("app.js")] : []);
+  arriveAll(panel);
+  ship("collect", plan, ["--spec", "01-a"]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "the finding is wrong" }], notes: "", status: "complete", summary: "declined", unfinished: []
+  });
+  assert.match(ship("snapshot", plan, ["--spec", "01-a"]).json.next, /recheck/);
+  const marker = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-declined.json"), "utf8"));
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const correctness = byLabel(recheck, "Re-check 01-a: correctness");
+  assert.match(outputOf(correctness), /rounds\/1\/recheck-declined-\d{8}T\d{6}Z\/correctness\.json$/);
+  report(byLabel(recheck, "Adversary on 01-a"), oid);
+  arriveAll(recheck);
+  const resent = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.deepEqual(labelsOf(resent), ["Re-check 01-a: correctness"]);
+  assert.equal(outputOf(resent.json.dispatch[0]), outputOf(correctness), "into the declined attempt's directory");
+  assert.match(resent.json.dispatch[0].prompt, /declined these findings/);
+  assert.ok(resent.json.dispatch[0].prompt.includes(marker.report), "with the fixer's reasons, as the first time");
+  write(outputOf(resent.json.dispatch[0]), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "withdrawn" }] });
+  arriveAll(resent);
+  const settled = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settled.status, 0, settled.stderr);
+  assert.equal(settled.json.review, "clean");
+  assert.match(settled.json.next, /publish/);
+});
+
+test("a re-check that sends nobody out records no set, and settle proceeds", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const { panel, oid } = toPanel(staged);
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid);
+  arriveAll(panel);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "clean");
+  // What `fix` writes when what is open is about the pull request: no fresh
+  // adversary pass, and here no lens with anything of its own to judge.
+  write(path.join(shipDir, "01-a", "fix-declined.json"), {
+    kind: "pull-request", round: 1, candidate: oid, from: "panel", record: path.join(shipDir, "01-a", "rounds", "1", "to-fix.json"),
+    report: null, attempt: "pull-request-20260101T000000Z", at: new Date().toISOString()
+  });
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.equal(recheck.status, 0, recheck.stderr);
+  assert.deepEqual(recheck.json.dispatch, []);
+  assert.equal(recheck.json.set, undefined);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "recheck-plan.json"), "utf8")).set, null);
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.equal(settle.json.review, "clean");
+});
+
+// Sessions are staged the way `usage.mjs` identifies them: a HOME of the
+// test's own, a transcript in this repository's project directory, and the
+// session variables naming it — or naming nothing.
+function sessionsFor(staged) {
+  const home = path.join(staged.dir, "home");
+  const projectDir = projectDirectoryFor(staged.repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  return {
+    as: (session) => ({ HOME: home, TAGTEAM_SESSION_ID: session ?? "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" }),
+    transcript: (session) => fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "")
+  };
+}
+
+test("a ship restarted from the same session while its panel is out keeps waiting, empties nothing, and collect judges once the rest arrive", () => {
+  const staged = stage();
+  const { plan } = staged;
+  const sessions = sessionsFor(staged);
+  sessions.transcript("A");
+  const A = sessions.as("A");
+  const { panel, oid, round } = toPanel(staged, A);
+  const [quality, correctness, codex] = labelsOf(panel);
+  report(byLabel(panel, correctness), oid);
+  assert.equal(arrive(panel, [correctness], A).status, 0);
+  // Still running: its file is there and its notice is not.
+  report(byLabel(panel, quality), oid);
+
+  const resumed = ship("begin", plan, ["--spec", "01-a"], A);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.json.next, /collect --plan .* --spec 01-a$/, "next is the judging step");
+  assert.deepEqual(resumed.json.set.labels, [quality, codex]);
+  assert.equal(resumed.json.howToWait, REVIEW_SET_WAIT);
+  assert.equal(resumed.json.dispatch, undefined, "nothing is sent out a second time");
+  assert.match(resumed.json.say.join("\n"), /still waiting on the code-quality reviewer and Codex/);
+  assert.ok(fs.existsSync(resultOf(byLabel(panel, correctness))), "findings already written survive");
+  assert.ok(fs.existsSync(resultOf(byLabel(panel, quality))));
+  assert.ok(fs.existsSync(path.join(round, "review.diff")), "the round was not emptied");
+
+  report(byLabel(panel, codex), oid);
+  assert.equal(arrive(resumed, [codex], A).json.say, "Codex is in (2 of 3)");
+  const last = arrive(resumed, [quality], A);
+  assert.equal(last.json.say, "All 3 are in. Judging the review now.");
+  const collected = ship("collect", plan, ["--spec", "01-a"], A);
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.equal(collected.json.review, "clean");
+});
+
+test("a ship restarted from another identified session releases the open review and takes today's route, though train.json still names the first", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const sessions = sessionsFor(staged);
+  sessions.transcript("A");
+  sessions.transcript("B");
+  const { panel, oid } = toPanel(staged, sessions.as("A"));
+  // The session `sessionOf` would keep: recorded, and its transcript still there.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).session, "A");
+  report(byLabel(panel, "Review 01-a: correctness"), oid);
+  arrive(panel, ["Review 01-a: correctness"], sessions.as("A"));
+
+  const resumed = ship("begin", plan, ["--spec", "01-a"], sessions.as("B"));
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(resumed.json.ask, undefined);
+  assert.equal(resumed.json.set, undefined);
+  assert.match(resumed.json.next, /snapshot --plan/, "today's route");
+  assert.match(resumed.json.say.join("\n"), /another session, which is gone; released it/);
+  assert.equal(setRecord(shipDir, panel.json.set.id).closed.reason, "released");
+  const reentered = ship("snapshot", plan, ["--spec", "01-a"], sessions.as("B"));
+  assert.equal(reentered.status, 0, reentered.stderr);
+  assert.equal(reentered.json.round, 1);
+  assert.match(reentered.json.say.join("\n"), /re-entering/);
+});
+
+test("a restart that cannot tell which session it is asks once; no keeps waiting, and yes releases the review", () => {
+  const staged = stage();
+  const { plan, shipDir } = staged;
+  const none = sessionsFor(staged).as(null);
+  const { panel, oid, round } = toPanel(staged, none);
+  report(byLabel(panel, "Review 01-a: correctness"), oid);
+  arrive(panel, ["Review 01-a: correctness"], none);
+
+  const asked = ship("begin", plan, ["--spec", "01-a"], none);
+  assert.equal(asked.status, 0, asked.stderr);
+  assert.match(asked.json.ask, /Is that earlier run gone\?/);
+  assert.match(asked.json.answers.gone, /begin --plan .* --spec 01-a --run-gone$/);
+  assert.match(asked.json.answers.live, /begin --plan .* --spec 01-a --run-live$/);
+  assert.ok(asked.json.ask.includes(asked.json.answers.gone) && asked.json.ask.includes(asked.json.answers.live), "the ask names both reruns");
+  assert.equal(asked.json.next, undefined);
+  assert.equal(setRecord(shipDir, panel.json.set.id).closed, null, "asking changes nothing");
+
+  const no = ship("begin", plan, ["--spec", "01-a", "--run-live"], none);
+  assert.equal(no.status, 0, no.stderr);
+  assert.equal(no.json.ask, undefined);
+  assert.match(no.json.next, /collect --plan/, "the same as a same-session restart");
+  assert.deepEqual(no.json.set.labels, ["Review 01-a: code-quality", "Codex review of 01-a"]);
+  assert.ok(fs.existsSync(path.join(round, "review.diff")));
+  assert.ok(fs.existsSync(resultOf(byLabel(panel, "Review 01-a: correctness"))));
+
+  const yes = ship("begin", plan, ["--spec", "01-a", "--run-gone"], none);
+  assert.equal(yes.status, 0, yes.stderr);
+  assert.match(yes.json.next, /snapshot --plan/, "the same as a restart from another session");
+  assert.match(yes.json.say.join("\n"), /on your word that the earlier run is gone/);
+  assert.equal(setRecord(shipDir, panel.json.set.id).closed.reason, "released");
+});
+
+test("a review payload carries the review-set instruction; begin's and fix's carry today's", () => {
+  const staged = stage();
+  const { plan } = staged;
+  const { panel, oid } = toPanel(staged);
+  assert.equal(panel.json.howToDispatch, REVIEW_SET_DISPATCH);
+  assert.match(REVIEW_SET_DISPATCH, /run_in_background: false where the call allows it/);
+  assert.match(REVIEW_SET_DISPATCH, /set\.arrive/);
+  assert.match(REVIEW_SET_DISPATCH, /end your turn/);
+  assert.match(REVIEW_SET_DISPATCH, /Never sleep, never poll, never watch/);
+  assert.match(panel.json.set.arrive, /dispatch-set\.mjs" arrive --dir ".*" --set "panel-r1-[^"]+"$/, "the set is named; only the label is left to append");
+
+  const fresh = stage();
+  ship("start", fresh.plan);
+  const first = ship("begin", fresh.plan, ["--spec", "01-a"]);
+  assert.equal(first.json.howToDispatch, HOW_TO_DISPATCH);
+  assert.equal(first.json.set, undefined);
+
+  for (const dispatch of panel.json.dispatch) report(dispatch, oid, dispatch.description === "Review 01-a: correctness" ? [major("app.js")] : []);
+  arriveAll(panel);
+  ship("collect", plan, ["--spec", "01-a"]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.json.howToDispatch, HOW_TO_DISPATCH);
+  assert.equal(fix.json.set, undefined);
 });

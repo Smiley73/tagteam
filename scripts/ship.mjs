@@ -13,17 +13,22 @@
 //
 // Every subcommand prints one JSON object:
 //   say       lines for the person, in the run's own words, to relay in plain English
-//   dispatch  agents to run — all of them in ONE message, each blocking
+//   dispatch  agents to run — all of them in ONE message
+//   set       for a review, the set those agents form: the run judges it only once
+//             every label in it has been recorded as arrived, through `set.arrive`
 //   ask       a decision only a person can make (the orchestrator asks, then re-runs)
-//   next      the command to run once the dispatches have returned
+//   next      the command to run once the dispatches have returned, or for a review
+//             set once the last arrival says it is in
 // and exits 0. A refusal exits non-zero with the reason on stderr; a spent budget
-// exits 4, as every budgeted script here does.
+// exits 4, as every budgeted script here does, and a judging step whose review set
+// is not in yet exits NOT_IN_YET, which is a wait and not a stop.
 //
 // The scripts this sequences are spawned rather than imported wherever they own a
 // guard — the round store, the state machine, the gates — so the invariants their
 // tests prove hold here by construction.
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
@@ -43,6 +48,7 @@ import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
+import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -263,7 +269,10 @@ function reviewerDispatch(ctx, spec, round, oid, lens, brief, job, pullRequest =
   };
 }
 
-function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
+// `reuse: false` is for a re-send only. Reuse checks the request, not what the
+// driver asks of the answer, so an artifact refused for its `candidate` or
+// `lens` matches its own request exactly and would come back again unrun.
+function codexReviewDispatch(ctx, spec, round, oid, lenses, job, { reuse = true } = {}) {
   const dir = roundDir(ctx, spec.id, round);
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
@@ -276,7 +285,8 @@ function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
     effort: job.effort,
     cd: ctx.worktree,
     slots: ctx.codexRoot,
-    maxConcurrent: ctx.config.maxConcurrentCodex
+    maxConcurrent: ctx.config.maxConcurrentCodex,
+    reuse
   });
   return runnerDispatch({ description: `Codex review of ${spec.id}`, ...prepared });
 }
@@ -319,7 +329,8 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
   };
 }
 
-function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null } = {}) {
+// `reuse` as in `codexReviewDispatch`: off for a re-send only.
+function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null, reuse = true } = {}) {
   const dir = roundDir(ctx, spec.id, round);
   const diff = path.join(dir, "review.diff");
   // Two templates, one per question. After a fix Codex reads new code; after a
@@ -337,7 +348,8 @@ function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedRepor
     effort: job.effort,
     cd: ctx.worktree,
     slots: ctx.codexRoot,
-    maxConcurrent: ctx.config.maxConcurrentCodex
+    maxConcurrent: ctx.config.maxConcurrentCodex,
+    reuse
   });
   return runnerDispatch({ description: `Codex re-check of ${spec.id}`, ...prepared });
 }
@@ -492,19 +504,132 @@ function repairDispatch(ctx, spec, state, job) {
   };
 }
 
-// The instruction that rides along with every dispatch list. Stated once here
-// rather than in prose so it cannot drift: a fan-out is one message of blocking
-// calls, which run concurrently and return together.
-const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with run_in_background: false, "
+// The instruction that rides along with every dispatch list that is not a review
+// set — the single implementer, fixer, redesign implementer and repair. Stated
+// once here rather than in prose so it cannot drift. A review set carries
+// REVIEW_SET_DISPATCH instead.
+export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with run_in_background: false, "
   + "subagent_type set to `agent`, `model` passed when it is not null and omitted when it is, `description` as given and "
   + "`prompt` verbatim. The message returns when all of them have finished; then run `next`. Never background, never watch, never poll.";
+
+// The instruction for a review, which is a set: several agents whose results are
+// judged together, and only once every one of them has reported. Claude Code may
+// run them in the background whatever the call asks for, so the message cannot be
+// relied on to return when they have finished; what the judging step reads is the
+// run's own record of who has arrived, kept by `dispatch-set.mjs`. The foreground
+// is still asked for, because one return is cheaper than one wake-up per agent.
+export const REVIEW_SET_DISPATCH = "This is a review set. Put every entry of `dispatch` into ONE message, each as an Agent call with "
+  + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed when it is not null and "
+  + "omitted when it is, `description` as given and `prompt` verbatim. Each agent's label is its `description`, exactly as "
+  + "Claude Code names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in "
+  + "double quotes. If the message returns with every agent finished, run `set.arrive` once with every label, then run `next`. "
+  + "If it returns before they have finished, end your turn; on each finished notice run `set.arrive` with that one label and "
+  + "nothing else, and relay the line it prints. When it says all are in, run `next`. If you are unsure whether you recorded "
+  + "one, record it again: a repeat is refused and changes nothing. Never sleep, never poll, never watch.";
+
+// The same set, already sent out by an earlier run in this session and not all in.
+export const REVIEW_SET_WAIT = "A review set is still out, and nothing is to be dispatched. End your turn. On each finished notice "
+  + "for one of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the "
+  + "line it prints. When it says all are in, run `next`. A label recorded twice is refused and changes nothing. "
+  + "Never sleep, never poll, never watch.";
 
 function nextCommand(ctx, sub, id, extra = "") {
   return `node ${q(path.join(SCRIPTS, "ship.mjs"))} ${sub} --plan ${q(ctx.plan)}${id ? ` --spec ${id}` : ""}${extra}`;
 }
 
+function instructionFor(payload) {
+  if (payload.set) return payload.dispatch?.length ? { howToDispatch: REVIEW_SET_DISPATCH } : { howToWait: REVIEW_SET_WAIT };
+  return payload.dispatch?.length ? { howToDispatch: HOW_TO_DISPATCH } : {};
+}
+
 function emit(payload) {
-  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...(payload.dispatch?.length ? { howToDispatch: HOW_TO_DISPATCH } : {}) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...instructionFor(payload) }, null, 2)}\n`);
+}
+
+// --- review sets -------------------------------------------------------------
+
+// Every review this driver sends out — the panel, `collect`'s re-send, the
+// re-check, `settle`'s re-send — is recorded as a set before it is printed, and
+// the step that judges it asks the record whether it is in before anything else
+// happens. A reviewer still running and a reviewer that failed look the same on
+// disk; only the record tells them apart.
+//
+// Each set lives in a directory of its own under the spec's `sets/`, never
+// inside a round: re-entering a round empties it, and a set's record is rewritten
+// on every arrival. One directory per set is also what keeps the restart rule to
+// the sets a spec's judging steps actually point at — `restart` acts on every
+// set in the directory it is given, and a set an earlier attempt left behind is
+// nobody's to wait on.
+//
+// Which set a judging step judges is named in one place per step, and nowhere
+// else: `collect-set.json` for `collect`, bound to the round and the candidate,
+// and `recheck-plan.json` for `settle`, which every `recheck` rewrites. A set id
+// is never reused, so an earlier round's set, the panel's after its re-send
+// replaced it, or a first re-check's after a declined attempt in the same round
+// can never be the one a step finds.
+
+// A judging step refused because its set is not in yet. It is a wait, not a
+// stop, and must be told apart from both: 1 is a stop, 2 a refused input, 3 an
+// older configuration and 4 a spent budget.
+export const NOT_IN_YET = 5;
+
+const setDir = (ctx, id, set) => path.join(specDir(ctx, id), "sets", set);
+const collectSetPath = (ctx, id) => path.join(specDir(ctx, id), "collect-set.json");
+const recheckPlanPath = (ctx, id) => path.join(specDir(ctx, id), "recheck-plan.json");
+const stampNow = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+
+// The file an agent of a review set is told to write, read off its own prompt so
+// that the set names exactly what the agent was told. A Codex runner is told its
+// command file, which sits beside the artifact it produces.
+function expectedOutput(dispatch) {
+  const written = /^Write your (?:findings|verdicts) to: (.*)$/m.exec(dispatch.prompt);
+  if (written) return written[1].trim();
+  const runner = /^Command file: (.*)\.cmd\.sh$/m.exec(dispatch.prompt);
+  if (runner) return runner[1].trim();
+  throw new Stop(`the dispatch ${q(dispatch.description)} names no output for its review set to expect`);
+}
+
+/**
+ * Record a review set before it is printed. `agents` is `{ dispatch, name }`,
+ * where the label is the dispatch's `description` — the name Claude Code prints
+ * in the agent's finished notice — and `name` is how the person hears of it.
+ * `step` is the judging step the last arrival names.
+ */
+async function sendSet(ctx, id, { kind, round, agents, step }) {
+  const set = `${kind}-r${round}-${stampNow()}-${randomBytes(3).toString("hex")}`;
+  const dir = setDir(ctx, id, set);
+  await recordSet({
+    dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing: "Judging the review now.",
+    agents: agents.map(({ dispatch, name }) => ({ label: dispatch.description, name, output: expectedOutput(dispatch) }))
+  });
+  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description) };
+}
+
+// What a payload carries about its set: the labels, and the arrival command with
+// the set already named, so only the label is left to append.
+const setPayload = ({ id, dir, labels }) => ({ id, labels, arrive: arriveCommand(dir, id) });
+
+/**
+ * Refuse, changing nothing, unless `set` is in. A set released by a restart is
+ * judged from disk, which is what releasing it means. Called before anything
+ * else a judging step does.
+ */
+function requireSetIn(ctx, id, set, step) {
+  const dir = setDir(ctx, id, set);
+  if (!readSet(dir, set)) throw new Stop(`the review set ${set} that ${step} judges for ${id} is not on disk`);
+  const answer = readiness({ dir, id: set });
+  if (answer.answer !== "refused") return answer;
+  throw new Stop(`Not judged yet: ${answer.reason}. Nothing was read and nothing changed. This is not a stop: end the turn and `
+    + `keep waiting. Record each finished notice with ${arriveCommand(dir, set)} followed by its label in double quotes; `
+    + `the last one names ${step} as the step to run.`, NOT_IN_YET);
+}
+
+const closeReviewSet = (ctx, id, set) => closeSet({ dir: setDir(ctx, id, set), id: set });
+
+// "a", "a and b", "a, b and c".
+function listOf(words) {
+  if (words.length <= 1) return words.join("");
+  return `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
 }
 
 // --- the fix-pending marker -----------------------------------------------
@@ -753,6 +878,23 @@ async function begin(options) {
   }
   if (["implementing", "reviewing", "fixing", "verifying"].includes(state.state) && init.existing) {
     git(ctx.worktree, ["switch", branch]);
+    // Before the route below, which re-enters the candidate's round and so
+    // empties it: a review set this spec sent out may still have agents working
+    // into that round. See `reviewSetsOnRestart`.
+    const review = await reviewSetsOnRestart(ctx, id, state, options);
+    say.push(...review.say);
+    if (review.ask) {
+      return emit({ say, ask: review.ask, answers: review.answers, state: state.state });
+    }
+    if (review.waiting) {
+      const { set, step, missing } = review.waiting;
+      return emit({
+        say: [...say, `${id} was interrupted while ${state.state}, and the review it sent out is still running; nothing was `
+          + `rebuilt, and ${step} judges it once the rest are in.`],
+        set: { id: set, labels: missing.map((agent) => agent.label), arrive: arriveCommand(setDir(ctx, id, set), set) },
+        next: nextCommand(ctx, step, id)
+      });
+    }
     return emit({
       say: [...say, `${id} was interrupted while ${state.state}; resuming from whatever is committed on ${branch}.`],
       next: nextCommand(ctx, "snapshot", id)
@@ -766,6 +908,58 @@ async function begin(options) {
   const job = roles(ctx, id).jobs.implement;
   say.push(`Starting ${id} on ${branch} from ${ctx.config.base} at ${baseOid.slice(0, 12)}; implementer ${settings(job)}.`);
   emit({ say, dispatch: [implementerDispatch(ctx, spec, job)], next: nextCommand(ctx, "snapshot", id) });
+}
+
+/**
+ * The restart rule, applied to the review sets a resumed spec's judging steps
+ * point at: `settle`'s set, then `collect`'s, each only when it was sent out for
+ * the candidate the spec is on. A set the restart closes is judged from disk by
+ * today's route; one sent out from this same session is waited on; and when no
+ * session can be identified the person is asked once, and only their yes
+ * (`--run-gone`) closes it — `--run-live` is the no, and waits.
+ *
+ * The session compared is the one identified from the environment when the set
+ * was sent and now, inside `dispatch-set.mjs`. Never `sessionOf`: that keeps the
+ * session `train.json` recorded while its transcript exists, so a restart from a
+ * new session would read as the old one and wait for ever.
+ */
+async function reviewSetsOnRestart(ctx, id, state, options) {
+  const pointed = [];
+  const plan = readJson(recheckPlanPath(ctx, id), null);
+  const recheckSet = plan?.resend?.set ?? plan?.set ?? null;
+  if (plan && plan.candidate === state.candidateOid && recheckSet) pointed.push({ set: recheckSet, step: "settle" });
+  const collected = readJson(collectSetPath(ctx, id), null);
+  if (collected && collected.candidate === state.candidateOid && collected.set) pointed.push({ set: collected.set, step: "collect" });
+
+  const result = { say: [], ask: null, answers: null, waiting: null };
+  const waiting = [];
+  const unconfirmed = [];
+  const questions = [];
+  for (const { set, step } of pointed) {
+    const dir = setDir(ctx, id, set);
+    if (!readSet(dir, set)) continue;
+    const outcome = await restart({ dir, repo: ctx.repo, confirmed: options.runGone === true });
+    for (const entry of outcome.waiting) waiting.push({ ...entry, step });
+    for (const entry of outcome.unconfirmed) unconfirmed.push({ ...entry, step });
+    if (!outcome.question) {
+      if (outcome.released.length > 0 || outcome.waiting.length > 0) result.say.push(outcome.say);
+    } else if (options.runLive) {
+      const names = listOf(outcome.unconfirmed.flatMap((entry) => entry.missing.map((agent) => agent.name)));
+      result.say.push(`On your word that the earlier run is still going, the run keeps waiting on ${names}.`);
+    } else {
+      questions.push(outcome.question);
+    }
+  }
+  if (unconfirmed.length > 0 && !options.runLive) {
+    const gone = nextCommand(ctx, "begin", id, " --run-gone");
+    const live = nextCommand(ctx, "begin", id, " --run-live");
+    result.ask = `${questions.join(" ")} If they say the earlier run is gone, run ${gone}. If they say it is still going, `
+      + `or are not sure, run ${live}, and the run keeps waiting.`;
+    result.answers = { gone, live };
+    return result;
+  }
+  result.waiting = waiting[0] ?? unconfirmed[0] ?? null;
+  return result;
 }
 
 function finishNext(ctx, id, say) {
@@ -976,7 +1170,11 @@ function reviewRouteFor(ctx, id, state, round) {
   return collected && !settled ? "recheck" : "panel";
 }
 
-function panel(options) {
+// How the person hears of each reader in a review set's progress lines; the
+// label, which is what Claude Code prints, is the dispatch's `description`.
+const reviewerName = (lens) => `the ${lens} reviewer`;
+
+async function panel(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -989,22 +1187,34 @@ function panel(options) {
   const resolved = roles(ctx, id);
   const lenses = state.reviewers;
   const pr = pullRequestLines(ctx, id, state);
-  const dispatch = lenses.map((lens) => reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines));
-  dispatch.push(codexReviewDispatch(ctx, spec, round.round, state.candidateOid, lenses, resolved.jobs["review-codex"]));
+  const agents = lenses.map((lens) => ({
+    dispatch: reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines),
+    name: reviewerName(lens)
+  }));
+  agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, lenses, resolved.jobs["review-codex"]), name: "Codex" });
+  const sent = await sendSet(ctx, id, { kind: "panel", round: round.round, agents, step: "collect" });
+  writeJson(collectSetPath(ctx, id), { round: round.round, candidate: state.candidateOid, set: sent.id, at: new Date().toISOString() });
   emit({
     say: [`Review panel on round ${round.round}: ${lenses.join(", ")} (${settings(resolved.jobs["review-lens"])}) plus Codex (${settings(resolved.jobs["review-codex"])}).`, ...pr.say],
-    dispatch,
+    dispatch: agents.map((entry) => entry.dispatch),
+    set: setPayload(sent),
     next: nextCommand(ctx, "collect", id)
   });
 }
 
-function collect(options) {
+async function collect(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
   const state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
+  // The set first, before anything is collected, marked or written.
+  const sentFor = readJson(collectSetPath(ctx, id), null);
+  if (!sentFor || sentFor.round !== round.round || sentFor.candidate !== state.candidateOid || !sentFor.set) {
+    throw new Stop(`no review set was sent out for round ${round.round} of ${id}, so nothing says whether its readers are in; run panel, which sends it`);
+  }
+  requireSetIn(ctx, id, sentFor.set, "collect");
   const expect = [...state.reviewers, "codex"];
   const result = node("collect-findings.mjs", [
     "--dir", path.join(round.dir, "findings"), "--candidate", state.candidateOid, "--expect", expect.join(","),
@@ -1017,19 +1227,32 @@ function collect(options) {
     const marker = path.join(specDir(ctx, id), `redispatched-${round.round}.json`);
     const missing = review.missing.map((gap) => gap.lens);
     if (!exists(marker)) {
-      writeJson(marker, { round: round.round, lenses: missing, at: new Date().toISOString() });
       const resolved = roles(ctx, id);
       const pr = pullRequestLines(ctx, id, state);
-      const dispatch = missing.filter((lens) => lens !== "codex")
-        .map((lens) => reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines));
+      const agents = missing.filter((lens) => lens !== "codex").map((lens) => ({
+        dispatch: reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines),
+        name: reviewerName(lens)
+      }));
       say.push(...pr.say);
-      if (missing.includes("codex")) dispatch.push(codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, resolved.jobs["review-codex"]));
+      if (missing.includes("codex")) {
+        agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, resolved.jobs["review-codex"], { reuse: false }), name: "Codex" });
+      }
+      // The re-send is a set of its own, and from here on it is the one this
+      // step judges. Recorded first, then the marker, then the pointer: a run
+      // that dies part-way never sends twice, because the marker is down before
+      // anything points at the re-send.
+      const sent = await sendSet(ctx, id, { kind: "collect-resend", round: round.round, agents, step: "collect" });
+      writeJson(marker, { round: round.round, lenses: missing, at: new Date().toISOString() });
+      writeJson(collectSetPath(ctx, id), { round: round.round, candidate: state.candidateOid, set: sent.id, at: new Date().toISOString() });
+      await closeReviewSet(ctx, id, sentFor.set);
       say.push(`${missing.join(", ")} produced no usable evidence; re-dispatching exactly those, once.`);
-      return emit({ say, dispatch, next: nextCommand(ctx, "collect", id) });
+      return emit({ say, dispatch: agents.map((entry) => entry.dispatch), set: setPayload(sent), next: nextCommand(ctx, "collect", id) });
     }
+    await closeReviewSet(ctx, id, sentFor.set);
     say.push(`${missing.join(", ")} produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended.`);
     return emit({ say, review: review.status, next: nextCommand(ctx, "recheck", id) });
   }
+  await closeReviewSet(ctx, id, sentFor.set);
   const openForFixer = review.status === "open" && (review.open ?? []).some((finding) => !isPullRequestFinding(finding));
   const churn = churnAsk(ctx, id, state, round.round, { openForFixer, atCollect: true });
   say.push(...churn.signal);
@@ -1212,7 +1435,7 @@ function accept(options) {
   emit({ say, accepted: [...ids], next: nextCommand(ctx, "recheck", id) });
 }
 
-function recheck(options) {
+async function recheck(options) {
   const ctx = context(options);
   const id = options.spec;
   const spec = specById(ctx, id);
@@ -1248,25 +1471,20 @@ function recheck(options) {
   }
 
   const pr = pullRequestLines(ctx, id, state);
-  // What each reader is told about the fixer: nothing, unless it declined — or
-  // unless none was dispatched because nothing open was for one.
-  const declinedLines = aboutPr
-    ? ["No fixer ran: these findings are about the pull request, which no fixer can reach, and nothing about the code changed. Judge each against the pull request body you are given — the one about to be published, where there is one — and against the code as it stands; resolved means the body now says what the finding asked for, or that you withdraw it"]
-    : declined?.report
-      ? [`The fixer changed nothing: it declined these findings, and its reasons are at ${declined.report}. There is no new code to read — judge each finding against the code as it stands and against those reasons; resolved means you withdraw it`]
-      : declined ? ["The fixer changed nothing and wrote no report. There is no new code to read — judge each finding against the code as it stands; resolved means you withdraw it"] : [];
-  const declinedFresh = declined
-    ? [`The fixer changed nothing since this diff was last read: it declined what was open${declined.report ? `, with its reasons at ${declined.report}` : ""}. Raise again only what still stands`]
-    : [];
+  // What the readers are told about the fixer, kept so that `settle` can tell a
+  // re-sent reader exactly the same; see `declinedContext`.
+  const given = { declined: declined ? { kind: declined.kind ?? "declined", report: declined.report ?? null } : null };
   // Where this re-check's evidence goes. The round's own `recheck/` and
   // `findings/adversary.json` are the first re-check's, and once settled they
   // are sealed; a decline's re-check writes beside them, under its attempt.
   const verdictsDir = declined ? path.join(round.dir, `recheck-${declined.attempt}`) : path.join(round.dir, "recheck");
   const adversaryFile = aboutPr ? null
     : declined ? path.join(round.dir, `findings-${declined.attempt}`, "adversary.json") : path.join(round.dir, "findings", "adversary.json");
-  const dispatch = adversaryFile
-    ? [adversaryDispatch(ctx, spec, round.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...declinedFresh], adversaryFile)]
-    : [];
+  // One entry per reader: what it is given, which is all `settle` needs to send
+  // it again through the same builder. Never its prompt — the pull request lines
+  // are read fresh at every dispatch, and a stored prompt would hand over a body
+  // a person has since edited.
+  const readers = adversaryFile ? [{ role: "adversary", name: "the adversary", output: adversaryFile }] : [];
   for (const [lens, files] of inputs) {
     if (lens === "codex") {
       let input = files[0];
@@ -1276,18 +1494,25 @@ function recheck(options) {
         input = path.join(verdictsDir, "codex-input.json");
         writeJson(input, merged);
       }
-      dispatch.push(codexRecheckDispatch(ctx, spec, round.round, state.candidateOid, input, resolved.jobs["recheck-codex"], { declinedReport: declined?.report ?? null, outDir: verdictsDir }));
-    } else if (lens === "adversary") {
-      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, "adversary", files, null, resolved.jobs["recheck-adversary"], [...pr.lines, ...declinedLines], verdictsDir));
+      readers.push({ role: "codex-recheck", lens, name: "Codex's re-check", input });
     } else {
-      dispatch.push(recheckDispatch(ctx, spec, round.round, state.candidateOid, lens, files, resolved.briefs[lens], resolved.jobs["recheck-lens"], [...pr.lines, ...declinedLines], verdictsDir));
+      readers.push({ role: "recheck", lens, name: lens === "adversary" ? "the adversary's re-check" : `${reviewerName(lens)}'s re-check`, inputs: files });
     }
   }
-  writeJson(path.join(specDir(ctx, id), "recheck-plan.json"), {
+  const where = { round: round.round, dir: verdictsDir, given };
+  const agents = readers.map((reader) => ({ dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), name: reader.name }));
+  for (const [index, { dispatch }] of agents.entries()) {
+    readers[index] = { ...readers[index], label: dispatch.description, output: expectedOutput(dispatch) };
+  }
+  // A re-check that dispatches nothing records no set, and says so with
+  // `set: null`, so that `settle` proceeds instead of waiting on nobody.
+  const sent = agents.length > 0 ? await sendSet(ctx, id, { kind: "recheck", round: round.round, agents, step: "settle" }) : null;
+  writeJson(recheckPlanPath(ctx, id), {
     round: round.round, candidate: state.candidateOid, collectionRound: collected, carry: carry?.count > 0 ? carry.file : null,
     declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
-    lenses: [...inputs.keys()], at: new Date().toISOString()
+    lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, resend: null, at: new Date().toISOString()
   });
+  const dispatch = agents.map((entry) => entry.dispatch);
   const say = [adversaryFile
     ? `Fresh adversary pass on round ${round.round} (${settings(resolved.jobs["adversary-fresh"])})`
     : `No fresh adversary pass on round ${round.round}: nothing about the code changed, and what is open is about the pull request.`];
@@ -1298,16 +1523,76 @@ function recheck(options) {
     say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${because}).`);
   } else say.push("Nothing to re-check: no earlier finding is open and no fixer has run since the panel.");
   say.push(...pr.say);
-  emit({ say, dispatch, next: nextCommand(ctx, "settle", id) });
+  emit({ say, dispatch, ...(sent ? { set: setPayload(sent) } : {}), next: nextCommand(ctx, "settle", id) });
 }
 
-function settle(options) {
+// What each re-check reader is told about the fixer: nothing, unless it declined
+// — or unless none was dispatched because nothing open was for one. `lines` go to
+// the readers re-judging what they raised, `fresh` to the adversary's fresh pass.
+function declinedContext(declined) {
+  const aboutPr = declined?.kind === "pull-request";
+  const lines = aboutPr
+    ? ["No fixer ran: these findings are about the pull request, which no fixer can reach, and nothing about the code changed. Judge each against the pull request body you are given — the one about to be published, where there is one — and against the code as it stands; resolved means the body now says what the finding asked for, or that you withdraw it"]
+    : declined?.report
+      ? [`The fixer changed nothing: it declined these findings, and its reasons are at ${declined.report}. There is no new code to read — judge each finding against the code as it stands and against those reasons; resolved means you withdraw it`]
+      : declined ? ["The fixer changed nothing and wrote no report. There is no new code to read — judge each finding against the code as it stands; resolved means you withdraw it"] : [];
+  const fresh = declined
+    ? [`The fixer changed nothing since this diff was last read: it declined what was open${declined.report ? `, with its reasons at ${declined.report}` : ""}. Raise again only what still stands`]
+    : [];
+  return { lines, fresh };
+}
+
+// One re-check reader's dispatch, from what `recheck` recorded it is given. The
+// one builder for both the re-check and `settle`'s re-send of it, so the two can
+// never tell a reader different things — except the pull request, which is read
+// fresh each time. `where` is the round, the verdicts directory and `given`.
+// `resend` is `settle`'s re-send, which must run Codex again rather than reuse
+// the artifact it is re-sent because of.
+function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend = false } = {}) {
+  const { lines, fresh } = declinedContext(where.given?.declined ?? null);
+  if (reader.role === "adversary") {
+    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...fresh], reader.output);
+  }
+  if (reader.role === "codex-recheck") {
+    return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, resolved.jobs["recheck-codex"],
+      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend });
+  }
+  if (reader.lens === "adversary") {
+    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, resolved.jobs["recheck-adversary"], [...pr.lines, ...lines], where.dir);
+  }
+  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], resolved.jobs["recheck-lens"], [...pr.lines, ...lines], where.dir);
+}
+
+// The readers a re-check sent out whose result `recheck.mjs` found unusable,
+// matched by the exact file each was told to write — which is also how
+// `recheck.mjs` tells the adversary's two roles apart. A gap inherited from the
+// collected review names no file a reader of this re-check writes, and its
+// reason says it is inherited: it was re-sent once already, at `collect`.
+const INHERITED_GAP = "(unresolved from an earlier review)";
+
+function unusableReaders(plan, review) {
+  const failed = new Set((review.missing ?? [])
+    .filter((gap) => gap.file && !String(gap.reason ?? "").endsWith(INHERITED_GAP))
+    .map((gap) => path.resolve(gap.file)));
+  return (plan.readers ?? []).filter((reader) => failed.has(path.resolve(reader.output)));
+}
+
+async function settle(options) {
   const ctx = context(options);
   const id = options.spec;
   const state = readState(ctx, id);
   refuseWhileWaiting(id, state, "settle");
-  const plan = readJson(path.join(specDir(ctx, id), "recheck-plan.json"), null);
+  const planPath = recheckPlanPath(ctx, id);
+  const plan = readJson(planPath, null);
   if (!plan || plan.candidate !== state.candidateOid) throw new Stop(`no recheck plan for ${state.candidateOid}; run recheck first`);
+  // The set first, before anything is settled or recorded: the re-send's once
+  // there is one, otherwise the re-check's. `set: null` is a re-check that sent
+  // nobody out; no `set` at all is a plan this driver did not write.
+  if (!Object.hasOwn(plan, "set")) {
+    throw new Stop(`the re-check of ${id} recorded no review set, so nothing says whether its readers are in; run recheck, which sends it`);
+  }
+  const judged = plan.resend?.set ?? plan.set;
+  if (judged) requireSetIn(ctx, id, judged, "settle");
   const dir = roundDir(ctx, id, plan.round);
   const args = [
     "--review", path.join(roundDir(ctx, id, plan.collectionRound), "review.json"), "--round", String(plan.round),
@@ -1321,11 +1606,33 @@ function settle(options) {
   if (plan.declined) args.push("--declined", plan.declined);
   const result = node("recheck.mjs", args, { allow: [1] });
   const settledReview = readJson(path.join(dir, "recheck.json"));
+  const say = result.stdout.trim().split("\n");
+  const failed = unusableReaders(plan, settledReview);
+  // A reader this re-check sent out that came back with nothing usable is sent
+  // again, once, into the same file — `recheck.mjs` leaves exactly those files
+  // writable and clears what it derived on the next run. Nothing is recorded,
+  // transitioned or counted on this pass: the gate, the move to verifying and
+  // the churn signal all belong to the pass that judges the re-send.
+  if (failed.length > 0 && !plan.resend) {
+    const spec = specById(ctx, id);
+    const resolved = roles(ctx, id);
+    const pr = pullRequestLines(ctx, id, state);
+    const where = { round: plan.round, dir: plan.dir, given: plan.given };
+    const agents = failed.map((reader) => ({ dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true }), name: reader.name }));
+    const sent = await sendSet(ctx, id, { kind: "settle-resend", round: plan.round, agents, step: "settle" });
+    writeJson(planPath, { ...plan, resend: { set: sent.id, labels: sent.labels, at: new Date().toISOString() } });
+    await closeReviewSet(ctx, id, plan.set);
+    say.push(...pr.say, `${listOf(failed.map((reader) => reader.name))} produced no usable evidence; re-dispatching exactly those, once.`);
+    return emit({ say, dispatch: agents.map((entry) => entry.dispatch), set: setPayload(sent), next: nextCommand(ctx, "settle", id) });
+  }
+  if (judged) await closeReviewSet(ctx, id, judged);
+  if (failed.length > 0) {
+    say.push(`${listOf(failed.map((reader) => reader.name))} produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended.`);
+  }
   record(ctx, id, "review", state.candidateOid, path.join(dir, "recheck.json"));
   // Already there after a revisit, whose re-check reaches here without a fixer
   // or a panel in between.
   if (state.state !== "verifying") transition(ctx, id, "verifying");
-  const say = result.stdout.trim().split("\n");
   const open = settledReview.open ?? [];
   const openForFixer = open.some((finding) => !isPullRequestFinding(finding));
   const churn = churnAsk(ctx, id, state, plan.round, { openForFixer, atCollect: false });
@@ -1810,7 +2117,9 @@ const SUBCOMMANDS = { start, begin, snapshot, verify, panel, collect, fix, redes
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
-  begin   --spec <id>                 branch and dispatch the implementer, or resume
+  begin   --spec <id> [--run-gone | --run-live]
+                                      branch and dispatch the implementer, or resume; the flags answer
+                                      the question a resume asks about a review an earlier run sent out
   snapshot --spec <id> [--message m]  commit, allocate the round, snapshot, bind, record the report
   verify  --spec <id>                 run the verify commands against the candidate
   panel   --spec <id>                 dispatch every lens plus Codex
@@ -1834,10 +2143,13 @@ function parseArgs(argv) {
     const key = rest[index];
     if (!key.startsWith("--")) throw new Stop(`unexpected argument: ${key}\n${USAGE}`, 2);
     if (key === "--reclaim") { options.reclaim = true; continue; }
+    if (key === "--run-gone") { options.runGone = true; continue; }
+    if (key === "--run-live") { options.runLive = true; continue; }
     const value = rest[++index];
     if (value === undefined) throw new Stop(`${key} requires a value\n${USAGE}`, 2);
     options[key.slice(2)] = value;
   }
+  if (options.runGone && options.runLive) throw new Stop("--run-gone and --run-live are the two answers to one question; give one", 2);
   return { sub, options };
 }
 
