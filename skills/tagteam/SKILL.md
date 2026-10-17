@@ -184,6 +184,20 @@ process it starts, and are already in the command file it is handed.
 
 The agent files in `agents/` are written by hand, one per role.
 
+**What each agent ran at is checked afterwards, and only reported.** Every set
+keeps, per agent, the agent, model and effort it was sent at: in a ship, the
+dispatch exactly as `ship.mjs` printed it, the runner's own pair and an
+escalated fixer's raised effort included; in a plan, what `plan.mjs record`
+resolves for the label, never anything the main agent supplies. After each
+spec, `finish`'s `say` names every Claude agent that ran at a different effort
+or model than that — read off the transcripts Claude Code keeps for the set's
+session — and every agent whose run could not be confirmed, with why; a plan's
+approval shows the same from `plan.mjs effort-check`. A model alias matches any
+full id of its family (`opus` matches `claude-opus-5-5`). Nothing blocks,
+re-sends or changes an exit code because of it, and when everything matched it
+says nothing. A set recorded before requests were kept is reported as not
+confirmed, never as a mismatch.
+
 **In a ship, a fan-out is one message, and the run judges it from its own record
 of who has reported.** A plan dispatches as `commands/plan.md` says. In a ship,
 every dispatch is a set — a review panel is one
@@ -365,7 +379,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints |
-| `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in) |
+| `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |

@@ -26,6 +26,7 @@ import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "../dispatch-set.mjs";
+import { runnerDispatch } from "./codex-command.mjs";
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const q = (value) => JSON.stringify(String(value));
@@ -281,12 +282,45 @@ function refuseOrder(kind, sets) {
   }
 }
 
+// What each agent of a plan set was asked to run at, attached by the script
+// rather than supplied by the main agent. A Claude label resolves through
+// `callForLabel`, which `plan.mjs` passes in: it is the function `plan.mjs
+// dispatch` prints from, and it is passed rather than imported because
+// `plan.mjs` imports this module. The Codex plan review's runner carries the
+// runner's own fixed call, never the configured Codex pair, which belongs to the
+// process it starts. A label nothing resolves, or a configuration that cannot be
+// read, leaves the entry without a request — the approval report then says it
+// could not be confirmed — and never refuses the record.
+export const CODEX_PLAN_REVIEW = "Codex plan review";
+
+function requestsFor(kind, entries, repo, callForLabel) {
+  let config = null;
+  try {
+    config = JSON.parse(fs.readFileSync(path.join(repo, ".tagteam", "config.json"), "utf8"));
+  } catch {}
+  return entries.map(({ label }) => {
+    let call = null;
+    try {
+      if (familyOf(kind) === "review" && label === CODEX_PLAN_REVIEW) {
+        call = runnerDispatch({ description: label, commandFile: "", statusFile: "" });
+      } else if (config && callForLabel) {
+        call = callForLabel(config, kind, label);
+      }
+    } catch {
+      call = null;
+    }
+    return call ? { agent: call.agent ?? null, model: call.model ?? null, effort: call.effort ?? null } : null;
+  });
+}
+
 /**
  * Record a set the main agent has just dispatched. `agents` is `{label,
  * output}` in dispatch order; the name each is announced by follows from its
- * kind and output. Every refusal comes before anything is written.
+ * kind and output, and the request each was sent at from its kind and label,
+ * through `callForLabel(config, kind, label)`. Every refusal comes before
+ * anything is written.
  */
-export async function recordPlanSet({ planDir, kind, agents, repo, env = process.env }) {
+export async function recordPlanSet({ planDir, kind, agents, repo, env = process.env, callForLabel = null }) {
   if (!KINDS.includes(kind)) refuse(`--kind must be one of ${KINDS.join(", ")}; got ${q(kind)}`);
   if (!Array.isArray(agents) || agents.length === 0) refuse(`a ${kind} set names at least one agent: --agent <label> <output>`);
   const entries = agents.map(({ label, output }) => ({ label, output: path.resolve(output) }));
@@ -295,6 +329,7 @@ export async function recordPlanSet({ planDir, kind, agents, repo, env = process
   refuseOrder(kind, sets);
   repo ??= repoFor(planDir);
   const { next, closing } = nextFor(kind, planDir, repo);
+  const requests = requestsFor(kind, entries, repo, callForLabel);
   const seq = (sets.at(-1)?.seq ?? 0) + 1;
   const id = `${String(seq).padStart(3, "0")}-${kind}`;
   const dir = setsDir(planDir);
@@ -306,7 +341,9 @@ export async function recordPlanSet({ planDir, kind, agents, repo, env = process
   }
   const record = await recordSet({
     dir, id, repo, env, next, closing,
-    agents: entries.map((entry) => ({ ...entry, name: nameFor(kind, entry.output) }))
+    agents: entries.map((entry, index) => ({
+      ...entry, name: nameFor(kind, entry.output), ...(requests[index] ? { request: requests[index] } : {})
+    }))
   });
   return { id, dir, record, labels: entries.map((entry) => entry.label) };
 }

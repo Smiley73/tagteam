@@ -318,6 +318,14 @@ what merged is still the commit the readers saw. When the check does not pass,
 `ask` says what it found and what the ways on are; say it as it was written, and
 do not offer approval — none reaches a change that fails where it would land.
 
+Whichever way `finish` ends, its `say` may carry up to two lines about how this
+spec's agents ran: one naming every Claude agent that ran at a different effort
+or model than it was sent at, and one naming every agent whose run could not be
+confirmed, each with why. Relay them as written. They are a report and nothing
+more: never a stop, never a reason to re-dispatch an agent, and they change
+nothing about the merge or the question you ask. When every agent ran as it was
+sent, there is no such line.
+
 When the gates are not satisfied, `finish` puts the spec in `awaiting-approval`,
 sends a desktop notification, and returns `ask` with `reasons` — the same list
 split into `blockers` and `approvals` — the pull request, `openFindings` (each

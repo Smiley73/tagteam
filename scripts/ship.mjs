@@ -51,6 +51,7 @@ import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
+import { effortCheckLines } from "./lib/effort-check.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -619,9 +620,15 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
   }
   const set = `${kind}${round === null ? "" : `-r${round}`}-${stampNow()}-${randomBytes(3).toString("hex")}`;
   const dir = setDir(ctx, id, set);
+  // Each entry keeps the agent, model and effort exactly as printed — an
+  // escalated fixer's raised pair, the runner's own — because `finish` compares
+  // what ran against this and must never work the request out again later.
   await recordSet({
     dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing,
-    agents: agents.map(({ dispatch, name }) => ({ label: dispatch.description, name, output: expectedOutput(dispatch) }))
+    agents: agents.map(({ dispatch, name }) => ({
+      label: dispatch.description, name, output: expectedOutput(dispatch),
+      request: { agent: dispatch.agent ?? null, model: dispatch.model ?? null, effort: dispatch.effort ?? null }
+    }))
   });
   return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description) };
 }
@@ -2082,7 +2089,7 @@ async function finish(options) {
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
-      say.push(...usageLines(ctx, id));
+      say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
       return finishNext(ctx, id, say);
     }
     // The gates are satisfied and the change still cannot be merged: it does not
@@ -2092,7 +2099,7 @@ async function finish(options) {
     state = readState(ctx, id);
     if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
     spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "the base moved"], { stdio: "ignore" });
-    say.push(...usageLines(ctx, id));
+    say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
     const following = nextSpecAfter(ctx, id);
     return emit({
       say, ask: landed.stop, landing: landed.landing ?? null, pullRequest: state.pr,
@@ -2111,7 +2118,7 @@ async function finish(options) {
     .map((entry) => readJson(path.join(entry.dir, "report.json"), null))
     .filter((report) => report && report.status !== "complete")
     .map((report) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part) => `left undone: ${part.part} — ${part.reason}`).join("; ")}`);
-  say.push(...usageLines(ctx, id));
+  say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const following = nextSpecAfter(ctx, id);
   const accepted = readJson(acceptedPath(ctx, id), null);
   emit({
@@ -2146,6 +2153,15 @@ function usageLines(ctx, id) {
   } catch {
     return [];
   }
+}
+
+// Best effort, never a stop, like the cost line beside it: which of this spec's
+// Claude agents ran at a different effort or model than they were sent at, and
+// which could not be confirmed. Every set the spec ever sent out is read, from
+// the requests recorded when each was sent; nothing here touches the verdict,
+// the merge or the exit code, and it says nothing when everything matched.
+function effortLines(ctx, id) {
+  return effortCheckLines({ side: "ship", root: path.join(specDir(ctx, id), "sets"), repo: ctx.repo });
 }
 
 // Give up this plan's ship lock, and say whether the worktree is this run's to
