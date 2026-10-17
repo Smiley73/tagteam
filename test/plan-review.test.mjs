@@ -12,6 +12,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkResponse, collectPlanReview, renderBrief, READERS } from "../scripts/plan.mjs";
 import { codexArgs, readCodexStatus, shellQuote, writeCodexCommand } from "../scripts/lib/codex-command.mjs";
+import { PLAN_READERS, arriveInto, recordPlanSet, stageExplored, stagePlanWorkspace } from "./stage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const PLAN = path.join(root, "scripts", "plan.mjs");
@@ -90,7 +91,15 @@ test("the response is complete only when every gating id is answered once, by an
 });
 
 test("the CLI writes findings.json and brief.md, exits 1 while a reader is missing, and check exits 1 while an answer is missing", () => {
-  const dir = reviewDir({ claude: review("claude", [finding("major", "a")]), codex: review("codex", []) });
+  // Each step judges a recorded set that is in, as a real plan's would.
+  const ws = stagePlanWorkspace();
+  const dir = ws.review;
+  stageExplored(ws);
+  const readers = recordPlanSet(ws, "review", PLAN_READERS(ws));
+  assert.equal(readers.status, 0, readers.stderr);
+  fs.writeFileSync(path.join(dir, "claude.json"), JSON.stringify(review("claude", [finding("major", "a")])));
+  fs.writeFileSync(path.join(dir, "codex.json"), JSON.stringify(review("codex", [])));
+  assert.equal(arriveInto(ws, readers, PLAN_READERS(ws).map(([label]) => label)).status, 0);
   const incomplete = spawnSync("node", [PLAN, "collect", "--dir", dir], { encoding: "utf8" });
   assert.equal(incomplete.status, 1);
   assert.match(incomplete.stdout, /MISSING  adversary/);
@@ -101,6 +110,9 @@ test("the CLI writes findings.json and brief.md, exits 1 while a reader is missi
   assert.ok(fs.existsSync(path.join(dir, "findings.json")));
   assert.ok(fs.existsSync(path.join(dir, "brief.md")));
 
+  const drafter = recordPlanSet(ws, "response", [["Answer the plan review", path.join(dir, "response.json")]]);
+  assert.equal(drafter.status, 0, drafter.stderr);
+  assert.equal(arriveInto(ws, drafter, ["Answer the plan review"]).status, 0);
   const unanswered = spawnSync("node", [PLAN, "check", "--dir", dir], { encoding: "utf8" });
   assert.equal(unanswered.status, 1);
   assert.match(unanswered.stderr, /no readable response/);

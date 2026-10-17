@@ -31,8 +31,8 @@ flowchart LR
 
 ## Install
 
-Requires Claude Code, Git, the [Codex CLI](https://github.com/openai/codex), and
-an authenticated GitHub CLI.
+Requires Claude Code 2.1.301 or newer, Git, the
+[Codex CLI](https://github.com/openai/codex), and an authenticated GitHub CLI.
 
 ```bash
 claude plugin marketplace add Smiley73/tagteam
