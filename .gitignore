@@ -13,4 +13,5 @@ coverage/
 .tagteam/**/.quota/
 .codegraph/
 .tagteam/plans/
+.tagteam/config.json
 # <<< tagteam managed <<<
