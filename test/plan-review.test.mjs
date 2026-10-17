@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkResponse, collectPlanReview, renderBrief, READERS } from "../scripts/plan.mjs";
-import { codexArgs, readCodexStatus, shellQuote, writeCodexCommand } from "../scripts/lib/codex-command.mjs";
+import { RUNNER, codexArgs, readCodexStatus, runnerDispatch, shellQuote, writeCodexCommand } from "../scripts/lib/codex-command.mjs";
 import { PLAN_READERS, arriveInto, recordPlanSet, stageExplored, stagePlanWorkspace } from "./stage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -144,4 +144,31 @@ test("the Codex command file quotes every argument, always reuses, and ends by w
   assert.equal(spawnSync("sh", [prepared.commandFile]).status, 0);
   assert.deepEqual(readCodexStatus(prepared.statusFile), { finished: true, exitCode: 7, said: "Codex ran, but how it routed could not be confirmed: x" });
   assert.deepEqual(readCodexStatus(path.join(dir, "absent")), { finished: false, exitCode: null, said: "" });
+});
+
+test("plan.mjs codex prints the runner at its own model and effort, never the configured Codex pair", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-codex-"));
+  const review = path.join(dir, "review");
+  fs.mkdirSync(review);
+  for (const name of ["goal.md", "plan.md"]) fs.writeFileSync(path.join(dir, name), "# x\n");
+  const printed = spawnSync(process.execPath, [PLAN, "codex", "--dir", review, "--goal", path.join(dir, "goal.md"),
+    "--plan", path.join(dir, "plan.md"), "--cd", dir, "--model", "gpt-5.6-sol", "--effort", "xhigh"], { encoding: "utf8" });
+  assert.equal(printed.status, 0, printed.stderr);
+  const { dispatch } = JSON.parse(printed.stdout);
+  assert.equal(dispatch.agent, "tagteam:codex-runner");
+  assert.equal(dispatch.model, "haiku");
+  assert.equal(dispatch.effort, "low");
+  // The configured pair goes to the Codex process, in the command file.
+  const script = fs.readFileSync(/^Command file: (.*)$/m.exec(dispatch.prompt)[1], "utf8");
+  assert.ok(script.includes("'--model' 'gpt-5.6-sol'") && script.includes("'--effort' 'xhigh'"), script);
+});
+
+test("the runner dispatch carries exactly the model and effort agents/codex-runner.md pins", () => {
+  // Two places hold the runner's pair — the agent file Claude Code reads and the
+  // dispatch the drivers print — and neither may change without the other.
+  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(fs.readFileSync(path.join(root, "agents", "codex-runner.md"), "utf8"))[1];
+  const field = (name) => new RegExp(`^${name}:\\s*(\\S+)\\s*$`, "m").exec(frontmatter)?.[1];
+  const dispatch = runnerDispatch({ description: "d", commandFile: "c.cmd.sh", statusFile: "c.status" });
+  assert.deepEqual({ model: dispatch.model, effort: dispatch.effort }, { model: field("model"), effort: field("effort") });
+  assert.deepEqual({ ...RUNNER }, { model: "haiku", effort: "low" });
 });

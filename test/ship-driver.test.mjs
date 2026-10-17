@@ -99,6 +99,19 @@ function arriveAll(result, env = {}) {
   return recorded;
 }
 
+// The effort an entry is printed with and, on a Claude entry, that the variant
+// its name selects is the same one, so the name and the passed effort agree.
+// The runner carries its own pair, which no configuration reaches.
+function assertEffort(entry, effort, why) {
+  assert.equal(entry.effort, effort, `${entry.description}: ${why}`);
+  if (entry.agent === "tagteam:codex-runner") {
+    assert.deepEqual([entry.model, entry.effort], ["haiku", "low"], `${entry.description}: the runner runs at its own pair`);
+    return;
+  }
+  assert.equal(entry.agent.slice(entry.agent.lastIndexOf("-") + 1), entry.effort,
+    `${entry.description}: ${entry.agent} names a different effort than the ${entry.effort} it passes`);
+}
+
 const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
 const major = (file) => ({ severity: "major", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
 
@@ -124,6 +137,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   const [implementer] = begin.json.dispatch;
   assert.equal(implementer.agent, "tagteam:implementer-high", "the implementer runs at effort.implementer");
   assert.equal(implementer.model, "sonnet", "the implementer runs the worker model");
+  assertEffort(implementer, "high", "the implementer passes effort.implementer");
   assert.match(implementer.prompt, /^Job: implementer/);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
@@ -150,7 +164,10 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   const agents = panel.json.dispatch.map((entry) => entry.agent);
   assert.deepEqual(agents, ["tagteam:reviewer-medium", "tagteam:reviewer-medium", "tagteam:codex-runner"],
     "one reviewer per default lens at effort.reviewer, plus the Codex runner");
-  assert.equal(panel.json.dispatch[2].model, null, "the runner's model is its own");
+  assert.equal(panel.json.dispatch[2].model, "haiku", "the runner's model is its own, not the configured Codex model");
+  assert.equal(panel.json.dispatch[2].effort, "low", "the runner's effort is its own, not the configured Codex effort");
+  for (const reviewer of panel.json.dispatch.slice(0, 2)) assertEffort(reviewer, "medium", "a reviewer passes effort.reviewer");
+  assertEffort(panel.json.dispatch[2], "low", "the runner passes its own effort");
   assert.match(panel.json.dispatch[2].prompt, /Command file: .*codex\.json\.cmd\.sh\nStatus file: .*codex\.json\.status/);
   assert.match(fs.readFileSync(/Command file: (.*)$/m.exec(panel.json.dispatch[2].prompt)[1], "utf8"), /'--var' 'LENSES=code-quality, correctness'/);
   assert.match(panel.json.howToDispatch, /run_in_background: false/);
@@ -171,6 +188,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
 
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
   assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary-high"], "nothing to re-check: the adversary alone");
+  assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
 
   arriveAll(recheck);
@@ -209,6 +227,7 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   assert.equal(fix.status, 0, fix.stderr);
   assert.equal(fix.json.dispatch[0].agent, "tagteam:fixer-high");
+  assertEffort(fix.json.dispatch[0], "high", "the fixer passes effort.fixer");
   assert.match(fix.json.dispatch[0].prompt, /to-fix\.json/, "the first fix of a cycle gets the panel's brief");
   assert.match(fix.json.say[0], /Fix round 1 of the 2/);
   assert.equal(state().fixRoundsUsed, 1);
@@ -232,6 +251,8 @@ test("a major finding spends a fix round, re-snapshots into round 2, and the fir
   const dispatched = recheck.json.dispatch.map((entry) => entry.agent);
   assert.deepEqual(dispatched, ["tagteam:adversary-high", "tagteam:reviewer-low"],
     "after the first fix: the fresh adversary and a re-check by the one lens that raised something, at effort.recheck — no panel");
+  assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
+  assertEffort(recheck.json.dispatch[1], "low", "a lens re-check passes effort.recheck");
   assert.match(recheck.json.dispatch[1].prompt, /rounds\/1\/open\/correctness\.json/, "the re-check judges the ids the collector minted");
   const second = state().candidateOid;
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
@@ -369,8 +390,15 @@ test("a fixer that declines every finding makes no round, and the lens that rais
 // snapshot went straight to `publish`, the lens was never asked again, and the
 // finding stayed open through every fix round the budget allowed.
 test("a fixer that declines after a settled round goes back through the re-check, not straight to publish", () => {
-  const { plan, shipDir } = stage();
-  ship("start", plan);
+  const { repo, plan, shipDir, config } = stage();
+  // Escalation after the first fix round, on efforts that tell every job apart:
+  // the second fixer and the re-check after it run raised, while the adversary's
+  // fresh pass in that same message never escalates and keeps its own effort.
+  config.escalation = { after: 1, models: { ...config.models }, effort: { ...config.effort, fixer: "max", recheck: "xhigh", adversary: "low" } };
+  fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), JSON.stringify(config, null, 2));
+  git(repo, "commit", "-qam", "escalate after one fix round");
+  git(repo, "push", "-q", "origin", "main");
+  assert.equal(ship("start", plan).status, 0);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
@@ -389,6 +417,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   arriveAll(panel);
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assertEffort(fix.json.dispatch[0], "high", "the first fix round is not raised: escalation is strictly after one");
   fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: []
@@ -397,6 +426,8 @@ test("a fixer that declines after a settled round goes back through the re-check
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
+  assertEffort(recheck.json.dispatch[1], "low", "the re-check after an unraised fix round passes effort.recheck");
   const second = state().candidateOid;
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
   write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still adds" }] });
@@ -408,6 +439,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   const again = ship("fix", plan, ["--spec", "01-a"]);
   assert.equal(again.status, 0, again.stderr);
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-declined.json")), "no decline is on record before the fixer answers");
+  assertEffort(again.json.dispatch[0], "max", "the second fixer passes escalation's fixer effort");
   write(outputOf(again.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "sub is meant to add; the spec says so" }], notes: "", status: "complete", summary: "declined", unfinished: []
   });
@@ -424,6 +456,9 @@ test("a fixer that declines after a settled round goes back through the re-check
   assert.equal(rejudge.status, 0, rejudge.stderr);
   const correctness = rejudge.json.dispatch.find((dispatch) => /^Re-check 01-a: correctness$/.test(dispatch.description));
   assert.ok(correctness, "the lens that raised the declined finding is asked again");
+  assertEffort(correctness, "xhigh", "the re-check after a raised fix round passes escalation's recheck effort");
+  assert.equal(rejudge.json.dispatch[0].description, "Adversary on 01-a");
+  assertEffort(rejudge.json.dispatch[0], "high", "the fresh adversary in the same message keeps the ordinary effort.adversary, not escalation's");
   assert.match(correctness.prompt, /declined these findings/);
   // The round's first re-check is settled and sealed, so this one writes beside
   // it rather than over it.
@@ -2629,6 +2664,7 @@ test("snapshot waits the same way for the first implementer, a redesign implemen
   const { run, state } = driveToRecurrence(again);
   const redesign = run("redesign");
   assert.deepEqual(redesign.json.set.labels, ["Redesign 01-a: app.js"]);
+  assertEffort(redesign.json.dispatch[0], "high", "a redesign implementer passes effort.implementer");
   const refused = ship("snapshot", again.plan, ["--spec", "01-a"]);
   assert.equal(refused.status, NOT_IN_YET, refused.stderr);
   assert.match(refused.stderr, /still waiting on Redesign 01-a: app\.js/);
@@ -2650,6 +2686,7 @@ test("snapshot waits the same way for the first implementer, a redesign implemen
   const repair = ship("repair", red.plan, ["--spec", "01-a"]);
   assert.equal(repair.status, 0, repair.stderr);
   assert.deepEqual(repair.json.set.labels, ["Repair CI for 01-a"]);
+  assertEffort(repair.json.dispatch[0], "high", "a CI repair passes effort.fixer");
   const waiting = ship("snapshot", red.plan, ["--spec", "01-a"]);
   assert.equal(waiting.status, NOT_IN_YET, waiting.stderr);
   assert.match(waiting.stderr, /still waiting on Repair CI for 01-a/);
@@ -2673,6 +2710,7 @@ test("snapshot waits the same way for the first implementer, a redesign implemen
   const landingRepair = ship("repair", landing.plan, ["--spec", "01-a"]);
   assert.equal(landingRepair.status, 0, landingRepair.stderr);
   assert.deepEqual(landingRepair.json.set.labels, ["Repair 01-a against the current main"]);
+  assertEffort(landingRepair.json.dispatch[0], "high", "a landing repair passes effort.fixer");
   const landingHead = git(landingTree, "rev-parse", "HEAD");
   const notYet = ship("snapshot", landing.plan, ["--spec", "01-a"]);
   assert.equal(notYet.status, NOT_IN_YET, notYet.stderr);
@@ -2864,4 +2902,70 @@ test("every dispatch carries the one instruction and its set: the arrival step, 
   assert.match(HOW_TO_DISPATCH, /Never sleep, never poll, never watch, never schedule a wake-up/);
   assert.doesNotMatch(HOW_TO_DISPATCH, /returns when all of them have finished/);
   assert.doesNotMatch(HOW_TO_DISPATCH, /Never background/i);
+  // The Agent tool sets an effort only when told to, so this is an instruction
+  // to pass it, never a description of the field.
+  assert.match(HOW_TO_DISPATCH, /subagent_type set to `agent`/);
+  assert.match(HOW_TO_DISPATCH, /`model` passed as given/);
+  assert.match(HOW_TO_DISPATCH, /pass `effort` on every call, exactly as given/);
+});
+
+// The configuration is validated at `start` only; every later step re-reads it
+// unvalidated. Whatever a person edits mid-train, a Claude dispatch with no
+// effort or an effort off the ladder is a stop that names the job — and it
+// stops before the set is recorded, so no step is ever left waiting on agents
+// that were never sent.
+function refusedBeforeTheSet(result, shipDir, job, pointer, why) {
+  assert.equal(result.status, 1, `${why}: ${result.stdout}${result.stderr}`);
+  assert.match(result.stderr, new RegExp(`the ${job} job's dispatch`), `${why}: the stop names the job`);
+  assert.equal(result.json, null, `${why}: nothing is printed, so nothing can be dispatched`);
+  assert.doesNotMatch(result.stdout, /"dispatch"/, why);
+  const sets = path.join(shipDir, "01-a", "sets");
+  return { sets: fs.existsSync(sets) ? fs.readdirSync(sets).sort() : [], pointer: fs.existsSync(pointer) ? fs.readFileSync(pointer, "utf8") : null };
+}
+
+test("a Claude dispatch with no effort, or one off the ladder, is a stop naming the job, and no set is recorded for it", () => {
+  // A single agent: the implementer, from begin. Each case is its own train,
+  // since a refused begin leaves the spec implementing, as any stop there does.
+  for (const [effort, found] of [[undefined, /has no effort/], ["extreme", /has the effort "extreme"/]]) {
+    const { repo, plan, shipDir } = stage();
+    assert.equal(ship("start", plan).status, 0);
+    const configPath = path.join(repo, ".tagteam", "config.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    config.effort.implementer = effort;
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    const begin = ship("begin", plan, ["--spec", "01-a"]);
+    const left = refusedBeforeTheSet(begin, shipDir, "implement", path.join(shipDir, "01-a", "snapshot-set.json"), `begin with effort ${effort}`);
+    assert.match(begin.stderr, found);
+    assert.deepEqual(left, { sets: [], pointer: null }, "no set was recorded and snapshot points at none");
+  }
+
+  // A panel: the reviewers, from panel, refused and then sent once the
+  // configuration is put right.
+  const { repo, plan, shipDir } = stage();
+  assert.equal(ship("start", plan).status, 0);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).status, 0);
+  assert.equal(ship("verify", plan, ["--spec", "01-a"]).status, 0);
+  const configPath = path.join(repo, ".tagteam", "config.json");
+  const original = fs.readFileSync(configPath, "utf8");
+  const before = fs.readdirSync(path.join(shipDir, "01-a", "sets")).sort();
+  assert.equal(before.length, 1, "the implementer's set alone");
+  for (const [effort, found] of [[undefined, /has no effort/], ["huge", /has the effort "huge"/]]) {
+    const config = JSON.parse(original);
+    config.effort.reviewer = effort;
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    const panel = ship("panel", plan, ["--spec", "01-a"]);
+    const left = refusedBeforeTheSet(panel, shipDir, "review-lens", path.join(shipDir, "01-a", "collect-set.json"), `panel with effort ${effort}`);
+    assert.match(panel.stderr, found);
+    assert.deepEqual(left, { sets: before, pointer: null }, "no new set was recorded and collect points at none");
+  }
+  fs.writeFileSync(configPath, original);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  assert.equal(panel.status, 0, panel.stderr);
+  assert.deepEqual(labelsOf(panel), PANEL_LABELS);
+  assert.equal(fs.readdirSync(path.join(shipDir, "01-a", "sets")).length, 2, "the panel's set, once the configuration is right");
 });

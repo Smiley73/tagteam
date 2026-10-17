@@ -25,7 +25,9 @@ Run the command the previous step printed as `next`. It prints one JSON object:
   as an Agent call with `run_in_background: false` where the call allows it,
   `subagent_type` set to the entry's `agent`, `model` set to its `model` when
   that is not null and omitted when it is null, `description` as given, and
-  `prompt` verbatim. The foreground is asked for because one return is cheaper
+  `prompt` verbatim — and pass `effort` on every call, set to the entry's
+  `effort` exactly as given. Left off, the agent silently runs at the session's
+  effort instead of the one the driver chose for it. The foreground is asked for because one return is cheaper
   than one wake-up per agent, and nothing depends on getting it: Claude Code may
   run the agents in the background whatever the call asks for. Every `dispatch`
   comes with a `set`, and *Sets* below says what to do with it. Never start a

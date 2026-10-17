@@ -47,6 +47,7 @@ import { ROUND_REDESIGN, writeRoundFile } from "./lib/round-store.mjs";
 import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
+import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
@@ -195,8 +196,12 @@ function carryFrom(ctx, id, round) {
   return null;
 }
 
+// Each job's entry also carries its own name, so that a dispatch built from it
+// can be refused by the job a person looks up in the configuration.
 function roles(ctx, id) {
-  return lastJson(node("gates.mjs", ["roles", statePath(ctx, id), ctx.configPath]).stdout);
+  const resolved = lastJson(node("gates.mjs", ["roles", statePath(ctx, id), ctx.configPath]).stdout);
+  for (const [name, job] of Object.entries(resolved?.jobs ?? {})) job.name = name;
+  return resolved;
 }
 
 function transition(ctx, id, next, { budgeted = false } = {}) {
@@ -210,13 +215,16 @@ const record = (ctx, id, gate, oid, file) => node("gates.mjs", ["record", stateP
 
 // --- dispatch builders -----------------------------------------------------
 
-const agent = (base, effort) => `tagteam:${base}-${effort}`;
+// A Claude entry's agent, model and effort, all three off the one job, so the
+// variant the name selects and the effort passed on the call cannot disagree.
+// Two jobs can share an agent — the fresh adversary and the adversary's
+// re-check — and each entry takes its effort from its own job, never the agent.
+const agent = (base, job) => ({ agent: `tagteam:${base}-${job.effort}`, model: job.model, effort: job.effort });
 const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ? " (raised: escalation is in force)" : ""}`;
 
 function implementerDispatch(ctx, spec, job) {
   return {
-    agent: agent("implementer", job.effort),
-    model: job.model,
+    ...agent("implementer", job),
     description: `Implement ${spec.id}`,
     prompt: [
       `Job: implementer`,
@@ -235,8 +243,7 @@ function implementerDispatch(ctx, spec, job) {
 // tells a redesign round from the first by its `redesign.json`.
 function redesignDispatch(ctx, spec, briefPath, files, job) {
   return {
-    agent: agent("implementer", job.effort),
-    model: job.model,
+    ...agent("implementer", job),
     description: `Redesign ${spec.id}: ${files.join(", ")}`,
     prompt: [
       `Job: implementer`,
@@ -254,8 +261,7 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
 function reviewerDispatch(ctx, spec, round, oid, lens, brief, job, pullRequest = []) {
   const dir = roundDir(ctx, spec.id, round);
   return {
-    agent: agent("reviewer", job.effort),
-    model: job.model,
+    ...agent("reviewer", job),
     description: `Review ${spec.id}: ${lens}`,
     prompt: [
       `Job: reviewer`,
@@ -295,8 +301,7 @@ function codexReviewDispatch(ctx, spec, round, oid, lenses, job, { reuse = true 
 function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null) {
   const dir = roundDir(ctx, spec.id, round);
   return {
-    agent: agent("adversary", job.effort),
-    model: job.model,
+    ...agent("adversary", job),
     description: `Adversary on ${spec.id}`,
     prompt: [
       `Job: adversary`,
@@ -314,8 +319,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
   const dir = roundDir(ctx, spec.id, round);
   const base = lens === "adversary" ? "adversary" : "reviewer";
   return {
-    agent: agent(base, job.effort),
-    model: job.model,
+    ...agent(base, job),
     description: `Re-check ${spec.id}: ${lens}`,
     prompt: [
       `Job: recheck`,
@@ -449,8 +453,7 @@ function refuseWhileWaiting(id, state, step) {
 
 function fixerDispatch(ctx, spec, recordPath, job) {
   return {
-    agent: agent("fixer", job.effort),
-    model: job.model,
+    ...agent("fixer", job),
     description: `Fix ${spec.id}`,
     prompt: [
       `Job: fixer`,
@@ -475,8 +478,7 @@ function repairDispatch(ctx, spec, state, job) {
   const landing = landingFailure(state);
   if (landing) {
     return {
-      agent: agent("fixer", job.effort),
-      model: job.model,
+      ...agent("fixer", job),
       description: `Repair ${spec.id} against the current ${state.base}`,
       prompt: [
         `Job: fixer`,
@@ -492,8 +494,7 @@ function repairDispatch(ctx, spec, state, job) {
     };
   }
   return {
-    agent: agent("fixer", job.effort),
-    model: job.model,
+    ...agent("fixer", job),
     description: `Repair CI for ${spec.id}`,
     prompt: [
       `Job: fixer`,
@@ -514,8 +515,10 @@ function repairDispatch(ctx, spec, state, job) {
 // depends on the message returning only once they have finished. The foreground
 // is still asked for, because one return is cheaper than one wake-up per agent.
 export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
-  + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed when it is not null and "
-  + "omitted when it is, `description` as given and `prompt` verbatim. The agents form a set, and the run judges their work "
+  + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed as given when it is not "
+  + "null and omitted when it is, `description` as given and `prompt` verbatim, and pass `effort` on every call, exactly as "
+  + "given: left off, the agent silently runs at the session's effort instead of the one chosen for it. The agents form a set, "
+  + "and the run judges their work "
   + "only once every one of them has been recorded as arrived. Each agent's label is its `description`, exactly as Claude Code "
   + "names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in double "
   + "quotes; relay the line it prints. If the message returns with every agent finished, run `set.arrive` once with every "
@@ -597,14 +600,23 @@ function expectedOutput(dispatch) {
 }
 
 /**
- * Record a set before it is printed. `agents` is `{ dispatch, name? }`, where
- * the label is the dispatch's `description` — the name Claude Code prints in the
- * agent's finished notice — and `name` is how the person hears of it, the label
- * itself when it is not given. `step` is the judging step the last arrival
- * names, and `closing` the phrase that completes the line it prints. `round` is
- * left out of the id when there is none yet, as for the first implementer.
+ * Record a set before it is printed. `agents` is `{ dispatch, job, name? }`,
+ * where the label is the dispatch's `description` — the name Claude Code prints
+ * in the agent's finished notice — `job` is the resolved job it was built from,
+ * and `name` is how the person hears of it, the label itself when it is not
+ * given. `step` is the judging step the last arrival names, and `closing` the
+ * phrase that completes the line it prints. `round` is left out of the id when
+ * there is none yet, as for the first implementer.
+ *
+ * A dispatch whose effort is not on the ladder is refused here, before the set
+ * is recorded: refused only at `emit`, the set would already be on disk naming
+ * agents that were never sent, and the next step would wait on them for ever.
  */
 async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "Judging the review now." }) {
+  for (const { dispatch, job } of agents) {
+    const refused = effortRefusal(dispatch, job?.name);
+    if (refused) throw new Stop(refused);
+  }
   const set = `${kind}${round === null ? "" : `-r${round}`}-${stampNow()}-${randomBytes(3).toString("hex")}`;
   const dir = setDir(ctx, id, set);
   await recordSet({
@@ -620,8 +632,8 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
  * and point `snapshot` at it. Its label is its `description`, which already says
  * which of them it is, and is how the person hears of it too: "Fix 01-a is in".
  */
-async function sendForSnapshot(ctx, id, { kind, round = null, dispatch }) {
-  const sent = await sendSet(ctx, id, { kind, round, agents: [{ dispatch }], step: "snapshot", closing: "Taking the snapshot now." });
+async function sendForSnapshot(ctx, id, { kind, round = null, dispatch, job }) {
+  const sent = await sendSet(ctx, id, { kind, round, agents: [{ dispatch, job }], step: "snapshot", closing: "Taking the snapshot now." });
   writeJson(snapshotSetPath(ctx, id), { set: sent.id, kind, label: dispatch.description, at: new Date().toISOString() });
   return setPayload(sent);
 }
@@ -947,7 +959,7 @@ async function begin(options) {
   const job = roles(ctx, id).jobs.implement;
   say.push(`Starting ${id} on ${branch} from ${ctx.config.base} at ${baseOid.slice(0, 12)}; implementer ${settings(job)}.`);
   const dispatch = implementerDispatch(ctx, spec, job);
-  const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch });
+  const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
 }
 
@@ -1244,11 +1256,14 @@ async function panel(options) {
   const resolved = roles(ctx, id);
   const lenses = state.reviewers;
   const pr = pullRequestLines(ctx, id, state);
+  const lensJob = resolved.jobs["review-lens"];
+  const codexJob = resolved.jobs["review-codex"];
   const agents = lenses.map((lens) => ({
-    dispatch: reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines),
+    dispatch: reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
+    job: lensJob,
     name: reviewerName(lens)
   }));
-  agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, lenses, resolved.jobs["review-codex"]), name: "Codex" });
+  agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, lenses, codexJob), job: codexJob, name: "Codex" });
   const sent = await sendSet(ctx, id, { kind: "panel", round: round.round, agents, step: "collect" });
   writeJson(collectSetPath(ctx, id), { round: round.round, candidate: state.candidateOid, set: sent.id, at: new Date().toISOString() });
   emit({
@@ -1286,13 +1301,16 @@ async function collect(options) {
     if (!exists(marker)) {
       const resolved = roles(ctx, id);
       const pr = pullRequestLines(ctx, id, state);
+      const lensJob = resolved.jobs["review-lens"];
+      const codexJob = resolved.jobs["review-codex"];
       const agents = missing.filter((lens) => lens !== "codex").map((lens) => ({
-        dispatch: reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], resolved.jobs["review-lens"], pr.lines),
+        dispatch: reviewerDispatch(ctx, spec, round.round, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
+        job: lensJob,
         name: reviewerName(lens)
       }));
       say.push(...pr.say);
       if (missing.includes("codex")) {
-        agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, resolved.jobs["review-codex"], { reuse: false }), name: "Codex" });
+        agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, codexJob, { reuse: false }), job: codexJob, name: "Codex" });
       }
       // The re-send is a set of its own, and from here on it is the one this
       // step judges. Recorded first, then the marker, then the pointer: a run
@@ -1380,7 +1398,7 @@ async function fix(options) {
   fs.rmSync(acceptedPath(ctx, id), { force: true });
   const budget = edge.output?.budget ?? {};
   const dispatch = fixerDispatch(ctx, spec, briefPath, job);
-  const set = await sendForSnapshot(ctx, id, { kind: "fix", round: round.round, dispatch });
+  const set = await sendForSnapshot(ctx, id, { kind: "fix", round: round.round, dispatch, job });
   emit({
     say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings about the code, from ${briefPath}.`, ...prSay],
     dispatch: [dispatch],
@@ -1450,7 +1468,7 @@ async function redesign(options) {
       : "The whole panel reads the rewrite."
   ];
   const dispatch = redesignDispatch(ctx, spec, briefPath, files, job);
-  const set = await sendForSnapshot(ctx, id, { kind: "redesign", round: round.round, dispatch });
+  const set = await sendForSnapshot(ctx, id, { kind: "redesign", round: round.round, dispatch, job });
   emit({ say, files, brief: briefPath, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
 }
 
@@ -1562,7 +1580,9 @@ async function recheck(options) {
     }
   }
   const where = { round: round.round, dir: verdictsDir, given };
-  const agents = readers.map((reader) => ({ dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), name: reader.name }));
+  const agents = readers.map((reader) => ({
+    dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), job: recheckReaderJob(reader, resolved), name: reader.name
+  }));
   for (const [index, { dispatch }] of agents.entries()) {
     readers[index] = { ...readers[index], label: dispatch.description, output: expectedOutput(dispatch) };
   }
@@ -1612,17 +1632,28 @@ function declinedContext(declined) {
 // the artifact it is re-sent because of.
 function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend = false } = {}) {
   const { lines, fresh } = declinedContext(where.given?.declined ?? null);
+  const job = recheckReaderJob(reader, resolved);
   if (reader.role === "adversary") {
-    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...fresh], reader.output);
+    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output);
   }
   if (reader.role === "codex-recheck") {
-    return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, resolved.jobs["recheck-codex"],
+    return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, job,
       { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend });
   }
   if (reader.lens === "adversary") {
-    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, resolved.jobs["recheck-adversary"], [...pr.lines, ...lines], where.dir);
+    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, job, [...pr.lines, ...lines], where.dir);
   }
-  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], resolved.jobs["recheck-lens"], [...pr.lines, ...lines], where.dir);
+  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], job, [...pr.lines, ...lines], where.dir);
+}
+
+// The job a re-check reader runs as. The adversary is two of them in one
+// message — its fresh pass, which never escalates, and its re-check, which does
+// — so the job comes off the reader's role and lens, never off the agent.
+function recheckReaderJob(reader, resolved) {
+  if (reader.role === "adversary") return resolved.jobs["adversary-fresh"];
+  if (reader.role === "codex-recheck") return resolved.jobs["recheck-codex"];
+  if (reader.lens === "adversary") return resolved.jobs["recheck-adversary"];
+  return resolved.jobs["recheck-lens"];
 }
 
 // The readers a re-check sent out whose result `recheck.mjs` found unusable,
@@ -1680,7 +1711,9 @@ async function settle(options) {
     const resolved = roles(ctx, id);
     const pr = pullRequestLines(ctx, id, state);
     const where = { round: plan.round, dir: plan.dir, given: plan.given };
-    const agents = failed.map((reader) => ({ dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true }), name: reader.name }));
+    const agents = failed.map((reader) => ({
+      dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true }), job: recheckReaderJob(reader, resolved), name: reader.name
+    }));
     const sent = await sendSet(ctx, id, { kind: "settle-resend", round: plan.round, agents, step: "settle" });
     writeJson(planPath, { ...plan, resend: { set: sent.id, labels: sent.labels, at: new Date().toISOString() } });
     await closeReviewSet(ctx, id, plan.set);
@@ -1771,7 +1804,7 @@ async function repair(options) {
   const round = currentRound(ctx, id, state)?.round ?? null;
   writeJson(fixPendingPath(ctx, id), { round, candidate: state.candidateOid, from: "repair", at: new Date().toISOString() });
   const dispatch = repairDispatch(ctx, spec, state, job);
-  const set = await sendForSnapshot(ctx, id, { kind: landing ? "landing-repair" : "ci-repair", round, dispatch });
+  const set = await sendForSnapshot(ctx, id, { kind: landing ? "landing-repair" : "ci-repair", round, dispatch, job });
   emit({
     say: [`${landing
       ? `Landing repair ${budget.ordinal} of the ${budget.limit} repairs this repository allows: the change passes alone and fails merged onto ${state.base} at ${landing.baseOid.slice(0, 12)}`

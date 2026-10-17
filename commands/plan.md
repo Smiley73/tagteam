@@ -69,8 +69,9 @@ argument: pass it to the Agent tool. The effort is carried by the agent's name:
 every tagteam agent ships as one variant per effort, `tagteam:<agent>-<effort>`,
 so `tagteam:plan-drafter-<effort>` below means the drafter variant at the effort
 `roles` printed for `draft`. No unsuffixed agent name exists. The one exception
-is `tagteam:codex-runner`, dispatched by that bare name with no model, which runs
-a prepared Codex command for you.
+is `tagteam:codex-runner`, which runs a prepared Codex command for you: dispatch
+it by that bare name, and pass the `agent`, `model` and `effort` that
+`plan.mjs codex` prints for it, exactly as printed.
 
 ## Before anything
 
@@ -237,7 +238,8 @@ node "$P/scripts/plan.mjs" codex --dir "$D/work/review" --goal "$D/goal.md" --pl
 ```
 
 The second command prepares the Codex plan review and prints the runner dispatch:
-an `agent`, a `description` and a `prompt`. Then dispatch, **in one message**:
+an `agent`, a `model`, an `effort`, a `description` and a `prompt`. Then
+dispatch, **in one message**:
 
 - `tagteam:plan-reviewer-<effort>` at `plan-review`'s model, labelled `Plan
   review: Claude`, given the goal, the plan and the exploration, writing
@@ -245,8 +247,9 @@ an `agent`, a `description` and a `prompt`. Then dispatch, **in one message**:
 - `tagteam:adversary-<effort>` at `plan-adversary`'s model, labelled `Plan
   review: adversary`, pointed at `prompts/plan-adversary.md`, given the same,
   writing `$D/work/review/adversary.json`
-- `tagteam:codex-runner` with the printed prompt and `description`, no model;
-  it writes `$D/work/review/codex.json`
+- `tagteam:codex-runner` with the printed prompt and `description`, passing the
+  printed `agent`, `model` and `effort` as given; it writes
+  `$D/work/review/codex.json`
 
 and record the three as one `review` set:
 

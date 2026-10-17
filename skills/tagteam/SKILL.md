@@ -169,14 +169,18 @@ what falls between them, and nothing about a repository brief reaches it.
 
 ## Dispatching
 
-**The model is an argument; the effort is a name.** The Agent tool takes a
-`model` parameter, so a resolved model is passed to it directly. It has no
-`effort` parameter, so a resolved effort is carried by agent frontmatter, and the
-plugin ships every agent once per level of the ladder, named for it:
-`tagteam:fixer-low` through `tagteam:fixer-max`. **A dispatch selects an effort
-by selecting a variant**, and there is no unsuffixed `tagteam:fixer`. The one
-bare name is `tagteam:codex-runner`, plumbing at a fixed model and effort that
-no configuration reaches.
+**The model and the effort are both arguments.** The Agent tool takes a `model`
+and an `effort` on every call, and a ship passes `effort` on every call, beside
+the `model`, exactly as `ship.mjs` printed them. An effort left off does not
+fail: the agent silently runs at whatever effort the session uses. The one bare
+name, `tagteam:codex-runner`, is passed its own fixed pair, `haiku` at `low` —
+what that plumbing agent runs at, which no configuration reaches. The configured
+Codex model and effort belong to the Codex process it starts, and are already in
+the command file it is handed. The agents still ship once per level of the
+ladder, named for it: `tagteam:fixer-low` through `tagteam:fixer-max`, and there
+is no unsuffixed `tagteam:fixer`. **A ship names the variant that matches the
+effort it passes**, so the name and the argument agree, and a plan's Claude
+dispatches still select their effort by that name alone.
 
 Those files are generated. `agent-sources/` holds one source per agent and
 `scripts/generate-agents.mjs` writes `agents/`, reading the ladder from
@@ -207,9 +211,9 @@ running `true` while it waited; every one of those turns re-read a context of
 several hundred thousand tokens. A turn that exists only to wait is the single
 most expensive thing an orchestrator can do, and there is never a reason for one.
 
-In a ship, `ship.mjs` prints the dispatch list with the agent variant, the model
-and the whole prompt for each, the set those agents form, and the instruction for
-both; `commands/ship.md` says the rest. In a plan, `plan.mjs roles` prints the
+In a ship, `ship.mjs` prints the dispatch list with the agent, the model, the
+effort and the prompt for each, the set those agents form, and the instruction
+for both; `commands/ship.md` says the rest. In a plan, `plan.mjs roles` prints the
 settings, and `commands/plan.md` names what each dispatch is given and how it is
 dispatched.
 
