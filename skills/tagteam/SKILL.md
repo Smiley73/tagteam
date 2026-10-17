@@ -16,8 +16,8 @@ directly through Bash and dispatches subagents only for model work. Subagents
 write their own output files; scripts read them and print summaries; the
 orchestrator reads the summaries. Nothing large is ever moved between steps by
 passing it through a model. In a ship, `scripts/ship.mjs` sequences every step
-and prints every dispatch; in a plan, `scripts/plan.mjs` resolves the settings
-and folds the review.
+and prints every dispatch; in a plan, `scripts/plan.mjs` prints every Claude
+call's settings and folds the review.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -213,9 +213,10 @@ most expensive thing an orchestrator can do, and there is never a reason for one
 
 In a ship, `ship.mjs` prints the dispatch list with the agent, the model, the
 effort and the prompt for each, the set those agents form, and the instruction
-for both; `commands/ship.md` says the rest. In a plan, `plan.mjs roles` prints the
-settings, and `commands/plan.md` names what each dispatch is given and how it is
-dispatched.
+for both; `commands/ship.md` says the rest. In a plan, `plan.mjs dispatch`
+prints each Claude call's agent, model, effort and label, step by step, and
+refuses by the job's name an effort that is missing or not on the ladder;
+`commands/plan.md` holds each prompt's wording and what each dispatch is given.
 
 ## Codex
 
@@ -367,7 +368,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints |
-| `plan.mjs` | The plan side: `roles`, `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in) |
+| `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in) |
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |

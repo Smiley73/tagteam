@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { drift, efforts, plan, plumbingAgents, readSources, PLUMBING_ROLE } from "../scripts/generate-agents.mjs";
+import { DRAFTER_PURPOSES, PLAN_STEPS, planCalls } from "../scripts/plan.mjs";
+import { KINDS } from "../scripts/lib/plan-sets.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -59,6 +61,24 @@ function driverAgentBases() {
   const source = read("scripts/ship.mjs");
   return [...new Set([...source.matchAll(/\bagent\("([a-z-]+)", /g)].map((match) => match[1]))];
 }
+
+// Every Claude call the plan driver can print, at the example configuration:
+// each kind of set, under every selection that chooses a different call.
+const PLAN_SELECTIONS = {
+  draft: Object.keys(DRAFTER_PURPOSES).map((purpose) => ({ purpose })),
+  "review-resend": [{ readers: ["claude"] }, { readers: ["adversary"] }],
+  "spec-writers": [{ specs: ["01-a", "02-b"] }],
+  "spec-writers-resend": [{ specs: ["01-a"] }]
+};
+function planDriverCalls(config = JSON.parse(read("examples/config.json"))) {
+  assert.deepEqual(Object.keys(PLAN_STEPS), KINDS, "the plan driver prints a step for every kind of set, and no other");
+  return KINDS.flatMap((kind) => (PLAN_SELECTIONS[kind] ?? [{}]).flatMap((selection) => planCalls(config, kind, selection)));
+}
+
+// The agents the plan driver can name, as it prints them: the name less the
+// effort it passes, which is where a plan's dispatches are composed now.
+const planDriverAgentBases = () =>
+  [...new Set(planDriverCalls().map((call) => call.agent.replace(/^tagteam:/, "").slice(0, -(call.effort.length + 1))))];
 
 test("agents/ is generated from agent-sources/ and is not stale", () => {
   assert.deepEqual(drift(), []);
@@ -126,14 +146,19 @@ test("each command pre-approves exactly the variants it can dispatch", () => {
   for (const command of COMMANDS) {
     const text = read(command);
     const granted = grantedAgents(text);
-    // The plan command names its dispatches in prose; the ship command's are
-    // composed by the driver, so the driver's source is what says what it needs.
+    // Both commands' Claude dispatches are composed by their drivers, so the
+    // driver is what says what each needs; the prose still names the runner.
     const mentioned = mentionedAgents(text).map(({ name }) => name.replace(/-<effort>$/, ""));
     const dispatched = new Set([
       ...mentioned,
-      ...(command === "commands/ship.md" ? driverAgentBases() : [])
+      ...(command === "commands/ship.md" ? driverAgentBases() : planDriverAgentBases())
     ].filter((name) => fs.existsSync(path.join(root, "agent-sources", `${name}.md`))));
     assert.ok(dispatched.size > 1, `${command}: no dispatch was found to check grants against`);
+    if (command === "commands/plan.md") {
+      // Every one of the plan's Claude agents, so a grant missing for any of them fails here.
+      assert.deepEqual([...dispatched].filter((name) => !plumbing.has(name)).sort(),
+        ["adversary", "explorer", "plan-drafter", "plan-reviewer", "spec-writer"]);
+    }
     for (const name of dispatched) {
       if (plumbing.has(name)) {
         assert.ok(granted.has(name), `${command}: dispatches ${name} but allowed-tools omits Agent(tagteam:${name})`);
@@ -164,6 +189,24 @@ test("no command dispatches a bare laddered agent name", () => {
         `${command}: \`tagteam:${name}\` is dispatched with no effort — name a variant`);
     }
   }
+  // The plan command's Claude calls are the plan driver's, so what it prints is
+  // what has to carry the effort.
+  const ladder = new Set(efforts());
+  for (const call of planDriverCalls()) {
+    const at = call.agent.lastIndexOf("-");
+    assert.ok(at > 0 && ladder.has(call.agent.slice(at + 1)), `plan.mjs prints ${call.agent} with no effort in its name`);
+    assert.equal(call.agent.slice(at + 1), call.effort, `plan.mjs prints ${call.agent} with the effort ${call.effort} beside it`);
+  }
+});
+
+test("the plan driver names every agent through the resolver's effort, never bare", () => {
+  const source = read("scripts/plan.mjs");
+  // One helper composes every name, as in the ship driver; a literal
+  // `tagteam:<name>-<effort>` string would be an effort somebody typed.
+  const literal = [...source.matchAll(/["`]tagteam:([a-z][a-z-]*)/g)].map((match) => match[1]);
+  assert.deepEqual(literal, [], `plan.mjs names an agent by a literal string: ${literal.join(", ")}`);
+  assert.equal(source.split("`tagteam:${base}-${job.effort}`").length, 2, "plan.mjs composes its agent names in one helper");
+  assert.deepEqual(planDriverAgentBases().sort(), ["adversary", "explorer", "plan-drafter", "plan-reviewer", "spec-writer"]);
 });
 
 test("the ship driver names every agent through the resolver's effort, never bare", () => {
