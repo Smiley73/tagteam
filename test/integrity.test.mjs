@@ -807,7 +807,14 @@ test("the plan driver resolves every planning dispatch from the schema's roles a
 // guard holds the ship command, the plan command, the skill and the driver to
 // that, so a sentence that brings back "the message returns when all of them
 // have finished" fails wherever it is written.
-function dispatchRuleProblems(name, text) {
+//
+// The same guard holds the effort: an effort left off the Agent call does not
+// fail, the agent silently runs at the session's, and the Agent tool sets one
+// only when told to. So the ship command, the skill and the driver must each
+// say to pass it, and none of the four may say the call has no such parameter.
+// `plan.md` is not yet held to the first: its Claude dispatches still select the
+// effort by the agent's name.
+function dispatchRuleProblems(name, text, { effortPassed = true } = {}) {
   const problems = [];
   const flat = text.replace(/\s+/g, " ").replace(/" \+ "/g, "");
   const must = (pattern, why) => { if (!pattern.test(flat)) problems.push(`${name} ${why}`); };
@@ -822,6 +829,8 @@ function dispatchRuleProblems(name, text) {
   never(/when the message returns/i, "still waits for the message to return");
   never(/returns when every (?:writer|reader|agent) has/i, "still says a message returns when every agent has finished");
   never(/never (?:dispatch in the )?background/i, "still forbids the background");
+  never(/no `?effort`? parameter/i, "still says the Agent call has no effort parameter");
+  if (effortPassed) must(/\bpass(?:es)? `effort` on every call\b/, "never says to pass `effort` on the call");
   return problems;
 }
 
@@ -829,8 +838,8 @@ test("both commands tell the orchestrator how to dispatch, and it is the driver'
   const ship = read("commands", "ship.md");
   const plan = read("commands", "plan.md");
   const problems = [
-    ["commands/ship.md", ship], ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
-  ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
+    ["commands/ship.md", ship], ["commands/plan.md", plan, { effortPassed: false }], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
+  ].flatMap(([name, text, options]) => dispatchRuleProblems(name, text, options));
   assert.deepEqual(problems, [], problems.join("\n"));
   assert.match(ship, /one message/i);
   assert.match(plan, /one message/i);
@@ -849,4 +858,26 @@ test("the dispatch guard fails on the plan command as it read before it had sets
   assert.ok(dispatchRuleProblems("plan.md", "Re-dispatch exactly that reader once, blocking. When the message returns: collect.")
     .some((problem) => /waits for the message to return/.test(problem)));
   assert.ok(dispatchRuleProblems("plan.md", "until [ -f x ]; do sleep 1; done").some((problem) => /watcher loop/.test(problem)));
+});
+
+test("the effort guard fails on the driver's instruction and the skill as they read in 0.10.0", () => {
+  // Each sentence as it was, set beside the rest of what its file said, which
+  // already named "effort" more than once: a guard on the bare word passes them,
+  // so it has to fail on what they say about the call.
+  const elsewhere = " The settings each dispatch runs at, model and effort, come off `gates.mjs roles`. Each Agent call asks "
+    + "for `run_in_background: false` where the call allows it, and an arrival is recorded by running `set.arrive`.";
+  const howToDispatch = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
+    + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed when it is not null and "
+    + "omitted when it is, `description` as given and `prompt` verbatim.";
+  const driverProblems = dispatchRuleProblems("scripts/ship.mjs", howToDispatch + elsewhere);
+  assert.ok(driverProblems.some((problem) => /never says to pass `effort`/.test(problem)), driverProblems.join("\n"));
+  const skillBefore = "**The model is an argument; the effort is a name.** The Agent tool takes a\n`model` parameter, so a resolved "
+    + "model is passed to it directly. It has no\n`effort` parameter, so a resolved effort is carried by agent frontmatter, and the\n"
+    + "plugin ships every agent once per level of the ladder, named for it:\n`tagteam:fixer-low` through `tagteam:fixer-max`.";
+  const problems = dispatchRuleProblems("SKILL.md", skillBefore + elsewhere);
+  assert.ok(problems.some((problem) => /has no effort parameter/.test(problem)), problems.join("\n"));
+  assert.ok(problems.some((problem) => /never says to pass `effort`/.test(problem)), problems.join("\n"));
+  // And the plan command, not yet held to passing it, is still held to the second.
+  assert.ok(dispatchRuleProblems("plan.md", "It has no `effort` parameter.", { effortPassed: false })
+    .some((problem) => /has no effort parameter/.test(problem)));
 });

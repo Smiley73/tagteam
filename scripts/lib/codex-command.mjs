@@ -100,13 +100,23 @@ export function readCodexStatus(statusFile) {
 }
 
 /**
- * The runner dispatch for one prepared command: the agent to name, and the
- * prompt to hand it. One shape for the plan review and every ship round.
+ * What the runner agent itself runs at — the pair `agents/codex-runner.md` pins,
+ * and a test holds the two together. Not the configured Codex model and effort:
+ * those belong to the Codex process the runner launches, and are already in the
+ * command file it is handed.
+ */
+export const RUNNER = Object.freeze({ model: "haiku", effort: "low" });
+
+/**
+ * The runner dispatch for one prepared command: the agent to name, the model
+ * and effort to pass, and the prompt to hand it. One shape for the plan review
+ * and every ship round.
  */
 export function runnerDispatch({ description, commandFile, statusFile }) {
   return {
     agent: "tagteam:codex-runner",
-    model: null,
+    model: RUNNER.model,
+    effort: RUNNER.effort,
     description,
     prompt: [
       "Job: codex-runner",
