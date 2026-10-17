@@ -269,7 +269,10 @@ function reviewerDispatch(ctx, spec, round, oid, lens, brief, job, pullRequest =
   };
 }
 
-function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
+// `reuse: false` is for a re-send only. Reuse checks the request, not what the
+// driver asks of the answer, so an artifact refused for its `candidate` or
+// `lens` matches its own request exactly and would come back again unrun.
+function codexReviewDispatch(ctx, spec, round, oid, lenses, job, { reuse = true } = {}) {
   const dir = roundDir(ctx, spec.id, round);
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
@@ -282,7 +285,8 @@ function codexReviewDispatch(ctx, spec, round, oid, lenses, job) {
     effort: job.effort,
     cd: ctx.worktree,
     slots: ctx.codexRoot,
-    maxConcurrent: ctx.config.maxConcurrentCodex
+    maxConcurrent: ctx.config.maxConcurrentCodex,
+    reuse
   });
   return runnerDispatch({ description: `Codex review of ${spec.id}`, ...prepared });
 }
@@ -325,7 +329,8 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
   };
 }
 
-function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null } = {}) {
+// `reuse` as in `codexReviewDispatch`: off for a re-send only.
+function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null, reuse = true } = {}) {
   const dir = roundDir(ctx, spec.id, round);
   const diff = path.join(dir, "review.diff");
   // Two templates, one per question. After a fix Codex reads new code; after a
@@ -343,7 +348,8 @@ function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedRepor
     effort: job.effort,
     cd: ctx.worktree,
     slots: ctx.codexRoot,
-    maxConcurrent: ctx.config.maxConcurrentCodex
+    maxConcurrent: ctx.config.maxConcurrentCodex,
+    reuse
   });
   return runnerDispatch({ description: `Codex re-check of ${spec.id}`, ...prepared });
 }
@@ -1229,7 +1235,7 @@ async function collect(options) {
       }));
       say.push(...pr.say);
       if (missing.includes("codex")) {
-        agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, resolved.jobs["review-codex"]), name: "Codex" });
+        agents.push({ dispatch: codexReviewDispatch(ctx, spec, round.round, state.candidateOid, state.reviewers, resolved.jobs["review-codex"], { reuse: false }), name: "Codex" });
       }
       // The re-send is a set of its own, and from here on it is the one this
       // step judges. Recorded first, then the marker, then the pointer: a run
@@ -1540,14 +1546,16 @@ function declinedContext(declined) {
 // one builder for both the re-check and `settle`'s re-send of it, so the two can
 // never tell a reader different things — except the pull request, which is read
 // fresh each time. `where` is the round, the verdicts directory and `given`.
-function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr) {
+// `resend` is `settle`'s re-send, which must run Codex again rather than reuse
+// the artifact it is re-sent because of.
+function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend = false } = {}) {
   const { lines, fresh } = declinedContext(where.given?.declined ?? null);
   if (reader.role === "adversary") {
     return adversaryDispatch(ctx, spec, where.round, state.candidateOid, resolved.jobs["adversary-fresh"], [...pr.lines, ...fresh], reader.output);
   }
   if (reader.role === "codex-recheck") {
     return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, resolved.jobs["recheck-codex"],
-      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir });
+      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend });
   }
   if (reader.lens === "adversary") {
     return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, resolved.jobs["recheck-adversary"], [...pr.lines, ...lines], where.dir);
@@ -1610,7 +1618,7 @@ async function settle(options) {
     const resolved = roles(ctx, id);
     const pr = pullRequestLines(ctx, id, state);
     const where = { round: plan.round, dir: plan.dir, given: plan.given };
-    const agents = failed.map((reader) => ({ dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), name: reader.name }));
+    const agents = failed.map((reader) => ({ dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true }), name: reader.name }));
     const sent = await sendSet(ctx, id, { kind: "settle-resend", round: plan.round, agents, step: "settle" });
     writeJson(planPath, { ...plan, resend: { set: sent.id, labels: sent.labels, at: new Date().toISOString() } });
     await closeReviewSet(ctx, id, plan.set);

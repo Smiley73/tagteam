@@ -2262,6 +2262,53 @@ test("a lens re-check, the fresh adversary pass and the Codex re-check that come
   assert.equal(state().gates.review.candidateOid, second);
 });
 
+test("a Codex answer refused for its candidate is re-sent to run Codex again, not to reuse the refused artifact", () => {
+  const commandOf = (dispatch) => fs.readFileSync(`${resultOf(dispatch)}.cmd.sh`, "utf8");
+  const staged = stage();
+  const { plan } = staged;
+  const { panel, state, oid, worktree } = toPanel(staged);
+  const codex = byLabel(panel, "Codex review of 01-a");
+  assert.match(commandOf(codex), /'--reuse'/, "a first send reuses, so a resumed step never buys a review twice");
+  // Schema-valid, and about the wrong commit: the request it answers is this one.
+  for (const dispatch of panel.json.dispatch) report(dispatch, dispatch === codex ? "0".repeat(40) : oid, dispatch === codex ? [] : [major("app.js")]);
+  arriveAll(panel);
+  const resend = ship("collect", plan, ["--spec", "01-a"]);
+  assert.equal(resend.status, 0, resend.stderr);
+  assert.deepEqual(labelsOf(resend), ["Codex review of 01-a"]);
+  assert.doesNotMatch(commandOf(resend.json.dispatch[0]), /'--reuse'/, "the re-send would hand back the refused artifact without running Codex");
+
+  // The same at settle, for the Codex re-check.
+  report(resend.json.dispatch[0], oid, [major("app.js")]);
+  arriveAll(resend);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  const toFix = JSON.parse(fs.readFileSync(/Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1], "utf8"));
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => b - a + 2 * (a - b);\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: toFix.findings.map((finding) => ({ id: finding.id, outcome: "fixed", note: "n" })), notes: "", status: "complete", summary: "fixed", unfinished: []
+  });
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).json.round, 2);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const codexRecheck = byLabel(recheck, "Codex re-check of 01-a");
+  assert.match(commandOf(codexRecheck), /'--reuse'/);
+  const second = state().candidateOid;
+  for (const dispatch of recheck.json.dispatch) {
+    if (dispatch === codexRecheck) {
+      write(resultOf(dispatch), { lens: "codex", candidate: oid, verdicts: toFix.findings.filter((finding) => finding.lens === "codex").map((finding) => ({ id: finding.id, resolved: true, evidence: "e" })) });
+    } else if (dispatch.description === "Adversary on 01-a") report(dispatch, second);
+    else {
+      const lens = /^Re-check 01-a: (.*)$/.exec(dispatch.description)[1];
+      write(outputOf(dispatch), { lens, candidate: second, verdicts: toFix.findings.filter((finding) => finding.lens === lens).map((finding) => ({ id: finding.id, resolved: true, evidence: "e" })) });
+    }
+  }
+  arriveAll(recheck);
+  const resent = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.deepEqual(labelsOf(resent), ["Codex re-check of 01-a"]);
+  assert.doesNotMatch(commandOf(resent.json.dispatch[0]), /'--reuse'/, "the re-send would hand back the refused artifact without running Codex");
+});
+
 test("a reader that fails in a declined attempt is re-sent into that attempt's directory and told what it was told the first time", () => {
   const staged = stage();
   const { plan, shipDir } = staged;
