@@ -364,7 +364,12 @@ test("the ship command names both limits its loops are bounded by, and asserts n
 const driverFunction = (name) => {
   const start = shipDriver.indexOf(`function ${name}(`);
   assert.ok(start > -1, `ship.mjs has no ${name} step`);
-  const end = shipDriver.indexOf("\nfunction ", start + 1);
+  // The next top-level function, whether or not it is async: a step that awaits
+  // the set it records is `async function`, and a slice that ran on past it would
+  // judge the step by its neighbour's source.
+  const next = /\n(?:async )?function /g;
+  next.lastIndex = start + 1;
+  const end = next.exec(shipDriver)?.index ?? -1;
   return shipDriver.slice(start, end === -1 ? undefined : end);
 };
 
@@ -797,13 +802,28 @@ test("the plan driver resolves every planning dispatch from the schema's roles a
   for (const job of Object.keys(PLAN_JOBS)) assert.ok(plan.includes(`\`${job}\``), `plan.md never names the ${job} job`);
 });
 
+// The ship side asks for the foreground and never depends on it: every dispatch
+// is a set, and what the run judges is its own record of who has arrived. The
+// plan side still says every message returns when all have finished, and keeps
+// saying it until the plan gets sets of its own.
 test("the ship command tells the orchestrator how to dispatch, and it is the driver's rule", () => {
   const ship = read("commands", "ship.md");
-  for (const file of [ship, read("commands", "plan.md"), skill]) {
-    const flat = file.replace(/\s+/g, " ");
-    assert.match(flat, /run_in_background: false/, "a command or the skill no longer says dispatches block");
-    assert.doesNotMatch(flat, /until \[ -f/, "a watcher loop is still described");
+  const plan = read("commands", "plan.md");
+  for (const file of [ship, plan, skill, shipDriver]) {
+    assert.doesNotMatch(file.replace(/\s+/g, " "), /until \[ -f/, "a watcher loop is still described");
   }
-  assert.match(shipDriver, /run_in_background: false/, "the driver's howToDispatch lost the blocking rule");
+  for (const [name, file] of [["commands/ship.md", ship], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]]) {
+    const flat = file.replace(/\s+/g, " ").replace(/" \+ "/g, "");
+    assert.match(flat, /run_in_background: false/, `${name} no longer asks for the foreground`);
+    assert.match(flat, /where the call allows it/, `${name} asks for the foreground as if it could always be had`);
+    assert.match(flat, /set\.arrive/, `${name} never says how an arrival is recorded`);
+    assert.doesNotMatch(flat, /every dispatch blocks/i, `${name} still says every dispatch blocks`);
+    assert.doesNotMatch(flat, /returns? when (?:all|every one) of them (?:have|has) finished/i, `${name} still says a message returns when every agent has finished`);
+    assert.doesNotMatch(flat, /message returns when all/i, `${name} still says a message returns when every agent has finished`);
+    assert.doesNotMatch(flat, /never (?:dispatch in the )?background/i, `${name} still forbids the background`);
+  }
+  // The plan command's half, unchanged until its own sets land.
+  const planFlat = plan.replace(/\s+/g, " ");
+  assert.match(planFlat, /run_in_background: false/, "plan.md no longer says dispatches block");
   assert.match(ship, /one message/i);
 });

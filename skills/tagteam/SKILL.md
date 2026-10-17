@@ -183,21 +183,35 @@ Those files are generated. `agent-sources/` holds one source per agent and
 `claudeEffort` in the config schema. Edit the source, re-run the generator;
 `test/effort-dispatch.test.mjs` fails on drift.
 
-**Every dispatch blocks, and a fan-out is one message.** Every Agent call is
-made with `run_in_background: false`; Agent calls in one message run at the
-same time, and the message returns when all of them have finished — this was
-verified, not assumed. So a review panel is one message of
-blocking calls: one reviewer per lens, plus the Codex runner. There is no
-background dispatch, no watcher, and nothing to poll for. The orchestrator that
+**In a ship, a fan-out is one message, and the run judges it from its own record
+of who has reported.** A plan dispatches as `commands/plan.md` says. In a ship,
+every dispatch is a set — a review panel is one
+message holding one reviewer per lens plus the Codex runner, and the
+implementer, a fixer, a redesign implementer or a repair is a set of one. Each
+Agent call asks for `run_in_background: false` where the call allows it, because
+one return is cheaper than one wake-up per agent, and nothing depends on getting
+it: Claude Code may run the agents in the background whatever the call asks for,
+so a message cannot be relied on to return only once all of them have finished.
+Each agent's label is its `description`, the name Claude Code repeats in the
+notice it posts when that agent finishes. The orchestrator records every arrival
+with `set.arrive` — once with every label when they come back together, or one
+quick call per finished notice when they do not — and relays the one line it
+prints. The step that judges the set refuses, changing nothing, until every
+label is in, so an agent still working is never read as one that failed or
+changed nothing. There is no watcher and nothing to poll for, and a wake-up that
+is not the last arrival runs that one call and nothing else.
+
+That is because waiting is what an orchestrator must never pay for. The one
 this replaced spent a third of its turns, and up to two thirds of its tokens,
 running `true` while it waited; every one of those turns re-read a context of
 several hundred thousand tokens. A turn that exists only to wait is the single
 most expensive thing an orchestrator can do, and there is never a reason for one.
 
 In a ship, `ship.mjs` prints the dispatch list with the agent variant, the model
-and the whole prompt for each; the orchestrator copies them into one message. In
-a plan, `plan.mjs roles` prints the settings and the command file names what each
-dispatch is given.
+and the whole prompt for each, the set those agents form, and the instruction for
+both; `commands/ship.md` says the rest. In a plan, `plan.mjs roles` prints the
+settings, and `commands/plan.md` names what each dispatch is given and how it is
+dispatched.
 
 ## Codex
 
@@ -213,8 +227,8 @@ orchestrator's context.
 **The orchestrator never runs it in the foreground.** The bridge allows itself
 900 seconds and waits out a quota in slices, longer than a single Bash call may
 run. Instead `ship.mjs` and `plan.mjs codex` write the invocation into a command
-file beside the artifact, and the orchestrator dispatches `tagteam:codex-runner`
-in the same blocking message as the reviewers. The runner starts the command
+file beside the artifact, and the orchestrator sends `tagteam:codex-runner` out
+with the reviewers, in the same message. The runner starts the command
 detached, waits for its status file, and returns one line: the exit code and what
 the bridge said last — its routing report, or why it failed. A non-zero exit is
 a Codex call that wrote no artifact; `collect` and `settle` report the lens as

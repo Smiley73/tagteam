@@ -157,7 +157,7 @@ flowchart TD
     branch --> implement
     implement --> snapshot
     snapshot --> verify
-    subgraph panel["Review panel, one message of blocking agents — every lens plus Codex,<br>on every round this step runs"]
+    subgraph panel["Review panel, sent out together — every lens plus Codex,<br>on every round this step runs; judged once all are in"]
         lenses
         codexr
     end
@@ -196,8 +196,11 @@ reviewer the plugin could never have written, and a brief named after one the
 plugin ships replaces it. A rostered lens with a brief in neither place is
 refused rather than reviewed on improvisation.
 
-The review panel is the spec's lenses plus a Codex cross-review, dispatched as
-one message of blocking agents that run at the same time. Codex is told which
+The review panel is the spec's lenses plus a Codex cross-review, sent out
+together to run at the same time. As each one reports you see one line saying
+who is in and how many of the panel have reported ("The correctness reviewer is
+in (1 of 3)"), and the review is judged once, when the last one is in; a reviewer
+still working is never mistaken for one that failed. Codex is told which
 lenses are reading beside it and hunts for what falls between them. After a fix
 round, each reviewer that raised a finding re-checks its own findings against
 the new code, and an adversary reads the fixed diff fresh. Anything still open
@@ -260,8 +263,10 @@ The orchestrator is the main Claude Code agent following the command files. In a
 ship it runs `scripts/ship.mjs` once per step; the driver runs git, Codex and
 the other scripts, decides the round, the route and every model and effort, and
 prints the agents to dispatch with their prompts written out. The orchestrator
-dispatches them as one blocking message, relays what happened in plain English,
-writes the pull request body, and asks the questions only a person can answer.
+sends them out together and tells the driver as each one reports, one short line
+per agent, and the driver judges their work only once all are in. The
+orchestrator relays what happened in plain English, writes the pull request
+body, and asks the questions only a person can answer.
 Subagents write their own outputs; scripts read them. Nothing large is ever
 moved between steps by passing it through a model.
 

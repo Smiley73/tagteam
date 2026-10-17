@@ -1,6 +1,6 @@
 ---
 name: codex-runner
-description: Runs one prepared Codex command for the orchestrator and waits for it to finish, so a review panel can be dispatched as one blocking message.
+description: Runs one prepared Codex command for the orchestrator, waits for it to finish, and reports how it ended in one line.
 model: haiku
 effort: low
 tools: Bash
