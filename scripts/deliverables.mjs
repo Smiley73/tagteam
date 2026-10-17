@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isMain } from "./lib/is-main.mjs";
+import { requireNothingOut } from "./lib/plan-sets.mjs";
 
 const SLUG = /^[0-9]{2}-[a-z0-9][a-z0-9-]*$/;
 
@@ -113,11 +114,14 @@ async function main() {
     return;
   }
   try {
+    // A drafter still cutting the plan has not finished writing it; the plan
+    // directory is the one the plan sits in.
+    requireNothingOut(path.dirname(path.resolve(planPath)), "deliverables.mjs");
     const deliverables = readDeliverables(planPath);
     process.stdout.write(`${JSON.stringify({ ok: true, count: deliverables.length, deliverables }, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
+    process.exitCode = error.exitCode ?? 1;
   }
 }
 

@@ -802,28 +802,51 @@ test("the plan driver resolves every planning dispatch from the schema's roles a
   for (const job of Object.keys(PLAN_JOBS)) assert.ok(plan.includes(`\`${job}\``), `plan.md never names the ${job} job`);
 });
 
-// The ship side asks for the foreground and never depends on it: every dispatch
-// is a set, and what the run judges is its own record of who has arrived. The
-// plan side still says every message returns when all have finished, and keeps
-// saying it until the plan gets sets of its own.
-test("the ship command tells the orchestrator how to dispatch, and it is the driver's rule", () => {
+// Both commands ask for the foreground and never depend on it: every dispatch
+// is a set, and what the run judges is its own record of who has arrived. One
+// guard holds the ship command, the plan command, the skill and the driver to
+// that, so a sentence that brings back "the message returns when all of them
+// have finished" fails wherever it is written.
+function dispatchRuleProblems(name, text) {
+  const problems = [];
+  const flat = text.replace(/\s+/g, " ").replace(/" \+ "/g, "");
+  const must = (pattern, why) => { if (!pattern.test(flat)) problems.push(`${name} ${why}`); };
+  const never = (pattern, why) => { if (pattern.test(flat)) problems.push(`${name} ${why}`); };
+  never(/until \[ -f/, "still describes a watcher loop");
+  must(/run_in_background: false/, "no longer asks for the foreground");
+  must(/where the call allows it/, "asks for the foreground as if it could always be had");
+  must(/set\.arrive/, "never says how an arrival is recorded");
+  never(/every dispatch (?:here )?blocks/i, "still says every dispatch blocks");
+  never(/returns? when (?:all|every one) of them (?:have|has) finished/i, "still says a message returns when every agent has finished");
+  never(/message returns when (?:all|every)/i, "still says a message returns when every agent has finished");
+  never(/when the message returns/i, "still waits for the message to return");
+  never(/returns when every (?:writer|reader|agent) has/i, "still says a message returns when every agent has finished");
+  never(/never (?:dispatch in the )?background/i, "still forbids the background");
+  return problems;
+}
+
+test("both commands tell the orchestrator how to dispatch, and it is the driver's rule", () => {
   const ship = read("commands", "ship.md");
   const plan = read("commands", "plan.md");
-  for (const file of [ship, plan, skill, shipDriver]) {
-    assert.doesNotMatch(file.replace(/\s+/g, " "), /until \[ -f/, "a watcher loop is still described");
-  }
-  for (const [name, file] of [["commands/ship.md", ship], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]]) {
-    const flat = file.replace(/\s+/g, " ").replace(/" \+ "/g, "");
-    assert.match(flat, /run_in_background: false/, `${name} no longer asks for the foreground`);
-    assert.match(flat, /where the call allows it/, `${name} asks for the foreground as if it could always be had`);
-    assert.match(flat, /set\.arrive/, `${name} never says how an arrival is recorded`);
-    assert.doesNotMatch(flat, /every dispatch blocks/i, `${name} still says every dispatch blocks`);
-    assert.doesNotMatch(flat, /returns? when (?:all|every one) of them (?:have|has) finished/i, `${name} still says a message returns when every agent has finished`);
-    assert.doesNotMatch(flat, /message returns when all/i, `${name} still says a message returns when every agent has finished`);
-    assert.doesNotMatch(flat, /never (?:dispatch in the )?background/i, `${name} still forbids the background`);
-  }
-  // The plan command's half, unchanged until its own sets land.
-  const planFlat = plan.replace(/\s+/g, " ");
-  assert.match(planFlat, /run_in_background: false/, "plan.md no longer says dispatches block");
+  const problems = [
+    ["commands/ship.md", ship], ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
+  ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
+  assert.deepEqual(problems, [], problems.join("\n"));
   assert.match(ship, /one message/i);
+  assert.match(plan, /one message/i);
+  // The plan side records its sets through its own script, in the ship's shape.
+  assert.match(plan, /scripts\/plan\.mjs" record --plan/, "plan.md never records a set");
+  assert.match(plan, /scripts\/plan\.mjs" resume --plan/, "plan.md's resume never applies the restart rule");
+});
+
+test("the dispatch guard fails on the plan command as it read before it had sets", () => {
+  const before = "**Dispatching.** Every agent below is dispatched with `run_in_background:\nfalse`. When several are dispatched "
+    + "together, they go in one message and run at\nthe same time; the message returns when all of them have finished. Never\n"
+    + "dispatch in the background, never start a watcher.";
+  const problems = dispatchRuleProblems("plan.md", before);
+  assert.ok(problems.some((problem) => /returns when every agent has finished/.test(problem)), problems.join("\n"));
+  assert.ok(problems.some((problem) => /forbids the background/.test(problem)), problems.join("\n"));
+  assert.ok(dispatchRuleProblems("plan.md", "Re-dispatch exactly that reader once, blocking. When the message returns: collect.")
+    .some((problem) => /waits for the message to return/.test(problem)));
+  assert.ok(dispatchRuleProblems("plan.md", "until [ -f x ]; do sleep 1; done").some((problem) => /watcher loop/.test(problem)));
 });

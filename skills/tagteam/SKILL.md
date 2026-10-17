@@ -363,7 +363,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints |
-| `plan.mjs` | The plan side: `roles`, `codex` (prepare the Codex plan review for the runner), `collect` (fold the three readers into a brief), `check` (every gating finding answered) |
+| `plan.mjs` | The plan side: `roles`, `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in) |
 | `codex.mjs` | Compose a request, run Codex, validate against a schema |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |

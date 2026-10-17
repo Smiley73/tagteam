@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { closeJudged, requireFamilyIn } from "./lib/plan-sets.mjs";
 
 // A spec is written for a capable implementer reading the repository with full
 // tool access. Its target is 12 KB and this is the ceiling the run enforces: left
@@ -134,13 +135,25 @@ async function main() {
     return;
   }
   try {
+    // The command line is what step 6 of a plan runs over files its spec
+    // writers have just written, so it refuses until they have all reported.
+    // Kept out of `readSpecs`, which shipping imports and which must never
+    // consult the plan side's sets.
+    const set = requireFamilyIn(planDir, "spec-writers", "specs.mjs");
     const here = path.dirname(fileURLToPath(import.meta.url));
     const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
-    const order = readSpecs(planDir, config, path.resolve(here, "..", "schemas", "spec.schema.json"), { enforceSize });
+    let order;
+    try {
+      order = readSpecs(planDir, config, path.resolve(here, "..", "schemas", "spec.schema.json"), { enforceSize });
+    } finally {
+      // Judged either way: a writer whose spec it refused is re-sent as a set of
+      // its own, which is recorded only once this one is judged.
+      await closeJudged(set);
+    }
     process.stdout.write(`${JSON.stringify({ ok: true, order }, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
+    process.exitCode = error.exitCode ?? 1;
   }
 }
 

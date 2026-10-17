@@ -11,11 +11,50 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
 You are the orchestrator. You run the scripts and hold the sequence; subagents do
 the model work and write their own files.
 
-**Dispatching.** Every agent below is dispatched with `run_in_background:
-false`. When several are dispatched together, they go in one message and run at
-the same time; the message returns when all of them have finished. Never
-dispatch in the background, never start a watcher, never run a command only to
-pass the time.
+**Dispatching.** Every dispatch below is a *set*, and the run judges a set's
+work only from its own record of which agents have reported, never from what is
+on disk: a reader still working and a reader that failed leave the same nothing
+behind. You keep that record by telling the run each time an agent reports.
+
+- Make each Agent call with `run_in_background: false` where the call allows
+  it, and put agents sent out together into one message, where they run at the
+  same time. The foreground is asked for because one return is cheaper than one
+  wake-up per agent, and nothing depends on getting it: Claude Code may run the
+  agents in the background whatever the call asks for.
+- Give every dispatch a `description` unique in its set. That is its label, and
+  the name Claude Code repeats in the notice it posts when that agent finishes;
+  each step below gives the labels to use. Straight after dispatching, record
+  the set, one `--agent` per agent with its label and the file you told it to
+  write — the step names the kind:
+
+  ```bash
+  node "$P/scripts/plan.mjs" record --plan "$D" --kind <kind> --agent "<label>" "<output>"
+  ```
+
+  It prints `set.arrive`, the command that records an arrival, and `next`.
+- **If the message came back with every agent finished**, run `set.arrive`
+  once with every label appended, each in double quotes, then run `next`.
+  Otherwise end your turn.
+- **On each finished notice**, run `set.arrive` with that one label in double
+  quotes and nothing else. It prints one line — "The plan reviewer is in (1 of
+  3)" — and you relay it as written. Run nothing else on that wake-up. The last
+  arrival prints "All 3 are in. Judging the review now." with `next`: run the
+  command it names.
+- **When you are unsure whether you recorded one**, record it anyway: a label
+  already in is refused by name and changes nothing. A label refused as not in
+  the set was copied wrong; the refusal lists the labels still out, so correct
+  it in the same turn.
+- **A step run early exits 5** — "still waiting on the adversary and Codex".
+  It is not a stop, and nothing changed: tell the person who is still out, end
+  the turn, and keep waiting for their notices. **Exit 2** from a step or from
+  `record` is the record refusing something it cannot vouch for: no set of that
+  kind was recorded, another set is still out, or a once-only re-send was
+  already spent. It says which and what to dispatch; a plan begun on a plugin
+  older than 0.10.0 has no sets, so its next step says this once.
+
+Never sleep, poll or watch for a set to finish, never start a watcher, and
+never run a command only to pass the time: a finished agent's own notice is the
+only thing that wakes you, and waiting costs no turns.
 
 **Settings.** Run once, at the start:
 
@@ -47,7 +86,32 @@ a prepared Codex command for you.
    stop. No config at all: same. Show any `note:` or `warning:` line about lens
    briefs as the validator wrote it.
 4. `codex --version`. It fails: stop and say Codex is required.
-5. `--resume <slug>`: pick up at the first step below whose output is missing.
+5. `--resume <slug>`: first see whether an earlier run left a set out:
+
+   ```bash
+   node "$P/scripts/plan.mjs" resume --plan "$D"
+   ```
+
+   - **Nothing open**: pick up at the first step below whose output is
+     missing.
+   - **`set` with `howToWait`**: those agents were sent out from this same
+     session and may still be working. Dispatch nothing; end your turn and
+     record each finished notice as *Dispatching* says.
+   - **Released**: the run that sent them out was another session, and it is
+     gone. Relay `say`. Run `next` when it is printed — its step judges what is
+     on disk, as for an agent that reported with nothing usable — and otherwise
+     pick up at the first step whose output is missing.
+   - **`ask`**: no session could be identified. Ask once, with
+     `AskUserQuestion`, whether an earlier run of this plan is still going
+     anywhere. If they say it is gone, run `answers.gone`; if they say it is
+     still going, or are not sure, run `answers.live`, and the run keeps
+     waiting. Only the run closes the set, and only on that yes.
+
+   A set whose finished notice never comes stays open: nothing times it out,
+   and a resume from the same session keeps waiting on it. The way out is to
+   resume from a new Claude Code session, which releases it, or to answer that
+   the earlier run is gone; what is on disk then decides.
+
    **`$D/goal.md` existing is not enough to skip step 3** — a session that
    stopped while you were waiting for the owner to read it leaves exactly that
    file behind, and only `$D/work/goal-approved` lets you skip it. Otherwise
@@ -65,9 +129,12 @@ Seven steps, and none of them loops.
 Dispatch one `tagteam:explorer-<effort>` at `explore`'s model: how the areas
 this goal touches are built today, which modules own them, what patterns the
 repository already uses, and where the tests for them live. Tell it to write its
-conclusion to `$D/work/exploration.md` and return one line. That file is read by
-the drafter and by every spec writer, so it stays out of your context: read its
-first thirty lines to know which questions are worth asking, and no more.
+conclusion to `$D/work/exploration.md` and return one line. Label it `Explore
+the repository` and record it as an `explore` set with that file as its output.
+That file is read by the drafter and by every spec writer, so it stays out of
+your context: the explorer's arrival prints the command that shows its first
+thirty lines, which is enough to know which questions are worth asking. Read no
+more of it.
 
 Read `conventionsPath` if the config names one. Read nothing else yourself —
 what you load here you carry through the whole interview.
@@ -151,11 +218,13 @@ Run this before **every** step from here on. It is one command and it is the
 only thing standing between "the plan was built from what you approved" and a
 claim nobody checked.
 
-Dispatch `tagteam:plan-drafter-<effort>` at `draft`'s model. Give it
-`$D/goal.md`, `$D/work/exploration.md`, and `$D/plan.md` to write. It returns a
-path and a byte count — do not read the plan. A plan is an index with an 8 KB
-target and a 12 KB ceiling that step 6 enforces; if the byte count it returns is
-over 12,000, re-dispatch it now to cut, before anyone reviews it.
+Dispatch `tagteam:plan-drafter-<effort>` at `draft`'s model, labelled `Draft
+the plan`. Give it `$D/goal.md`, `$D/work/exploration.md`, and `$D/plan.md` to
+write, and record it as a `draft` set with `$D/plan.md` as its output; the run
+refuses that record until the explorer's set is in. It returns a path and a byte
+count — do not read the plan. A plan is an index with an 8 KB target and a 12 KB
+ceiling that step 6 enforces; if the byte count it returns is over 12,000,
+re-dispatch it now to cut, before anyone reviews it, as another `draft` set.
 
 ## 5 — Review, once
 
@@ -169,38 +238,55 @@ node "$P/scripts/plan.mjs" codex --dir "$D/work/review" --goal "$D/goal.md" --pl
 The second command prepares the Codex plan review and prints the runner dispatch:
 an `agent`, a `description` and a `prompt`. Then dispatch, **in one message**:
 
-- `tagteam:plan-reviewer-<effort>` at `plan-review`'s model, given the goal, the
-  plan and the exploration, writing `$D/work/review/claude.json`
-- `tagteam:adversary-<effort>` at `plan-adversary`'s model, pointed at
-  `prompts/plan-adversary.md`, given the same, writing
-  `$D/work/review/adversary.json`
-- `tagteam:codex-runner` with the printed prompt, no model
+- `tagteam:plan-reviewer-<effort>` at `plan-review`'s model, labelled `Plan
+  review: Claude`, given the goal, the plan and the exploration, writing
+  `$D/work/review/claude.json`
+- `tagteam:adversary-<effort>` at `plan-adversary`'s model, labelled `Plan
+  review: adversary`, pointed at `prompts/plan-adversary.md`, given the same,
+  writing `$D/work/review/adversary.json`
+- `tagteam:codex-runner` with the printed prompt and `description`, no model;
+  it writes `$D/work/review/codex.json`
 
-When the message returns:
+and record the three as one `review` set:
+
+```bash
+node "$P/scripts/plan.mjs" record --plan "$D" --kind review \
+  --agent "Plan review: Claude" "$D/work/review/claude.json" \
+  --agent "Plan review: adversary" "$D/work/review/adversary.json" \
+  --agent "Codex plan review" "$D/work/review/codex.json"
+```
+
+The last arrival names the step that judges them:
 
 ```bash
 node "$P/scripts/plan.mjs" collect --dir "$D/work/review"
 ```
 
-It folds the three files into `findings.json` and `brief.md`, assigns an id to
-every finding, and prints one line per finding. Exit 1 means a reader produced
-no usable file: it names which. Re-dispatch exactly that reader once, blocking,
-and run `collect` again; still missing, carry on and say so at step 7.
+It refuses until the review set is in. Then it folds the three files into
+`findings.json` and `brief.md`, assigns an id to every finding, and prints one
+line per finding. Exit 1 means a reader produced no usable file — one that
+reported and left nothing counts the same: it names which. Re-dispatch exactly
+that reader once, under the same label, record it alone as a `review-resend`
+set, and run `collect` again when its arrival names it. The run refuses a second
+re-send. Still missing, carry on and say so at step 7.
 
 **`clean` — nothing blocking or major: go to step 6.** Otherwise dispatch one
-`tagteam:plan-drafter-<effort>` at `draft`'s model, blocking, given the goal,
-the plan, the exploration, `$D/work/review/brief.md`, and
-`$D/work/review/response.json` to write. It revises `plan.md` for the findings
-it accepts and answers every finding in the brief by id — applied, rejected with
-a reason, or handed to the owner. Then:
+`tagteam:plan-drafter-<effort>` at `draft`'s model, labelled `Answer the plan
+review`, given the goal, the plan, the exploration, `$D/work/review/brief.md`,
+and `$D/work/review/response.json` to write, and record it as a `response` set
+with `$D/work/review/response.json` as its output. It revises `plan.md` for the
+findings it accepts and answers every finding in the brief by id — applied,
+rejected with a reason, or handed to the owner. Its arrival names:
 
 ```bash
 node "$P/scripts/plan.mjs" check --dir "$D/work/review"
 ```
 
-Exit 1 means a blocking or major finding has no answer: it names which.
-Re-dispatch the drafter once for exactly those; still unanswered, stop and show
-what it printed. Its output lists the rejections and the questions for the owner.
+It refuses until the response set is in. Exit 1 means a blocking or major
+finding has no answer: it names which. Re-dispatch the drafter once for exactly
+those, labelled `Answer the plan review again`, as a `response-resend` set; the
+run refuses a second. Still unanswered, stop and show what it printed. Its
+output lists the rejections and the questions for the owner.
 
 **A finding for the owner** is the most valuable thing the review produces: a
 reader established that the *outcome* is underspecified, or that a decision the
@@ -211,8 +297,10 @@ not decide it yourself.
 
 If their answer changes the goal, they edit `goal.md` or tell you what to write.
 Show them the changed file and run `goal-gate.mjs approve` again — the marker
-records the new hash. Then dispatch the drafter once more, blocking, with the
-answers, to revise the plan against the goal they read. Nothing is re-reviewed:
+records the new hash. Then dispatch the drafter once more with the answers,
+labelled `Revise the plan`, to revise the plan against the goal they read, and
+record it as a `draft` set with `$D/plan.md` as its output; its arrival names
+step 6. Nothing is re-reviewed:
 the answers are the owner's, and a second panel over them would be spending
 three readers to check the person's own decision. If their answer does not
 change the goal — the reader was wrong, or the point belongs in a spec — tell
@@ -232,20 +320,24 @@ node "$P/scripts/deliverables.mjs" "$D/plan.md"
 
 That returns one object per deliverable — id, what it delivers, dependencies,
 user-visibility, and the row verbatim. It is how you dispatch without reading
-`plan.md`. It refuses a plan over the 12 KB ceiling, naming the size: re-dispatch
-the drafter, blocking, to cut it to the target, and run it again.
+`plan.md`. It refuses while any set is still out. It refuses a plan over the
+12 KB ceiling, naming the size: re-dispatch the drafter to cut it to the target,
+labelled `Cut the plan`, as a `draft` set; its arrival runs this again.
 
 Dispatch one `tagteam:spec-writer-<effort>` per deliverable at `spec-write`'s
-model, **all in one message**, each writing exactly `$D/specs/<id>.md`. Give
-each one the goal path, the plan path, the exploration path, its own row, and
-the configured default lens set so it knows what it is naming exceptions to.
-The message returns when every writer has.
+model, **all in one message**, each labelled `Write spec <id>` and writing
+exactly `$D/specs/<id>.md`. Give each one the goal path, the plan path, the
+exploration path, its own row, and the configured default lens set so it knows
+what it is naming exceptions to. Record them all as one `spec-writers` set, one
+`--agent "Write spec <id>" "$D/specs/<id>.md"` each.
 
-Then validate:
+The last arrival names the validation:
 `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json" --enforce-size`. It
-checks front matter, refuses a spec over the 18 KB ceiling by name, resolves each
-spec's lenses against the default set, and returns dependency order. Fix what it
-reports by re-dispatching that spec's writer, blocking, with what it said.
+refuses until the spec writers' set is in. Then it checks front matter, refuses
+a spec over the 18 KB ceiling by name, resolves each spec's lenses against the
+default set, and returns dependency order. Fix what it reports by re-dispatching
+that spec's writer with what it said, labelled `Write spec <id> again`, as a
+`spec-writers-resend` set of its own; its arrival runs the validation again.
 
 **The reviewer selection lives in the spec front matter**, because that is what
 `specs.mjs` and shipping actually read. There is no separate manifest to edit.
@@ -305,8 +397,15 @@ Do not read `plan.md`, `exploration.md` beyond its opening, or any spec body
 into your own context. You do not need them and you will need the room.
 
 Do not run a script over files the agents you dispatched have not written yet.
-Every dispatch here blocks, so when the message returns the files exist; a
-missing one is a reader that failed, which `collect` and `specs.mjs` report.
+The scripts refuse until the set is in: `collect`, `check`, `deliverables.mjs`
+and `specs.mjs` exit 5 while an agent is out, naming it, and change nothing.
+Once the set is in, a missing file is an agent that failed, which `collect` and
+`specs.mjs` report.
+
+Never run a command only to pass the time. A turn that exists only to wait
+re-reads your whole context for nothing; a finished agent's notice is what
+wakes you, and its one arrival call is all that wake-up runs until the set is
+in.
 
 Do not add a review log, a changelog, or a record of what a reviewer asked to any
 committed file. The plan states the current shape of the work; the review record
