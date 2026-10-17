@@ -155,6 +155,22 @@ test("an earlier plan's agent with the same label in the same session is never t
   assert.deepEqual(reportLines(results), []);
 });
 
+test("a first set whose agent left no transcript is not confirmed, never joined to the lone earlier plan's transcript of that label", () => {
+  const { agent, check } = workspace();
+  const earlier = "/repo/.tagteam/plans/earlier";
+  const now = "/repo/.tagteam/plans/now";
+  // Only the earlier plan's explorer is in the session, at what this plan asks
+  // for and at what it does not: neither is this plan's run.
+  const lone = agent({ label: "Explore the repository", start: 0, prompt: `Write your conclusion to ${earlier}/work/exploration.md`, records: [ran("high")] });
+  const records = [set("001-explore", 60, [entry("Explore the repository", `${now}/work/exploration.md`, "high")], [["Explore the repository", 65]])];
+  const results = check("plan", records);
+  assert.deepEqual(outcomes(results), ["not-confirmed"]);
+  assert.match(results[0].reason, /no transcript found/);
+
+  fs.writeFileSync(lone, fs.readFileSync(lone, "utf8").replaceAll("\"high\"", "\"low\""));
+  assert.deepEqual(outcomes(check("plan", records)), ["not-confirmed"], "another plan's run is never reported as a mismatch either");
+});
+
 test("two transcripts that still qualify, a set with no session and an entry with no request are not confirmed and never a mismatch", () => {
   const { agent, check } = workspace();
   agent({ label: "Review 01-a: correctness", start: 1, prompt: "Write your findings to: /x/correctness.json", records: [ran("low")] });

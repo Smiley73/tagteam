@@ -28,8 +28,9 @@
 // **Labels repeat, so a label alone joins nothing.** `Fix 01-a` comes back every
 // fix round and `Explore the repository` every plan run in a session, so an
 // entry joins only to a transcript in its set's own session, with its label, that
-// started inside the entry's window; when several still qualify, only those whose
-// first prompt names the entry's output. Anything but exactly one is "not
+// started inside the entry's window; when several still qualify, or the window
+// has no lower bound, only those whose first prompt names the entry's output.
+// Anything but exactly one is "not
 // confirmed": erring that way is safe, and erring towards a match is not.
 import fs from "node:fs";
 import os from "node:os";
@@ -169,7 +170,11 @@ function judge(entry, set, window, index) {
     // stays in: dropping it could leave another round's transcript as the match.
     return run === null || run.start === null || (run.start >= window.from && run.start <= window.to);
   });
-  const narrowed = qualified.length > 1
+  // A window with no lower bound (a plan's first set) also takes in every
+  // earlier plan's agent of that label in the session, so even a lone candidate
+  // there has to name the entry's output: when this plan's agent left no
+  // transcript, the one left over is another plan's.
+  const narrowed = qualified.length > 1 || window.from === -Infinity
     ? qualified.filter((candidate) => {
       const run = index.runOf(candidate.file);
       return run === null || run.prompt.includes(entry.output);
