@@ -408,6 +408,14 @@ test("a fixer that declines after a settled round goes back through the re-check
   ship("snapshot", plan, ["--spec", "01-a"]);
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
+  // What each set keeps as the request of every agent in it, which the report at
+  // finish compares against: the dispatch exactly as printed.
+  const requested = (result) => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "sets", result.json.set.id, `${result.json.set.id}.json`), "utf8"))
+    .agents.map((agent) => agent.request);
+  const printed = (result) => result.json.dispatch.map(({ agent, model, effort }) => ({ agent, model, effort }));
+  assert.deepEqual(requested(panel), printed(panel));
+  assert.deepEqual(requested(panel)[2], { agent: "tagteam:codex-runner", model: "haiku", effort: "low" },
+    "the runner's request is its own call, not the configured Codex model and effort");
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
   const first = state().candidateOid;
   for (const dispatch of panel.json.dispatch.slice(0, 2)) {
@@ -419,6 +427,7 @@ test("a fixer that declines after a settled round goes back through the re-check
   ship("collect", plan, ["--spec", "01-a"]);
   const fix = ship("fix", plan, ["--spec", "01-a"]);
   assertEffort(fix.json.dispatch[0], "high", "the first fix round is not raised: escalation is strictly after one");
+  assert.deepEqual(requested(fix), printed(fix));
   fs.appendFileSync(path.join(worktree, "app.js"), "export const mul = (a, b) => a * b;\n");
   write(outputOf(fix.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: []
@@ -441,6 +450,8 @@ test("a fixer that declines after a settled round goes back through the re-check
   assert.equal(again.status, 0, again.stderr);
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-declined.json")), "no decline is on record before the fixer answers");
   assertEffort(again.json.dispatch[0], "max", "the second fixer passes escalation's fixer effort");
+  assert.deepEqual(requested(again), printed(again), "the escalated fixer's set keeps the raised effort it was printed with");
+  assert.equal(requested(again)[0].effort, "max");
   write(outputOf(again.json.dispatch[0]), {
     outcomes: [{ id: "1.correctness.1", outcome: "wont-fix", note: "sub is meant to add; the spec says so" }], notes: "", status: "complete", summary: "declined", unfinished: []
   });
@@ -1945,16 +1956,16 @@ function mergingEnv(dir) {
 // One spec of one plan, from `begin` to the point where its gates are satisfied
 // and the pull request is the only thing left. No findings anywhere, so it takes
 // the shortest route a real spec takes.
-function driveToPublishable({ plan, shipDir }, id, file, contents) {
-  const begin = ship("begin", plan, ["--spec", id]);
+function driveToPublishable({ plan, shipDir }, id, file, contents, env = {}) {
+  const begin = ship("begin", plan, ["--spec", id], env);
   assert.equal(begin.status, 0, begin.stderr);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   fs.writeFileSync(path.join(worktree, file), contents);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${file}`, unfinished: [] });
   arriveAll(begin);
-  ship("snapshot", plan, ["--spec", id]);
-  ship("verify", plan, ["--spec", id]);
-  const panel = ship("panel", plan, ["--spec", id]);
+  ship("snapshot", plan, ["--spec", id], env);
+  ship("verify", plan, ["--spec", id], env);
+  const panel = ship("panel", plan, ["--spec", id], env);
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, id, "state.json"), "utf8"));
   const oid = state().candidateOid;
   for (const dispatch of panel.json.dispatch.slice(0, 2)) {
@@ -1962,11 +1973,11 @@ function driveToPublishable({ plan, shipDir }, id, file, contents) {
   }
   write(path.join(shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid));
   arriveAll(panel);
-  ship("collect", plan, ["--spec", id]);
-  const recheck = ship("recheck", plan, ["--spec", id]);
+  ship("collect", plan, ["--spec", id], env);
+  const recheck = ship("recheck", plan, ["--spec", id], env);
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
   arriveAll(recheck);
-  const settled = ship("settle", plan, ["--spec", id]);
+  const settled = ship("settle", plan, ["--spec", id], env);
   assert.equal(settled.json.review, "clean", settled.stderr);
   return { worktree, state };
 }
@@ -2032,6 +2043,59 @@ test("two ships in one repository both merge, and the second spends no round on 
   assert.match(show("b.js"), /export const twice/);
 
   for (const train of [staged, second]) assert.equal(ship("end", train.plan, [], env).status, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The effort check at `finish` reads what Claude Code wrote for each agent the
+// spec sent out, staged here for every set the spec recorded, each transcript
+// starting when its set was recorded and naming the output its agent was told
+// to write. One reviewer ran at an effort it was not sent at; the report names
+// it, and the spec merges exactly as it would have without it.
+test("an agent that ran at another effort is named in finish's say, and the spec still merges with the same exit code", () => {
+  const staged = stage();
+  const { dir, repo, plan, shipDir } = staged;
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  const subagents = path.join(projectDir, "mine", "subagents");
+  fs.mkdirSync(subagents, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "mine.jsonl"), "");
+  const session = { HOME: home, TAGTEAM_SESSION_ID: "mine", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+  const env = { ...mergingEnv(dir), ...session };
+  const body = path.join(dir, "body.md");
+  fs.writeFileSync(body, "What this changes.\n");
+
+  assert.equal(ship("start", plan, [], session).status, 0);
+  const { state } = driveToPublishable(staged, "01-a", "app.js", "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n", session);
+
+  const setsRoot = path.join(shipDir, "01-a", "sets");
+  let count = 0;
+  for (const name of fs.readdirSync(setsRoot)) {
+    const record = JSON.parse(fs.readFileSync(path.join(setsRoot, name, `${name}.json`), "utf8"));
+    assert.equal(record.session, "mine", "the set was not recorded against the session it was sent from");
+    for (const agent of record.agents) {
+      count += 1;
+      const effort = agent.label === "Review 01-a: correctness" ? "high" : agent.request.effort;
+      fs.writeFileSync(path.join(subagents, `agent-${count}.meta.json`), JSON.stringify({ description: agent.label }));
+      fs.writeFileSync(path.join(subagents, `agent-${count}.jsonl`), [
+        { timestamp: record.createdAt, message: { role: "user", content: `Write to: ${agent.output}` } },
+        { timestamp: record.createdAt, message: { role: "assistant", model: `claude-${agent.request.model}-5-5`, content: [] }, effort, perTurnEffort: effort },
+        { timestamp: record.createdAt, message: { role: "assistant", model: "<synthetic>", content: [] } }
+      ].map((line) => JSON.stringify(line)).join("\n"));
+    }
+  }
+  assert.ok(count >= 4, "the spec sent out fewer agents than its route does");
+
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", body], env).status, 0);
+  const finish = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.equal(finish.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(finish.json.ask ?? "")}`);
+  assert.equal(state().state, "merged");
+  const named = finish.json.say.filter((line) => /asked for/.test(line));
+  assert.equal(named.length, 1, finish.json.say.join("\n"));
+  assert.match(named[0], /Review 01-a: correctness asked for medium on opus and ran at high on claude-opus-5-5/);
+  assert.doesNotMatch(named[0], /code-quality|Implement|Adversary|Codex/, "an agent that ran as asked was named");
+  assert.ok(!finish.json.say.some((line) => /^Could not confirm/.test(line)), finish.json.say.join("\n"));
+  assert.equal(ship("end", plan, [], env).status, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -395,6 +395,19 @@ that the system behaves under conditions the spec doesn't enumerate
 Say nothing about how large anything is: the ceilings are enforced in code, and
 by the time a person is deciding whether to approve, a byte count is noise.
 
+Then run
+
+```bash
+node "$P/scripts/plan.mjs" effort-check --plan "$D"
+```
+
+and show what its `say` holds alongside the rest of the approval, as written:
+every planning agent that ran at a different effort or model than it was sent
+at, and every one whose run could not be confirmed, with why. It always exits 0
+and prints nothing to say when every agent ran as it was sent. It is a report
+and nothing more: never a stop, never a reason to re-dispatch an agent, and it
+changes nothing about the question below.
+
 Run `node "$P/scripts/goal-gate.mjs" verify "$D"` one last time before asking.
 
 Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.json`

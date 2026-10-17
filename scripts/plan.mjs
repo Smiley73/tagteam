@@ -35,6 +35,11 @@
 // ship prints, and `collect` and `check` refuse, changing nothing, until the set
 // they judge is in: Claude Code may run the agents in the background, and a
 // reader still working looks on disk exactly like one that failed.
+//
+// `record` also keeps, per agent, the call it was sent as — resolved here from
+// its kind and label, never supplied by the main agent — and `effort-check`
+// reads those at approval against what each agent actually ran at, as a report
+// that blocks nothing.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +49,7 @@ import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { arriveCommand } from "./dispatch-set.mjs";
 import { effortRefusal } from "./lib/effort-ladder.mjs";
 import {
+  CODEX_PLAN_REVIEW,
   HOW_TO_RECORD,
   HOW_TO_WAIT,
   KINDS,
@@ -52,9 +58,12 @@ import {
   REFUSED,
   closeJudged,
   recordPlanSet,
+  repoFor,
   requireFamilyIn,
-  resumePlanSets
+  resumePlanSets,
+  setsDir
 } from "./lib/plan-sets.mjs";
+import { effortCheckLines } from "./lib/effort-check.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMAS = path.resolve(here, "..", "schemas");
@@ -338,6 +347,7 @@ const USAGE = `usage:
   plan.mjs resume   --plan <plan-dir> [--run-gone | --run-live]
   plan.mjs collect  --dir <work/review>
   plan.mjs check    --dir <work/review>
+  plan.mjs effort-check --plan <plan-dir>
 
   \`roles\` prints the model and effort of every planning dispatch, with the plan
   override applied when there is one; the Codex command takes its pair from it.
@@ -354,7 +364,10 @@ const USAGE = `usage:
   findings.json and brief.md; exit 1 while a reader is missing. \`check\` reads
   response.json against findings.json; exit 1 while a blocking or major finding
   is unanswered. \`collect\` and \`check\` exit ${NOT_IN_YET} while their set is not in, and
-  ${REFUSED} when none was recorded, changing nothing either way.
+  ${REFUSED} when none was recorded, changing nothing either way. \`effort-check\`
+  names, for step 7, every planning agent that ran at a different effort or model
+  than it was sent at and every one that could not be confirmed; it prints
+  nothing to say when all matched, and exits 0 whatever it finds.
 `;
 
 function flags(argv) {
@@ -436,7 +449,9 @@ async function main() {
   try {
     if (action === "record") {
       const options = recordFlags(rest);
-      const sent = await recordPlanSet({ planDir: options.plan, kind: options.kind, agents: options.agents });
+      const sent = await recordPlanSet({
+        planDir: options.plan, kind: options.kind, agents: options.agents, callForLabel: planCallForLabel
+      });
       const names = sent.record.agents.map((agent) => agent.name);
       print({
         say: [`Recorded set ${sent.id}: waiting on ${names.length === 1 ? names[0] : `all ${names.length}`}.`],
@@ -450,6 +465,20 @@ async function main() {
       const options = resumeFlags(rest);
       const { outcome, ...payload } = await resumePlanSets({ planDir: options.plan, runGone: options.runGone, runLive: options.runLive });
       print({ ...payload, ...(outcome === "waiting" ? { howToWait: HOW_TO_WAIT } : {}) });
+      return;
+    }
+    if (action === "effort-check") {
+      const options = flags(rest);
+      if (!options.plan) throw new PlanSetError(`effort-check needs --plan\n${USAGE}`);
+      // A report for the approval and nothing else: whatever it finds, and
+      // whatever goes wrong finding it, it says so and exits 0.
+      let repo = null;
+      try { repo = repoFor(options.plan); } catch {}
+      print({
+        say: repo
+          ? effortCheckLines({ side: "plan", root: setsDir(options.plan), repo })
+          : [`Could not confirm what any planning agent ran at: ${path.resolve(options.plan)} is not inside a git repository.`]
+      });
       return;
     }
     if (action === "roles") {
@@ -482,7 +511,7 @@ async function main() {
       });
       process.stdout.write(`${JSON.stringify({
         ok: true,
-        dispatch: runnerDispatch({ description: "Codex plan review", commandFile: prepared.commandFile, statusFile: prepared.statusFile }),
+        dispatch: runnerDispatch({ description: CODEX_PLAN_REVIEW, commandFile: prepared.commandFile, statusFile: prepared.statusFile }),
         statusFile: prepared.statusFile
       }, null, 2)}\n`);
       return;

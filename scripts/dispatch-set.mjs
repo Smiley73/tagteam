@@ -198,12 +198,29 @@ export function readSet(dir, id) {
   return readRecord(recordPath(dir, id));
 }
 
+// What an agent was asked to run at, kept exactly as the caller printed or
+// resolved it so a report written after the agent finished compares against the
+// request and not against a configuration that may have changed since. Only its
+// shape is held here; a missing request, or a missing part of one, is the
+// report's to call unconfirmed, never a reason to refuse a set.
+const REQUEST_KEYS = ["agent", "model", "effort"];
+
+function requestOf(entry, id) {
+  if (entry.request === undefined || entry.request === null) return null;
+  const { request } = entry;
+  const malformed = typeof request !== "object" || Array.isArray(request)
+    || REQUEST_KEYS.some((key) => request[key] !== undefined && request[key] !== null && typeof request[key] !== "string");
+  if (malformed) refuse(`agent ${q(entry.label)} of set ${id} has a request that is not {agent, model, effort} as strings or null`);
+  return Object.fromEntries(REQUEST_KEYS.map((key) => [key, request[key] ?? null]));
+}
+
 /**
  * Record a set before it is sent out. `agents` is one entry per agent:
- * `{ label, name?, output }`, where `name` is how the person is told about it
- * and defaults to the label. Set ids are written once: a re-send or a later
- * attempt is a new set, so a late notice from an old set can never land in a new
- * one that reuses its labels.
+ * `{ label, name?, output, request? }`, where `name` is how the person is told
+ * about it and defaults to the label, and `request` is the agent, model and
+ * effort it was sent at, stored as given and read by nothing in this module.
+ * Set ids are written once: a re-send or a later attempt is a new set, so a late
+ * notice from an old set can never land in a new one that reuses its labels.
  */
 export async function recordSet({ dir, id, agents, next, closing, repo, env = process.env, home } = {}) {
   recordPath(dir, id);
@@ -213,7 +230,8 @@ export async function recordSet({ dir, id, agents, next, closing, repo, env = pr
     const name = entry.name ?? entry.label;
     if (!nonEmpty(name)) refuse(`agent ${q(entry.label)} of set ${id} has an empty name`);
     if (!nonEmpty(entry.output)) refuse(`agent ${q(entry.label)} of set ${id} names no expected output`);
-    return { label: entry.label, name, output: entry.output };
+    const request = requestOf(entry, id);
+    return { label: entry.label, name, output: entry.output, ...(request ? { request } : {}) };
   });
   const seen = new Set();
   const duplicates = new Set();
@@ -461,7 +479,7 @@ const USAGE = `usage: node dispatch-set.mjs <command> [options]
   ready   --dir <d> --set <id>              whether the set may be judged; refused while anyone is out
   close   --dir <d> --set <id>              mark a set that is in as judged
   record  --dir <d> --set <id> --repo <r> --agents <file> --next <command> --closing <phrase>
-                                            record a set; <file> is a JSON array of {label, name?, output}
+                                            record a set; <file> is a JSON array of {label, name?, output, request?}
   restart --dir <d> --repo <r> [--confirmed]   apply the restart rule to every set still waiting
 `;
 

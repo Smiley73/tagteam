@@ -256,6 +256,9 @@ flowchart TD
 After each spec, `/tagteam:status` can say what it cost: tagteam reads the
 session transcripts Claude Code keeps and reports the spend as input-token
 equivalents, split between the orchestrating agent and the agents it dispatched.
+Each spec, and each plan at approval, also names any agent that ran at a
+different effort or model than it was sent at, or whose run could not be
+confirmed, as a report that never holds anything up.
 
 ## How it is built
 
