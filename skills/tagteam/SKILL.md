@@ -542,7 +542,8 @@ mid-train is the failure this design exists to avoid. Three rules:
   reviewed commit's round and spends nothing. Never `repair` for this: a repair
   is a CI repair, spends one, and tells the fixer a check is red.
 - **Codex quota**: the bridge waits, in slices, to a four-hour ceiling, then
-  fails. The runner waits with it. Nothing else needs doing.
+  fails, aiming at the reset time Codex reports when it reports one. The runner
+  waits with it. Nothing else needs doing.
 - **A model Codex cannot use**: the bridge refuses on the first attempt, naming
   the model and quoting what the provider said. The repair is the configured
   model, not a retry.

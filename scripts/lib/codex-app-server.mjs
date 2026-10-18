@@ -122,6 +122,16 @@ import { fileURLToPath } from "node:url";
 // semantic versioning orders it: which 0.153.0 pre-release first carried the
 // fields was not checked. A pre-release of anything above the floor passes; the
 // version run today, `0.163.0-alpha.10.2`, is one.
+//
+// Re-checked for what failure recognition reads, on 2026-10-17, by running
+// `codex app-server generate-json-schema` from the published 0.153.0
+// darwin-arm64 build: its turn error carries `codexErrorInfo` with
+// `usageLimitExceeded` and `rateLimitExceeded` among the string variants and
+// the single-key objects carrying `httpStatusCode`; its `error` notification
+// requires `willRetry`; and it has `account/rateLimits/updated`, whose windows
+// carry `usedPercent` and `resetsAt`, beside `rateLimitReachedType`. All of
+// them were there at the floor, so it stays. Every one of them is read as "no
+// verdict" when it is missing.
 export const CODEX_MINIMUM = [0, 153, 0];
 
 /**
@@ -284,6 +294,35 @@ function turnError(error) {
   };
 }
 
+// The part of a rate-limit window a quota wait reads, merged field by field into
+// the window already kept. Anything else Codex sends — the window's length, the
+// plan, the credit balance, the account — is account data nothing here uses, so
+// it is not kept.
+function rateLimitWindow(kept, window) {
+  if (window === null || typeof window !== "object" || Array.isArray(window)) return kept;
+  return {
+    usedPercent: window.usedPercent ?? kept?.usedPercent ?? null,
+    resetsAt: window.resetsAt ?? kept?.resetsAt ?? null
+  };
+}
+
+// `account/rateLimits/updated` is, in the protocol's own words, a "sparse rolling
+// rate-limit update": a value it leaves out or sends as null is unavailable, not
+// cleared. So each field — each window's `usedPercent` and `resetsAt` on its
+// own, too — keeps the latest value any update in this attempt carried, and an
+// update that carried none of them changes nothing.
+function mergeRateLimits(kept, update) {
+  if (update === null || typeof update !== "object" || Array.isArray(update)) return kept;
+  const next = { ...(kept ?? { primary: null, secondary: null, rateLimitReachedType: null }) };
+  for (const name of ["primary", "secondary"]) {
+    next[name] = rateLimitWindow(next[name], update[name]);
+  }
+  if (update.rateLimitReachedType !== undefined && update.rateLimitReachedType !== null) {
+    next.rateLimitReachedType = update.rateLimitReachedType;
+  }
+  return next;
+}
+
 // Codex reports a fatal start-up error as one `Error: <sentence>` line on
 // stderr; the last one is the sentence.
 function startupError(stderr) {
@@ -327,8 +366,11 @@ function within(promise, ms) {
  * wrote on stdout, as text and in order, whether or not it parsed — the
  * attempt's own transcript, for a caller that keeps one. A model or an effort
  * left out is not sent, and Codex's own configuration decides it. Resolves to
- * one outcome, each carrying `stderr`, `routing` and `errors` — every `error`
- * notification kept, whatever the outcome:
+ * one outcome, each carrying `stderr`, `routing`, `errors` — every `error`
+ * notification kept as `{error, willRetry}`, whatever the outcome — and
+ * `rateLimits`, the `{primary, secondary, rateLimitReachedType}` this attempt's
+ * `account/rateLimits/updated` notifications reported, each window as
+ * `{usedPercent, resetsAt}`; null when none arrived:
  *
  * - `{outcome: "completed", message}` — the final agent message, as text.
  * - `{outcome: "configuration-error", arrivedAt, message}` — `arrivedAt` is
@@ -368,6 +410,7 @@ export async function runAppServerTurn({
   const responses = new Map();
   const errors = [];
   const serverRequests = [];
+  let rateLimits = null;
   let completedTurn = null;
   let exit = null;
   let wake = () => {};
@@ -441,9 +484,14 @@ export async function runAppServerTurn({
       } else if (message.method === "error" && message.params) {
         // Kept whether or not Codex will retry: `willRetry: true` is not
         // terminal and ends nothing, but it is part of what the turn went
-        // through.
-        errors.push({ error: turnError(message.params.error), willRetry: message.params.willRetry === true });
+        // through. Kept as Codex sent it, and null when it sent no boolean, so
+        // that a caller deciding which errors were final can tell "will not
+        // retry" from "did not say".
+        const willRetry = typeof message.params.willRetry === "boolean" ? message.params.willRetry : null;
+        errors.push({ error: turnError(message.params.error), willRetry });
         if (errors.length > ERROR_NOTIFICATIONS_KEPT) errors.shift();
+      } else if (message.method === "account/rateLimits/updated" && message.params) {
+        rateLimits = mergeRateLimits(rateLimits, message.params.rateLimits);
       }
       return;
     }
@@ -627,7 +675,7 @@ export async function runAppServerTurn({
   await endGroup(child, exited, () => exit !== null, outcome.outcome !== "timed-out");
   // On every outcome, not only a failed turn: a server that exits mid-turn has
   // often said why in an `error` notification first.
-  return { ...outcome, errors: [...errors], routing, serverRequests: [...serverRequests], stderr };
+  return { ...outcome, errors: [...errors], rateLimits, routing, serverRequests: [...serverRequests], stderr };
 }
 
 // Ask the server to go by closing its input, then end its whole group: SIGTERM,

@@ -10,6 +10,13 @@
 // applied to. Keeping both here means a Codex release that changes either one is
 // a change to a single small module with pure functions and fixtures.
 //
+// A failure is read from what Codex reported in structured form first — the
+// typed kind, and the status, error type and sentence inside a provider's
+// message — and by the word lists over its text as well. Structure only ever
+// adds evidence: nothing the word lists recognise stops being recognised, which
+// is also why the command-line entry point below, which only has text, goes
+// straight to them.
+//
 // Nothing here decides what the caller then does. It says "this looks like an
 // unusable model", "this looks like an exhausted quota", "this is something
 // else", and how far away a reset is; whether that becomes a refusal, a wait or
@@ -81,6 +88,147 @@ export function classifyProviderError(text, provider = "codex") {
   }
   if (QUOTA.some((token) => normalized.includes(token))) return { kind: "quota" };
   return { kind: "transient" };
+}
+
+// The typed kinds that mean an exhausted quota, from the protocol description
+// Codex generates (`codex app-server generate-json-schema`). Every other kind it
+// lists — `other`, `contextWindowExceeded`, `unauthorized`, `sandboxError`,
+// `badRequest` and the rest — says nothing about a quota or a model, and is no
+// verdict. No real one of these was ever seen: an exhausted quota cannot be
+// provoked on demand.
+const QUOTA_KINDS = ["usageLimitExceeded", "rateLimitExceeded"];
+// The error types inside a provider's message that mean the same. None was ever
+// seen either. `usage_limit_reached` is the type Codex itself looks for in a 429
+// body (it is in the codex-cli 0.163 binary, beside `UsageErrorBody`);
+// `insufficient_quota` and `rate_limit_exceeded` are the OpenAI API's.
+const QUOTA_ERROR_TYPES = ["usage_limit_reached", "insufficient_quota", "rate_limit_exceeded"];
+const TOO_MANY_REQUESTS = 429;
+// Today's margin after a reported reset, as `parseResetTime` adds it.
+const RESET_MARGIN_MS = 120_000;
+
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * What one app-server attempt reported about its failure in structured form,
+ * for `classifyFailure` and `quotaResetTime`. `outcome` is what
+ * `runAppServerTurn` returned.
+ *
+ * - `errors`: `{kind, message}` for the failed turn's own error, and for every
+ *   `error` notification that said `willRetry: false`. A notification Codex will
+ *   retry is not the turn's failure, and one that did not say is not read as
+ *   final either. A refused request — the handshake, `thread/start`,
+ *   `turn/start` — is a JSON-RPC error rather than a turn's, and is not here;
+ *   its text still reaches the word matching through
+ *   `appServerFailureEvidence`.
+ * - `rateLimits`: the rate-limit snapshot the attempt received, or null. It only
+ *   ever feeds the wait; on its own it never makes a failure a quota.
+ */
+export function appServerFailure(outcome) {
+  const errors = [];
+  if (outcome?.outcome === "turn-failed" && outcome.stage === "turn") {
+    errors.push({ kind: outcome.kind ?? null, message: outcome.message ?? null });
+  }
+  for (const entry of Array.isArray(outcome?.errors) ? outcome.errors : []) {
+    if (entry?.willRetry === false) errors.push({ kind: entry.error?.kind ?? null, message: entry.error?.message ?? null });
+  }
+  return { errors, rateLimits: isRecord(outcome?.rateLimits) ? outcome.rateLimits : null };
+}
+
+// A provider's error, as Codex stringifies it into a turn error's message:
+// `{"type":"error","status":400,"error":{"type":"invalid_request_error",
+// "message":"<sentence>"}}`, as captured. Parsed once; anything that is not JSON
+// of that shape is just text, and null here.
+function providerError(message) {
+  if (typeof message !== "string") return null;
+  let parsed;
+  try { parsed = JSON.parse(message); } catch { return null; }
+  if (!isRecord(parsed)) return null;
+  const inner = isRecord(parsed.error) ? parsed.error : {};
+  const read = {
+    status: Number.isInteger(parsed.status) ? parsed.status : null,
+    type: typeof inner.type === "string" ? inner.type : null,
+    sentence: typeof inner.message === "string" ? inner.message : null,
+    // Unverified: `resets_at` is the name Codex's own usage-error body gives
+    // it (the codex-cli 0.163 binary carries `plan_type`, `resets_at` beside
+    // `UsageErrorBody`), read here as seconds, the unit of every reset time
+    // Codex was seen to report. No message carrying one was ever seen.
+    resetsAt: inner.resets_at ?? null
+  };
+  return read.status === null && read.type === null && read.sentence === null ? null : read;
+}
+
+// A typed kind as Codex sent it: one of the plain strings, or a single-key
+// object such as `{"httpConnectionFailed": {"httpStatusCode": 429}}`. Anything
+// else is an unknown form, and no verdict.
+function kindSaysQuota(kind) {
+  if (typeof kind === "string") return QUOTA_KINDS.includes(kind);
+  if (!isRecord(kind)) return false;
+  const values = Object.values(kind);
+  return values.length === 1 && isRecord(values[0]) && values[0].httpStatusCode === TOO_MANY_REQUESTS;
+}
+
+/**
+ * The kind of a failure: the first pass over what Codex reported in structured
+ * form, with today's word matching over `text` (`appServerFailureEvidence`) as
+ * the fallback. Structure only ever adds evidence, so nothing the word matching
+ * recognised stops being recognised, and the precedence is today's:
+ *
+ * - model-unavailable (provider `codex` only) when the sentence inside a
+ *   provider's message, or the text, matches `MODEL_UNAVAILABLE`. Never from a
+ *   status or an error type: a schema the API refuses is the same 400
+ *   `invalid_request_error` as a model the account may not use, with only the
+ *   sentence different.
+ * - quota when a typed kind says so, a provider's message has status 429 or a
+ *   quota error type, or the text says so.
+ * - transient otherwise.
+ *
+ * `failure` is what `appServerFailure` returned; anything else, null included,
+ * is read as no structure at all.
+ */
+export function classifyFailure(failure, text, provider = "codex") {
+  const fallback = classifyProviderError(text, provider).kind;
+  const errors = Array.isArray(failure?.errors) ? failure.errors.filter(isRecord) : [];
+  const provided = errors.map((error) => providerError(error.message)).filter(Boolean);
+  if (provider === "codex") {
+    const modelWords = provided.some(({ sentence }) => sentence !== null
+      && MODEL_UNAVAILABLE.some((token) => sentence.toLocaleLowerCase().includes(token)));
+    if (fallback === "model-unavailable" || modelWords) return { kind: "model-unavailable" };
+  }
+  const quota = errors.some((error) => kindSaysQuota(error.kind))
+    || provided.some(({ status, type }) => status === TOO_MANY_REQUESTS || QUOTA_ERROR_TYPES.includes(type));
+  if (fallback === "quota" || quota) return { kind: "quota" };
+  return { kind: "transient" };
+}
+
+/**
+ * When to retry after an exhausted quota, in milliseconds: the latest reset time
+ * Codex reported, plus today's two-minute margin; otherwise exactly what
+ * `parseResetTime` makes of `text`.
+ *
+ * A reset time is reported by a rate-limit window that is exhausted, or by a
+ * provider's message (unverified; see `providerError`). A window is exhausted
+ * when its `usedPercent` is at or above 100. Only when no window says so does a
+ * snapshot whose `rateLimitReachedType` is set count its windows instead: with
+ * one window used up, a window beside it that still has headroom is not why the
+ * limit was reached, and aiming at its later reset would wait out the four-hour
+ * ceiling instead of retrying once the used-up window resets. A snapshot showing
+ * headroom is not a reset time. Codex reports them in seconds. One that is not a
+ * finite number, or not in the future, is absent: aiming at it would retry at
+ * once, and again, until the four-hour ceiling.
+ */
+export function quotaResetTime(failure, text, now = Date.now()) {
+  const limits = isRecord(failure?.rateLimits) ? failure.rateLimits : {};
+  const windows = [limits.primary, limits.secondary].filter(isRecord);
+  const exhausted = windows.filter((window) => Number.isFinite(window.usedPercent) && window.usedPercent >= 100);
+  const reached = limits.rateLimitReachedType !== undefined && limits.rateLimitReachedType !== null;
+  const reported = (exhausted.length > 0 ? exhausted : reached ? windows : []).map((window) => window.resetsAt);
+  for (const error of Array.isArray(failure?.errors) ? failure.errors : []) {
+    const provided = providerError(error?.message);
+    if (provided) reported.push(provided.resetsAt);
+  }
+  const future = reported.filter((seconds) => Number.isFinite(seconds) && seconds * 1000 > now);
+  if (future.length === 0) return parseResetTime(text, now);
+  return Math.max(...future) * 1000 + RESET_MARGIN_MS;
 }
 
 export function parseResetTime(text, now = Date.now()) {
