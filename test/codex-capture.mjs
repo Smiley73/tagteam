@@ -256,6 +256,40 @@ function messageProblems(message, on, at, problems) {
   }
 }
 
+// Every string in `value`, keys included, that holds a UUID, a home or temporary
+// path, an operating-system version, or anything naming this machine.
+function identifyingStrings(value, machine) {
+  const problems = [];
+  const word = (text) => new RegExp(`(^|[^A-Za-z0-9])${escapeRegExp(text)}([^A-Za-z0-9]|$)`, "i");
+  const named = [
+    ...machine.hostnames.map((name) => ["this machine's hostname", word(name)]),
+    ["this machine's home directory", new RegExp(escapeRegExp(machine.homedir))],
+    ["this machine's user name", word(machine.username)],
+    ["this machine's OS release", word(machine.release)]
+  ].filter(([, pattern]) => pattern.source.length > 0);
+  for (const { at, text } of strings(value)) {
+    if (new RegExp(UUID.source, "i").test(text)) problems.push(`${at} holds a UUID-shaped string`);
+    if (PRIVATE_PATH.test(text)) problems.push(`${at} holds a home or temporary path`);
+    if (OS_VERSION.test(text)) problems.push(`${at} holds an operating-system version`);
+    for (const [what, pattern] of named) if (pattern.test(text)) problems.push(`${at} holds ${what}`);
+  }
+  return problems;
+}
+
+/**
+ * The same scrub for a committed file that is not a conversation — the trimmed
+ * protocol description under `test/fixtures/codex-protocol/` — which has no
+ * steps and no allow-list to be held to: anything identifying this machine, and
+ * any plan type, credit balance, account id or reset time that is not its
+ * placeholder. An empty list is a pass.
+ */
+export function privacyProblems(value, machine = thisMachine()) {
+  return [
+    ...identifyingStrings(value, machine),
+    ...namedValueProblems(value, false).map(([at, what]) => `${at} holds ${what} that is not its placeholder`)
+  ];
+}
+
 /**
  * Everything wrong with a fixture as a privacy surface: a UUID, a home or
  * temporary path, an operating-system version, anything naming this machine, a
@@ -277,19 +311,7 @@ export function fixtureProblems(fixture, machine = thisMachine()) {
     step.send.forEach((message, position) => messageProblems(message ?? {}, step.on, `${at}.send[${position}]`, problems));
   }
 
-  const word = (text) => new RegExp(`(^|[^A-Za-z0-9])${escapeRegExp(text)}([^A-Za-z0-9]|$)`, "i");
-  const named = [
-    ...machine.hostnames.map((name) => ["this machine's hostname", word(name)]),
-    ["this machine's home directory", new RegExp(escapeRegExp(machine.homedir))],
-    ["this machine's user name", word(machine.username)],
-    ["this machine's OS release", word(machine.release)]
-  ].filter(([, pattern]) => pattern.source.length > 0);
-  for (const { at, text } of strings(fixture)) {
-    if (new RegExp(UUID.source, "i").test(text)) problems.push(`${at} holds a UUID-shaped string`);
-    if (PRIVATE_PATH.test(text)) problems.push(`${at} holds a home or temporary path`);
-    if (OS_VERSION.test(text)) problems.push(`${at} holds an operating-system version`);
-    for (const [what, pattern] of named) if (pattern.test(text)) problems.push(`${at} holds ${what}`);
-  }
+  problems.push(...identifyingStrings(fixture, machine));
   for (const [at, what] of namedValueProblems(fixture.steps, fixture.synthetic !== false, "$.steps")) {
     problems.push(`${at} holds ${what} that is not its placeholder`);
   }

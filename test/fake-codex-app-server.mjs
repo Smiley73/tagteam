@@ -18,17 +18,24 @@
 //                       — every request, notification and response, parsed, or
 //                       `{unparsed}` — plus `{argv}` first and `{grandchild}`
 //                       for each process a `$grandchild` directive started.
-//   FAKE_CODEX_EDIT     JSON `{message, path, value}`: in every message the
-//                       fixture sends as the answer to the request `message`, or
-//                       as the notification `message`, set the dotted `path` to
-//                       `value` — or remove it when there is no `value` key. This
-//                       is how a test builds a drift or an absence out of a real
-//                       capture rather than an invented one.
+//   FAKE_CODEX_EDIT     JSON `{message, path, value}`, or a list of them: in
+//                       every message the fixture sends as the answer to the
+//                       request `message`, or as the notification `message`, set
+//                       the dotted `path` to `value` — or remove it when there is
+//                       no `value` key. This is how a test builds a drift or an
+//                       absence out of a real capture rather than an invented one.
 //   FAKE_CODEX_VERSION  what `--version` reports; otherwise the fixture's
 //                       `capturedOn`, otherwise the version captured today.
 //   FAKE_CODEX_PIDFILE  a file that gets this server's pid, one line per start,
 //                       so a test can check nothing it started outlived the
 //                       caller without changing what FAKE_CODEX_RECORD holds.
+//   FAKE_CODEX_PROTOCOL, FAKE_CODEX_PROTOCOL_EXPERIMENTAL
+//                       the protocol description `app-server generate-json-schema`
+//                       writes, without and with `--experimental`: a path, or
+//                       `none` to fail as a Codex without the generator would.
+//                       Otherwise the trimmed real ones in
+//                       `test/fixtures/codex-protocol/`. Generating is not an
+//                       `app-server` start, and FAKE_CODEX_RECORD does not count it.
 //
 // It answers each request with the first unused step for that method, giving
 // each response the id of the request it answers. Ids inside messages are the
@@ -40,6 +47,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 
 const FIXTURE_DIR = path.join(import.meta.dirname, "fixtures", "codex-app-server");
+const PROTOCOL_DIR = path.join(import.meta.dirname, "fixtures", "codex-protocol");
 const argv = process.argv.slice(2);
 const recordFile = process.env.FAKE_CODEX_RECORD;
 
@@ -74,6 +82,20 @@ if (argv[0] === "--version") {
   process.exit(0);
 }
 
+if (argv[0] === "app-server" && argv[1] === "generate-json-schema") {
+  const experimental = argv.includes("--experimental");
+  const named = process.env[experimental ? "FAKE_CODEX_PROTOCOL_EXPERIMENTAL" : "FAKE_CODEX_PROTOCOL"];
+  if (named === "none") {
+    process.stderr.write("error: unrecognized subcommand 'generate-json-schema'\n");
+    process.exit(2);
+  }
+  const out = argv[argv.indexOf("--out") + 1];
+  const source = named ?? path.join(PROTOCOL_DIR, experimental ? "experimental.json" : "stable.json");
+  fs.mkdirSync(out, { recursive: true });
+  fs.copyFileSync(source, path.join(out, "codex_app_server_protocol.schemas.json"));
+  process.exit(0);
+}
+
 record({ argv });
 if (process.env.FAKE_CODEX_PIDFILE) fs.appendFileSync(process.env.FAKE_CODEX_PIDFILE, `${process.pid}\n`);
 if (argv[0] !== "app-server" || !fixture) {
@@ -81,22 +103,23 @@ if (argv[0] !== "app-server" || !fixture) {
   process.exit(2);
 }
 
-const edit = process.env.FAKE_CODEX_EDIT ? JSON.parse(process.env.FAKE_CODEX_EDIT) : null;
+const edits = process.env.FAKE_CODEX_EDIT ? [JSON.parse(process.env.FAKE_CODEX_EDIT)].flat() : [];
 
 function applyEdit(message, on) {
-  if (!edit) return message;
   const names = typeof message.method === "string" ? message.method : on;
-  if (names !== edit.message) return message;
-  const copy = structuredClone(message);
-  const keys = edit.path.split(".");
-  let node = copy;
-  for (const key of keys.slice(0, -1)) {
-    if (node === null || typeof node !== "object") return copy;
-    node = node[key];
+  let copy = message;
+  for (const edit of edits.filter((entry) => entry.message === names)) {
+    copy = structuredClone(copy);
+    const keys = edit.path.split(".");
+    let node = copy;
+    for (const key of keys.slice(0, -1)) {
+      if (node === null || typeof node !== "object") break;
+      node = node[key];
+    }
+    if (node === null || typeof node !== "object") continue;
+    if (Object.hasOwn(edit, "value")) node[keys.at(-1)] = edit.value;
+    else delete node[keys.at(-1)];
   }
-  if (node === null || typeof node !== "object") return copy;
-  if (Object.hasOwn(edit, "value")) node[keys.at(-1)] = edit.value;
-  else delete node[keys.at(-1)];
   return copy;
 }
 
