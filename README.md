@@ -191,7 +191,7 @@ flowchart TD
     recheck --> settle
     settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
     settle -->|"nothing open, or the fix rounds this repository allows are spent —<br>with the person's answer to publish as it is, or with this cycle's rewrite used"| publish
-    settle -. "the same file keeps failing, round after round — a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, redesign is not offered" .-> redesign
+    settle -. "the same file keeps failing, or new findings keep arriving on different files,<br>round after round — one question, and a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, or with no file to rewrite, redesign is not offered" .-> redesign
     open -. "the same question, asked here too, and asked once per round — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
     redesign --> snapshot
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
@@ -219,13 +219,20 @@ run out the pull request stops with the findings on it and says so. The one way
 past that limit without raising it is a person's answer to the question below,
 once per cycle.
 
-The rounds also watch for the pattern no single round can see: the same file
-drawing a new blocking or major finding three or more rounds running, each
-repair opening the next case. When that happens the run stops to ask. While a
+The rounds also watch for two patterns no single round can see. One is the same
+file drawing a new blocking or major finding three or more rounds running, each
+repair opening the next case. The other is new blocking or major findings
+arriving in each of the last three rounds of the cycle, on a different file each
+time — or on the pull request, or on no file at all. A spec that is converging
+never shows the second: a quiet round breaks the run. When either happens the
+run stops to ask, and when both do it asks once, naming each file once. While a
 fix round is still left there are four answers: fix it once more; redesign — a
-fresh implementer rewrites the area from a brief of everything raised on it this
-cycle, spending a fix round, and the rewrite starts a fresh count; accept —
-publish it as it is with what is open disclosed, to be merged by hand; or stop.
+fresh implementer rewrites the files from a brief of everything raised on them
+this cycle, spending a fix round, and the rewrite starts a fresh count for each
+file it changes; accept — publish it as it is with what is open disclosed, to be
+merged by hand; or stop. A redesign covers the files both patterns name; when
+the findings are only about the pull request or name no file, there is nothing
+to rewrite, and redesign is not offered.
 
 When every fix round is spent, the run asks before it publishes, with three
 answers: redesign, which takes one more round past `limits.fixRounds` that only

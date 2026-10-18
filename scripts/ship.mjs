@@ -41,7 +41,7 @@ import {
   restoreWorktree
 } from "./lib/landing.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
-import { churnLines, churnSignal } from "./lib/churn.mjs";
+import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_REDESIGN, writeRoundFile } from "./lib/round-store.mjs";
 import { recordedIn } from "./record-round-report.mjs";
@@ -427,14 +427,34 @@ function pullRequestFindingsLine(ctx, id, findings) {
     + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
 }
 
-// The Recurring signal and, when a person can answer it, the question — the one
-// place that decides whether it is asked. The signal is what `churn.mjs` reports
-// at `round`; the question is put only when something open is for a fixer — a
-// pull request finding spends nothing and has its own route. Which form it takes
-// is the cycle rule: a cycle gets one rewrite, in budget or past the cap.
+// What is live at `round` of this cycle: both signals `churn.mjs` reports, the
+// files a redesign from them would cover, and the *Recurring:* lines that say
+// them. Read here and only here — by the question's gate below and by the two
+// commands that answer it — so that a signal the question offered is never
+// refused by the command that answers it, nor the other way round.
+function liveAt(ctx, id, state, round) {
+  const scope = cycleScope(state);
+  const signals = churnSignal(roundsRoot(ctx, id), { scope, round });
+  const loose = looseSignal(roundsRoot(ctx, id), { scope, round });
+  return {
+    scope, signals, loose,
+    live: signals.length > 0 || loose !== null,
+    files: redesignFiles(signals, undefined, loose),
+    lines: [...churnLines(signals), ...looseLines(loose)]
+  };
+}
+
+// The Recurring signals and, when a person can answer them, the question — the
+// one place that decides whether it is asked. The signals are what `liveAt`
+// reads at `round`: the same file failing round after round, new findings
+// arriving round after round on different files, or both, and both are one
+// question. It is put only when something open is for a fixer — a pull request
+// finding spends nothing and has its own route. Which form it takes is the cycle
+// rule: a cycle gets one rewrite, in budget or past the cap, and a rewrite needs
+// a file it could change — the loose signal's findings may name none.
 //
 // - A fix round left: the question, with a redesign among its answers only while
-//   the cycle's rewrite is unused.
+//   the cycle's rewrite is unused and a file is left to rewrite.
 // - Every fix round spent and the rewrite unused: the question at the cap, whose
 //   redesign answer is the one round past the limit. It is recorded — see
 //   `capAskPath` — and at `settle` (`honour`) a record from the same round's
@@ -443,27 +463,30 @@ function pullRequestFindingsLine(ctx, id, findings) {
 //   `honoured` says so. Anything open it does not cover is asked about again,
 //   and the record replaced. A record `settle` wrote is a question still waiting
 //   for its answer, never one answered, so a settle run again asks it again.
-// - Every fix round spent and the rewrite used, or the round past the limit
-//   gone: nothing is asked, `note` says the spec publishes with what is open
-//   disclosed, and the spent branch of `fix` routes it there as it always has.
+// - Every fix round spent and the rewrite used, the round past the limit gone,
+//   or no file to rewrite: nothing is asked, `note` says the spec publishes with
+//   what is open disclosed, and the spent branch of `fix` routes it there as it
+//   always has.
 //
 // An absent counter reads as zero, as `counterOf` in gates.mjs reads it.
 function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = false }) {
-  const scope = cycleScope(state);
-  const signals = churnSignal(roundsRoot(ctx, id), { scope, round });
-  const result = { signal: churnLines(signals), signals, ask: null, note: null, honoured: null };
-  if (signals.length === 0 || !openForFixer) return result;
+  const { scope, signals, loose, live, files, lines } = liveAt(ctx, id, state, round);
+  const result = { signal: lines, signals, loose, ask: null, note: null, honoured: null };
+  if (!live || !openForFixer) return result;
   const spent = state.fixRoundsUsed ?? 0;
   const limit = ctx.config.limits.fixRounds;
   const used = redesignUsed(ctx, id, state);
+  const rewritable = files.length > 0;
   if (spent < limit) {
-    result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used });
+    result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used, rewritable, loose });
     return result;
   }
-  if (used || spent > limit) {
+  if (used || spent > limit || !rewritable) {
     result.note = used
       ? "This cycle's one rewrite has been used, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub."
-      : `Every fix round is spent and no round past the ${limit} is left, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.`;
+      : spent > limit
+        ? `Every fix round is spent and no round past the ${limit} is left, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.`
+        : "Every fix round is spent and none of what keeps arriving is in a file a rewrite could change, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.";
     return result;
   }
   const { ids } = openAt(ctx, id, round);
@@ -476,7 +499,7 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
     return result;
   }
   writeJson(capAskPath(ctx, id), { round, candidate: state.candidateOid, scope, ids: [...ids], step: atCollect ? "collect" : "settle", answered: null, at: new Date().toISOString() });
-  result.ask = redesignAsk(signals, { spent, limit, atCollect, atCap: true });
+  result.ask = redesignAsk(signals, { spent, limit, atCollect, atCap: true, loose });
   return result;
 }
 
@@ -1563,13 +1586,16 @@ async function redesign(options) {
   // Before anything is built or spent: a pending fixer's marker would be
   // overwritten, and its work would land as a redesign at the next snapshot.
   if (exists(fixPendingPath(ctx, id))) throw new Stop(`a fixer is pending on ${id}; run snapshot first, then answer the question it asks`);
-  if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; redesign answers the question collect and settle ask when the same file keeps failing`);
+  if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; redesign answers the question collect and settle ask when the same file keeps failing or new findings keep arriving on different files`);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
-  const scope = cycleScope(state);
-  const signals = churnSignal(roundsRoot(ctx, id), { scope, round: round.round });
-  const files = redesignFiles(signals, options.file);
-  if (files.length === 0) throw new Stop(`nothing is recurring on ${id} at round ${round.round} and --file named no file; a redesign answers the Recurring question`);
+  const { scope, signals, loose, live } = liveAt(ctx, id, state, round.round);
+  const files = redesignFiles(signals, options.file, loose);
+  if (files.length === 0) {
+    throw new Stop(live
+      ? `what keeps arriving on ${id} at round ${round.round} is about the pull request or names no file, so there is nothing a rewrite could change, and --file named no file; a redesign answers the Recurring question with files to rewrite`
+      : `nothing is recurring on ${id} at round ${round.round} — no file keeps failing round after round, and new findings are not arriving round after round on different files — and --file named no file; a redesign answers the Recurring question`);
+  }
   const settled = exists(path.join(round.dir, "recheck.json"));
   // Past the cap a refusal keeps the shape of a spent budget — no exit, and on
   // to publish or the re-check — because that is where the spec goes whatever
@@ -1603,7 +1629,7 @@ async function redesign(options) {
   const reportPath = path.join(specDir(ctx, id), "implement-report.json");
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   const briefPath = path.join(specDir(ctx, id), REDESIGN_BRIEFS, `round-${round.round}-${stamp}.md`);
-  const brief = renderBrief({ spec, round: round.round, files, history, signals, reportPath });
+  const brief = renderBrief({ spec, round: round.round, files, history, signals, loose, reportPath });
   // The grant, past the cap only, then the edge it lets through. A grant this
   // cycle already holds is the one an interrupted redesign took before it
   // reached the edge, and the round it buys is still unspent — asking again
@@ -1663,11 +1689,10 @@ function accept(options) {
   const state = readState(ctx, id);
   refuseWhileWaiting(id, state, "accept");
   if (exists(fixPendingPath(ctx, id))) throw new Stop(`a fixer is pending on ${id}; run snapshot first, then answer the question it asks`);
-  if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; accept answers the question collect and settle ask when the same file keeps failing`);
+  if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; accept answers the question collect and settle ask when the same file keeps failing or new findings keep arriving on different files`);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
-  const signals = churnSignal(roundsRoot(ctx, id), { scope: repairScope(state.ciRepairsUsed ?? 0), round: round.round });
-  if (signals.length === 0) throw new Stop(`nothing is recurring on ${id} at round ${round.round}; accept answers the Recurring question and nothing else — a spec that ran out of fix rounds publishes on its own`);
+  if (!liveAt(ctx, id, state, round.round).live) throw new Stop(`nothing is recurring on ${id} at round ${round.round} — no file keeps failing round after round, and new findings are not arriving round after round on different files; accept answers the Recurring question and nothing else — a spec that ran out of fix rounds publishes on its own`);
   // At the cap the question offers no accept: publishing as it is there is
   // `next`, which goes on through the spent branch of `fix`.
   if ((state.fixRoundsUsed ?? 0) >= ctx.config.limits.fixRounds) throw new Stop(`no fix round is left on ${id}, so accept is not one of the answers; to publish it as it is, with what is open disclosed, run next — it goes on through fix to publish`);
@@ -2444,11 +2469,13 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   panel   --spec <id>                 dispatch every lens plus Codex
   collect --spec <id>                 collect the panel; decides fix or recheck
   fix     --spec <id>                 spend a fix round and dispatch the fixer
-  redesign --spec <id> [--file a,b]   a person's answer to the Recurring question, never printed by next: spend a fix round on a fresh
-                                      implementer with a brief of everything raised on the recurring files — or, when the question was
-                                      put at the cap, the one round past limits.fixRounds that only this answer grants. One per cycle:
-                                      refused once this cycle has had one
-  accept  --spec <id>                 a person's other answer to it while a fix round is left, never printed by next: publish as it is
+  redesign --spec <id> [--file a,b]   a person's answer to the Recurring question — asked once when the same file keeps failing,
+                                      new findings keep arriving on different files, or both — never printed by next: spend a fix
+                                      round on a fresh implementer with a brief of everything raised on the files either signal names
+                                      — or, when the question was put at the cap, the one round past limits.fixRounds that only this
+                                      answer grants. One per cycle: refused once this cycle has had one
+  accept  --spec <id>                 a person's other answer to it, for either signal, while a fix round is left, never printed by
+                                      next: publish as it is
                                       with what is open disclosed; it then waits to be merged by hand. Refused at the cap, where
                                       publishing as it is is next
   recheck --spec <id>                 dispatch the adversary and the re-checks

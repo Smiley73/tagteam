@@ -97,11 +97,20 @@ the marker, the round's report and its redesign record, and rebuilds it — whil
 a different commit is refused. Codex's own output is the exception, replaced in place when a Codex
 lens that produced nothing usable is re-dispatched.
 
-The rounds also carry a signal no single round can see. When one file draws a
+The rounds also carry two signals no single round can see. When one file draws a
 new blocking or major finding in three or more rounds of a single repair cycle,
 the current round among them, `collect` and `settle` say so — a line beginning
 *Recurring:* — because each repair there is opening the next case rather than
-closing the last. When something open is for a fixer they also ask. While a fix
+closing the last. The loose signal is the other: each of the cycle's last three
+recorded rounds, ending at the current one, raised a new blocking or major
+finding — on any file, on the pull request, or on none — and it gets a
+*Recurring:* line of its own. A quiet round breaks it, so a converging spec never
+shows it. When something open is for a fixer they also ask, and when both
+signals are live it is one question naming each file once. A redesign from it
+covers the same-file signal's files, then the files the loose signal's findings
+touch, then any `--file` additions; a pull request finding or one with no file
+counts toward the signal but is not a file to rewrite, and when no file is left
+the question offers no `redesign` and at the cap nothing is asked. While a fix
 round is still available the question has two answers besides "fix it again"
 and "stop" that `next` never prints: `redesign`, which spends a fix round on a
 fresh implementer working from a brief of every finding the rounds record on
@@ -120,7 +129,7 @@ anything: after it the question has no `redesign` answer, `redesign` is refused,
 and at the cap nothing is asked — the spec publishes with what is open
 disclosed. A CI repair starts a new cycle with a rewrite of its own. A redesign's commit
 gets `redesign.json` in its round naming the requested files it actually
-changed; the signal restarts those files' count at that round and leaves a file
+changed; both signals restart those files' count at that round and leave a file
 the rewrite never touched counting as before. The reset is about counting only:
 a finding still open on a rewritten file is carried and re-judged by the lens
 that raised it, exactly as before. The route a rewrite takes is the one any

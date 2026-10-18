@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.4
+
+- When a spec runs out of fix rounds while the same file keeps drawing new serious findings, ask before publishing instead of publishing on its own, with three answers: redesign the files, publish it as it is with what is open disclosed, or stop.
+- Choosing redesign at the fix-round limit grants one fix round beyond the limit, for the rewrite.
+- Allow one redesign per repair cycle, whether it was chosen with rounds left or at the limit. After it the question no longer offers redesign, and at the limit the run publishes with what is open disclosed and says so. A CI repair starts a new cycle with a redesign of its own.
+- Ask the question only once per round: an answer given after the review stands after the re-check, unless the re-check found something you have not seen.
+- Also ask when new serious findings keep arriving in each of the last three rounds on different files, or on the pull request, not only when the same file keeps failing. A redesign chosen then covers the files those findings touch.
+- Ask one question when both happen at once, naming each file once.
+- Show in the status view when one more fix round is available only by choosing a redesign.
+- Count that extra round in the configuration check's note on how many review panels a spec can take.
+
 ## 0.10.3
 
 - Run every Codex call over the Codex app-server instead of `codex exec`.

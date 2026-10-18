@@ -1,7 +1,8 @@
 // What a redesign is made of: the files, their history, the brief and the ask.
 //
-// `churn.mjs` says when the same file keeps drawing a new gating finding. This
-// module is what the driver does once a person answers that signal with
+// `churn.mjs` says when the same file keeps drawing a new gating finding, and
+// when new ones keep arriving round after round on different files. This
+// module is what the driver does once a person answers either signal with
 // "start over": it names the files, reads everything the round records hold
 // about them — every finding raised on them, how each fixer answered it, what
 // each re-check decided — and renders that into a brief for a fresh implementer,
@@ -48,14 +49,15 @@ const idsOf = (record) =>
 const flat = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
 /**
- * The files a redesign is about: every file the signal reports, then the ones
- * a person added with `--file` — trimmed, a leading `./` dropped, once each, in
- * that order. The ask says they "may name other files", and other means in
- * addition: a person who names one is widening the rewrite, not replacing the
- * file that keeps failing with it.
+ * The files a redesign is about: every file the same-file signal reports, then
+ * the files the loose signal's findings touch, then the ones a person added with
+ * `--file` — trimmed, a leading `./` dropped, once each, in that order. The ask
+ * says they "may name other files", and other means in addition: a person who
+ * names one is widening the rewrite, not replacing the file that keeps failing
+ * with it.
  */
-export function redesignFiles(signals, explicit) {
-  const files = [...new Set((signals ?? []).map((signal) => signal.file))];
+export function redesignFiles(signals, explicit, loose = null) {
+  const files = [...new Set([...(signals ?? []).map((signal) => signal.file), ...(loose?.files ?? [])])];
   if (typeof explicit === "string") {
     for (const raw of explicit.split(",")) {
       const file = raw.trim().replace(/^\.\//, "");
@@ -214,14 +216,20 @@ function renderFinding(finding) {
  * The brief a redesign implementer reads: markdown, since the reader is a
  * model that was handed a spec in the same form.
  */
-export function renderBrief({ spec, round, files, history, signals = [], reportPath }) {
+export function renderBrief({ spec, round, files, history, signals = [], loose = null, reportPath }) {
   const lines = [`# Redesign brief: ${spec.id}, from round ${round}`, "", `Files: ${files.join(", ")}`, "", "## Why", ""];
   for (const file of files) {
     const signal = signals.find((entry) => entry.file === file);
     const entry = history.files.find((item) => item.file === file);
+    // A file both signals name keeps the same-file reason: it is the sharper one.
     if (signal) {
       lines.push(`- \`${file}\` drew a new blocking or major finding in ${signal.rounds.length} rounds of this cycle `
         + `(${signal.rounds.join(", ")}): ${titlesOf(signal.findings)}. Each repair opened the next case.`);
+    } else if (loose?.files.includes(file)) {
+      lines.push(`- \`${file}\` is one of the files new blocking or major findings kept arriving across, in each of `
+        + `${loose.rounds.length} rounds of this cycle in a row (${loose.rounds.join(", ")}); on this file: `
+        + `${titlesOf(loose.findings.filter((finding) => finding.file === file))}. Each repair was followed by the next `
+        + "finding somewhere else in the area.");
     } else if (entry && entry.findings.length > 0) {
       lines.push(`- \`${file}\` was named by the person who asked for this redesign; what this cycle recorded on it is below.`);
     } else {
@@ -259,18 +267,43 @@ export function renderBrief({ spec, round, files, history, signals = [], reportP
   return `${lines.join("\n")}\n`;
 }
 
+// The places a run of loose findings arrived on, as a person reads them: the
+// files not already named, then the pull request, then "no file in particular".
+function arrivedOn(loose, named) {
+  const places = loose.files.filter((file) => !named.has(file));
+  if (loose.findings.some((finding) => finding.file != null && !loose.files.includes(finding.file))) places.push("the pull request itself");
+  if (loose.findings.some((finding) => finding.file == null)) places.push("no file in particular");
+  if (places.length < 2) return places.join("");
+  return `${places.slice(0, -1).join(", ")} and ${places.at(-1)}`;
+}
+
+// One sentence for the loose signal. Beside a same-file sentence it adds only
+// what that sentence did not name, so that no file is named twice.
+function arrivingSentence(loose, named) {
+  const where = arrivedOn(loose, named);
+  if (named.size > 0) {
+    return `New findings have also kept arriving in each of the last ${loose.rounds.length} rounds of this cycle`
+      + (where ? `, on ${where} as well.` : ".");
+  }
+  return `In each of the last ${loose.rounds.length} rounds of this cycle a new finding serious enough to stop a merge came up, `
+    + `across ${where}; repairing each one has not stopped the next from arriving, so one more fix round is likely to do the same.`;
+}
+
 /**
- * The question the driver asks when the signal is live on something a fixer
+ * The question the driver asks when a signal is live on something a fixer
  * could answer. Written for a person, as SKILL.md's "Asking" says: no ids, no
  * commit oids, no gate or state names, and no severity words either — those are
- * the run's vocabulary. One sentence per recurring file.
+ * the run's vocabulary. One sentence per recurring file, and one for the loose
+ * signal (`loose`, from `looseSignal`) when it is live: both signals are one
+ * question, and a file is named once.
  *
  * Three forms, and the driver decides which — never whether to ask, which is
  * `churnAsk`'s alone:
  *
  * - a fix round left and this cycle's rewrite unused (`redesign`): four answers;
- * - a fix round left and the rewrite used (`redesign: false`): three, none of
- *   them a rewrite — a cycle gets one;
+ * - a fix round left and the rewrite used (`redesign: false`), or no file a
+ *   rewrite could change (`rewritable: false`): three, none of them a rewrite —
+ *   a cycle gets one, and a rewrite needs a file;
  * - every fix round spent and the rewrite unused (`atCap`): three, the rewrite
  *   buying the one round past the limit that only this answer grants, and
  *   publishing as it is being `next`, because that is where the run goes at the
@@ -280,11 +313,13 @@ export function renderBrief({ spec, round, files, history, signals = [], reportP
  * comes back after the next re-check": at the cap there is no fix round to get
  * there, and the question is not put twice for one round.
  */
-export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, atCap = false } = {}) {
+export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, rewritable = true, atCap = false, loose = null } = {}) {
   const each = signals.map(({ file, rounds, findings }) =>
     `${file} has drawn a new finding serious enough to stop a merge in ${rounds.length} rounds of this cycle, each time `
     + `about: ${titlesOf(findings)}; every repair has opened the next case, so one more fix round there is likely to do the same.`);
-  const opening = `The same place keeps failing. ${each.join(" ")} ${spent} of ${limit} fix rounds ${spent === 1 ? "is" : "are"} spent`;
+  if (loose) each.push(arrivingSentence(loose, new Set(signals.map((signal) => signal.file))));
+  const heading = signals.length > 0 ? "The same place keeps failing." : "New findings keep arriving, round after round, on different files.";
+  const opening = `${heading} ${each.join(" ")} ${spent} of ${limit} fix rounds ${spent === 1 ? "is" : "are"} spent`;
   const disclosed = "with what is still open disclosed in the pull request — it will not merge unattended and finish "
     + "cannot approve past an open finding, so merging it is theirs to do on GitHub, or a revisit once a reader withdraws "
     + "what it found";
@@ -304,6 +339,10 @@ export function redesignAsk(signals, { spent, limit, atCollect = false, redesign
   const accept = `publish it as it is ${disclosed} (run accept; spends nothing)`;
   if (!redesign) {
     return `${opening}. This cycle's one rewrite has already been used, so a redesign is not one of the answers. `
+      + `Three ways on: ${fixAgain}; ${accept}; ${stop}`;
+  }
+  if (!rewritable) {
+    return `${opening}. None of what keeps arriving is in a file a rewrite could change, so a redesign is not one of the answers. `
       + `Three ways on: ${fixAgain}; ${accept}; ${stop}`;
   }
   const rewrite = "have a fresh implementer rewrite that area from a brief of everything raised on it so far instead of "
