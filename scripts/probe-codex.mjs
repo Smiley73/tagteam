@@ -478,10 +478,12 @@ async function leftoverCheck({ pid, initialize, threadStart }) {
 
 // Why a call that never answered could not test the contract, or null when it
 // is the call itself that broke. The bridge's own classification, the
-// structured first pass included.
+// structured first pass included. A timeout is classified too: Codex can say
+// it hit a usage limit, or cannot use the model, and then never complete the
+// turn, and that timeout is the limit's and not the contract's.
 function couldNotRunReason(outcome, model, effort) {
   if (outcome.outcome === "configuration-error") return configurationErrorMessage(outcome);
-  if (outcome.outcome === "completed" || outcome.outcome === "timed-out") return null;
+  if (outcome.outcome === "completed") return null;
   const said = appServerFailureEvidence(outcome);
   const failure = appServerFailure(outcome);
   const { kind } = classifyFailure(failure, said, "codex");

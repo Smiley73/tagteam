@@ -285,6 +285,50 @@ test("a server that leaves a child alive in its group fails the leftover check, 
   }
 });
 
+test("a timeout after Codex said why it could not run could not run; one with no such word is a broken answer", { concurrency: true }, async (t) => {
+  // What the client returns when the turn never completed, with the `error`
+  // notifications it kept on the way.
+  const timedOut = (errors) => ({
+    outcome: "timed-out", interruptSent: true, turnStatus: null, errors, rateLimits: null,
+    usage: { value: null, reason: "Codex sent no thread/tokenUsage/updated" }, routing: {}, serverRequests: [], stderr: ""
+  });
+  const cases = [
+    {
+      name: "a usage limit",
+      errors: [{ willRetry: false, error: { kind: "usageLimitExceeded", message: "You have hit your limit." } }],
+      status: COULD_NOT_RUN,
+      fail: /^could not run: Codex reported a usage limit, so the call could not test anything\. What Codex said: You have hit your limit\.$/
+    },
+    {
+      name: "a model the account cannot use",
+      errors: [{ willRetry: false, error: { kind: "other", message: "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account." } }],
+      status: COULD_NOT_RUN,
+      fail: /^could not run: Codex cannot use model gpt-5\.6-sol at low effort on this account/
+    },
+    {
+      name: "nothing said",
+      errors: [],
+      status: BROKEN,
+      fail: /^FAIL {2}answer: expected an answer within 120s, and none arrived/
+    }
+  ];
+  await Promise.all(cases.map((testCase) => t.test(testCase.name, async () => {
+    const lines = [];
+    const { exitCode } = await paidHalf({
+      codexBin: FAKE,
+      model: "gpt-5.6-sol",
+      out: (entry) => lines.push(entry),
+      runTurn: async ({ onLine }) => {
+        onLine(JSON.stringify({ id: 0, result: { userAgent: "fake" } }));
+        return timedOut(testCase.errors);
+      }
+    });
+    assert.equal(exitCode, testCase.status, lines.join("\n"));
+    const failures = lines.filter((entry) => entry.startsWith("FAIL") || entry.startsWith("could not run:"));
+    assert.match(failures[0] ?? "", testCase.fail, lines.join("\n"));
+  })));
+});
+
 test("a Codex below the floor is refused with the floor's message before any thread starts", async () => {
   const result = await probe(MODEL, { env: { FAKE_CODEX_VERSION: "codex-cli 0.152.1" } });
   assert.equal(result.status, COULD_NOT_RUN);
