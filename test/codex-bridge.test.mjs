@@ -436,11 +436,11 @@ test("a server that exits mid-turn takes the two-attempt path, quoting what it s
 // reset. The key is computed the way codex.mjs computes it rather than pasted:
 // a hard-coded digest would stop matching in silence, and a seed that does not
 // match is a call that waits.
-function seedExhaustedQuota(dir) {
+function seedExhaustedQuota(dir, firstDetectedAt = Date.now() - 5 * 60 * 60_000) {
   const key = createHash("sha256").update(`${MODEL}\u0000${EFFORT}`).digest("hex").slice(0, 32);
   const quota = path.join(dir, "slots", ".quota");
   fs.mkdirSync(quota, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(quota, `${key}.json`), JSON.stringify({ firstDetectedAt: Date.now() - 5 * 60 * 60_000 }));
+  fs.writeFileSync(path.join(quota, `${key}.json`), JSON.stringify({ firstDetectedAt }));
 }
 
 // The only quota evidence anyone has is `429 rate limit reached; retry-after: 1`
@@ -470,6 +470,123 @@ for (const [where, fixture] of [["on stderr", quotaOnStderr], ["on the failed tu
     assert.equal(starts(space.dir).length, 1, "a quota that had already run out was retried");
   });
 }
+
+// No real typed quota error was ever seen: none can be provoked on demand. These
+// are the unusable-model capture with its error changed to what the protocol
+// description Codex generates (`codex app-server generate-json-schema`,
+// codex-cli 0.163.0-alpha.10.2) says one would be, worded to match no quota
+// word, so that only the structure can say "quota".
+const NEUTRAL = "Something went wrong. Please try again later.";
+const turnErrors = (fixture) => fixture.steps.find((step) => step.on === "turn/start").send
+  .map((message) => (message.method === "error" ? message.params.error : message.method === "turn/completed" ? message.params.turn.error : null))
+  .filter(Boolean);
+const typedFailure = (description, kind, message) => () => changedFixture("unusable-model", description, (fixture) => {
+  for (const error of turnErrors(fixture)) {
+    error.codexErrorInfo = kind;
+    error.message = message;
+  }
+});
+const typedQuotas = [
+  ["a typed usage limit", typedFailure("the turn fails typed usageLimitExceeded, in words no quota word matches.", "usageLimitExceeded", NEUTRAL)],
+  ["a 429 inside the parsed message", typedFailure("the provider's message carries status 429, in words no quota word matches.", "other",
+    JSON.stringify({ type: "error", status: 429, error: { type: "invalid_request_error", message: NEUTRAL } }))]
+];
+
+for (const [what, fixture] of typedQuotas) {
+  test(`${what} is a quota, and a seeded exhausted quota aborts at once`, () => {
+    const space = workspace();
+    seedExhaustedQuota(space.dir);
+    const result = run(space, { fixture: fixture(), spawnOptions: { timeout: 60_000 } });
+    assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`quota did not clear within four hours for ${MODEL}/${EFFORT}`));
+    assert.doesNotMatch(result.stderr, /after 2 attempts|unavailable/, `${what} was not taken for a quota`);
+    assert.equal(starts(space.dir).length, 1, "a quota that had already run out was retried");
+  });
+}
+
+// `willRetry: true` is Codex retrying on its own, not the turn's failure: a
+// typed usage limit there does not make the refused schema after it a quota.
+// Its words still reach the word matching, as they did before the first pass.
+const retriedFirst = (description, error) => () => changedFixture("refused-schema", description, (fixture) => {
+  fixture.steps.find((step) => step.on === "turn/start").send.splice(1, 0, { method: "error", params: { error, willRetry: true } });
+});
+
+test("an error Codex will retry is not the failure: a typed usage limit there leaves a refused schema two attempts", () => {
+  const space = workspace();
+  const fixture = retriedFirst("a typed usage limit Codex will retry, before the refusal.",
+    { message: NEUTRAL, codexErrorInfo: "usageLimitExceeded", additionalDetails: null })();
+  const result = run(space, { fixture, spawnOptions: { timeout: 60_000 } });
+  assert.equal(result.status, 1);
+  assert.equal(starts(space.dir).length, 2, "an error Codex was retrying was read as the turn's failure");
+  assert.match(result.stderr, /did not produce a valid artifact after 2 attempts: the turn ended failed\./);
+});
+
+test("an error Codex will retry still has its words read, as before the first pass", () => {
+  const space = workspace();
+  seedExhaustedQuota(space.dir);
+  const fixture = retriedFirst("a rate-limit line Codex will retry, before the refusal.",
+    { message: "429 Too Many Requests", codexErrorInfo: "other", additionalDetails: null })();
+  const result = run(space, { fixture, spawnOptions: { timeout: 60_000 } });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /quota did not clear within four hours/, "the retried notification's words stopped reaching the word matching");
+  assert.equal(starts(space.dir).length, 1);
+});
+
+// The bridge reads the parsed sentence, not only the raw text: with the
+// provider's spaces escaped, no word on the list matches the text as it
+// arrived, and only the sentence inside it says what this is.
+test("an unusable model only the parsed sentence names is still refused on the first attempt", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const escaped = '{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-5.1-codex\' model\\u0020is\\u0020not\\u0020supported when using Codex with a ChatGPT account."}}';
+  const fixture = changedFixture("unusable-model", "the provider's sentence has its spaces escaped.", (body) => {
+    for (const error of turnErrors(body)) error.message = escaped;
+  });
+  const result = run(space, { fixture });
+  assert.equal(result.status, 1);
+  assert.equal(starts(space.dir).length, 1, "an unusable model was retried");
+  assert.match(result.stderr, /is unavailable, so --model is what has to change/);
+  assertCleared(space, result, "an unusable model named only in the parsed sentence");
+});
+
+// The real failing run carried this advisory beside the refusal.
+test("the unusable-model capture with its advisory warning is still refused once, and the warning is not quoted", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const result = run(space, { fixture: changedFixture("unusable-model", "the advisory warning the real run carried.", addWarning) });
+  assert.equal(result.status, 1);
+  assert.equal(starts(space.dir).length, 1, "an unusable model was retried");
+  assert.match(result.stderr, /is unavailable, so --model is what has to change/);
+  assert.doesNotMatch(result.stderr, /Model metadata/, "the advisory warning was quoted as part of the failure");
+  assertCleared(space, result, "an unusable model with a warning");
+});
+
+// The reset time Codex reports reaches the wait, and is read in seconds: as
+// milliseconds it would name January 1970 and retry at once. The ceiling is
+// seeded a few seconds away and each sleep is cut short, so the call names its
+// target, wakes, and ends at the ceiling instead of waiting out the hour.
+test("the reset time Codex reports is the time the wait names", () => {
+  const space = workspace();
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const fixture = changedFixture("unusable-model", "an exhausted usage limit, with a rate-limit snapshot whose primary window is used up.", (body) => {
+    for (const error of turnErrors(body)) {
+      error.codexErrorInfo = "usageLimitExceeded";
+      error.message = NEUTRAL;
+    }
+    body.steps.find((step) => step.on === "turn/start").send.splice(1, 0, {
+      method: "account/rateLimits/updated",
+      params: { rateLimits: { primary: { usedPercent: 100, resetsAt }, secondary: null, rateLimitReachedType: "rate_limit_reached" } }
+    });
+  });
+  seedExhaustedQuota(space.dir, Date.now() - 4 * 60 * 60_000 + 3_000);
+  const result = run(space, { fixture, env: { TAGTEAM_QUOTA_SLEEP_MS: "500" }, spawnOptions: { timeout: 60_000 } });
+  assert.equal(result.status, 1, result.stderr);
+  const expected = new Date(resetsAt * 1000 + 120_000).toISOString();
+  assert.match(result.stderr, new RegExp(`retrying at ${expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(ceiling `),
+    `the wait does not name the reported reset time plus the margin: ${result.stderr}`);
+  assert.match(result.stderr, /quota did not clear within four hours/);
+  assert.equal(starts(space.dir).length, 1, "the quota wait started Codex again before the ceiling");
+});
 
 test("a quota that never clears takes the earlier run's artifact and sidecar with it", () => {
   const space = workspace();

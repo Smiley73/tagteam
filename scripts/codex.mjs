@@ -25,10 +25,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { validateJson } from "./validate-json.mjs";
 import { acquireLock, acquireSlot } from "./lib/locks.mjs";
 import {
+  appServerFailure,
   appServerFailureEvidence,
-  classifyProviderError,
+  classifyFailure,
   nextBackoff,
-  parseResetTime,
+  quotaResetTime,
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
 import { isMain } from "./lib/is-main.mjs";
@@ -44,6 +45,13 @@ const SCHEMA_ATTEMPTS = 2;
 // A call that never started Codex has nothing to report about how Codex routed:
 // a --reuse hit and a --dry-run both answer without starting anything.
 const NOT_RUN = { ran: false, observed: null, observedReason: null };
+// The longest one sleep of a quota wait lasts. Only a test sets
+// `TAGTEAM_QUOTA_SLEEP_MS`, to show the reset time Codex reported reaching the
+// wait without sitting out a fifteen-minute slice. It shortens a sleep and
+// nothing else: every wake asks `nextBackoff` again, so the target, the
+// "retrying at" line and the four-hour ceiling are the real ones.
+const sleepOverride = Number(process.env.TAGTEAM_QUOTA_SLEEP_MS);
+const QUOTA_SLEEP_MS = Number.isFinite(sleepOverride) && sleepOverride > 0 ? sleepOverride : Infinity;
 
 function splitPair(flag, raw) {
   const index = String(raw ?? "").indexOf("=");
@@ -649,9 +657,11 @@ async function dispatch(options, artifact, requestPath) {
       // and the unusable-model refusal came as the failed turn's message with
       // stderr empty. Reading one of them was how both of the branches below
       // became unreachable and every provider failure was reported as a bad
-      // answer.
+      // answer. What Codex reported in structured form is read first, and only
+      // ever adds to what those words say.
       const said = appServerFailureEvidence(outcome);
-      const classification = classifyProviderError(said, "codex");
+      const failure = appServerFailure(outcome);
+      const classification = classifyFailure(failure, said, "codex");
       if (classification.kind === "model-unavailable") {
         // Named as the flag rather than as the model alone: the thing to change
         // is the configured model this run was dispatched with, and a retry
@@ -670,7 +680,9 @@ async function dispatch(options, artifact, requestPath) {
       }
       if (classification.kind === "quota") {
         const state = readOrCreateQuotaState(quotaStatePath);
-        const targetAt = parseResetTime(said);
+        // The reset time Codex reported when it reported one; the rate-limit
+        // snapshot is read here and nowhere else.
+        const targetAt = quotaResetTime(failure, said);
         while (true) {
           const next = nextBackoff({ firstDetectedAt: state.firstDetectedAt, targetAt });
           if (next.action === "abort") {
@@ -683,7 +695,7 @@ async function dispatch(options, artifact, requestPath) {
           }
           if (next.action === "retry") break;
           process.stderr.write(`Codex usage limit reached; retrying at ${new Date(targetAt).toISOString()} (ceiling ${new Date(next.ceilingAt).toISOString()}).\n`);
-          await delay(next.milliseconds);
+          await delay(Math.min(next.milliseconds, QUOTA_SLEEP_MS));
         }
         // A quota wait is not a failed attempt.
         continue;

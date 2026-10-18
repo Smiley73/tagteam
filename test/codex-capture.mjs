@@ -15,7 +15,9 @@
 // and session ids. So the scrub is an allow-list, never a deny-list: a message
 // whose method is not in `ALLOW_LIST` is dropped, and of the messages kept only
 // the fields the client reads survive. Then every id and every path is replaced
-// with an obvious placeholder, and the result is put through `fixtureProblems`,
+// with an obvious placeholder — and every reset time, plan type, credit balance
+// and account id with its own, wherever one survived, a provider's message
+// included — and the result is put through `fixtureProblems`,
 // the same check `test/codex-app-server.test.mjs` runs over every committed
 // fixture. A capture that fails it is not written.
 //
@@ -43,6 +45,9 @@ export const FIXTURE_DIR = path.join(import.meta.dirname, "fixtures", "codex-app
 // `true` keeps a value whole; an object keeps only the keys it names; a
 // one-element array applies its element to every entry.
 const TURN_ERROR = { message: true, codexErrorInfo: true, additionalDetails: true };
+// What a quota wait reads of a rate-limit window. `windowDurationMins` is not
+// read, so it is not kept.
+const RATE_LIMIT_WINDOW = { usedPercent: true, resetsAt: true };
 
 /**
  * Every message, and every field within one, that a fixture may hold: what the
@@ -66,6 +71,12 @@ export const ALLOW_LIST = {
   notifications: {
     "turn/completed": { turn: { id: true, status: true, items: [{ type: true, text: true, phase: true }], error: TURN_ERROR } },
     "error": { error: TURN_ERROR, willRetry: true },
+    // Read for the quota wait's reset time, and for nothing else. The plan, the
+    // credits, the limit's name and id and the spend controls Codex sends with
+    // it are account data nothing reads.
+    "account/rateLimits/updated": {
+      rateLimits: { primary: RATE_LIMIT_WINDOW, secondary: RATE_LIMIT_WINDOW, rateLimitReachedType: true }
+    },
     // Read by nothing: the client drops it on arrival. Allowed so that a test
     // can prove the advisory — "Model metadata for `<model>` not found.
     // Defaulting to fallback metadata" — refuses nothing. No capture holds one
@@ -92,8 +103,79 @@ export const PLACEHOLDER = {
   codexHome: "/codex-home",
   home: "/user-home",
   tmp: "/tmp-dir",
-  uuid: "<uuid>"
+  uuid: "<uuid>",
+  plan: "<plan>",
+  balance: "<balance>",
+  account: "<account>",
+  // 2100-01-01T00:00:00Z in seconds, the unit Codex reports reset times in.
+  resetsAt: 4_102_444_800
 };
+
+// Account data none of the shapes below catch, by the name it travels under:
+// as a field, or quoted inside a provider's message stringified into one. Each
+// may only ever hold its placeholder, or null. A reset time is held to that in a
+// real capture only: a changed capture sets one relative to the moment the test
+// runs, which is the whole point of changing it.
+const NAMED_VALUES = [
+  { what: "a plan type", key: /^plan_?type$/i, placeholder: PLACEHOLDER.plan },
+  { what: "a credit balance", key: /^balance$/i, placeholder: PLACEHOLDER.balance },
+  { what: "an account id", key: /^(?:chatgpt_?)?account_?id$/i, placeholder: PLACEHOLDER.account },
+  { what: "a reset time", key: /^resets_?at$/i, placeholder: PLACEHOLDER.resetsAt, realOnly: true }
+];
+// A quoted key and its value inside text, the quotes escaped or not. The value
+// is a string or a bare token; an object or a list is walked into instead.
+const QUOTED_PAIR = /(\\?")([A-Za-z_]+)\\?"\s*:\s*(\\?"(?:[^"\\]|\\[^"])*\\?"|[^,{}[\]\s"\\]+)/g;
+
+function namedValue(key, synthetic) {
+  return NAMED_VALUES.find((entry) => entry.key.test(key) && !(entry.realOnly && synthetic));
+}
+
+function holdsPlaceholder(value, placeholder) {
+  const bare = String(value).replace(/\\?"/g, "");
+  return value === null || bare === "null" || bare === String(placeholder);
+}
+
+// Every named value in `value` that is not its placeholder, as `[at, what]`.
+function namedValueProblems(value, synthetic, at = "$", found = []) {
+  if (typeof value === "string") {
+    for (const [, , key, text] of value.matchAll(QUOTED_PAIR)) {
+      const named = namedValue(key, synthetic);
+      if (named && !holdsPlaceholder(text, named.placeholder)) found.push([at, named.what]);
+    }
+  } else if (Array.isArray(value)) {
+    value.forEach((entry, index) => namedValueProblems(entry, synthetic, `${at}[${index}]`, found));
+  } else if (value && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      const named = namedValue(key, synthetic);
+      if (named && (entry === null || typeof entry !== "object") && !holdsPlaceholder(entry, named.placeholder)) {
+        found.push([`${at}.${key}`, named.what]);
+      }
+      namedValueProblems(entry, synthetic, `${at}.${key}`, found);
+    }
+  }
+  return found;
+}
+
+// Each named value replaced by its placeholder, in fields and in text alike.
+function replaceNamedValues(value) {
+  if (typeof value === "string") {
+    return value.replace(QUOTED_PAIR, (whole, quote, key) => {
+      const named = namedValue(key, false);
+      if (!named) return whole;
+      const replacement = typeof named.placeholder === "number" ? String(named.placeholder) : `${quote}${named.placeholder}${quote}`;
+      return `${quote}${key}${quote}:${replacement}`;
+    });
+  }
+  if (Array.isArray(value)) return value.map(replaceNamedValues);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+      const named = namedValue(key, false);
+      if (named && entry !== null && typeof entry !== "object") return [key, named.placeholder];
+      return [key, replaceNamedValues(entry)];
+    }));
+  }
+  return value;
+}
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const PRIVATE_PATH = /\/Users\/|\/home\/|\/private\/|\/var\/folders\/|C:\\Users\\/i;
@@ -165,8 +247,10 @@ function messageProblems(message, on, at, problems) {
 
 /**
  * Everything wrong with a fixture as a privacy surface: a UUID, a home or
- * temporary path, an operating-system version, anything naming this machine,
- * and any method or field outside `ALLOW_LIST`. An empty list is a pass.
+ * temporary path, an operating-system version, anything naming this machine, a
+ * plan type, a credit balance or an account id that is not its placeholder (and
+ * in a real capture, a reset time that is not), and any method or field outside
+ * `ALLOW_LIST`. An empty list is a pass.
  */
 export function fixtureProblems(fixture, machine = thisMachine()) {
   const problems = [];
@@ -194,6 +278,9 @@ export function fixtureProblems(fixture, machine = thisMachine()) {
     if (PRIVATE_PATH.test(text)) problems.push(`${at} holds a home or temporary path`);
     if (OS_VERSION.test(text)) problems.push(`${at} holds an operating-system version`);
     for (const [what, pattern] of named) if (pattern.test(text)) problems.push(`${at} holds ${what}`);
+  }
+  for (const [at, what] of namedValueProblems(fixture.steps, fixture.synthetic !== false, "$.steps")) {
+    problems.push(`${at} holds ${what} that is not its placeholder`);
   }
   return problems;
 }
@@ -330,7 +417,7 @@ export function scrubTranscript(transcript, { scenario, description, capturedOn,
     capturedOn: swap(capturedOn),
     scenario,
     description,
-    steps: replaceEverywhere(steps, swap)
+    steps: replaceNamedValues(replaceEverywhere(steps, swap))
   };
 }
 
@@ -351,6 +438,9 @@ const REFUSED_SCHEMA = {
 export const SCENARIOS = {
   "success": {
     description: "A turn that completes with a schema-valid answer, in a repository with no AGENTS.md."
+  },
+  "success-rate-limits": {
+    description: "A turn that completes, keeping the account/rateLimits/updated notification it received: only each window's usedPercent and resetsAt and the rateLimitReachedType, every reset time replaced."
   },
   "success-agents-md": {
     description: "A turn that completes in a repository that has its own AGENTS.md, which the thread lists as an instruction source.",

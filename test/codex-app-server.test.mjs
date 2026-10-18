@@ -130,6 +130,7 @@ test("each capture comes back as its own outcome and none as another", async () 
   const expected = {
     "success": "completed",
     "success-agents-md": "completed",
+    "success-rate-limits": "completed",
     "max-effort": "completed",
     "configuration-error-thread-start": "configuration-error",
     "configuration-error-startup": "configuration-error",
@@ -324,6 +325,43 @@ test("an error Codex will retry is not terminal", async () => {
   assert.equal(outcome.outcome, "completed", "an error notification with willRetry: true ended the turn");
 });
 
+// --- what failure recognition reads ---
+
+test("the rate-limit snapshot a real turn received is kept, and only the fields a quota wait reads", async () => {
+  const { outcome } = await call("success-rate-limits");
+  assert.equal(outcome.outcome, "completed");
+  assert.deepEqual(outcome.rateLimits, { primary: { usedPercent: 2, resetsAt: 4_102_444_800 }, secondary: null, rateLimitReachedType: null });
+  assert.equal((await call("success")).outcome.rateLimits, null, "a turn that received no snapshot reported one");
+});
+
+// The protocol calls the notification a sparse rolling update: a value it
+// leaves out or sends as null is unavailable, not cleared.
+test("rate-limit updates are merged, each field keeping the latest value any of them carried", async () => {
+  const variant = structuredClone(fixture("success-rate-limits"));
+  const send = variant.steps.find((step) => step.on === "turn/start").send;
+  send.splice(2, 0,
+    { method: "account/rateLimits/updated", params: { rateLimits: { primary: null, secondary: { usedPercent: 100, resetsAt: 4_102_444_900 } } } },
+    { method: "account/rateLimits/updated", params: { rateLimits: { primary: { usedPercent: 7 }, rateLimitReachedType: "rate_limit_reached" } } },
+    { method: "account/rateLimits/updated", params: { rateLimits: "not a snapshot" } },
+    { method: "account/rateLimits/updated", params: {} });
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-app-server-fixture-")), "variant.json");
+  fs.writeFileSync(file, JSON.stringify(variant));
+  const { outcome } = await call(file);
+  assert.deepEqual(outcome.rateLimits, {
+    primary: { usedPercent: 7, resetsAt: null },
+    secondary: { usedPercent: 100, resetsAt: 4_102_444_900 },
+    rateLimitReachedType: "rate_limit_reached"
+  });
+});
+
+test("whether Codex will retry an error is kept as it said it, and as null when it did not say", async () => {
+  const said = (await call("refused-schema")).outcome;
+  assert.equal(said.errors[0].willRetry, false);
+  assert.equal(said.errors[0].error.kind, "other", "the typed kind of an error notification is kept");
+  const silent = (await call("refused-schema", { edit: { message: "error", path: "params.willRetry" } })).outcome;
+  assert.equal(silent.errors[0].willRetry, null, "a notification that did not say it would retry was read as not retrying");
+});
+
 test("a clean exit still ends the server's whole process group", async () => {
   const { outcome, received, pid } = await call("grandchild-left-running");
   assert.equal(outcome.outcome, "completed");
@@ -384,7 +422,7 @@ test("every fixture passes the scrub check", () => {
 
 test("every capture the spec names is a real one, and every synthetic fixture says so", () => {
   const real = [
-    "success", "success-agents-md", "max-effort", "configuration-error-thread-start", "configuration-error-startup",
+    "success", "success-agents-md", "success-rate-limits", "max-effort", "configuration-error-thread-start", "configuration-error-startup",
     "unusable-model", "refused-schema", "killed-mid-turn", "interrupted"
   ];
   for (const name of real) assert.equal(fixture(name).synthetic, false, `${name} is not a real capture`);
@@ -449,6 +487,62 @@ test("the scrub check catches each shape it exists for", () => {
   assert.ok(fixtureProblems(withServerRequest, machine).some((problem) => /server request outside the allow-list/.test(problem)));
 });
 
+// Account data none of the shapes above catch. Each is planted where a later
+// fixture could carry it — as a field, which the allow-list would also refuse
+// today, and quoted inside a provider's message, which it would not — and must
+// fail on its own name; its placeholder must pass.
+test("the scrub check catches a plan type, a credit balance and an account id, and passes their placeholders", () => {
+  const machine = thisMachine();
+  const inMessage = (text) => {
+    const planted = structuredClone(fixture("unusable-model"));
+    planted.steps.find((step) => step.on === "turn/start").send
+      .find((message) => message.method === "turn/completed").params.turn.error.message = text;
+    return fixtureProblems(planted, machine);
+  };
+  const asField = (key, value) => {
+    const planted = structuredClone(fixture("success-rate-limits"));
+    planted.steps.find((step) => step.on === "turn/start").send[1].params.rateLimits[key] = value;
+    return fixtureProblems(planted, machine);
+  };
+  const samples = [
+    ["a plan type", inMessage('{"type":"error","status":429,"error":{"type":"usage_limit_reached","plan_type":"plus"}}')],
+    ["a plan type", inMessage('{\\"error\\":{\\"plan_type\\":\\"pro\\"}}')],
+    ["a plan type", asField("planType", "team")],
+    ["a credit balance", inMessage('{"credits":{"hasCredits":true,"balance":"12.50"}}')],
+    ["a credit balance", inMessage('{"credits":{"balance":12.5}}')],
+    ["a credit balance", asField("balance", "0")],
+    ["an account id", inMessage('{"error":{"account_id":"acct_8f2k"}}')],
+    ["an account id", inMessage('{"chatgpt_account_id":"user-abc"}')],
+    ["an account id", asField("accountId", "org-123")]
+  ];
+  for (const [what, problems] of samples) {
+    assert.ok(problems.some((problem) => problem.includes(`holds ${what} that is not its placeholder`)), `${what} passed the scrub: ${problems.join("; ")}`);
+  }
+  const placeholders = inMessage('{"plan_type":"<plan>","credits":{"balance":"<balance>"},"account_id":"<account>","resets_at":null}');
+  assert.deepEqual(placeholders, [], "a placeholder failed the scrub");
+});
+
+// A reset time is account data too, and moves on every capture. A real capture
+// may hold only the placeholder; a changed one may hold any, because the tests
+// that change a capture set it relative to the moment they run.
+test("a real capture holding a reset time that is not the placeholder fails the scrub, and a changed one does not", () => {
+  const machine = thisMachine();
+  const plant = (synthetic, resetsAt, where = "field") => {
+    const planted = structuredClone(fixture("success-rate-limits"));
+    planted.synthetic = synthetic;
+    const send = planted.steps.find((step) => step.on === "turn/start").send;
+    if (where === "field") send[1].params.rateLimits.primary.resetsAt = resetsAt;
+    else send.push({ method: "error", params: { error: { message: `{"error":{"resets_at":${resetsAt}}}` }, willRetry: false } });
+    return fixtureProblems(planted, machine);
+  };
+  for (const where of ["field", "message"]) {
+    assert.ok(plant(false, 1_792_675_820, where).some((problem) => /a reset time that is not its placeholder/.test(problem)),
+      `a real reset time in a ${where} passed the scrub`);
+    assert.deepEqual(plant(true, 1_792_675_820, where), [], `a changed capture's reset time in a ${where} failed the scrub`);
+    assert.deepEqual(plant(false, 4_102_444_800, where), [], `the placeholder in a ${where} failed the scrub`);
+  }
+});
+
 test("the capture tool's scrub keeps only allow-listed messages and fields and replaces ids and paths", () => {
   const home = path.join(os.homedir(), ".codex");
   const repo = path.join(os.tmpdir(), "tagteam-capture-sample", "repo");
@@ -467,7 +561,12 @@ test("the capture tool's scrub keeps only allow-listed messages and fields and r
     } } },
     { dir: "out", message: { id: 3, method: "turn/start", params: {} } },
     { dir: "in", message: { id: 3, result: { turn: { id: turn, status: "inProgress", items: [] } } } },
-    { dir: "in", message: { method: "account/rateLimits/updated", params: { rateLimits: {} } } },
+    { dir: "in", message: { method: "account/rateLimits/updated", params: { rateLimits: {
+      limitId: "codex", limitName: null, normalModelSlug: null,
+      primary: { usedPercent: 3, windowDurationMins: 10080, resetsAt: 1792675820 }, secondary: null,
+      credits: { hasCredits: false, unlimited: false, balance: "0" }, individualLimit: null,
+      spendControlReached: false, planType: "plus", rateLimitReachedType: null
+    } } } },
     { dir: "in", message: { method: "turn/completed", params: { threadId: thread, turn: {
       id: turn, status: "completed", error: null, durationMs: 5,
       items: [{ type: "agentMessage", id: "msg_1", text: '{"ok":true}', phase: "final_answer", memoryCitation: null }]
@@ -485,8 +584,11 @@ test("the capture tool's scrub keeps only allow-listed messages and fields and r
   assert.deepEqual(scrubbed.steps[0].send, [{ result: {} }]);
   assert.deepEqual(scrubbed.steps[1].send[0].result.thread, { id: "thread-1" });
   assert.deepEqual(scrubbed.steps[1].send[0].result.instructionSources, ["/codex-home/AGENTS.md", "/work/repo/AGENTS.md"]);
-  assert.deepEqual(scrubbed.steps[2].send.map((message) => message.method ?? "result"), ["result", "turn/completed"]);
+  assert.deepEqual(scrubbed.steps[2].send.map((message) => message.method ?? "result"), ["result", "account/rateLimits/updated", "turn/completed"]);
   assert.deepEqual(scrubbed.steps[2].send[1].params, {
+    rateLimits: { primary: { usedPercent: 3, resetsAt: 4_102_444_800 }, secondary: null, rateLimitReachedType: null }
+  }, "the rate-limit snapshot kept more than a quota wait reads, or kept its reset time");
+  assert.deepEqual(scrubbed.steps[2].send[2].params, {
     turn: { id: "turn-1", status: "completed", error: null, items: [{ type: "agentMessage", text: '{"ok":true}', phase: "final_answer" }] }
   });
   assert.deepEqual(Object.keys(ALLOW_LIST.results).sort(), ["initialize", "thread/read", "thread/start", "turn/interrupt", "turn/start"]);
