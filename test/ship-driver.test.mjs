@@ -1122,6 +1122,14 @@ test("redesign and accept refuse a spent budget, a spec with nothing recurring, 
   const nothing = ship("redesign", quiet.plan, ["--spec", "01-a"]);
   assert.notEqual(nothing.status, 0);
   assert.match(nothing.stderr, /nothing is recurring/);
+  // --file only adds to what a signal names; with nothing recurring it opens nothing.
+  const named = ship("redesign", quiet.plan, ["--spec", "01-a", "--file", "app.js"]);
+  assert.notEqual(named.status, 0, "--file does not make a redesign the question did not offer");
+  assert.match(named.stderr, /nothing is recurring/);
+  const quietState = JSON.parse(fs.readFileSync(path.join(quiet.shipDir, "01-a", "state.json"), "utf8"));
+  assert.equal(quietState.state, "reviewing");
+  assert.equal(quietState.fixRoundsUsed ?? 0, 0, "nothing was spent by being refused");
+  assert.ok(!fs.existsSync(path.join(quiet.shipDir, "01-a", "redesign-cycle.json")), "the cycle's rewrite is still unused");
   const noAccept = ship("accept", quiet.plan, ["--spec", "01-a"]);
   assert.notEqual(noAccept.status, 0);
   assert.match(noAccept.stderr, /nothing is recurring/);
@@ -2568,6 +2576,14 @@ test("at the cap, new findings that touch only the pull request or no file publi
   const refused = ship("redesign", plan, ["--spec", "01-a"]);
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /about the pull request or names no file, so there is nothing a rewrite could change/);
+  // --file adds to the signal's files and never stands in for them: naming one
+  // does not open the redesign the question did not offer.
+  const named = ship("redesign", plan, ["--spec", "01-a", "--file", "app.js"]);
+  assert.notEqual(named.status, 0, "--file does not make a redesign of a signal with no file");
+  assert.match(named.stderr, /about the pull request or names no file, so there is nothing a rewrite could change/);
+  assert.equal(state().fixRoundsUsed, 4, "nothing was spent by being refused");
+  assert.equal(state().fixRoundGrant ?? null, null, "and no grant was taken");
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "redesign-cycle.json")), "the cycle's rewrite is still unused");
   const fix = run("fix");
   assert.equal(fix.json.budget, "spent");
   assert.match(fix.json.next, /publish --plan/);

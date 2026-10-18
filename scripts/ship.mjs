@@ -1589,13 +1589,13 @@ async function redesign(options) {
   if (state.state !== "reviewing") throw new Stop(`${id} is ${state.state}, not reviewing; redesign answers the question collect and settle ask when the same file keeps failing or new findings keep arriving on different files`);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
-  const { scope, signals, loose, live } = liveAt(ctx, id, state, round.round);
+  // Whether redesign is an answer at all is the question's gate, read from the
+  // signals alone; `--file` only adds to the files they name, so it can neither
+  // open a redesign the question did not offer nor stand in for a signal file.
+  const { scope, signals, loose, live, files: signalled } = liveAt(ctx, id, state, round.round);
+  if (!live) throw new Stop(`nothing is recurring on ${id} at round ${round.round} — no file keeps failing round after round, and new findings are not arriving round after round on different files; a redesign answers the Recurring question, and --file only adds to the files it names`);
+  if (signalled.length === 0) throw new Stop(`what keeps arriving on ${id} at round ${round.round} is about the pull request or names no file, so there is nothing a rewrite could change; a redesign answers the Recurring question with files to rewrite, and --file only adds to the files it names`);
   const files = redesignFiles(signals, options.file, loose);
-  if (files.length === 0) {
-    throw new Stop(live
-      ? `what keeps arriving on ${id} at round ${round.round} is about the pull request or names no file, so there is nothing a rewrite could change, and --file named no file; a redesign answers the Recurring question with files to rewrite`
-      : `nothing is recurring on ${id} at round ${round.round} — no file keeps failing round after round, and new findings are not arriving round after round on different files — and --file named no file; a redesign answers the Recurring question`);
-  }
   const settled = exists(path.join(round.dir, "recheck.json"));
   // Past the cap a refusal keeps the shape of a spent budget — no exit, and on
   // to publish or the re-check — because that is where the spec goes whatever
