@@ -187,14 +187,19 @@ at each point:
   was recorded — then run `next`.
 - **After `collect` and `settle`**: say the finding summary in `say` as
   behaviour — what goes wrong and for whom — never as ids or file coordinates.
-  A line beginning *Recurring:* is a signal of its own and is relayed whole: the
-  same file has drawn a new blocking or major finding in three or more rounds of
-  this cycle, and the driver is saying that another fix round there is likely to
-  open the next case rather than close the last. It stops nothing on its own.
-  When the output also carries `ask`, the decision is the person's: ask it as
-  written, with exactly the answers it offers, each one command. The `ask` says
-  all of what follows; do not paraphrase the commands away. It comes in three
-  forms.
+  A line beginning *Recurring:* is a signal of its own and is relayed whole,
+  each such line separately, as `signal` lists them. There are two kinds. One
+  says the same file has drawn a new blocking or major finding in three or more
+  rounds of this cycle; the other says new blocking or major findings have kept
+  arriving in each of the last three or more rounds, on different files — or on
+  the pull request, or on no file. Either way the driver is saying that another
+  fix round is likely to open the next case rather than close the last. Neither
+  stops anything on its own. When the output also carries `ask`, the decision is
+  the person's: ask it as written, with exactly the answers it offers, each one
+  command. There is one `ask` even when both signals are live — it names each
+  file once — so put it once; never merge it with anything or ask twice. The
+  `ask` says all of what follows; do not paraphrase the commands away. It comes
+  in three forms.
 
   *A fix round is still left* — four answers. **Fix it once more** is `next`.
   **Redesign** is
@@ -204,9 +209,9 @@ at each point:
   ```
 
   with `--file a,b` added only when the person names files of their own — those
-  are added to the recurring file, never put in its place; it spends a fix round
-  on a fresh implementer working from a brief of everything raised on those
-  files this cycle. **Accept** is
+  are added to the files the signals name, never put in their place; it spends a
+  fix round on a fresh implementer working from a brief of everything raised on
+  those files this cycle. **Accept** is
 
   ```bash
   node "$P/scripts/ship.mjs" accept --plan "$D" --spec <id>
@@ -221,7 +226,9 @@ at each point:
   fix it once more (`next`), accept, and stop. A cycle gets one rewrite, whether
   it was chosen with rounds left or at the cap and whether or not it changed
   anything, so redesign is not offered, and `redesign` run anyway is refused and
-  spends nothing.
+  spends nothing. The same three answers come when the findings that keep
+  arriving are all about the pull request or name no file: there is no file to
+  rewrite, and the `ask` says so.
 
   *Every fix round is spent* — three answers, asked before anything publishes,
   and the `ask` says the rounds are spent and what the extra one buys.
@@ -236,10 +243,13 @@ at each point:
   ask again — its `say` says it is publishing as the person decided — unless the
   re-check raised something the person was not shown, and then it asks again.
 
-  When every fix round is spent and this cycle has had its rewrite, there is no
-  `ask`: `say` carries a line saying the cycle's rewrite has been used and that
-  the spec publishes with what is open disclosed. Relay it and run `next`.
-- **After `redesign`**: say the announcement in `say` — which files, which fix
+  When every fix round is spent and this cycle has had its rewrite, or no file
+  is left to rewrite, there is no `ask`: `say` carries a line saying why nothing
+  is asked and that the spec publishes with what is open disclosed. Relay it and
+  run `next`.
+- **After `redesign`**: say the announcement in `say` — which files (those the
+  same file failing names, then those the findings arriving on different files
+  touch, then the person's own), which fix
   round of how many — or, at the cap, that this is the one round past the limit
   that the person's answer granted, and that nothing is left after it — at what
   model and effort, that escalation never raises an implementer, that this is
@@ -253,7 +263,8 @@ at each point:
 - **After `snapshot` when the redesign implementer changed nothing**: its report
   is kept aside and the round it spent stays spent. The cycle's rewrite is used
   all the same, so when `snapshot` returns `ask` it is the question without its
-  redesign answer — fix it once more, accept, or stop. With no fix round left
+  redesign answer — fix it once more, accept, or stop — asked as one question
+  whichever signals are live, with its *Recurring:* lines relayed as above. With no fix round left
   there is no `ask`: `say` says the spec publishes with what is open disclosed —
   and, when the spent round was the one past the limit, that it is gone. Relay it
   and run `next`.

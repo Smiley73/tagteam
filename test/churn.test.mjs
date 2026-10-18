@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CHURN_ROUNDS, churnLines, churnSignal, redesignedAt } from "../scripts/lib/churn.mjs";
+import { CHURN_ROUNDS, churnLines, churnSignal, looseLines, looseSignal, redesignedAt } from "../scripts/lib/churn.mjs";
 
 const OID = (n) => String(n).repeat(40).slice(0, 40);
 
@@ -126,4 +126,122 @@ test("a root with no rounds, or a round nothing recorded, reports nothing", () =
   fs.writeFileSync(path.join(bare, "1", "round.json"), JSON.stringify({ owner: OID(1), scope: "repair:0" }));
   assert.deepEqual(churnSignal(bare, { scope: "repair:0", round: 1 }), []);
   assert.deepEqual(churnSignal(bare, { scope: "repair:0", round: 0 }), []);
+});
+
+// --- the loose signal: new findings round after round, on any file ----------
+
+const loose = (root, round, scope = "repair:0") => looseSignal(root, { scope, round });
+
+test("a converging spec never trips the loose signal", () => {
+  const once = rootWith({ 1: { raised: [["src/a.ts", "major"]] } });
+  assert.equal(loose(once, 1), null, "one raising round");
+  const quieted = rootWith({ 1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { raised: [] } });
+  assert.equal(loose(quieted, 3), null, "two raising rounds and then a quiet one, judged at the quiet one");
+  const broken = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { raised: [] }, 4: { raised: [["src/c.ts", "major"]] }
+  });
+  assert.equal(loose(broken, 4), null, "a quiet round breaks the run, and the findings after it start again");
+});
+
+test("the loose signal is live only when the judged round ends the run", () => {
+  const root = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { raised: [["src/c.ts", "major"]] }, 4: { raised: [] }
+  });
+  assert.deepEqual(loose(root, 3).rounds, [1, 2, 3], "live at the round that ended it");
+  assert.equal(loose(root, 4), null, "a run of three that ended earlier is not live now");
+  assert.equal(loose(root, 5), null, "nor at a round nothing recorded");
+});
+
+test("three rounds on three different files are live and name all three, where the same-file signal is not", () => {
+  const root = rootWith({
+    1: { raised: [["src/a.ts", "major"]] },
+    2: { raised: [["src/b.ts", "blocking", "recheck.json"]] },
+    3: { raised: [["src/c.ts", "major"], ["src/a.ts", "minor"]] }
+  });
+  assert.deepEqual(churnSignal(root, { scope: "repair:0", round: 3 }), [], "no one file recurs");
+  const signal = loose(root, 3);
+  assert.deepEqual(signal.rounds, [1, 2, 3]);
+  assert.deepEqual(signal.files, ["src/a.ts", "src/b.ts", "src/c.ts"]);
+  assert.deepEqual(signal.findings.map((finding) => finding.id), ["1.correctness.1", "2.adversary.1", "3.correctness.1"], "the minor does not count");
+  const longer = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { raised: [["src/c.ts", "major"]] }, 4: { raised: [["src/d.ts", "major"]] }
+  });
+  assert.deepEqual(loose(longer, 4).rounds, [1, 2, 3, 4], "the run is as long as it is unbroken");
+  const [line] = looseLines(signal);
+  assert.match(line, /^Recurring: 3 rounds of this cycle in a row \(1, 2, 3\) each raised a new blocking or major finding, across src\/a\.ts, src\/b\.ts, src\/c\.ts: t1-1; t2-1; t3-1\./);
+  assert.doesNotMatch(line, /\d+\.[a-z-]+\.\d+/, "the line relayed whole carries no finding ids");
+  assert.match(line, /Consider a redesign of these files/);
+  assert.deepEqual(looseLines(null), []);
+  assert.deepEqual(churnLines([]), [], "the same-file lines are unchanged for the same input");
+});
+
+test("only minors, or only carried findings, make a round raise nothing for the loose signal", () => {
+  const carried = { id: "1.correctness.1", lens: "correctness", severity: "major", file: "src/a.ts", line: 1, title: "t", detail: "d" };
+  const minors = rootWith({ 1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "minor"]] }, 3: { raised: [["src/c.ts", "major"]] } });
+  assert.equal(loose(minors, 3), null, "a round of minors breaks the run");
+  const carrying = rootWith({ 1: { raised: [["src/a.ts", "major"]] }, 2: { carried: [carried] }, 3: { raised: [["src/c.ts", "major"]] } });
+  assert.equal(loose(carrying, 3), null, "a round that only carried an earlier finding raised nothing");
+  const reappearing = rootWith({ 1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { raised: [["src/c.ts", "major"]], carried: [carried] } });
+  const signal = loose(reappearing, 3);
+  assert.deepEqual(signal.findings.map((finding) => finding.id), ["1.correctness.1", "2.correctness.1", "3.correctness.1"], "the carried finding is counted once, at its own round");
+});
+
+test("pull request and file-less findings make a round count, and are not among the files", () => {
+  const root = rootWith({
+    1: { raised: [["src/a.ts", "major"]] },
+    2: { raised: [["pr-body.md", "major"]] },
+    3: { raised: [[null, "blocking", "recheck.json"]] }
+  });
+  const signal = loose(root, 3);
+  assert.deepEqual(signal.rounds, [1, 2, 3]);
+  assert.deepEqual(signal.files, ["src/a.ts"]);
+  assert.equal(signal.findings.length, 3);
+  assert.match(looseLines(signal)[0], /across src\/a\.ts, the pull request, no file in particular:/);
+  const none = rootWith({ 1: { raised: [[null, "major"]] }, 2: { raised: [["pull-request.md", "major"]] }, 3: { raised: [[null, "major"]] } });
+  const fileless = loose(none, 3);
+  assert.deepEqual(fileless.files, [], "nothing a rewrite could change");
+  assert.match(looseLines(fileless)[0], /a redesign is not on offer/);
+  assert.deepEqual(churnSignal(none, { scope: "repair:0", round: 3 }).filter((signal) => signal.file === null), [], "the same-file signal still ignores file-less findings");
+});
+
+test("the loose signal counts its own cycle's rounds: a CI repair breaks the run, and a round with no scope counts", () => {
+  const spanning = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { scope: "repair:1", raised: [["src/c.ts", "major"]] }
+  });
+  assert.equal(loose(spanning, 3, "repair:1"), null, "a run that spans a CI repair is not live");
+  const unscoped = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "major"]] }, 3: { raised: [["src/c.ts", "major"]] }
+  });
+  fs.writeFileSync(path.join(unscoped, "2", "round.json"), JSON.stringify({ owner: OID(2) }));
+  assert.deepEqual(loose(unscoped, 3).rounds, [1, 2, 3], "a round with no scope of its own counts in every scope");
+  const repaired = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/a.ts", "major"]] }, 3: { raised: [] },
+    4: { scope: "repair:1", raised: [["src/a.ts", "major"]] }, 5: { scope: "repair:1", raised: [["src/b.ts", "major"]] },
+    6: { scope: "repair:1", raised: [["src/c.ts", "major"]] }
+  });
+  assert.deepEqual(loose(repaired, 6, "repair:1").rounds, [4, 5, 6], "round numbers are global");
+  assert.equal(loose(repaired, 5, "repair:1"), null);
+});
+
+test("a rewrite discounts the findings before it on the files it changed, and the rewrite round itself counts", () => {
+  const only = rootWith({
+    1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/a.ts", "major"]] },
+    3: { redesign: ["src/a.ts"], raised: [["src/b.ts", "major"]] }, 4: { raised: [["src/c.ts", "major"]] }
+  });
+  assert.deepEqual(loose(only, 2), null);
+  assert.equal(loose(only, 4), null, "rounds whose only findings were on a file rewritten later raise nothing");
+  const mixed = rootWith({
+    1: { raised: [["src/a.ts", "major"], ["src/b.ts", "major"]] }, 2: { raised: [["src/a.ts", "major"]] },
+    3: { redesign: ["src/a.ts"], raised: [["src/a.ts", "major", "recheck.json"]] }
+  });
+  // Round 2's only finding was on the rewritten file, so the run is round 3 alone.
+  assert.equal(loose(mixed, 3), null);
+  const kept = rootWith({
+    1: { raised: [["src/a.ts", "major"], ["src/b.ts", "major"]] }, 2: { raised: [["src/a.ts", "major"], ["src/c.ts", "major"]] },
+    3: { redesign: ["src/a.ts"], raised: [["src/a.ts", "major", "recheck.json"]] }
+  });
+  const signal = loose(kept, 3);
+  assert.deepEqual(signal.rounds, [1, 2, 3], "a round with a finding on an untouched file still counts");
+  assert.deepEqual(signal.files, ["src/b.ts", "src/c.ts", "src/a.ts"], "and names only the untouched files, then the rewrite's own");
+  assert.deepEqual(signal.findings.map((finding) => finding.id), ["1.correctness.2", "2.correctness.2", "3.adversary.1"], "findings on the rewrite round itself count");
 });

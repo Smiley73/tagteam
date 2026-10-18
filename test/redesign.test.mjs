@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "../scripts/lib/redesign.mjs";
-import { churnSignal } from "../scripts/lib/churn.mjs";
+import { churnSignal, looseSignal } from "../scripts/lib/churn.mjs";
 
 const OID = (n) => String(n).repeat(40).slice(0, 40);
 const write = (file, value) => {
@@ -210,4 +210,49 @@ test("each form of the question lists exactly its answers: four in budget, three
     assert.equal(/the adversary reads it fresh/.test(cap), atCollect);
     assertPlain(cap, "at the cap");
   }
+});
+
+// --- both signals: one question, each file once ----------------------------
+
+test("redesignFiles puts the same-file signal's files first, then the loose signal's, then the person's", () => {
+  const loose = { rounds: [1, 2, 3], findings: [], files: ["src/b.ts", "src/handler.ts", "src/c.ts"] };
+  assert.deepEqual(redesignFiles([{ file: "src/handler.ts" }], "src/d.ts, src/b.ts", loose), ["src/handler.ts", "src/b.ts", "src/c.ts", "src/d.ts"]);
+  assert.deepEqual(redesignFiles([], undefined, { ...loose, files: [] }), [], "a loose signal on the pull request alone leaves nothing to rewrite");
+});
+
+test("renderBrief gives a loose-signal file a reason of its own, and a file both signals name keeps the same-file reason", () => {
+  const { spec, rounds } = specWith();
+  const signals = churnSignal(rounds, { scope: "repair:0", round: 3 });
+  const loose = looseSignal(rounds, { scope: "repair:0", round: 3 });
+  assert.deepEqual(loose.files, ["src/handler.ts", "src/other.ts"]);
+  const files = redesignFiles(signals, undefined, loose);
+  assert.deepEqual(files, ["src/handler.ts", "src/other.ts"]);
+  const history = fileHistory(rounds, { files, scope: "repair:0", round: 3, declinedDir: path.join(spec, "declined") });
+  const brief = renderBrief({ spec: { id: "01-a", path: "/plan/specs/01-a.md" }, round: 3, files, history, signals, loose, reportPath: "/r.json" });
+  assert.match(brief, /^- `src\/handler\.ts` drew a new blocking or major finding in 3 rounds of this cycle/m);
+  assert.match(brief, /^- `src\/other\.ts` is one of the files new blocking or major findings kept arriving across, in each of 3 rounds of this cycle in a row \(1, 2, 3\); on this file: unrelated file\./m);
+  assert.doesNotMatch(brief, /named by the person who asked/, "the loose signal replaces that fallback");
+});
+
+test("with both signals live the question is one question, a sentence for each signal, and each file named once", () => {
+  const { rounds } = specWith();
+  const signals = churnSignal(rounds, { scope: "repair:0", round: 3 });
+  const loose = looseSignal(rounds, { scope: "repair:0", round: 3 });
+  for (const form of [{}, { redesign: false }, { atCap: true, spent: 4 }]) {
+    const ask = redesignAsk(signals, { spent: 2, limit: 4, loose, ...form });
+    assert.match(ask, /^The same place keeps failing\. src\/handler\.ts has drawn/);
+    assert.match(ask, /New findings have also kept arriving in each of the last 3 rounds of this cycle, on src\/other\.ts as well\./);
+    assert.equal(ask.split("src/handler.ts").length - 1, 1, "src/handler.ts is named once");
+    assert.equal(ask.split("src/other.ts").length - 1, 1, "src/other.ts is named once");
+    assertPlain(ask, JSON.stringify(form));
+  }
+  const alone = redesignAsk([], { spent: 2, limit: 4, loose });
+  assert.match(alone, /^New findings keep arriving, round after round, on different files\. In each of the last 3 rounds of this cycle a new finding serious enough to stop a merge came up, across src\/handler\.ts and src\/other\.ts; /);
+  assert.deepEqual(answersIn(alone), ["next", "redesign", "accept", "end"]);
+  assertPlain(alone, "loose alone");
+  const nowhere = redesignAsk([], { spent: 2, limit: 4, rewritable: false, loose: { rounds: [1, 2, 3], files: [], findings: [{ file: null }, { file: "pr-body.md" }] } });
+  assert.match(nowhere, /across no file in particular and the pull request itself|across the pull request itself and no file in particular/);
+  assert.match(nowhere, /None of what keeps arriving is in a file a rewrite could change, so a redesign is not one of the answers\. Three ways on/);
+  assert.deepEqual(answersIn(nowhere), ["next", "accept", "end"]);
+  assertPlain(nowhere, "nothing to rewrite");
 });
