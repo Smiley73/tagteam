@@ -1,0 +1,88 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "refused-schema",
+  "description": "An output schema with a property missing from required: turn/start accepts it, then the API refuses it and the turn fails.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "method": "error",
+          "params": {
+            "error": {
+              "message": "{\"type\":\"error\",\"error\":{\"message\":\"Invalid schema for response_format 'codex_output_schema': 'schema.required' is required to include every key in properties. Missing 'extra'.\",\"type\":\"invalid_request_error\",\"param\":\"text.format.schema\",\"code\":\"invalid_json_schema\"},\"status\":400}",
+              "codexErrorInfo": "other",
+              "additionalDetails": null
+            },
+            "willRetry": false
+          }
+        },
+        {
+          "method": "turn/completed",
+          "params": {
+            "turn": {
+              "id": "turn-1",
+              "status": "failed",
+              "items": [],
+              "error": {
+                "message": "{\"type\":\"error\",\"error\":{\"message\":\"Invalid schema for response_format 'codex_output_schema': 'schema.required' is required to include every key in properties. Missing 'extra'.\",\"type\":\"invalid_request_error\",\"param\":\"text.format.schema\",\"code\":\"invalid_json_schema\"},\"status\":400}",
+                "codexErrorInfo": "other",
+                "additionalDetails": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "thread/read",
+      "send": [
+        {
+          "result": {
+            "thread": {
+              "model": "gpt-5.6-sol",
+              "reasoningEffort": "low",
+              "cliVersion": "0.163.0-alpha.10.2"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

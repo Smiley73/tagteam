@@ -1,0 +1,103 @@
+{
+  "synthetic": true,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "server-request-mid-turn",
+  "description": "Synthetic, written by hand from the success capture: mid-turn the server sends a line that is not JSON, an error it will retry, and an approval request; the turn completes once the client has answered the request.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "$raw": "this line is not JSON"
+        },
+        {
+          "method": "error",
+          "params": {
+            "error": {
+              "message": "Reconnecting... 1/5",
+              "codexErrorInfo": "other",
+              "additionalDetails": null
+            },
+            "willRetry": true
+          }
+        },
+        {
+          "id": "approval-1",
+          "method": "item/commandExecution/requestApproval",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "on": "$response",
+      "send": [
+        {
+          "method": "turn/completed",
+          "params": {
+            "turn": {
+              "id": "turn-1",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "text": "{\"ok\":true}",
+                  "phase": "final_answer"
+                }
+              ],
+              "error": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "thread/read",
+      "send": [
+        {
+          "result": {
+            "thread": {
+              "model": "gpt-5.6-sol",
+              "reasoningEffort": "low",
+              "cliVersion": "0.163.0-alpha.10.2"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

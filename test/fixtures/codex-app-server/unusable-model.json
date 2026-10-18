@@ -1,0 +1,88 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "unusable-model",
+  "description": "A model the account may not use: thread/start accepts it, then the turn fails with the provider's message stringified.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "method": "error",
+          "params": {
+            "error": {
+              "message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.\"}}",
+              "codexErrorInfo": "other",
+              "additionalDetails": null
+            },
+            "willRetry": false
+          }
+        },
+        {
+          "method": "turn/completed",
+          "params": {
+            "turn": {
+              "id": "turn-1",
+              "status": "failed",
+              "items": [],
+              "error": {
+                "message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.\"}}",
+                "codexErrorInfo": "other",
+                "additionalDetails": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "thread/read",
+      "send": [
+        {
+          "result": {
+            "thread": {
+              "model": "gpt-5.1-codex",
+              "reasoningEffort": "low",
+              "cliVersion": "0.163.0-alpha.10.2"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

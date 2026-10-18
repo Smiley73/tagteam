@@ -1,0 +1,79 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "success",
+  "description": "A turn that completes with a schema-valid answer, in a repository with no AGENTS.md.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "method": "turn/completed",
+          "params": {
+            "turn": {
+              "id": "turn-1",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "text": "{\"ok\":true}",
+                  "phase": "final_answer"
+                }
+              ],
+              "error": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "thread/read",
+      "send": [
+        {
+          "result": {
+            "thread": {
+              "model": "gpt-5.6-sol",
+              "reasoningEffort": "low",
+              "cliVersion": "0.163.0-alpha.10.2"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
