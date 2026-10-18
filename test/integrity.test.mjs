@@ -876,3 +876,51 @@ test("the effort guard fails on the driver's instruction and the skill as they r
     + "every tagteam agent ships as one variant per effort.";
   assert.ok(dispatchRuleProblems("plan.md", planBefore + elsewhere).some((problem) => /never says to pass `effort`/.test(problem)));
 });
+
+// --- how Codex is run ---
+
+// Every Codex call goes through `codex app-server`, on a throwaway thread, and
+// nothing tagteam does keeps or deletes a Codex session. A sentence that brings
+// back the old transport, or the sessions it left behind, sends a person looking
+// for files that are not there and a command that never runs. Worded so the
+// Claude Code session and its transcripts — which the cost and effort reports
+// read — are left alone.
+const SESSION_VERB = "(?:kept|keeps?|keeping|deleted|deletes?|deleting|removed|removes?|removing)";
+function codexTransportProblems(name, text) {
+  const flat = text.replace(/\s+/g, " ");
+  const problems = [];
+  if (/\bcodex exec\b/i.test(flat)) problems.push(`${name} still names \`codex exec\``);
+  if (/\bcodex delete\b/i.test(flat)) problems.push(`${name} still names \`codex delete\``);
+  for (const sentence of flat.split(/(?<=[.!?])\s+/)) {
+    if (!/\bCodex sessions?\b/i.test(sentence)) continue;
+    if (new RegExp(`\\b${SESSION_VERB}\\b`, "i").test(sentence)) {
+      problems.push(`${name} still speaks of Codex sessions being kept or deleted: ${sentence.slice(0, 120)}`);
+    }
+  }
+  return problems;
+}
+
+test("nothing a person or an agent reads describes codex exec, codex delete, or Codex sessions kept or deleted", () => {
+  const agents = agentNames.map((agent) => [`agents/${agent}.md`, read("agents", `${agent}.md`)]);
+  const files = [["README.md", readme], ["skills/tagteam/SKILL.md", skill], ...commands.map((entry) => [`commands/${entry.file}`, entry.text]), ...agents];
+  const problems = files.flatMap(([name, text]) => codexTransportProblems(name, text));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the Codex transport guard fails on the prose as it read before app-server, and passes the Claude Code session wording", () => {
+  const before = [
+    "runs `codex exec --output-schema`, validates the answer and writes the artifact",
+    "The Codex sessions a good call created are deleted afterwards; a call whose routing could not be read keeps them, and the runner's line says so.",
+    "Removal goes through `codex delete --force <uuid>`.",
+    "| a live `codex exec --ephemeral --sandbox read-only` probe in a temp directory | yes |"
+  ];
+  for (const text of before) {
+    assert.ok(codexTransportProblems("before", text).length > 0, `the guard passes: ${text}`);
+  }
+  const claudeCode = [
+    "read off the transcripts Claude Code keeps for the set's session",
+    "reads the session transcripts Claude Code keeps and reports the spend",
+    "a session whose transcript is gone is reported repository-wide"
+  ];
+  for (const text of claudeCode) assert.deepEqual(codexTransportProblems("claude", text), [], `the guard refuses: ${text}`);
+});

@@ -248,21 +248,29 @@ test("the Claude model enum exists once, referenced from both models.lead and mo
 
 test("effort is keyed by job, and effort.codex keeps its own ladder", async () => {
   const { validateJson } = await import("../scripts/validate-json.mjs");
-  // The two ladders diverge on purpose and the hoist must not have merged them:
-  // every Claude job reaches the Claude enum, which has `max`; `codex` carries
-  // its own inline enum, which does not.
+  // The hoist must not have merged the two ladders: every Claude job reaches the
+  // Claude enum, the one the dispatch drivers check against, and `codex` carries
+  // its own inline enum — the same five words today, and Codex's to change.
   const effortDef = schema.$defs?.jobEffort;
   const claudeJobs = ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner"];
   assert.deepEqual(effortDef?.required, [...claudeJobs, "codex"]);
   for (const job of claudeJobs) assert.equal(effortDef?.properties?.[job]?.$ref, "#/$defs/claudeEffort", job);
-  assert.deepEqual(effortDef?.properties?.codex?.enum, ["low", "medium", "high", "xhigh"]);
+  assert.equal(effortDef?.properties?.codex?.$ref, undefined, "effort.codex reaches the Claude ladder instead of keeping its own");
+  assert.deepEqual(effortDef?.properties?.codex?.enum, ["low", "medium", "high", "xhigh", "max"]);
 
+  // `max` came back from Codex as `max`, so a configuration may ask for it.
   const codexMax = { ...example, effort: { ...example.effort, codex: "max" } };
-  const codexErrors = validateJson(schema, codexMax);
+  const maxErrors = validateJson(schema, codexMax).filter((error) => error.includes("effort.codex"));
+  assert.deepEqual(maxErrors, [], `expected effort.codex: "max" to validate, got: ${maxErrors.join("; ")}`);
+  const codexUnknown = { ...example, effort: { ...example.effort, codex: "ultra" } };
+  const codexErrors = validateJson(schema, codexUnknown);
   assert.ok(
     codexErrors.some((error) => error.includes("effort.codex")),
-    `expected effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
+    `expected effort.codex: "ultra" to be refused, got: ${codexErrors.join("; ")}`
   );
+  const { CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
+  assert.equal(CONFIG_VERSION, 9, "a Codex effort word joining the ladder is not a new configuration shape");
+  assert.equal(schema.properties?.version?.const, 9);
 
   const recheckMax = { ...example, effort: { ...example.effort, recheck: "max" } };
   const recheckErrors = validateJson(schema, recheckMax).filter((error) => error.includes("effort.recheck"));
@@ -948,11 +956,15 @@ test("the $refs validate, rather than merely spelling a pointer", async () => {
     `expected escalation.models.worker: "haiku" to be refused, got: ${floorErrors.join("; ")}`
   );
 
+  // A word the Codex enum refuses, so a refusal proves `plan.effort` reached
+  // `jobEffort` and its Codex ladder; `max` is on that ladder and validates.
   const codexMax = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, codex: "max" } } });
-  const codexErrors = validateJson(schema, codexMax);
+  assert.deepEqual(validateJson(schema, codexMax), [], 'plan.effort.codex: "max" must validate');
+  const codexUnknown = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, codex: "ultra" } } });
+  const codexErrors = validateJson(schema, codexUnknown);
   assert.ok(
     codexErrors.some((error) => error.includes("plan.effort.codex")),
-    `expected plan.effort.codex: "max" to be refused, got: ${codexErrors.join("; ")}`
+    `expected plan.effort.codex: "ultra" to be refused, got: ${codexErrors.join("; ")}`
   );
 
   const plannerMax = configured({ plan: { models: RAISED_MODELS, effort: { ...RAISED_EFFORT, planner: "max" } } });

@@ -40,41 +40,38 @@ const QUOTA = [
 // an error message on stderr, and the tail of a refusal. A provider that streams
 // a large failure body — a stack, an echo of the request — would otherwise push
 // the part that says what went wrong off the top of a terminal, and put the
-// whole of it into every log that keeps the failure.
+// whole of it into every log that keeps the failure. Stderr is not cut here: the
+// client already keeps only its last 64 KiB, and the one quota message anyone
+// has seen arrived there.
 const EVIDENCE_LIMIT = 4_000;
 
 /**
- * The provider failure a `codex exec --json` run reported on stdout, as one
- * string, empty when the stream reports no failure.
+ * What one app-server attempt said about a failure, as one string for the word
+ * matching below; empty when it said nothing. `outcome` is what
+ * `runAppServerTurn` returned.
  *
- * - A line that does not parse as JSON is skipped silently. The caller keeps a
- *   fixed-size tail of stdout, so the first line is mid-line by construction,
- *   and a partial line must never throw.
- * - Evidence comes from a top-level `type === "error"` event (its `message`,
- *   when a string) and from a `turn.failed` event (its nested `error.message`,
- *   when a string), joined in stream order.
- * - Every `item.*` event is ignored, whatever its `item.type` is. The failing
- *   run this was written against also emitted an `item.completed` whose
- *   `item.type` was `"error"`, carrying "Model metadata ... Defaulting to
- *   fallback metadata" — an advisory notice that a succeeding run emits just as
- *   readily. Treating any error-shaped item as a failure turned that notice into
- *   a hard refusal, so only a top-level failure event counts.
- * - The result is capped at EVIDENCE_LIMIT characters, keeping the tail.
+ * - The failed turn's message, or the message a request was refused with —
+ *   never a completed turn's, which is the answer rather than a failure.
+ * - Every `error` notification's message, in the order they arrived, each
+ *   distinct message once: a failed turn repeats its own message as an `error`
+ *   notification, and one sentence counted twice is noise in what a person reads.
+ * - The server's stderr, last, where the exhausted-quota message came.
+ *
+ * A `warning` notification is not here and cannot be: the client keeps none. The
+ * one seen — "Model metadata for `<model>` not found. Defaulting to fallback
+ * metadata" — came on runs that went fine, and its words are the vocabulary the
+ * model-unavailable list matches, so reading it would refuse runs that were
+ * fine. The messages are capped at EVIDENCE_LIMIT characters, keeping the tail.
  */
-export function providerFailureEvidence(stdout) {
-  const evidence = [];
-  for (const line of String(stdout ?? "").split("\n")) {
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    if (event === null || typeof event !== "object") continue;
-    const type = typeof event.type === "string" ? event.type : "";
-    // Stated rather than left to fall through the checks below, so that a later
-    // reader adding a field to look at cannot pick up an advisory item with it.
-    if (type.startsWith("item.")) continue;
-    if (type === "error" && typeof event.message === "string") evidence.push(event.message);
-    if (type === "turn.failed" && typeof event.error?.message === "string") evidence.push(event.error.message);
-  }
-  return evidence.join("\n").slice(-EVIDENCE_LIMIT);
+export function appServerFailureEvidence(outcome) {
+  const messages = [];
+  const add = (message) => {
+    if (typeof message === "string" && message.trim() !== "" && !messages.includes(message)) messages.push(message);
+  };
+  if (outcome?.outcome !== "completed") add(outcome?.message);
+  for (const entry of Array.isArray(outcome?.errors) ? outcome.errors : []) add(entry?.error?.message);
+  const stderr = typeof outcome?.stderr === "string" ? outcome.stderr.trim() : "";
+  return [messages.join("\n").slice(-EVIDENCE_LIMIT), stderr].filter(Boolean).join("\n");
 }
 
 export function classifyProviderError(text, provider = "codex") {

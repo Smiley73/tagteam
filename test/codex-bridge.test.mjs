@@ -1,9 +1,16 @@
-// The Codex bridge, exercised against a fake `codex` binary.
+// The Codex bridge, exercised against the fake app-server.
 //
 // These run the real script as a subprocess rather than importing it, because
 // the things worth checking are the things that only happen at the process
-// boundary: what argv is built, what reaches stdin, what is written where, and
-// what the exit code says when a payload is missing.
+// boundary: what Codex is asked for, what is written where, and what the exit
+// code and stderr say. The fake replays 01's scrubbed captures; a scenario no
+// real run has produced — a quota, a field reported differently or not at all —
+// is a real capture with one thing changed, labelled as changed and held to the
+// same scrub (`changedFixture`).
+//
+// What Codex is asked for is asserted on what the fake recorded receiving, whole:
+// a check that only looks for the parts it expects would let an extra override
+// through.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -13,177 +20,46 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { ensureGitignore } from "../scripts/ensure-gitignore.mjs";
 import { acquireSlot } from "../scripts/lib/locks.mjs";
+import { initializeParams } from "../scripts/lib/codex-app-server.mjs";
+import { changedFixture } from "./codex-capture.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const bridge = path.join(root, "scripts", "codex.mjs");
+const FAKE = path.join(import.meta.dirname, "fake-codex-app-server.mjs");
 
-const SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["verdict", "notes"],
-  properties: { verdict: { type: "string" }, notes: { type: "array", items: { type: "string" } } }
-};
-
-// Writes what it was invoked with, so a test can assert on argv and stdin, and
-// can be told to answer with something schema-invalid or to hang.
-//
-// It also does what the real `codex exec` does after the answer: announces its
-// session id on stdout and leaves a rollout under `$CODEX_HOME/sessions/` saying
-// how the session routed. The rollout shape is copied from a real one written by
-// codex-cli 0.148.0-alpha.21 — a `turn_context` record whose `payload` carries
-// `model`, `effort` and `sandbox_policy.type` — because a fixture invented from
-// a description would pass these tests while the bridge read nothing at all in
-// production. It answers `delete --force <uuid>` too, which is how those
-// sessions are removed again.
-const FAKE_CODEX = `#!/usr/bin/env node
-import fs from "node:fs";
-import path from "node:path";
-import { randomUUID } from "node:crypto";
-const argv = process.argv.slice(2);
-const home = process.env.FAKE_CODEX_DIR;
-const mode = process.env.FAKE_CODEX_MODE ?? "ok";
-const codexHome = process.env.CODEX_HOME || home;
-const sessions = path.join(codexHome, "sessions");
-
-function record(entry) {
-  const calls = JSON.parse(fs.readFileSync(home + "/calls.json", "utf8"));
-  calls.push(entry);
-  fs.writeFileSync(home + "/calls.json", JSON.stringify(calls));
-  return calls;
-}
-
-function findRollout(id) {
-  const walk = (dir) => {
-    let entries = [];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        const hit = walk(full);
-        if (hit) return hit;
-      } else if (entry.name.endsWith("-" + id + ".jsonl")) return full;
-    }
-    return null;
-  };
-  return walk(sessions);
-}
-
-if (argv[0] === "delete") {
-  record({ argv, home: codexHome });
-  const file = mode === "delete-refuses" ? null : findRollout(argv[argv.length - 1]);
-  if (!file) { process.stderr.write("Error: failed to delete session\\n"); process.exit(1); }
-  fs.unlinkSync(file);
-  process.exit(0);
-}
-
-const flag = (name) => argv[argv.indexOf(name) + 1];
-const out = flag("-o");
-const model = flag("-m");
-const asked = argv.find((entry) => entry.startsWith("model_reasoning_effort=")) ?? "";
-const effort = asked.split('"')[1] ?? "";
-const sandbox = flag("--sandbox");
-
-function writeRollout(id, records) {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, "0");
-  const day = path.join(sessions, String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()));
-  fs.mkdirSync(day, { recursive: true });
-  const stamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
-  const body = records.map((entry) => JSON.stringify(entry)).join("\\n") + "\\n";
-  fs.writeFileSync(path.join(day, "rollout-" + stamp + "-" + id + ".jsonl"), body);
-}
-
-let stdin = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { stdin += chunk; });
-process.stdin.on("end", async () => {
-  const attempt = record({ argv, prompt: stdin, home: codexHome }).filter((entry) => entry.argv[0] === "exec").length;
-  if (mode === "hang") { setInterval(() => {}, 1000); await new Promise(() => {}); }
-  if (mode === "quota") { process.stderr.write("429 rate limit reached; retry-after: 1\\n"); process.exit(1); }
-  // The same words, on the other stream, inside a top-level failure event.
-  if (mode === "quota-stdout") {
-    process.stdout.write(JSON.stringify({ type: "error", message: "429 rate limit reached; retry-after: 1" }) + "\\n");
-    process.exit(1);
-  }
-  // What codex-cli 0.148.0-alpha.21 actually emits for a model the account may
-  // not use: two events on stdout, nothing on stderr, no artifact. The inner
-  // JSON is built with JSON.stringify rather than pasted escaped, so these are
-  // the CLI's bytes and not this file's escaping of them.
-  if (mode === "unusable-model") {
-    const detail = JSON.stringify({
-      type: "error",
-      status: 400,
-      error: { type: "invalid_request_error", message: "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account." }
-    });
-    process.stdout.write(JSON.stringify({ type: "error", message: detail }) + "\\n");
-    process.stdout.write(JSON.stringify({ type: "turn.failed" }) + "\\n");
-    process.exit(1);
-  }
-
-  const id = randomUUID();
-  const stamp = new Date().toISOString();
-  const meta = { timestamp: stamp, ordinal: 0, type: "session_meta", payload: { session_id: id, id, source: "exec" } };
-  const routing = { model, effort, sandbox_policy: { type: sandbox }, approval_policy: "never", summary: "auto" };
-  if (mode === "no-turn-context") {
-    writeRollout(id, [meta]);
-  } else if (mode !== "no-rollout") {
-    const payload = { turn_id: id, cwd: process.cwd(), ...routing };
-    if (mode === "no-effort") delete payload.effort;
-    if (mode === "effort-drift") payload.effort = effort === "low" ? "high" : "low";
-    // The same effort, spelled the way a recording change would spell it.
-    if (mode === "effort-case") payload.effort = " " + effort.toUpperCase() + " ";
-    // A record that kept its effort and lost everything beside it: the shape a
-    // release that renames a field actually has.
-    if (mode === "effort-only") { delete payload.model; delete payload.sandbox_policy; }
-    if (mode === "model-drift") payload.model = "codex-auto-review";
-    writeRollout(id, [meta, { timestamp: stamp, ordinal: 5, type: "turn_context", payload }]);
-  }
-
-  if (mode === "invalid-then-ok") {
-    if (attempt === 1) fs.writeFileSync(out, JSON.stringify({ wrong: true }));
-    else fs.writeFileSync(out, JSON.stringify({ verdict: "ok", notes: ["second"] }));
-  } else if (mode === "always-invalid" || mode === "advisory-item" || mode === "unrecognised-failure") {
-    fs.writeFileSync(out, JSON.stringify({ wrong: true }));
-  } else {
-    fs.writeFileSync(out, JSON.stringify({ verdict: "ok", notes: ["fake"] }));
-  }
-  if (mode !== "no-thread-id") process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: id }) + "\\n");
-  // An informational notice on a run that is otherwise fine, shaped like an
-  // error and worded like an unusable model. The real one said "Model metadata
-  // ... Defaulting to fallback metadata".
-  if (mode === "advisory-item") {
-    process.stdout.write(JSON.stringify({
-      type: "item.completed",
-      item: { type: "error", text: "Model metadata for an invalid model could not be read. Defaulting to fallback metadata." }
-    }) + "\\n");
-  }
-  if (mode === "unrecognised-failure") {
-    process.stdout.write(JSON.stringify({ type: "error", message: "upstream connect error or disconnect/reset before headers" }) + "\\n");
-  }
-  process.stdout.write(JSON.stringify({ type: "item.completed" }) + "\\n");
-});
-`;
+// The schema the captures were taken against, so a capture's answer is valid.
+const SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
+// What the captures report they ran as.
+const MODEL = "gpt-5.6-sol";
+const EFFORT = "low";
+const VERSION = "0.163.0-alpha.10.2";
+const TRIGGER = "how it routed could not be confirmed";
+const STDOUT_KEYS = ["ok", "reused", "artifact", "promptPath", "bytes", "sections", "routing", "result"];
 
 function workspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-codex-"));
   fs.writeFileSync(path.join(dir, "schema.json"), JSON.stringify(SCHEMA));
   fs.writeFileSync(path.join(dir, "template.md"), "Review {{NAME}}.\n\n{{DIFF}}\n");
   fs.writeFileSync(path.join(dir, "payload.diff"), "diff --git a/x b/x\n+hello\n");
-  fs.writeFileSync(path.join(dir, "calls.json"), "[]");
-  const fake = path.join(dir, "fake-codex.mjs");
-  fs.writeFileSync(fake, FAKE_CODEX, { mode: 0o755 });
-  fs.mkdirSync(path.join(dir, "codex-home"), { recursive: true });
   fs.mkdirSync(path.join(dir, "repo"));
   spawnSync("git", ["-C", path.join(dir, "repo"), "init", "-q"]);
-  return { dir, fake };
+  // Something that records being run and is not Codex: the dry run and the
+  // reuse hit are pointed at it, and must never start it.
+  const recorder = path.join(dir, "recorder.sh");
+  fs.writeFileSync(recorder, `#!/bin/sh\necho "$@" >> '${path.join(dir, "recorder-ran")}'\nexit 1\n`, { mode: 0o755 });
+  return { dir, recorder };
 }
 
+// `fixture` is a capture's name, a changed capture's path, or a list of them —
+// one per server start, for a call that makes more than one attempt.
 // `spawnOptions` exists for the quota tests, which pre-seed the bridge's own
 // state so the first backoff decision is `abort` and the call returns at once. A
 // seed the bridge does not find is a call that waits out a real reset instead,
 // so those tests bound the child: a stall becomes a failed assertion rather than
 // a test run nobody sees finish.
-function run({ dir, fake }, extra = [], env = {}, spawnOptions = {}) {
+function run({ dir }, {
+  fixture = "success", extra = [], env = {}, model = MODEL, effort = EFFORT, codexBin = FAKE, spawnOptions = {}
+} = {}) {
   return spawnSync("node", [
     bridge,
     "--template", path.join(dir, "template.md"),
@@ -191,99 +67,188 @@ function run({ dir, fake }, extra = [], env = {}, spawnOptions = {}) {
     "--fence", `DIFF=${path.join(dir, "payload.diff")}`,
     "--schema", path.join(dir, "schema.json"),
     "--out", path.join(dir, "result.json"),
-    "--model", "m1", "--effort", "high",
+    "--model", model, "--effort", effort,
     "--cd", path.join(dir, "repo"),
     "--slots", path.join(dir, "slots"),
-    "--codex-bin", fake,
+    "--codex-bin", codexBin,
     ...extra
   ], {
     encoding: "utf8",
-    // CODEX_HOME is set here rather than per test so that no test can write a
-    // session into, or delete a session out of, the developer's own ~/.codex.
-    env: { ...process.env, FAKE_CODEX_DIR: dir, CODEX_HOME: path.join(dir, "codex-home"), ...env },
+    env: {
+      ...process.env,
+      FAKE_CODEX_FIXTURE: Array.isArray(fixture) ? JSON.stringify(fixture) : fixture,
+      FAKE_CODEX_RECORD: path.join(dir, "received.jsonl"),
+      FAKE_CODEX_PIDFILE: path.join(dir, "server-pids"),
+      ...env
+    },
     ...spawnOptions
   });
 }
 
-const calls = (dir) => JSON.parse(fs.readFileSync(path.join(dir, "calls.json"), "utf8"));
-// One log holds both subcommands the fake answers, so a test that counts
-// attempts counts `exec` and a test that counts removals counts `delete`.
-const execs = (dir) => calls(dir).filter((call) => call.argv[0] === "exec");
-const deletions = (dir) => calls(dir).filter((call) => call.argv[0] === "delete");
+function received(dir) {
+  const file = path.join(dir, "received.jsonl");
+  return fs.existsSync(file)
+    ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+}
+// One server start per attempt, each recorded as its argv first.
+const starts = (dir) => received(dir).filter((entry) => Object.hasOwn(entry, "argv"));
+const requests = (dir, method) => received(dir).filter((entry) => entry.method === method);
 const sidecar = (dir) => JSON.parse(fs.readFileSync(path.join(dir, "result.json.request.json"), "utf8"));
+const artifactExists = (dir) => fs.existsSync(path.join(dir, "result.json"));
+const sidecarExists = (dir) => fs.existsSync(path.join(dir, "result.json.request.json"));
+const recorderRan = (dir) => fs.existsSync(path.join(dir, "recorder-ran"));
 
-// Every rollout under the workspace's own CODEX_HOME, whatever day directory the
-// fake put it in.
-function rollouts(dir) {
-  const found = [];
-  const walk = (at) => {
-    for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
-      const full = path.join(at, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.name.startsWith("rollout-")) found.push(full);
-    }
-  };
-  try { walk(path.join(dir, "codex-home", "sessions")); } catch { /* nothing ran */ }
-  return found;
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
 }
 
-test("composes the prompt, fences the payload, and writes the artifact", () => {
+// An earlier dispatch's artifact and sidecar at --out, which every terminal
+// failure must take with it: collect-findings.mjs reads that file without
+// consulting the sidecar, so a call that got no usable answer would still have
+// produced a review that counts.
+function withEarlierArtifact(space) {
+  const first = run(space);
+  assert.equal(first.status, 0, `the first run should have written an artifact: ${first.stderr}`);
+  assert.equal(artifactExists(space.dir), true);
+  fs.rmSync(path.join(space.dir, "received.jsonl"), { force: true });
+}
+
+function assertCleared(space, result, why) {
+  assert.equal(artifactExists(space.dir), false, `the earlier artifact survived ${why}`);
+  assert.equal(sidecarExists(space.dir), false, `the earlier sidecar survived ${why}`);
+  assert.match(result.stderr, /were removed so nothing later can count them/, `${why} does not say what became of what was at --out`);
+}
+
+// --- what Codex is asked for ---
+
+test("Codex is started as app-server and asked for an ephemeral read-only thread, approvals never, at the requested model and effort", () => {
   const space = workspace();
   const result = run(space);
   assert.equal(result.status, 0, result.stderr);
-  const stdout = JSON.parse(result.stdout);
-  assert.equal(stdout.ok, true);
-  assert.deepEqual(stdout.result, { verdict: "ok", notes: ["fake"] });
 
-  const [call] = calls(space.dir);
-  assert.match(call.prompt, /Review widget\./);
-  assert.match(call.prompt, /<untrusted-diff>\ndiff --git a\/x b\/x\n\+hello\n<\/untrusted-diff>/);
-  // The payload travels on stdin, never in argv.
-  assert.ok(!call.argv.join(" ").includes("hello"));
+  const all = received(space.dir);
+  assert.deepEqual(all[0], { argv: ["app-server"] }, "the server is started as `app-server` and nothing else");
+  assert.deepEqual(all.slice(1).map((entry) => entry.method), ["initialize", "initialized", "thread/start", "turn/start", "thread/read"]);
+  assert.deepEqual(requests(space.dir, "initialize")[0].params, initializeParams());
+  assert.deepEqual(requests(space.dir, "thread/start")[0].params, {
+    cwd: path.join(space.dir, "repo"),
+    model: MODEL,
+    approvalPolicy: "never",
+    sandbox: "read-only",
+    ephemeral: true,
+    config: { model_reasoning_effort: EFFORT }
+  });
+
+  const prompt = fs.readFileSync(path.join(space.dir, "result.json.prompt.md"), "utf8");
+  assert.match(prompt, /Review widget\./);
+  assert.match(prompt, /<untrusted-diff>\ndiff --git a\/x b\/x\n\+hello\n<\/untrusted-diff>/);
+  assert.deepEqual(requests(space.dir, "turn/start")[0].params, {
+    threadId: "thread-1",
+    input: [{ type: "text", text: prompt, text_elements: [] }],
+    outputSchema: SCHEMA,
+    effort: EFFORT
+  }, "the turn carries exactly the schema and the prompt, intact");
+  assert.ok(!JSON.stringify(all[0]).includes("hello"), "the payload travelled in argv");
 });
 
-test("the invocation is read-only and never bypasses the sandbox", () => {
+// --- a clean run ---
+
+test("a clean run records every field Codex reported, and prints the same record and today's keys on stdout", () => {
   const space = workspace();
-  run(space);
-  const [call] = calls(space.dir);
-  assert.ok(call.argv.includes("--sandbox"));
-  assert.equal(call.argv[call.argv.indexOf("--sandbox") + 1], "read-only");
-  assert.ok(call.argv.includes("--output-schema"));
-  // --ephemeral is gone and must stay gone: it suppresses the session file, and
-  // a session that is never written is one nothing can read the routing off and
-  // nothing can delete afterwards.
-  assert.ok(!call.argv.includes("--ephemeral"));
-  assert.ok(call.argv.includes('approval_policy="never"'));
-  assert.ok(!call.argv.includes("--dangerously-bypass-approvals-and-sandbox"));
+  const result = run(space);
+  assert.equal(result.status, 0, result.stderr);
+  const record = sidecar(space.dir);
+  // What was asked for stays where it was, at the top level.
+  assert.equal(record.model, MODEL);
+  assert.equal(record.effort, EFFORT);
+  assert.equal(record.sandbox, "read-only", "the request record no longer says what was asked for");
+  assert.deepEqual(record.routing, {
+    ran: true,
+    observed: {
+      model: MODEL,
+      effort: EFFORT,
+      sandbox: "readOnly",
+      networkAccess: false,
+      approvalPolicy: "never",
+      codexVersion: VERSION,
+      instructionFiles: ["/codex-home/AGENTS.md"]
+    },
+    observedReason: null
+  });
+
+  const printed = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(printed), STDOUT_KEYS, "the keys of the stdout line changed");
+  assert.equal(printed.ok, true);
+  assert.deepEqual(printed.result, { ok: true });
+  assert.deepEqual(printed.routing, record.routing, "the printed routing and the recorded routing disagree");
+  assert.equal(result.stderr, "", "a clean run said something on stderr");
+  assert.equal(starts(space.dir).length, 1);
 });
 
-test("writes a provenance sidecar and truncates the event log", () => {
+test("max effort is asked for and recorded end to end", () => {
   const space = workspace();
-  run(space);
-  const sidecar = JSON.parse(fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8"));
-  assert.equal(sidecar.model, "m1");
-  assert.equal(sidecar.sandbox, "read-only");
-  assert.match(sidecar.promptSha256, /^[0-9a-f]{64}$/);
+  const result = run(space, { fixture: "max-effort", effort: "max" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests(space.dir, "thread/start")[0].params.config.model_reasoning_effort, "max");
+  assert.equal(requests(space.dir, "turn/start")[0].params.effort, "max");
+  assert.equal(sidecar(space.dir).effort, "max");
+  assert.equal(sidecar(space.dir).routing.observed.effort, "max");
+});
 
-  const before = fs.statSync(path.join(space.dir, "result.json.events.jsonl")).size;
-  run(space);
-  const after = fs.statSync(path.join(space.dir, "result.json.events.jsonl")).size;
+test("the event log holds what the server said, and is truncated per attempt", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0);
+  const events = path.join(space.dir, "result.json.events.jsonl");
+  const lines = fs.readFileSync(events, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(lines.some((message) => message.method === "turn/completed"), "the event log does not hold the turn");
+  const before = fs.statSync(events).size;
+  assert.equal(run(space).status, 0);
   // Appending is how one plan accumulated six megabytes of transcripts.
-  assert.equal(after, before);
+  assert.equal(fs.statSync(events).size, before);
 });
 
-test("--reuse returns the existing artifact, and a changed payload invalidates it", () => {
-  const space = workspace();
-  run(space);
-  assert.equal(execs(space.dir).length, 1);
+// --- reuse and dry run ---
 
-  run(space, ["--reuse"]);
-  assert.equal(execs(space.dir).length, 1, "an identical request should not re-invoke Codex");
+test("--reuse returns the existing artifact without starting anything, and a changed payload invalidates it", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0);
+  const before = fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8");
+
+  const reused = run(space, { extra: ["--reuse"], codexBin: space.recorder });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(recorderRan(space.dir), false, "a reuse hit started a process");
+  const printed = JSON.parse(reused.stdout);
+  assert.equal(printed.reused, true);
+  assert.deepEqual(printed.routing, { ran: false, observed: null, observedReason: null });
+  assert.equal(fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8"), before,
+    "a reuse hit rewrote the sidecar the original run left");
 
   fs.writeFileSync(path.join(space.dir, "payload.diff"), "diff --git a/y b/y\n+changed\n");
-  run(space, ["--reuse"]);
-  assert.equal(execs(space.dir).length, 2, "a changed payload is a different question");
+  assert.equal(run(space, { extra: ["--reuse"] }).status, 0);
+  assert.equal(starts(space.dir).length, 2, "a changed payload is a different question");
 });
+
+test("a dry run writes a stub artifact and starts nothing, by flag and by environment", () => {
+  for (const how of [{ extra: ["--dry-run"] }, { env: { TAGTEAM_DRY_RUN: "1" } }]) {
+    const space = workspace();
+    const result = run(space, { ...how, codexBin: space.recorder });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(recorderRan(space.dir), false, "a dry run started a process");
+    const printed = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(printed), STDOUT_KEYS);
+    assert.deepEqual(printed.routing, { ran: false, observed: null, observedReason: null });
+    assert.deepEqual(printed.result, { ok: false });
+    assert.deepEqual(sidecar(space.dir).routing, printed.routing);
+  }
+});
+
+// --- requests that never reach Codex ---
 
 test("a missing payload stops the request before Codex is started", () => {
   const space = workspace();
@@ -291,7 +256,7 @@ test("a missing payload stops the request before Codex is started", () => {
   const result = run(space);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /diff section is missing/);
-  assert.equal(calls(space.dir).length, 0);
+  assert.equal(starts(space.dir).length, 0);
 });
 
 test("a payload carrying its own closing marker cannot be fenced", () => {
@@ -300,7 +265,7 @@ test("a payload carrying its own closing marker cannot be fenced", () => {
   const result = run(space);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /closing marker/);
-  assert.equal(calls(space.dir).length, 0);
+  assert.equal(starts(space.dir).length, 0);
 });
 
 test("a template variable with no value is refused", () => {
@@ -316,10 +281,10 @@ test("a template variable with no value is refused", () => {
 
 test("--min-bytes catches a request that composed to almost nothing", () => {
   const space = workspace();
-  const result = run(space, ["--min-bytes", "100000"]);
+  const result = run(space, { extra: ["--min-bytes", "100000"] });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /below the 100000/);
-  assert.equal(calls(space.dir).length, 0);
+  assert.equal(starts(space.dir).length, 0);
 });
 
 test("--slots is required, so concurrency control cannot silently vanish", () => {
@@ -328,105 +293,142 @@ test("--slots is required, so concurrency control cannot silently vanish", () =>
     bridge, "--template", path.join(space.dir, "template.md"), "--var", "NAME=w",
     "--fence", `DIFF=${path.join(space.dir, "payload.diff")}`,
     "--schema", path.join(space.dir, "schema.json"), "--out", path.join(space.dir, "r.json"),
-    "--model", "m1", "--effort", "high", "--cd", path.join(space.dir, "repo")
+    "--model", MODEL, "--effort", EFFORT, "--cd", path.join(space.dir, "repo")
   ], { encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /--slots is required/);
 });
 
-test("a schema-invalid answer is retried once with a corrective note", () => {
+// The terminal ends that happen before Codex is anywhere in sight. A call that
+// cannot compose its request never reaches the loop where the refusals live, and
+// ship.md documents exactly the re-dispatch that makes what it leaves behind
+// countable: step 6 re-dispatches a missing lens "against the same candidate",
+// onto a path that is usually already there.
+test("a request that cannot be composed clears the artifact an earlier run left at --out", () => {
   const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "invalid-then-ok" });
+  withEarlierArtifact(space);
+  fs.rmSync(path.join(space.dir, "payload.diff"));
+  const result = run(space);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /The diff section is missing/);
+  assert.equal(starts(space.dir).length, 0, "a call that composed no request still reached Codex");
+  assertCleared(space, result, "a request that was never composed");
+});
+
+// The slot is held by this test process rather than by a sibling bridge, so the
+// holder is unmistakably live and the wait is not shortened by a reclaim;
+// `TAGTEAM_LOCK_WAIT_TIMEOUT_MS` is what keeps the wait to a second.
+test("a call that never gets a slot clears the artifact an earlier run left at --out", async () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const held = await acquireSlot(path.join(space.dir, "slots", ".codex-slots"), 1);
+  try {
+    const result = run(space, { extra: ["--max-concurrent", "1"], env: { TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1000" } });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /execution slot/);
+    assert.equal(starts(space.dir).length, 0, "a call that never got a slot still reached Codex");
+    assertCleared(space, result, "a call that never got a slot");
+  } finally {
+    held.release();
+  }
+});
+
+// --- schema retries ---
+
+const answerInvalid = (fixture) => {
+  fixture.steps.find((step) => step.on === "turn/start").send
+    .find((message) => message.method === "turn/completed").params.turn.items[0].text = '{"ok":"yes"}';
+};
+const invalidAnswer = () => changedFixture("success", "the answer is not schema-valid.", answerInvalid);
+
+test("a schema-invalid answer is retried once, as a new call, with a corrective note", () => {
+  const space = workspace();
+  const result = run(space, { fixture: [invalidAnswer(), "success"] });
   assert.equal(result.status, 0, result.stderr);
-  const attempts = execs(space.dir);
-  assert.equal(attempts.length, 2);
-  assert.match(attempts[1].prompt, /did not produce JSON matching the required schema/);
-  assert.deepEqual(JSON.parse(result.stdout).result, { verdict: "ok", notes: ["second"] });
+  assert.equal(starts(space.dir).length, 2, "each attempt is its own server");
+  const turns = requests(space.dir, "turn/start");
+  assert.equal(turns.length, 2);
+  assert.match(turns[1].params.input[0].text, /did not produce JSON matching the required schema/);
+  assert.equal(requests(space.dir, "thread/start").length, 2, "the retry reused the failed attempt's thread");
+  assert.deepEqual(JSON.parse(result.stdout).result, { ok: true });
 });
 
-test("two invalid answers fail without leaving an artifact behind", () => {
+test("two invalid answers fail, and take an earlier good run's artifact and sidecar with them", () => {
   const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "always-invalid" });
+  withEarlierArtifact(space);
+  const result = run(space, { fixture: invalidAnswer() });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /after 2 attempts/);
-  assert.equal(execs(space.dir).length, 2);
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false);
+  assert.match(result.stderr, /did not produce a valid artifact after 2 attempts/);
+  assert.equal(starts(space.dir).length, 2);
+  assertCleared(space, result, "two invalid answers");
 });
 
-// The same state a fresh workspace cannot show, for the end that is not a
-// refusal: the retries run out, the attempt files are cleaned up, and the
-// earlier dispatch's artifact is still sitting at --out for
-// collect-findings.mjs to read as this candidate's review.
-test("an exhausted retry takes an earlier good run's artifact and sidecar with it", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
-
-  const result = run(space, [], { FAKE_CODEX_MODE: "always-invalid" });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /after 2 attempts/);
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
-    "the earlier artifact survived two invalid answers");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
-    "the earlier sidecar survived two invalid answers");
-  assert.match(result.stderr, /were removed so nothing later can count them/,
-    "the exhausted retry does not say what became of what was at --out");
-});
+// --- provider failures ---
 
 // A provider failure is not a bad answer, and reporting it as one costs a second
-// call and tells a person the wrong thing to fix. The bytes the fake emits here
-// are the ones codex-cli 0.148.0-alpha.21 emitted against an account that could
-// not use the model it was asked for: on stdout, with stderr empty.
+// call and tells a person the wrong thing to fix.
 test("a model this account cannot use ends the call on the first attempt, in the provider's own words", () => {
   const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "unusable-model" });
+  withEarlierArtifact(space);
+  const result = run(space, { fixture: "unusable-model" });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /model m1/, "the refusal does not name the model that was asked for");
-  assert.match(result.stderr, /high effort/, "the refusal does not name the effort");
+  assert.match(result.stderr, new RegExp(`model ${MODEL}`), "the refusal does not name the model that was asked for");
+  assert.match(result.stderr, /low effort/, "the refusal does not name the effort");
   assert.match(result.stderr, /--model/, "the refusal does not name the flag that supplies the model");
-  assert.match(result.stderr, /is not supported when using Codex with a ChatGPT account/,
-    "the refusal does not carry what the provider actually said");
-  // The assertion that separates a refusal from a schema retry: a model this
-  // account may not use will not become usable on a second call.
-  assert.equal(execs(space.dir).length, 1, "an unusable model was retried");
-  assert.ok(!/after 2 attempts/.test(result.stderr), "a provider failure was reported as a schema failure");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the refused call left an artifact behind");
+  assert.match(result.stderr, /is not supported when using Codex with a ChatGPT account\."\}\}\n$/,
+    "the refusal does not end on what the provider actually said");
+  assert.equal(starts(space.dir).length, 1, "an unusable model was retried");
+  assert.doesNotMatch(result.stderr, /after 2 attempts/, "a provider failure was reported as a schema failure");
+  assertCleared(space, result, "an unusable model");
 });
 
-// The state a fresh workspace cannot show: a lens re-dispatched into a round it
-// already wrote into. The provider turning the second call away leaves the first
-// call's artifact where it was, and collect-findings.mjs reads that file without
-// consulting the sidecar, so the refused dispatch would count as a review.
-test("an unusable model clears the artifact and sidecar an earlier good run left at --out", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
+// The trap. A `warning` is an advisory that a run which goes fine sends too, and
+// this one is worded like an unusable model.
+const WARNING = { method: "warning", params: { message: "Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues." } };
+const addWarning = (fixture) => {
+  fixture.steps.find((step) => step.on === "turn/start").send.splice(1, 0, WARNING);
+};
 
-  const result = run(space, [], { FAKE_CODEX_MODE: "unusable-model" });
-  assert.equal(result.status, 1, "the re-dispatch should have refused");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived an unusable model");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived an unusable model");
-  assert.match(result.stderr, /were removed so nothing later can count them/,
-    "the refusal does not say what became of what was at --out");
-});
-
-// The trap. An `item.completed` whose `item.type` is "error" is an advisory, and
-// a run that succeeds emits them too. Matching error-shaped things anywhere in
-// the stream turns this notice into a terminal refusal.
-test("an advisory error item cannot refuse a run, however much it sounds like an unusable model", () => {
+test("an advisory warning refuses nothing, however much it sounds like an unusable model", () => {
   const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "advisory-item" });
+  const fine = run(space, { fixture: changedFixture("success", "an advisory warning during the turn.", addWarning) });
+  assert.equal(fine.status, 0, `a warning refused a run that went fine: ${fine.stderr}`);
+  assert.equal(artifactExists(space.dir), true);
+  assert.equal(fine.stderr, "");
+
+  const invalid = workspace();
+  const both = changedFixture("success", "an advisory warning during the turn, and an answer that is not schema-valid.", (fixture) => {
+    answerInvalid(fixture);
+    addWarning(fixture);
+  });
+  const result = run(invalid, { fixture: both });
   assert.equal(result.status, 1);
-  assert.equal(execs(space.dir).length, 2, "an advisory notice stopped the schema retry");
-  assert.match(result.stderr, /after 2 attempts/, "an advisory notice was reported as a provider failure");
+  assert.equal(starts(invalid.dir).length, 2, "a warning stopped the schema retry");
+  assert.match(result.stderr, /after 2 attempts/, "a warning was reported as a provider failure");
 });
 
-test("a failure with no name here still says what the provider said", () => {
+test("a schema the API refuses takes the two-attempt path, quoting Codex", () => {
   const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "unrecognised-failure" });
-  assert.equal(execs(space.dir).length, 2, "an unrecognised failure was not retried");
-  assert.match(result.stderr, /upstream connect error/,
-    "the reported failure carries nothing of what the provider said");
+  const result = run(space, { fixture: "refused-schema" });
+  assert.equal(result.status, 1);
+  assert.equal(starts(space.dir).length, 2, "an unrecognised failure was not retried");
+  assert.match(result.stderr, /did not produce a valid artifact after 2 attempts: the turn ended failed\./);
+  assert.match(result.stderr, /What Codex said: .*invalid_json_schema/, "the failure carries nothing of what the provider said");
+});
+
+test("a server that exits mid-turn takes the two-attempt path, quoting what it said", () => {
+  const exited = workspace();
+  const result = run(exited, { fixture: "exits-mid-turn" });
+  assert.equal(result.status, 1);
+  assert.equal(starts(exited.dir).length, 2);
+  assert.match(result.stderr, /after 2 attempts: the Codex server exited with code 101 during turn\./);
+  assert.match(result.stderr, /What Codex said: thread main panicked[\s\S]*synthetic panic/);
+
+  const killed = workspace();
+  const signalled = run(killed, { fixture: "killed-mid-turn" });
+  assert.equal(signalled.status, 1);
+  assert.equal(starts(killed.dir).length, 2);
+  assert.match(signalled.stderr, /after 2 attempts: the Codex server exited on SIGKILL during turn\./);
 });
 
 // The state the bridge would have written five hours ago, at the path it reads
@@ -435,78 +437,242 @@ test("a failure with no name here still says what the provider said", () => {
 // a hard-coded digest would stop matching in silence, and a seed that does not
 // match is a call that waits.
 function seedExhaustedQuota(dir) {
-  const key = createHash("sha256").update("m1\u0000high").digest("hex").slice(0, 32);
+  const key = createHash("sha256").update(`${MODEL}\u0000${EFFORT}`).digest("hex").slice(0, 32);
   const quota = path.join(dir, "slots", ".quota");
   fs.mkdirSync(quota, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(quota, `${key}.json`), JSON.stringify({ firstDetectedAt: Date.now() - 5 * 60 * 60_000 }));
 }
 
-test("an exhausted quota reaches the wait and its four-hour ceiling", () => {
-  const space = workspace();
-  seedExhaustedQuota(space.dir);
-  const result = run(space, [], { FAKE_CODEX_MODE: "quota" }, { timeout: 60_000 });
-  assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
-  assert.match(result.stderr, /quota did not clear within four hours for m1\/high/,
-    "an exhausted quota did not reach the four-hour ceiling");
-  assert.ok(!/after 2 attempts/.test(result.stderr), "a quota failure was reported as a schema failure");
-  assert.equal(execs(space.dir).length, 1, "a quota that had already run out was retried");
+// The only quota evidence anyone has is `429 rate limit reached; retry-after: 1`
+// on stderr, from `codex exec`. Nobody can provoke an exhausted quota on demand,
+// so where an app-server puts it has not been seen: these guard the code paths,
+// one per place it could arrive, and are not evidence about Codex.
+const quotaOnStderr = () => changedFixture("killed-mid-turn", "the server writes a rate-limit line on stderr before it goes.", (fixture) => {
+  const send = fixture.steps.find((step) => step.on === "turn/start").send;
+  send.splice(send.length - 1, 0, { $stderr: "429 rate limit reached; retry-after: 1\n" });
+});
+const QUOTA_MESSAGE = JSON.stringify({ type: "error", status: 429, error: { type: "usage_limit_reached", message: "You've hit your usage limit." } });
+const quotaOnTurn = () => changedFixture("unusable-model", "the provider's message is an exhausted usage limit.", (fixture) => {
+  for (const message of fixture.steps.find((step) => step.on === "turn/start").send) {
+    if (message.method === "error") message.params.error.message = QUOTA_MESSAGE;
+    if (message.method === "turn/completed") message.params.turn.error.message = QUOTA_MESSAGE;
+  }
 });
 
-// Be honest about what this one shows. The test above is pinned to the only
-// quota evidence anyone has: `429 rate limit reached; retry-after: 1` on stderr.
-// Nobody can provoke an exhausted quota on demand, so nobody has seen what
-// `codex exec --json` emits on stdout when one runs out -- this fixture is
-// written to match the implementation's assumption, and a fixture written to
-// match the implementation cannot show that the stdout half fires live. It
-// guards the code path; it is not evidence about the CLI. That is why the token
-// list was only ever extended, and why the stderr path above stays asserted.
-test("a quota signal carried on stdout reaches the same wait", () => {
-  const space = workspace();
-  seedExhaustedQuota(space.dir);
-  const result = run(space, [], { FAKE_CODEX_MODE: "quota-stdout" }, { timeout: 60_000 });
-  assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
-  assert.match(result.stderr, /quota did not clear within four hours for m1\/high/,
-    "a quota reported on stdout did not reach the four-hour ceiling");
-  assert.ok(!/after 2 attempts/.test(result.stderr), "a quota failure was reported as a schema failure");
-  assert.equal(execs(space.dir).length, 1, "a quota that had already run out was retried");
-});
+for (const [where, fixture] of [["on stderr", quotaOnStderr], ["on the failed turn", quotaOnTurn]]) {
+  test(`an exhausted quota reported ${where} reaches the wait and its four-hour ceiling`, () => {
+    const space = workspace();
+    seedExhaustedQuota(space.dir);
+    const result = run(space, { fixture: fixture(), spawnOptions: { timeout: 60_000 } });
+    assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`quota did not clear within four hours for ${MODEL}/${EFFORT}`));
+    assert.doesNotMatch(result.stderr, /after 2 attempts/, "a quota failure was reported as a schema failure");
+    assert.equal(starts(space.dir).length, 1, "a quota that had already run out was retried");
+  });
+}
 
-// The ceiling is terminal, and a terminal end owes --out what the refusals owe
-// it: an earlier dispatch's artifact left in place is one a later command counts
-// as this candidate's review.
 test("a quota that never clears takes the earlier run's artifact and sidecar with it", () => {
   const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
-
+  withEarlierArtifact(space);
   // Seeded after the good run, which removes the quota state it finds.
   seedExhaustedQuota(space.dir);
-  const result = run(space, [], { FAKE_CODEX_MODE: "quota" }, { timeout: 60_000 });
+  const result = run(space, { fixture: quotaOnStderr(), spawnOptions: { timeout: 60_000 } });
   assert.equal(result.status, 1, `the call did not end at the ceiling: ${result.stderr}`);
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived an exhausted quota");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived an exhausted quota");
-  assert.match(result.stderr, /were removed so nothing later can count them/,
-    "the abort does not say what became of what was at --out");
+  assertCleared(space, result, "an exhausted quota");
 });
+
+// --- configuration errors ---
+
+// Decided by where it arrived, never by its words: each of these quotes text the
+// word matching reads as an exhausted quota ("429") or an unusable model ("does
+// not exist"), so a bridge that classified first would wait or refuse wrongly.
+const configurationErrors = [
+  ["at thread start", () => changedFixture("configuration-error-thread-start", "the configuration error quotes words the classifier matches.", (fixture) => {
+    fixture.steps.find((step) => step.on === "thread/start").send[0].error.message =
+      "failed to load configuration: /codex-home/config.toml:3:1: the profile `429` does not exist";
+  }), "failed to load configuration: /codex-home/config.toml:3:1: the profile `429` does not exist"],
+  ["at start-up", () => "configuration-error-startup", 'CODEX_HOME points to "/codex-home", but that path does not exist'],
+  ["at start-up, quoting a 429", () => changedFixture("configuration-error-startup", "the start-up error quotes a 429.", (fixture) => {
+    fixture.steps[0].send[0].$stderr = "Error: unknown configuration field `retry_429` in -c/--config override\n";
+  }), "unknown configuration field `retry_429` in -c/--config override"]
+];
+
+for (const [where, fixture, said] of configurationErrors) {
+  test(`a configuration error ${where} ends the call after one start, ending on Codex's words`, () => {
+    const space = workspace();
+    withEarlierArtifact(space);
+    const result = run(space, { fixture: fixture(), spawnOptions: { timeout: 60_000 } });
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(starts(space.dir).length, 1, "a configuration error was retried");
+    assert.ok(result.stderr.trimEnd().endsWith(`What Codex said: ${said}`), `the message does not end on Codex's words: ${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /unavailable|quota|usage limit|after 2 attempts/,
+      "the configuration error was classified by its words");
+    assert.equal(result.stderr.trim().split("\n").length, 1, "the account is not one line");
+    assertCleared(space, result, "a configuration error");
+  });
+}
+
+// --- timeout ---
+
+test("a hung server is terminal at the timeout, clears --out, and leaves no fake process running", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const started = Date.now();
+  const result = run(space, { fixture: "ignores-interrupt", extra: ["--timeout-sec", "1"] });
+  const elapsed = Date.now() - started;
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /exceeded its 1s timeout/);
+  // Retrying a timeout would spend the same wall clock again to learn the same
+  // thing, so there is exactly one attempt.
+  assert.equal(starts(space.dir).length, 1);
+  assert.ok(elapsed < 20_000, `the timeout did not take effect (${elapsed}ms)`);
+  assertCleared(space, result, "a timeout");
+
+  // The bridge's exit code proves nothing about what it left behind; the pids do.
+  const pids = fs.readFileSync(path.join(space.dir, "server-pids"), "utf8").trim().split("\n").map(Number);
+  const grandchildren = received(space.dir).filter((entry) => Object.hasOwn(entry, "grandchild")).map((entry) => entry.grandchild);
+  assert.ok(grandchildren.length > 0, "the fake started no grandchild to check");
+  for (const pid of [...pids, ...grandchildren]) assert.equal(alive(pid), false, `process ${pid} outlived the bridge`);
+});
+
+// --- what Codex reported it ran as ---
+
+test("an effort Codex reports differently refuses the call, names what Codex reported, and clears --out", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const result = run(space, { effort: "high" });
+  assert.equal(result.status, 1, "a mis-routed run was allowed to succeed");
+  assert.match(result.stderr, /Codex ran at low effort but the request asked for high\./);
+  assert.match(result.stderr, new RegExp(`${MODEL} at "low", Codex ${VERSION.replace(/\./g, "\\.")}`),
+    "the refusal does not name what Codex reported");
+  assert.equal(starts(space.dir).length, 1);
+  assertCleared(space, result, "an effort refusal");
+});
+
+// The comparison is trimmed and case-folded deliberately, and this is the only
+// test that reaches the fold. Delete `.trim().toLocaleLowerCase()` from
+// `sameEffort` and this is what fails.
+test("an effort reported in a different case, with padding, is the effort that was asked for", () => {
+  const space = workspace();
+  const fixture = changedFixture("success", "the effort is reported in another case, padded.", (body) => {
+    body.steps.find((step) => step.on === "thread/read").send[0].result.thread.reasoningEffort = " LOW ";
+  });
+  const result = run(space, { fixture });
+  assert.equal(result.status, 0, `an effort reported as " LOW " refused the call: ${result.stderr}`);
+  assert.equal(sidecar(space.dir).routing.observed.effort, " LOW ", "the effort was not recorded exactly as Codex reported it");
+});
+
+const threadStart = (fixture) => fixture.steps.find((step) => step.on === "thread/start").send[0].result;
+const threadRead = (fixture) => fixture.steps.find((step) => step.on === "thread/read").send[0].result.thread;
+
+// Nothing in the tree matches model names for a decision: a configured name
+// legitimately prefixes another model's. A disagreement is recorded, said once,
+// and that is all — for the sandbox, the network and the approval policy too.
+const disagreements = [
+  ["model", (fixture) => { threadRead(fixture).model = "codex-auto-review"; }, "codex-auto-review",
+    /Codex answered as model codex-auto-review, while the request asked for gpt-5\.6-sol\. Recorded; nothing was blocked\./],
+  ["sandbox", (fixture) => { threadStart(fixture).sandbox.type = "workspaceWrite"; }, "workspaceWrite",
+    /Codex ran under the workspaceWrite sandbox rather than readOnly\. Recorded; nothing was blocked\./],
+  ["networkAccess", (fixture) => { threadStart(fixture).sandbox.networkAccess = true; }, true,
+    /Codex ran with its network open \(networkAccess true\) rather than closed\. Recorded; nothing was blocked\./],
+  ["approvalPolicy", (fixture) => { threadStart(fixture).approvalPolicy = "onRequest"; }, "onRequest",
+    /Codex ran under the onRequest approval policy rather than never\. Recorded; nothing was blocked\./]
+];
+
+for (const [field, change, value, line] of disagreements) {
+  test(`a ${field} Codex reports differently is recorded, said once, and blocks nothing`, () => {
+    const space = workspace();
+    const result = run(space, { fixture: changedFixture("success", `${field} reported differently.`, change) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(artifactExists(space.dir), true, "a disagreement stopped the artifact being written");
+    assert.match(result.stderr, line);
+    assert.equal(result.stderr.trim().split("\n").length, 1, `more than one line was said: ${result.stderr}`);
+    assert.doesNotMatch(result.stderr, new RegExp(TRIGGER), "a disagreement was reported as an absence");
+    assert.deepEqual(sidecar(space.dir).routing.observed[field], value);
+    assert.equal(sidecar(space.dir).routing.observedReason, null);
+  });
+}
+
+// Absence is not disagreement, for every field. A release that stops reporting
+// one lands here — asking a person — and never in the refusing path; and today's
+// silent pass for a missing model or sandbox is gone.
+const absences = [
+  ["model", (fixture) => { delete threadRead(fixture).model; }, /its model/],
+  ["effort", (fixture) => { delete threadRead(fixture).reasoningEffort; }, /its effort/],
+  ["codexVersion", (fixture) => { delete threadRead(fixture).cliVersion; }, /its version/],
+  ["sandbox", (fixture) => { delete threadStart(fixture).sandbox.type; }, /its sandbox/],
+  ["networkAccess", (fixture) => { delete threadStart(fixture).sandbox.networkAccess; }, /whether its network was open/],
+  ["approvalPolicy", (fixture) => { delete threadStart(fixture).approvalPolicy; }, /its approval policy/],
+  ["instructionFiles", (fixture) => { delete threadStart(fixture).instructionSources; }, /which instruction files it read/]
+];
+
+for (const [field, change, named] of absences) {
+  test(`a ${field} Codex did not report succeeds with a reason and ends on the question's trigger`, () => {
+    const space = workspace();
+    const result = run(space, { fixture: changedFixture("success", `${field} not reported.`, change) });
+    assert.equal(result.status, 0, `a missing ${field} refused the call: ${result.stderr}`);
+    assert.equal(artifactExists(space.dir), true);
+    const routing = sidecar(space.dir).routing;
+    assert.equal(routing.observedReason, null, "a partly read routing was recorded as unread");
+    assert.equal(typeof routing.observed[field]?.notObserved, "string", `${field} carries no reason it was not observed`);
+    assert.ok(routing.observed[field].notObserved.length > 0);
+    for (const [other] of absences.filter(([name]) => name !== field)) {
+      assert.ok(!Object.hasOwn(Object(routing.observed[other]), "notObserved"), `${other} was lost along with ${field}`);
+    }
+    assert.match(result.stderr, named, "the question does not name the field");
+    assert.ok(result.stderr.endsWith(`${TRIGGER}.\n`), `stderr does not end on the trigger: ${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /nothing was blocked/, `an absent ${field} was reported as a disagreement`);
+    assert.deepEqual(JSON.parse(result.stdout).routing, routing);
+  });
+}
+
+test("an empty list of instruction files is a reading, not an absence", () => {
+  const space = workspace();
+  const result = run(space, { fixture: changedFixture("success", "no instruction files.", (fixture) => { threadStart(fixture).instructionSources = []; }) });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(sidecar(space.dir).routing.observed.instructionFiles, []);
+  assert.equal(result.stderr, "");
+});
+
+// The runner returns the last 700 characters of stderr, and the commands react
+// to the trigger in them. Instruction-file paths are long, so they never go
+// there, and the trigger comes after any disagreement.
+test("with a disagreement and an absence together the trigger is last, and no instruction file reaches stderr", () => {
+  const space = workspace();
+  const fixture = changedFixture("success-agents-md", "a different model, and no version.", (body) => {
+    threadRead(body).model = "codex-auto-review";
+    delete threadRead(body).cliVersion;
+  });
+  const result = run(space, { fixture });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stderr.trim().split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /answered as model codex-auto-review/);
+  assert.ok(lines[1].endsWith(`${TRIGGER}.`));
+  assert.ok(result.stderr.length <= 700 || result.stderr.slice(-700).includes(TRIGGER));
+  assert.doesNotMatch(result.stderr, /AGENTS\.md/, "an instruction file path reached stderr");
+  assert.deepEqual(sidecar(space.dir).routing.observed.instructionFiles, ["/codex-home/AGENTS.md", "/work/repo/AGENTS.md"]);
+});
+
+// --- the slots root ---
 
 // The --slots root is a directory inside `.tagteam/`, which a project commits
 // from, so everything a run leaves there has to be covered by the managed
 // .gitignore block. This is checked against Git rather than against a path
-// string, because a path-shape assertion is the same kind of claim the stale
-// probe already made. Both roots the plugin passes are checked: a plan directory
-// for a plan review, and the repository's own `.tagteam/` for a ship, whose
-// slots bound Codex across every ship in the repository at once.
-for (const root of [".tagteam/plans/slug", ".tagteam"]) {
-  test(`a run leaves nothing untracked-and-unignored under a slots root at ${root}`, () => {
+// string. Both roots the plugin passes are checked: a plan directory for a plan
+// review, and the repository's own `.tagteam/` for a ship, whose slots bound
+// Codex across every ship in the repository at once.
+for (const slotsAt of [".tagteam/plans/slug", ".tagteam"]) {
+  test(`a run leaves nothing untracked-and-unignored under a slots root at ${slotsAt}`, () => {
     const space = workspace();
     const repo = path.join(space.dir, "repo");
-    const slots = path.join(repo, root);
+    const slots = path.join(repo, slotsAt);
     fs.mkdirSync(slots, { recursive: true });
     assert.deepEqual(ensureGitignore(repo).notIgnored, []);
 
     // --out stays in the workspace outside the repository, so what remains under
     // the slots root is bookkeeping only.
-    const result = run(space, ["--slots", slots]);
+    const result = run(space, { extra: ["--slots", slots] });
     assert.equal(result.status, 0, result.stderr);
 
     const left = [];
@@ -529,295 +695,3 @@ for (const root of [".tagteam/plans/slug", ".tagteam"]) {
     assert.deepEqual(fs.readdirSync(slots).filter((entry) => entry.startsWith("slot-")), []);
   });
 }
-
-test("a hung Codex is killed at the timeout, and the timeout is terminal", () => {
-  const space = workspace();
-  const started = Date.now();
-  const result = run(space, ["--timeout-sec", "1"], { FAKE_CODEX_MODE: "hang" });
-  const elapsed = Date.now() - started;
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /exceeded its 1s timeout/);
-  // Retrying a timeout would spend the same wall clock again to learn the same
-  // thing, so there is exactly one attempt.
-  assert.equal(execs(space.dir).length, 1);
-  assert.ok(elapsed < 20_000, `the timeout did not take effect (${elapsed}ms)`);
-});
-
-// The terminal ends that happen before Codex is anywhere in sight. A call that
-// cannot compose its request never reaches the loop where the refusals live, and
-// ship.md documents exactly the re-dispatch that makes what it leaves behind
-// countable: step 6 re-dispatches a missing lens "against the same candidate",
-// onto a path that is usually already there.
-test("a request that cannot be composed clears the artifact an earlier run left at --out", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
-
-  fs.rmSync(path.join(space.dir, "payload.diff"));
-  const result = run(space);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /The diff section is missing/);
-  assert.equal(execs(space.dir).length, 1, "a call that composed no request still reached Codex");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
-    "the earlier artifact survived a request that was never composed");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
-    "the earlier sidecar survived a request that was never composed");
-  assert.match(result.stderr, /were removed so nothing later can count them/,
-    "the refusal does not say what became of what was at --out");
-});
-
-// The other end that is thrown before the first `try` inside the call: the slot
-// this bridge bounds its concurrency with. The slot is held by this test process
-// rather than by a sibling bridge, so the holder is unmistakably live and the
-// wait is not shortened by a reclaim; `TAGTEAM_LOCK_WAIT_TIMEOUT_MS` is what
-// keeps the wait to a second.
-test("a call that never gets a slot clears the artifact an earlier run left at --out", async () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
-
-  const held = await acquireSlot(path.join(space.dir, "slots", ".codex-slots"), 1);
-  try {
-    const result = run(space, ["--max-concurrent", "1"], { TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1000" });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /execution slot/);
-    assert.equal(execs(space.dir).length, 1, "a call that never got a slot still reached Codex");
-    assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
-      "the earlier artifact survived a call that never got a slot");
-    assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
-      "the earlier sidecar survived a call that never got a slot");
-    assert.match(result.stderr, /were removed so nothing later can count them/,
-      "the refusal does not say what became of what was at --out");
-  } finally {
-    held.release();
-  }
-});
-
-// A timeout is terminal, and terminal ends owe --out what the refusals owe it.
-// The bridge is dispatched at the same --out on a re-run, so a lens whose second
-// call hangs would otherwise have its first call's artifact counted as the
-// review of a candidate that answered nothing.
-test("a timeout takes an earlier good run's artifact and sidecar with it", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
-
-  const result = run(space, ["--timeout-sec", "1"], { FAKE_CODEX_MODE: "hang" });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /exceeded its 1s timeout/);
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false,
-    "the earlier artifact survived a timeout");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false,
-    "the earlier sidecar survived a timeout");
-  assert.match(result.stderr, /were removed so nothing later can count them/,
-    "the timeout does not say what became of what was at --out");
-});
-
-test("the sidecar records the model, effort and sandbox Codex itself wrote down", () => {
-  const space = workspace();
-  const result = run(space);
-  assert.equal(result.status, 0, result.stderr);
-  const record = sidecar(space.dir);
-  // What was asked for stays where it was, at the top level.
-  assert.equal(record.model, "m1", "the sidecar no longer records the requested model");
-  assert.equal(record.effort, "high", "the sidecar no longer records the requested effort");
-  assert.equal(record.sandbox, "read-only", "the sidecar no longer records the requested sandbox");
-
-  assert.equal(record.routing.ran, true, "the sidecar does not say Codex ran");
-  assert.equal(record.routing.observedReason, null, "a clean run recorded a reason it could not be observed");
-  assert.equal(record.routing.observed.model, "m1", "the observed model is not the one the rollout recorded");
-  assert.equal(record.routing.observed.effort, "high", "the observed effort is not the one the rollout recorded");
-  assert.equal(record.routing.observed.sandbox, "read-only", "the observed sandbox is not the one the rollout recorded");
-  assert.match(record.routing.observed.sessionId, /^[0-9a-f-]{36}$/, "no session id was recorded");
-  assert.match(record.routing.observed.rollout, /rollout-.*\.jsonl$/, "no rollout path was recorded");
-  assert.deepEqual(record.routing.sessions, [record.routing.observed.sessionId], "the session the call created is not in the record");
-});
-
-test("the same routing record reaches stdout, so a caller need not open the sidecar", () => {
-  const space = workspace();
-  const result = run(space);
-  assert.equal(result.status, 0, result.stderr);
-  const printed = JSON.parse(result.stdout);
-  assert.equal(printed.routing.ran, true, "the printed line does not say Codex ran");
-  assert.notEqual(printed.routing.observed, null, "the printed line carries no observation");
-  assert.deepEqual(printed.routing, sidecar(space.dir).routing, "the printed routing and the recorded routing disagree");
-});
-
-test("an observed effort that disagrees with the request refuses the call", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "effort-drift" });
-  assert.equal(result.status, 1, "a mis-routed run was allowed to succeed");
-  assert.match(result.stderr, /ran at low effort/, "the refusal does not name the effort Codex ran at");
-  assert.match(result.stderr, /asked for high/, "the refusal does not name the effort that was requested");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the refused call left an artifact behind");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the refused call left a sidecar behind");
-});
-
-test("a refusal removes an artifact and sidecar an earlier good run had left at --out", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0, "the first run should have written an artifact");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true);
-
-  // A Codex lens re-dispatched into the same round overwrites those files as a
-  // set. If the refusal only skipped the rename, collect-findings.mjs would
-  // still read the first dispatch's artifact and count it as this run's review.
-  const result = run(space, [], { FAKE_CODEX_MODE: "effort-drift" });
-  assert.equal(result.status, 1, "the re-dispatch should have refused");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), false, "the earlier artifact survived a refusal");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json.request.json")), false, "the earlier sidecar survived a refusal");
-});
-
-test("a refusal keeps the session Codex wrote, because that file is the only evidence", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "effort-drift" });
-  assert.equal(result.status, 1);
-  assert.equal(rollouts(space.dir).length, 1, "the refused run's rollout was removed");
-  assert.deepEqual(deletions(space.dir), [], "a refused run invoked codex delete");
-});
-
-// Nothing in the tree matches model names for a decision: a configured name
-// legitimately prefixes another model's, and most real sessions record a name
-// that extends no alias at all. It is recorded, said once, and that is all.
-test("an observed model that disagrees with the request is recorded and blocks nothing", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "model-drift" });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).result, { verdict: "ok", notes: ["fake"] }, "a valid artifact was not returned");
-  assert.match(result.stderr, /answered as model codex-auto-review/, "stderr does not name the model Codex answered as");
-  assert.match(result.stderr, /asked for m1/, "stderr does not name the model the request asked for");
-  const record = sidecar(space.dir).routing;
-  assert.equal(record.observed.model, "codex-auto-review", "the observed model was not recorded");
-  assert.equal(record.observed.effort, "high", "the run was otherwise not a matching one");
-  assert.equal(record.sessionsKept, false, "a run that went fine kept its sessions");
-  assert.deepEqual(rollouts(space.dir), [], "a run that went fine left its session on disk");
-});
-
-test("a good run removes its session through codex delete --force", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0);
-  const removals = deletions(space.dir);
-  assert.equal(removals.length, 1, "a good run did not remove exactly one session");
-  assert.deepEqual(removals[0].argv.slice(0, 2), ["delete", "--force"], "the removal did not go through `codex delete --force`");
-  assert.match(removals[0].argv[2], /^[0-9a-f-]{36}$/, "the removal named something other than a uuid");
-  assert.equal(rollouts(space.dir).length, 0, "the session Codex wrote is still on disk");
-});
-
-test("a retried call removes every session it created, not only the last one", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "invalid-then-ok" });
-  assert.equal(result.status, 0, result.stderr);
-  const record = sidecar(space.dir).routing;
-  assert.equal(record.sessions.length, 2, "the two attempts did not both record a session");
-  const removed = deletions(space.dir).map((call) => call.argv[2]);
-  assert.deepEqual([...removed].sort(), [...record.sessions].sort(), "not every session the call created was removed");
-  assert.deepEqual(rollouts(space.dir), [], "a session the call created is still on disk");
-});
-
-for (const [mode, note] of [
-  ["no-thread-id", "Codex announced no session id"],
-  ["no-rollout", "Codex wrote no session file"],
-  ["no-turn-context", "the session file records no routing"]
-]) {
-  test(`routing that cannot be observed succeeds and records why (${note})`, () => {
-    const space = workspace();
-    const result = run(space, [], { FAKE_CODEX_MODE: mode });
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout).result, { verdict: "ok", notes: ["fake"] }, "a valid artifact was not returned");
-    const record = sidecar(space.dir).routing;
-    assert.equal(record.ran, true, "the record does not say Codex ran");
-    assert.equal(record.observed, null, `${mode} recorded an observation it cannot have made`);
-    assert.ok(String(record.observedReason ?? "").length > 0, `${mode} recorded no reason it could not be observed`);
-    assert.equal(record.sessionsKept, true, `${mode} did not keep its sessions`);
-    assert.match(result.stderr, /how it routed could not be confirmed/, `${mode} said nothing on stderr`);
-    assert.deepEqual(deletions(space.dir), [], `${mode} deleted the sessions it was about to ask a question about`);
-    if (mode !== "no-rollout") {
-      assert.equal(rollouts(space.dir).length, 1, `${mode} removed the only file a person could look at`);
-    }
-  });
-}
-
-// The field-rename test. A Codex release that renames, moves or drops `effort`
-// makes every rollout look like this one, and this is the assertion that keeps
-// that release out of the refusing path: absence is a question, never a
-// mismatch. Getting it backwards converts every repository on earth to manual
-// merging over a field rename.
-test("a turn_context carrying no effort is unobservable rather than a mismatch", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "no-effort" });
-  assert.equal(result.status, 0, `a missing effort field refused the call: ${result.stderr}`);
-  const record = sidecar(space.dir).routing;
-  assert.equal(record.observed, null, "a record with no effort was treated as an observation");
-  assert.ok(String(record.observedReason ?? "").length > 0, "no reason was recorded for the missing field");
-});
-
-// The comparison is trimmed and case-folded deliberately, and this is the only
-// test that reaches the fold. `HIGH` with padding around it is the effort the
-// request asked for, recorded differently -- and a byte-exact comparison would
-// refuse the call, unlink the artifact and fail the run over it, which is the one
-// outcome the spec says a recording change must never produce. Delete
-// `.trim().toLocaleLowerCase()` from `sameEffort` and this is what fails.
-test("an effort recorded in a different case, with padding, is the effort that was asked for", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "effort-case" });
-  assert.equal(result.status, 0, `an effort recorded as " HIGH " refused the call: ${result.stderr}`);
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true, "a matching run wrote no artifact");
-  const record = sidecar(space.dir).routing;
-  assert.equal(record.observed.effort, " HIGH ", "the effort was not recorded exactly as Codex wrote it");
-  assert.equal(record.observedReason, null, "a matching run recorded a reason it could not be observed");
-});
-
-// Absence is not disagreement for every field, not only for effort. A release
-// that keeps `effort` and renames `model` or `sandbox_policy` records the rest as
-// null, and the guards in `reportRouting` are what keep "Codex answered as model
-// null" off a person's terminal. This is the run that reaches them.
-test("a turn_context carrying only an effort records the rest as absent and says nothing about it", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "effort-only" });
-  assert.equal(result.status, 0, `a record carrying only an effort refused the call: ${result.stderr}`);
-  const record = sidecar(space.dir).routing;
-  assert.equal(record.observed.effort, "high", "the one field the record carried was not observed");
-  assert.equal(record.observed.model, null, "a model the record does not carry was not recorded as absent");
-  assert.equal(record.observed.sandbox, null, "a sandbox the record does not carry was not recorded as absent");
-  assert.ok(!/answered as model/.test(result.stderr), `an absent model was reported as a disagreement: ${result.stderr}`);
-  assert.ok(!/sandbox rather than/.test(result.stderr), `an absent sandbox was reported as a disagreement: ${result.stderr}`);
-});
-
-test("a session that will not delete is reported and does not fail the run", () => {
-  const space = workspace();
-  const result = run(space, [], { FAKE_CODEX_MODE: "delete-refuses" });
-  assert.equal(result.status, 0, "a failed removal turned a finished review into a failed one");
-  assert.equal(fs.existsSync(path.join(space.dir, "result.json")), true, "the artifact was not kept");
-  const id = sidecar(space.dir).routing.sessions[0];
-  assert.match(result.stderr, new RegExp(`Codex session ${id} could not be removed`), "stderr does not name the session that survived");
-});
-
-test("--dry-run and a --reuse hit observe nothing and delete nothing", () => {
-  const dry = workspace();
-  const dryRun = run(dry, ["--dry-run"]);
-  assert.equal(dryRun.status, 0, dryRun.stderr);
-  assert.equal(JSON.parse(dryRun.stdout).routing.ran, false, "a dry run claimed Codex ran");
-  assert.deepEqual(deletions(dry.dir), [], "a dry run deleted a session");
-
-  const space = workspace();
-  assert.equal(run(space).status, 0);
-  const before = fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8");
-  const removalsBefore = deletions(space.dir).length;
-
-  const reused = run(space, ["--reuse"]);
-  assert.equal(reused.status, 0, reused.stderr);
-  assert.equal(JSON.parse(reused.stdout).routing.ran, false, "a reuse hit claimed Codex ran");
-  assert.equal(deletions(space.dir).length, removalsBefore, "a reuse hit deleted a session");
-  assert.equal(fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8"), before,
-    "a reuse hit rewrote the sidecar the original run left");
-});
-
-// The harness itself: every one of these runs points Codex at a home inside its
-// own workspace, so nothing here can write into or delete out of the sessions a
-// person has on their own machine.
-test("every run in this file is pointed at a Codex home inside its workspace", () => {
-  const space = workspace();
-  assert.equal(run(space).status, 0);
-  for (const call of calls(space.dir)) {
-    assert.equal(call.home, path.join(space.dir, "codex-home"), "a call ran against a Codex home outside the workspace");
-  }
-});

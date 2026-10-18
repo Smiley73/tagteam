@@ -65,7 +65,13 @@ export const ALLOW_LIST = {
   error: { code: true, message: true },
   notifications: {
     "turn/completed": { turn: { id: true, status: true, items: [{ type: true, text: true, phase: true }], error: TURN_ERROR } },
-    "error": { error: TURN_ERROR, willRetry: true }
+    "error": { error: TURN_ERROR, willRetry: true },
+    // Read by nothing: the client drops it on arrival. Allowed so that a test
+    // can prove the advisory — "Model metadata for `<model>` not found.
+    // Defaulting to fallback metadata" — refuses nothing. No capture holds one
+    // yet; the test that sends one adds it to a real capture and labels the
+    // result as changed.
+    "warning": { message: true }
   },
   // Only ever synthetic: no real server request was seen. The client reads the
   // method and the id and nothing in the params.
@@ -190,6 +196,27 @@ export function fixtureProblems(fixture, machine = thisMachine()) {
     for (const [what, pattern] of named) if (pattern.test(text)) problems.push(`${at} holds ${what}`);
   }
   return problems;
+}
+
+/**
+ * A committed capture with one thing changed, for a scenario no real run has
+ * produced: a field Codex reported differently or not at all, a quota, an
+ * advisory. `change` edits a copy in place. The result is labelled as changed
+ * rather than observed — `synthetic: true`, and a description that opens
+ * "Changed from the <name> capture:" — and is held to `fixtureProblems` like
+ * every committed fixture. It is written to a temporary file, never into the
+ * fixture directory, and the path is returned for `FAKE_CODEX_FIXTURE`.
+ */
+export function changedFixture(name, description, change) {
+  const fixture = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, `${name}.json`), "utf8"));
+  change(fixture);
+  fixture.synthetic = true;
+  fixture.description = `Changed from the ${name} capture: ${description}`;
+  const problems = fixtureProblems(fixture);
+  if (problems.length > 0) throw new Error(`the changed ${name} capture fails the scrub:\n  ${problems.join("\n  ")}`);
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-changed-fixture-")), `${name}.json`);
+  fs.writeFileSync(file, `${JSON.stringify(fixture, null, 2)}\n`);
+  return file;
 }
 
 function pick(value, tree) {

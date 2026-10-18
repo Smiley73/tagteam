@@ -102,7 +102,8 @@ printed.
    Exit 3 means an older plugin wrote it — tell them to run `/tagteam:configure` and
    stop. No config at all: same. Show any `note:` or `warning:` line about lens
    briefs as the validator wrote it.
-4. `codex --version`. It fails: stop and say Codex is required.
+4. `node "$P/scripts/codex-preflight.mjs" version`. It exits non-zero: stop
+   and say what it printed — Codex is required, at 0.153.0 or newer.
 5. `--resume <slug>`: first see whether an earlier run left a set out:
 
    ```bash
@@ -425,10 +426,12 @@ A failed call is a failed call and is reported as one, not as this.
 `$D/work/codex-routing-ack` exists: say nothing about it and carry on.
 
 Otherwise ask once, with `AskUserQuestion`. Tell them the answer arrived and is
-valid, that tagteam could not confirm which model Codex used or how hard it was
-told to think, and that the likeliest cause is a newer Codex recording a run
-differently than this version of tagteam knows how to read. Three options: carry
-on; carry on and stop asking for the rest of this run; stop here.
+valid, that Codex did not report part of how it ran — which model it used, how
+hard it was told to think, its sandbox, network or approval policy, its version,
+or which instruction files it read; the line names which — and that the
+likeliest cause is a newer Codex reporting a run differently than this version
+of tagteam knows how to read. Three options: carry on; carry on and stop asking
+for the rest of this run; stop here.
 
 Only the middle one writes anything: `printf '' > "$D/work/codex-routing-ack"`.
 Do not describe that to them as a file, a path or a setting; it is not one.

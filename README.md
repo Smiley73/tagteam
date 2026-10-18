@@ -32,7 +32,17 @@ flowchart LR
 ## Install
 
 Requires Claude Code 2.1.301 or newer, Git, the
-[Codex CLI](https://github.com/openai/codex), and an authenticated GitHub CLI.
+[Codex CLI](https://github.com/openai/codex) 0.153.0 or newer, and an
+authenticated GitHub CLI. An older Codex is refused before a plan or a ship
+starts: every Codex call goes through `codex app-server`, and 0.153.0 is the
+first release that reports the model and effort a call actually ran at.
+`TAGTEAM_CODEX_BIN`, when set, names the Codex binary to use instead of the one
+on your PATH, and that is the one checked.
+
+Not yet verified: Windows (where ending a Codex process and everything it
+started works differently), Codex signed in with an API key or pointed at a
+custom model provider rather than a ChatGPT account, and whether a `notify` hook
+in your own Codex configuration fires on tagteam's calls.
 
 ```bash
 claude plugin marketplace add Smiley73/tagteam
@@ -286,8 +296,19 @@ does not.
 
 - Reviewers have no write or shell tools. Codex runs `read-only` and only ever
   reviews.
-- Codex runs through `codex exec --output-schema`. MCP is unsupported because its
-  tool contract cannot enforce a response schema.
+- Codex runs through `codex app-server`: one throwaway thread per call, a
+  read-only sandbox with the network closed, approvals never, and the answer
+  held to a JSON schema. MCP is unsupported because its tool contract cannot
+  enforce a response schema.
+- What Codex reports it ran as is recorded beside every answer: the model, the
+  effort, the sandbox and network, the approval policy, the Codex version, and
+  the instruction files it read. Those instruction files — your own global
+  `AGENTS.md` and the repository's — keep steering Codex by design; they are
+  recorded, not switched off. An effort other than the one asked for fails the
+  call; anything else that differs is said once and blocks nothing; anything
+  Codex did not report is asked about.
+- Codex still writes its own short-lived files under its home directory while a
+  call runs, and tagteam deletes nothing there.
 - Every gate binds to one commit; a new commit clears all of them, and every fix
   round makes one.
 - Merges use `--match-head-commit`, so what merges is the commit that was

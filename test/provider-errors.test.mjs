@@ -8,20 +8,88 @@
 // says something; only the reason is wrong, and the reason is the whole of what
 // a person acts on.
 //
-// The other half is the trap on the way there. The same failing run also emitted
-// an advisory `item.completed` whose `item.type` was "error", and a succeeding
-// run emits one just as readily, so a recogniser that matches error-shaped
-// things — or that token-matches the raw stream — refuses runs that were fine.
+// The other half is the trap on the way there. A run that went fine can carry an
+// advisory `warning` notification worded like an unusable model, so a reader
+// that matches everything Codex said refuses runs that were fine.
+//
+// The evidence is read off what the app-server client returned for 01's
+// captures, replayed by the fake app-server: a shape written to match the reader
+// would pass while the reader read nothing in production.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyProviderError, providerFailureEvidence } from "../scripts/quota-backoff.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { appServerFailureEvidence, classifyProviderError } from "../scripts/quota-backoff.mjs";
+import { runAppServerTurn } from "../scripts/lib/codex-app-server.mjs";
+import { changedFixture as changed } from "./codex-capture.mjs";
 
-// Byte for byte what codex-cli 0.148.0-alpha.21 wrote to stdout, with stderr at
-// 0 bytes, when asked for a model the account cannot use. `String.raw` because
-// the escaped inner JSON is the point: a template literal would eat the
-// backslashes and this fixture would stop being a record of anything.
-const ERROR_EVENT = String.raw`{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.\"}}"}`;
+const FAKE = path.join(import.meta.dirname, "fake-codex-app-server.mjs");
+const SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
 const SENTENCE = "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.";
+
+async function outcomeOf(fixture) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-provider-"));
+  return runAppServerTurn({
+    codexBin: FAKE, cwd, model: "gpt-5.6-sol", effort: "low", prompt: "p", outputSchema: SCHEMA, timeoutSec: 30,
+    env: { ...process.env, FAKE_CODEX_FIXTURE: fixture }
+  });
+}
+
+test("the refusal a real account got yields the provider's sentence once, and it is a model that cannot be used", async () => {
+  const outcome = await outcomeOf("unusable-model");
+  const evidence = appServerFailureEvidence(outcome);
+  assert.ok(evidence.includes(SENTENCE), `the provider's sentence is not in the evidence: ${evidence}`);
+  assert.equal(evidence.split(SENTENCE).length - 1, 1,
+    "the failed turn and the error notification that repeats it were both kept");
+  assert.equal(classifyProviderError(evidence, "codex").kind, "model-unavailable",
+    "the sentence a real account refusal produced is not recognised as an unusable model");
+});
+
+test("a refused schema is evidence, and is not mistaken for an unusable model or a quota", async () => {
+  const evidence = appServerFailureEvidence(await outcomeOf("refused-schema"));
+  assert.match(evidence, /invalid_json_schema/);
+  assert.equal(classifyProviderError(evidence, "codex").kind, "transient");
+});
+
+// The advisory. It arrives on a run that would otherwise have succeeded, and its
+// text is worse than harmless: it talks about model metadata, which is exactly
+// the vocabulary the token list matches on.
+test("an advisory warning is not evidence of anything, however much it sounds like an unusable model", async () => {
+  const fixture = changed("refused-schema", "a warning notification before the failure.", (body) => {
+    body.steps.find((step) => step.on === "turn/start").send.splice(1, 0, {
+      method: "warning",
+      params: { message: "Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues." }
+    });
+  });
+  const evidence = appServerFailureEvidence(await outcomeOf(fixture));
+  assert.doesNotMatch(evidence, /Model metadata/, "the advisory was collected as evidence of a failure");
+  assert.equal(classifyProviderError(evidence, "codex").kind, "transient");
+});
+
+test("a completed turn's answer is never evidence, and a clean run has none", async () => {
+  const outcome = await outcomeOf("success");
+  assert.equal(outcome.outcome, "completed");
+  assert.equal(appServerFailureEvidence(outcome), "");
+});
+
+test("a failed turn with no message still carries the error notifications and stderr", async () => {
+  const fixture = changed("unusable-model", "the failed turn's message removed and a line on stderr.", (body) => {
+    const send = body.steps.find((step) => step.on === "turn/start").send;
+    send.find((message) => message.method === "turn/completed").params.turn.error.message = null;
+    send.push({ $stderr: "429 rate limit reached; retry-after: 1\n" });
+  });
+  const outcome = await outcomeOf(fixture);
+  assert.equal(outcome.message, null);
+  const evidence = appServerFailureEvidence(outcome);
+  assert.ok(evidence.includes(SENTENCE), "the error notification was not read");
+  assert.ok(evidence.endsWith("429 rate limit reached; retry-after: 1"), `stderr is not the last of the evidence: ${evidence}`);
+});
+
+test("a server that exits mid-turn has its stderr read", async () => {
+  const evidence = appServerFailureEvidence(await outcomeOf("exits-mid-turn"));
+  assert.match(evidence, /synthetic panic/);
+});
 
 // The token lists as they stand, copied rather than imported. Importing them
 // would make this test agree with any rewording the source ever gets, and the
@@ -36,41 +104,6 @@ const QUOTA_TODAY = [
   "rate limit", "rate_limit", "quota", "429", "too many requests",
   "usage limit", "resets at", "retry-after"
 ];
-
-test("the error event a real refusal wrote yields the provider's sentence, and it is a model that cannot be used", () => {
-  const evidence = providerFailureEvidence(`${ERROR_EVENT}\n{"type":"turn.failed"}\n`);
-  assert.ok(evidence.includes(SENTENCE), `the provider's sentence is not in the evidence: ${evidence}`);
-  assert.equal(classifyProviderError(evidence, "codex").kind, "model-unavailable",
-    "the sentence a real account refusal produced is not recognised as an unusable model");
-});
-
-// The advisory. This one arrived on a run that would otherwise have succeeded,
-// and its text is worse than harmless: it talks about model metadata, which is
-// exactly the vocabulary the token list matches on.
-test("an error-typed item event is not a failure, however much it sounds like one", () => {
-  const advisory = JSON.stringify({
-    type: "item.completed",
-    item: { type: "error", text: "Model metadata for an invalid model could not be read. Defaulting to fallback metadata." }
-  });
-  assert.equal(providerFailureEvidence(`${advisory}\n`), "",
-    "an advisory item.completed was collected as evidence of a failure");
-});
-
-test("a turn.failed carries its nested message, and one carrying nothing is not a failure", () => {
-  const failed = JSON.stringify({ type: "turn.failed", error: { message: "stream disconnected before completion" } });
-  assert.equal(providerFailureEvidence(`${failed}\n`), "stream disconnected before completion");
-  assert.equal(providerFailureEvidence('{"type":"turn.failed"}\n'), "",
-    "a turn.failed with no message reported a failure with nothing in it");
-});
-
-// The tail is 64 KiB of a stream, so its first line is cut by construction and
-// its last one can be. Neither may throw, and neither may cost the complete
-// lines between them.
-test("a tail that starts and ends mid-line still yields the evidence between", () => {
-  const tail = `del\":\"gpt-5.1-codex\"}}\n${ERROR_EVENT}\n{"type":"turn.fai`;
-  const evidence = providerFailureEvidence(tail);
-  assert.ok(evidence.includes(SENTENCE), `a mid-line tail lost the evidence in it: ${evidence}`);
-});
 
 test("nothing that was recognised before this change stopped being recognised", () => {
   const offenders = [];
