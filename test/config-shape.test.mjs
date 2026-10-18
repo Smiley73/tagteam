@@ -37,7 +37,8 @@ const CONSUMED = [
   // example that leaves it null.
   ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
   ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec"]],
-  ["scripts/plan.mjs", ["models", "effort", "plan"]]
+  ["scripts/plan.mjs", ["models", "effort", "plan"]],
+  ["scripts/probe-codex.mjs", ["models"]]
 ];
 
 // Keys older config shapes had and the current one does not. A key that comes

@@ -1,12 +1,13 @@
 {
   "name": "tagteam-plugin",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "private": true,
   "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --test test/*.test.mjs"
+    "check": "node --test test/*.test.mjs",
+    "probe:codex": "node scripts/probe-codex.mjs"
   },
   "engines": {
     "node": ">=20"

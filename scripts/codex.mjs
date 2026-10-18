@@ -33,15 +33,15 @@ import {
   readOrCreateQuotaState
 } from "./quota-backoff.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { runAppServerTurn } from "./lib/codex-app-server.mjs";
+// What the request record says was asked for — `SANDBOX_MODE` — is what the
+// thread is asked for, and Codex reports it back in its own words: sandbox
+// `REPORTED_SANDBOX` with `networkAccess: false`. The client owns the words,
+// because they are part of what it lists as using of the protocol.
+import {
+  APPROVAL_POLICY, REPORTED_SANDBOX, SANDBOX_MODE, runAppServerTurn
+} from "./lib/codex-app-server.mjs";
 import { NOT_REPORTED, SPEND_KEY, spendHistory } from "./codex-usage.mjs";
 
-// What the request record says was asked for. The thread is asked for exactly
-// this, and Codex reports it back in its own words: sandbox `readOnly` with
-// `networkAccess: false`.
-const SANDBOX = "read-only";
-const REPORTED_SANDBOX = "readOnly";
-const APPROVAL_POLICY = "never";
 const SCHEMA_ATTEMPTS = 2;
 // A call that never started Codex has nothing to report about how Codex routed:
 // a --reuse hit and a --dry-run both answer without starting anything.
@@ -219,7 +219,8 @@ function sha256(value) {
 // Exact word, trimmed and case-folded, and nothing cleverer. Codex reports the
 // same five words the configuration uses — low, medium, high, xhigh, max — so a
 // disagreement here is a disagreement about the run, not about spelling.
-function sameEffort(observed, requested) {
+// Exported so that the contract probe compares effort exactly as the bridge does.
+export function sameEffort(observed, requested) {
   return String(observed).trim().toLocaleLowerCase() === String(requested).trim().toLocaleLowerCase();
 }
 
@@ -396,7 +397,7 @@ function requestRecord(options, prompt) {
   return {
     model: options.model,
     effort: options.effort,
-    sandbox: SANDBOX,
+    sandbox: SANDBOX_MODE,
     promptSha256: sha256(prompt),
     schemaSha256: sha256(fs.readFileSync(path.resolve(options.schema))),
     completedAt: new Date().toISOString()

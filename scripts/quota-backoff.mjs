@@ -95,8 +95,9 @@ export function classifyProviderError(text, provider = "codex") {
 // lists — `other`, `contextWindowExceeded`, `unauthorized`, `sandboxError`,
 // `badRequest` and the rest — says nothing about a quota or a model, and is no
 // verdict. No real one of these was ever seen: an exhausted quota cannot be
-// provoked on demand.
-const QUOTA_KINDS = ["usageLimitExceeded", "rateLimitExceeded"];
+// provoked on demand. Exported for the client's list of what it uses of the
+// protocol, which the contract probe checks against the installed Codex.
+export const QUOTA_KINDS = Object.freeze(["usageLimitExceeded", "rateLimitExceeded"]);
 // The error types inside a provider's message that mean the same. None was ever
 // seen either. `usage_limit_reached` is the type Codex itself looks for in a 429
 // body (it is in the codex-cli 0.163 binary, beside `UsageErrorBody`);

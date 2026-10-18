@@ -97,6 +97,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { QUOTA_KINDS } from "../quota-backoff.mjs";
 
 // The oldest Codex whose thread reports the model and the effort it ran at, which
 // is the last thing this client depends on to arrive.
@@ -195,13 +196,33 @@ const OPTED_OUT = [
   "item/reasoning/textDelta"
 ];
 
+// What the thread is asked for, and the words Codex reports it back in. The
+// bridge compares what the thread reported against the last two.
+export const SANDBOX_MODE = "read-only";
+export const REPORTED_SANDBOX = "readOnly";
+export const APPROVAL_POLICY = "never";
+// The item that carries an answer, and the phase that marks the final one.
+const AGENT_MESSAGE = "agentMessage";
+const FINAL_ANSWER = "final_answer";
+
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
 function clientVersion() {
   try {
-    const manifest = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
-    return String(JSON.parse(fs.readFileSync(manifest, "utf8")).version);
+    return String(JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8")).version);
   } catch {
     return "unknown";
   }
+}
+
+// Every word `effort.codex` accepts, from the configuration schema and nowhere
+// else: each is a word this client may send as an effort and compare a reported
+// one against.
+function codexEfforts() {
+  const file = path.join(PLUGIN_ROOT, "schemas", "config.schema.json");
+  const words = JSON.parse(fs.readFileSync(file, "utf8"))?.$defs?.jobEffort?.properties?.codex?.enum;
+  if (!Array.isArray(words) || words.length === 0) throw new Error(`${file} has no $defs.jobEffort.properties.codex.enum`);
+  return [...words];
 }
 
 // The three requests, exported so the capture tool sends exactly what the
@@ -221,8 +242,8 @@ export function threadStartParams({ cwd, model, effort }) {
   return {
     cwd: path.resolve(cwd),
     ...(model === undefined ? {} : { model }),
-    approvalPolicy: "never",
-    sandbox: "read-only",
+    approvalPolicy: APPROVAL_POLICY,
+    sandbox: SANDBOX_MODE,
     ephemeral: true,
     ...(effort === undefined ? {} : { config: { model_reasoning_effort: effort } })
   };
@@ -287,8 +308,8 @@ function markThreadUnread(routing, reason) {
 // answer, or failing that the last agent message. None at all is a failure.
 function finalMessage(turn) {
   const messages = (Array.isArray(turn?.items) ? turn.items : [])
-    .filter((item) => item?.type === "agentMessage" && typeof item.text === "string");
-  const final = messages.filter((item) => item.phase === "final_answer");
+    .filter((item) => item?.type === AGENT_MESSAGE && typeof item.text === "string");
+  const final = messages.filter((item) => item.phase === FINAL_ANSWER);
   return (final.at(-1) ?? messages.at(-1))?.text ?? null;
 }
 
@@ -378,6 +399,133 @@ function readUsage(breakdown) {
   if (!isCount(breakdown.inputTokens) || !isCount(breakdown.outputTokens)) return null;
   return Object.fromEntries(USAGE_FIELDS.map((name) => [name, isCount(breakdown[name]) ? breakdown[name] : null]));
 }
+
+// ## What this client uses of the protocol
+//
+// Every method it sends, every parameter key it sets, every notification it
+// acts on or opts out of, every field it or the bridge reads, and every literal
+// value either sends or compares against — as data, so that the contract probe
+// (`scripts/probe-codex.mjs`) checks the installed Codex's own protocol
+// description against exactly this and keeps no list of its own. An edit that
+// sends or reads something new belongs here too; `test/codex-contract.test.mjs`
+// fails when the client sends a key, or reads a field, that is missing.
+//
+// In call order, so that the first entry the probe finds missing is the
+// earliest point in a call at which this client would break. Each entry names
+// one thing:
+//
+// - `{request}`, `{clientNotification}`, `{notification}`: a method by name. A
+//   notification with `optedOut` is one the handshake asks Codex not to send: it
+//   must exist all the same, because opting out of a renamed notification
+//   silently stops opting out.
+// - with `params` or `result`: a key of that request's parameters or of its
+//   result; with `field`, of that notification's parameters. `{error}` is a
+//   field of a refused request's JSON-RPC error. A path is dotted, `[]` steps
+//   into a list's items, and `*` is any key at all.
+// - `values`: the literal strings sent or compared at that path, each of which
+//   must be one Codex accepts there.
+// - `text`: a parameter the caller's own text fills — a directory, a model
+//   name, an id — rather than a literal of the protocol's. `opaque`: a parameter
+//   whose contents are the caller's own (the output schema), not protocol keys.
+//   `notifications`: a list of strings that are notification names.
+const CODEX_EFFORTS = codexEfforts();
+const TURN_STATUSES = ["completed", "failed", "interrupted"];
+const TURN_ERROR_FIELDS = (prefix) => [
+  { field: `${prefix}.message` },
+  // The typed kind, and the quota kinds failure recognition compares it with.
+  { field: `${prefix}.codexErrorInfo`, values: [...QUOTA_KINDS] },
+  { field: `${prefix}.codexErrorInfo.*.httpStatusCode` },
+  { field: `${prefix}.additionalDetails` }
+];
+const on = (key, name, entries) => entries.map((entry) => ({ [key]: name, ...entry }));
+
+export const CODEX_CONTRACT = Object.freeze([
+  // The handshake.
+  { request: "initialize" },
+  ...on("request", "initialize", [
+    { params: "clientInfo.name", text: true },
+    { params: "clientInfo.title", text: true },
+    { params: "clientInfo.version", text: true },
+    { params: "capabilities.experimentalApi" },
+    { params: "capabilities.requestAttestation" },
+    { params: "capabilities.optOutNotificationMethods", notifications: true }
+  ]),
+  ...OPTED_OUT.map((name) => ({ notification: name, optedOut: true })),
+  // Any request can be refused; the handshake is the first that can be.
+  { error: "message" },
+  { clientNotification: "initialized" },
+
+  // The thread.
+  { request: "thread/start" },
+  ...on("request", "thread/start", [
+    { params: "cwd", text: true },
+    { params: "model", text: true },
+    { params: "approvalPolicy", values: [APPROVAL_POLICY] },
+    { params: "sandbox", values: [SANDBOX_MODE] },
+    { params: "ephemeral" },
+    { params: "config.model_reasoning_effort", values: CODEX_EFFORTS },
+    { result: "approvalPolicy", values: [APPROVAL_POLICY] },
+    { result: "sandbox.type", values: [REPORTED_SANDBOX] },
+    { result: "sandbox.networkAccess" },
+    { result: "instructionSources" },
+    { result: "thread.id" }
+  ]),
+
+  // The turn.
+  { request: "turn/start" },
+  ...on("request", "turn/start", [
+    { params: "threadId", text: true },
+    { params: "input[].type", values: ["text"] },
+    { params: "input[].text", text: true },
+    { params: "input[].text_elements" },
+    { params: "outputSchema", opaque: true },
+    { params: "effort", values: CODEX_EFFORTS },
+    { result: "turn.id" }
+  ]),
+
+  // What arrives while the turn runs, and how it ends.
+  { notification: "error" },
+  ...on("notification", "error", [...TURN_ERROR_FIELDS("error"), { field: "willRetry" }]),
+  { notification: "account/rateLimits/updated" },
+  ...on("notification", "account/rateLimits/updated", [
+    ...["primary", "secondary"].flatMap((window) => [
+      { field: `rateLimits.${window}.usedPercent` },
+      { field: `rateLimits.${window}.resetsAt` }
+    ]),
+    { field: "rateLimits.rateLimitReachedType" }
+  ]),
+  { notification: "thread/tokenUsage/updated" },
+  ...on("notification", "thread/tokenUsage/updated", [
+    { field: "threadId" },
+    ...USAGE_FIELDS.map((name) => ({ field: `tokenUsage.total.${name}` }))
+  ]),
+  { notification: "turn/completed" },
+  ...on("notification", "turn/completed", [
+    { field: "turn.id" },
+    { field: "turn.status", values: TURN_STATUSES },
+    { field: "turn.items[].type", values: [AGENT_MESSAGE] },
+    { field: "turn.items[].text" },
+    { field: "turn.items[].phase", values: [FINAL_ANSWER] },
+    ...TURN_ERROR_FIELDS("turn.error")
+  ]),
+
+  // Out of time.
+  { request: "turn/interrupt" },
+  ...on("request", "turn/interrupt", [
+    { params: "threadId", text: true },
+    { params: "turnId", text: true }
+  ]),
+
+  // What the thread says it ran as.
+  { request: "thread/read" },
+  ...on("request", "thread/read", [
+    { params: "threadId", text: true },
+    { params: "includeTurns" },
+    { result: "thread.model" },
+    { result: "thread.reasoningEffort", values: CODEX_EFFORTS },
+    { result: "thread.cliVersion" }
+  ])
+].map((entry) => Object.freeze(entry)));
 
 // Codex reports a fatal start-up error as one `Error: <sentence>` line on
 // stderr; the last one is the sentence.
