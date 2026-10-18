@@ -5,11 +5,15 @@
 // pre-fix head. Each of them looks exactly like success from the outside.
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   initState, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope,
-  budgetTaken, resolveRoles
+  budgetTaken, resolveRoles, grantFixRound
 } from "../scripts/gates.mjs";
+import { allocateRound, listRounds } from "../scripts/lib/rounds.mjs";
 
 // `gates.mjs init` resolves each lens's brief, so it needs a repository to look
 // for `.tagteam/lenses/` in. These specs roster `correctness`, which the plugin
@@ -867,4 +871,359 @@ test("a revisit leaves waiting without spending anything, and what follows it is
   assert.equal(step(revisited, "publishing").state, "publishing");
   // The repair edge out of waiting is untouched by the new one beside it.
   assert.equal(step(waiting, "reviewing").ciRepairsUsed, 1);
+});
+
+// --- one fix round past the cap ---
+//
+// Two checks enforce the fix budget: the `fixing` edge against the state file's
+// counter, and the `round` allocation against the rounds on disk, which runs
+// only after the fixer has committed. A grant honoured by the first and not the
+// second is refused after the work is done, so these tests take a real round
+// through both.
+
+const GATES_SCRIPT = path.join(root, "scripts", "gates.mjs");
+const oid = (n) => n.toString(16).padStart(40, "0");
+
+function grantFixture({ fixRounds = 2, ciRepairs = 1 } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-grant-"));
+  const stateFile = path.join(dir, "state.json");
+  const rounds = path.join(dir, "rounds");
+  const configFile = path.join(dir, "config.json");
+  const limits = { fixRounds, ciRepairs };
+  fs.writeFileSync(configFile, JSON.stringify({ limits }));
+  const run = (...args) => spawnSync("node", [GATES_SCRIPT, ...args], { encoding: "utf8" });
+  assert.equal(run("init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root).status, 0);
+  const ok = (result) => {
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  return {
+    stateFile, rounds, limits, ok,
+    read: () => JSON.parse(fs.readFileSync(stateFile, "utf8")),
+    raw: () => fs.readFileSync(stateFile, "utf8"),
+    write: (state) => fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`),
+    to: (next) => run("state", stateFile, next, configFile),
+    round: (candidate) => run("round", stateFile, rounds, candidate, configFile),
+    grant: () => run("grant", stateFile, rounds, configFile)
+  };
+}
+
+// The implementation and every fix round the budget allows, each one a real
+// round on disk, ending at `reviewing` with the counter and the disk both at the
+// cap. Returns the next unused candidate number.
+function spendTheBudget(f, { from = 0, start = true } = {}) {
+  let next = from;
+  if (start) {
+    f.ok(f.to("implementing"));
+    f.ok(f.round(oid(next++)));
+    f.ok(f.to("reviewing"));
+  }
+  for (let fix = 0; fix < f.limits.fixRounds; fix += 1) {
+    f.ok(f.to("fixing"));
+    f.ok(f.round(oid(next++)));
+    f.ok(f.to("reviewing"));
+  }
+  return next;
+}
+
+// At the cap, granted, and the granted round taken through both checks.
+function spendTheGrant(f) {
+  const next = spendTheBudget(f);
+  const granted = f.ok(f.grant());
+  const fixing = f.ok(f.to("fixing"));
+  const round = f.ok(f.round(oid(next)));
+  return { granted, fixing, round, candidate: oid(next), next: next + 1 };
+}
+
+test("a grant takes one real round past the cap through the fixing edge and the allocator", () => {
+  const f = grantFixture({ fixRounds: 2 });
+  const next = spendTheBudget(f);
+  assert.equal(f.read().fixRoundsUsed, 2);
+  // Without the grant this is where it stops, as it always has.
+  assert.equal(f.to("fixing").status, 4);
+
+  const granted = f.ok(f.grant());
+  assert.deepEqual(granted.grant.scope, "repair:0");
+  assert.equal(f.read().fixRoundGrant.scope, "repair:0");
+  assert.deepEqual(f.read().history.at(-1).granted, { scope: "repair:0", fixRoundsUsed: 2, limit: 2 },
+    "the state records when the person's choice was taken");
+
+  const fixing = f.ok(f.to("fixing"));
+  assert.deepEqual(fixing.budget, {
+    counter: "fixRoundsUsed", limitName: "limits.fixRounds", limit: 2, ordinal: 3, granted: true
+  }, "the configured limit, and separately that this round is the grant's");
+  assert.equal(f.read().fixRoundsUsed, 3);
+
+  // The allocation the snapshot makes for the fixer's commit — the check that
+  // arrives after the work is done.
+  const round = f.ok(f.round(oid(next)));
+  assert.equal(round.reentered, false);
+  assert.equal(round.round, 4);
+  assert.equal(round.scope, "repair:0");
+  assert.equal(round.spent, 3);
+  assert.equal(round.limit, 2, "never reported as a bigger limit");
+  assert.equal(round.remaining, 0);
+  assert.equal(round.granted, true);
+
+  // Both counts agree afterwards.
+  const after = f.read();
+  assert.equal(after.fixRoundsUsed, 3);
+  const { state, changed } = reconcileBudgets(after, listRounds(f.rounds));
+  assert.deepEqual(changed, []);
+  assert.equal(state.fixRoundsUsed, 3);
+});
+
+test("a grant buys exactly one round: the next edge and the next allocation are refused", () => {
+  const f = grantFixture({ fixRounds: 2 });
+  const { candidate, next } = spendTheGrant(f);
+  f.ok(f.to("reviewing"));
+
+  const edge = f.to("fixing");
+  assert.equal(edge.status, 4, edge.stderr);
+  assert.match(edge.stderr, /^01-x has spent its limits\.fixRounds budget and the one extra round granted for repair:0: 3 of 2 round\(s\) used/);
+  assert.match(edge.stderr, /raise limits\.fixRounds/);
+  assert.equal(f.read().state, "reviewing", "a refused edge changes nothing");
+
+  const allocation = f.round(oid(next));
+  assert.equal(allocation.status, 4, allocation.stderr);
+  assert.match(allocation.stderr, /the one extra round granted for repair:0: 3 of 2 round\(s\) used/);
+  assert.match(allocation.stderr, /counted from the rounds on disk in repair:0 \(the state file counts 3\)/);
+  assert.equal(listRounds(f.rounds).length, 4, "no directory for a round that was never allowed");
+
+  // Re-entry spends nothing, as it always has — the granted round still says it
+  // is the grant's, and the implementation re-entered does not.
+  const again = f.ok(f.round(candidate));
+  assert.equal(again.reentered, true);
+  assert.equal(again.round, 4);
+  assert.equal(again.granted, true);
+  const implementation = f.ok(f.round(oid(0)));
+  assert.equal(implementation.reentered, true);
+  assert.equal(implementation.granted, undefined);
+  assert.equal(f.read().fixRoundsUsed, 3);
+});
+
+test("a cycle gets one grant, refused again before and after its round is spent", () => {
+  const f = grantFixture({ fixRounds: 1 });
+  const next = spendTheBudget(f);
+  f.ok(f.grant());
+
+  const before = f.raw();
+  const unspent = f.grant();
+  assert.equal(unspent.status, 4, unspent.stderr);
+  assert.match(unspent.stderr, /already has its one extra fix round for repair:0/);
+  assert.equal(f.raw(), before, "a refused grant leaves the state file byte for byte as it was");
+
+  f.ok(f.to("fixing"));
+  f.ok(f.round(oid(next)));
+  const after = f.raw();
+  const spent = f.grant();
+  assert.equal(spent.status, 4, spent.stderr);
+  assert.match(spent.stderr, /already has its one extra fix round for repair:0, granted at .* and spent/);
+  assert.equal(f.raw(), after);
+
+  // The pure decision refuses it the same way.
+  assert.throws(() => grantFixRound(f.read(), { limits: f.limits }), (error) => error.exitCode === 4);
+});
+
+test("a grant is refused while the cycle still has a fix round left", () => {
+  const f = grantFixture({ fixRounds: 2 });
+  f.ok(f.to("implementing"));
+  f.ok(f.round(oid(0)));
+  f.ok(f.to("reviewing"));
+  f.ok(f.to("fixing"));
+  f.ok(f.round(oid(1)));
+  f.ok(f.to("reviewing"));
+  assert.equal(f.read().fixRoundsUsed, 1);
+
+  const before = f.raw();
+  const early = f.grant();
+  assert.equal(early.status, 2, early.stderr);
+  assert.match(early.stderr, /has 1 of its 2 fix round\(s\) left in repair:0/);
+  assert.equal(f.raw(), before);
+  assert.equal(f.read().fixRoundGrant, null);
+  // And with no grant the ordinary round is still there to take.
+  assert.equal(f.ok(f.to("fixing")).budget.granted, undefined);
+});
+
+test("a cap only the rounds on disk show is refused by the decision alone and seen by the action", async () => {
+  // A commit made outside a fix dispatch puts the disk ahead of the counter. The
+  // decision on the unreconciled state reads the counter and refuses; the action
+  // reconciles first, as `round` does, and so sees the cap the next allocation
+  // would refuse at.
+  const f = grantFixture({ fixRounds: 2 });
+  f.ok(f.to("implementing"));
+  f.ok(f.round(oid(0)));
+  f.ok(f.to("reviewing"));
+  f.ok(f.to("fixing"));
+  f.ok(f.round(oid(1)));
+  f.ok(f.to("reviewing"));
+  await allocateRound(f.rounds, { candidate: oid(2), scope: "repair:0", limit: 2, limitName: "limits.fixRounds", exempt: 1 });
+  assert.equal(f.read().fixRoundsUsed, 1, "the counter lags the disk");
+
+  assert.throws(() => grantFixRound(f.read(), { limits: f.limits }), (error) => {
+    assert.equal(error.exitCode, 2);
+    assert.match(error.message, /1 of its 2 fix round\(s\) left/);
+    return true;
+  });
+
+  const granted = f.ok(f.grant());
+  assert.deepEqual(granted.reconciled, [{ counter: "fixRoundsUsed", from: 1, to: 2 }]);
+  assert.equal(f.read().fixRoundsUsed, 2, "the raised counter is written, the way round writes it");
+  assert.equal(f.read().fixRoundGrant.scope, "repair:0");
+});
+
+test("a CI repair starts a cycle the old grant gives nothing in, and that can take its own", () => {
+  const f = grantFixture({ fixRounds: 1, ciRepairs: 1 });
+  let { next } = spendTheGrant(f);
+  f.ok(f.to("verifying"));
+  f.ok(f.to("publishing"));
+
+  // The repair edge: a new scope, a fresh fix budget, and the old record left
+  // where it is — it simply no longer counts.
+  f.ok(f.to("reviewing"));
+  assert.equal(f.read().ciRepairsUsed, 1);
+  assert.equal(f.read().fixRoundsUsed, 0);
+  assert.equal(f.ok(f.round(oid(next++))).scope, "repair:1");
+  next = spendTheBudget(f, { from: next, start: false });
+
+  const edge = f.to("fixing");
+  assert.equal(edge.status, 4, edge.stderr);
+  assert.match(edge.stderr, /1 of 1 round\(s\) used/);
+  assert.doesNotMatch(edge.stderr, /extra round/, "the earlier cycle's grant buys nothing here");
+  const allocation = f.round(oid(next));
+  assert.equal(allocation.status, 4, allocation.stderr);
+  assert.doesNotMatch(allocation.stderr, /extra round/);
+  assert.match(allocation.stderr, /in repair:1/);
+
+  // This cycle's own grant, once its rounds are spent.
+  assert.equal(f.ok(f.grant()).grant.scope, "repair:1");
+  assert.equal(f.ok(f.to("fixing")).budget.granted, true);
+  const round = f.ok(f.round(oid(next)));
+  assert.equal(round.scope, "repair:1");
+  assert.equal(round.granted, true);
+});
+
+test("a scope moved by reconciliation alone leaves the old grant behind too", async () => {
+  // `reconcileBudgets` can raise the repair count from disk with no edge taken,
+  // so clearing the grant on the repair edge alone would not be enough.
+  const f = grantFixture({ fixRounds: 1, ciRepairs: 1 });
+  const next = spendTheBudget(f);
+  f.ok(f.grant());
+  for (const candidate of [oid(next), oid(next + 1)]) {
+    await allocateRound(f.rounds, { candidate, scope: "repair:1", limit: 1, limitName: "limits.fixRounds", exempt: 1 });
+  }
+  assert.equal(f.read().ciRepairsUsed, 0);
+
+  const allocation = f.round(oid(next + 2));
+  assert.equal(allocation.status, 4, allocation.stderr);
+  assert.doesNotMatch(allocation.stderr, /extra round/);
+  assert.match(allocation.stderr, /in repair:1/);
+  assert.equal(f.read().ciRepairsUsed, 1, "the repair count was raised from disk");
+  const edge = f.to("fixing");
+  assert.equal(edge.status, 4, edge.stderr);
+  assert.doesNotMatch(edge.stderr, /extra round/);
+
+  // In-process, the same: a grant recorded for repair:0 on a state in repair:1.
+  const moved = at("reviewing", { fixRoundsUsed: 1, ciRepairsUsed: 1, fixRoundGrant: { scope: "repair:0", at: "t" } });
+  assert.throws(() => step(moved, "fixing"), (error) => error.exitCode === 4 && !/extra round/.test(error.message));
+
+  // And the moved cycle can take its own.
+  assert.equal(f.ok(f.grant()).grant.scope, "repair:1");
+  assert.equal(f.ok(f.round(oid(next + 2))).granted, true);
+});
+
+test("a scope moved by reconciliation alone starts the new cycle's fix count from its own rounds", () => {
+  // The fix counter in the state file counts the cycle before. Carried into the
+  // moved cycle, it would read that cycle as spent before it fixed anything: a
+  // grant taken at once, and the cycle left with the grant's round alone.
+  const limits = { fixRounds: 2, ciRepairs: 1 };
+  const disk = [
+    { round: 1, scope: repairScope(0) }, { round: 2, scope: repairScope(0) }, { round: 3, scope: repairScope(0) },
+    { round: 4, scope: repairScope(1) }
+  ];
+  const spent = at("reviewing", { fixRoundsUsed: 2, ciRepairsUsed: 0, fixRoundGrant: { scope: "repair:0", at: "t" } });
+  const { state, changed, scope } = reconcileBudgets(spent, disk);
+  assert.equal(scope, "repair:1");
+  assert.equal(state.ciRepairsUsed, 1);
+  assert.equal(state.fixRoundsUsed, 0, "only the implementation is on disk in repair:1");
+  assert.deepEqual(changed, [
+    { counter: "fixRoundsUsed", from: 2, to: 0 },
+    { counter: "ciRepairsUsed", from: 0, to: 1 }
+  ]);
+
+  // Nothing to grant yet, and both configured rounds are still there to take.
+  assert.throws(() => grantFixRound(state, { limits }), (error) => error.exitCode === 2 && /2 of its 2/.test(error.message));
+  let cycle = step(state, "fixing", limits);
+  cycle = step(step(cycle, "reviewing", limits), "fixing", limits);
+  assert.equal(cycle.fixRoundsUsed, 2);
+
+  // The moved cycle's own rounds on disk are still counted, never fewer.
+  const fixed = reconcileBudgets(spent, [...disk, { round: 5, scope: repairScope(1) }]);
+  assert.equal(fixed.state.fixRoundsUsed, 1);
+  // And with no move, a counter ahead of disk is kept as it always was.
+  assert.equal(reconcileBudgets({ ...spent, ciRepairsUsed: 1 }, disk).state.fixRoundsUsed, 2);
+});
+
+test("the grant survives bind and ordinary transitions, and a state file without one reads as no grant", () => {
+  const limits = { fixRounds: 1, ciRepairs: 1 };
+  let state = grantFixRound(at("reviewing", { fixRoundsUsed: 1 }), { limits });
+  const record = state.fixRoundGrant;
+  assert.equal(record.scope, "repair:0");
+  state = bindCandidate(state, A, BASE);
+  state = transition(state, "verifying");
+  state = transition(state, "reviewing");
+  state = bindCandidate(state, B, BASE);
+  assert.deepEqual(state.fixRoundGrant, record);
+  assert.equal(step(state, "fixing", limits).fixRoundsUsed, 2);
+
+  // A fresh state carries an explicit no-grant, and an older file without the
+  // key reads the same: the cap refuses as it always has, and a grant can be taken.
+  assert.equal(fresh().fixRoundGrant, null);
+  const { fixRoundGrant, ...older } = at("reviewing", { fixRoundsUsed: 1 });
+  assert.throws(() => step(older, "fixing", limits), (error) => error.exitCode === 4 && !/extra round/.test(error.message));
+  assert.equal(grantFixRound(older, { limits }).fixRoundGrant.scope, "repair:0");
+});
+
+test("a malformed grant record throws rather than granting or being overwritten", () => {
+  const limits = { fixRounds: 1, ciRepairs: 1 };
+  const malformed = [true, 1, "repair:0", [], {}, { scope: "repair:0" }, { scope: "repair:x", at: "t" }, { scope: 0, at: "t" }];
+  for (const broken of malformed) {
+    const state = at("reviewing", { fixRoundsUsed: 1, fixRoundGrant: broken });
+    const refused = (error) => /fixRoundGrant/.test(error.message) && error.exitCode === undefined;
+    assert.throws(() => step(state, "fixing", limits), refused, `${JSON.stringify(broken)} on the edge`);
+    assert.throws(() => grantFixRound(state, { limits }), refused, `${JSON.stringify(broken)} on a new grant`);
+  }
+
+  // Through the CLI, neither action replaces it or lets a round through on it.
+  const f = grantFixture({ fixRounds: 1 });
+  const next = spendTheBudget(f);
+  const broken = { scope: "repair:0" };
+  f.write({ ...f.read(), fixRoundGrant: broken });
+  for (const result of [f.grant(), f.round(oid(next)), f.to("fixing")]) {
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /fixRoundGrant/);
+  }
+  assert.deepEqual(f.read().fixRoundGrant, broken);
+  assert.equal(listRounds(f.rounds).length, 2);
+});
+
+test("the granted round escalates the fixer and the re-checks, and never the implementer", () => {
+  const f = grantFixture({ fixRounds: 2 });
+  spendTheGrant(f);
+  const state = f.read();
+  assert.equal(state.fixRoundsUsed, 3);
+  assert.deepEqual(raisedJobs(state, RAISED), ESCALATING);
+  assert.equal(resolveRoles(state, RAISED).jobs.implement.escalated, false);
+});
+
+test("budgetTaken marks only a round past the configured limit, and only with a live grant", () => {
+  const limits = { fixRounds: 1, ciRepairs: 1 };
+  const before = grantFixRound(at("reviewing", { fixRoundsUsed: 1 }), { limits });
+  assert.equal(budgetTaken(before, step(before, "fixing", limits), { limits }).granted, true);
+  // Within the limit nothing is the grant's, even when one is recorded.
+  const inBudget = { ...before, fixRoundsUsed: 0 };
+  assert.equal(budgetTaken(inBudget, step(inBudget, "fixing", limits), { limits }).granted, undefined);
+  // And the repair edge never is.
+  const published = { ...before, state: "publishing" };
+  assert.equal(budgetTaken(published, step(published, "reviewing", limits), { limits }).granted, undefined);
 });
