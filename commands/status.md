@@ -38,7 +38,18 @@ back spends one of the CI repairs and hands it that whole fix budget again. So
 the thing that bounds it is `limits.ciRepairs`: "sending this one back costs one
 of the two repair attempts it has left, and it starts its three fix rounds over".
 
-A waiting or publishing spec **without** that key has no restart to promise: its
+A budget entry carrying `fixRoundOnRedesign` is a spec that has spent every fix
+round its cycle allows on its own, and can still get exactly one more — but only
+if the person chooses it. When the same place keeps failing, the run asks before
+it publishes, and answering that question with a redesign buys one round past
+`limits.fixRounds` for a fresh rewrite of that area. Its fix rounds left stay 0,
+because that is what the run spends without a person, so say the two together:
+"no fix rounds left on its own — one more is there only if you choose a redesign
+when it asks". Once that round has been used, or this cycle's one rewrite has
+been chosen already, the key is gone and nothing beyond the limit is promised:
+say only that no fix rounds are left.
+
+A waiting or publishing spec **without** `fixBudgetRestarts` has no restart to promise: its
 repair attempts are gone or unknown, so the fix rounds beside it are what is
 actually reachable, which is none. Say that it is finished rather than that it
 has a budget: "no repair attempts left, so this one cannot go back for more work

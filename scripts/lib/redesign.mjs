@@ -260,25 +260,58 @@ export function renderBrief({ spec, round, files, history, signals = [], reportP
 }
 
 /**
- * The question the driver asks when the signal is live and a fix round is still
- * available. Written for a person, as SKILL.md's "Asking" says: no ids, no
+ * The question the driver asks when the signal is live on something a fixer
+ * could answer. Written for a person, as SKILL.md's "Asking" says: no ids, no
  * commit oids, no gate or state names, and no severity words either — those are
  * the run's vocabulary. One sentence per recurring file.
+ *
+ * Three forms, and the driver decides which — never whether to ask, which is
+ * `churnAsk`'s alone:
+ *
+ * - a fix round left and this cycle's rewrite unused (`redesign`): four answers;
+ * - a fix round left and the rewrite used (`redesign: false`): three, none of
+ *   them a rewrite — a cycle gets one;
+ * - every fix round spent and the rewrite unused (`atCap`): three, the rewrite
+ *   buying the one round past the limit that only this answer grants, and
+ *   publishing as it is being `next`, because that is where the run goes at the
+ *   cap anyway. `accept` is not among them: it answers only while a round is left.
+ *
+ * The cap form leaves out the in-budget form's "choosing it when the question
+ * comes back after the next re-check": at the cap there is no fix round to get
+ * there, and the question is not put twice for one round.
  */
-export function redesignAsk(signals, { spent, limit, atCollect = false } = {}) {
+export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, atCap = false } = {}) {
   const each = signals.map(({ file, rounds, findings }) =>
     `${file} has drawn a new finding serious enough to stop a merge in ${rounds.length} rounds of this cycle, each time `
     + `about: ${titlesOf(findings)}; every repair has opened the next case, so one more fix round there is likely to do the same.`);
-  const redesign = "have a fresh implementer rewrite that area from a brief of everything raised on it so far instead of "
+  const opening = `The same place keeps failing. ${each.join(" ")} ${spent} of ${limit} fix rounds ${spent === 1 ? "is" : "are"} spent`;
+  const disclosed = "with what is still open disclosed in the pull request — it will not merge unattended and finish "
+    + "cannot approve past an open finding, so merging it is theirs to do on GitHub, or a revisit once a reader withdraws "
+    + "what it found";
+  const stop = "or stop the train (run end).";
+  if (atCap) {
+    const rewrite = "have a fresh implementer rewrite that area from a brief of everything raised on it so far instead of "
+      + `patching the last finding (run redesign; it takes one more round past the ${limit}, which only this answer grants, `
+      + "and they may name other files with --file"
+      + (atCollect ? " — the readers judge their earlier findings against the rewrite and the adversary reads it fresh)" : ")")
+      + ". It is this cycle's only rewrite: if the rewrite still fails, the run publishes with what is open disclosed and "
+      + "merging it is theirs to do by hand on GitHub";
+    const publish = `publish it as it is now ${disclosed} (run next; spends nothing`
+      + (atCollect ? ", and the re-check settles this round first: anything new it raises is put to them again)" : ")");
+    return `${opening}, which is every fix round this repository allows. Three ways on: ${rewrite}; ${publish}; ${stop}`;
+  }
+  const fixAgain = "fix it once more (run next; spends a fix round)";
+  const accept = `publish it as it is ${disclosed} (run accept; spends nothing)`;
+  if (!redesign) {
+    return `${opening}. This cycle's one rewrite has already been used, so a redesign is not one of the answers. `
+      + `Three ways on: ${fixAgain}; ${accept}; ${stop}`;
+  }
+  const rewrite = "have a fresh implementer rewrite that area from a brief of everything raised on it so far instead of "
     + "patching the last finding (run redesign; spends a fix round too, and they may name other files with --file"
     + (atCollect
       ? " — chosen now, the readers judge their earlier findings against the rewrite and the adversary reads it fresh; "
         + "choosing it when the question comes back after the next re-check settles puts the whole panel on it instead, "
         + "at the price of the fix round that gets there)"
       : ")");
-  return `The same place keeps failing. ${each.join(" ")} ${spent} of ${limit} fix rounds ${spent === 1 ? "is" : "are"} spent. `
-    + `Four ways on: fix it once more (run next; spends a fix round); ${redesign}; publish it as it is with what is `
-    + "still open disclosed in the pull request — it will not merge unattended and finish cannot approve past an open "
-    + "finding, so merging it is theirs to do on GitHub, or a revisit once a reader withdraws what it found (run accept; "
-    + "spends nothing); or stop the train (run end).";
+  return `${opening}. Four ways on: ${fixAgain}; ${rewrite}; ${accept}; ${stop}`;
 }

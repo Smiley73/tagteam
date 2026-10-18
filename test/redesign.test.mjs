@@ -170,3 +170,44 @@ test("the ask names four answers, the files and what they keep failing on, and n
   }
   assert.match(redesignAsk(signals, { spent: 1, limit: 4 }), /1 of 4 fix rounds is spent\./);
 });
+
+// The commands a question names, in order: each answer is exactly one.
+const answersIn = (ask) => [...ask.matchAll(/\(run (\w+)/g)].map((match) => match[1]);
+
+// Nothing in any form is the run's own vocabulary.
+function assertPlain(ask, form) {
+  assert.doesNotMatch(ask, /\d+\.[a-z-]+\.\d+/, `${form}: no finding ids`);
+  assert.doesNotMatch(ask, /[0-9a-f]{12,}/, `${form}: no commit oids`);
+  assert.doesNotMatch(ask, /\b(blocking|major|minor|nit)\b/, `${form}: no severity words`);
+  assert.doesNotMatch(ask, /\b(reviewing|verifying|fixing|publishing|awaiting-approval|review-open)\b/, `${form}: no state or gate names`);
+}
+
+test("each form of the question lists exactly its answers: four in budget, three once the rewrite is used, three at the cap", () => {
+  const { rounds } = specWith();
+  const signals = churnSignal(rounds, { scope: "repair:0", round: 3 });
+  for (const atCollect of [false, true]) {
+    const unused = redesignAsk(signals, { spent: 2, limit: 4, atCollect });
+    assert.deepEqual(answersIn(unused), ["next", "redesign", "accept", "end"]);
+    assert.match(unused, /Four ways on: fix it once more/);
+    assert.match(unused, /\(run accept; spends nothing\)/);
+    assertPlain(unused, "in budget");
+
+    const used = redesignAsk(signals, { spent: 2, limit: 4, atCollect, redesign: false });
+    assert.deepEqual(answersIn(used), ["next", "accept", "end"], "a cycle gets one rewrite");
+    assert.match(used, /2 of 4 fix rounds are spent\. This cycle's one rewrite has already been used/);
+    assert.match(used, /Three ways on: fix it once more \(run next; spends a fix round\)/);
+    assert.doesNotMatch(used, /--file|fresh implementer/);
+    assertPlain(used, "in budget, rewrite used");
+
+    const cap = redesignAsk(signals, { spent: 4, limit: 4, atCollect, atCap: true });
+    assert.deepEqual(answersIn(cap), ["redesign", "next", "end"], "at the cap accept is not an answer, and publishing as it is is next");
+    assert.match(cap, /4 of 4 fix rounds are spent, which is every fix round this repository allows/);
+    assert.match(cap, /\(run redesign; it takes one more round past the 4, which only this answer grants/);
+    assert.match(cap, /It is this cycle's only rewrite: if the rewrite still fails, the run publishes with what is open disclosed and merging it is theirs to do by hand on GitHub/);
+    assert.match(cap, /publish it as it is now with what is still open disclosed[\s\S]*\(run next; spends nothing/);
+    assert.match(cap, /stop the train \(run end\)\.$/);
+    assert.doesNotMatch(cap, /when the question comes back|at the price of the fix round/, "no fix round is left to bring the question back");
+    assert.equal(/the adversary reads it fresh/.test(cap), atCollect);
+    assertPlain(cap, "at the cap");
+  }
+});

@@ -637,19 +637,22 @@ test("limitNotices warns above 5 and not at 5, once per offending limit", async 
 test("the note reports the worst-case panel count as a product", async () => {
   // The arithmetic is the part a person will trust, so pin the number rather
   // than the sentence. A CI repair restarts the cycle with a fresh fix budget,
-  // which is why fix rounds multiply by repairs instead of adding to them.
+  // which is why fix rounds multiply by repairs instead of adding to them. Each
+  // cycle also counts the one round past fixRounds that a person's redesign
+  // answer at the cap can add.
   const { limitNotices } = await import("../scripts/validate-json.mjs");
   const note = (fixRounds, ciRepairs) => limitNotices({
     ...example,
     limits: { fixRounds, ciRepairs }
   }).find((line) => line.startsWith("note:"));
-  assert.match(note(1, 1), /\b4\b/);
-  assert.match(note(2, 1), /\b6\b/);
-  assert.match(note(3, 3), /\b16\b/);
+  assert.match(note(1, 1), /at most 6 full review panels/);
+  assert.match(note(2, 1), /at most 8 full review panels/);
+  assert.match(note(3, 3), /at most 20 full review panels/);
+  assert.match(note(3, 3), /\(5 per candidate, counting the one round past fixRounds/);
   // No ceiling in the schema means a limit can exceed what a double counts to.
-  // In floating point 1 + 9007199254740992 rounds back to itself and the note
-  // understates the product by two; 1e308 overflows to Infinity outright.
-  assert.match(note(9007199254740992, 1), /\b18014398509481986\b/);
+  // In floating point 9007199254740992 + 2 is not exact and the note would be
+  // off; 1e308 overflows to Infinity outright.
+  assert.match(note(9007199254740992, 1), /at most 18014398509481988 full review panels/);
   assert.doesNotMatch(note(1e308, 1), /Infinity/);
 });
 
@@ -715,7 +718,7 @@ test("validating expensive limits prints a warning line per limit and still exit
   for (const key of ["fixRounds", "ciRepairs"]) {
     assert.ok(warnings.some((line) => line.includes(key)), `expected a warning naming ${key}`);
   }
-  assert.match(result.stderr, /^note:.*\b100\b/m);
+  assert.match(result.stderr, /^note:.*\b110\b/m);
 });
 
 test("escalationNotices warns at and above fixRounds, not below", async () => {

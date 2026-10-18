@@ -190,9 +190,9 @@ flowchart TD
     adv --> settle
     recheck --> settle
     settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
-    settle -->|"nothing open, or the fix rounds<br>this repository allows are spent"| publish
-    settle -. "the same file keeps failing, round after round — a person answers:<br>fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop" .-> redesign
-    open -. "the same question, asked here too — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
+    settle -->|"nothing open, or the fix rounds this repository allows are spent —<br>with the person's answer to publish as it is, or with this cycle's rewrite used"| publish
+    settle -. "the same file keeps failing, round after round — a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, redesign is not offered" .-> redesign
+    open -. "the same question, asked here too, and asked once per round — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
     redesign --> snapshot
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
     publish --> outcome
@@ -215,15 +215,31 @@ lenses are reading beside it and hunts for what falls between them. After a fix
 round, each reviewer that raised a finding re-checks its own findings against
 the new code, and an adversary reads the fixed diff fresh. Anything still open
 starts another round, for as many rounds as `limits.fixRounds` allows; when they
-run out the pull request stops with the findings on it and says so.
+run out the pull request stops with the findings on it and says so. The one way
+past that limit without raising it is a person's answer to the question below,
+once per cycle.
 
 The rounds also watch for the pattern no single round can see: the same file
 drawing a new blocking or major finding three or more rounds running, each
-repair opening the next case. When that happens and a fix round is still left,
-the run stops to ask, with four answers: fix it once more; redesign — a fresh
-implementer rewrites the area from a brief of everything raised on it this
+repair opening the next case. When that happens the run stops to ask. While a
+fix round is still left there are four answers: fix it once more; redesign — a
+fresh implementer rewrites the area from a brief of everything raised on it this
 cycle, spending a fix round, and the rewrite starts a fresh count; accept —
 publish it as it is with what is open disclosed, to be merged by hand; or stop.
+
+When every fix round is spent, the run asks before it publishes, with three
+answers: redesign, which takes one more round past `limits.fixRounds` that only
+this answer grants; publish it as it is, with what is open disclosed, to be
+merged by hand; or stop. The question is put once per round: answered at the
+review, the re-check that follows does not ask again unless it raises something
+the person was not shown.
+
+A cycle gets one rewrite, whether it is chosen with rounds left or at the cap,
+and whether or not it changes anything. After it, the question no longer offers
+redesign, and once the fix rounds are spent the run publishes with what is open
+disclosed without asking, and says so. A rewrite at the cap that still fails is
+published the same way, for a person to merge by hand. A CI repair starts a new
+cycle, and the new cycle gets a rewrite of its own.
 
 Each job thinks as hard as its work needs: the implementer, the fixer and the
 adversary at high effort by default, lens reviewers at medium, and re-checks —

@@ -140,7 +140,7 @@ export function configStaleness(value) {
 
 // What the configured limits commit the repository to, as lines of text. The
 // numbers validate — there is no ceiling in the schema — but nobody works out
-// from `fixRounds: 3, ciRepairs: 3` that they have bought sixteen review panels
+// from `fixRounds: 3, ciRepairs: 3` that they have bought twenty review panels
 // per spec, so the arithmetic is done here and said out loud. A CI repair
 // produces a new candidate that runs the whole review cycle with a fresh fix
 // budget, which is why the panel count is a product rather than a sum.
@@ -164,12 +164,17 @@ export function limitNotices(config) {
   // for small numbers is worse than none, since the large numbers are exactly
   // the ones nobody can work out unaided. Every value here has already been
   // checked with Number.isInteger, so BigInt() cannot throw.
-  const perCandidate = 1n + BigInt(fixRounds);
+  //
+  // Each cycle can also take one round past `fixRounds`, when a person answers
+  // the question asked at the cap with a redesign, so a candidate cycle is the
+  // first panel, `fixRounds`, and that one.
+  const perCandidate = 1n + BigInt(fixRounds) + 1n;
   const cycles = 1n + BigInt(ciRepairs);
   const panels = perCandidate * cycles;
   notices.push(
     `note: these limits allow at most ${panels} full review panels per spec `
-    + `(${perCandidate} per candidate × ${cycles} candidate cycles)`
+    + `(${perCandidate} per candidate, counting the one round past fixRounds a person's redesign answer can add, `
+    + `× ${cycles} candidate cycles)`
   );
   return notices;
 }
