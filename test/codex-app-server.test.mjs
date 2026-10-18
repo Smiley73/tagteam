@@ -200,6 +200,42 @@ test("a server that exits mid-turn is reported with its exit code and stderr", a
   assert.match(outcome.stderr, /synthetic panic/);
 });
 
+// The success capture with what the server does on `thread/read` replaced, kept
+// out of the fixture directory: it is a variation of a real capture, not one.
+function successWithThreadRead(send) {
+  const variant = structuredClone(fixture("success"));
+  variant.steps.find((step) => step.on === "thread/read").send = send;
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-app-server-fixture-")), "variant.json");
+  fs.writeFileSync(file, JSON.stringify(variant));
+  return file;
+}
+
+test("a server that exits before answering thread/read is that exit, not a completed turn", async () => {
+  const { outcome, pid } = await call(successWithThreadRead([{ $stderr: "synthetic panic\n" }, { $exit: 101 }]));
+  assert.equal(outcome.outcome, "server-exited");
+  assert.deepEqual(
+    { stage: outcome.stage, exitCode: outcome.exitCode, signal: outcome.signal },
+    { stage: "thread/read", exitCode: 101, signal: null }
+  );
+  assert.ok(!Object.hasOwn(outcome, "message"), "the turn's answer was returned as if the call had completed");
+  assert.equal(outcome.routing.sandbox.value, "readOnly", "what thread/start reported is kept");
+  assert.deepEqual(outcome.routing.model, { value: null, reason: "the server exited before thread/read answered" });
+  assert.equal(alive(pid), false);
+});
+
+test("a thread/read that never answers times out at the deadline, not a completed turn", async () => {
+  const { outcome, requests, pid, elapsedMs } = await call(successWithThreadRead([]), { timeoutSec: 2 });
+  assert.equal(outcome.outcome, "timed-out");
+  assert.equal(outcome.interruptSent, false);
+  assert.equal(outcome.turnStatus, "completed");
+  assert.equal(requests("turn/interrupt").length, 0, "a turn that had completed was interrupted");
+  assert.ok(elapsedMs >= 1_900, `returned after ${elapsedMs}ms, before the timeout`);
+  assert.ok(elapsedMs < 2_000 + KILL_AFTER_MS + 1_500, `took ${elapsedMs}ms`);
+  assert.equal(outcome.routing.sandbox.value, "readOnly", "what thread/start reported is kept");
+  assert.deepEqual(outcome.routing.model, { value: null, reason: "thread/read did not answer before the timeout" });
+  assert.equal(alive(pid), false);
+});
+
 test("a completed turn with no agent message is a failure, never an empty answer", async () => {
   const { outcome } = await call("success", { edit: { message: "turn/completed", path: "params.turn.items", value: [] } });
   assert.equal(outcome.outcome, "turn-failed");

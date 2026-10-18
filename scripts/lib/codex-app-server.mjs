@@ -333,9 +333,12 @@ function within(promise, ms) {
  *   `kind` is the typed `codexErrorInfo` as Codex sent it; `message` is Codex's
  *   raw text, null when it said nothing; `errors` is every `error` notification
  *   kept; `reason` is this client's sentence.
- * - `{outcome: "server-exited", stage, exitCode, signal}`.
+ * - `{outcome: "server-exited", stage, exitCode, signal}` — `stage` is
+ *   `"thread/read"` when the turn had completed and the server went before
+ *   answering the read.
  * - `{outcome: "timed-out", interruptSent, turnStatus}` — `turnStatus` is what
- *   `turn/completed` said during the grace, or null.
+ *   `turn/completed` said during the grace, or before the deadline ran out on
+ *   `thread/read`; null when it said nothing.
  *
  * Throws only when the binary cannot be started.
  */
@@ -577,12 +580,23 @@ export async function runAppServerTurn({
       break conversation;
     }
 
+    // The read is part of the call: a server that goes, or runs out the
+    // deadline, before answering it is that outcome and never a completed turn,
+    // whatever the turn said.
     stage = "thread/read";
     const read = await waitFor(reply(request("thread/read", { threadId, includeTurns: false })), deadline);
+    if (read.exited) {
+      markThreadUnread(routing, "the server exited before thread/read answered");
+      outcome = serverExited();
+      break conversation;
+    }
+    if (read.late) {
+      markThreadUnread(routing, "thread/read did not answer before the timeout");
+      outcome = timedOut({ turnStatus: done.status ?? null });
+      break conversation;
+    }
     if (answered(read)) readThreadRouting(routing, read.result?.thread);
-    else if (read.error) markThreadUnread(routing, `thread/read failed: ${read.error.message}`);
-    else if (read.exited) markThreadUnread(routing, "the server exited before thread/read answered");
-    else markThreadUnread(routing, "thread/read did not answer before the timeout");
+    else markThreadUnread(routing, `thread/read failed: ${read.error.message}`);
 
     const status = done.status ?? null;
     const message = status === "completed" ? finalMessage(done) : null;
