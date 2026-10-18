@@ -341,7 +341,15 @@ test("of several exhausted windows the latest reset is aimed at, and a window wi
   assert.equal(quotaResetTime(withLimits({ primary: exhausted(IN_AN_HOUR), secondary: exhausted(later, 40) }), "", NOW),
     IN_AN_HOUR * 1000 + MARGIN, "a window with headroom was aimed at");
   assert.equal(quotaResetTime(withLimits({ primary: exhausted(IN_AN_HOUR, 40), secondary: exhausted(later, 3), rateLimitReachedType: "rate_limit_reached" }), "", NOW),
-    later * 1000 + MARGIN, "a snapshot that says a limit was reached did not count its windows");
+    later * 1000 + MARGIN, "a snapshot that says a limit was reached, and shows no window used up, did not count its windows");
+});
+
+// Codex's usual shape: a short window used up, a weekly one with headroom.
+test("a snapshot that says a limit was reached aims at its used-up window, not a later one with headroom", () => {
+  const inFiveDays = NOW / 1000 + 5 * 24 * 3600;
+  const failure = withLimits({ primary: exhausted(IN_AN_HOUR), secondary: exhausted(inFiveDays, 40), rateLimitReachedType: "rate_limit_reached" });
+  assert.equal(quotaResetTime(failure, "", NOW), IN_AN_HOUR * 1000 + MARGIN,
+    "a window with headroom was aimed at because the snapshot said a limit was reached");
 });
 
 test("a snapshot with headroom, or a reset time that is past, missing or not a number, falls back to today's result", () => {

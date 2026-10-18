@@ -205,23 +205,23 @@ export function classifyFailure(failure, text, provider = "codex") {
  * Codex reported, plus today's two-minute margin; otherwise exactly what
  * `parseResetTime` makes of `text`.
  *
- * A reset time is reported by a rate-limit window that is exhausted — its
- * `usedPercent` at or above 100, or any window of a snapshot whose
- * `rateLimitReachedType` is set — or by a provider's message (unverified; see
- * `providerError`). A snapshot showing headroom is not a reset time. Codex
- * reports them in seconds. One that is not a finite number, or not in the
- * future, is absent: aiming at it would retry at once, and again, until the
- * four-hour ceiling.
+ * A reset time is reported by a rate-limit window that is exhausted, or by a
+ * provider's message (unverified; see `providerError`). A window is exhausted
+ * when its `usedPercent` is at or above 100. Only when no window says so does a
+ * snapshot whose `rateLimitReachedType` is set count its windows instead: with
+ * one window used up, a window beside it that still has headroom is not why the
+ * limit was reached, and aiming at its later reset would wait out the four-hour
+ * ceiling instead of retrying once the used-up window resets. A snapshot showing
+ * headroom is not a reset time. Codex reports them in seconds. One that is not a
+ * finite number, or not in the future, is absent: aiming at it would retry at
+ * once, and again, until the four-hour ceiling.
  */
 export function quotaResetTime(failure, text, now = Date.now()) {
-  const reported = [];
   const limits = isRecord(failure?.rateLimits) ? failure.rateLimits : {};
+  const windows = [limits.primary, limits.secondary].filter(isRecord);
+  const exhausted = windows.filter((window) => Number.isFinite(window.usedPercent) && window.usedPercent >= 100);
   const reached = limits.rateLimitReachedType !== undefined && limits.rateLimitReachedType !== null;
-  for (const window of [limits.primary, limits.secondary]) {
-    if (isRecord(window) && (reached || (Number.isFinite(window.usedPercent) && window.usedPercent >= 100))) {
-      reported.push(window.resetsAt);
-    }
-  }
+  const reported = (exhausted.length > 0 ? exhausted : reached ? windows : []).map((window) => window.resetsAt);
   for (const error of Array.isArray(failure?.errors) ? failure.errors : []) {
     const provided = providerError(error?.message);
     if (provided) reported.push(provided.resetsAt);

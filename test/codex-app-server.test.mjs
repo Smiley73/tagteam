@@ -348,7 +348,7 @@ test("rate-limit updates are merged, each field keeping the latest value any of 
   fs.writeFileSync(file, JSON.stringify(variant));
   const { outcome } = await call(file);
   assert.deepEqual(outcome.rateLimits, {
-    primary: { usedPercent: 7, resetsAt: null },
+    primary: { usedPercent: 7, resetsAt: 4_102_444_800 },
     secondary: { usedPercent: 100, resetsAt: 4_102_444_900 },
     rateLimitReachedType: "rate_limit_reached"
   });

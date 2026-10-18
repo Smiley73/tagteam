@@ -294,24 +294,28 @@ function turnError(error) {
   };
 }
 
-// The part of a rate-limit window a quota wait reads. Anything else Codex sends
-// — the window's length, the plan, the credit balance, the account — is account
-// data nothing here uses, so it is not kept.
-function rateLimitWindow(window) {
-  if (window === null || typeof window !== "object" || Array.isArray(window)) return null;
-  return { usedPercent: window.usedPercent ?? null, resetsAt: window.resetsAt ?? null };
+// The part of a rate-limit window a quota wait reads, merged field by field into
+// the window already kept. Anything else Codex sends — the window's length, the
+// plan, the credit balance, the account — is account data nothing here uses, so
+// it is not kept.
+function rateLimitWindow(kept, window) {
+  if (window === null || typeof window !== "object" || Array.isArray(window)) return kept;
+  return {
+    usedPercent: window.usedPercent ?? kept?.usedPercent ?? null,
+    resetsAt: window.resetsAt ?? kept?.resetsAt ?? null
+  };
 }
 
 // `account/rateLimits/updated` is, in the protocol's own words, a "sparse rolling
 // rate-limit update": a value it leaves out or sends as null is unavailable, not
-// cleared. So each field keeps the latest value any update in this attempt
-// carried, and an update that carried none of them changes nothing.
+// cleared. So each field — each window's `usedPercent` and `resetsAt` on its
+// own, too — keeps the latest value any update in this attempt carried, and an
+// update that carried none of them changes nothing.
 function mergeRateLimits(kept, update) {
   if (update === null || typeof update !== "object" || Array.isArray(update)) return kept;
   const next = { ...(kept ?? { primary: null, secondary: null, rateLimitReachedType: null }) };
   for (const name of ["primary", "secondary"]) {
-    const window = rateLimitWindow(update[name]);
-    if (window) next[name] = window;
+    next[name] = rateLimitWindow(next[name], update[name]);
   }
   if (update.rateLimitReachedType !== undefined && update.rateLimitReachedType !== null) {
     next.rateLimitReachedType = update.rateLimitReachedType;
