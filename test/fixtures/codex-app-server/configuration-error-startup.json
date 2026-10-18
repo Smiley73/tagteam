@@ -1,0 +1,19 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "configuration-error-startup",
+  "description": "A CODEX_HOME that does not exist: the server exits with code 1 before it answers initialize.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "$stderr": "WARNING: proceeding, even though we could not create PATH aliases: CODEX_HOME points to \"/codex-home\", but that path does not exist\nError: CODEX_HOME points to \"/codex-home\", but that path does not exist\n"
+        },
+        {
+          "$exit": 1
+        }
+      ]
+    }
+  ]
+}

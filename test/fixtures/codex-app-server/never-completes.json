@@ -1,0 +1,48 @@
+{
+  "synthetic": true,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "never-completes",
+  "description": "Synthetic, written by hand from the success capture: turn/start is answered and the turn never completes; turn/interrupt is never answered either.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

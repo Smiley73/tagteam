@@ -1,0 +1,27 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "configuration-error-thread-start",
+  "description": "A malformed config.toml in the Codex home: the server starts, then answers thread/start with a JSON-RPC error.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "error": {
+            "code": -32600,
+            "message": "failed to load configuration: /codex-home/config.toml:2:10: unclosed table, expected `]`"
+          }
+        }
+      ]
+    }
+  ]
+}

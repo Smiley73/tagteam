@@ -1,0 +1,51 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "killed-mid-turn",
+  "description": "The server sent SIGKILL a few seconds into a turn: no turn/completed, and an exit by signal.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "$signal": "SIGKILL"
+        }
+      ]
+    }
+  ]
+}
