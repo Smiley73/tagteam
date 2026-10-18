@@ -139,7 +139,9 @@ test("each capture comes back as its own outcome and none as another", async () 
     "killed-mid-turn": "server-exited",
     "exits-mid-turn": "server-exited",
     "server-request-mid-turn": "completed",
-    "grandchild-left-running": "completed"
+    "grandchild-left-running": "completed",
+    "token-usage": "completed",
+    "usage-then-killed": "server-exited"
   };
   for (const [name, kind] of Object.entries(expected)) {
     const { outcome } = await call(name);
@@ -354,6 +356,67 @@ test("rate-limit updates are merged, each field keeping the latest value any of 
   });
 });
 
+// --- what a call spent ---
+
+const usageUpdates = (name) => fixture(name).steps.flatMap((step) => step.send)
+  .filter((message) => message.method === "thread/tokenUsage/updated").map((message) => message.params.tokenUsage);
+
+test("a turn that sent several usage updates reports the latest cumulative total, not the last request and not a sum", async () => {
+  const updates = usageUpdates("token-usage");
+  assert.ok(updates.length >= 2, "the capture holds fewer than two updates");
+  const latest = updates.at(-1);
+  // The numbers the wrong readings would give, so that each is told apart.
+  const summed = updates.reduce((sum, update) => sum + update.total.inputTokens, 0);
+  assert.notEqual(latest.last.inputTokens, latest.total.inputTokens, "the capture cannot tell `last` from `total`");
+  assert.notEqual(summed, latest.total.inputTokens, "the capture cannot tell a sum from the latest total");
+
+  const { outcome } = await call("token-usage");
+  assert.equal(outcome.outcome, "completed");
+  assert.deepEqual(outcome.usage, { value: latest.total, reason: null });
+});
+
+test("a turn that sent no usage update says so, and never reports zeros", async () => {
+  for (const name of ["success", "unusable-model", "configuration-error-startup"]) {
+    const { outcome } = await call(name);
+    assert.deepEqual(outcome.usage, { value: null, reason: "Codex sent no thread/tokenUsage/updated" }, `${name} reported usage it never received`);
+  }
+});
+
+test("the usage a turn reported before it timed out or its server was killed travels with that outcome", async () => {
+  const [timedOutWith] = usageUpdates("usage-then-timeout");
+  const timedOut = (await call("usage-then-timeout", { timeoutSec: 2 })).outcome;
+  assert.equal(timedOut.outcome, "timed-out");
+  assert.equal(timedOut.turnStatus, "interrupted");
+  assert.deepEqual(timedOut.usage, { value: timedOutWith.total, reason: null });
+
+  const [killedWith] = usageUpdates("usage-then-killed");
+  const killed = (await call("usage-then-killed")).outcome;
+  assert.equal(killed.outcome, "server-exited");
+  assert.equal(killed.signal, "SIGKILL");
+  assert.deepEqual(killed.usage, { value: killedWith.total, reason: null });
+});
+
+test("an update for another thread is not this call's, and one that cannot be read leaves the last that could", async () => {
+  const variant = structuredClone(fixture("token-usage"));
+  const send = variant.steps.find((step) => step.on === "turn/start").send;
+  const updates = send.filter((message) => message.method === "thread/tokenUsage/updated");
+  const kept = updates.at(-1).params.tokenUsage.total;
+  const at = send.indexOf(updates.at(-1)) + 1;
+  send.splice(at, 0,
+    { method: "thread/tokenUsage/updated", params: { threadId: "thread-2", tokenUsage: { total: { ...kept, inputTokens: kept.inputTokens * 10 } } } },
+    { method: "thread/tokenUsage/updated", params: { threadId: "thread-1", tokenUsage: { total: { inputTokens: "many" } } } });
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-app-server-fixture-")), "variant.json");
+  fs.writeFileSync(file, JSON.stringify(variant));
+  const { outcome } = await call(file);
+  assert.deepEqual(outcome.usage, { value: kept, reason: null });
+
+  const unreadable = structuredClone(fixture("success"));
+  unreadable.steps.find((step) => step.on === "turn/start").send.splice(1, 0,
+    { method: "thread/tokenUsage/updated", params: { threadId: "thread-1", tokenUsage: { last: kept } } });
+  fs.writeFileSync(file, JSON.stringify(unreadable));
+  assert.deepEqual((await call(file)).outcome.usage, { value: null, reason: "no thread/tokenUsage/updated carried a readable total" });
+});
+
 test("whether Codex will retry an error is kept as it said it, and as null when it did not say", async () => {
   const said = (await call("refused-schema")).outcome;
   assert.equal(said.errors[0].willRetry, false);
@@ -423,10 +486,13 @@ test("every fixture passes the scrub check", () => {
 test("every capture the spec names is a real one, and every synthetic fixture says so", () => {
   const real = [
     "success", "success-agents-md", "success-rate-limits", "max-effort", "configuration-error-thread-start", "configuration-error-startup",
-    "unusable-model", "refused-schema", "killed-mid-turn", "interrupted"
+    "unusable-model", "refused-schema", "killed-mid-turn", "interrupted", "token-usage"
   ];
   for (const name of real) assert.equal(fixture(name).synthetic, false, `${name} is not a real capture`);
-  const synthetic = ["never-completes", "ignores-interrupt", "server-request-mid-turn", "exits-mid-turn", "grandchild-left-running"];
+  const synthetic = [
+    "never-completes", "ignores-interrupt", "server-request-mid-turn", "exits-mid-turn", "grandchild-left-running",
+    "usage-then-timeout", "usage-then-killed"
+  ];
   for (const name of synthetic) {
     assert.equal(fixture(name).synthetic, true, `${name} is not labelled synthetic`);
     assert.match(fixture(name).description, /^Synthetic/);
@@ -468,10 +534,17 @@ test("the scrub check catches each shape it exists for", () => {
   withNotification.steps[2].send.push({ method: "account/updated", params: { authMode: "chatgpt" } });
   assert.ok(fixtureProblems(withNotification, machine).some((problem) => /notification outside the allow-list: account\/updated/.test(problem)));
 
-  const withTokenUsage = structuredClone(fixture("success"));
-  withTokenUsage.steps[2].send.push({ method: "thread/tokenUsage/updated", params: {} });
-  assert.ok(fixtureProblems(withTokenUsage, machine).some((problem) => /thread\/tokenUsage\/updated/.test(problem)),
-    "token usage belongs to 04 and stays off the allow-list until then");
+  // Token usage is on the allow-list, and only the counts the client reads: the
+  // turn id and the context window are not.
+  const withTokenUsage = structuredClone(fixture("token-usage"));
+  const update = withTokenUsage.steps[2].send.find((message) => message.method === "thread/tokenUsage/updated");
+  update.params.turnId = "turn-1";
+  update.params.tokenUsage.modelContextWindow = 258400;
+  update.params.tokenUsage.total.cacheWriteInputTokens = 0;
+  const usageProblems = fixtureProblems(withTokenUsage, machine);
+  for (const field of ["params.turnId", "tokenUsage.modelContextWindow", "total.cacheWriteInputTokens"]) {
+    assert.ok(usageProblems.some((problem) => problem.includes(`${field} is a field outside the allow-list`)), `${field} passed the scrub: ${usageProblems.join("; ")}`);
+  }
 
   const withField = structuredClone(fixture("success"));
   withField.steps[0].send[0].result.userAgent = "tagteam/0.1";

@@ -37,6 +37,11 @@ import os from "node:os";
 import path from "node:path";
 import { isMain } from "./lib/is-main.mjs";
 
+// The key `codex-usage.mjs` keeps its figures under in `usage.json`. Named here
+// rather than imported, so that nothing in the Codex reader can stop this file
+// loading.
+const CODEX_KEY = "codex";
+
 // The published price ratios, so one number can stand for a mixed bill: cache
 // reads at a tenth of the uncached input rate, cache writes at a quarter over
 // it, output at five times. "Input-token equivalents" is what every cost figure
@@ -328,8 +333,17 @@ async function main() {
       repo: options.repo, since: options.since, until: options.until ?? null, session: options.session ?? null
     });
     if (options.out) {
-      fs.mkdirSync(path.dirname(path.resolve(options.out)), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.resolve(options.out), `${JSON.stringify(result, null, 2)}\n`);
+      const out = path.resolve(options.out);
+      fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
+      // The Claude report owns the top level and nothing else: the Codex figures
+      // `codex-usage.mjs` keeps under their own key in the same file are carried
+      // over as they are, so neither writer can erase the other's part.
+      let codex = {};
+      try {
+        const existing = JSON.parse(fs.readFileSync(out, "utf8"));
+        if (existing && typeof existing === "object" && Object.hasOwn(existing, CODEX_KEY)) codex = { [CODEX_KEY]: existing[CODEX_KEY] };
+      } catch {}
+      fs.writeFileSync(out, `${JSON.stringify({ ...result, ...codex }, null, 2)}\n`);
     }
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);
   } catch (error) {

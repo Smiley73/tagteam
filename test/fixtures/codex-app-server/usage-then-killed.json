@@ -1,0 +1,73 @@
+{
+  "synthetic": true,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "usage-then-killed",
+  "description": "Synthetic, written by hand from the killed-mid-turn and token-usage captures: the turn sends one usage update and the server is then killed by SIGKILL, with no turn/completed, which is what a real server killed after a command did on codex-cli 0.163.0-alpha.10.2.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params": {
+            "threadId": "thread-1",
+            "tokenUsage": {
+              "total": {
+                "inputTokens": 19195,
+                "cachedInputTokens": 0,
+                "outputTokens": 105,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19300
+              },
+              "last": {
+                "inputTokens": 19195,
+                "cachedInputTokens": 0,
+                "outputTokens": 105,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19300
+              }
+            }
+          }
+        },
+        {
+          "$signal": "SIGKILL"
+        }
+      ]
+    }
+  ]
+}

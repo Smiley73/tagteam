@@ -48,11 +48,14 @@ const TURN_ERROR = { message: true, codexErrorInfo: true, additionalDetails: tru
 // What a quota wait reads of a rate-limit window. `windowDurationMins` is not
 // read, so it is not kept.
 const RATE_LIMIT_WINDOW = { usedPercent: true, resetsAt: true };
+// The token counts of one usage breakdown. Not identifiers. `cacheWriteInputTokens`
+// is not read, so it is not kept.
+const TOKEN_USAGE = { inputTokens: true, cachedInputTokens: true, outputTokens: true, reasoningOutputTokens: true, totalTokens: true };
 
 /**
  * Every message, and every field within one, that a fixture may hold: what the
  * client reads and nothing more. `results` is keyed by the request a response
- * answers. `thread/tokenUsage/updated` stays off until 04 reads it.
+ * answers.
  */
 export const ALLOW_LIST = {
   results: {
@@ -76,6 +79,14 @@ export const ALLOW_LIST = {
     // it are account data nothing reads.
     "account/rateLimits/updated": {
       rateLimits: { primary: RATE_LIMIT_WINDOW, secondary: RATE_LIMIT_WINDOW, rateLimitReachedType: true }
+    },
+    // The client reads the thread id and `total`. `last` is the one exception to
+    // "what the client reads": it is kept so that a test can hold the client to
+    // `total` against the per-request figure it could have taken instead. The
+    // turn id and the context window are not kept.
+    "thread/tokenUsage/updated": {
+      threadId: true,
+      tokenUsage: { total: TOKEN_USAGE, last: TOKEN_USAGE }
     },
     // Read by nothing: the client drops it on arrival. Allowed so that a test
     // can prove the advisory — "Model metadata for `<model>` not found.
@@ -441,6 +452,10 @@ export const SCENARIOS = {
   },
   "success-rate-limits": {
     description: "A turn that completes, keeping the account/rateLimits/updated notification it received: only each window's usedPercent and resetsAt and the rateLimitReachedType, every reset time replaced."
+  },
+  "token-usage": {
+    description: "A turn that runs two read-only shell commands before it answers, so the thread sends one thread/tokenUsage/updated per model request, each total the running sum.",
+    prompt: 'Using the shell, run `ls -a`, and then, as a separate command, `echo done`. Then answer with exactly {"ok":true}.'
   },
   "success-agents-md": {
     description: "A turn that completes in a repository that has its own AGENTS.md, which the thread lists as an instruction source.",

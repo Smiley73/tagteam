@@ -266,6 +266,11 @@ flowchart TD
 After each spec, `/tagteam:status` can say what it cost: tagteam reads the
 session transcripts Claude Code keeps and reports the spend as input-token
 equivalents, split between the orchestrating agent and the agents it dispatched.
+A Codex line follows it with what that spec's own Codex calls spent, in plain
+tokens — input, how much of it was cached, and output — kept apart from the
+Claude figure because Codex is paid from a different bill, and still there when
+the Claude figure could not be worked out. A Codex call that fails keeps its
+spend on record too.
 Each spec, and each plan at approval, also names any agent that ran at a
 different effort or model than it was sent at, or whose run could not be
 confirmed, as a report that never holds anything up.

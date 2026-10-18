@@ -132,6 +132,12 @@ import { fileURLToPath } from "node:url";
 // carry `usedPercent` and `resetsAt`, beside `rateLimitReachedType`. All of
 // them were there at the floor, so it stays. Every one of them is read as "no
 // verdict" when it is missing.
+//
+// Re-checked for what spend reads, on 2026-10-18, the same way: 0.153.0's
+// `thread/tokenUsage/updated` is identical to 0.163's, `threadId`, `total`,
+// `last` and every breakdown field, `cachedInputTokens` included, already
+// there. So the floor stays for that too, and a missing update reads as "not
+// reported", never as zero.
 export const CODEX_MINIMUM = [0, 153, 0];
 
 /**
@@ -323,6 +329,56 @@ function mergeRateLimits(kept, update) {
   return next;
 }
 
+// ## What a call spent
+//
+// `thread/tokenUsage/updated` carries `{threadId, turnId, tokenUsage: {total,
+// last, modelContextWindow}}`, each breakdown `{inputTokens, cachedInputTokens,
+// cacheWriteInputTokens, outputTokens, reasoningOutputTokens, totalTokens}`.
+// What running it established, on codex-cli 0.163.0-alpha.10.2 on 2026-10-18
+// (the `token-usage` capture is one of those runs, scrubbed):
+//
+// - A turn that ran commands sent one update per model request: three for two
+//   commands and an answer. Each `last` is that one request; each `total` is the
+//   running sum of every `last` on the thread so far.
+// - `total` accumulates across turns on one thread too: a second turn's first
+//   `total` was the first turn's final `total` plus its own `last`.
+// - `totalTokens = inputTokens + outputTokens` in every update, with cached input
+//   counted inside input, never beside it.
+// - With 115 `reasoningOutputTokens`, `outputTokens` was 137 and the total still
+//   input plus output: reasoning is part of output, and adding it again would
+//   count it twice. One capture, at high effort.
+// - Interrupted after a command, the turn sent its last update again, unchanged,
+//   just before `turn/completed` said `interrupted`; the request that was running
+//   when the interrupt landed appeared in no update.
+// - A server killed by SIGKILL after a command had sent the updates of the
+//   requests that had finished, and nothing for the one it died in.
+// - A turn that failed before the model ran (an unusable model) sent none.
+//
+// So an attempt's spend is the `total` of the latest update for its own thread:
+// not `last`, which is one request, and not a sum of updates, which counts every
+// earlier request again. Each attempt is its own server and its own ephemeral
+// thread, so no attempt shares a thread with another and none needs the
+// difference from an earlier one. What a request that was cut off cost, if
+// anything, is never reported, so an interrupted or killed attempt's figure can
+// be short of what was billed.
+//
+// The notification and every field read here are in the protocol description
+// the 0.153.0 floor generates (`codex app-server generate-json-schema`, run on
+// 2026-10-18 from the published darwin-arm64 build), identical to 0.163's,
+// `cachedInputTokens` among the required fields: the floor stays where it is.
+const USAGE_FIELDS = ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"];
+
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+
+// A breakdown is read only when input and output are both counts: without them
+// there is no figure to keep. Any other field that is not a count is null, which
+// says "not reported" for that field alone.
+function readUsage(breakdown) {
+  if (breakdown === null || typeof breakdown !== "object" || Array.isArray(breakdown)) return null;
+  if (!isCount(breakdown.inputTokens) || !isCount(breakdown.outputTokens)) return null;
+  return Object.fromEntries(USAGE_FIELDS.map((name) => [name, isCount(breakdown[name]) ? breakdown[name] : null]));
+}
+
 // Codex reports a fatal start-up error as one `Error: <sentence>` line on
 // stderr; the last one is the sentence.
 function startupError(stderr) {
@@ -370,7 +426,11 @@ function within(promise, ms) {
  * notification kept as `{error, willRetry}`, whatever the outcome — and
  * `rateLimits`, the `{primary, secondary, rateLimitReachedType}` this attempt's
  * `account/rateLimits/updated` notifications reported, each window as
- * `{usedPercent, resetsAt}`; null when none arrived:
+ * `{usedPercent, resetsAt}`; null when none arrived — and `usage`, what the
+ * thread reported it had spent, as `{value, reason}`: `value` is `{inputTokens,
+ * cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens}` from the
+ * latest update's `total`, and null with a `reason` when no update arrived or
+ * none could be read. It is never zeros standing in for "not reported":
  *
  * - `{outcome: "completed", message}` — the final agent message, as text.
  * - `{outcome: "configuration-error", arrivedAt, message}` — `arrivedAt` is
@@ -411,6 +471,12 @@ export async function runAppServerTurn({
   const errors = [];
   const serverRequests = [];
   let rateLimits = null;
+  // The latest readable `total` for this call's thread, and whether any update
+  // arrived at all, so that "none arrived" and "none could be read" are told
+  // apart.
+  let usage = null;
+  let usageUpdates = 0;
+  let ourThread = null;
   let completedTurn = null;
   let exit = null;
   let wake = () => {};
@@ -492,6 +558,15 @@ export async function runAppServerTurn({
         if (errors.length > ERROR_NOTIFICATIONS_KEPT) errors.shift();
       } else if (message.method === "account/rateLimits/updated" && message.params) {
         rateLimits = mergeRateLimits(rateLimits, message.params.rateLimits);
+      } else if (message.method === "thread/tokenUsage/updated" && message.params) {
+        // One thread per server, so an update naming another thread is not
+        // ours; one naming none is. An update whose total cannot be read
+        // leaves the last one that could: totals only grow, so that is the
+        // closest figure there is.
+        const thread = message.params.threadId;
+        if (typeof thread === "string" && ourThread !== null && thread !== ourThread) return;
+        usageUpdates += 1;
+        usage = readUsage(message.params.tokenUsage?.total) ?? usage;
       }
       return;
     }
@@ -606,6 +681,7 @@ export async function runAppServerTurn({
       outcome = { outcome: "turn-failed", stage, status: null, kind: null, message: null, additionalDetails: null, errors, reason: "the thread/start result named no thread" };
       break conversation;
     }
+    ourThread = threadId;
 
     stage = "turn/start";
     const turn = await waitFor(reply(request("turn/start", turnStartParams({ threadId, prompt, outputSchema, effort }))), deadline);
@@ -674,8 +750,12 @@ export async function runAppServerTurn({
 
   await endGroup(child, exited, () => exit !== null, outcome.outcome !== "timed-out");
   // On every outcome, not only a failed turn: a server that exits mid-turn has
-  // often said why in an `error` notification first.
-  return { ...outcome, errors: [...errors], rateLimits, routing, serverRequests: [...serverRequests], stderr };
+  // often said why in an `error` notification first, and a timed-out or killed
+  // turn has usually spent something before it went.
+  const spent = usage !== null
+    ? { value: usage, reason: null }
+    : { value: null, reason: usageUpdates === 0 ? "Codex sent no thread/tokenUsage/updated" : "no thread/tokenUsage/updated carried a readable total" };
+  return { ...outcome, errors: [...errors], rateLimits, usage: spent, routing, serverRequests: [...serverRequests], stderr };
 }
 
 // Ask the server to go by closing its input, then end its whole group: SIGTERM,

@@ -1,0 +1,184 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.163.0-alpha.10.2",
+  "scenario": "token-usage",
+  "description": "A turn that runs two read-only shell commands before it answers, so the thread sends one thread/tokenUsage/updated per model request, each total the running sum.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params": {
+            "threadId": "thread-1",
+            "tokenUsage": {
+              "total": {
+                "inputTokens": 19195,
+                "cachedInputTokens": 0,
+                "outputTokens": 105,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19300
+              },
+              "last": {
+                "inputTokens": 19195,
+                "cachedInputTokens": 0,
+                "outputTokens": 105,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19300
+              }
+            }
+          }
+        },
+        {
+          "method": "account/rateLimits/updated",
+          "params": {
+            "rateLimits": {
+              "primary": {
+                "usedPercent": 3,
+                "resetsAt": 4102444800
+              },
+              "secondary": null,
+              "rateLimitReachedType": null
+            }
+          }
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params": {
+            "threadId": "thread-1",
+            "tokenUsage": {
+              "total": {
+                "inputTokens": 38520,
+                "cachedInputTokens": 19072,
+                "outputTokens": 191,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 38711
+              },
+              "last": {
+                "inputTokens": 19325,
+                "cachedInputTokens": 19072,
+                "outputTokens": 86,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19411
+              }
+            }
+          }
+        },
+        {
+          "method": "account/rateLimits/updated",
+          "params": {
+            "rateLimits": {
+              "primary": {
+                "usedPercent": 3,
+                "resetsAt": 4102444800
+              },
+              "secondary": null,
+              "rateLimitReachedType": null
+            }
+          }
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params": {
+            "threadId": "thread-1",
+            "tokenUsage": {
+              "total": {
+                "inputTokens": 57956,
+                "cachedInputTokens": 38272,
+                "outputTokens": 206,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 58162
+              },
+              "last": {
+                "inputTokens": 19436,
+                "cachedInputTokens": 19200,
+                "outputTokens": 15,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19451
+              }
+            }
+          }
+        },
+        {
+          "method": "account/rateLimits/updated",
+          "params": {
+            "rateLimits": {
+              "primary": {
+                "usedPercent": 3,
+                "resetsAt": 4102444800
+              },
+              "secondary": null,
+              "rateLimitReachedType": null
+            }
+          }
+        },
+        {
+          "method": "turn/completed",
+          "params": {
+            "turn": {
+              "id": "turn-1",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "text": "{\"ok\":true}",
+                  "phase": "final_answer"
+                }
+              ],
+              "error": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "thread/read",
+      "send": [
+        {
+          "result": {
+            "thread": {
+              "model": "gpt-5.6-sol",
+              "reasoningEffort": "low",
+              "cliVersion": "0.163.0-alpha.10.2"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

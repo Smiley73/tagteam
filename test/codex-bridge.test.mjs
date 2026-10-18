@@ -119,10 +119,15 @@ function withEarlierArtifact(space) {
   fs.rmSync(path.join(space.dir, "received.jsonl"), { force: true });
 }
 
+// The sidecar may survive a failure, but only as the spend history: nothing
+// `--reuse` could match and nothing that reads as a finished call.
 function assertCleared(space, result, why) {
   assert.equal(artifactExists(space.dir), false, `the earlier artifact survived ${why}`);
-  assert.equal(sidecarExists(space.dir), false, `the earlier sidecar survived ${why}`);
-  assert.match(result.stderr, /were removed so nothing later can count them/, `${why} does not say what became of what was at --out`);
+  if (sidecarExists(space.dir)) {
+    assert.deepEqual(Object.keys(sidecar(space.dir)), ["codexSpend"], `the earlier sidecar survived ${why} with more than its spend`);
+  }
+  assert.match(result.stderr, /(?:were removed|was removed and its request record cut down to the Codex spend alone),? so nothing later can count them/,
+    `${why} does not say what became of what was at --out`);
 }
 
 // --- what Codex is asked for ---
@@ -769,6 +774,226 @@ test("with a disagreement and an absence together the trigger is last, and no in
   assert.ok(result.stderr.length <= 700 || result.stderr.slice(-700).includes(TRIGGER));
   assert.doesNotMatch(result.stderr, /AGENTS\.md/, "an instruction file path reached stderr");
   assert.deepEqual(sidecar(space.dir).routing.observed.instructionFiles, ["/codex-home/AGENTS.md", "/work/repo/AGENTS.md"]);
+});
+
+// --- what a call spent ---
+
+const spendOf = (dir) => sidecar(dir).codexSpend;
+const fixtureFile = (name) => path.join(import.meta.dirname, "fixtures", "codex-app-server", `${name}.json`);
+const totalsIn = (fixture) => fixture.steps.flatMap((step) => step.send)
+  .filter((message) => message.method === "thread/tokenUsage/updated").map((message) => message.params.tokenUsage);
+const capturedTotals = (name) => totalsIn(JSON.parse(fs.readFileSync(fixtureFile(name), "utf8")));
+// The usage the bridge should record for a fixture: its latest update's total.
+const latestTotal = (name) => capturedTotals(name).at(-1).total;
+const usageOnly = (attempts) => attempts.map((attempt) => attempt.usage);
+
+test("several usage updates in one turn record the latest cumulative total, not a sum and not the last request", () => {
+  const space = workspace();
+  const result = run(space, { fixture: "token-usage" });
+  assert.equal(result.status, 0, result.stderr);
+  const updates = capturedTotals("token-usage");
+  const summed = updates.reduce((sum, update) => sum + update.total.inputTokens, 0);
+  const latest = updates.at(-1);
+  assert.notEqual(summed, latest.total.inputTokens);
+  assert.notEqual(latest.last.inputTokens, latest.total.inputTokens);
+
+  const spend = spendOf(space.dir);
+  assert.equal(spend.length, 1, "one call made one history entry");
+  assert.ok(!Number.isNaN(Date.parse(spend[0].at)), "the call does not say when it ran");
+  assert.deepEqual(spend[0].attempts, [{ ended: "completed", usage: latest.total }]);
+  // The rest of the sidecar is today's, so --reuse still recognises it.
+  assert.equal(sidecar(space.dir).model, MODEL);
+  assert.equal(typeof sidecar(space.dir).promptSha256, "string");
+});
+
+// The first attempt answers invalidly with numbers of its own, so the order the
+// two are recorded in is visible.
+const invalidWithSpend = (inputTokens) => changedFixture("token-usage", "the answer is not schema-valid, and the last total is changed.", (fixture) => {
+  answerInvalid(fixture);
+  totalsIn(fixture).at(-1).total.inputTokens = inputTokens;
+});
+
+test("two schema attempts are both recorded, in the order they ran", () => {
+  const space = workspace();
+  const result = run(space, { fixture: [invalidWithSpend(111_111), "token-usage"] });
+  assert.equal(result.status, 0, result.stderr);
+  const [call] = spendOf(space.dir);
+  assert.deepEqual(call.attempts.map((attempt) => attempt.ended), ["completed", "completed"]);
+  assert.deepEqual(usageOnly(call.attempts), [{ ...latestTotal("token-usage"), inputTokens: 111_111 }, latestTotal("token-usage")]);
+});
+
+// A failure clears the artifact and keeps the spend, and the spend-only sidecar
+// it leaves matches no request: the identical request runs Codex again.
+function assertSpendKeptAndNotReusable(space, earlier, thisCall) {
+  assert.equal(artifactExists(space.dir), false, "the artifact survived the failure");
+  const record = sidecar(space.dir);
+  assert.deepEqual(Object.keys(record), ["codexSpend"], "the failure left more than the spend in the sidecar");
+  assert.deepEqual(record.codexSpend.slice(0, -1), earlier, "the earlier calls' spend was not carried forward");
+  assert.deepEqual(record.codexSpend.at(-1).attempts, thisCall);
+
+  const before = starts(space.dir).length;
+  const again = run(space, { extra: ["--reuse"] });
+  assert.equal(again.status, 0, again.stderr);
+  assert.doesNotMatch(again.stderr, /Reusing/);
+  assert.equal(starts(space.dir).length, before + 1, "the identical request did not run Codex again");
+}
+
+test("after a timeout that followed a usage update, the artifact is gone and the sidecar still holds the spend", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const earlier = spendOf(space.dir);
+  const result = run(space, { fixture: "usage-then-timeout", extra: ["--timeout-sec", "2"] });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /exceeded its 2s timeout/);
+  assert.match(result.stderr, /cut down to the Codex spend alone, so nothing later can count them/);
+  assertSpendKeptAndNotReusable(space, earlier, [{ ended: "timed-out", usage: latestTotal("usage-then-timeout") }]);
+});
+
+test("after a server killed mid-turn twice, both attempts' spend is kept", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const earlier = spendOf(space.dir);
+  const result = run(space, { fixture: "usage-then-killed" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /after 2 attempts: the Codex server exited on SIGKILL during turn\./);
+  const spent = { ended: "server-exited", usage: latestTotal("usage-then-killed") };
+  assertSpendKeptAndNotReusable(space, earlier, [spent, spent]);
+});
+
+test("after running out of schema attempts, both attempts' spend is kept", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const earlier = spendOf(space.dir);
+  const result = run(space, { fixture: [invalidWithSpend(111_111), invalidWithSpend(222_222)] });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /did not produce a valid artifact after 2 attempts/);
+  assertSpendKeptAndNotReusable(space, earlier, [
+    { ended: "completed", usage: { ...latestTotal("token-usage"), inputTokens: 111_111 } },
+    { ended: "completed", usage: { ...latestTotal("token-usage"), inputTokens: 222_222 } }
+  ]);
+});
+
+test("an attempt that reported no usage is recorded as not reported, never as zero", () => {
+  const space = workspace();
+  const result = run(space, { fixture: "unusable-model" });
+  assert.equal(result.status, 1);
+  const [call] = spendOf(space.dir);
+  assert.deepEqual(call.attempts, [{ ended: "turn-failed", usage: "not reported", why: "Codex sent no thread/tokenUsage/updated" }]);
+  assert.doesNotMatch(JSON.stringify(spendOf(space.dir)), /Tokens":0\b/);
+});
+
+// Every terminal end records the attempts it ran: a configuration error, an
+// effort refusal, and a quota wait's attempt as well as a schema retry's.
+test("a configuration error, an effort refusal and an exhausted quota each record the attempt they ran", () => {
+  const configuration = workspace();
+  assert.equal(run(configuration, { fixture: "configuration-error-startup" }).status, 1);
+  assert.deepEqual(usageOnly(spendOf(configuration.dir)[0].attempts), ["not reported"]);
+
+  const effort = workspace();
+  assert.equal(run(effort, { fixture: "token-usage", effort: "high" }).status, 1);
+  assert.deepEqual(spendOf(effort.dir)[0].attempts, [{ ended: "completed", usage: latestTotal("token-usage") }]);
+
+  const quota = workspace();
+  seedExhaustedQuota(quota.dir);
+  assert.equal(run(quota, { fixture: quotaOnTurn(), spawnOptions: { timeout: 60_000 } }).status, 1);
+  assert.deepEqual(usageOnly(spendOf(quota.dir)[0].attempts), ["not reported"]);
+});
+
+test("a second call to the same --out keeps the first call's spend, whether it succeeds or fails", () => {
+  for (const [second, status] of [["success", 0], ["unusable-model", 1]]) {
+    const space = workspace();
+    assert.equal(run(space, { fixture: "token-usage" }).status, 0);
+    const [first] = spendOf(space.dir);
+    const result = run(space, { fixture: second });
+    assert.equal(result.status, status, result.stderr);
+    const spend = spendOf(space.dir);
+    assert.equal(spend.length, 2, `a ${second} call did not add itself to the history`);
+    assert.deepEqual(spend[0], first, `a ${second} call changed the first call's spend`);
+    assert.deepEqual(usageOnly(spend[1].attempts), ["not reported"]);
+  }
+});
+
+test("a --reuse hit leaves the history byte-for-byte, and a dry run records no call", () => {
+  const space = workspace();
+  assert.equal(run(space, { fixture: "token-usage" }).status, 0);
+  const before = fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8");
+  const reused = run(space, { extra: ["--reuse"], codexBin: space.recorder });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(JSON.parse(reused.stdout).reused, true);
+  assert.equal(fs.readFileSync(path.join(space.dir, "result.json.request.json"), "utf8"), before);
+
+  const spent = spendOf(space.dir);
+  const dry = run(space, { extra: ["--dry-run"], codexBin: space.recorder });
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.deepEqual(spendOf(space.dir), spent, "a dry run added to the history or lost it");
+
+  const fresh = workspace();
+  assert.equal(run(fresh, { extra: ["--dry-run"], codexBin: fresh.recorder }).status, 0);
+  assert.deepEqual(spendOf(fresh.dir), []);
+});
+
+test("a sidecar from before spend was recorded is carried forward as one call that reported nothing", () => {
+  const space = workspace();
+  assert.equal(run(space).status, 0);
+  const legacy = sidecar(space.dir);
+  delete legacy.codexSpend;
+  fs.writeFileSync(path.join(space.dir, "result.json.request.json"), JSON.stringify(legacy));
+  assert.equal(run(space, { fixture: "token-usage" }).status, 0);
+  const spend = spendOf(space.dir);
+  assert.equal(spend.length, 2);
+  assert.equal(spend[0].at, legacy.completedAt);
+  assert.deepEqual(usageOnly(spend[0].attempts), ["not reported"]);
+  assert.deepEqual(usageOnly(spend[1].attempts), [latestTotal("token-usage")]);
+});
+
+// The edge the spend-only record exists for: an artifact a failure could not
+// clear, beside the record that failure left. Nothing in it matches a request,
+// so the artifact is not an answer `--reuse` may return.
+test("a schema-valid artifact beside a spend-only record is not reused", () => {
+  const space = workspace();
+  assert.equal(run(space, { fixture: "token-usage" }).status, 0);
+  fs.writeFileSync(path.join(space.dir, "result.json.request.json"), JSON.stringify({ codexSpend: spendOf(space.dir) }));
+  const before = starts(space.dir).length;
+  const result = run(space, { extra: ["--reuse"] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /Reusing/);
+  assert.equal(starts(space.dir).length, before + 1, "a spend-only record let a stranded artifact be reused");
+  assert.equal(spendOf(space.dir).length, 2, "the spend-only record's history was not carried forward");
+});
+
+test("a failure before Codex was started keeps the spend already on disk", () => {
+  const space = workspace();
+  assert.equal(run(space, { fixture: "token-usage" }).status, 0);
+  const earlier = spendOf(space.dir);
+  fs.rmSync(path.join(space.dir, "payload.diff"));
+  const result = run(space);
+  assert.equal(result.status, 1);
+  assert.equal(artifactExists(space.dir), false);
+  assert.deepEqual(sidecar(space.dir), { codexSpend: earlier });
+});
+
+// Keeping nothing countable matters more than keeping the spend. A directory
+// nothing may write into stops the spend-only record being written; what is
+// left is today's remove-or-empty, and the message says the spend is lost.
+test("a sidecar that cannot be cut down to the spend falls back to remove-or-empty, and says the spend is lost", { skip: process.getuid?.() === 0 }, () => {
+  const space = workspace();
+  const out = path.join(space.dir, "out");
+  fs.mkdirSync(out);
+  const extra = ["--out", path.join(out, "result.json")];
+  assert.equal(run(space, { fixture: "token-usage", extra }).status, 0);
+  fs.rmSync(path.join(space.dir, "payload.diff"));
+  fs.chmodSync(out, 0o500);
+  try {
+    const result = run(space, { extra });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not be cut down to the Codex spend alone \([^)]*\), so the spend it held is lost/);
+    assert.match(result.stderr, /emptied in place instead/);
+    for (const file of ["result.json", "result.json.request.json"]) {
+      assert.equal(fs.readFileSync(path.join(out, file), "utf8"), "", `${file} was left countable`);
+    }
+  } finally {
+    fs.chmodSync(out, 0o700);
+  }
 });
 
 // --- the slots root ---

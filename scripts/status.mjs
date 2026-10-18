@@ -193,6 +193,12 @@ export function inventory(repoRoot) {
     const usage = Object.fromEntries(directories(root)
       .map((spec) => [spec, json(path.join(root, spec, "usage.json"))?.summary ?? null])
       .filter(([, summary]) => summary !== null));
+    // What each spec's own Codex calls spent, in plain tokens, kept apart from
+    // `usage` because the two are paid from different bills and never add up.
+    // Read on its own, so a spec whose Claude cost is unknown still has one.
+    const codexUsage = Object.fromEntries(directories(root)
+      .map((spec) => [spec, json(path.join(root, spec, "usage.json"))?.codex ?? null])
+      .filter(([, codex]) => codex !== null && typeof codex === "object" && !Array.isArray(codex)));
     // The landing checks that ran on this ship's specs, keyed the same way, and
     // only the ones bound to the candidate their spec is on now.
     const landing = Object.fromEntries(directories(root)
@@ -212,6 +218,7 @@ export function inventory(repoRoot) {
       waitingOn: waiting.map((spec) => ({ spec: spec.spec, pr: spec.pr?.number ?? null, branch: spec.branch })),
       stoppedOn: failed.map((spec) => ({ spec: spec.spec, branch: spec.branch })),
       usage,
+      codexUsage,
       landing,
       // One entry per spec that could still spend something. A merged or failed
       // spec has no budget, so it has no entry — and a spec waiting for a person

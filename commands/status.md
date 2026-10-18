@@ -76,6 +76,21 @@ counted in it: "about 14M input-token equivalents, though that is everything thi
 checkout spent in the window and another ship was running". Never present a
 repository-wide number as this spec's bill.
 
+**What each spec's Codex calls spent** is under `codexUsage` on the ship, keyed
+by spec, beside `usage` and independent of it: a spec can have one without the
+other. It counts only that spec's own calls. Give it in tokens, as its own clause
+after the Claude one: `calls`, `inputTokens` with how many of them were
+`cachedInputTokens` — cached is part of input, never added to it — and
+`outputTokens`, as in "Codex: 4 calls, 231K input tokens (115K of them cached)
+and 1.2K output tokens". These are plain tokens on Codex's own bill. Never add
+them to the input-token equivalents, never convert them, and never compare the
+two. A `callsWithoutUsage` above zero is that many calls that did not report all
+they spent, so the totals are short — say so. Token figures of `null` mean no
+call reported any: what Codex spent is unknown. An `unreadable` above zero is
+that many request records nobody could read, whose spend is unknown too. Say
+nothing for a spec with no entry: absent is unknown, not free, for Codex as for
+Claude.
+
 **A landing record is a base that moved**, under `landing` on the ship, keyed by
 spec. It is there only for a spec whose reviewed change met a base branch that
 had moved on since the review, and only for the change that spec is on right
