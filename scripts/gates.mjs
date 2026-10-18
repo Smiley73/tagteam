@@ -410,6 +410,11 @@ export function grantFixRound(state, { limits } = {}) {
  * counter ahead of disk is normal and legitimate: a fixer can be dispatched and
  * produce no commit, so no round directory ever appears.
  *
+ * The one exception is the fix counter when disk proves a repair the state file
+ * never recorded. That counter counts the cycle before, which the repair edge
+ * would have reset, so it is replaced by what disk proves of the new cycle —
+ * the cycle the state file is now in, and never less than its rounds on disk.
+ *
  * `rounds` is `listRounds()` output. A state file written before the counters
  * existed has neither; absent reads as 0 here rather than being written into
  * files nobody asked to touch.
@@ -420,20 +425,27 @@ export function reconcileBudgets(state, rounds) {
     .filter((index) => index !== undefined)
     .map(Number);
   const repairsOnDisk = indices.length > 0 ? Math.max(...indices) : 0;
-  const repairs = Math.max(counterOf(state, REPAIR_COUNTER), repairsOnDisk);
+  const recordedRepairs = counterOf(state, REPAIR_COUNTER);
+  const repairs = Math.max(recordedRepairs, repairsOnDisk);
   // Rounds with no scope of their own count in every scope, exactly as they do
   // when a budget is allocated.
   const current = repairScope(repairs);
   const inCurrent = (rounds ?? []).filter((entry) => (entry.scope ?? current) === current).length;
   const fixesOnDisk = Math.max(0, inCurrent - EXEMPT_ROUNDS_PER_SCOPE);
+  // Read even when it is about to be replaced, so a malformed counter is still
+  // refused rather than silently overwritten.
+  const recordedFixes = counterOf(state, FIX_COUNTER);
+  const cycleMoved = repairs > recordedRepairs;
 
   const changed = [];
   const next = { ...state };
-  for (const [counter, derived] of [[FIX_COUNTER, fixesOnDisk], [REPAIR_COUNTER, repairsOnDisk]]) {
-    const was = counterOf(state, counter);
-    const raised = Math.max(was, derived);
-    next[counter] = raised;
-    if (raised > was) changed.push({ counter, from: state[counter] ?? null, to: raised });
+  for (const [counter, derived, was] of [
+    [FIX_COUNTER, fixesOnDisk, cycleMoved ? 0 : recordedFixes],
+    [REPAIR_COUNTER, repairsOnDisk, recordedRepairs]
+  ]) {
+    const settled = Math.max(was, derived);
+    next[counter] = settled;
+    if (settled !== counterOf(state, counter)) changed.push({ counter, from: state[counter] ?? null, to: settled });
   }
   return { state: next, changed, scope: repairScope(next[REPAIR_COUNTER]) };
 }
@@ -786,7 +798,7 @@ async function main() {
     const limits = readLimits(configFile);
     const { state: reconciled, changed, scope } = reconcileBudgets(readJson(stateFile), listRounds(roundsRoot));
     // Written before the allocation rather than after it: reconciliation only
-    // ever raises a counter to what disk already proves, so recording it is safe
+    // ever moves a counter to what disk already proves, so recording it is safe
     // whatever happens next — and a refusal that left the file claiming a budget
     // the rounds on disk contradict is exactly the disagreement this exists to
     // prevent.

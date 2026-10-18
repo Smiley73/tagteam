@@ -1132,6 +1132,38 @@ test("a scope moved by reconciliation alone leaves the old grant behind too", as
   assert.equal(f.ok(f.round(oid(next + 2))).granted, true);
 });
 
+test("a scope moved by reconciliation alone starts the new cycle's fix count from its own rounds", () => {
+  // The fix counter in the state file counts the cycle before. Carried into the
+  // moved cycle, it would read that cycle as spent before it fixed anything: a
+  // grant taken at once, and the cycle left with the grant's round alone.
+  const limits = { fixRounds: 2, ciRepairs: 1 };
+  const disk = [
+    { round: 1, scope: repairScope(0) }, { round: 2, scope: repairScope(0) }, { round: 3, scope: repairScope(0) },
+    { round: 4, scope: repairScope(1) }
+  ];
+  const spent = at("reviewing", { fixRoundsUsed: 2, ciRepairsUsed: 0, fixRoundGrant: { scope: "repair:0", at: "t" } });
+  const { state, changed, scope } = reconcileBudgets(spent, disk);
+  assert.equal(scope, "repair:1");
+  assert.equal(state.ciRepairsUsed, 1);
+  assert.equal(state.fixRoundsUsed, 0, "only the implementation is on disk in repair:1");
+  assert.deepEqual(changed, [
+    { counter: "fixRoundsUsed", from: 2, to: 0 },
+    { counter: "ciRepairsUsed", from: 0, to: 1 }
+  ]);
+
+  // Nothing to grant yet, and both configured rounds are still there to take.
+  assert.throws(() => grantFixRound(state, { limits }), (error) => error.exitCode === 2 && /2 of its 2/.test(error.message));
+  let cycle = step(state, "fixing", limits);
+  cycle = step(step(cycle, "reviewing", limits), "fixing", limits);
+  assert.equal(cycle.fixRoundsUsed, 2);
+
+  // The moved cycle's own rounds on disk are still counted, never fewer.
+  const fixed = reconcileBudgets(spent, [...disk, { round: 5, scope: repairScope(1) }]);
+  assert.equal(fixed.state.fixRoundsUsed, 1);
+  // And with no move, a counter ahead of disk is kept as it always was.
+  assert.equal(reconcileBudgets({ ...spent, ciRepairsUsed: 1 }, disk).state.fixRoundsUsed, 2);
+});
+
 test("the grant survives bind and ordinary transitions, and a state file without one reads as no grant", () => {
   const limits = { fixRounds: 1, ciRepairs: 1 };
   let state = grantFixRound(at("reviewing", { fixRoundsUsed: 1 }), { limits });
