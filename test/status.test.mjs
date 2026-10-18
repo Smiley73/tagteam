@@ -204,6 +204,22 @@ test("what a spec cost is reported when its ship recorded it, and absent otherwi
   assert.equal(reported.usage["01-a"].equivalentTokens, 1200000);
 });
 
+// A spec whose transcripts could not be read has no Claude summary, and its
+// Codex figures are still worth saying: neither depends on the other.
+test("what a spec's Codex calls spent is reported beside the Claude cost, including for a spec with no Claude summary", () => {
+  const repo = repository();
+  ship(repo, "01-a", { state: "merged", fixRoundsUsed: 1, ciRepairsUsed: 0 });
+  ship(repo, "02-b", { state: "merged", fixRoundsUsed: 0, ciRepairsUsed: 0 });
+  ship(repo, "03-c", { state: "merged", fixRoundsUsed: 0, ciRepairsUsed: 0 });
+  const codex = { records: 1, unreadable: 0, calls: 2, callsWithoutUsage: 0, inputTokens: 40000, cachedInputTokens: 30000, outputTokens: 500 };
+  write(path.join(repo, ".tagteam", "ships", "s", "01-a", "usage.json"), { summary: { equivalentTokens: 1200000, agents: 9, minutes: 40 }, codex });
+  write(path.join(repo, ".tagteam", "ships", "s", "02-b", "usage.json"), { summary: null, codex });
+  write(path.join(repo, ".tagteam", "ships", "s", "03-c", "usage.json"), { codex: "not figures" });
+  const [reported] = inventory(repo).ships;
+  assert.deepEqual(Object.keys(reported.usage), ["01-a"], "the Claude summary changed shape");
+  assert.deepEqual(reported.codexUsage, { "01-a": codex, "02-b": codex });
+});
+
 // A landing record says the base moved under a reviewed change and that the
 // change was re-checked against it. It is bound to one candidate, and honouring
 // one bound to an earlier candidate here would make `/tagteam:status` the single

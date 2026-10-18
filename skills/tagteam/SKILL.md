@@ -274,6 +274,18 @@ recorded with why, and the runner's line ends on *how it routed could not be
 confirmed* — the trigger for *When Codex could not say how it ran* in both
 commands.
 
+The sidecar also keeps `codexSpend`: every call ever made to that `--out`, in
+order, each with its attempts — quota retries and schema retries included — and
+each attempt the input, cached input and output tokens Codex reported for its
+thread, or `"not reported"`, never zero. A later call carries the history
+forward; a `--reuse` hit and a dry run add nothing. **Spend survives a failure.**
+Every terminal failure still removes the artifact, and cuts the sidecar down to
+`codexSpend` alone: nothing `--reuse` could match and nothing that reads as a
+finished call. Only if that cannot be written does the failure fall back to
+removing or emptying the sidecar, and its message says the spend was lost.
+`finish` sums a spec's sidecars into a Codex line after the Claude cost line, in
+plain tokens and never added to the Claude figure.
+
 The instruction files are recorded, not acted on: the person's global
 `AGENTS.md` and the repository's keep steering Codex, by decision. A
 configuration error — Codex refusing to start, or to open the thread — ends the

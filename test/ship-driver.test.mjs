@@ -1755,6 +1755,145 @@ test("the cost line finish prints, and the usage.json status reads, cover this s
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// --- what Codex cost, beside what Claude cost ---
+
+// A Codex request record as the bridge leaves it: the request beside the spend
+// on success, the spend alone after a failure.
+const codexRecord = (calls, request = true) => ({
+  ...(request ? { model: "gpt-5.6-sol", effort: "low", promptSha256: "p", schemaSha256: "s" } : {}),
+  codexSpend: calls.map((attempts) => ({ at: new Date().toISOString(), attempts }))
+});
+const codexAttempt = (inputTokens, cachedInputTokens, outputTokens) => ({
+  ended: "completed", usage: { inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens: 0, totalTokens: inputTokens + outputTokens }
+});
+
+// This spec's review and a re-check's spend, and two records that are not this
+// spec's at all: another spec's round, and the plan review.
+function plantCodexRecords({ repo, plan, shipDir }) {
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json.request.json"),
+    codexRecord([[codexAttempt(100_000, 40_000, 1_000)], [{ ended: "timed-out", usage: "not reported", why: "Codex sent no thread/tokenUsage/updated" }]]));
+  write(path.join(shipDir, "01-a", "rounds", "1", "recheck-1", "codex.json.request.json"), codexRecord([[codexAttempt(20_000, 10_000, 300)]], false));
+  write(path.join(shipDir, "02-b", "rounds", "1", "findings", "codex.json.request.json"), codexRecord([[codexAttempt(9_000_000, 0, 9_000)]]));
+  write(path.join(plan, "work", "review", "codex.json.request.json"), codexRecord([[codexAttempt(7_000_000, 0, 7_000)]]));
+  assert.ok(fs.existsSync(repo));
+}
+const CODEX_LINE = /^usage \(Codex\): 3 calls, 120,000 input tokens \(50,000 of them cached\) and 1,300 output tokens — plain tokens on Codex's own bill, not part of the Claude figure\. 1 call did not report all of its usage/;
+
+function finishCost(plan, env, dir) {
+  const finish = ship("finish", plan, ["--spec", "01-a"], { ...env, PATH: quietPath(dir) });
+  assert.equal(finish.status, 0, finish.stderr);
+  return finish.json.say;
+}
+
+test("finish prints the Codex line straight after the Claude line, counting only this spec's own Codex calls", () => {
+  const staged = stage();
+  const { dir, plan, shipDir } = staged;
+  // A home with no project directory: the Claude report says it could not be
+  // read and writes no summary, and the Codex line follows it all the same.
+  const env = { HOME: path.join(dir, "home"), TAGTEAM_SESSION_ID: "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(ship("begin", plan, ["--spec", "01-a"], env).status, 0);
+  plantCodexRecords(staged);
+
+  const say = finishCost(plan, env, dir);
+  const claude = say.findIndex((line) => line.startsWith("usage:"));
+  assert.match(say[claude], /could not be read .* so what this cost is unknown/);
+  assert.match(say[claude + 1], CODEX_LINE, say.join("\n"));
+  assert.doesNotMatch(say[claude + 1], /could not be read|unknown/, "the Codex line said why the Claude figures are missing");
+  assert.ok(say.slice(claude + 2).some((line) => /^Could not confirm/.test(line)), "the effort report no longer follows the cost lines");
+
+  const written = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "usage.json"), "utf8"));
+  assert.equal(written.summary, null, "the Claude report's own summary changed");
+  assert.equal(written.readable, false);
+  assert.deepEqual(
+    { calls: written.codex.calls, input: written.codex.inputTokens, cached: written.codex.cachedInputTokens, output: written.codex.outputTokens },
+    { calls: 3, input: 120_000, cached: 50_000, output: 1_300 }
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the Codex line still appears when the transcripts are unreadable, the Claude report fails, or there is no history start", { skip: process.getuid?.() === 0 }, () => {
+  const staged = stage();
+  const { dir, repo, plan, shipDir } = staged;
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "mine.jsonl"), "");
+  const env = { HOME: home, TAGTEAM_SESSION_ID: "mine", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(ship("begin", plan, ["--spec", "01-a"], env).status, 0);
+  plantCodexRecords(staged);
+  const codexLines = (say) => say.filter((line) => line.startsWith("usage (Codex):"));
+
+  // A transcript that is there and cannot be read: the report still exits 0.
+  fs.chmodSync(path.join(projectDir, "mine.jsonl"), 0o000);
+  try {
+    const say = finishCost(plan, env, dir);
+    const claude = say.findIndex((line) => line.startsWith("usage:"));
+    assert.ok(claude > -1, say.join("\n"));
+    assert.match(say[claude + 1], CODEX_LINE);
+  } finally {
+    fs.chmodSync(path.join(projectDir, "mine.jsonl"), 0o600);
+  }
+
+  // A project directory that is there and cannot be listed: the report exits
+  // non-zero and prints no Claude line.
+  fs.chmodSync(projectDir, 0o000);
+  try {
+    const say = finishCost(plan, env, dir);
+    assert.ok(!say.some((line) => line.startsWith("usage:")), "a Claude line was printed from a report that failed");
+    assert.equal(codexLines(say).length, 1, say.join("\n"));
+    assert.match(codexLines(say)[0], CODEX_LINE);
+  } finally {
+    fs.chmodSync(projectDir, 0o700);
+  }
+
+  // No history start: the Claude report is never asked for.
+  const statePath = path.join(shipDir, "01-a", "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  fs.writeFileSync(statePath, JSON.stringify({ ...state, history: [] }, null, 2));
+  const say = finishCost(plan, env, dir);
+  assert.ok(!say.some((line) => line.startsWith("usage:")));
+  assert.match(codexLines(say)[0], CODEX_LINE);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "usage.json"), "utf8")).codex.calls, 3);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the Claude line and usage.json's summary are the same with and without Codex records present", () => {
+  const staged = stage();
+  const { dir, repo, plan, shipDir } = staged;
+  const home = path.join(dir, "home");
+  const projectDir = projectDirectoryFor(repo, home);
+  fs.mkdirSync(path.join(projectDir, "mine", "subagents"), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "mine.jsonl"), "");
+  const env = { HOME: home, TAGTEAM_SESSION_ID: "mine", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" };
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(ship("begin", plan, ["--spec", "01-a"], env).status, 0);
+  const at = new Date().toISOString();
+  fs.writeFileSync(path.join(projectDir, "mine.jsonl"), [
+    { timestamp: at, message: { role: "user", content: "ship my plan" } },
+    { timestamp: at, message: { id: "m1", role: "assistant", content: [], usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 10_000, output_tokens: 100 } } }
+  ].map((line) => JSON.stringify(line)).join("\n"));
+  const usageFile = path.join(shipDir, "01-a", "usage.json");
+  // `minutes` is a clock reading taken at each `finish`, not a figure anything
+  // Codex-related could move, so it is set aside before comparing.
+  const claudeSummary = () => {
+    const { minutes, ...rest } = JSON.parse(fs.readFileSync(usageFile, "utf8")).summary;
+    return rest;
+  };
+
+  const before = finishCost(plan, env, dir);
+  const summaryBefore = claudeSummary();
+  assert.match(before.find((line) => line.startsWith("usage (Codex):")), /no Codex calls are recorded for this spec/);
+  plantCodexRecords(staged);
+  const after = finishCost(plan, env, dir);
+  assert.equal(after.find((line) => line.startsWith("usage:")), before.find((line) => line.startsWith("usage:")));
+  assert.deepEqual(claudeSummary(), summaryBefore);
+  assert.ok(summaryBefore.equivalentTokens > 0, "the transcript staged no spend to compare");
+  assert.match(after.find((line) => line.startsWith("usage (Codex):")), CODEX_LINE);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a redesign answered at settle goes to the whole panel", () => {
   const staged = stage();
   const { state, app, run } = driveToSettleAsk(staged);

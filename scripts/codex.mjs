@@ -34,6 +34,7 @@ import {
 } from "./quota-backoff.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { runAppServerTurn } from "./lib/codex-app-server.mjs";
+import { NOT_REPORTED, SPEND_KEY, spendHistory } from "./codex-usage.mjs";
 
 // What the request record says was asked for. The thread is asked for exactly
 // this, and Codex reports it back in its own words: sandbox `readOnly` with
@@ -248,6 +249,48 @@ function removeCountable(file) {
   }
 }
 
+function readRecord(requestPath) {
+  try { return JSON.parse(fs.readFileSync(requestPath, "utf8")); } catch { return null; }
+}
+
+// The sidecar is replaced whole or not at all, so a crash mid-write leaves the
+// record that was there rather than half of one. The temporary name ends in
+// `.tmp`, which nothing that counts a sidecar reads.
+function writeRecord(requestPath, record) {
+  const temporary = `${requestPath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, requestPath);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch {}
+  }
+}
+
+// A sidecar holding the spend history and nothing else. It has no prompt hash,
+// no schema hash, no model and no effort — nothing `--reuse` could match — so it
+// can never pass for a finished call, whatever is left beside it. That is what
+// lets the spend outlive a failure: even an artifact that could neither be
+// removed nor emptied gains no record that would make it reusable.
+const spendOnly = (history) => ({ [SPEND_KEY]: history });
+
+// Cut the sidecar down to the spend alone, or remove it as before when there is
+// no spend to keep or the cut cannot be written. Keeping nothing countable
+// matters more than keeping the spend, so a write that fails falls back to
+// today's remove-or-empty and says what was lost.
+function keepSpendOnly(requestPath, history) {
+  if (history.length === 0) return { kept: false, lost: null, note: removeCountable(requestPath) };
+  try {
+    writeRecord(requestPath, spendOnly(history));
+    return { kept: true, lost: null, note: null };
+  } catch (error) {
+    return {
+      kept: false,
+      lost: `the request record at ${requestPath} could not be cut down to the Codex spend alone (${error.message}), so the spend it held is lost`,
+      note: removeCountable(requestPath)
+    };
+  }
+}
+
 // What every terminal failure owes `--out`, in one place because they all owe
 // it the same thing. A Codex lens re-dispatched into a round it already wrote
 // into overwrites the artifact and its sidecar as a set; a call that ends
@@ -256,18 +299,29 @@ function removeCountable(file) {
 // a run that got no usable answer would still have produced a review that
 // counts. Sidecar first, for the reason the write path's ordering comment gives:
 // a crash between the two leaves something non-reusable rather than something
-// reused for the wrong request. `.prompt.md` and `.events.jsonl` stay — nothing
-// counts them, and they are what a person opens.
+// reused for the wrong request. The sidecar keeps the spend history — every
+// earlier call's and this one's — and loses everything else. `.prompt.md` and
+// `.events.jsonl` stay — nothing counts them, and they are what a person opens.
+//
+// `history` is the call's own when it has one; a failure before the call held
+// the artifact lock reads what is on disk instead, outside the lock. That read
+// can race a live holder and drop the attempt it just recorded: spend may be
+// lost in that race, countability never.
 //
 // It returns a sentence rather than nothing, because what the removal actually
 // managed is the part a person needs: the failure message is the only account
 // anyone gets, and a removal that failed is precisely the case where something
 // countable is still sitting at `--out`.
-function clearCountable(requestPath, artifact) {
-  const stranded = [removeCountable(requestPath), removeCountable(artifact)].filter((note) => note !== null);
-  return stranded.length === 0
-    ? `The artifact at ${artifact} and its request record were removed so nothing later can count them.`
-    : `${stranded.join("; ")}; check those paths by hand before anything reads what is there as this candidate's review.`;
+function clearCountable(requestPath, artifact, history = spendHistory(readRecord(requestPath))) {
+  const record = keepSpendOnly(requestPath, history);
+  const stranded = [record.note, removeCountable(artifact)].filter((note) => note !== null);
+  if (stranded.length > 0) {
+    return `${[...stranded, ...(record.lost ? [record.lost] : [])].join("; ")}; check those paths by hand before anything reads what is there as this candidate's review.`;
+  }
+  if (record.kept) {
+    return `The artifact at ${artifact} was removed and its request record cut down to the Codex spend alone, so nothing later can count them.`;
+  }
+  return `The artifact at ${artifact} and its request record were removed so nothing later can count them${record.lost ? `; ${record.lost}` : ""}.`;
 }
 
 // A terminal failure that has already cleared `--out` and worded its own account
@@ -412,6 +466,17 @@ function endedWithout(outcome) {
   return outcome.reason ?? `the call ended ${outcome.outcome}`;
 }
 
+// What one attempt spent, for the history: the cumulative total its thread
+// reported last (see "What a call spent" in the client), or "not reported" with
+// the client's reason. Never zeros: an attempt that reported nothing may have
+// spent anything.
+function attemptSpend(outcome) {
+  const usage = outcome.usage;
+  return usage?.value
+    ? { ended: outcome.outcome, usage: usage.value }
+    : { ended: outcome.outcome, usage: NOT_REPORTED, why: usage?.reason ?? "the client said nothing about usage" };
+}
+
 // The attempt's own transcript: every line the server wrote, truncated per
 // attempt rather than appended, because appending across attempts and re-runs is
 // how a single plan accumulated megabytes of it. A stream that cannot be written
@@ -478,23 +543,26 @@ async function runAttempt({ options, prompt, schema, eventsPath, onSpawn }) {
 // forbid; and the loser of that race is left with no artifact rather than with a
 // stale one that counts, which is the direction this whole file errs in. A
 // `--reuse` candidate is cleared too: an answer nothing may count is not an
-// answer a later run may resume from either.
+// answer a later run may resume from either. Clearing keeps the spend history,
+// here as everywhere: `dispatch` hands over its own once it holds the lock, and
+// before that the one on disk is kept.
 export async function runCodex(options) {
   const artifact = path.resolve(options.out);
   const requestPath = `${artifact}.request.json`;
+  const spend = { history: null };
   try {
-    return await dispatch(options, artifact, requestPath);
+    return await dispatch(options, artifact, requestPath, spend);
   } catch (thrown) {
     const error = thrown instanceof Error ? thrown : new Error(String(thrown));
     if (!error.clearedCountable) {
       error.clearedCountable = true;
-      error.message = `${error.message} ${clearCountable(requestPath, artifact)}`;
+      error.message = `${error.message} ${clearCountable(requestPath, artifact, spend.history?.())}`;
     }
     throw error;
   }
 }
 
-async function dispatch(options, artifact, requestPath) {
+async function dispatch(options, artifact, requestPath, spend) {
   const { prompt, bytes, sections } = composePrompt(options);
   const schema = JSON.parse(fs.readFileSync(path.resolve(options.schema), "utf8"));
   const promptPath = `${artifact}.prompt.md`;
@@ -540,15 +608,42 @@ async function dispatch(options, artifact, requestPath) {
   // outside the slot root — where a successful run then unlinks it.
   const quotaKey = sha256(`${options.model}\u0000${options.effort}`).slice(0, 32);
   const quotaStatePath = path.join(slotsRoot, ".quota", `${quotaKey}.json`);
-  // The answer becomes the artifact. The sidecar is removed before the artifact
-  // moves and rewritten after, so a crash between them leaves a result that will
-  // not be reused rather than one reused for the wrong request.
+  // The spend history this call carries forward. Read here, once, under the
+  // artifact lock that serialises every call to this `--out`, so nothing can
+  // rewrite it between this read and this call's writes. This call is added to
+  // it once it has run an attempt: a dry run, which starts nothing, adds nothing.
+  const prior = spendHistory(readRecord(requestPath));
+  const call = { at: new Date().toISOString(), attempts: [] };
+  const history = () => (call.attempts.length > 0 ? [...prior, call] : [...prior]);
+  spend.history = history;
+  const clear = () => clearCountable(requestPath, artifact, history());
+  // The sidecar as the spend alone: written as each attempt ends, so a bridge
+  // killed between attempts loses at most the one that was running, and again
+  // before an answer lands. A write that fails removes the sidecar instead, as
+  // landing did before there was any spend to keep: the spend can be lost, but
+  // an earlier request's record is never left beside what happens next.
+  const stripToSpend = () => {
+    const kept = history();
+    if (kept.length > 0) {
+      try {
+        writeRecord(requestPath, spendOnly(kept));
+        return;
+      } catch {}
+    }
+    try { fs.unlinkSync(requestPath); } catch {}
+  };
+  // The answer becomes the artifact. The sidecar is cut down to the spend before
+  // the artifact moves and rewritten whole after, so a crash between them leaves
+  // a result that will not be reused rather than one reused for the wrong
+  // request: at any point a crash leaves either a spend-only record, which
+  // matches nothing, or the complete record of the answer beside it.
   const land = (attemptPath, routing) => {
     fs.chmodSync(attemptPath, 0o600);
     record.routing = routing;
-    try { fs.unlinkSync(requestPath); } catch {}
+    record[SPEND_KEY] = history();
+    stripToSpend();
     fs.renameSync(attemptPath, artifact);
-    fs.writeFileSync(requestPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+    writeRecord(requestPath, record);
     try { fs.unlinkSync(quotaStatePath); } catch {}
   };
   try {
@@ -582,6 +677,10 @@ async function dispatch(options, artifact, requestPath) {
           artifactLock.protect(pid);
         }
       });
+      // Every attempt is recorded, a quota retry's included, before anything
+      // decides what the attempt was worth.
+      call.attempts.push(attemptSpend(outcome));
+      stripToSpend();
 
       // A timeout is terminal, not a retryable bad answer: retrying it would
       // spend the same wall clock again to learn the same thing, and the caller
@@ -593,7 +692,7 @@ async function dispatch(options, artifact, requestPath) {
       if (outcome.outcome === "timed-out") {
         throw cleared(
           `Codex exceeded its ${options.timeoutSec}s timeout and was terminated. `
-          + clearCountable(requestPath, artifact)
+          + clear()
         );
       }
 
@@ -603,7 +702,7 @@ async function dispatch(options, artifact, requestPath) {
       // It ends the call on the first attempt, because nothing about a retry
       // changes the configuration it was refused on.
       if (outcome.outcome === "configuration-error") {
-        throw cleared(configurationErrorMessage(outcome, clearCountable(requestPath, artifact)));
+        throw cleared(configurationErrorMessage(outcome, clear()));
       }
 
       // What this attempt got instead of a valid answer, for the sentence that
@@ -634,7 +733,7 @@ async function dispatch(options, artifact, requestPath) {
           throw cleared(
             `Codex ran at ${effort.value} effort but the request asked for ${options.effort}. `
             + `That is Codex's own report of the thread: ${model} at ${JSON.stringify(effort.value)}, Codex ${version}. `
-            + clearCountable(requestPath, artifact)
+            + clear()
           );
         }
 
@@ -674,7 +773,7 @@ async function dispatch(options, artifact, requestPath) {
         // provider's sentence goes last because it is the truncated part.
         throw cleared(
           `Codex model ${options.model} at ${options.effort} effort is unavailable, so --model is what has to change. `
-          + `${clearCountable(requestPath, artifact)} `
+          + `${clear()} `
           + `What Codex said: ${said.slice(-1000)}`
         );
       }
@@ -690,7 +789,7 @@ async function dispatch(options, artifact, requestPath) {
             // Terminal, so it owes --out the same clearing the refusals above do.
             throw cleared(
               `Codex quota did not clear within four hours for ${options.model}/${options.effort}. `
-              + clearCountable(requestPath, artifact)
+              + clear()
             );
           }
           if (next.action === "retry") break;
@@ -711,7 +810,7 @@ async function dispatch(options, artifact, requestPath) {
         // it is the truncated part.
         throw cleared(
           `Codex did not produce a valid artifact after ${SCHEMA_ATTEMPTS} attempts: ${problem}. `
-          + clearCountable(requestPath, artifact)
+          + clear()
           + (said ? ` What Codex said: ${said.slice(-1000)}` : "")
         );
       }

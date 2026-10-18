@@ -385,6 +385,30 @@ test("the report command narrows to the session its flag names, both on the line
   fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
+// `usage.json` carries the Codex figures under their own key, written after this
+// report. Rewriting the report keeps that key, and the Claude part is the same
+// whether it is there or not.
+test("the report command keeps the Codex figures already in the file it writes, and writes the same Claude report beside them", () => {
+  const fixture = twoShips();
+  const plain = path.join(fixture.home, "plain", "usage.json");
+  const beside = path.join(fixture.home, "beside", "usage.json");
+  const codex = { calls: 2, callsWithoutUsage: 0, inputTokens: 10, cachedInputTokens: 4, outputTokens: 1 };
+  fs.mkdirSync(path.dirname(beside), { recursive: true });
+  fs.writeFileSync(beside, JSON.stringify({ summary: "stale", codex }));
+  for (const out of [plain, beside]) {
+    const ran = spawnSync(process.execPath, [
+      USAGE, "report", "--repo", fixture.repo, "--since", WINDOW.since, "--until", WINDOW.until, "--session", "mine", "--out", out
+    ], { encoding: "utf8", env: { ...process.env, HOME: fixture.home } });
+    assert.equal(ran.status, 0, ran.stderr);
+  }
+  const without = JSON.parse(fs.readFileSync(plain, "utf8"));
+  const { codex: kept, ...claude } = JSON.parse(fs.readFileSync(beside, "utf8"));
+  assert.deepEqual(kept, codex, "the report erased the Codex figures");
+  assert.deepEqual(claude, without, "the Claude report differs when Codex figures are present");
+  assert.ok(!Object.hasOwn(without, "codex"));
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
 test("the agent classifier reads the job line first and falls back to what old prompts said", () => {
   assert.equal(classifyAgent("Job: fixer\nFindings to fix: x"), "fixer");
   assert.equal(classifyAgent("Tagteam job: adversary"), "adversary");

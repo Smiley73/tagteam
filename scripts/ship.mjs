@@ -50,6 +50,7 @@ import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
+import { codexSpend, codexUsageLine, recordCodexUsage } from "./codex-usage.mjs";
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
@@ -2140,11 +2141,23 @@ function nextSpecAfter(ctx, id) {
     .find((spec) => !exists(statePath(ctx, spec.id)) || readJson(statePath(ctx, spec.id)).state !== "merged")?.id ?? null;
 }
 
-// Best effort, never a stop: what this spec cost, from the session transcripts.
-// Scoped to the session `start` recorded when it could record one, so that two
-// ships in one checkout do not each report the other's spend as their own; the
-// report says which scope its number came from either way.
+// Best effort, never a stop: what this spec cost. The Claude line first, then
+// the Codex line, each worked out apart from the other so that nothing going
+// wrong with one — no history start, a report that fails, transcripts that
+// cannot be read — costs the other its line. The Codex line comes out of here
+// rather than beside `effortLines`, so it lands before the effort report and is
+// never read as part of it.
 function usageLines(ctx, id) {
+  return [...claudeUsageLines(ctx, id), ...codexUsageLines(ctx, id)];
+}
+
+// What Claude cost, from the session transcripts. Scoped to the session `start`
+// recorded when it could record one, so that two ships in one checkout do not
+// each report the other's spend as their own; the report says which scope its
+// number came from either way. It runs first because it writes `usage.json`
+// whole at the top level; the Codex figures go under their own key after it,
+// and each writer keeps the other's part.
+function claudeUsageLines(ctx, id) {
   try {
     const state = readState(ctx, id);
     const since = state.history?.[0]?.at;
@@ -2155,6 +2168,20 @@ function usageLines(ctx, id) {
       "--out", path.join(specDir(ctx, id), "usage.json")
     ], { encoding: "utf8" });
     return result.status === 0 ? result.stdout.trim().split("\n").slice(0, 1) : [];
+  } catch {
+    return [];
+  }
+}
+
+// What this spec's own Codex calls spent, in plain tokens, from the request
+// records under its rounds directory — never the plan review's, never another
+// spec's. Recorded in `usage.json` for `/tagteam:status` even when the line
+// cannot be, and the line said even when the record cannot be written.
+function codexUsageLines(ctx, id) {
+  try {
+    const summary = codexSpend(roundsRoot(ctx, id));
+    try { recordCodexUsage(path.join(specDir(ctx, id), "usage.json"), summary); } catch {}
+    return [codexUsageLine(summary)];
   } catch {
     return [];
   }
