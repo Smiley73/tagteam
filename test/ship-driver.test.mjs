@@ -2042,6 +2042,15 @@ test("at the cap the question is asked once at collect: answered next, settle pu
   assert.match(asked.json.ask, /sub throws on undefined/);
   assert.doesNotMatch(asked.json.say.join("\n"), /as you decided/);
   assert.ok(JSON.parse(fs.readFileSync(capRecordPath(fresh.shipDir), "utf8")).ids.includes("3.adversary.1"), "the record now covers what this question showed");
+
+  // Settle run again before the person answers — its output lost, say — asks
+  // the same question again: a record settle wrote is a question still waiting
+  // for its answer, never a "publish" given.
+  const replayed = again.run("settle");
+  assert.equal(replayed.json.review, "open");
+  assert.deepEqual(answersIn(replayed.json.ask), ["redesign", "next", "end"], "the question is put again");
+  assert.match(replayed.json.ask, /sub throws on undefined/);
+  assert.doesNotMatch(replayed.json.say.join("\n"), /as you decided/, "and is not answered on the person's behalf");
 });
 
 test("at the cap, redesign takes the one round past the limit, and on its round nothing is asked, the spec publishes and fix is refused", () => {
@@ -2116,11 +2125,60 @@ test("past the cap, redesign without the question put for this round, candidate 
   const settle = recheckWith(run, state, { resolved: false });
   assert.deepEqual(answersIn(settle.json.ask), ["redesign", "next", "end"]);
   assert.doesNotMatch(settle.json.ask, /adversary reads it fresh/);
+  // The question first put at settle is put again by a settle run again: no
+  // answer was given to it, so none is assumed.
+  const replayed = run("settle");
+  assert.deepEqual(answersIn(replayed.json.ask), ["redesign", "next", "end"], "a replayed settle asks again");
+  assert.doesNotMatch(replayed.json.say.join("\n"), /as you decided/);
   const redesign = run("redesign");
   assert.equal(redesign.json.dispatch.length, 1);
   assert.equal(state().fixRoundGrant?.scope, "repair:0");
   assert.equal(state().fixRoundsUsed, 3);
   assert.match(redesign.json.say.join("\n"), /The whole panel reads the rewrite/);
+});
+
+test("a redesign interrupted between the grant and the edge: fix will not spend the person's round, and redesign resumes without a second grant", () => {
+  const staged = stage();
+  const { shipDir } = staged;
+  const { state, run } = driveToRecurrence(staged, { fixRounds: 2 });
+  // What a redesign leaves when it stops after `gates.mjs grant` and before the
+  // budgeted edge: every fix round spent, and this cycle's grant held unspent.
+  const granted = spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "grant", path.join(shipDir, "01-a", "state.json"), path.join(shipDir, "01-a", "rounds"), path.join(staged.repo, ".tagteam", "config.json")], { encoding: "utf8" });
+  assert.equal(granted.status, 0, granted.stderr);
+  assert.equal(state().fixRoundsUsed, 2);
+  assert.equal(state().fixRoundGrant?.scope, "repair:0");
+
+  // A plain fixer never takes the round the grant buys.
+  const fix = run("fix");
+  assert.equal(fix.json.budget, "spent", "fix refuses as spent, though the edge would let it through");
+  assert.equal(fix.json.dispatch, undefined, "no fixer is dispatched");
+  assert.match(fix.json.next, /recheck --plan/);
+  assert.equal(state().fixRoundsUsed, 2, "the round past the limit is not spent");
+  assert.equal(state().state, "reviewing");
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")));
+
+  // The redesign, resumed against the question at the cap this round put, spends
+  // the grant it already holds rather than asking for a second.
+  const redesign = run("redesign");
+  assert.equal(redesign.json.dispatch.length, 1);
+  assert.equal(redesign.json.dispatch[0].agent, "tagteam:implementer");
+  assert.equal(state().fixRoundsUsed, 3, "the one round past the limit");
+  assert.equal(state().fixRoundGrant?.scope, "repair:0");
+  assert.equal(state().state, "fixing");
+});
+
+test("a question at the cap put at collect stands for a publish at settle only once fix's spent branch answered it", () => {
+  const staged = stage();
+  const { shipDir } = staged;
+  const { state, run } = driveToRecurrence(staged, { fixRounds: 2 });
+  const asked = JSON.parse(fs.readFileSync(capRecordPath(shipDir), "utf8"));
+  assert.deepEqual([asked.step, asked.answered], ["collect", null], "put at collect and not yet answered");
+  // The record as a redesign that went no further would leave it: put at collect,
+  // never answered "publish". Settle asks rather than publishing on its behalf.
+  const unanswered = recheckWith(run, state, { resolved: false });
+  assert.deepEqual(answersIn(unanswered.json.ask), ["redesign", "next", "end"], "the question is put, not assumed answered");
+  assert.doesNotMatch(unanswered.json.say.join("\n"), /as you decided/);
+  assert.equal(JSON.parse(fs.readFileSync(capRecordPath(shipDir), "utf8")).step, "settle");
 });
 
 test("a cycle gets one rewrite: after an in-budget redesign that rewrote, the question offers none, redesign is refused, and at the cap nothing is asked", () => {

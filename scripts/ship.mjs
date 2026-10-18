@@ -438,9 +438,11 @@ function pullRequestFindingsLine(ctx, id, findings) {
 // - Every fix round spent and the rewrite unused: the question at the cap, whose
 //   redesign answer is the one round past the limit. It is recorded — see
 //   `capAskPath` — and at `settle` (`honour`) a record from the same round's
-//   collect that covers everything open stands for the answer already given:
-//   nothing is asked, and `honoured` says so. Anything open it does not cover is
-//   asked about again, and the record replaced.
+//   collect, answered "publish" through `fix`'s spent branch, that covers
+//   everything open stands for the answer already given: nothing is asked, and
+//   `honoured` says so. Anything open it does not cover is asked about again,
+//   and the record replaced. A record `settle` wrote is a question still waiting
+//   for its answer, never one answered, so a settle run again asks it again.
 // - Every fix round spent and the rewrite used, or the round past the limit
 //   gone: nothing is asked, `note` says the spec publishes with what is open
 //   disclosed, and the spent branch of `fix` routes it there as it always has.
@@ -467,12 +469,13 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   const { ids } = openAt(ctx, id, round);
   const asked = readJson(capAskPath(ctx, id), null);
   const shown = new Set(Array.isArray(asked?.ids) ? asked.ids : []);
-  if (honour && asked && asked.round === round && asked.candidate === state.candidateOid && asked.scope === scope
+  if (honour && asked && asked.step === "collect" && asked.answered === "publish"
+    && asked.round === round && asked.candidate === state.candidateOid && asked.scope === scope
     && [...ids].every((open) => shown.has(open))) {
     result.honoured = asked;
     return result;
   }
-  writeJson(capAskPath(ctx, id), { round, candidate: state.candidateOid, scope, ids: [...ids], at: new Date().toISOString() });
+  writeJson(capAskPath(ctx, id), { round, candidate: state.candidateOid, scope, ids: [...ids], step: atCollect ? "collect" : "settle", answered: null, at: new Date().toISOString() });
   result.ask = redesignAsk(signals, { spent, limit, atCollect, atCap: true });
   return result;
 }
@@ -775,8 +778,13 @@ const acceptedPath = (ctx, id) => path.join(specDir(ctx, id), "accepted.json");
 // collect goes through `fix`'s spent branch and the re-check, and `settle` must
 // not ask again about what the person already saw — but must about anything
 // they have not, which is why the ids are recorded, exactly as `accepted.json`
-// records them. Unlike an accept it survives `fix`, because `fix`'s spent branch
-// is the person's answer. Every snapshot and every revisit removes it: both
+// records them. Which step put it (`step`) and whether that spent branch was
+// taken on it (`answered`, set by `fix`) are recorded too: only a collect-time
+// question that `fix` saw answered "publish" stands for an answer at `settle`.
+// One `settle` put itself is still unanswered, and one whose answer was a
+// redesign that went no further is not a publish. Unlike an accept it survives
+// `fix`, because `fix`'s spent branch is the person's answer. Every snapshot
+// and every revisit removes it: both
 // rebuild the review it was about, and a revisit re-enters the same round and
 // candidate, so a record left behind would skip the question and let a redesign
 // through.
@@ -1500,6 +1508,12 @@ async function fix(options) {
     if (settled) {
       transition(ctx, id, "verifying");
       return emit({ say, budget: "spent", next: nextCommand(ctx, "publish", id) });
+    }
+    // Before the settle, this branch is the answer "publish" to a question put
+    // at the cap for this round; the settle reads that off the record.
+    const asked = readJson(capAskPath(ctx, id), null);
+    if (asked && asked.step === "collect" && asked.round === round.round && asked.candidate === state.candidateOid && asked.scope === cycleScope(state)) {
+      writeJson(capAskPath(ctx, id), { ...asked, answered: "publish" });
     }
     return emit({ say, budget: "spent", next: nextCommand(ctx, "recheck", id) });
   }
