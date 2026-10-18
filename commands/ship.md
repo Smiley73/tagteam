@@ -136,7 +136,8 @@ node "$P/scripts/ship.mjs" start --plan "$D"
 ```
 
 It checks `approved.json`, validates the configuration, checks `git`, `codex`
-and `gh`, takes this plan's ship lock, creates or reuses the worktree, and prints
+(0.153.0 or newer, the binary `TAGTEAM_CODEX_BIN` names when it is set) and
+`gh`, takes this plan's ship lock, creates or reuses the worktree, and prints
 the specs in dependency order with what state each is in. Its `snapshot` key is
 what `scripts/running-plugin.mjs` reported: render it first, as *The running
 snapshot* in the skill says. It never stops anything, whatever it says — a
@@ -427,10 +428,12 @@ removes it, so an answer given about one version of Codex is never inherited by
 a train that resumes days later.
 
 Otherwise ask once, with `AskUserQuestion`. Tell them the answer arrived and is
-valid, that tagteam could not confirm which model Codex used or how hard it was
-told to think, and that the likeliest cause is a newer Codex recording a run
-differently than this version of tagteam knows how to read. Three options: carry
-on; carry on and stop asking for the rest of this run; stop here.
+valid, that Codex did not report part of how it ran — which model it used, how
+hard it was told to think, its sandbox, network or approval policy, its version,
+or which instruction files it read; the line names which — and that the
+likeliest cause is a newer Codex reporting a run differently than this version
+of tagteam knows how to read. Three options: carry on; carry on and stop asking
+for the rest of this run; stop here.
 
 Only the middle one writes anything: `printf '' > "$S/codex-routing-ack"`. Do
 not describe that to them as a file or a setting; it is not one. On *stop here*,

@@ -19,9 +19,9 @@ command.
 | `git -C "$R" rev-parse --show-toplevel` | yes |
 | `git --version` is 2.38 or newer | yes |
 | `git -C "$R" status --porcelain` is empty | no — warn |
-| `codex --version` | yes |
+| `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes |
 | `gh auth status` and `gh repo view --json defaultBranchRef` | yes |
-| a live `codex exec --ephemeral --sandbox read-only -c 'approval_policy="never"' --output-schema` probe in a temp directory | yes |
+| `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes |
 | `codegraph` on PATH and `.codegraph/` present | no |
 
 The git version matters for the same reason: when the base branch moves under a
@@ -30,9 +30,19 @@ with `git merge-tree --write-tree`, which arrived in 2.38, and `ship.mjs start`
 stops without it. Checked here, a machine that cannot merge says so before
 anyone plans anything on it.
 
-The Codex probe matters: a Codex that runs but cannot honour `--output-schema`
-fails on every review, and finding that out here costs one call instead of a
-train.
+Both Codex rows check the binary the reviews will run: `TAGTEAM_CODEX_BIN` when
+it is set, otherwise `codex` on the PATH. Each exits non-zero with the reason on
+stderr; say what it printed. Below 0.153.0, Codex either has no `app-server` or
+does not report the model and effort a call ran at, so no review could say how
+it was routed.
+
+The Codex probe matters: a Codex that runs but cannot answer a read-only,
+network-closed call in the schema it is given fails on every review, and finding
+that out here costs one call instead of a train. It goes through
+`codex app-server` exactly as a review does, and sends no model and no effort —
+none has been chosen yet — so it runs at whatever Codex's own configuration
+names, and says which. A configuration error ends it in Codex's own words,
+worded as a review would word it.
 
 ## Infer first
 

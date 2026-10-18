@@ -187,7 +187,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner", "codex"],
-      "description": "The thinking effort each job is dispatched at. A reader that only has to answer whether one fix landed (`recheck`) needs less than a reader looking for what is wrong (`reviewer`), which needs less than the one writing the code (`implementer`). `planner` covers the explorer, the plan-drafter, the plan-reviewer and the spec-writer; `adversary` covers both the plan adversary and the code adversary; `codex` covers every Codex call. Every site carrying an effort map $refs this one. The two ladders diverge on purpose — the Claude one has `max` and the Codex one does not.",
+      "description": "The thinking effort each job is dispatched at. A reader that only has to answer whether one fix landed (`recheck`) needs less than a reader looking for what is wrong (`reviewer`), which needs less than the one writing the code (`implementer`). `planner` covers the explorer, the plan-drafter, the plan-reviewer and the spec-writer; `adversary` covers both the plan adversary and the code adversary; `codex` covers every Codex call. Every site carrying an effort map $refs this one. The Codex ladder is its own inline list rather than a $ref to the Claude one, though the two now hold the same words: `$defs.claudeEffort` is the ladder Claude dispatches are checked against, and Codex's words are Codex's to change.",
       "properties": {
         "implementer": { "$ref": "#/$defs/claudeEffort" },
         "fixer": { "$ref": "#/$defs/claudeEffort" },
@@ -195,7 +195,7 @@
         "recheck": { "$ref": "#/$defs/claudeEffort" },
         "adversary": { "$ref": "#/$defs/claudeEffort" },
         "planner": { "$ref": "#/$defs/claudeEffort" },
-        "codex": { "type": "string", "enum": ["low", "medium", "high", "xhigh"] }
+        "codex": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
       }
     }
   }

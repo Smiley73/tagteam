@@ -52,6 +52,7 @@ import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
+import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -810,8 +811,12 @@ async function start(options) {
         + "When the base branch moves under a reviewed change, the ship checks that the same change still lands on "
         + "the new base with `git merge-tree --write-tree`, and older git has no such thing. Upgrade git and run this again.");
     }
-    const codex = spawnSync("codex", ["--version"], { encoding: "utf8", shell: false });
-    if (codex.status !== 0) throw new Stop("Codex is required and `codex --version` failed");
+    // The binary the bridge will run, `TAGTEAM_CODEX_BIN` included: checking
+    // the `codex` on the PATH instead would pass a machine whose reviews then run
+    // something else. Below the floor, every Codex call in the train would come
+    // back with a routing nobody can read, or not come back at all.
+    const codexProblem = codexVersionProblem(codexBinary());
+    if (codexProblem) throw new Stop(codexProblem);
     const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf8", shell: false });
     if (auth.status !== 0) throw new Stop(`gh is not authenticated: ${(auth.stderr || auth.stdout).trim()}`);
   }

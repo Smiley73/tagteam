@@ -1479,20 +1479,60 @@ test("start refuses a git that predates the landing check's merge-tree, and pass
     // this machine reports and nothing else about the run may change.
     fs.writeFileSync(path.join(bin, "git"),
       `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version ${version}"; exit 0; fi\nexec ${real} "$@"\n`, { mode: 0o755 });
-    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // A Codex at the floor, so the Codex check `start` makes next passes.
+    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\necho 'codex-cli 0.153.0'\n", { mode: 0o755 });
     fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     fs.writeFileSync(path.join(bin, "osascript"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     return `${bin}${path.delimiter}${process.env.PATH}`;
   };
 
-  const old = ship("start", plan, [], { PATH: stubs("2.37.9"), TAGTEAM_SKIP_TOOL_CHECKS: "" });
+  const old = ship("start", plan, [], { PATH: stubs("2.37.9"), TAGTEAM_SKIP_TOOL_CHECKS: "", TAGTEAM_CODEX_BIN: "" });
   assert.equal(old.status, 1, old.stdout);
   assert.match(old.stderr, /git 2\.38 or newer is required and this machine has 2\.37/);
   assert.match(old.stderr, /merge-tree --write-tree/, "the refusal does not say what needs it");
 
-  const current = ship("start", plan, [], { PATH: stubs("2.38.0"), TAGTEAM_SKIP_TOOL_CHECKS: "" });
+  const current = ship("start", plan, [], { PATH: stubs("2.38.0"), TAGTEAM_SKIP_TOOL_CHECKS: "", TAGTEAM_CODEX_BIN: "" });
   assert.equal(current.status, 0, current.stderr);
   assert.match(current.json.next, /begin --plan .* --spec 01-a$/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The check reads the binary the bridge will run. Each stub reached through
+// TAGTEAM_CODEX_BIN is paired with a `codex` on PATH that answers the other way,
+// so a check that ignored the variable would fail every case here.
+test("start refuses a Codex below the floor or with a version it cannot read, checking the binary TAGTEAM_CODEX_BIN names", () => {
+  const { dir, plan } = stage();
+  const stub = (name, says) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, `#!/bin/sh\n${says === null ? "exit 0" : `echo '${says}'`}\n`, { mode: 0o755 });
+    return file;
+  };
+  const pathWith = (codexSays) => {
+    const bin = path.join(dir, `bin-${codexSays.replace(/[^0-9a-z]/gi, "-")}`);
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "codex"), `#!/bin/sh\necho '${codexSays}'\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "osascript"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    return `${bin}${path.delimiter}${process.env.PATH}`;
+  };
+  const start = (codexBin, onPath) => ship("start", plan, [], {
+    PATH: pathWith(onPath), TAGTEAM_SKIP_TOOL_CHECKS: "", TAGTEAM_CODEX_BIN: codexBin
+  });
+
+  const below = stub("codex-below", "codex-cli 0.152.1");
+  const old = start(below, "codex-cli 0.163.0");
+  assert.equal(old.status, 1, old.stdout);
+  assert.match(old.stderr, new RegExp(`Codex 0\\.153\\.0 or newer is required and ${below.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} has 0\\.152\\.1`));
+  assert.match(old.stderr, /app-server/, "the refusal does not say what needs it");
+  assert.match(old.stderr, /Upgrade Codex/, "the refusal does not say what to do");
+
+  const unreadable = start(stub("codex-silent", null), "codex-cli 0.163.0");
+  assert.equal(unreadable.status, 1, unreadable.stdout);
+  assert.match(unreadable.stderr, /no version `.*codex-silent --version` could be read from/);
+
+  const atFloor = start(stub("codex-at-floor", "codex-cli 0.153.0"), "codex-cli 0.152.1");
+  assert.equal(atFloor.status, 0, atFloor.stderr);
+  assert.match(atFloor.json.next, /begin --plan .* --spec 01-a$/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

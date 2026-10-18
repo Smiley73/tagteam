@@ -231,14 +231,26 @@ refuses by the job's name an effort that is missing or not on the ladder;
 
 ## Codex
 
-Required. If `codex --version` fails, stop and say so.
+Required, at 0.153.0 or newer. Run
+
+```bash
+node "$P/scripts/codex-preflight.mjs" version
+```
+
+and if it exits non-zero, stop and say what it printed. It checks the binary
+the bridge will run — `TAGTEAM_CODEX_BIN` when that is set, otherwise `codex`
+on the PATH — and refuses one too old to report how a call ran, or whose version
+cannot be read.
 
 A Codex call is `scripts/codex.mjs`: it composes a prompt from a plugin-owned
 template, substitutes `--var` values, appends each `--fence` payload read off
-disk beside the engine, runs `codex exec --output-schema`, validates the answer
-and writes the artifact with a `.prompt.md`, a `.request.json` sidecar and a
-truncated `.events.jsonl`. A large payload never passes through the
-orchestrator's context.
+disk beside the engine, and runs one turn over `codex app-server` — a throwaway
+thread, read-only, network closed, approvals never, the answer held to the
+schema — then validates the answer and writes the artifact with a
+`.prompt.md`, a `.request.json` sidecar and a `.events.jsonl` holding what the
+server said on its last attempt. A large payload never passes through the
+orchestrator's context. Each attempt is a call of its own, so a retry inherits
+nothing from the attempt before it.
 
 **The orchestrator never runs it in the foreground.** The bridge allows itself
 900 seconds and waits out a quota in slices, longer than a single Bash call may
@@ -250,18 +262,30 @@ the bridge said last — its routing report, or why it failed. A non-zero exit i
 a Codex call that wrote no artifact; `collect` and `settle` report the lens as
 having produced no usable evidence and re-dispatch it once.
 
-The sidecar records what Codex itself reported it ran at, beside what the call
-asked for. An effort that disagrees with the request **fails the call** and
-leaves no artifact behind. A model that disagrees is recorded and said once, and
-blocks nothing. The Codex sessions a good call created are deleted afterwards; a
-call whose routing could not be read keeps them, and the runner's line says so
-— that is the trigger for *When Codex could not say how it ran* in both
+The sidecar's `routing` records what Codex itself reported it ran as, beside
+what the call asked for: `model`, `effort`, `sandbox` and `networkAccess`,
+`approvalPolicy`, `codexVersion` and `instructionFiles` — each Codex's own value,
+or `{"notObserved": <why>}` when Codex did not report it. That is Codex's record
+and no more: a model name that does not exist comes back exactly as it was
+given. An effort that disagrees with the request **fails the call** and leaves
+no artifact behind. A model, sandbox, network or approval policy that disagrees
+is recorded and said once, and blocks nothing. Any field Codex did not report is
+recorded with why, and the runner's line ends on *how it routed could not be
+confirmed* — the trigger for *When Codex could not say how it ran* in both
 commands.
+
+The instruction files are recorded, not acted on: the person's global
+`AGENTS.md` and the repository's keep steering Codex, by decision. A
+configuration error — Codex refusing to start, or to open the thread — ends the
+call on its first attempt, in Codex's own words. Nothing tagteam does deletes
+anything under Codex's home, where Codex keeps short-lived files of its own
+while a call runs.
 
 Three things to know:
 
 - **Codex runs read-only and cannot write files.** Its output is the artifact the
-  script writes from `--output-schema`. Never instruct it to write one.
+  script writes from the answer the schema held it to. Never instruct it to
+  write one.
 - **Schemas must be strict-mode legal**: every property in `required`, every
   `const` given a `type`. Otherwise the request returns HTTP 400 before the model
   runs, identically on every retry.
@@ -380,7 +404,8 @@ a new commit appears — and every fix round makes one.
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints |
 | `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
-| `codex.mjs` | Compose a request, run Codex, validate against a schema |
+| `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
+| `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |

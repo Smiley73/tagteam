@@ -8,7 +8,12 @@
 // the real ones.
 //
 // Environment:
-//   FAKE_CODEX_FIXTURE  the fixture's name, or a path to one.
+//   FAKE_CODEX_FIXTURE  the fixture's name, or a path to one; or a JSON list of
+//                       them, of which the nth `app-server` start replays the
+//                       nth (the last one repeating), counted off the starts
+//                       FAKE_CODEX_RECORD already holds. That is how a caller
+//                       that starts one server per attempt is given a different
+//                       answer on its second attempt.
 //   FAKE_CODEX_RECORD   a file that gets one JSON line per thing the client sent
 //                       — every request, notification and response, parsed, or
 //                       `{unparsed}` — plus `{argv}` first and `{grandchild}`
@@ -21,6 +26,9 @@
 //                       capture rather than an invented one.
 //   FAKE_CODEX_VERSION  what `--version` reports; otherwise the fixture's
 //                       `capturedOn`, otherwise the version captured today.
+//   FAKE_CODEX_PIDFILE  a file that gets this server's pid, one line per start,
+//                       so a test can check nothing it started outlived the
+//                       caller without changing what FAKE_CODEX_RECORD holds.
 //
 // It answers each request with the first unused step for that method, giving
 // each response the id of the request it answers. Ids inside messages are the
@@ -39,9 +47,21 @@ function record(entry) {
   if (recordFile) fs.appendFileSync(recordFile, `${JSON.stringify(entry)}\n`);
 }
 
+// How many `app-server` starts the record already holds: this one is not in it
+// yet.
+function startsSoFar() {
+  if (!recordFile || !fs.existsSync(recordFile)) return 0;
+  return fs.readFileSync(recordFile, "utf8").split("\n").filter(Boolean)
+    .filter((line) => JSON.parse(line).argv?.[0] === "app-server").length;
+}
+
 function loadFixture() {
-  const named = process.env.FAKE_CODEX_FIXTURE;
+  let named = process.env.FAKE_CODEX_FIXTURE;
   if (!named) return null;
+  if (named.startsWith("[")) {
+    const list = JSON.parse(named);
+    named = list[Math.min(startsSoFar(), list.length - 1)];
+  }
   const file = named.includes("/") ? named : path.join(FIXTURE_DIR, `${named}.json`);
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
@@ -55,6 +75,7 @@ if (argv[0] === "--version") {
 }
 
 record({ argv });
+if (process.env.FAKE_CODEX_PIDFILE) fs.appendFileSync(process.env.FAKE_CODEX_PIDFILE, `${process.pid}\n`);
 if (argv[0] !== "app-server" || !fixture) {
   process.stderr.write(`fake codex: expected \`app-server\` and FAKE_CODEX_FIXTURE, got ${JSON.stringify(argv)}\n`);
   process.exit(2);

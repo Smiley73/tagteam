@@ -89,7 +89,7 @@
 //   configuration-error runs) until the group was sent SIGTERM. That, and the
 //   person's MCP servers starting on every call, is why the whole group is ended
 //   on every path, a clean exit included. A grandchild that moves itself into a
-//   new session or process group escapes this, as it does `codex exec` today.
+//   new session or process group escapes this, as it always has.
 //
 // The minimum version is below `CODEX_MINIMUM`, with its evidence.
 import fs from "node:fs";
@@ -199,15 +199,16 @@ export function initializeParams() {
 
 // Effort goes on the thread and on the turn, as the spike sent it and as both
 // `low` and `max` came back. `--strict-config` and `--ignore-user-config` are
-// deliberately absent (D13).
+// deliberately absent (D13). A model or an effort that is undefined is left out
+// rather than sent empty, so that Codex's own configuration decides it.
 export function threadStartParams({ cwd, model, effort }) {
   return {
     cwd: path.resolve(cwd),
-    model,
+    ...(model === undefined ? {} : { model }),
     approvalPolicy: "never",
     sandbox: "read-only",
     ephemeral: true,
-    config: { model_reasoning_effort: effort }
+    ...(effort === undefined ? {} : { config: { model_reasoning_effort: effort } })
   };
 }
 
@@ -321,8 +322,13 @@ function within(promise, ms) {
 
 /**
  * Run one turn. Options: `codexBin`, `cwd`, `model`, `effort`, `prompt`,
- * `outputSchema` (an object), `timeoutSec`, and optionally `onSpawn(pid)` and
- * `env`. Resolves to one outcome, each carrying `stderr` and `routing`:
+ * `outputSchema` (an object), `timeoutSec`, and optionally `onSpawn(pid)`,
+ * `onLine(line)` and `env`. `onLine` is given every complete line the server
+ * wrote on stdout, as text and in order, whether or not it parsed — the
+ * attempt's own transcript, for a caller that keeps one. A model or an effort
+ * left out is not sent, and Codex's own configuration decides it. Resolves to
+ * one outcome, each carrying `stderr`, `routing` and `errors` — every `error`
+ * notification kept, whatever the outcome:
  *
  * - `{outcome: "completed", message}` — the final agent message, as text.
  * - `{outcome: "configuration-error", arrivedAt, message}` — `arrivedAt` is
@@ -343,7 +349,7 @@ function within(promise, ms) {
  * Throws only when the binary cannot be started.
  */
 export async function runAppServerTurn({
-  codexBin, cwd, model, effort, prompt, outputSchema, timeoutSec, onSpawn = () => {}, env = process.env
+  codexBin, cwd, model, effort, prompt, outputSchema, timeoutSec, onSpawn = () => {}, onLine = () => {}, env = process.env
 }) {
   const startedAt = Date.now();
   const budgetMs = timeoutSec * 1000;
@@ -458,6 +464,8 @@ export async function runAppServerTurn({
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
       if (skipping) { skipping = false; continue; }
+      // A caller's transcript failing is never this call's failure.
+      try { onLine(line); } catch { /* the transcript is the caller's */ }
       let message;
       try { message = JSON.parse(line); } catch { continue; }
       receive(message);
@@ -617,8 +625,9 @@ export async function runAppServerTurn({
   }
 
   await endGroup(child, exited, () => exit !== null, outcome.outcome !== "timed-out");
-  if (outcome.errors) outcome.errors = [...outcome.errors];
-  return { ...outcome, routing, serverRequests: [...serverRequests], stderr };
+  // On every outcome, not only a failed turn: a server that exits mid-turn has
+  // often said why in an `error` notification first.
+  return { ...outcome, errors: [...errors], routing, serverRequests: [...serverRequests], stderr };
 }
 
 // Ask the server to go by closing its input, then end its whole group: SIGTERM,
