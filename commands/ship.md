@@ -174,8 +174,9 @@ else is open, no fix round is spent on them.
 You do not choose the route; `next` does. Three steps `next` never prints,
 because only a person decides them: `revisit`, which looks at a spec that
 stopped for a person again — see *Looking again* below — and `redesign` and
-`accept`, the two answers to the *Recurring* question that are not "fix it
-again" — see *After `collect` and `settle`* below. What is yours at each point:
+`accept`, the answers to the *Recurring* question that are not "fix it again"
+or "publish as it is" — see *After `collect` and `settle`* below. What is yours
+at each point:
 
 - **After `begin`, `fix` and `repair`**: say the announcement in `say` — what is
   starting, which round of how many, and at what model and effort. Say it every
@@ -190,9 +191,13 @@ again" — see *After `collect` and `settle`* below. What is yours at each point
   same file has drawn a new blocking or major finding in three or more rounds of
   this cycle, and the driver is saying that another fix round there is likely to
   open the next case rather than close the last. It stops nothing on its own.
-  When the output also carries `ask`, a fix round is still available and the
-  decision is the person's: ask it as written, with its four answers, each one
-  command. **Fix it once more** is `next`. **Redesign** is
+  When the output also carries `ask`, the decision is the person's: ask it as
+  written, with exactly the answers it offers, each one command. The `ask` says
+  all of what follows; do not paraphrase the commands away. It comes in three
+  forms.
+
+  *A fix round is still left* — four answers. **Fix it once more** is `next`.
+  **Redesign** is
 
   ```bash
   node "$P/scripts/ship.mjs" redesign --plan "$D" --spec <id>
@@ -210,23 +215,56 @@ again" — see *After `collect` and `settle`* below. What is yours at each point
   which spends nothing and publishes the change as it is, with what is open
   disclosed — it will not merge unattended, `finish` cannot approve past an open
   finding, and merging it is the person's to do on GitHub. **Stop the train**
-  is `end`. The `ask` says all of this; do not paraphrase the commands away.
+  is `end`.
+
+  *A fix round is left, and this cycle has had its rewrite* — three answers:
+  fix it once more (`next`), accept, and stop. A cycle gets one rewrite, whether
+  it was chosen with rounds left or at the cap and whether or not it changed
+  anything, so redesign is not offered, and `redesign` run anyway is refused and
+  spends nothing.
+
+  *Every fix round is spent* — three answers, asked before anything publishes,
+  and the `ask` says the rounds are spent and what the extra one buys.
+  **Redesign** is the same `redesign` command: it takes one round past
+  `limits.fixRounds`, which only this answer grants, and it is the cycle's only
+  rewrite — if the rewrite still fails, the spec publishes with what is open
+  disclosed and the person merges it by hand. **Publish it as it is** is `next`:
+  `fix` refuses on the spent budget and the spec goes on to publish with what is
+  open disclosed, exactly as it does at the cap without a question. `accept` is
+  not an answer here and refuses. **Stop the train** is `end`. The question is
+  put once per round: answered at `collect`, the same round's `settle` does not
+  ask again — its `say` says it is publishing as the person decided — unless the
+  re-check raised something the person was not shown, and then it asks again.
+
+  When every fix round is spent and this cycle has had its rewrite, there is no
+  `ask`: `say` carries a line saying the cycle's rewrite has been used and that
+  the spec publishes with what is open disclosed. Relay it and run `next`.
 - **After `redesign`**: say the announcement in `say` — which files, which fix
-  round of how many, at what model and effort, that escalation never raises an
-  implementer, and which review the rewrite gets: answered after `collect`, the
-  readers judge their earlier findings against it and the adversary reads it
-  fresh; answered after `settle`, the whole panel reads it. Then dispatch it as
-  a set, as every dispatch is.
-- **After `snapshot` when it returns `ask`**: the redesign implementer changed
-  nothing. Its report is kept aside, the fix round it spent stays spent, and the
-  same question is asked again with the same four answers.
+  round of how many — or, at the cap, that this is the one round past the limit
+  that the person's answer granted, and that nothing is left after it — at what
+  model and effort, that escalation never raises an implementer, that this is
+  the cycle's one rewrite, and which review the rewrite gets: answered after
+  `collect`, the readers judge their earlier findings against it and the
+  adversary reads it fresh; answered after `settle`, the whole panel reads it.
+  Then dispatch it as a set, as every dispatch is. A `redesign` past the cap
+  that was not answering the question at the cap for this round, or that comes
+  after the cycle's rewrite, returns `budget: "spent"` with no dispatch: say what
+  `say` says and run `next`.
+- **After `snapshot` when the redesign implementer changed nothing**: its report
+  is kept aside and the round it spent stays spent. The cycle's rewrite is used
+  all the same, so when `snapshot` returns `ask` it is the question without its
+  redesign answer — fix it once more, accept, or stop. With no fix round left
+  there is no `ask`: `say` says the spec publishes with what is open disclosed —
+  and, when the spent round was the one past the limit, that it is gone. Relay it
+  and run `next`.
 - **Never dispatch a fixer of your own, and never run `redesign` or `accept`
   on your own judgement.** A commit that reaches `snapshot` without `fix` having
   dispatched it is committed and counted as a fix round all the same —
   `snapshot` says so — but it was never announced, and it is not the way round
-  a spent budget: raising `limits.fixRounds` is, and only a person does that.
-  `redesign` and `accept` are answers to a question, and only the person
-  answers it.
+  a spent budget. There are two ways round one, and both are a person's: raising
+  `limits.fixRounds`, or answering the question at the cap with `redesign`, which
+  buys one round past it once per cycle. `redesign` and `accept` are answers to a
+  question, and only the person answers it.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
   returned, or the line its finished notice carries. If it
   contains *how it routed could not be confirmed*, take *When Codex could not
@@ -276,10 +314,13 @@ Two things do carry over from the run, because they are about the software:
   whom, in the same plain English you use for a person. `settle`'s `say` gives
   you each one. A finding the person accepted — they answered the *Recurring*
   question with `accept` — goes there the same way: it is still open, and the
-  body is where it is disclosed.
+  body is where it is disclosed. So does one the person chose to publish with at
+  the cap, answering that question with "publish as it is".
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
-  to let it try again.
+  to let it try again. When the area was rewritten at the cap and the rewrite
+  still failed, say that too: a fresh rewrite was tried and did not settle it,
+  and merging is the person's to do by hand.
 
 `## Risk` says "nothing known" when there is nothing, rather than being dropped.
 
@@ -361,7 +402,11 @@ When a budget is what stopped it, say that too: it used every fix round or every
 CI repair this repository allows, what is still open in behaviour terms, and
 that `limits.fixRounds` or `limits.ciRepairs` in `.tagteam/config.json` is what
 a person would raise to let it try again. The setting is an aside for someone
-who wants it; the behaviour is the explanation.
+who wants it; the behaviour is the explanation. This is also how the stop reads
+when the person answered the question at the cap with "publish as it is", and
+when the cycle's rewrite — at the cap or before it — was tried and still left
+something open: the fix rounds are spent, what is open is disclosed, and the
+merge is theirs to make by hand.
 
 When the person accepted it — they answered the *Recurring* question with
 `accept` — `ask` says so first: the spec stops here by their own decision, with

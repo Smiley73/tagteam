@@ -10,6 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isMain } from "./lib/is-main.mjs";
+import { repairScope } from "./gates.mjs";
 
 function directories(root) {
   try {
@@ -128,6 +129,30 @@ function fixBudget(limits, spec, ciRemaining, ciUnknown) {
   return restarted.fixRoundsRemaining === null ? restarted : { ...restarted, fixBudgetRestarts: true };
 }
 
+// Whether a spec at its cap can still get one more fix round — only if a person
+// answers the question at the cap with redesign. `fixRoundsRemaining` keeps its
+// meaning, what the run spends without a person, so it stays 0 there; this is
+// the fact beside it, present only when it is true:
+//
+// - the cap is reached and not passed — past it, the one extra round is spent
+//   and nothing beyond the limit is promised;
+// - this cycle's one rewrite is unused — `ship.mjs` keeps that as
+//   `redesign-cycle.json`, keyed by the cycle's repair scope, so a record from an
+//   earlier cycle is not this one's;
+// - and the spec is not one `fixBudgetRestarts` speaks for: waiting or
+//   publishing, its next fix rounds come from a CI repair, not from this.
+//
+// Tolerant like every read here: an unreadable counter or record is absence.
+function oneMoreRound(limits, spec, record) {
+  const limit = limitOf(limits, "fixRounds");
+  const used = counterOf(spec, "fixRoundsUsed");
+  const repairs = counterOf(spec, "ciRepairsUsed");
+  if (limit === null || used === null || repairs === null || FIX_BUDGET_RESTARTS.has(spec.state)) return {};
+  if (used !== limit) return {};
+  if (record?.scope === repairScope(repairs)) return {};
+  return { fixRoundOnRedesign: true };
+}
+
 // What the landing check found for one spec, or null. A person reading later
 // should not have to open `state.json` to learn that the base moved under a
 // reviewed change and that the change was re-checked against it.
@@ -242,6 +267,7 @@ export function inventory(repoRoot) {
             spec: spec.spec,
             state: spec.state,
             ...fixBudget(limits, spec, repairs.ciRepairsRemaining, repairs.ciRepairsUnknown),
+            ...oneMoreRound(limits, spec, typeof spec.spec === "string" ? json(path.join(root, spec.spec, "redesign-cycle.json")) : null),
             ...repairs
           };
         }),

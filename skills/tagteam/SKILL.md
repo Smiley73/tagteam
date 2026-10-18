@@ -61,6 +61,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  between two steps                                          ignored
     accepted.json  a person's answer to the Recurring question: publish it as
                  it is, with the ids they accepted                          ignored
+    asked-at-cap.json  the Recurring question was put at the cap: the round,
+                 candidate, cycle and the ids the person was shown          ignored
+    redesign-cycle.json  the cycle whose one rewrite has been chosen        ignored
     redesign-briefs/  round-<n>-<stamp>.md, the brief a redesign implementer
                  read, kept outside every round                             ignored
     declined/    the reports of fixers and redesign implementers that changed
@@ -98,13 +101,24 @@ The rounds also carry a signal no single round can see. When one file draws a
 new blocking or major finding in three or more rounds of a single repair cycle,
 the current round among them, `collect` and `settle` say so — a line beginning
 *Recurring:* — because each repair there is opening the next case rather than
-closing the last. While a fix round is still available they also ask, and the
-question has two answers besides "fix it again" and "stop" that `next` never
-prints: `redesign`, which spends a fix round on a fresh implementer working
-from a brief of every finding the rounds record on those files and how each was
-answered, and `accept`, which spends nothing and publishes the change as it is
-with what is open disclosed — an open finding is a blocker no approval clears,
-so the spec then waits at `finish` to be merged by hand. A redesign's commit
+closing the last. When something open is for a fixer they also ask. While a fix
+round is still available the question has two answers besides "fix it again"
+and "stop" that `next` never prints: `redesign`, which spends a fix round on a
+fresh implementer working from a brief of every finding the rounds record on
+those files and how each was answered, and `accept`, which spends nothing and
+publishes the change as it is with what is open disclosed — an open finding is a
+blocker no approval clears, so the spec then waits at `finish` to be merged by
+hand. With every fix round spent they ask before anything publishes, and the
+question has three answers: `redesign`, which takes one round past
+`limits.fixRounds` — `gates.mjs grant`, taken only when this question was put
+for this round, candidate and cycle; publishing as it is, which is `next`, since
+the spent branch of `fix` already goes on to publish; and stop. `accept` is
+refused there. The question is put once per round: put at `collect`, the same
+round's `settle` asks again only about something open the person was not shown.
+A cycle gets one rewrite, in budget or past the cap, whether or not it changed
+anything: after it the question has no `redesign` answer, `redesign` is refused,
+and at the cap nothing is asked — the spec publishes with what is open
+disclosed. A CI repair starts a new cycle with a rewrite of its own. A redesign's commit
 gets `redesign.json` in its round naming the requested files it actually
 changed; the signal restarts those files' count at that round and leaves a file
 the rewrite never touched counting as before. The reset is about counting only:
@@ -139,7 +153,7 @@ upgradable.
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
-| `limits` | `fixRounds` (fix rounds per spec per cycle), `ciRepairs` (repairs of a red pull request). Each at least 1 |
+| `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when a person answers the Recurring question at the cap with `redesign`), `ciRepairs` (repairs of a red pull request). Each at least 1 |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
 
@@ -414,7 +428,7 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
-| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints |
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
 | `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |

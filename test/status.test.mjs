@@ -114,6 +114,39 @@ test("a waiting spec whose repairs are gone reports no fix rounds, not a fresh b
   }
 });
 
+// The round a person's redesign answer can still add at the cap. The remainder
+// keeps meaning what the run spends on its own, so it stays 0 there; the fact
+// beside it is present only while it is true — the cap reached and not passed,
+// this cycle's rewrite unused, and the spec not one whose fix rounds come from a
+// CI repair.
+test("a spec at its cap says that one more round is there only if a person chooses redesign, and only while it is", () => {
+  const repo = repository();
+  const cycle = (id, scope) => write(path.join(repo, ".tagteam", "ships", "s", id, "redesign-cycle.json"), { scope, round: 3, at: "2026-01-01T00:00:00Z" });
+  ship(repo, "01-a", { state: "reviewing", fixRoundsUsed: 3, ciRepairsUsed: 0 });
+  // The rewrite used in this cycle, in budget or past the cap.
+  ship(repo, "02-b", { state: "reviewing", fixRoundsUsed: 3, ciRepairsUsed: 0 });
+  cycle("02-b", "repair:0");
+  // The extra round spent.
+  ship(repo, "03-c", { state: "fixing", fixRoundsUsed: 4, ciRepairsUsed: 0, fixRoundGrant: { scope: "repair:0", at: "2026-01-01T00:00:00Z" } });
+  // A restart state: what bounds it is the repair edge, not this.
+  ship(repo, "04-d", { state: "awaiting-approval", fixRoundsUsed: 3, ciRepairsUsed: 0 });
+  // A rewrite used in an earlier cycle is not this one's.
+  ship(repo, "05-e", { state: "reviewing", fixRoundsUsed: 3, ciRepairsUsed: 1 });
+  cycle("05-e", "repair:0");
+  // Below the cap the run still spends rounds without a person.
+  ship(repo, "06-f", { state: "reviewing", fixRoundsUsed: 2, ciRepairsUsed: 0 });
+  const result = inventory(repo);
+
+  for (const id of ["01-a", "05-e"]) {
+    assert.equal(budgetFor(result, id).fixRoundOnRedesign, true, `${id} can still get one more round`);
+    assert.equal(budgetFor(result, id).fixRoundsRemaining, 0, `${id}: the remainder is what the run spends on its own`);
+  }
+  for (const id of ["02-b", "03-c", "04-d", "06-f"]) {
+    assert.equal("fixRoundOnRedesign" in budgetFor(result, id), false, `${id} promised a round nothing will grant`);
+  }
+  assert.equal(budgetFor(result, "03-c").fixRoundsRemaining, 0, "a counter past the limit is never negative");
+});
+
 test("a waiting spec whose repair budget is unknown reports its fix budget unknown, for the same reason", () => {
   // The repair counter is not a number of rounds: `gates.mjs` throws on it before
   // it would take the edge, so what a continuation would get is unknowable rather
