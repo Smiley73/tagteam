@@ -937,35 +937,88 @@ async function planTipCheck(ctx, outcome) {
   return origin;
 }
 
-// What GitHub says about a pull request's merge, as adoption reads it, or null
-// when it cannot be read.
-function mergeFactsOf(ctx, number) {
-  try { return readMergedPr(ctx.repo, number); } catch { return null; }
+// What GitHub says about a pull request's merge, as adoption reads it. A read
+// that fails is a stop of its own, and says so: taken for "not merged", it would
+// fall through to the tip check and be reported as a commit pushed by hand, with
+// advice that takes a merged spec back off the plan branch.
+function mergeFactsOf(ctx, number, outcome) {
+  try { return readMergedPr(ctx.repo, number); } catch (error) {
+    const why = String(error.message).replace(/^could not read pull request #\d+: /, "");
+    throw new Stop(`could not read pull request #${number} from GitHub (${why}), so ${outcome}. `
+      + "Nothing about the plan branch was decided from it; run this again.");
+  }
 }
 
+// The first parent of a commit already fetched, or null for one with none.
+function firstParentOf(ctx, oid) {
+  const found = git(ctx.repo, ["rev-parse", "--verify", "--quiet", `${oid}^1`], { allowFailure: true });
+  return found.status === 0 ? found.stdout.trim() : null;
+}
+
+// Whether `oid` is `tip` or one of the commits behind it.
+const isAtOrBelow = (ctx, oid, tip) => Boolean(oid && tip)
+  && (oid === tip || git(ctx.repo, ["merge-base", "--is-ancestor", oid, tip], { allowFailure: true }).status === 0);
+
 /**
- * A spec's squash, made by GitHub, becomes the recorded tip — once origin's plan
- * branch is seen at exactly that commit. Anything else at the tip is a commit
- * the ship did not record making, and a stop. Recording a tip the record already
- * holds changes nothing, so a run resumed after the record moved and before the
- * spec's own state did passes straight through.
+ * Origin's plan branch, walked back from its tip by first parent to the commit
+ * the ship last recorded there. Every commit on the way has to be one of
+ * `squashes` — the merge commits of this plan's own pull requests, merged at
+ * their reviewed heads — and then origin's tip becomes the recorded tip. So two
+ * spec pull requests merged one after the other are taken in together, and a
+ * squash GitHub made on top of a commit nobody reviewed is not: that commit is
+ * on the walk, and it is not one of the squashes. Returns where origin is,
+ * whether the walk reached the record, and the first commit on it that is
+ * neither recorded nor a squash.
  */
-async function followMerge(ctx, id, mergeOid) {
+async function walkToRecord(ctx, squashes) {
   const route = routeOf(ctx);
-  if (mergeOid && route.tipOid === mergeOid) return;
+  const recorded = new Set([route.tipOid, route.pendingOid].filter(Boolean));
   const origin = await originTipOf(ctx, route.branch);
-  if (mergeOid && origin === mergeOid) {
-    recordMerge(ctx.trainPath, mergeOid);
-    ctx.train = readJson(ctx.trainPath);
-    return;
+  let walked = 0;
+  let at = origin;
+  // Every step takes one more of `squashes` or ends the walk, so it is never
+  // longer than they are.
+  while (at && !recorded.has(at) && squashes.has(at) && walked < squashes.size) {
+    walked += 1;
+    at = firstParentOf(ctx, at);
   }
+  if (!at || !recorded.has(at)) return { origin, reached: false, stray: at && !squashes.has(at) ? at : null };
+  if (walked > 0) {
+    recordMerge(ctx.trainPath, origin);
+    ctx.train = readJson(ctx.trainPath);
+  }
+  return { origin, reached: true, stray: null };
+}
+
+// The sentence a merged spec pull request whose squash cannot be recorded stops
+// with. Nothing was recorded for any of them.
+function unplacedStop(ctx, walk, unplaced) {
+  const route = routeOf(ctx);
   const short = (oid) => String(oid).slice(0, 12);
-  throw new Stop(`${id}'s pull request is merged into ${route.branch}, but `
-    + (mergeOid ? `${route.branch} on origin is at ${origin ? short(origin) : "nothing — the branch is gone"}, not at ${short(mergeOid)}, the commit that merge made`
-      : "GitHub reported no merge commit for it, so the ship cannot tell its own commit from anyone else's")
-    + ". A commit this ship did not record making is on the plan branch — pushed by hand, or another pull request merged "
-    + "into it at the same time — and the ship records nothing further until the plan branch holds only commits it "
-    + `recorded. Put ${route.branch} on origin back at ${mergeOid ? short(mergeOid) : "the merge commit of this pull request"} and run this again.`);
+  const missing = unplaced.find((entry) => !entry.squash);
+  if (missing) {
+    return `${missing.id}'s pull request is merged into ${route.branch}, but GitHub reported no merge commit for it, so the `
+      + "ship cannot tell its own commit from anyone else's. Nothing was recorded; run this again once GitHub reports the merge commit.";
+  }
+  const named = unplaced.map((entry) => entry.id).join(" and ");
+  const are = unplaced.length > 1 ? "are" : "is";
+  if (!walk.origin) {
+    const last = unplaced[unplaced.length - 1].squash;
+    return `${named} ${are} merged into ${route.branch} at the reviewed commit, but ${route.branch} is gone from origin, so `
+      + `nothing was recorded. Push it back (git push origin ${last}:refs/heads/${route.branch}) and run this again.`;
+  }
+  if (walk.stray) {
+    return `${named} ${are} merged into ${route.branch} at the reviewed commit, but ${route.branch} on origin, at `
+      + `${short(walk.origin)}, also holds ${short(walk.stray)}, a commit this ship did not record making, above `
+      + `${short(route.tipOid)}, where it last recorded the branch — pushed by hand, most likely while a merge went through. `
+      + "A squash made on top of a commit nobody reviewed is not recorded as the ship's, so nothing was recorded, and nothing "
+      + `further is built on or merged into ${route.branch}. What to do with ${short(walk.stray)} is yours to decide: the ship `
+      + `goes on once ${route.branch} on origin holds only commits it recorded, with this plan's reviewed squashes on top of them.`;
+  }
+  return `${named} ${are} merged into ${route.branch} at the reviewed commit, but `
+    + `${unplaced.map((entry) => short(entry.squash)).join(" and ")}, the commit${unplaced.length > 1 ? "s" : ""} that merge made, `
+    + `${are} not on ${route.branch} on origin, which is at ${short(walk.origin)}. Nothing was recorded. Put ${route.branch} on `
+    + `origin back at ${short(unplaced[unplaced.length - 1].squash)} and run this again; what is under it is checked again.`;
 }
 
 /**
@@ -975,29 +1028,54 @@ async function followMerge(ctx, id, mergeOid) {
  * commit. Done before the tip is compared: compared first, every crash between
  * a squash and its record would be a false stop.
  *
- * The record moves first and the spec's state second. Whether the merge is one
- * adoption would take is asked of `adoptMerge` itself on the facts GitHub gives,
- * before anything is written; a pull request merged at a head nobody reviewed is
- * never adopted, so its commit is never recorded as the ship's and the tip check
- * stops on it. A run that dies between the two finds the record already at the
- * merge commit, which `followMerge` passes, and adopts. Returns what to say and
- * which specs were adopted.
+ * Whether a merge is one adoption would take is asked of `adoptMerge` itself on
+ * the facts GitHub gives, before anything is written; a pull request merged at a
+ * head nobody reviewed is never adopted, so its commit is never recorded as the
+ * ship's and the tip check stops on it. Then every squash found is placed at
+ * once by `walkToRecord`, so specs merged one after another are taken in
+ * together, in whatever order they merged. The record moves first and each
+ * spec's state second: a run that dies between the two finds the squash already
+ * at or behind the recorded tip, and adopts.
+ *
+ * `own` is the spec `finish` is landing: its squash is placed like the rest, and
+ * `finish` records it as merged itself. With `landed`, it has just been merged,
+ * and a merge that cannot be placed is a stop. Returns what to say and which
+ * specs were adopted.
  */
-async function reconcileMerged(ctx) {
+async function reconcileMerged(ctx, { own = null, landed = false } = {}) {
   const route = routeOf(ctx);
   const result = { say: [], adopted: new Set() };
+  const found = [];
   for (const spec of specsInOrder(ctx)) {
     if (!exists(statePath(ctx, spec.id))) continue;
     const state = readState(ctx, spec.id);
     if (!state.pr || state.state === "merged" || state.base !== route.branch) continue;
-    const facts = mergeFactsOf(ctx, state.pr.number);
-    if (!facts?.merged) continue;
-    try { adoptMerge(state, facts); } catch { continue; }
-    await followMerge(ctx, spec.id, facts.mergeCommitOid);
-    node("gates.mjs", ["adopt-merge", statePath(ctx, spec.id), "--repo", ctx.repo]);
-    result.adopted.add(spec.id);
-    result.say.push(`${spec.id} was found merged into ${route.branch} at the reviewed commit; recorded, and the plan branch's record follows it.`);
+    const required = landed && spec.id === own;
+    const facts = mergeFactsOf(ctx, state.pr.number, required
+      ? `${spec.id} is merged and the plan branch's record has not followed it; nothing else was recorded`
+      : `whether ${spec.id} is merged into ${route.branch} is not known, and nothing was recorded`);
+    try { adoptMerge(state, facts); } catch (error) {
+      if (required) throw new Stop(`${spec.id} was merged, and GitHub's account of pull request #${state.pr.number} does not match: ${error.message}. Nothing was recorded.`);
+      continue;
+    }
+    found.push({ id: spec.id, squash: facts.mergeCommitOid ?? null });
   }
+  if (found.length === 0) return result;
+
+  const walk = await walkToRecord(ctx, new Set(found.map((entry) => entry.squash).filter(Boolean)));
+  const tip = routeOf(ctx).tipOid;
+  const unplaced = [];
+  for (const entry of found) {
+    if (!isAtOrBelow(ctx, entry.squash, tip)) {
+      if (entry.id !== own || landed) unplaced.push(entry);
+      continue;
+    }
+    if (entry.id === own) continue;
+    node("gates.mjs", ["adopt-merge", statePath(ctx, entry.id), "--repo", ctx.repo]);
+    result.adopted.add(entry.id);
+    result.say.push(`${entry.id} was found merged into ${route.branch} at the reviewed commit; recorded, and the plan branch's record follows it.`);
+  }
+  if (unplaced.length > 0) throw new Stop(unplacedStop(ctx, walk, unplaced));
   return result;
 }
 
@@ -2596,9 +2674,21 @@ async function landingCheck(ctx, id, state, say) {
 // refusal — is worth another go: it means someone pushed between the check and
 // the merge. Everything else `merge.mjs` says, a `gh` refusal included, is a
 // stop. The loop is bounded by `mergeWithLanding`, which owns the accounting.
-function landAndMerge(ctx, id, state, say) {
+//
+// On a plan branch the tip is compared again before every check, not only once
+// before the loop: a commit pushed by hand while a check ran is what moved the
+// base, and the next check would otherwise re-verify the spec on top of it and
+// pass. Another spec of this plan merged meanwhile is taken in first, so that it
+// is not mistaken for one.
+function landAndMerge(ctx, id, state, say, planRoute) {
   return mergeWithLanding({
-    check: () => landingCheck(ctx, id, state, say),
+    check: async () => {
+      if (planRoute) {
+        say.push(...(await reconcileMerged(ctx, { own: id })).say);
+        await planTipCheck(ctx, "nothing was merged");
+      }
+      return landingCheck(ctx, id, state, say);
+    },
     merge: () => {
       const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath],
         { allow: [BASE_NOT_ACCEPTED] });
@@ -2645,12 +2735,14 @@ async function finish(options) {
     }
   }
   if (verdict.ready) {
-    const landed = await landAndMerge(ctx, id, state, say);
+    const landed = await landAndMerge(ctx, id, state, say, planRoute);
     if (landed.merged) {
       // The squash GitHub just made becomes the plan branch's recorded tip before
       // the spec is recorded as merged, so a run that dies in between finds the
       // pull request merged and the spec not, which `reconcileMerged` takes in.
-      if (planRoute) await followMerge(ctx, id, mergeFactsOf(ctx, landed.merged.pr)?.mergeCommitOid ?? null);
+      // It is placed the way every squash is: on the record, with nothing under
+      // it the ship did not record, and beside any other spec merged meanwhile.
+      if (planRoute) say.push(...(await reconcileMerged(ctx, { own: id, landed: true })).say);
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);

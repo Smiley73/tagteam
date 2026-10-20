@@ -2754,12 +2754,20 @@ if (argv[1] === "create") {
     mergedAt: pull.mergedAt ?? null, mergeCommit: pull.mergeCommit ? { oid: pull.mergeCommit } : null
   };
   const asked = (flag(argv, "--json") ?? "").split(",").filter(Boolean);
+  // GH_STUB_VIEW_FAILS: GitHub cannot be reached for a merged pull request's
+  // merge commit, so a test can say what a failed read does after a merge.
+  if (process.env.GH_STUB_VIEW_FAILS && pull.state === "MERGED" && asked.includes("mergeCommit")) {
+    die("gh stub: HTTP 502: Bad Gateway");
+  }
   process.stdout.write(JSON.stringify(Object.fromEntries(asked.map((field) => [field, everything[field]]))) + "\\n");
 } else if (argv[1] === "merge") {
   const pull = find(argv[2]);
   const head = git("rev-parse", "refs/heads/" + pull.branch);
   const asked = flag(argv, "--match-head-commit");
   if (asked && asked !== head) die("gh stub: " + pull.branch + " heads at " + head + ", not " + asked);
+  // GH_STUB_UNDER_MERGE: a commit pushed to the base after the ship last looked
+  // and before GitHub squashed, so the squash lands on top of it.
+  if (process.env.GH_STUB_UNDER_MERGE) git("update-ref", "refs/heads/" + pull.base, process.env.GH_STUB_UNDER_MERGE);
   // A squash merge: one commit on the base carrying the merged tree, so a base
   // that has already taken another ship's change keeps it.
   const base = git("rev-parse", "refs/heads/" + pull.base);
@@ -4343,5 +4351,128 @@ test("a plan branch gone from origin after its creation was confirmed stops begi
   assert.equal(stopped.status, 1, stopped.stdout);
   assert.match(stopped.stderr, new RegExp(`plan/demo is gone from origin, so 01-a was not begun.*${tip}:refs/heads/plan/demo`));
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "state.json")));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// What merge.mjs does to a spec's pull request, run by hand: a person merging it
+// on GitHub, or the ship's own merge in a run that dies before recording it.
+function mergeByHand({ dir, env }, number, candidateOid) {
+  const merged = spawnSync(process.execPath, [path.join(dir, "gh-stub.mjs"), "pr", "merge", String(number), "--squash",
+    "--match-head-commit", candidateOid], { encoding: "utf8", env: { ...process.env, ...env } });
+  assert.equal(merged.status, 0, merged.stderr);
+}
+
+test("a finish rerun after a squash the run died before recording adopts it, and does not stop on its own merge", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  mergeByHand(staged, 1, a.state().candidateOid);
+
+  const rerun = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.doesNotMatch(rerun.stderr, /did not record making/);
+  assert.match(rerun.json.say.join("\n"), /01-a was found merged into plan\/demo/);
+  assert.match(rerun.json.next, /--spec 02-b$/);
+  assert.equal(a.state().state, "merged");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a reviewed spec merged on top of a commit pushed by hand is not recorded, and the next begin stops naming that commit", () => {
+  const staged = stagePlan({ autoMerge: false });
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.match(a.finished.json.ask, /auto-merge is off/);
+  const tip = trainOf(shipDir).route.tipOid;
+  const stray = commitByHand(staged, "plan/demo").oid;
+  mergeByHand(staged, 1, a.state().candidateOid);
+
+  const stopped = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(stopped.status, 1, stopped.stdout);
+  assert.match(stopped.stderr, new RegExp(`also holds ${stray.slice(0, 12)}, a commit this ship did not record making`));
+  assert.equal(trainOf(shipDir).route.tipOid, tip, "the record took in a squash with an unrecorded commit under it");
+  assert.notEqual(a.state().state, "merged");
+  assert.ok(!fs.existsSync(path.join(shipDir, "02-b", "state.json")), "02-b was begun on a commit nobody reviewed");
+  assert.equal(git(origin, "rev-parse", "plan/demo^"), stray);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("two spec pull requests merged into the plan branch one after the other are both adopted, and nothing stops", () => {
+  const staged = stagePlan({ autoMerge: false });
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.match(a.finished.json.ask, /auto-merge is off/);
+  const b = shipThrough(staged, "02-b", "b.js", B_CHANGE);
+  assert.match(b.finished.json.ask, /auto-merge is off/);
+  mergeByHand(staged, 1, a.state().candidateOid);
+  const first = onOrigin(origin, "plan/demo");
+  mergeByHand(staged, 2, b.state().candidateOid);
+  const second = onOrigin(origin, "plan/demo");
+  assert.equal(git(origin, "rev-parse", `${second}^`), first);
+
+  const rerun = ship("finish", plan, ["--spec", "02-b"], env);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  const said = rerun.json.say.join("\n");
+  assert.match(said, /01-a was found merged into plan\/demo/);
+  assert.match(said, /02-b was found merged into plan\/demo/);
+  assert.deepEqual([a.state().state, b.state().state], ["merged", "merged"]);
+  assert.equal(trainOf(shipDir).route.tipOid, second);
+  assert.match(rerun.json.next, / end /);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a commit pushed by hand after finish last looked and before GitHub squashed stops finish, and the squash is not recorded", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const tip = trainOf(shipDir).route.tipOid;
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  // Pushed to a branch of its own, so origin has it; the stub puts it under the
+  // squash, where a push landing between merge.mjs's check and GitHub's merge is.
+  const stray = commitByHand(staged, "side", { from: "plan/demo" }).oid;
+
+  const stopped = ship("finish", plan, ["--spec", "01-a"], { ...env, GH_STUB_UNDER_MERGE: stray });
+  assert.equal(stopped.status, 1, stopped.stdout);
+  assert.match(stopped.stderr, new RegExp(`also holds ${stray.slice(0, 12)}, a commit this ship did not record making`));
+  assert.equal(git(origin, "rev-parse", "plan/demo^"), stray, "the stub did not squash on top of the stray commit");
+  assert.equal(trainOf(shipDir).route.tipOid, tip, "a squash on top of a commit nobody reviewed was recorded as the ship's");
+  assert.notEqual(a.state().state, "merged");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a pull request GitHub cannot be read for is its own stop, never a hand push, and a rerun goes on", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  const failing = { ...env, GH_STUB_VIEW_FAILS: "1" };
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+
+  // Right after the squash: the read that follows it fails.
+  const finished = ship("finish", plan, ["--spec", "01-a"], failing);
+  assert.equal(finished.status, 1, finished.stdout);
+  assert.match(finished.stderr, /could not read pull request #1 from GitHub \(gh stub: HTTP 502: Bad Gateway\)/);
+  assert.match(finished.stderr, /run this again/);
+  assert.doesNotMatch(finished.stderr, /did not record making|no merge commit|back at/);
+  assert.equal(pullsOf(env)[0].state, "MERGED");
+  assert.notEqual(a.state().state, "merged");
+
+  // The next begin, before anything recorded the squash: the same read fails.
+  const begun = ship("begin", plan, ["--spec", "02-b"], failing);
+  assert.equal(begun.status, 1, begun.stdout);
+  assert.match(begun.stderr, /could not read pull request #1 from GitHub/);
+  assert.doesNotMatch(begun.stderr, /did not record making|back at/);
+  assert.ok(!fs.existsSync(path.join(shipDir, "02-b", "state.json")));
+
+  const resumed = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.json.say.join("\n"), /01-a was found merged into plan\/demo/);
+  assert.equal(a.state().state, "merged");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
   fs.rmSync(dir, { recursive: true, force: true });
 });
