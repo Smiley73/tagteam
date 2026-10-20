@@ -510,6 +510,58 @@ test("a base that moves between the check and the merge, with the version lines 
   fs.rmSync(busy.scratch, { recursive: true, force: true });
 });
 
+test("a check stopped on a spent budget after the landing began: the dialog names limits.ciRepairs, and once it is raised the next run goes to the check, which makes the fix", () => {
+  const staged = stageClean({ ciRepairs: 1 });
+  const { dir, repo, plan, shipDir, origin, env, configPath } = staged;
+  const checkRecordOf = (n) => JSON.parse(fs.readFileSync(path.join(shipDir, "whole-plan", String(n), "record.json"), "utf8"));
+  assert.equal(toDialog(staged).json.planLanding.merge, true);
+  // The base moves where the plan's change is: the landing differs, the base is
+  // merged in, and the check of that tip spends the one fix the limit allows
+  // without getting clean.
+  const main = commitToMain(repo, { "b.js": B_CHANGE });
+  assert.match(toDialog(staged).json.next, /plan-check --plan .* --why merge-in$/);
+  const open = reviewWholePlan(staged, ship("plan-check", plan, ["--why", "merge-in"], env), [major("b.js")]);
+  assert.match(open.json.next, /--spec plan-fix-1$/);
+  shipUnit(staged, "plan-fix-1", { "b.js": "export const twice = (n) => n + n;\n" });
+  const stopped = reviewWholePlan(staged, ship("plan-check", plan, ["--why", "fix-unit"], env), [major("b.js")]);
+  assert.equal(stopped.json.budget, "spent", stopped.stdout);
+  assert.deepEqual([checkRecordOf(3).status, checkRecordOf(3).reason], ["failed", "spent"]);
+
+  // Every way back is the dialog, with Merge withheld, and it says what moves
+  // it: the limit, not only the plan or the base.
+  assert.equal(ship("end", plan, [], env).status, 0);
+  assert.match(ship("start", plan, [], env).json.next, /plan-land --plan /);
+  const dialog = ship("plan-land", plan, [], env);
+  assert.equal(dialog.status, 0, dialog.stderr);
+  assert.equal(dialog.json.dispatch, undefined);
+  assert.equal(dialog.json.planLanding.merge, false);
+  assert.match(dialog.json.say.join("\n"), /every one of the 1 whole-plan fix\(es\) limits\.ciRepairs allows has been made \(plan-fix-1\)/);
+  assert.match(dialog.json.say.join("\n"), /Raising limits\.ciRepairs in \.tagteam\/config\.json and running .*plan-land --plan .* again lets the ship make another fix/);
+  assert.match(dialog.json.ask, /what moves them is limits\.ciRepairs raised, as said above, or the plan or the base changing/);
+  assert.match(dialog.json.ask, /Leave open \(run .*end --plan /);
+  assert.equal(onOrigin(origin, "main"), main);
+
+  // Raised: neither way back is the dialog any more. The check answers the
+  // same tip's stop with one more fix, with nothing dispatched to decide it again.
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, limits: { ...config.limits, ciRepairs: 2 } }, null, 2));
+  assert.equal(ship("end", plan, [], env).status, 0);
+  assert.match(ship("start", plan, [], env).json.next, /plan-check --plan /, "a raised limit still sent the next run to the dialog");
+  const raised = ship("plan-land", plan, [], env);
+  assert.equal(raised.status, 0, raised.stderr);
+  assert.equal(raised.json.ask, undefined, "the dialog came back over a raised limit");
+  assert.match(raised.json.next, /plan-check --plan /);
+  assert.match(raised.json.say.join("\n"), /limits\.ciRepairs now allows 2; the check answers it/);
+  const check = ship("plan-check", plan, [], env);
+  assert.equal(check.status, 0, check.stderr);
+  assert.equal(check.json.dispatch, undefined);
+  assert.match(check.json.next, /begin --plan .* --spec plan-fix-2$/);
+  assert.deepEqual([checkRecordOf(3).status, checkRecordOf(3).units], ["open", ["plan-fix-2"]]);
+  assert.match(ship("plan-land", plan, [], env).json.next, /begin --plan .* --spec plan-fix-2$/, "the landing did not hold for the fix the raise bought");
+  assert.equal(onOrigin(origin, "main"), main);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("re-entry: after Leave open the same dialog comes back without verify running again, after Stop status says stopped, and a plan merged by hand ends the train", async () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-runs-"));
   const runs = path.join(scratch, "runs.txt");

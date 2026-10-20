@@ -2067,6 +2067,14 @@ function followingCommand(ctx, id) {
 // for it.
 const afterCleanCheck = (ctx) => nextCommand(ctx, "plan-land", null);
 
+// A whole-plan check that stopped for want of a fix, once limits.ciRepairs allows
+// one more: `plan-check` answers it with the next unit, as its stop said raising
+// the limit would. Any other stop — a reviewer that produced nothing usable
+// twice, a combined change that is empty — is decided for its tip, and only a
+// new tip is checked again.
+const reopensOnRaise = (ctx, check) =>
+  check?.status === "failed" && check.reason === "spent" && fixUnitIds(ctx.shipDir).length < ctx.config.limits.ciRepairs;
+
 /**
  * What follows the specs. Off the plan route, `end`, as it always was. On it,
  * `end` only once every spec and every whole-plan fix unit is merged and the
@@ -2088,9 +2096,13 @@ function afterSpecs(ctx, from = null) {
   if (cleanResultFor(ctx.shipDir, route.tipOid)) return afterCleanCheck(ctx);
   // A check of this tip that stopped, once the landing has begun: the dialog
   // shows it, with Merge withheld, rather than the check saying it again. Its
-  // pull request is open, and the person is asked about it.
+  // pull request is open, and the person is asked about it. Unless the limit
+  // was raised since: then the check answers it, and the dialog is not shown
+  // over a fix the person has already paid for.
   const stopped = checkFor(ctx.shipDir, route.tipOid);
-  if (landingBegun(ctx.shipDir) && stopped?.status && stopped.status !== "open" && stopped.status !== "clean") return nextCommand(ctx, "plan-land", null);
+  if (landingBegun(ctx.shipDir) && stopped?.status && stopped.status !== "open" && stopped.status !== "clean" && !reopensOnRaise(ctx, stopped)) {
+    return nextCommand(ctx, "plan-land", null);
+  }
   const why = from === null ? "" : ` --why ${isFixUnitId(from) ? "fix-unit" : "last-spec"}`;
   return nextCommand(ctx, "plan-check", null, why);
 }
@@ -4063,6 +4075,25 @@ function resultLines(route, record, results) {
   return lines;
 }
 
+// What the dialog says of a whole-plan check that stopped for this tip: why,
+// where its record is, and what moves it. A spent budget is raised, and the
+// check then answers it — the one stop a person can clear without a new tip.
+// Any other stop is decided for its tip, and only a new tip is checked again.
+function stoppedCheckNote(ctx, check) {
+  const at = `${check.branch} at ${short(check.tip)}`;
+  const where = checkRecordPath(ctx.shipDir, check.n);
+  if (check.reason === "spent") {
+    const limit = ctx.config.limits.ciRepairs;
+    return `The whole-plan check of ${at} stopped: every one of the ${limit} whole-plan fix(es) limits.ciRepairs allows has been made `
+      + `(${fixUnitIds(ctx.shipDir).join(", ")}), and the plan is still not clean — ${foundLine(ctx, check)}. Its record is ${where}. `
+      + `Raising limits.ciRepairs in .tagteam/config.json and running ${nextCommand(ctx, "plan-land", null)} again lets the ship make another fix.`;
+  }
+  const why = check.reason === "empty"
+    ? "the plan's combined change is empty, which is never clean"
+    : "its reviewer produced no usable evidence twice, which is not a clean review";
+  return `The whole-plan check of ${at} stopped ${check.status}: ${why}. Its record is ${where}; only a new tip is checked again.`;
+}
+
 /**
  * The dialog: what lands, every result with the commit it is for, and the
  * three answers. Merge is offered only when nothing withholds it, whatever
@@ -4092,6 +4123,11 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
   const merge = nextCommand(ctx, "plan-land", null, " --approve \"<their email>\"");
   const stop = nextCommand(ctx, "plan-land", null, " --stop");
   const leave = nextCommand(ctx, "end", null);
+  // What moves a blocker: a whole-plan check that stopped on a spent budget is
+  // moved by raising limits.ciRepairs — the note above says how — and anything
+  // else by the plan or the base changing.
+  const spent = results.wholePlan.status === "failed" && results.wholePlan.reason === "spent";
+  const moves = `${spent ? "limits.ciRepairs raised, as said above, or " : ""}the plan or the base changing`;
   const text = [
     `What lands on ${route.base}: ${landsText(lands)}. ${pr} would merge ${route.branch} at ${short(tip)} with one merge commit, `
       + `which keeps each spec's own commit on ${route.base}'s history. The plan as a whole is ${path.join(ctx.plan, "plan.md")}.`,
@@ -4100,7 +4136,7 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
       ? `Offer: Merge (run ${merge}) — merges it now, at exactly ${short(tip)}, after checking the base once more, and then deletes `
         + `${route.branch}; Leave open (run ${leave}) — the pull request stays open, and /tagteam:ship ${ctx.plan} brings this `
         + `question back; or Stop (run ${stop}) — the same, recorded as stopped by them.`
-      : `Merge is not offered: ${withheld.join("; ")}. No approval clears these; what moves them is the plan or the base changing. `
+      : `Merge is not offered: ${withheld.join("; ")}. No approval clears these; what moves them is ${moves}. `
         + `Offer: Leave open (run ${leave}) — the pull request stays as it is, and /tagteam:ship ${ctx.plan} looks again; or Stop `
         + `(run ${stop}) — the same, recorded as stopped by them.`
   ].join(" ");
@@ -4244,9 +4280,15 @@ async function landingStep(ctx, record, options, say) {
   if (open) return resumeRound(ctx, open, options, say);
   const check = checkFor(ctx.shipDir, tip);
   if (!isCleanFor(check, tip)) {
+    // A check that stopped for want of a fix, with the limit raised since: the
+    // check answers it, as its stop said; the dialog is not shown over it.
+    if (reopensOnRaise(ctx, check)) {
+      say.push(`The whole-plan check of ${route.branch} at ${short(tip)} stopped for want of a fix, and limits.ciRepairs now allows `
+        + `${ctx.config.limits.ciRepairs}; the check answers it with one more before anything about landing it.`);
+      return { say, next: nextCommand(ctx, "plan-check", null) };
+    }
     if (check?.status && check.status !== "open") {
-      return landingDialog(ctx, record, tip, await currentBase(ctx), options, say,
-        [`The whole-plan check of ${route.branch} at ${short(tip)} stopped ${check.status}; its record is ${checkRecordPath(ctx.shipDir, check.n)}.`]);
+      return landingDialog(ctx, record, tip, await currentBase(ctx), options, say, [stoppedCheckNote(ctx, check)]);
     }
     say.push(`No clean whole-plan check describes ${route.branch} at ${short(tip)}, so it is checked before anything about landing it.`);
     return { say, next: nextCommand(ctx, "plan-check", null, whyFor(ctx, record, tip)) };
