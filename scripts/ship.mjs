@@ -45,7 +45,8 @@ import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mj
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_REDESIGN, ROUND_REPORT, writeRoundFile } from "./lib/round-store.mjs";
 import {
-  RECORD, RESOLVE_DIR, hasMarkers, judgeView, listResolveRounds, markerSizes, parentsProblem, resolveBrief, versionStep
+  RECORD, RESOLVE_DIR, attemptsLeft, hasMarkers, listResolveRounds, markerSizes, nextRoundNumber, parentsProblem, resolveBrief,
+  versionStep, writeRecord
 } from "./lib/resolve.mjs";
 import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
@@ -1191,13 +1192,17 @@ async function planRouteRefusals(ctx, order, route, fresh, say) {
 //               happened; resumed by doing them again, never by taking another
 //   dispatched  the resolver is out; `resolve-commit` judges it
 //   committing  the merge is being committed; whatever HEAD is then is the ship's
-//   committed   the merge commit is made; its round, coverage and verify follow
+//   committed   the merge commit is made; its round, report, coverage and verify
+//               follow
 //   verified    verify passed; the panel follows
 //   panel       the panel is out; `resolve-collect` judges it
-//   failed      thrown away; the next attempt starts again from the plan tip
 //   pushing     the attempt passed; the push and its confirmation follow
+//   failed      thrown away; the next attempt starts again from the plan tip
+//   stopped     the round stopped on it for a person
 //
-// and the round as a whole is `open`, `passed` or `stopped`.
+// and the round as a whole is `open`, `passed` or `stopped`. Every attempt ends
+// as a push, a failure or a stop, and a stop that leaves attempts unspent is
+// taken up again by `begin` — the person who read it decides whether to.
 
 const resolveRoot = (ctx) => path.join(ctx.shipDir, RESOLVE_DIR);
 const resolveDirOf = (ctx, n) => path.join(resolveRoot(ctx), String(n));
@@ -1208,8 +1213,23 @@ const recordPathOf = (ctx, n) => path.join(resolveDirOf(ctx, n), RECORD);
 const resolveLabel = (record) => `${record.base} into ${record.branch}`;
 
 function saveRecord(ctx, record) {
-  writeJson(recordPathOf(ctx, record.n), { ...record, updatedAt: new Date().toISOString() });
+  record.updatedAt = new Date().toISOString();
+  writeRecord(resolveDirOf(ctx, record.n), record);
   return record;
+}
+
+// Every round this plan has, or a stop naming the one whose record does not
+// parse: read as absent, a spent round would be opened again with its budget
+// refunded, in the directory whose attempts already belong to other commits.
+function resolveRounds(ctx) {
+  const rounds = listResolveRounds(resolveRoot(ctx));
+  const torn = rounds.find((entry) => entry.record.unreadable);
+  if (torn) {
+    throw new Stop(`the record of resolve round ${torn.n} at ${recordPathOf(ctx, torn.n)} cannot be read (${torn.record.unreadable}), `
+      + "so whether that round is open, passed or spent is unknown and nothing is decided from it. Restore it, or move "
+      + "the round's directory aside if it is to be forgotten, and run this again.");
+  }
+  return rounds;
 }
 
 // The jobs a resolve round dispatches. There is no spec state to read them off,
@@ -1220,7 +1240,7 @@ function resolveJobs(ctx) {
   return resolved;
 }
 
-const openResolveRound = (ctx) => listResolveRounds(resolveRoot(ctx)).find((entry) => entry.record.status === "open")?.record ?? null;
+const openResolveRound = (ctx) => resolveRounds(ctx).find((entry) => entry.record.status === "open")?.record ?? null;
 
 function requireOpenRound(ctx, id, step) {
   const record = openResolveRound(ctx);
@@ -1240,17 +1260,30 @@ function settleWorktree(ctx) {
 }
 
 // What the person is told when a round stops, said again word for word when
-// `begin` meets the same pair a second time.
+// `begin` meets a spent round's pair a second time. A stop with attempts left
+// says that `begin` takes the next one; a spent one, that it does not.
 function resolveStopAsk(ctx, record) {
+  const left = attemptsLeft(record);
+  const after = left
+    ? `Running begin again takes attempt ${record.attempts.length + 1} of the ${record.limit} allowed, from the plan tip again, `
+      + "and tells the resolver why this one stopped. Offer: try again (run begin), or stop the train (run end)."
+    : `Running begin again stops here again while ${record.base} and ${record.branch} are where they are; once `
+      + `${record.base} moves on, it opens a fresh round against it. Taking a resolution of your own onto the plan branch `
+      + "is not something the ship does yet. Offer: stop the train (run end).";
   return `${record.stop.explanation} The conflicted paths: ${record.dryRun.join(", ")}. The round's record is `
-    + `${recordPathOf(ctx, record.n)}. Nothing was pushed to ${record.branch}, and ${record.held}. `
-    + `Running begin again stops here again while ${record.base} and ${record.branch} are where they are; once `
-    + `${record.base} moves on, it opens a fresh round against it. Taking a resolution of your own onto the plan branch `
-    + "is not something the ship does yet. Offer: stop the train (run end).";
+    + `${recordPathOf(ctx, record.n)}. Nothing was pushed to ${record.branch}, and ${record.held}. ${after}`;
 }
 
+// The round stops for a person. The attempt it stopped on — any not already
+// thrown away — is marked so, with why, which is what the next attempt is told
+// if the person has `begin` take one.
 function stopRound(ctx, record, reason, explanation, say = []) {
   settleWorktree(ctx);
+  const attempt = record.attempts.at(-1);
+  if (attempt && attempt.phase !== "failed" && attempt.phase !== "stopped") {
+    attempt.phase = "stopped";
+    attempt.carry = { kind: "stopped", reason, explanation };
+  }
   record.status = "stopped";
   record.stop = { reason, explanation, at: new Date().toISOString() };
   saveRecord(ctx, record);
@@ -1271,13 +1304,16 @@ const stoppedPayload = (ctx, record, say = []) => ({
 function previousLines(previous) {
   if (!previous) return [];
   const commit = previous.mergeOid ? ` Its merge commit was ${previous.mergeOid}; read it with git show if it helps, but nothing of it is in this worktree.` : "";
-  const what = previous.carry?.kind === "verify"
+  const kind = previous.carry?.kind;
+  const what = kind === "verify"
     ? `this repository's verify commands failed on it; the log is ${previous.carry.log}`
-    : previous.carry?.kind === "findings"
+    : kind === "findings"
       ? `the reviewers found something blocking or major in it; their findings are ${previous.carry.file}`
-      : previous.carry?.kind === "incomplete"
+      : kind === "incomplete"
         ? `a reviewer produced no usable evidence about it; the review is ${previous.carry.file}`
-        : `it left ${(previous.carry?.paths ?? []).join(", ")} unresolved — committed as the merge left it`;
+        : kind === "stopped"
+          ? `the round stopped on it for a person, who then had this attempt taken — ${previous.carry.explanation.replace(/\.$/, "")}`
+          : `it left ${(previous.carry?.paths ?? []).join(", ")} unresolved — committed with conflict markers still in it`;
   return [`Attempt ${previous.k} was thrown away: ${what}. This attempt starts again from the plan tip.${commit}`];
 }
 
@@ -1297,7 +1333,9 @@ function resolverDispatch(ctx, record, attempt, job, previous) {
       `Brief (what the reviewers are told this change is): ${resolveBriefPath(ctx, record.n)}`,
       ...previousLines(previous),
       `Worktree (work only beneath this path): ${ctx.worktree}`,
-      `Write your fix report to: ${resolverReportPath(ctx, record.n)} — outcomes is an empty array, and the resolution is described in summary.`
+      "Your fix report: outcomes is an empty array, the resolution is described in summary, and status is complete only if "
+        + "every path above is resolved. Without a complete report the merge is not pushed.",
+      `Write your fix report to: ${resolverReportPath(ctx, record.n)}`
     ].join("\n")
   };
 }
@@ -1313,23 +1351,40 @@ function resolverDispatch(ctx, record, attempt, job, previous) {
  */
 async function openRound(ctx, { baseOid, planTip, conflicts, spec, handBack, before = `${spec} begins`, held = `${spec} was not begun` }, say = []) {
   const route = routeOf(ctx);
-  const n = (listResolveRounds(resolveRoot(ctx)).at(-1)?.n ?? 0) + 1;
+  // Past every directory there, read or not, so a round is never opened over
+  // another's attempts.
+  const n = nextRoundNumber(resolveRoot(ctx));
   const record = {
     n, base: route.base, branch: route.branch, baseOid, planTip, dryRun: conflicts, spec, handBack, before, held,
-    status: "open", limit: ctx.config.limits.ciRepairs, attempts: [], stop: null, pushed: null,
+    status: "open", limit: ctx.config.limits.ciRepairs, attempts: [], stop: null, stops: [], pushed: null,
     openedAt: new Date().toISOString()
   };
-  saveRecord(ctx, record);
+  // The brief first: a record saved before it would name a file that a crash in
+  // between left absent, for the resolver and every reader to be pointed at.
   const merged = new Set(specsInOrder(ctx).filter((entry) => exists(statePath(ctx, entry.id)) && readState(ctx, entry.id).state === "merged").map((entry) => entry.id));
   const brief = resolveBrief({
     base: record.base, baseOid, branch: record.branch, planTip, conflicts,
     specs: specsInOrder(ctx).map((entry) => ({ id: entry.id, path: entry.path, merged: merged.has(entry.id) }))
   });
+  fs.mkdirSync(resolveDirOf(ctx, n), { recursive: true, mode: 0o700 });
   fs.writeFileSync(resolveBriefPath(ctx, n), brief, { mode: 0o600 });
+  saveRecord(ctx, record);
   say.push(`origin/${record.base} at ${baseOid.slice(0, 12)} no longer merges cleanly into ${record.branch} at `
     + `${planTip.slice(0, 12)} (${conflicts.join(", ")}), so resolve round ${n} runs before ${before}. Each attempt is `
     + `one whole resolution from the plan tip, verified and then reviewed as what it does differently from git's own merge; `
     + `${record.limit} attempt(s) are allowed, from limits.ciRepairs.`);
+  return takeAttempt(ctx, record, say);
+}
+
+// A stopped round with attempts left, taken up again: a person read why it
+// stopped and ran begin. Its budget is the one it had — nothing is refunded.
+function reopenRound(ctx, record, say) {
+  say.push(`Resolve round ${record.n} stopped on attempt ${record.attempts.length} (${record.stop.reason}); taking attempt `
+    + `${record.attempts.length + 1} of the ${record.limit} allowed, from the plan tip again.`);
+  record.stops = [...(record.stops ?? []), record.stop];
+  record.stop = null;
+  record.status = "open";
+  saveRecord(ctx, record);
   return takeAttempt(ctx, record, say);
 }
 
@@ -1344,7 +1399,7 @@ async function takeAttempt(ctx, record, say = []) {
     if (record.attempts.length >= record.limit) {
       return stopRound(ctx, record, "spent", `Every one of the ${record.limit} resolve attempt(s) limits.ciRepairs allows `
         + `for merging ${record.base} at ${record.baseOid.slice(0, 12)} into ${record.branch} at ${record.planTip.slice(0, 12)} `
-        + "has failed, and no attempt passed.", say);
+        + "has been taken, and none passed.", say);
     }
     attempt = { k: record.attempts.length + 1, phase: "merging", startedAt: new Date().toISOString() };
     record.attempts.push(attempt);
@@ -1386,6 +1441,8 @@ async function takeAttempt(ctx, record, say = []) {
     try { text = fs.readFileSync(path.join(ctx.worktree, file), "utf8"); } catch {}
     return hasMarkers(text, sizes.get(file));
   });
+  // The resolver's report goes to a path with no attempt in it; one left there
+  // by an earlier attempt is not this one's account.
   fs.rmSync(resolverReportPath(ctx, record.n), { force: true });
   const job = resolveJobs(ctx).jobs.resolve;
   const dispatch = resolverDispatch(ctx, record, attempt, job, record.attempts.at(-2) ?? null);
@@ -1408,18 +1465,6 @@ function failAttempt(ctx, record, attempt, carry, line, say) {
   saveRecord(ctx, record);
   say.push(`Resolve attempt ${attempt.k} failed: ${line}. Its merge commit is thrown away, never fixed on top of.`);
   return takeAttempt(ctx, record, say);
-}
-
-// Every path in a merge commit's remerge view, with its diff. Read whole here
-// rather than off the round's review diff, which leaves out what `reviewExclude`
-// names: a conflicted lock file is not reviewed, and is still resolved or not.
-function remergeFiles(ctx, oid) {
-  const names = git(ctx.worktree, ["show", "--remerge-diff", "--format=", "--no-ext-diff", "--name-only", "-z", oid]).stdout.split("\0").filter(Boolean);
-  const sizes = markerSizesOf(ctx, names);
-  return names.map((file) => ({
-    path: file, size: sizes.get(file),
-    diff: git(ctx.worktree, ["show", "--remerge-diff", "--format=", "--no-ext-diff", oid, "--", file]).stdout
-  }));
 }
 
 // Each path's conflict-marker size as the worktree's attributes set it.
@@ -1453,17 +1498,24 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
 /**
  * Push the passed attempt's merge commit onto the plan branch — recorded as the
  * ship's before the push and confirmed after it, through the same calls as every
- * commit the ship puts there — close the round, and hand back. A push refused
- * because the plan branch moved is 01's stop, said by its own check: the push is
- * a fast-forward from the recorded tip, never forced, and never retried into a
- * branch someone else moved.
+ * commit the ship puts there — close the round, and hand back.
+ *
+ * The plan branch is checked against the record first, immediately before the
+ * push: a plain push is accepted over any ancestor of the merge commit, so a
+ * branch someone rewound to an earlier tip, or deleted, while the panel was out
+ * would otherwise be fast-forwarded over without anyone seeing it. That is 01's
+ * hand-push stop, said by its own check. A push refused all the same means the
+ * branch moved in between: the same check says so, and nothing is retried into
+ * it or forced.
  */
 async function pushResolution(ctx, record, attempt, say) {
+  const outcome = `the resolved merge was not pushed, and ${record.held}`;
+  await planTipCheck(ctx, outcome);
   if (routeOf(ctx).tipOid !== attempt.mergeOid) {
     try {
       await pushToPlanBranch(ctx, attempt.mergeOid);
     } catch (error) {
-      await planTipCheck(ctx, `the resolved merge was not pushed, and ${record.held}`);
+      await planTipCheck(ctx, outcome);
       throw new Stop(`the push of the resolved merge ${attempt.mergeOid.slice(0, 12)} to ${record.branch} failed while `
         + `${record.branch} on origin is still where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
     }
@@ -1482,7 +1534,10 @@ async function pushResolution(ctx, record, attempt, say) {
 /**
  * Before a genuinely new spec begins on the plan route: resume an open round, or
  * dry-run the base against the plan tip and open one on a conflict. Null when
- * there is nothing in the way and the spec starts as it always did.
+ * there is nothing in the way and the spec starts as it always did. A round
+ * already stopped for the same pair is taken up again when it has attempts
+ * left, and stops again when it is spent; a fresh round is never opened for a
+ * pair that already has one.
  */
 async function resolveBeforeBegin(ctx, id, planTip, options, say) {
   const open = openResolveRound(ctx);
@@ -1492,9 +1547,9 @@ async function resolveBeforeBegin(ctx, id, planTip, options, say) {
   let dry;
   try { dry = dryRunMerge(ctx.repo, planTip, baseOid); } catch (error) { throw new Stop(error.message); }
   if (dry.clean) return null;
-  const same = listResolveRounds(resolveRoot(ctx))
+  const same = resolveRounds(ctx)
     .find((entry) => entry.record.baseOid === baseOid && entry.record.planTip === planTip && entry.record.status === "stopped");
-  if (same) return stoppedPayload(ctx, same.record, say);
+  if (same) return attemptsLeft(same.record) ? reopenRound(ctx, same.record, say) : stoppedPayload(ctx, same.record, say);
   return openRound(ctx, { baseOid, planTip, conflicts: dry.conflicts, spec: id, handBack: nextCommand(ctx, "begin", id) }, say);
 }
 
@@ -1503,7 +1558,7 @@ async function resumeRound(ctx, record, options, say) {
   const attempt = record.attempts.at(-1);
   const home = resolveDirOf(ctx, record.n);
   say.push(`Resolve round ${record.n} — ${record.base} into ${record.branch} — is still open; picking it up at attempt ${attempt?.k ?? 1}.`);
-  if (!attempt || attempt.phase === "merging" || attempt.phase === "failed") return takeAttempt(ctx, record, say);
+  if (!attempt || attempt.phase === "merging" || attempt.phase === "failed" || attempt.phase === "stopped") return takeAttempt(ctx, record, say);
   if (attempt.phase === "pushing") return pushResolution(ctx, record, attempt, say);
   const out = attempt.phase === "dispatched" ? { set: attempt.set, step: "resolve-commit" }
     : attempt.phase === "panel" ? { set: attempt.resendSet ?? attempt.panelSet, step: "resolve-collect" }
@@ -2865,10 +2920,13 @@ function revisit(options) {
   emit({ say, next: nextCommand(ctx, "snapshot", id) });
 }
 
-// After the resolver: the merge commit, its parents, the resolution view with
-// its empty and coverage rules, then verify on the merge commit, and the panel
-// only once verify has passed — a failing verify does not cost a panel. A rerun
-// re-enters whatever phase the attempt reached without taking another.
+// After the resolver: the merge commit and its parents; then, on the commit,
+// the round — whose snapshot is the one reader of the resolution view and
+// records what the attempt resolved — the resolver's report, the empty and
+// coverage rules, and verify; and the panel only once verify has passed — a
+// failing verify does not cost a panel. Every check here ends the attempt as a
+// failure or the round as a stop, or lets it on to the next. A rerun re-enters
+// whatever phase the attempt reached without taking another.
 async function resolveCommit(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -2886,6 +2944,7 @@ async function resolveCommit(options) {
     // committed or abandoned by someone else — the resolver, most likely — and
     // what HEAD is then is nobody's reviewed resolution.
     if (attempt.phase === "dispatched" && !mergeInProgress(ctx)) {
+      await closeSet({ dir: setDir(ctx, id, attempt.set, home), id: attempt.set });
       return emit(stopRound(ctx, record, "parents", `Resolve attempt ${attempt.k}: the merge was no longer in progress when the `
         + "resolver came back — it committed or abandoned the merge itself — so HEAD is not a merge commit this ship made.", say));
     }
@@ -2901,47 +2960,74 @@ async function resolveCommit(options) {
     saveRecord(ctx, record);
     await closeSet({ dir: setDir(ctx, id, attempt.set, home), id: attempt.set });
   }
+  const merge = attempt.mergeOid;
+  const at = merge.slice(0, 12);
 
-  const parents = git(ctx.worktree, ["rev-parse", `${attempt.mergeOid}^@`]).stdout.split("\n").filter(Boolean);
+  const parents = git(ctx.worktree, ["rev-parse", `${merge}^@`]).stdout.split("\n").filter(Boolean);
   const wrong = parentsProblem(parents, { planTip: record.planTip, baseOid: record.baseOid });
   if (wrong) {
-    return emit(stopRound(ctx, record, "parents", `Resolve attempt ${attempt.k}: ${attempt.mergeOid.slice(0, 12)} is not the merge `
-      + `this round makes — ${wrong}.`, say));
+    return emit(stopRound(ctx, record, "parents", `Resolve attempt ${attempt.k}: ${at} is not the merge this round makes — ${wrong}.`, say));
   }
 
   const dir = attemptDirOf(ctx, record.n, attempt.k);
   if (attempt.phase === "committed") {
     // Everything the resolver left was committed by the step above, so anything
     // a rerun finds changed since is what an interrupted verify run wrote.
-    git(ctx.worktree, ["switch", "--discard-changes", "--detach", attempt.mergeOid]);
-    // Judged before the snapshot, which is handed what was kept: a path left as
-    // git's own merge left it is not in the remerge view, and goes into the review
-    // diff beside it so that the panel still reads which side it keeps.
-    const view = judgeView({ handed: attempt.conflicts, marked: attempt.marked, files: remergeFiles(ctx, attempt.mergeOid) });
-    node("snapshot-candidate.mjs", [
-      "--primary", ctx.repo, "--worktree", ctx.worktree, "--base", record.planTip, "--candidate", attempt.mergeOid,
-      "--out-dir", dir, "--config", ctx.configPath, "--view", "remerge",
-      ...(view.kept.length > 0 ? ["--kept", JSON.stringify(view.kept)] : [])
-    ]);
-    // The resolver's account, kept with the attempt it is about.
-    const scratch = resolverReportPath(ctx, record.n);
-    if (exists(scratch) && !exists(path.join(dir, ROUND_REPORT))) {
-      const report = readJson(scratch, null);
-      writeRoundFile(path.join(dir, ROUND_REPORT), `${JSON.stringify({ kind: "fix", status: report?.status ?? "invalid", report }, null, 2)}\n`);
-      fs.rmSync(scratch, { force: true });
+    git(ctx.worktree, ["switch", "--discard-changes", "--detach", merge]);
+
+    // A merge whose tree is the plan tip's brings nothing of the base in: every
+    // change the base made is dropped or was already there. There is no change
+    // for verify to select on or for a round to hold, and the snapshot would
+    // refuse it as empty on every rerun — so it is said here, as what it is.
+    const [mergeTree, tipTree] = git(ctx.worktree, ["rev-parse", `${merge}^{tree}`, `${record.planTip}^{tree}`]).stdout.trim().split("\n");
+    if (mergeTree === tipTree) {
+      return emit(stopRound(ctx, record, "unchanged", `Resolve attempt ${attempt.k}: the merge commit ${at} has exactly the tree of `
+        + `the plan tip ${record.planTip.slice(0, 12)}, so it brings nothing of ${record.base} at ${record.baseOid.slice(0, 12)} into `
+        + `${record.branch}: the resolution kept the plan's side of every conflict, and every change ${record.base} made since the `
+        + "two diverged is dropped or was already there. Nothing is left for verify or the readers to judge beside the plan, "
+        + "and whether that is the resolution is a person's call.", say));
     }
+
+    node("snapshot-candidate.mjs", [
+      "--primary", ctx.repo, "--worktree", ctx.worktree, "--base", record.planTip, "--candidate", merge,
+      "--out-dir", dir, "--config", ctx.configPath, "--view", "remerge",
+      "--conflicts", JSON.stringify({ handed: attempt.conflicts, marked: attempt.marked ?? attempt.conflicts })
+    ]);
+    const view = readJson(path.join(dir, "candidate.json")).resolution;
+
+    // The resolver's account, recorded into the attempt's round by the one
+    // script that records every round's report, under the same rules. Nothing it
+    // did not say it finished is pushed.
+    const recorded = node("record-round-report.mjs", ["--dir", home, "--out", path.join(dir, ROUND_REPORT)], { allow: [2] });
+    if (recorded.status === 2) {
+      throw new Stop(`the resolver's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) `
+        + `and rerun resolve-commit --spec ${id}; the merge commit stays as it is.`, 2);
+    }
+    say.push(...recorded.stdout.trim().split("\n"));
+    const report = readJson(path.join(dir, ROUND_REPORT));
+    if (report.status !== "complete") {
+      const why = report.status === "missing"
+        ? `the resolver left no report of its own (${report.reason})`
+        : `the resolver's report says it did not finish${(report.report?.unfinished ?? []).length > 0
+          ? `: ${report.report.unfinished.map((entry) => `${entry.part} — ${entry.reason}`).join("; ")}` : ""}`;
+      return emit(stopRound(ctx, record, "report", `Resolve attempt ${attempt.k}: ${why}. A resolution nobody accounted for as `
+        + `finished is not verified, reviewed or pushed; the merge commit ${at} is kept for a person to read.`, say));
+    }
+
     if (view.empty) {
       const why = view.uncovered.length > 0
         ? "which is what committing the conflicted files with their markers still in them looks like"
         : `because git wrote no markers into ${view.kept.join(", ")} — a binary file, or a file one side deleted — and the `
           + "merge commit keeps the version git's own merge left in the tree, so there is nothing for the reviewers to read "
           + "and whether that is the resolution is a person's call";
-      return emit(stopRound(ctx, record, "empty", `Resolve attempt ${attempt.k}: the resolution view of ${attempt.mergeOid.slice(0, 12)} `
-        + `is empty — the merge commit does nothing git's own merge would not have done, ${why}. An empty view is never a pass.`, say));
+      return emit(stopRound(ctx, record, "empty", `Resolve attempt ${attempt.k}: the resolution view of ${at} is empty — the merge `
+        + `commit does nothing git's own merge would not have done, ${why}. An empty view is never a pass.`, say));
     }
     if (view.uncovered.length > 0) {
+      const many = view.uncovered.length > 1;
       return emit(await failAttempt(ctx, record, attempt, { kind: "uncovered", paths: view.uncovered },
-        `${view.uncovered.join(", ")} ${view.uncovered.length > 1 ? "are" : "is"} not in the resolution view, so ${view.uncovered.length > 1 ? "they were" : "it was"} not resolved`, say));
+        `${view.uncovered.join(", ")} ${many ? "are" : "is"} not resolved: ${many ? "each" : "it"} still carries conflict markers `
+        + "the merge wrote, or is missing from the resolution view", say));
     }
     if (view.kept.length > 0) {
       say.push(`${view.kept.join(", ")} conflicted without markers — a binary file, or a file one side deleted — and the merge `
@@ -2949,16 +3035,17 @@ async function resolveCommit(options) {
         + "the resolution view; the review diff shows the panel which version each side and the merge commit carry, and "
         + "what each side did to it, so that keeping one side's version is reviewed like any other resolution.");
     }
+
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-      "--base", record.planTip, "--candidate-oid", attempt.mergeOid, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
-      throw new Stop(`verify could not run against ${attempt.mergeOid.slice(0, 12)}: ${(verified.stderr || verified.stdout || "").trim()}`);
+      throw new Stop(`verify could not run against ${at}: ${(verified.stderr || verified.stdout || "").trim()}`);
     }
     // What the verify commands wrote while the worktree sat on the merge commit
     // is theirs, and is discarded, as the landing check discards it.
-    git(ctx.worktree, ["switch", "--discard-changes", "--detach", attempt.mergeOid]);
+    git(ctx.worktree, ["switch", "--discard-changes", "--detach", merge]);
     const outcome = readJson(path.join(dir, "verify.json"));
     attempt.verify = outcome.status;
     say.push(`Verification of the merge: ${outcome.status}.`);
@@ -2970,21 +3057,20 @@ async function resolveCommit(options) {
     }
     if (outcome.status !== "passed") {
       return emit(stopRound(ctx, record, "not-applicable", `Resolve attempt ${attempt.k}: none of this repository's verify commands `
-        + `selected the merge ${attempt.mergeOid.slice(0, 12)}, which is not evidence that it works, and the ship pushes it with `
-        + "nobody watching.", say));
+        + `selected the merge ${at}, which is not evidence that it works, and the ship does not push it with nobody watching.`, say));
     }
     attempt.phase = "verified";
     saveRecord(ctx, record);
   }
 
   const lenses = ctx.config.reviewers.default;
-  const { agents, sent, settings: at } = await resolvePanel(ctx, record, attempt, { lenses });
+  const { agents, sent, settings: panelAt } = await resolvePanel(ctx, record, attempt, { lenses });
   attempt.lenses = lenses;
   attempt.panelSet = sent.id;
   attempt.resendSet = null;
   attempt.phase = "panel";
   saveRecord(ctx, record);
-  say.push(`Review panel on the resolution of attempt ${attempt.k}: ${lenses.join(", ")} (${at}). They read only what this `
+  say.push(`Review panel on the resolution of attempt ${attempt.k}: ${lenses.join(", ")} (${panelAt}). They read only what this `
     + "merge does differently from git's own merge, and a blocking or major finding throws the attempt away.");
   emit({ say, dispatch: agents.map((entry) => entry.dispatch), set: setPayload(sent), next: nextCommand(ctx, "resolve-collect", id) });
 }
@@ -3460,7 +3546,10 @@ async function end(options) {
   // A resolve round that did not pass is named, so that a train ended on one is
   // not read as a train that simply ran out of specs.
   const unresolved = listResolveRounds(resolveRoot(ctx)).filter((entry) => entry.record.status !== "passed")
-    .map(({ record }) => ({ round: record.n, status: record.status, before: record.before, record: recordPathOf(ctx, record.n) }));
+    .map(({ n, record }) => ({
+      round: n, status: record.unreadable ? "unreadable" : record.status, before: record.before ?? "the spec it was opened for",
+      record: recordPathOf(ctx, n)
+    }));
   for (const entry of unresolved) {
     say.push(`Resolve round ${entry.round}, merging ${route.base} into ${route.branch} before ${entry.before}, is ${entry.status}; its record is ${entry.record}.`);
   }

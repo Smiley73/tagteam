@@ -188,9 +188,12 @@ round's merge commit onto this plan's branch, and `next` is `begin` for the same
 spec again. That push is the driver's step and nothing wider: you dispatch and
 record exactly as for every other set, and nothing in this file runs git. When a
 round stops — every attempt spent, a resolution that changed nothing, a merge
-commit that is not the one the round makes — it returns `ask`. Say what it says,
-including which files conflicted and where the round's record is. The next spec
-does not start, and `begin` asks the same again until the base moves on.
+commit that is not the one the round makes, a resolver that did not report
+itself finished — it returns `ask`. Say what it says, including which files
+conflicted and where the round's record is, and ask the person. The next spec
+does not start. When the `ask` says attempts are left, `begin` for the same spec
+takes the next one, and only the person's answer runs it; when every attempt is
+spent, `begin` asks the same again until the base moves on.
 
 You do not choose the route; `next` does. Three steps `next` never prints,
 because only a person decides them: `revisit`, which looks at a spec that

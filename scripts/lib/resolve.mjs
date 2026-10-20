@@ -17,10 +17,25 @@
 // unreviewed commit on the plan branch. So there is no fix and re-check inside a
 // round, and each attempt costs one of `limits.ciRepairs`.
 //
+// Every attempt ends in exactly one of three ways: it passes and is pushed, it is
+// thrown away and the next one taken, or the round stops for a person — and a
+// stop that leaves attempts unspent is one `begin` can take the next attempt
+// from, once the person says so. Nothing an attempt does is allowed to end in
+// none of the three.
+//
+// What an attempt resolved is judged once, by `judgeView`, and from two facts
+// that cannot disagree with what the panel reads: the resolution view as the
+// snapshot reads it for the panel (`snapshot-candidate.mjs --view remerge` is the
+// one reader of it, and records the verdict in the round's `candidate.json`), and
+// the merge commit's own contents. The view says what the resolver did; the
+// contents say whether it finished — a file carrying a conflict marker its
+// parents never had is unresolved however much else in it changed.
+//
 // What is here takes facts and returns decisions, so it can be tested without
-// git; `ship.mjs` runs the git around it.
+// git; `ship.mjs` and the snapshot run the git around it.
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 export const RESOLVE_DIR = "resolve";
@@ -86,30 +101,53 @@ export function changesBeyondMarkers(diff, size = MARKER_SIZE) {
 }
 
 /**
- * What the resolution view says about an attempt, from its per-file remerge
- * diffs: `{ path, diff, size }` each, `size` the file's marker size. A file
- * whose diff changes only marker labels is not in the view. `empty` is a view
- * with nothing in it at all — a stop, never a pass. Only the handed paths are
- * checked, never the dry run's — a path the version step settled is not the
- * resolver's.
- *
- * `marked` is the handed paths git wrote conflict markers into, every one of
- * them unless said otherwise. A marked path that is not in the view was
- * committed with its markers: `uncovered`, not resolved, which fails the
- * attempt. A handed path git wrote no markers into — a binary file changed on
- * both sides, or a file one side deleted — has no unresolved form to look for:
- * git left one side's version in the tree, and committing that is a resolution
- * that keeps that side. It is `kept`, and not in the view, because it does
- * nothing git's own merge would not have done.
+ * Whether a file as committed still carries a conflict marker at `size` that
+ * neither parent's version of it carries. Read off the contents, not off any
+ * diff: an unresolved hunk beside a resolved one, or beside an edit anywhere
+ * else in the file, is still there. A marker-shaped line one of the parents
+ * already had — a test fixture, a document about merging — is that file's
+ * content, and is not counted. `text` null is a file the commit deleted.
  */
-export function judgeView({ handed, marked = handed, files }) {
+export function markersLeft(text, parents = [], size = MARKER_SIZE) {
+  if (text === null || text === undefined) return false;
+  const marker = markerLine(markerSize(size));
+  const strip = (line) => line.replace(/\r$/, "");
+  const had = new Set(parents.filter((parent) => typeof parent === "string").flatMap((parent) => parent.split("\n").map(strip)));
+  return String(text).split("\n").map(strip).some((line) => marker.test(line) && !had.has(line));
+}
+
+/**
+ * What an attempt resolved, judged once, for every reader of it.
+ *
+ * `files` is the resolution view as the snapshot reads it — every path in it,
+ * the ones `reviewExclude` keeps from the panel included — with each path's
+ * remerge diff and marker `size`. A path whose diff changes only marker labels
+ * is not in the view: it does nothing git's own merge would not have done.
+ * `empty` is a view with nothing in it at all — a stop, never a pass.
+ *
+ * Only the handed paths are judged — what the index still had unmerged after the
+ * version step — never the dry run's: a path that step settled is not the
+ * resolver's. `marked` is those of them git wrote conflict markers into, and
+ * `markered` those of them whose committed contents still carry one (see
+ * `markersLeft`). A marked path is `uncovered`, and fails the attempt, when it
+ * is missing from the view or still carries a marker: either way it was not
+ * resolved. A handed path git wrote no markers into — a binary file changed on
+ * both sides, or a file one side deleted — has no unresolved form: git left one
+ * side's version in the tree. Committed as git left it, it is `kept`, which is a
+ * resolution that keeps that side, and the snapshot puts it in front of the
+ * panel beside the view rather than letting it pass unread.
+ */
+export function judgeView({ handed, marked = handed, files, markered = [] }) {
   const shown = new Set(files.filter((file) => changesBeyondMarkers(file.diff, file.size)).map((file) => file.path));
-  const unshown = handed.filter((file) => !shown.has(file));
+  const left = new Set(markered);
+  const isMarked = (file) => marked.includes(file);
   return {
+    handed: [...handed],
+    marked: handed.filter(isMarked),
     empty: shown.size === 0,
     shown: [...shown],
-    uncovered: unshown.filter((file) => marked.includes(file)),
-    kept: unshown.filter((file) => !marked.includes(file))
+    uncovered: handed.filter((file) => isMarked(file) && (!shown.has(file) || left.has(file))),
+    kept: handed.filter((file) => !isMarked(file) && !shown.has(file))
   };
 }
 
@@ -128,19 +166,63 @@ export function parentsProblem(parents, { planTip, baseOid }) {
   return `its parents are ${short(parents[0])} then ${short(parents[1])}, not the plan tip ${short(planTip)} then the base ${short(baseOid)}`;
 }
 
-/** The record of a resolve round, or null. */
+/**
+ * The record of a resolve round: the parsed record, null when the directory
+ * holds none — a round whose opening never got as far as its record — or
+ * `{ unreadable }` when there is a file and it does not parse. The last is never
+ * taken for "no round": a spent round read as absent would refund its budget.
+ */
 export function readRecord(dir) {
-  try { return JSON.parse(fs.readFileSync(path.join(dir, RECORD), "utf8")); } catch { return null; }
+  let text;
+  try { text = fs.readFileSync(path.join(dir, RECORD), "utf8"); } catch (error) {
+    if (error.code === "ENOENT") return null;
+    return { unreadable: error.message };
+  }
+  try { return JSON.parse(text); } catch (error) { return { unreadable: error.message }; }
 }
 
-/** Every resolve round under `root`, oldest first, each with its directory. */
+/**
+ * A round's record, written whole or not at all: to a file of its own beside
+ * it, then renamed into place, so a run killed mid-write leaves the record it
+ * had before.
+ */
+export function writeRecord(dir, record) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, RECORD);
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+const roundNumbers = (root) => {
+  try { return fs.readdirSync(root).filter((name) => /^\d+$/.test(name)).map(Number).sort((a, b) => a - b); } catch { return []; }
+};
+
+/**
+ * Every resolve round under `root`, oldest first, each with its directory and
+ * its record. A directory with no record is left out; one whose record does not
+ * parse is listed, with `record.unreadable` saying why.
+ */
 export function listResolveRounds(root) {
-  let names = [];
-  try { names = fs.readdirSync(root); } catch { return []; }
-  return names.filter((name) => /^\d+$/.test(name)).map(Number).sort((a, b) => a - b)
+  return roundNumbers(root)
     .map((n) => ({ n, dir: path.join(root, String(n)), record: readRecord(path.join(root, String(n))) }))
     .filter((entry) => entry.record);
 }
+
+/** The number the next round takes: past every directory there, whatever is in it. */
+export const nextRoundNumber = (root) => (roundNumbers(root).at(-1) ?? 0) + 1;
+
+/**
+ * Whether a stopped round has attempts left for `begin` to take, once a person
+ * has seen why it stopped. A spent round has none, and is stopped again for the
+ * same pair until the base moves.
+ */
+export const attemptsLeft = (record) => record.stop?.reason !== "spent" && record.attempts.length < record.limit;
 
 /**
  * The version step: the one place in every merge of the base into the plan

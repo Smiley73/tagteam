@@ -4529,11 +4529,16 @@ const mergeInProgress = (worktree) => spawnSync("git", ["-C", worktree, "rev-par
 const conflictedLine = (dispatch) => /^Conflicted paths [^:]*: (.*)$/m.exec(dispatch.prompt)?.[1];
 const RESOLVED = { outcomes: [], notes: "", status: "complete", summary: "resolved the merge", unfinished: [] };
 
+// The report a resolver of attempt `k` writes. Each attempt's says so: one
+// report recorded for two attempts would be the same account of two commits,
+// and the second is recorded as having none.
+const resolvedReport = (dispatch, extra = {}) => ({ ...RESOLVED, summary: `resolved the merge (${/attempt \d+$/.exec(dispatch.description)?.[0]})`, ...extra });
+
 // What the resolver does: writes `files` into the worktree and its report, and
 // is recorded as arrived; then the driver's commit step.
-function resolveAs(staged, payload, files, env = staged.env) {
+function resolveAs(staged, payload, files, env = staged.env, report = resolvedReport(payload.json.dispatch[0])) {
   for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(staged.worktree, name), text);
-  write(outputOf(payload.json.dispatch[0]), RESOLVED);
+  if (report) write(outputOf(payload.json.dispatch[0]), report);
   arriveAll(payload);
   return ship("resolve-commit", staged.plan, ["--spec", "02-b"], env);
 }
@@ -4709,7 +4714,7 @@ test("a failing verify throws the attempt away before any panel, and with limits
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a conflicted file committed with its markers still in it is an empty view: a stop, never a pass, with nothing pushed", () => {
+test("a conflicted file committed with its markers still in it is an empty view: a stop, never a pass, with nothing pushed, and begin then takes the next attempt", () => {
   const staged = stageConflict({ ciRepairs: 2 });
   const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
   const begun = ship("begin", plan, ["--spec", "02-b"], env);
@@ -4718,11 +4723,20 @@ test("a conflicted file committed with its markers still in it is an empty view:
   assert.equal(committed.json.dispatch, undefined, "an empty view went on to the panel or another attempt");
   assert.equal(committed.json.resolve.reason, "empty");
   assert.match(committed.json.ask, /resolution view of .* is empty/);
-  assert.equal(recordOf(shipDir).attempts.length, 1, "an empty view was counted as a failed attempt");
+  assert.match(committed.json.ask, /Running begin again takes attempt 2 of the 2 allowed/);
+  assert.deepEqual(recordOf(shipDir).attempts.map((attempt) => attempt.phase), ["stopped"], "an empty view was counted as a failed attempt");
   assert.equal(onOrigin(origin, "plan/demo"), planTip);
   assert.ok(!mergeInProgress(worktree));
+  // The person read it and ran begin: the same round, its budget as it was, and
+  // the next resolver told why the last one stopped.
   const again = ship("begin", plan, ["--spec", "02-b"], env);
-  assert.equal(again.json.ask, committed.json.ask);
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(again.json.dispatch[0].agent, "tagteam:fixer");
+  assert.match(again.json.dispatch[0].description, /attempt 2$/);
+  assert.match(again.json.dispatch[0].prompt, /Attempt 1 was thrown away: the round stopped on it for a person, .*resolution view of .* is empty/);
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve", "2")), "a stopped round's pair opened a fresh round");
+  assert.deepEqual([recordOf(shipDir).status, recordOf(shipDir).stops.map((stop) => stop.reason)], ["open", ["empty"]]);
+  assert.ok(mergeInProgress(worktree));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -4733,8 +4747,8 @@ test("with two files conflicted and only one resolved, the attempt fails on the 
   assert.equal(conflictedLine(begun.json.dispatch[0]), "app.js, lib.js");
   const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
   assert.equal(committed.status, 0, committed.stderr);
-  assert.match(committed.json.say.join("\n"), /Resolve attempt 1 failed: lib\.js is not in the resolution view, so it was not resolved/);
-  assert.doesNotMatch(committed.json.say.join("\n"), /app\.js is not in the resolution view/);
+  assert.match(committed.json.say.join("\n"), /Resolve attempt 1 failed: lib\.js is not resolved: it still carries conflict markers/);
+  assert.doesNotMatch(committed.json.say.join("\n"), /app\.js[^\n]* is not resolved/);
   assert.equal(committed.json.dispatch[0].agent, "tagteam:fixer", "the attempt did not fail into the next one");
   assert.match(committed.json.dispatch[0].prompt, /it left lib\.js unresolved/);
   assert.deepEqual(recordOf(shipDir).attempts[0].carry, { kind: "uncovered", paths: ["lib.js"] });
@@ -4822,8 +4836,13 @@ test("the version step's place: a stand-in that settles one of two conflicted fi
   assert.deepEqual(recordOf(shipDir).attempts[0].conflicts, ["app.js"]);
   const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD }, standIn);
   assert.equal(committed.status, 0, committed.stderr);
-  assert.doesNotMatch(committed.json.say.join("\n"), /lib\.js is not in the resolution view/, "the settled file was reported unresolved");
+  assert.doesNotMatch(committed.json.say.join("\n"), /lib\.js[^\n]* is not resolved/, "the settled file was reported unresolved");
   assert.deepEqual(committed.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"]);
+  // Coverage was judged against what the step left, and not the dry run's list:
+  // the verdict the round records names the paths it judged.
+  const { resolution } = JSON.parse(fs.readFileSync(path.join(attemptDirIn(shipDir, 1), "candidate.json"), "utf8"));
+  assert.deepEqual([resolution.handed, resolution.marked, resolution.uncovered], [["app.js"], ["app.js"], []],
+    "coverage was judged against the dry run's list");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -4849,9 +4868,10 @@ test("a resolve round interrupted mid-attempt resumes without spending another, 
   assert.equal(midPanel.status, 0, midPanel.stderr);
   assert.match(midPanel.json.next, /resolve-collect --plan .* --spec 02-b$/);
   assert.equal(recordOf(shipDir).attempts.length, 1);
-  // The same session keeps waiting on the panel; another, or a person's yes,
-  // released it.
-  const collected = reviewResolution(staged, committed, {}, { released: !midPanel.json.set });
+  // The run that sent the panel is gone, so the set is released and judged from
+  // disk by resolve-collect rather than waited on.
+  assert.equal(midPanel.json.set, undefined, "a --run-gone resume kept waiting on a panel whose run is gone");
+  const collected = reviewResolution(staged, committed, {}, { released: true });
   assert.equal(collected.status, 0, collected.stderr);
   const merge = onOrigin(origin, "plan/demo");
 
@@ -4919,7 +4939,7 @@ test("a resolve attempt interrupted after its budget was taken and before its di
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a plan branch moved while the round was out refuses the push, which is the hand-push stop, and nothing is forced", () => {
+test("a plan branch moved while the round was out is the hand-push stop before any push, and nothing is forced", () => {
   const staged = stageConflict();
   const { dir, plan, shipDir, origin, env, planTip } = staged;
   const begun = ship("begin", plan, ["--spec", "02-b"], env);
@@ -4930,12 +4950,156 @@ test("a plan branch moved while the round was out refuses the push, which is the
   assert.equal(refused.status, 1, refused.stdout);
   assert.match(refused.stderr, /plan\/demo on origin is at .*, a commit this ship did not record making/);
   assert.equal(onOrigin(origin, "plan/demo"), stray, "the push was forced over the moved branch");
-  const merge = recordOf(shipDir).attempts[0].mergeOid;
-  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [planTip, merge]);
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [planTip, null], "the push was attempted");
   assert.equal(recordOf(shipDir).status, "open");
   const again = ship("begin", plan, ["--spec", "02-b"], env);
   assert.equal(again.status, 1, again.stdout);
   assert.match(again.stderr, /did not record making/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("conflict markers left in a file the resolver also edited elsewhere fail the attempt, however much else changed", () => {
+  const staged = stageConflict({ ciRepairs: 2 });
+  const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  // The conflicted hunk left exactly as the merge wrote it, and a line edited
+  // elsewhere in the same file: the remerge view shows a change there.
+  const merged = fs.readFileSync(path.join(worktree, "app.js"), "utf8");
+  assert.match(merged, /^<{7} /m);
+  const committed = resolveAs(staged, begun, { "app.js": merged.replace("export const add = (a, b) => a + b;", "export const add = (a, b) => b + a;") });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.match(committed.json.say.join("\n"), /Resolve attempt 1 failed: app\.js is not resolved: it still carries conflict markers/);
+  assert.equal(committed.json.dispatch[0].agent, "tagteam:fixer", "markers beside an edit went on to verify and the panel");
+  const { resolution } = JSON.parse(fs.readFileSync(path.join(attemptDirIn(shipDir, 1), "candidate.json"), "utf8"));
+  assert.deepEqual([resolution.empty, resolution.shown, resolution.uncovered], [false, ["app.js"], ["app.js"]]);
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resolver that leaves no report, or reports itself unfinished, stops the round with nothing verified or pushed, and with no attempt left it stops again", () => {
+  const staged = stageConflict({ ciRepairs: 2 });
+  const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const missing = resolveAs(staged, begun, { "app.js": BOTH_ADD }, env, null);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.equal(missing.json.dispatch, undefined, "a resolution nobody reported went on to the panel");
+  assert.equal(missing.json.resolve.reason, "report");
+  assert.match(missing.json.ask, /the resolver left no report of its own/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(attemptDirIn(shipDir, 1), "report.json"), "utf8")).status, "missing");
+  assert.ok(!fs.existsSync(path.join(attemptDirIn(shipDir, 1), "verify.json")), "verify ran on an unreported resolution");
+  assert.ok(!mergeInProgress(worktree));
+
+  const again = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.json.dispatch[0].description, /attempt 2$/);
+  const unfinished = resolveAs(staged, again, { "app.js": BOTH_ADD }, env,
+    resolvedReport(again.json.dispatch[0], { status: "unfinished", unfinished: [{ part: "app.js", reason: "could not tell which side wins" }] }));
+  assert.equal(unfinished.status, 0, unfinished.stderr);
+  assert.equal(unfinished.json.resolve.reason, "report");
+  assert.match(unfinished.json.ask, /says it did not finish: app\.js — could not tell which side wins/);
+  assert.match(unfinished.json.ask, /stops here again while main and plan\/demo are where they are/, "a stop with no attempt left offered another");
+  assert.equal(onOrigin(origin, "plan/demo"), planTip, "something was pushed");
+
+  const stopped = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(stopped.json.dispatch, undefined, "a round with every attempt taken took another");
+  assert.equal(stopped.json.ask, unfinished.json.ask, "the second begin did not stop with the same explanation");
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve", "2")), "a round with no attempt left opened a fresh one");
+  assert.deepEqual(recordOf(shipDir).attempts.map((attempt) => attempt.phase), ["stopped", "stopped"]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resolution whose tree is the plan tip's stops with its own explanation, before any snapshot", () => {
+  const staged = stageConflict({ mainFiles: { "app.js": MAIN_ADD } });
+  const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  // The plan's side kept, and the base changed nothing else.
+  const committed = resolveAs(staged, begun, { "app.js": A_CHANGE });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.json.resolve.reason, "unchanged");
+  assert.match(committed.json.ask, /has exactly the tree of the plan tip/);
+  assert.doesNotMatch(committed.json.ask + committed.stderr, /implementation was not committed/);
+  assert.ok(!fs.existsSync(path.join(attemptDirIn(shipDir, 1), "candidate.json")));
+  assert.equal(recordOf(shipDir).status, "stopped");
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  assert.ok(!mergeInProgress(worktree));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resolver that commits the merge itself is a stop, nothing is pushed, and the worktree is still removable", () => {
+  const staged = stageConflict();
+  const { dir, plan, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  fs.writeFileSync(path.join(worktree, "app.js"), BOTH_ADD);
+  git(worktree, "add", "-A");
+  git(worktree, "commit", "-q", "-m", "the resolver's own commit");
+  const committed = resolveAs(staged, begun, {});
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.json.resolve.reason, "parents");
+  assert.match(committed.json.ask, /no longer in progress when the resolver came back/);
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  const ended = ship("end", plan, [], env);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.ok(!fs.existsSync(worktree), "the worktree was not removed");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a merge no verify command selects is a stop, not a pass", () => {
+  const staged = stageConflict();
+  const { dir, plan, origin, env, planTip, configPath } = staged;
+  // Configured once 01-a is merged, so that only the merge goes unselected.
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.verify = [{ command: "true", when: { globs: ["docs/**"], keywords: [] }, timeoutSec: 60 }];
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.json.resolve.reason, "not-applicable");
+  assert.equal(committed.json.dispatch, undefined, "an unverified merge went to the panel");
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a reader that produced nothing is sent again once, and nothing usable twice fails the attempt", () => {
+  const staged = stageConflict();
+  const { dir, plan, origin, env, planTip } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(committed.status, 0, committed.stderr);
+  const merge = recordOf(staged.shipDir).attempts[0].mergeOid;
+  // Every lens answers; Codex writes nothing.
+  const answerLenses = (panel) => {
+    for (const dispatch of panel.json.dispatch) {
+      if (dispatch.agent !== "tagteam:codex-runner") write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], merge));
+    }
+    arriveAll(panel);
+    return ship("resolve-collect", plan, ["--spec", "02-b"], env);
+  };
+  const resent = answerLenses(committed);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.deepEqual(resent.json.dispatch.map((entry) => entry.agent), ["tagteam:codex-runner"], "the re-send was not exactly the missing reader");
+  assert.match(resent.json.say.join("\n"), /codex produced no usable evidence; re-dispatching exactly those, once/);
+  const failed = answerLenses(resent);
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.match(failed.json.say.join("\n"), /Resolve attempt 1 failed: a reviewer produced no usable evidence twice/);
+  assert.equal(failed.json.budget, "spent", "a second incomplete review was taken for a clean one");
+  assert.equal(onOrigin(origin, "plan/demo"), planTip, "an incomplete review was pushed");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan branch rewound on origin while the panel was out is the hand-push stop, not fast-forwarded over", () => {
+  const staged = stageConflict();
+  const { dir, plan, origin, env, planTip } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(committed.status, 0, committed.stderr);
+  const earlier = git(origin, "rev-parse", `${planTip}^1`);
+  git(origin, "update-ref", "refs/heads/plan/demo", earlier);
+  const refused = reviewResolution(staged, committed);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /a commit this ship did not record making/);
+  assert.equal(onOrigin(origin, "plan/demo"), earlier, "the rewound branch was fast-forwarded over");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
