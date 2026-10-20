@@ -36,8 +36,12 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   work/review/     the one review: claude.json, codex.json (and its sidecars),
                    adversary.json, findings.json, brief.md, response.json   ignored
 .tagteam/ships/<slug>/
-  train.json       the train: repository, worktree, base commit, and the
-                   Claude Code session the cost report scopes to            ignored
+  train.json       the train: repository, worktree, base commit, the Claude
+                   Code session the cost report scopes to, and the route it
+                   recorded when it first started — on a plan branch, the
+                   branch's recorded tip, the version lines and the kind of
+                   increase it was routed under, and the increase the ship
+                   last made (its commit and the base value it came from)   ignored
   lock-token       this run's claim on the plan's ship lock, given back by
                    `end`                                                    ignored
   resolve/<n>/     on a plan branch, one merge of the base into it: record.json
@@ -63,7 +67,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    merge of the base the ship made — each for the one tip it is
                    about — the person's Merge for a tip, a Stop, and the merge),
                    pr-body.md (the body the orchestrator writes for the plan as
-                   a whole), ci-<tip>.json, checks/<tip>/ (the landing check's
+                   a whole), pr-body.sent.md (that body with the line saying
+                   what the plan lands as, which the ship adds under
+                   ## Summary), ci-<tip>.json, checks/<tip>/ (the landing check's
                    evidence, one directory per base) and snapshots/. Never a
                    state.json: it is not a spec                              ignored
   <spec-id>/
@@ -171,8 +177,8 @@ Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** 
 tell the person to run `/tagteam:configure` and stop. No key has a fallback in a
 script, so an older configuration is incomplete. Configure carries a version-9
 file forward: every value it holds is offered back, and version 10's two keys,
-`planBranch` and `versionFiles`, are written `false` and `[]`. Anything older is
-a different shape and is replaced.
+`planBranch` and `versionFiles`, are asked about — off and empty change nothing
+about how a plan ships. Anything older is a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -192,6 +198,8 @@ a different shape and is replaced.
 | `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when a person answers the Recurring question at the cap with `redesign`), `ciRepairs` (repairs of a red pull request). Each at least 1 |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
+| `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms, `autoMerge` notwithstanding. False: every spec merges into `base` as it is ready. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
+| `versionFiles[]` | The lines that carry this repository's version, each `{file, pointer}` (a JSON Pointer, such as `/version` or `/plugins/0/version`) or `{file, pattern}` (a line pattern with one capture group). On a plan branch, each gets the plan's one increase — patch, or minor when `plan.md` says `Version increase: minor` — made by the ship after the whole-plan check, from the base's version then; a spec that changes one stops. Each must name exactly one `MAJOR.MINOR.PATCH` value on the base, and they must agree. Empty: no increase. A one-spec plan is outside this and keeps the repository's own habit, so it can collide |
 
 `examples/config.json` is a complete file.
 
@@ -489,6 +497,55 @@ resolve round's merge is: the commit that lands on the plan branch is the
 two-parent commit itself. It runs the version step at the same point a resolve
 attempt does. A conflict at the landing is a resolve round, through the forms
 above.
+
+With `versionFiles` configured, the plan's one version increase is the last
+step before its pull request is opened or brought up to date, and every merge of
+the base resets it. These are its forms, beside those above:
+
+```bash
+git -C "$R" cat-file blob origin/<base>:<file>                # read-only, from git objects: the base's version, never the worktree's
+git -C "$R" cat-file blob <commit>:<file>                     # read-only: a version line at a commit — the tip, a spec's candidate and its base
+git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: whether a merge of the base sits above the recorded increase
+git -C "$R" merge-base --is-ancestor <baseOid> <planTip>      # read-only: whether the plan already holds the base
+git -C "$W" checkout --detach <planTip>                       # the tip the version commit goes on
+git -C "$W" add -- <files> && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
+git -C "$W" commit-tree <tree> -p <planTip> -m "Version <x.y.z>"   # the version commit: the version lines' own bytes and nothing else
+git -C "$W" switch --discard-changes --detach <versionCommit> # the worktree on it, as it is
+git -C "$R" push origin <versionCommit>:refs/heads/plan/<slug>  # recorded before with the increase it makes, confirmed after
+git -C "$R" diff-tree -r --no-renames --name-status -z <parent> <versionCommit>  # read-only: the move is the version lines alone
+git -C "$W" ls-files -u -z -- <file>                          # read-only: a conflicted version file's stages
+git -C "$W" cat-file blob <stage-oid>                         # read-only: each side of it as the merge holds it
+git -C "$W" merge-file -p -L HEAD -L "merged common ancestors" -L <baseOid> <ours> <ancestor> <theirs>  # temporary files: the same merge with the lines set
+git -C "$W" add -- <file>                                     # the version lines set to the base's values, or a version-only conflict settled
+git -C "$R" merge-tree --write-tree --name-only -z <planTip> <baseOid>  # read-only: git's own merge, which the ship's commit is checked against
+git -C "$R" diff-tree -r --name-only -z <ownTree> <tree>      # read-only: where the ship's merge differs from git's own
+```
+
+The increase is decided by comparing values, never by waiting for a version
+line to conflict: two plans raising the same number write identical lines,
+which merge cleanly. The base's value now is held against the increase the
+route recorded. Recorded from that value, nothing is done, whatever landed on
+top — a whole-plan fix after the increase sits on it. Recorded from another
+value, the base's version moved, and the base is merged in first. None recorded
+and the tip's lines are the base's: the version commit, written by replacing
+only the version strings' bytes, recorded with the base value before its push.
+None recorded and the lines differ: the base is merged in first. A merge of the
+base clears the recorded increase, and an increase with a merge of the base
+above it on the plan branch's first-parent line is gone whether or not the
+record says so, so a run that died between a push and its record never reads a
+reset line as an increase.
+
+The reset is the version step in every merge of the base: once `merge --no-ff
+--no-commit` is in progress, each configured line is set to the base's value. A
+version file the merge left conflicted is merged again with the plan's side and
+its common ancestor set to the base's values; a conflict that was only a version
+line is settled and staged, and one that holds more stays conflicted, the line
+already set, for the resolver, whose prompt and brief say the lines are the
+ship's — an attempt that changes one fails. Nothing left conflicted, the ship
+commits the merge itself, with no resolver, only after checking that it is
+git's own merge with those lines set and nothing more. A tip whose one change
+over a tip with a clean whole-plan check is the ship's version commit keeps that
+check's review, and still gets verify and the landing check.
 
 The plan's pull request merges with a merge commit, never a squash, pinned to
 the tip that was checked, and the plan branch is deleted afterwards rather than

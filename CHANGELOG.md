@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.6
+
+- Add a `planBranch` setting. With it on, a plan of two or more specs collects its specs on a branch of its own, `plan/<slug>`, and nothing from it reaches the base until the whole plan is done. Each spec is still its own pull request, into that branch, reviewed and gated as before. A plan of one spec, and a plan already started, ship as they did.
+- Before each spec of such a plan starts, check whether the base still merges cleanly into the plan's branch, and when it does not, have an agent resolve that merge, review what it resolved, and push the merge commit. The plan's branch is never rebased.
+- After the last spec, check the plan as one change: every verify command, and one reviewer reading how the specs fit together. What it finds is fixed as one more small pull request into the plan's branch.
+- Land the plan through one final pull request, merged with a merge commit at exactly the commit that was checked, and only when a person says Merge, whatever `autoMerge` says. The question shows what lands and every check against the commit it is about, and offers Merge only when none fails; Leave open and Stop keep the pull request open for the next run.
+- Add a `versionFiles` setting: the lines that carry the repository's version. A plan of two or more specs on its own branch carries exactly one increase of them, a patch unless its plan document says `Version increase: minor`, made by the ship after the plan is checked, from the base's version at that moment. Two such plans that land one after the other never land the same number. A plan of one spec keeps the repository's own habit and can still collide.
+- Stop a spec of such a plan that changes a version line before it is published, naming the file, the line and both values.
+- `/tagteam:configure` asks about both settings. Every repository runs it once: the configuration is now version 10, and a version-9 file is carried forward with both settings off and empty.
+- Say plainly when a repository forbids merge commits, or does not run its checks on pull requests into the plan's branch, instead of treating either as a pass.
+
 ## 0.10.5
 
 - Ask for the approvals a repository's conventions require (a new dependency, a new top-level file or directory, and the like) when the plan is approved, instead of stopping at ship time. Each spec now lists them under `Sign-offs`, and the plan approval shows them per spec.

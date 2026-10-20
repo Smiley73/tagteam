@@ -44,6 +44,7 @@ export const WHY = {
   "fix-unit": "a whole-plan fix merged",
   "merge-in": "the base was merged into the plan branch",
   resolve: "a resolved merge of the base landed on the plan branch",
+  version: "the ship made the plan's version increase",
   "tip-moved": "the plan branch moved"
 };
 

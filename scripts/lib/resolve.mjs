@@ -37,6 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { resetVersionLines } from "./version-lines.mjs";
 
 export const RESOLVE_DIR = "resolve";
 export const RECORD = "record.json";
@@ -227,28 +228,34 @@ export const attemptsLeft = (record) => record.stop?.reason !== "spent" && recor
 /**
  * The version step: the one place in every merge of the base into the plan
  * branch, after `merge --no-commit` and before anything reads what still
- * conflicts, where the configured version lines are set to the base's values.
- * Run once per attempt. It belongs to a later change and does nothing here —
- * before it lands nothing puts an increase on the plan branch, so a version line
- * cannot conflict from the plan's side.
+ * conflicts, where the configured version lines are set to the base's values —
+ * `resetVersionLines`, which settles a conflict that was only ever about a
+ * version line and leaves anything else conflicted with the lines already set.
+ * Run once per attempt, and once per merge the ship makes on its own. `entries`
+ * are the lines the train's route recorded; none, and it does nothing.
  *
  * `TAGTEAM_TEST_VERSION_STEP` is a shell command the tests run in its place, in
  * the worktree, to prove that the conflicted set is read after this step and not
  * from the dry run. Nothing else sets it.
  */
-export function versionStep({ worktree, env = process.env }) {
+export function versionStep({ worktree, entries = [], baseOid, env = process.env }) {
   const standIn = env.TAGTEAM_TEST_VERSION_STEP;
-  if (!standIn) return { ran: false };
-  const result = spawnSync("/bin/sh", ["-c", standIn], { cwd: worktree, encoding: "utf8", shell: false });
-  if (result.status !== 0) throw new Error(`the version step failed: ${(result.stderr || result.stdout || "").trim()}`);
-  return { ran: true };
+  if (standIn) {
+    const result = spawnSync("/bin/sh", ["-c", standIn], { cwd: worktree, encoding: "utf8", shell: false });
+    if (result.status !== 0) throw new Error(`the version step failed: ${(result.stderr || result.stdout || "").trim()}`);
+    return { ran: true, set: [], settled: [], conflicted: [] };
+  }
+  try {
+    return { ran: entries.length > 0, ...resetVersionLines({ worktree, entries, baseOid }) };
+  } catch (error) {
+    throw new Error(`the version step failed: ${error.message}`);
+  }
 }
 
 /**
  * What stands in for "Spec:" for every reader of a resolve attempt, and what the
- * resolver is told the readers will be told. Built here and nowhere else, so that
- * a later change saying the version lines were set by the ship says it once, in
- * `extra`.
+ * resolver is told the readers will be told. Built here and nowhere else; what
+ * the ship did to the version lines is said once, in `extra`.
  */
 export function resolveBrief({ base, baseOid, branch, planTip, specs, conflicts, extra = [], held = "the next spec of the plan does not begin until they do" }) {
   const short = (oid) => String(oid).slice(0, 12);

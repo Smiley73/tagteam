@@ -30,7 +30,7 @@ import { evaluate } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
-import { isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
+import { increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
 import { checkFor, ciFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
 import { isCleanFor } from "./lib/whole-plan.mjs";
 import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
@@ -42,9 +42,10 @@ import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
 export const BASE_NOT_ACCEPTED = 5;
 
 // A plan's version lines are not exactly one increase over the base as it was
-// read under the lock. Its own code because it is never retried: the base moved
-// past the value the increase was made from, and only a new increase — a new
-// tip, put to the person again — answers it.
+// read under the lock. Its own code because it is never retried here: the base
+// moved past the value the increase was made from, and only a new increase — a
+// new tip, put to the person again — answers it, so the caller goes back into
+// its landing loop, which makes one, rather than spending a landing attempt.
 export const VERSION_NOT_ONE_INCREASE = 6;
 
 export async function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
@@ -239,7 +240,8 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
     const found = spawnSync("git", ["-C", repo, "cat-file", "-e", `${tip}^{commit}`], { encoding: "utf8", shell: false });
     if (found.status !== 0) throw refuse(`${short(tip)} is not in this checkout after the fetch`);
 
-    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: record.increase ?? "patch" });
+    // The kind the plan declared, as its route recorded it when the train started.
+    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: increaseOf(route) ?? "patch" });
     if (!version.holds) {
       throw refuse(`the version lines at ${short(tip)} are not exactly one increase over origin/${route.base} at ${short(baseOid)}: `
         + versionLines(version, route.base).join("; "), VERSION_NOT_ONE_INCREASE);

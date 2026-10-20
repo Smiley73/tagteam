@@ -39,6 +39,12 @@ it is also an interaction: it was reviewed, and raising it again here reviews it
 twice. Style, naming and structure are not yours. Something a later deliverable
 of the plan is described as doing is not missing yet.
 
+One increase of the repository's configured version lines is the ship's own:
+it makes the plan's one version increase itself, as a commit of those lines and
+nothing else, and sets them to the base's values whenever it merges the base in.
+That increase, and those lines reading the base's values, are not a finding, and
+asking for another increase never is.
+
 ## Severity
 
 `blocking` or `major` for an interaction that makes the plan fail at what its
