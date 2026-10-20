@@ -4776,7 +4776,7 @@ const REASONS = {
   "continuous-integration-failed": "a check on the pull request failed",
   "continuous-integration-not-recorded": "this repository waits for checks and none were recorded",
   "continuous-integration-inconclusive": "the checks proved nothing either way",
-  "user-visible": "this changes something people will see, so it waits for you by design",
+  "user-visible": "once this merges, a person can try something new here, so it waits for you to try it",
   "workflow-change": "it changes the CI workflows, which every later gate depends on",
   "work-not-accounted-for": "the agent that wrote this never confirmed it finished what it was given",
   "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one",

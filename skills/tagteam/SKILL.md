@@ -607,17 +607,26 @@ check of an earlier commit never speaks for a later one. A conflict, a change
 that would land as something else, and a failure on the new base are all stops
 for a person, and no approval reaches the last of them.
 
-A pull request stops and waits when: the spec is marked user-visible;
-verification failed, or CI failed or proved nothing; a finding is still open
+A pull request stops and waits when: the spec is marked user-visible, meaning
+that once it merges a person can try something new, so it waits for manual
+testing; verification failed, or CI failed or proved nothing; a finding is still open
 after the re-check; **a selected reviewer produced no usable evidence**;
 `.github/workflows/**` changed; or the agent that wrote the code never confirmed
 it finished what it was given.
 
-User-visibility is the plan's judgement, settled per spec by the person who
-approved it. A plan marks a deliverable user-visible only when it is sure a
-person will see or do something different; unsure is not yes, because every
-user-visible spec stops for the owner, and in the runs before this rule the flag
-alone stopped a third of all specs.
+The marking is the plan's judgement, settled per spec by the person who
+approved it. The question is reachability as of the moment a spec merges: a
+typed flag, an opt-in setting, a changed default, or a screen, message or
+document a person can reach counts; a helper nothing calls yet, plumbing, or a
+surface whose way in comes from a later spec does not. For a feature built
+across several specs, the plan marks the spec that adds the way in and leaves
+the earlier ones unmarked. Unsure is not yes, because every marked spec stops
+for manual testing, and in the runs before this rule the flag alone stopped a
+third of all specs — but "unsure" means real doubt that any way in exists, and
+"it is behind a flag" or "it is off by default" is never a reason to leave a
+spec unmarked. The spec writer corrects the marking only when sure. It is
+editable in the spec's front matter until that spec begins shipping; the first
+`begin` freezes it into `state.json`, and a later edit changes nothing for it.
 
 That fourth one is the important one. An absent, unparseable, or wrongly-bound
 findings file yields an empty finding set, and an empty finding set is

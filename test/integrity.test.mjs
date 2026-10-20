@@ -357,6 +357,30 @@ test("the ship command names both limits its loops are bounded by, and asserts n
   }
 });
 
+// The stop marked in each spec's front matter means a person can try something
+// new once it merges, not that they would notice the change. Only the old,
+// unqualified claims are forbidden: pinning the new sentences would break on the
+// next rewording and prove nothing about the rule.
+test("no document a person or a model reads still says a user-visible change always stops", () => {
+  const files = [
+    "README.md", "skills/tagteam/SKILL.md", "commands/plan.md", "commands/ship.md", "commands/status.md",
+    "prompts/plan-draft.md", "prompts/spec-write.md", "schemas/spec.schema.json", "scripts/ship.mjs"
+  ];
+  const claims = [
+    "User-visible changes always wait",
+    "always stops for the owner",
+    "True always waits for approval",
+    "changes something people will see",
+    "every user-visible spec stops"
+  ];
+  for (const file of files) {
+    const flat = read(...file.split("/")).replace(/\s+/g, " ").toLowerCase();
+    for (const claim of claims) {
+      assert.ok(!flat.includes(claim.toLowerCase()), `${file} still says "${claim}"`);
+    }
+  }
+});
+
 // --- the driver's routes, decided statically where the driver test cannot reach ---
 
 const driverFunction = (name) => {

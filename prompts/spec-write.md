@@ -29,13 +29,19 @@ reviewers: [experience]
 
 `id` matches the file name without `.md`. `depends_on` names spec ids that must
 be merged first — copy them from the plan's table, and add one only if you found
-a real dependency the plan missed. `user_visible` copies the plan's judgement;
-change it only when you are sure the plan was wrong — a surface it missed that a
-person will plainly see, or a "yes" for something no person will ever notice.
-Unsure is not yes: a user-visible spec always stops for the owner before it
-merges. `reviewers` names only the lenses this spec needs *beyond* the
-configured default set, or a lens prefixed with `-` to drop a default that does
-not apply (a docs-only spec has nothing for `code-quality` to say). Leave it
+a real dependency the plan missed. `user_visible` means that once this spec
+merges, a person can see or do something new: a typed flag, a setting someone
+can turn on, a changed default, or a screen, message or document they can reach
+counts; a helper nothing calls yet, plumbing, or a surface whose way in comes
+from a later spec does not. A marked spec stops for manual testing before it
+merges. Copy the plan's judgement, and change it only when you are sure the plan
+was wrong — writing the spec showed that the way in lands somewhere other than
+where the plan thought, or this spec adds a flag, a setting or a changed default
+the plan marked no. Those three always count, even when what is behind them is
+off by default. Unsure is not yes, but "unsure" means real doubt that any way in
+exists once this spec lands, and nothing else. `reviewers` names only the lenses
+this spec needs *beyond* the configured default set, or a lens prefixed with `-`
+to drop a default that does not apply (a docs-only spec has nothing for `code-quality` to say). Leave it
 `[]` when the defaults are right, which is most of the time.
 
 **Outcome** — what must be true when this is done, observable from outside.
