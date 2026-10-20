@@ -2914,9 +2914,14 @@ async function resolveCommit(options) {
     // Everything the resolver left was committed by the step above, so anything
     // a rerun finds changed since is what an interrupted verify run wrote.
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", attempt.mergeOid]);
+    // Judged before the snapshot, which is handed what was kept: a path left as
+    // git's own merge left it is not in the remerge view, and goes into the review
+    // diff beside it so that the panel still reads which side it keeps.
+    const view = judgeView({ handed: attempt.conflicts, marked: attempt.marked, files: remergeFiles(ctx, attempt.mergeOid) });
     node("snapshot-candidate.mjs", [
       "--primary", ctx.repo, "--worktree", ctx.worktree, "--base", record.planTip, "--candidate", attempt.mergeOid,
-      "--out-dir", dir, "--config", ctx.configPath, "--view", "remerge"
+      "--out-dir", dir, "--config", ctx.configPath, "--view", "remerge",
+      ...(view.kept.length > 0 ? ["--kept", JSON.stringify(view.kept)] : [])
     ]);
     // The resolver's account, kept with the attempt it is about.
     const scratch = resolverReportPath(ctx, record.n);
@@ -2925,7 +2930,6 @@ async function resolveCommit(options) {
       writeRoundFile(path.join(dir, ROUND_REPORT), `${JSON.stringify({ kind: "fix", status: report?.status ?? "invalid", report }, null, 2)}\n`);
       fs.rmSync(scratch, { force: true });
     }
-    const view = judgeView({ handed: attempt.conflicts, marked: attempt.marked, files: remergeFiles(ctx, attempt.mergeOid) });
     if (view.empty) {
       const why = view.uncovered.length > 0
         ? "which is what committing the conflicted files with their markers still in them looks like"
@@ -2942,7 +2946,8 @@ async function resolveCommit(options) {
     if (view.kept.length > 0) {
       say.push(`${view.kept.join(", ")} conflicted without markers — a binary file, or a file one side deleted — and the merge `
         + `commit keeps the version git's own merge left in the tree, so ${view.kept.length > 1 ? "they are" : "it is"} not in `
-        + "the resolution view the panel reads.");
+        + "the resolution view; the review diff shows the panel which version each side and the merge commit carry, and "
+        + "what each side did to it, so that keeping one side's version is reviewed like any other resolution.");
     }
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),

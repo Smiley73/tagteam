@@ -396,7 +396,7 @@ git -C "$W" rev-parse --verify --quiet MERGE_HEAD             # read-only: wheth
 git -C "$W" merge --abort                                     # only a merge this round started, before a stop or a retry
 git -C "$W" rev-parse HEAD                                    # read-only: the merge commit the commit chain just made
 git -C "$W" rev-parse <mergeCommit>^@                         # read-only: its parents, the plan tip then the base
-git -C "$W" show --remerge-diff --format= <mergeCommit>       # read-only: the resolution, which is all the panel reads
+git -C "$W" show --remerge-diff --format= <mergeCommit>       # read-only: the resolution, which is what the panel reads
 git -C "$W" switch --discard-changes --detach <mergeCommit>   # what the verify commands wrote on the merge commit
 git -C "$R" push origin <mergeCommit>:refs/heads/plan/<slug>  # the push above: recorded before, confirmed after
 ```

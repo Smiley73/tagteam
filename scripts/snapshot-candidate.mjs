@@ -121,7 +121,7 @@ function writePerFileDiffs(dir, entries, isExcluded, diffOf) {
     if (isExcluded(destination)) continue;
     const name = perFileDiffName(position, destination);
     position += 1;
-    const text = diffOf(entry.paths);
+    const text = diffOf(entry);
     writeRoundFile(path.join(dir, name), text);
     index.push(`${name}\t${destination}`);
   }
@@ -232,6 +232,29 @@ export function snapshotCandidate(options) {
     // content removed from the old path never reaches the reviewers or Codex.
     reviewDiff += reviewedOf(entry.paths);
   }
+  // A path that conflicted without markers — a binary file changed on both
+  // sides, or a file one side deleted — is absent from the remerge view when the
+  // merge commit keeps the version git's own merge left, since there is no
+  // difference from that merge to show. Keeping it is still one side's version
+  // chosen over the other's, so the readers are shown which version each parent
+  // and the merge commit carry, and what each side did to the path since the two
+  // diverged, rather than nothing. `--kept` is a JSON array of those paths.
+  if (options.kept !== undefined && !remerge) throw new Error("--kept is only for --view remerge");
+  const kept = options.kept === undefined ? [] : JSON.parse(options.kept);
+  if (!Array.isArray(kept) || kept.some((file) => typeof file !== "string" || file === "")) {
+    throw new Error(`--kept is a JSON array of paths, not ${options.kept}`);
+  }
+  const keptEntries = kept.map(normalizeRepoPath).map((file) => {
+    const versions = `# ${file} | first parent ${blobAt(worktree, `${candidateOid}^1`, file) ?? "(absent)"} | second parent `
+      + `${blobAt(worktree, `${candidateOid}^2`, file) ?? "(absent)"} | merge commit ${blobAt(worktree, candidateOid, file) ?? "(absent)"}\n`;
+    const side = (label, from, to) => `## What the ${label} parent did to ${file}\n`
+      + git(worktree, ["diff", "--no-ext-diff", `${candidateOid}^${from}...${candidateOid}^${to}`, "--", file]).stdout;
+    return { status: "kept", paths: [file], text: isExcluded(file) ? versions : versions + side("first", 2, 1) + side("second", 1, 2) };
+  });
+  if (keptEntries.length > 0) {
+    reviewDiff += "\n# Conflicted without markers, and kept as git's own merge left it\n";
+    for (const entry of keptEntries) reviewDiff += entry.text;
+  }
   const excluded = changedPaths.filter(isExcluded).map((file) => ({
     path: file,
     oldBlob: blobAt(worktree, baseOid, file),
@@ -281,7 +304,7 @@ export function snapshotCandidate(options) {
   // longer than that; a re-check that read the first 2000 and stopped judged a
   // truncated change. Per-file diffs let a lens read the files it cares about
   // whole, and let every reader know where the change ends.
-  writePerFileDiffs(path.join(outDir, "review.diff.d"), reviewedEntries, isExcluded, reviewedOf);
+  writePerFileDiffs(path.join(outDir, "review.diff.d"), [...reviewedEntries, ...keptEntries], isExcluded, (entry) => entry.text ?? reviewedOf(entry.paths));
   // The same list candidate.json carries, alone in a file the bridge can fence
   // directly. candidate.json cannot serve that purpose: it also holds
   // addedLines, so fencing it would put the whole change into the prompt a

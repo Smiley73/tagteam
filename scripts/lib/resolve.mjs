@@ -193,6 +193,11 @@ export function resolveBrief({ base, baseOid, branch, planTip, specs, conflicts,
       + `have made on its own, read with \`git show --remerge-diff\`. Everything ${base} brought in that merged cleanly is `
       + "not in it, and is not yours to review.",
     "",
+    "A path that conflicted without markers — a binary file changed on both sides, or a file one side deleted — and that "
+      + "the merge commit keeps as git's own merge left it has no difference to show there. It follows that view, under "
+      + "\"Conflicted without markers\": which version each parent and the merge commit carry, and what each side did to it "
+      + "since the two diverged. Keeping one side's version of it is the resolution of that path, and is yours to review.",
+    "",
     `A resolution must keep both sides' intent: what the plan's specs set out to do, and what ${base}'s own commits did. `
       + "A resolution that keeps one side and drops the other's change is a finding, however clean it reads.",
     "",

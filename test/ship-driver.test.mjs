@@ -4758,7 +4758,7 @@ test("a conflicted file with markers of its configured size, committed with them
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a file one side deleted is kept as git left it, not unresolved: the attempt goes on with the text conflict beside it", () => {
+test("a file one side deleted is kept as git left it, not unresolved: the attempt goes on with the text conflict beside it, and the panel reads which side it keeps", () => {
   const staged = stageConflict({
     planFiles: { "app.js": A_CHANGE, "lib.js": PLAN_LIB }, mainRemoves: ["app.js"], mainFiles: { "lib.js": MAIN_LIB, "other.js": UNRELATED }
   });
@@ -4775,6 +4775,19 @@ test("a file one side deleted is kept as git left it, not unresolved: the attemp
   assert.match(said, /app\.js conflicted without markers .* keeps the version git's own merge left in the tree/);
   assert.deepEqual(committed.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"]);
   assert.equal(recordOf(shipDir).attempts.length, 1);
+  // Keeping the plan's app.js undoes main's deletion of it, and that choice is in
+  // front of the panel: which version each parent and the merge commit carry, and
+  // the deletion main made, in the review diff and in its own per-file piece.
+  const round = attemptDirIn(shipDir, 1);
+  const reviewDiff = fs.readFileSync(path.join(round, "review.diff"), "utf8");
+  assert.match(reviewDiff, /^diff --git a\/lib\.js b\/lib\.js$/m);
+  assert.match(reviewDiff, /^# Conflicted without markers, and kept as git's own merge left it$/m, "the kept file never reaches the panel");
+  assert.match(reviewDiff, /^# app\.js \| first parent [0-9a-f]{40} \| second parent \(absent\) \| merge commit [0-9a-f]{40}$/m);
+  const second = reviewDiff.slice(reviewDiff.indexOf("## What the second parent did to app.js"));
+  assert.match(second, /^## What the second parent did to app\.js\ndiff --git a\/app\.js b\/app\.js\ndeleted file mode/m, "main's deletion of app.js is not shown");
+  const index = fs.readFileSync(path.join(round, "review.diff.d", "index.txt"), "utf8");
+  assert.match(index, /\tapp\.js$/m, "the kept file has no per-file piece");
+  assert.match(fs.readFileSync(path.join(shipDir, "resolve", "1", "brief.md"), "utf8"), /Conflicted without markers/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
