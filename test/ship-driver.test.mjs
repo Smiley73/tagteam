@@ -4501,8 +4501,10 @@ function commitToMain(repo, files, message = "someone else, on main") {
 
 // The plan route with 01-a merged into plan/demo, and then a commit on main that
 // really conflicts with it — the same lines of the same file, or of both files
-// with `two` — beside an unrelated file of its own.
-function stageConflict({ two = false, ciRepairs = 1, verifyCommand = null } = {}) {
+// with `two` — beside an unrelated file of its own. `planFiles`, `mainFiles` and
+// `mainRemoves` stage a conflict of another shape: what 01-a writes, what main's
+// commit writes, and what it deletes.
+function stageConflict({ two = false, ciRepairs = 1, verifyCommand = null, planFiles = null, mainFiles = null, mainRemoves = [] } = {}) {
   const staged = stagePlan();
   const { plan, configPath, env, repo, origin, shipDir } = staged;
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -4510,13 +4512,14 @@ function stageConflict({ two = false, ciRepairs = 1, verifyCommand = null } = {}
   if (verifyCommand) config.verify = [{ command: verifyCommand, when: { globs: [], keywords: [] }, timeoutSec: 60 }];
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   assert.equal(ship("start", plan, [], env).status, 0);
-  const a = two
-    ? shipThrough(staged, "01-a", { "app.js": A_CHANGE, "lib.js": PLAN_LIB })
-    : shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  const a = planFiles ? shipThrough(staged, "01-a", planFiles)
+    : two ? shipThrough(staged, "01-a", { "app.js": A_CHANGE, "lib.js": PLAN_LIB })
+      : shipThrough(staged, "01-a", "app.js", A_CHANGE);
   assert.equal(a.finished.status, 0, a.finished.stderr);
   assert.equal(a.state().state, "merged");
   const planTip = onOrigin(origin, "plan/demo");
-  const baseOid = commitToMain(repo, { "app.js": MAIN_ADD, ...(two ? { "lib.js": MAIN_LIB } : {}), "other.js": UNRELATED });
+  for (const name of mainRemoves) git(repo, "rm", "-q", "--", name);
+  const baseOid = commitToMain(repo, mainFiles ?? { "app.js": MAIN_ADD, ...(two ? { "lib.js": MAIN_LIB } : {}), "other.js": UNRELATED });
   return { ...staged, a, planTip, baseOid, worktree: trainOf(shipDir).worktree };
 }
 
@@ -4739,6 +4742,62 @@ test("with two files conflicted and only one resolved, the attempt fails on the 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a conflicted file with markers of its configured size, committed with them still in it, is an empty view", () => {
+  const staged = stageConflict({ planFiles: { "app.js": A_CHANGE, ".gitattributes": "app.js conflict-marker-size=32\n" } });
+  const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.match(fs.readFileSync(path.join(worktree, "app.js"), "utf8"), /^<{32} /m, "the merge did not write 32-character markers");
+  assert.deepEqual(recordOf(shipDir).attempts[0].marked, ["app.js"]);
+  const committed = resolveAs(staged, begun, {});
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.json.dispatch, undefined, "a file committed with its markers went on to verify and the panel");
+  assert.equal(committed.json.resolve.reason, "empty");
+  assert.match(committed.json.ask, /with their markers still in them/);
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a file one side deleted is kept as git left it, not unresolved: the attempt goes on with the text conflict beside it", () => {
+  const staged = stageConflict({
+    planFiles: { "app.js": A_CHANGE, "lib.js": PLAN_LIB }, mainRemoves: ["app.js"], mainFiles: { "lib.js": MAIN_LIB, "other.js": UNRELATED }
+  });
+  const { dir, plan, shipDir, env } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(conflictedLine(begun.json.dispatch[0]), "app.js, lib.js");
+  assert.deepEqual(recordOf(shipDir).attempts[0].marked, ["lib.js"], "a modify/delete conflict was read as carrying markers");
+  // The plan's modified app.js stays, as the merge left it; lib.js is resolved.
+  const committed = resolveAs(staged, begun, { "lib.js": BOTH_LIB });
+  assert.equal(committed.status, 0, committed.stderr);
+  const said = committed.json.say.join("\n");
+  assert.doesNotMatch(said, /not in the resolution view, so/, "the kept file failed the attempt as unresolved");
+  assert.match(said, /app\.js conflicted without markers .* keeps the version git's own merge left in the tree/);
+  assert.deepEqual(committed.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"]);
+  assert.equal(recordOf(shipDir).attempts.length, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a binary conflict committed as git left it is an empty view, said as that and not as markers left in", () => {
+  const staged = stageConflict({
+    ciRepairs: 2, planFiles: { "logo.bin": "\0\x01plan\n" }, mainFiles: { "logo.bin": "\0\x01main\n", "other.js": UNRELATED }
+  });
+  const { dir, plan, shipDir, origin, env, planTip } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(conflictedLine(begun.json.dispatch[0]), "logo.bin");
+  assert.deepEqual(recordOf(shipDir).attempts[0].marked, []);
+  const committed = resolveAs(staged, begun, {});
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.json.dispatch, undefined, "a binary kept as git left it was failed into another attempt");
+  assert.equal(committed.json.resolve.reason, "empty");
+  assert.match(committed.json.ask, /git wrote no markers into logo\.bin/);
+  assert.doesNotMatch(committed.json.ask, /with their markers still in them/);
+  assert.equal(recordOf(shipDir).attempts.length, 1);
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("the version step's place: a stand-in that settles one of two conflicted files leaves only the other to the resolver and to coverage", () => {
   const staged = stageConflict({ two: true });
   const { dir, plan, shipDir, env } = staged;
@@ -4800,6 +4859,50 @@ test("a resolve round interrupted mid-attempt resumes without spending another, 
   assert.equal(started.status, 0, started.stderr);
   assert.equal(started.json.dispatch[0].agent, "tagteam:implementer");
   assert.match(started.json.say.join("\n"), new RegExp(`from plan/demo at ${merge.slice(0, 12)}`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resolve attempt interrupted after its budget was taken and before its dispatch, or around its commit, is re-entered without spending another", () => {
+  // One attempt allowed: an attempt taken on resume would be a stop.
+  const staged = stageConflict();
+  const { dir, plan, shipDir, env, planTip, baseOid, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+
+  // As if the run died once the attempt was recorded and before anything was
+  // dispatched: the record says merging, and the merge is gone.
+  const record = recordOf(shipDir);
+  record.attempts[0].phase = "merging";
+  delete record.attempts[0].set;
+  fs.writeFileSync(path.join(shipDir, "resolve", "1", "record.json"), JSON.stringify(record, null, 2));
+  git(worktree, "merge", "--abort");
+  const resumed = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(resumed.json.budget, undefined, "the resume stopped as spent");
+  assert.equal(resumed.json.dispatch?.[0]?.agent, "tagteam:fixer", "the resume did not dispatch the resolver");
+  assert.match(resumed.json.dispatch[0].description, /attempt 1$/);
+  assert.deepEqual(recordOf(shipDir).attempts.map((attempt) => [attempt.k, attempt.phase]), [[1, "dispatched"]], "the resume took another attempt");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), planTip);
+  assert.ok(mergeInProgress(worktree), "the resume did not start the merge again");
+
+  // As if the run died around its commit: the resolution committed as the merge,
+  // and the record still says committing.
+  fs.writeFileSync(path.join(worktree, "app.js"), BOTH_ADD);
+  write(outputOf(resumed.json.dispatch[0]), RESOLVED);
+  arriveAll(resumed);
+  git(worktree, "add", "-A");
+  git(worktree, "commit", "-q", "-m", "Merge main into plan/demo");
+  const made = git(worktree, "rev-parse", "HEAD");
+  assert.deepEqual(git(worktree, "rev-parse", `${made}^@`).split("\n"), [planTip, baseOid]);
+  const committing = recordOf(shipDir);
+  committing.attempts[0].phase = "committing";
+  fs.writeFileSync(path.join(shipDir, "resolve", "1", "record.json"), JSON.stringify(committing, null, 2));
+  const committed = ship("resolve-commit", plan, ["--spec", "02-b"], env);
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.deepEqual(committed.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"]);
+  assert.equal(recordOf(shipDir).attempts.length, 1, "the rerun took another attempt");
+  assert.equal(recordOf(shipDir).attempts[0].mergeOid, made, "the rerun did not take HEAD as the merge");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), made, "the rerun committed a second time");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

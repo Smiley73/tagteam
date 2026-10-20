@@ -32,18 +32,52 @@ export const RECORD = "record.json";
 // remerge view writes abbreviated commits and subjects — so a diff whose removed
 // and added lines are the same once the labels are dropped is no change at all.
 // A resolution is a change: it removes marker lines and adds none back.
-const MARKER = /^(<{7}|>{7}|\|{7})(?: .*)?$/;
-const unlabelled = (line) => line.replace(MARKER, "$1");
+//
+// A marker is `conflict-marker-size` characters long: seven unless the path's
+// `.gitattributes` says otherwise, and exactly that many, since a run of another
+// length is not a marker git wrote for that file. A file with CRLF line endings
+// gets its markers with a CR on the end as well.
+export const MARKER_SIZE = 7;
+const markerLine = (size) => new RegExp(`^(<{${size}}|>{${size}}|\\|{${size}})(?: .*)?\\r?$`);
+const openingMarker = (size) => new RegExp(`^<{${size}}(?: .*)?\\r?$`);
+
+/** The marker size `git check-attr conflict-marker-size` reports, or git's own default. */
+export function markerSize(value) {
+  const size = Number(value);
+  return Number.isInteger(size) && size > 0 ? size : MARKER_SIZE;
+}
+
+/**
+ * Every path's marker size, from the output of
+ * `git check-attr -z conflict-marker-size -- <paths>`: path, attribute and value
+ * in turn, each ended by a NUL.
+ */
+export function markerSizes(output) {
+  const fields = String(output ?? "").split("\0");
+  const sizes = new Map();
+  for (let index = 0; index + 2 < fields.length; index += 3) sizes.set(fields[index], markerSize(fields[index + 2]));
+  return sizes;
+}
+
+/** Whether a file's text carries a conflict marker git would write at `size`. */
+export function hasMarkers(text, size = MARKER_SIZE) {
+  const opening = openingMarker(markerSize(size));
+  return String(text ?? "").split("\n").some((line) => opening.test(line));
+}
 
 /**
  * Whether one file's remerge diff changes anything beyond conflict markers'
- * labels. The `+++` and `---` headers are headers, matched before the content
- * test.
+ * labels, with the file's marker `size`. The `+++` and `---` headers are
+ * headers, matched before the content test. A binary file's diff has no lines
+ * to compare — git says only that the two differ — and that is a change.
  */
-export function changesBeyondMarkers(diff) {
+export function changesBeyondMarkers(diff, size = MARKER_SIZE) {
+  const marker = markerLine(markerSize(size));
+  const unlabelled = (line) => line.replace(marker, "$1");
   const removed = [];
   const added = [];
   for (const line of String(diff ?? "").split("\n")) {
+    if (line.startsWith("Binary files ")) return true;
     if (line.startsWith("+++ ") || line.startsWith("--- ")) continue;
     if (line.startsWith("-")) removed.push(unlabelled(line.slice(1)));
     else if (line.startsWith("+")) added.push(unlabelled(line.slice(1)));
@@ -53,19 +87,29 @@ export function changesBeyondMarkers(diff) {
 
 /**
  * What the resolution view says about an attempt, from its per-file remerge
- * diffs: `{ path, diff }` each. A file whose diff changes only marker labels is
- * not in the view. `empty` is a view with nothing in it at all — a stop, never a
- * pass. `uncovered` is every path the resolver was handed as conflicted and that
- * is not in the view: not resolved, which fails the attempt. Only the handed
- * paths are checked, never the dry run's — a path the version step settled is
- * not the resolver's.
+ * diffs: `{ path, diff, size }` each, `size` the file's marker size. A file
+ * whose diff changes only marker labels is not in the view. `empty` is a view
+ * with nothing in it at all — a stop, never a pass. Only the handed paths are
+ * checked, never the dry run's — a path the version step settled is not the
+ * resolver's.
+ *
+ * `marked` is the handed paths git wrote conflict markers into, every one of
+ * them unless said otherwise. A marked path that is not in the view was
+ * committed with its markers: `uncovered`, not resolved, which fails the
+ * attempt. A handed path git wrote no markers into — a binary file changed on
+ * both sides, or a file one side deleted — has no unresolved form to look for:
+ * git left one side's version in the tree, and committing that is a resolution
+ * that keeps that side. It is `kept`, and not in the view, because it does
+ * nothing git's own merge would not have done.
  */
-export function judgeView({ handed, files }) {
-  const shown = new Set(files.filter((file) => changesBeyondMarkers(file.diff)).map((file) => file.path));
+export function judgeView({ handed, marked = handed, files }) {
+  const shown = new Set(files.filter((file) => changesBeyondMarkers(file.diff, file.size)).map((file) => file.path));
+  const unshown = handed.filter((file) => !shown.has(file));
   return {
     empty: shown.size === 0,
     shown: [...shown],
-    uncovered: handed.filter((file) => !shown.has(file))
+    uncovered: unshown.filter((file) => marked.includes(file)),
+    kept: unshown.filter((file) => !marked.includes(file))
   };
 }
 

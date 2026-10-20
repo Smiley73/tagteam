@@ -391,6 +391,7 @@ git -C "$R" merge-tree --write-tree <planTip> <baseOid>     # read-only dry run:
 git -C "$W" checkout --detach <planTip>                       # each attempt starts again from the plan tip
 git -C "$W" merge --no-ff --no-commit <baseOid>               # the merge the resolver finishes; never committed by it
 git -C "$W" diff --name-only --diff-filter=U -z               # read-only: what still conflicts after the version step
+git -C "$W" check-attr -z conflict-marker-size -- <paths>     # read-only: how long the conflict markers in those paths are
 git -C "$W" rev-parse --verify --quiet MERGE_HEAD             # read-only: whether a merge is in progress
 git -C "$W" merge --abort                                     # only a merge this round started, before a stop or a retry
 git -C "$W" rev-parse HEAD                                    # read-only: the merge commit the commit chain just made

@@ -45,7 +45,7 @@ import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mj
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_REDESIGN, ROUND_REPORT, writeRoundFile } from "./lib/round-store.mjs";
 import {
-  RECORD, RESOLVE_DIR, judgeView, listResolveRounds, parentsProblem, resolveBrief, versionStep
+  RECORD, RESOLVE_DIR, hasMarkers, judgeView, listResolveRounds, markerSizes, parentsProblem, resolveBrief, versionStep
 } from "./lib/resolve.mjs";
 import { recordedIn } from "./record-round-report.mjs";
 import { readSpecs } from "./specs.mjs";
@@ -1377,6 +1377,15 @@ async function takeAttempt(ctx, record, say = []) {
     throw new Stop(`the version step left nothing conflicted in the merge of ${record.base} into ${record.branch}, and what `
       + "happens then is not decided yet; nothing was committed or pushed");
   }
+  // Which of them git wrote markers into, read off the worktree as the merge left
+  // it: only those have an unresolved form for coverage to find. A binary file or
+  // a file one side deleted is left as one side's version, with no markers.
+  const sizes = markerSizesOf(ctx, attempt.conflicts);
+  attempt.marked = attempt.conflicts.filter((file) => {
+    let text = "";
+    try { text = fs.readFileSync(path.join(ctx.worktree, file), "utf8"); } catch {}
+    return hasMarkers(text, sizes.get(file));
+  });
   fs.rmSync(resolverReportPath(ctx, record.n), { force: true });
   const job = resolveJobs(ctx).jobs.resolve;
   const dispatch = resolverDispatch(ctx, record, attempt, job, record.attempts.at(-2) ?? null);
@@ -1406,9 +1415,17 @@ function failAttempt(ctx, record, attempt, carry, line, say) {
 // names: a conflicted lock file is not reviewed, and is still resolved or not.
 function remergeFiles(ctx, oid) {
   const names = git(ctx.worktree, ["show", "--remerge-diff", "--format=", "--no-ext-diff", "--name-only", "-z", oid]).stdout.split("\0").filter(Boolean);
+  const sizes = markerSizesOf(ctx, names);
   return names.map((file) => ({
-    path: file, diff: git(ctx.worktree, ["show", "--remerge-diff", "--format=", "--no-ext-diff", oid, "--", file]).stdout
+    path: file, size: sizes.get(file),
+    diff: git(ctx.worktree, ["show", "--remerge-diff", "--format=", "--no-ext-diff", oid, "--", file]).stdout
   }));
+}
+
+// Each path's conflict-marker size as the worktree's attributes set it.
+function markerSizesOf(ctx, paths) {
+  if (paths.length === 0) return new Map();
+  return markerSizes(git(ctx.worktree, ["check-attr", "-z", "conflict-marker-size", "--", ...paths]).stdout);
 }
 
 // The panel on an attempt: the configured default lenses, calibrated the way a
@@ -2908,15 +2925,24 @@ async function resolveCommit(options) {
       writeRoundFile(path.join(dir, ROUND_REPORT), `${JSON.stringify({ kind: "fix", status: report?.status ?? "invalid", report }, null, 2)}\n`);
       fs.rmSync(scratch, { force: true });
     }
-    const view = judgeView({ handed: attempt.conflicts, files: remergeFiles(ctx, attempt.mergeOid) });
+    const view = judgeView({ handed: attempt.conflicts, marked: attempt.marked, files: remergeFiles(ctx, attempt.mergeOid) });
     if (view.empty) {
+      const why = view.uncovered.length > 0
+        ? "which is what committing the conflicted files with their markers still in them looks like"
+        : `because git wrote no markers into ${view.kept.join(", ")} — a binary file, or a file one side deleted — and the `
+          + "merge commit keeps the version git's own merge left in the tree, so there is nothing for the reviewers to read "
+          + "and whether that is the resolution is a person's call";
       return emit(stopRound(ctx, record, "empty", `Resolve attempt ${attempt.k}: the resolution view of ${attempt.mergeOid.slice(0, 12)} `
-        + "is empty — the merge commit does nothing git's own merge would not have done, which is what committing the "
-        + "conflicted files with their markers still in them looks like. An empty view is never a pass.", say));
+        + `is empty — the merge commit does nothing git's own merge would not have done, ${why}. An empty view is never a pass.`, say));
     }
     if (view.uncovered.length > 0) {
       return emit(await failAttempt(ctx, record, attempt, { kind: "uncovered", paths: view.uncovered },
         `${view.uncovered.join(", ")} ${view.uncovered.length > 1 ? "are" : "is"} not in the resolution view, so ${view.uncovered.length > 1 ? "they were" : "it was"} not resolved`, say));
+    }
+    if (view.kept.length > 0) {
+      say.push(`${view.kept.join(", ")} conflicted without markers — a binary file, or a file one side deleted — and the merge `
+        + `commit keeps the version git's own merge left in the tree, so ${view.kept.length > 1 ? "they are" : "it is"} not in `
+        + "the resolution view the panel reads.");
     }
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
