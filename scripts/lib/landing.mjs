@@ -331,10 +331,14 @@ export function dryRunMerge(repo, ours, theirs) {
  * `candidate.json`, so passing the new base or the throwaway commit there would
  * make `validateCandidateSnapshot` refuse. Handing it the round's snapshot is
  * also what makes the same `when` matchers select the same commands.
+ *
+ * A plan's landing passes `select: "all"`, as its whole-plan check selects, and
+ * `branch: null`: the worktree is detached at the plan's tip, and goes back
+ * there, detached, with what the verify commands wrote discarded.
  */
 export function checkLanding({
   repo, worktree, branch, config, configPath,
-  baseOid, newBaseOid, candidateOid, candidatePath, landingDir
+  baseOid, newBaseOid, candidateOid, candidatePath, landingDir, select = null
 }) {
   const exclusions = pathExclusions(config?.reviewExclude);
   const base = { reviewedBaseOid: baseOid, baseOid: newBaseOid, candidateOid };
@@ -370,6 +374,7 @@ export function checkLanding({
     const result = spawnSync(process.execPath, [
       path.join(SCRIPTS, "verify-run.mjs"),
       "--worktree", worktree, "--config", configPath, "--candidate", candidatePath,
+      ...(select ? ["--select", select] : []),
       "--base", baseOid, "--candidate-oid", candidateOid,
       "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
     ], { encoding: "utf8", shell: false, maxBuffer: 64 * 1024 * 1024 });
@@ -392,9 +397,10 @@ export function checkLanding({
   try {
     // With a discard: the verify commands just ran here, and what they wrote is
     // the check's own leftovers rather than anyone's work.
-    restoreWorktree(worktree, branch, { discard: true });
+    if (branch) restoreWorktree(worktree, branch, { discard: true });
+    else git(worktree, ["switch", "--discard-changes", "--detach", candidateOid]);
   } catch (error) {
-    if (failure) failure.message += ` — and the worktree could not be put back on ${branch}: ${error.message}`;
+    if (failure) failure.message += ` — and the worktree could not be put back on ${branch ?? candidateOid.slice(0, 12)}: ${error.message}`;
     else failure = error;
   }
   if (failure) throw failure;
@@ -416,6 +422,10 @@ export function checkLanding({
  * Both are awaited: the check fetches the primary checkout under that checkout's
  * mutex, and a mutex cannot be taken without waiting. A callback that returns a
  * plain value is awaited just the same.
+ *
+ * A merge that returns `{stop}` was refused for a reason no retry answers — a
+ * plan's version lines that are no longer one increase over the base — and ends
+ * the loop there, with nothing merged.
  */
 export async function mergeWithLanding({ check, merge, attempts = LANDING_ATTEMPTS }) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -423,6 +433,7 @@ export async function mergeWithLanding({ check, merge, attempts = LANDING_ATTEMP
     if (checked?.stop) return { ...checked, attempt };
     const result = await merge(attempt);
     if (result?.merged) return { merged: result.merged, attempt };
+    if (result?.stop) return { ...result, attempt };
   }
   return {
     stop: `the base kept moving: ${attempts} landing checks in a row were overtaken by another push before the `

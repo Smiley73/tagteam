@@ -392,6 +392,11 @@ gate that fired. A refused merge — a
 protection rule, a failing check, a change that no longer lands as what was
 reviewed — is a stop: say what it said.
 
+It does not reach the plan's own pull request. On a plan branch the plan lands on
+the base through one pull request at the end, and `autoMerge` and a `ready`
+verdict have nothing to do with it: the person's **Merge**, answered in *Landing
+the plan* below, is the only authority for that merge, every time.
+
 A base branch that moved is not one of those refusals. `finish` checks the
 reviewed change against the base as it now stands and merges the reviewed commit
 when the check passes, and its `say` then carries one line about it: relay it —
@@ -499,7 +504,7 @@ what verify found, and at what model and effort the reviewer runs.
 
 `plan-collect` ends in one of three ways, and `next` already says which:
 
-- **Clean** — `say` says so, and `next` is `end`.
+- **Clean** — `say` says so, and `next` is `plan-land`: see *Landing the plan*.
 - **A real problem** — a failed verify command, or something blocking or
   major — is fixed as one more small pull request into the plan's branch, a
   *fix unit*, and `next` is `begin` for it. A fix unit ships exactly like a
@@ -521,6 +526,109 @@ that result again; run on a tip whose reviewer is still out, it sends nothing ne
 and works as *When a ship restarts while agents are out* says, its answers being
 `plan-check` with `--run-gone` or `--run-live` instead of `begin`.
 
+## Landing the plan
+
+Once the whole-plan check is clean for the plan branch's tip, `next` is
+
+```bash
+node "$P/scripts/ship.mjs" plan-land --plan "$D"
+```
+
+It opens the plan's own pull request, from the plan's branch into the base the
+train recorded, waits for its checks, checks it against the base as it now
+stands, and asks the person what to do. Run it as printed whenever `next` names
+it; `/tagteam:ship` on a plan whose specs have all merged comes back here too.
+
+**The body first.** The first time, before anything is opened, it returns `body`
+with the path to write and what the plan carries. Write that file yourself, in
+the same shape as a spec's — *The pull request body* above — but for the plan as
+a whole: what is different for the person using the software once the whole plan
+is in. `body.plan` is the plan's deliverables; read it for the summary. Under
+`## Risk` carry over what each spec's own body disclosed — `body.lands` names
+each one's `pr-body.md` — above all a finding a person accepted open, or one
+disclosed when a fix budget ran out; and say each budget in `body.spent` that ran
+out, with the setting a person would raise. `## Risk` says "nothing known" when
+there is nothing. Then run `next`. A `--title "<title>"` of your own is taken the
+same way as for `publish`; without one, the plan document's heading is used.
+
+**What it does on the way**, each step said in `say` — relay it plainly:
+
+- The pull request's checks are waited for as a spec's are. Checks that never
+  ran are said to have not run, and never count as passed — and are waited for
+  again on every later run, since they may have started since. A check that failed
+  is fixed the way the whole-plan check fixes what it finds: `next` is `begin`
+  for one more fix unit.
+- The landing check runs the plan's tip against the base as it is now: does it
+  still merge cleanly, is it still the change that was reviewed, and does every
+  verify command pass on the result. A conflict goes to a resolve round, exactly
+  as before a spec, except that it is opened to land the plan: its steps are
+  `resolve-commit` and `resolve-collect` with no `--spec`, and when it passes
+  `next` is `plan-land` again. A round still out when the ship restarts is
+  picked up by `plan-land` as `begin` picks up its own, and its restart answers
+  are `plan-land` with `--run-gone` or `--run-live`. A result that is not a conflict has nothing to
+  resolve: the driver merges the base into the plan's branch and pushes that
+  merge commit onto this plan's branch itself, and `next` is the whole-plan
+  check of that new tip. No resolver is sent for it.
+- Whenever the plan's branch moves — a fix, a merge of the base, anything the
+  ship puts there — every result is about the commit before it, and the step
+  starts again from the whole-plan check. A run where nothing moved reuses what
+  it already found and runs no verify command twice.
+
+The ship pushing its own merge commit onto the plan's branch is a new kind of
+push, and the session's permission checks may refuse it. If one is refused, say
+so, and say what was refused; do not try another way to make the push.
+
+**The question.** When the step gets there it returns `ask`: what lands — the
+specs and fixes by name and pull request, from the records — and every result
+named with the commit it is about: the whole-plan check, the pull request's
+checks, the landing check against the base, and the version lines it compared,
+with both values. Say all of it in the person's terms: what lands, what was
+checked against which commit, and what each answer does. Then ask, with exactly
+the answers it offers — `answers` carries each command:
+
+- **Merge** — run `plan-land` again with `--approve <their email>`:
+
+  ```bash
+  node "$P/scripts/ship.mjs" plan-land --plan "$D" --approve <their email>
+  ```
+
+  It merges the plan's pull request with one merge commit at exactly the commit
+  that was checked, after checking the base once more, and then deletes the
+  plan's branch. Offered only when every result is for that commit and none
+  fails, and when each configured version line is exactly one increase over the
+  base's current value — whatever `autoMerge` says. When it is not offered, say
+  why, from what `ask` says; never offer an approval in its place. A Merge given
+  anyway records nothing, and says so: **no approval clears a blocker**.
+- **Leave open** — run `end`. The pull request stays open, and `/tagteam:ship`
+  on the plan again brings back the same question.
+- **Stop** — run `plan-land` with `--stop`, then `end`:
+
+  ```bash
+  node "$P/scripts/ship.mjs" plan-land --plan "$D" --stop
+  ```
+
+  The same as leaving it open, recorded as stopped by the person, so the status
+  says so.
+
+If the person is not there to answer, the run ends with the pull request open:
+the step has already sent a notification, and `/tagteam:ship` on the plan again
+asks the same question.
+
+A Merge that cannot go through — the base moved again and the re-check did not
+pass, or the version lines no longer hold against the base as it now is — merges
+nothing, withdraws the Merge, and `next` is `plan-land`: run it, and ask the
+question it returns. A plan pull request someone merged by hand on GitHub is
+recorded as merged — `say` says whether what merged was the commit that was
+checked — its branch is deleted, and the train ends.
+
+**Two plans landing at once.** Re-reading the base, the version lines and the
+merge itself happen under one lock, so a second plan confirmed moments after the
+first sees the first one landed and does not merge on the same version number.
+That lock is this checkout's: two people confirming two plans on different
+machines within seconds can still land the same number. The guard there is the
+repository's own rule that a branch be up to date before it merges — a setting
+the person changes on GitHub, never something this ship changes.
+
 ## Stopping between specs
 
 Stop between specs when your context is getting tight. Say which specs merged,
@@ -539,7 +647,10 @@ worktree that will not come out is holding something, and `end` says so). Any
 other plan being shipped from this checkout is untouched — its lock is its own.
 When a later run of this plan took the lock over, `end` releases nothing and says
 so, and the worktree stays where it is, because that run is working in it.
-Summarise: what merged, what waits, what stopped and why.
+Summarise: what merged, what waits, what stopped and why. On a plan branch, say
+where the plan's own pull request is — `say` and `planLanding` give its number
+and whether it is open, stopped by the person or merged — and, while it is not
+merged, that nothing of the plan has reached the base.
 
 ## When Codex could not say how it ran
 
@@ -572,7 +683,8 @@ reported the way any failed Codex call is.
 ## Discipline
 
 Never read a diff, a findings file or a spec. Never run git or `gh` by hand
-inside a train; the driver runs them. Never merge without `finish`. Never put a
+inside a train; the driver runs them. Never merge without `finish` — and the
+plan's own pull request never without the person's Merge, through `plan-land`. Never put a
 finding id, a commit oid, a gate name or a file-and-line coordinate into a
 question or the text around one. Never run a command to pass the time, and never
 sleep, poll, watch or schedule a wake-up for an agent: its own finished notice is

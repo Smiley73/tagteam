@@ -57,6 +57,15 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   whole-plan/units/plan-fix-<k>/  one fix a whole-plan check needed, shipped as
                    one more pull request into the plan branch: spec.md (its
                    generated document) and everything a <spec-id>/ holds     ignored
+  plan-landing/    on a plan branch, the plan's own pull request into the base:
+                   record.json (the pull request and the head it was seen at,
+                   its checks, the landing check, the version lines and the
+                   merge of the base the ship made — each for the one tip it is
+                   about — the person's Merge for a tip, a Stop, and the merge),
+                   pr-body.md (the body the orchestrator writes for the plan as
+                   a whole), ci-<tip>.json, checks/<tip>/ (the landing check's
+                   evidence, one directory per base) and snapshots/. Never a
+                   state.json: it is not a spec                              ignored
   <spec-id>/
     state.json     the state machine, the reviewed commit, the gates, and the
                    landing check bound to the current candidate             ignored
@@ -358,6 +367,7 @@ git -C "$W" switch -c "<branchPrefix><slug>/<spec-id>"
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" commit -m "<message>"
 git -C "$W" diff --name-only -z <commit> <commit>  # read-only: which requested files a redesign commit changed
 git -C "$W" push -u origin "<branch>"
+git -C "$R" push origin --delete "<branch>"          # a merged spec's branch, after its merge
 git -C "$R" worktree remove "$R/.tagteam/worktrees/<slug>"
 ```
 
@@ -447,6 +457,43 @@ git -C "$W" diff --no-ext-diff <mergeBase>..<planTip>         # read-only: the c
 A fix the check needs is a pull request like any spec's, through the forms
 above; the check itself commits and pushes nothing.
 
+Once the check is clean for the tip, the plan lands through one pull request of
+its own, `plan/<slug>` into the base the train recorded. Beside the hand-push
+check, the landing check's four and the whole-plan check's snapshot, these are
+its forms:
+
+```bash
+gh pr create --base <base> --head plan/<slug> --title "<title>" --body-file <file>   # the plan's own pull request
+gh pr edit <number> --title "<title>" --body-file <file>                            # its body, when the orchestrator rewrote it
+gh pr view plan/<slug> --json number,url,state,headRefOid,baseRefName,mergeCommit    # read-only: open, merged, and where it heads
+gh pr checks <number> --json name,state,bucket,link,completedAt                      # read-only, through ci-wait.mjs
+git -C "$R" merge-base <planTip> <baseOid>                    # read-only: the reviewed base, worked out for this tip
+git -C "$R" cat-file blob <commit>:<file>                     # read-only: a version line at the tip and on the base
+git -C "$W" checkout --detach <planTip>                       # the tip the landing check and the merge of the base start from
+git -C "$W" merge --no-ff --no-commit <baseOid>               # the merge of the base after a failed or differing landing
+git -C "$W" diff --name-only --diff-filter=U -z               # read-only: it is clean, as the landing check found
+git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
+git -C "$W" commit-tree <tree> -p <planTip> -p <baseOid> -m "<message>"   # that merge, the plan tip first
+git -C "$W" merge --quit                                      # the merge is committed; nothing is left in progress
+git -C "$W" switch --discard-changes --detach <mergeCommit>   # the worktree on it, as it is
+git -C "$R" push origin <mergeCommit>:refs/heads/plan/<slug>  # the push above: recorded before, confirmed after
+gh pr merge <number> --merge --match-head-commit <planTip> --delete-branch=false   # merge.mjs, on a person's Merge only
+git -C "$R" push origin --delete plan/<slug>                  # once the plan's pull request has merged
+```
+
+The merge of the base adds no code: the landing check found the merged tree
+clean, so there is nothing to resolve, and what still has to be read — does the
+plan hold on that base — is the whole-plan check's, which then runs on the new
+tip. It is pushed directly, never through a pull request, for the reason a
+resolve round's merge is: the commit that lands on the plan branch is the
+two-parent commit itself. It runs the version step at the same point a resolve
+attempt does. A conflict at the landing is a resolve round, through the forms
+above.
+
+The plan's pull request merges with a merge commit, never a squash, pinned to
+the tip that was checked, and the plan branch is deleted afterwards rather than
+inside the merge command.
+
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —
 the reason a `.env.test` copied into a worktree does not end up in history.
@@ -469,12 +516,19 @@ merge without `--match-head-commit`, delete a branch inside a merge command,
 `node $P/scripts/gates.mjs evaluate <state.json> <config.json>` decides whether a
 pull request merges unattended. It is code because it is silent when it is wrong.
 
-**A `ready` verdict is the owner's authorization to merge, and `ship.mjs finish`
-acts on it without asking.** Merging is outward-facing and hard to reverse, so
-the instinct to confirm is right in general and wrong here: the owner already
-confirmed, by setting `autoMerge` and running the command, and `ready` is the
-condition they attached. When a person really should decide, `evaluate` returns
-`needsHuman` and names why.
+**A `ready` verdict is the owner's authorization to merge a spec of this plan,
+and `ship.mjs finish` acts on it without asking.** Merging is outward-facing and
+hard to reverse, so the instinct to confirm is right in general and wrong here:
+the owner already confirmed, by setting `autoMerge` and running the command, and
+`ready` is the condition they attached. When a person really should decide,
+`evaluate` returns `needsHuman` and names why.
+
+That is a spec's merge, and a whole-plan fix's, and nothing more. On a plan
+branch the plan's own pull request into the base is never merged on a verdict:
+`evaluate` is not asked about it and `autoMerge` does not reach it. The one
+authority for that merge is the person's Merge, given in the ship session for
+the exact tip they were shown, and `merge.mjs` re-reads it — with every result
+the person was shown — before it merges anything.
 
 **It authorizes `merge.mjs`, and nothing else.** `merge.mjs` re-fetches,
 compares `origin/<base>` against the base the review was bound to, and re-reads
@@ -539,7 +593,7 @@ a new commit appears — and every fix round makes one.
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
-| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit |
+| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |

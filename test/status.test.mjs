@@ -379,3 +379,64 @@ test("a whole-plan fix unit and the check that made it are not counted as specs"
   assert.deepEqual([shipped.started, shipped.merged, shipped.status], [2, 2, "complete"]);
   assert.equal(budgetFor(inventory(repo), "plan-fix-1"), null, "the fix unit was given a spec's budget line");
 });
+
+// On a plan branch every spec merged is not the plan landed. Its own pull request
+// into the base is what lands it, so a ship whose specs are all in the plan
+// branch is complete only once that pull request has merged — and the records
+// that say so live beside the specs without being counted as one. A result
+// recorded about an earlier tip is not about the tip the train holds now, and is
+// reported as not run, never as passed.
+test("a plan on its own branch is not complete before its pull request merges, and its landing record is not a spec", () => {
+  const repo = repository();
+  const tip = "a".repeat(40);
+  const base = "b".repeat(40);
+  const root = path.join(repo, ".tagteam", "ships", "s");
+  ship(repo, "01-a", { state: "merged" });
+  ship(repo, "02-b", { state: "merged" });
+  write(path.join(root, "train.json"), { slug: "s", route: { kind: "plan", branch: "plan/s", base: "main", tipOid: tip, pendingOid: null } });
+  write(path.join(root, "whole-plan", "1", "record.json"), { n: 1, tip, status: "clean", verify: { tip, status: "passed" }, review: { status: "clean", tip }, units: [] });
+  const landingFile = path.join(root, "plan-landing", "record.json");
+
+  let [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.status, shipped.started, shipped.merged], ["in progress", 2, 2], "every spec merged read as the plan landed");
+  assert.equal(shipped.planLanding.state, "not-opened");
+
+  const open = {
+    pr: { number: 9, url: "https://example.invalid/9", head: tip, base: "main" },
+    ci: { tip, status: "not-run", reason: "no checks were registered" },
+    landing: { tip, baseOid: base, status: "passed" },
+    version: { tip, baseOid: base, holds: true, kind: "patch", lines: [] }
+  };
+  write(landingFile, open);
+  [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.status, shipped.started], ["waiting for you", 2], "the plan's landing directory was read as a spec");
+  assert.deepEqual([shipped.planLanding.state, shipped.planLanding.pr], ["open", 9]);
+  assert.deepEqual(shipped.planLanding.results, { wholePlan: "passed", ci: "not-run", landing: "passed", version: "passed" });
+
+  // The train moved on to a new tip: nothing recorded speaks for it.
+  write(path.join(root, "train.json"), { slug: "s", route: { kind: "plan", branch: "plan/s", base: "main", tipOid: "c".repeat(40), pendingOid: null } });
+  [shipped] = inventory(repo).ships;
+  assert.deepEqual(shipped.planLanding.results, { wholePlan: "not-run", ci: "not-run", landing: "not-run", version: "not-run" });
+
+  write(landingFile, { ...open, stopped: { tip, at: "2026-01-01T00:00:00Z" } });
+  [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.status, shipped.planLanding.state], ["stopped", "stopped"]);
+
+  write(landingFile, { ...open, merged: { by: "ship", pr: 9, head: tip, checkedTip: true } });
+  [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.status, shipped.planLanding.state, shipped.planLanding.mergedBy], ["complete", "merged", "ship"]);
+
+  // A record cut off mid-write is reported as unreadable, and status still runs.
+  fs.writeFileSync(landingFile, "{\"pr\":");
+  [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.status, shipped.planLanding.state], ["in progress", "unreadable"]);
+});
+
+test("a ship on the base has no plan landing, and every spec merged is complete as it always was", () => {
+  const repo = repository();
+  ship(repo, "01-a", { state: "merged" });
+  write(path.join(repo, ".tagteam", "ships", "s", "train.json"), { slug: "s", route: { kind: "base" } });
+  const [shipped] = inventory(repo).ships;
+  assert.equal(shipped.status, "complete");
+  assert.equal(shipped.planLanding, undefined);
+});
