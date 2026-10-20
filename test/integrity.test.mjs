@@ -293,17 +293,21 @@ test("the configure command asks about both of the settings a person can only ge
   for (const job of jobs) assert.ok(effortItem.includes(`\`${job}\``), `configure.md's effort question never names ${job}`);
 });
 
-// The reviewed commit is read out of state.json everywhere except the one place
-// that names a commit just made, before anything is bound to it — which is now a
-// function of the driver rather than a line in a command file.
-test("only the driver's snapshot step reads HEAD, and no command file does", () => {
+// The reviewed commit is read out of state.json everywhere except the places
+// that name a commit just made, before anything is bound to it — which are
+// functions of the driver rather than lines in a command file: a spec's snapshot
+// step, and the resolve round's commit step, which makes the plan route's merge
+// commit and records it before anything reads it.
+test("only the driver's snapshot and resolve-commit steps read HEAD, and no command file does", () => {
   for (const { file, text } of commands) {
     assert.ok(!text.includes("rev-parse HEAD"), `commands/${file} re-derives a commit from HEAD`);
   }
   const uses = [...shipDriver.matchAll(/rev-parse", "HEAD"/g)];
   const snapshot = shipDriver.slice(shipDriver.indexOf("function snapshot("), shipDriver.indexOf("function verify("));
-  assert.equal(uses.length, [...snapshot.matchAll(/rev-parse", "HEAD"/g)].length,
-    "ship.mjs reads HEAD outside its snapshot step");
+  const resolveCommit = shipDriver.slice(shipDriver.indexOf("function resolveCommit("), shipDriver.indexOf("function resolveCollect("));
+  assert.ok(resolveCommit.length > 0, "ship.mjs has no resolveCommit step");
+  assert.equal(uses.length, [...snapshot.matchAll(/rev-parse", "HEAD"/g)].length + [...resolveCommit.matchAll(/rev-parse", "HEAD"/g)].length,
+    "ship.mjs reads HEAD outside its snapshot and resolve-commit steps");
   assert.match(skill, /`git rev-parse HEAD` to learn the reviewed commit/);
 });
 

@@ -46,9 +46,10 @@ Run the command the previous step printed as `next`. It prints one JSON object:
 A non-zero exit is a stop. Say what stderr says, in plain words, and stop —
 except exit 3, which means the configuration is older than this plugin: tell
 them to run `/tagteam:configure` and stop; and exit 5, which is not a stop at
-all: `collect`, `settle` or `snapshot` refused because the set it judges is not
-all in yet — see *Sets*. A spent budget never exits: the driver prints where the
-spec goes instead and says so in `say`.
+all: `collect`, `settle`, `snapshot`, `resolve-commit` or `resolve-collect`
+refused because the set it judges is not all in yet — see *Sets*. A spent
+budget never exits: the driver prints where the spec goes instead and says so
+in `say`.
 
 ## Sets
 
@@ -81,8 +82,9 @@ when that agent finishes.
   was compressed, say — record it anyway. A label that is already in is refused
   by name and changes nothing. A label refused as not in the set was copied
   wrong; the refusal lists the labels still out, so correct it in the same turn.
-- **`collect`, `settle` or `snapshot` exiting 5** says "Not judged yet: still
-  waiting on the security reviewer and Codex", or "still waiting on Fix 01-a".
+- **`collect`, `settle`, `snapshot`, `resolve-commit` or `resolve-collect`
+  exiting 5** says "Not judged yet: still waiting on the security reviewer and
+  Codex", or "still waiting on Fix 01-a".
   It is not a stop and nothing changed — nothing was committed and no fix round
   was lost: tell the person who is still out, end the turn, and keep waiting for
   their notices.
@@ -96,12 +98,13 @@ when that agent finishes.
 `begin` on a spec that was interrupted part-way first looks for a set still
 waiting on agents — a review, or the implementer, fixer, redesign implementer or
 repair whose work `snapshot` would commit — and decides by which Claude Code
-session sent it out:
+session sent it out. A resolve round still open is picked up the same way, at
+the attempt it was on, and no attempt is spent picking it up:
 
 - **From this same session**: its agents may still be working. `begin` prints
   `set` with the labels still out, `howToWait`, and `next` naming `collect`,
-  `settle` or `snapshot`. Dispatch nothing. End your turn and record each
-  finished notice as above.
+  `settle`, `snapshot`, `resolve-commit` or `resolve-collect`. Dispatch nothing.
+  End your turn and record each finished notice as above.
 - **From another session**: that run is gone. `begin` says the set was released
   and resumes as it always has, from what is on disk; relay what `say` says. A
   fixer released this way that left nothing in the worktree is then read as
@@ -171,6 +174,27 @@ and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
 that it says what they ask for; the readers that raised them judge that body at
 the next re-check, before it is published, and `publish` sends it. When nothing
 else is open, no fix round is spent on them.
+
+On a plan branch, `begin` on a spec that has not started first asks whether the
+base still merges cleanly into this plan's branch. When it does, nothing happens
+and the spec starts. When it does not, `begin` opens a **resolve round** instead
+of starting the spec. It dispatches a fixer to resolve exactly the conflicted
+files of that one merge — a set of one, like any other — and `next` names
+`resolve-commit`, which commits the merge, checks it, verifies it and sends the
+panel, then `resolve-collect`, which judges the panel. A failed attempt is thrown
+away and the next one is dispatched from the same steps; each attempt costs one
+of `limits.ciRepairs`. When an attempt passes, the driver pushes the resolve
+round's merge commit onto this plan's branch, and `next` is `begin` for the same
+spec again. That push is the driver's step and nothing wider: you dispatch and
+record exactly as for every other set, and nothing in this file runs git. When a
+round stops — every attempt spent, a resolution that changed nothing, a merge
+commit that is not the one the round makes, a resolver that did not report
+itself finished — it returns `ask`. Say what it says, including which files
+conflicted and where the round's record is, and ask the person. The next spec
+does not start. When the `ask` says attempts are left, `begin` for the same spec
+takes the next one, and only the person's answer runs it; when every attempt is
+spent, `begin` asks the same again until the base moves on.
+
 You do not choose the route; `next` does. Three steps `next` never prints,
 because only a person decides them: `revisit`, which looks at a spec that
 stopped for a person again — see *Looking again* below — and `redesign` and
@@ -182,6 +206,10 @@ at each point:
   starting, which round of how many, and at what model and effort. Say it every
   time, so a round that runs at raised settings looks different on screen from
   one that did not.
+- **After `resolve-commit` and `resolve-collect`**: say what `say` says — which
+  attempt of how many, whether verify passed, what the panel found, and, when the
+  round passed, that the merge is on the plan's branch — then dispatch what they
+  print, or run `next`.
 - **After `revisit`**: say what `say` says — that the same commit is being looked
   at again, that looking spends nothing, and where the pull request as it stands
   was recorded — then run `next`.

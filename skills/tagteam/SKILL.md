@@ -40,6 +40,13 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    Claude Code session the cost report scopes to            ignored
   lock-token       this run's claim on the plan's ship lock, given back by
                    `end`                                                    ignored
+  resolve/<n>/     on a plan branch, one merge of the base into it: record.json
+                   (the base and plan tip it is for, each attempt and how it
+                   ended), brief.md (what its readers are told), fix-report.json
+                   (the resolver's, until it is recorded), sets/, and
+                   attempts/<k>/ laid out as a round — its review diff is the
+                   remerge view, and its candidate.json records what the
+                   attempt resolved. Never a state.json: it is not a spec    ignored
   <spec-id>/
     state.json     the state machine, the reviewed commit, the gates, and the
                    landing check bound to the current candidate             ignored
@@ -374,6 +381,44 @@ ship records putting on the plan branch is its own, whatever kind of commit it
 is; anything else at the tip on origin stops `begin` before it branches and
 `finish` before the landing check. The `gh api` reads run on every `start` of
 such a train; a source that cannot be read is said and not taken as clean.
+
+Before a spec of such a train begins — never on a spec already in flight — the
+base is dry-run against the plan branch, and only a real conflict opens a
+resolve round, which merges the base into the plan branch in the ship's
+worktree. These are its forms, beside the commit chain above:
+
+```bash
+git -C "$R" merge-tree --write-tree <planTip> <baseOid>     # read-only dry run: clean, or which paths conflict
+git -C "$W" checkout --detach <planTip>                       # each attempt starts again from the plan tip
+git -C "$W" merge --no-ff --no-commit <baseOid>               # the merge the resolver finishes; never committed by it
+git -C "$W" diff --name-only --diff-filter=U -z               # read-only: what still conflicts after the version step
+git -C "$W" check-attr -z conflict-marker-size -- <paths>     # read-only: how long the conflict markers in those paths are
+git -C "$W" rev-parse --verify --quiet MERGE_HEAD             # read-only: whether a merge is in progress
+git -C "$W" merge --abort                                     # only a merge this round started, before a stop or a retry
+git -C "$W" rev-parse HEAD                                    # read-only: the merge commit the commit chain just made
+git -C "$W" rev-parse <mergeCommit>^@                         # read-only: its parents, the plan tip then the base
+git -C "$W" rev-parse <mergeCommit>^{tree} <planTip>^{tree}   # read-only: whether the merge brings anything of the base in
+git -C "$W" show --remerge-diff --format= <mergeCommit>       # read-only: the resolution, which is what the panel reads
+git -C "$W" cat-file blob <commit>:<path>                     # read-only: a conflicted file as the merge and each parent hold it
+git -C "$W" switch --discard-changes --detach <mergeCommit>   # what the verify commands wrote on the merge commit
+git -C "$R" push origin <mergeCommit>:refs/heads/plan/<slug>  # the push above: recorded before, confirmed after
+```
+
+A merge commit's first parent is the plan tip and its second the base commit
+the dry run saw; anything else is a stop. The snapshot of the attempt is the one
+reader of its resolution view, and records in the round what the attempt
+resolved: a conflicted file still carrying a conflict marker neither parent had
+is unresolved, however much else in it changed. The driver pushes the resolve round's
+merge commit onto this plan's branch itself, as a plain fast-forward from the
+recorded tip and never through a pull request, because what the verify commands
+and the panel judged is that one two-parent commit: a pull request would land a
+squash of it, which is a different commit nobody reviewed, and would lose the
+second parent that keeps the base's history in the plan branch's. The merge in
+the worktree is local and is not a pull request merge, so `--match-head-commit`
+does not apply to it. The plan branch is checked against the record immediately
+before the push, so a branch someone moved, rewound or deleted is the stop above
+rather than something a fast-forward goes over; a push refused all the same is
+that stop too, never retried and never forced.
 
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —

@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { normalizeRepoPath, pathExclusions } from "./lib/matcher.mjs";
 import { enterRound, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { judgeView, markerSizes, markersLeft } from "./lib/resolve.mjs";
 
 function git(cwd, args, { allowFailure = false, encoding = "utf8" } = {}) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding, shell: false, maxBuffer: 128 * 1024 * 1024 });
@@ -112,7 +113,7 @@ export function primaryStatus(output) {
 export const perFileDiffName = (index, file) =>
   `${String(index + 1).padStart(2, "0")}-${normalizeRepoPath(file).replace(/\//g, "__").replace(/[^A-Za-z0-9._-]/g, "-")}.diff`;
 
-function writePerFileDiffs(worktree, dir, baseOid, candidateOid, entries, isExcluded) {
+function writePerFileDiffs(dir, entries, isExcluded, diffOf) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const index = [];
   let position = 0;
@@ -121,7 +122,7 @@ function writePerFileDiffs(worktree, dir, baseOid, candidateOid, entries, isExcl
     if (isExcluded(destination)) continue;
     const name = perFileDiffName(position, destination);
     position += 1;
-    const text = git(worktree, ["diff", "--no-ext-diff", "-M", `${baseOid}..${candidateOid}`, "--", ...entry.paths]).stdout;
+    const text = diffOf(entry);
     writeRoundFile(path.join(dir, name), text);
     index.push(`${name}\t${destination}`);
   }
@@ -131,6 +132,39 @@ function writePerFileDiffs(worktree, dir, baseOid, candidateOid, entries, isExcl
 function blobAt(cwd, oid, file) {
   const result = git(cwd, ["rev-parse", `${oid}:${file}`], { allowFailure: true });
   return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function blobText(cwd, oid, file) {
+  const result = git(cwd, ["cat-file", "blob", `${oid}:${file}`], { allowFailure: true });
+  return result.status === 0 ? result.stdout : null;
+}
+
+function parseConflicts(value) {
+  let parsed;
+  try { parsed = JSON.parse(value); } catch { parsed = null; }
+  const paths = (list) => Array.isArray(list) && list.every((file) => typeof file === "string" && file !== "");
+  if (!parsed || !paths(parsed.handed) || !paths(parsed.marked)) {
+    throw new Error(`--conflicts is {"handed": [paths], "marked": [paths]}, not ${value}`);
+  }
+  return { handed: parsed.handed.map(normalizeRepoPath), marked: parsed.marked.map(normalizeRepoPath) };
+}
+
+// The verdict `judgeView` gives a merge commit, from this snapshot's own reading
+// of its view — every entry, `reviewExclude` or not, since a conflicted lock file
+// is still resolved or not — and from what the commit holds at each marked path
+// against what its two parents hold there.
+function judgeResolution(worktree, candidateOid, { handed, marked }, entries) {
+  const listed = entries.flatMap((entry) => entry.paths.map((file) => ({ path: normalizeRepoPath(file), diff: entry.text })));
+  const asked = [...new Set([...listed.map((file) => file.path), ...handed])];
+  const sizes = asked.length > 0
+    ? markerSizes(git(worktree, ["check-attr", "-z", "conflict-marker-size", "--", ...asked]).stdout)
+    : new Map();
+  const markered = marked.filter((file) => markersLeft(
+    blobText(worktree, candidateOid, file),
+    [blobText(worktree, `${candidateOid}^1`, file), blobText(worktree, `${candidateOid}^2`, file)],
+    sizes.get(file)
+  ));
+  return judgeView({ handed, marked, markered, files: listed.map((file) => ({ ...file, size: sizes.get(file.path) })) });
 }
 
 function sha256File(file) {
@@ -199,18 +233,73 @@ export function snapshotCandidate(options) {
   // Both listings ask for rename detection explicitly rather than inheriting
   // whatever `diff.renames` the repository happens to set, so the two agree on
   // what counts as one entry no matter whose checkout this runs in.
-  const nameStatusBuffer = git(worktree, ["diff", "--no-ext-diff", "--name-status", "-M", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
+  // What the reviewers read. The two-dot change from the base, ordinarily. For a
+  // merge commit the ship made itself — `--view remerge` — it is what the merge
+  // commit does differently from the merge git would have made on its own: the
+  // resolution, and nothing the merged side brought in cleanly. Handed the
+  // two-dot change of a merge, a reader would be reviewing the whole of the
+  // other branch. Everything else in this snapshot — the changed paths, the
+  // added lines `when` selects verify commands on, the size and the hash — is
+  // still the first-parent change, because that is what has to work.
+  const remerge = options.view === "remerge";
+  if (options.view !== undefined && !remerge) throw new Error(`--view is "remerge" or absent, not ${JSON.stringify(options.view)}`);
+  // The first-parent change is only the merge's own when the base it is taken
+  // from is the merge's first parent.
+  if (remerge && git(worktree, ["rev-parse", "--verify", "--quiet", `${candidateOid}^1`], { allowFailure: true }).stdout.trim() !== baseOid) {
+    throw new Error(`--view remerge needs a merge commit whose first parent is the base ${baseOid}; ${candidateOid} is not one`);
+  }
+  const reviewedRange = remerge ? ["show", "--remerge-diff", "--format=", candidateOid] : ["diff", `${baseOid}..${candidateOid}`];
+  const nameStatusBuffer = remerge
+    ? git(worktree, ["show", "--remerge-diff", "--format=", "--no-ext-diff", "--name-status", "-M", "-z", candidateOid], { encoding: "buffer" }).stdout
+    : git(worktree, ["diff", "--no-ext-diff", "--name-status", "-M", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
+  const reviewedOf = (paths) => git(worktree, [...reviewedRange.slice(0, 1), "--no-ext-diff", "-M", ...reviewedRange.slice(1), "--", ...paths]).stdout;
+  // Each entry's diff, read at most once, when first asked for, and used for
+  // everything below: the review diff, the per-file pieces and, for a merge,
+  // the judgement of what it resolved. Every `--remerge-diff` read re-runs git's
+  // whole automatic merge; an excluded file's diff is read only for that
+  // judgement.
+  //
+  // A rename is diffed against *both* of its paths. Restricted to the
+  // destination alone, git cannot see the source's deletion to pair it with, so
+  // it renders a renamed-and-edited file as a brand-new addition and the content
+  // removed from the old path never reaches the reviewers or Codex.
+  const reviewedEntries = parseNameStatus(nameStatusBuffer.toString("utf8")).map((entry) => {
+    let text = null;
+    return { ...entry, get text() { return (text ??= reviewedOf(entry.paths)); } };
+  });
   let reviewDiff = "";
-  for (const entry of parseNameStatus(nameStatusBuffer.toString("utf8"))) {
+  for (const entry of reviewedEntries) {
     // The last path is the destination, which is the one `--name-only` reports
     // and the one `reviewExclude` is written against; for anything but a rename
     // it is the only path there is.
     if (excludesEntry(entry.paths)) continue;
-    // A rename is diffed against *both* of its paths. Restricted to the
-    // destination alone, git cannot see the source's deletion to pair it with,
-    // so it renders a renamed-and-edited file as a brand-new addition and the
-    // content removed from the old path never reaches the reviewers or Codex.
-    reviewDiff += git(worktree, ["diff", "--no-ext-diff", "-M", `${baseOid}..${candidateOid}`, "--", ...entry.paths]).stdout;
+    reviewDiff += entry.text;
+  }
+  // What a merge resolved, judged here, by the one reader of its view, and
+  // recorded in candidate.json for the ship to act on — never read a second
+  // time somewhere else, where a different listing could judge a different set
+  // of files from the one the panel reads. `--conflicts` is what the attempt
+  // handed its resolver: `{"handed": [...], "marked": [...]}`.
+  if (options.conflicts !== undefined && !remerge) throw new Error("--conflicts is only for --view remerge");
+  if (remerge && options.conflicts === undefined) throw new Error("--view remerge needs --conflicts, the paths the merge was handed to resolve");
+  const resolution = remerge ? judgeResolution(worktree, candidateOid, parseConflicts(options.conflicts), reviewedEntries) : null;
+  // A path that conflicted without markers — a binary file changed on both
+  // sides, or a file one side deleted — is absent from the remerge view when the
+  // merge commit keeps the version git's own merge left, since there is no
+  // difference from that merge to show. Keeping it is still one side's version
+  // chosen over the other's, so the readers are shown which version each parent
+  // and the merge commit carry, and what each side did to the path since the two
+  // diverged, rather than nothing.
+  const keptEntries = (resolution?.kept ?? []).map(normalizeRepoPath).map((file) => {
+    const versions = `# ${file} | first parent ${blobAt(worktree, `${candidateOid}^1`, file) ?? "(absent)"} | second parent `
+      + `${blobAt(worktree, `${candidateOid}^2`, file) ?? "(absent)"} | merge commit ${blobAt(worktree, candidateOid, file) ?? "(absent)"}\n`;
+    const side = (label, from, to) => `## What the ${label} parent did to ${file}\n`
+      + git(worktree, ["diff", "--no-ext-diff", `${candidateOid}^${from}...${candidateOid}^${to}`, "--", file]).stdout;
+    return { status: "kept", paths: [file], text: isExcluded(file) ? versions : versions + side("first", 2, 1) + side("second", 1, 2) };
+  });
+  if (keptEntries.length > 0) {
+    reviewDiff += "\n# Conflicted without markers, and kept as git's own merge left it\n";
+    for (const entry of keptEntries) reviewDiff += entry.text;
   }
   const excluded = changedPaths.filter(isExcluded).map((file) => ({
     path: file,
@@ -218,9 +307,14 @@ export function snapshotCandidate(options) {
     newBlob: blobAt(worktree, candidateOid, file),
     diffstat: git(worktree, ["diff", "--shortstat", `${baseOid}..${candidateOid}`, "--", file]).stdout.trim()
   }));
-  if (excluded.length > 0) {
+  // A merge's summaries are of what its resolution changed in an excluded file,
+  // not of everything the merged side changed there.
+  const summarized = remerge
+    ? excluded.filter((item) => reviewedEntries.some((entry) => normalizeRepoPath(entry.paths[entry.paths.length - 1]) === item.path))
+    : excluded;
+  if (summarized.length > 0) {
     reviewDiff += "\n# Excluded generated or lock files (deterministic summaries)\n";
-    for (const item of excluded) {
+    for (const item of summarized) {
       reviewDiff += `${item.path} | old ${item.oldBlob ?? "(absent)"} | new ${item.newBlob ?? "(absent)"} | ${item.diffstat || "binary or metadata-only change"}\n`;
     }
   }
@@ -256,7 +350,7 @@ export function snapshotCandidate(options) {
   // longer than that; a re-check that read the first 2000 and stopped judged a
   // truncated change. Per-file diffs let a lens read the files it cares about
   // whole, and let every reader know where the change ends.
-  writePerFileDiffs(worktree, path.join(outDir, "review.diff.d"), baseOid, candidateOid, parseNameStatus(nameStatusBuffer.toString("utf8")), isExcluded);
+  writePerFileDiffs(path.join(outDir, "review.diff.d"), [...reviewedEntries, ...keptEntries], isExcluded, (entry) => entry.text);
   // The same list candidate.json carries, alone in a file the bridge can fence
   // directly. candidate.json cannot serve that purpose: it also holds
   // addedLines, so fencing it would put the whole change into the prompt a
@@ -276,7 +370,8 @@ export function snapshotCandidate(options) {
     excluded,
     diffBytes: Buffer.byteLength(fullDiff),
     fileCount: changedPaths.length,
-    treeClean
+    treeClean,
+    ...(remerge ? { reviewView: "remerge", resolution } : {})
   };
   const candidatePath = path.join(outDir, "candidate.json");
   writeRoundFile(candidatePath, JSON.stringify(candidate, null, 2) + "\n");
