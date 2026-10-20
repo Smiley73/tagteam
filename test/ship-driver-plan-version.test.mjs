@@ -73,14 +73,16 @@ function stageVersioned({ version = "0.1.0", entries = ENTRIES, files = {}, prep
  * question: each step `next` names, the body written when it is asked for, and
  * the whole-plan reviewer answering clean whenever one is sent. Any other agent
  * sent on the way — a resolver above all — fails the walk. Returns the dialog,
- * with every step taken and how many whole-plan reviewers were sent.
+ * with every step taken and how many whole-plan reviewers were sent; with
+ * `untilStop`, the first step that stops instead, as `stopped`.
  */
-function walkToDialog(staged, { env = staged.env, plan = staged.plan, max = 16 } = {}) {
+function walkToDialog(staged, { env = staged.env, plan = staged.plan, max = 16, untilStop = false } = {}) {
   const at = { ...staged, plan, env };
   const steps = [];
   let reviewers = 0;
   let result = ship("plan-land", plan, [], env);
   for (let step = 0; step < max; step += 1) {
+    if (untilStop && result.status !== 0) return { stopped: result, steps, reviewers };
     assert.equal(result.status, 0, result.stderr);
     steps.push(result);
     if (result.json.body) {
@@ -112,6 +114,24 @@ function walkToDialog(staged, { env = staged.env, plan = staged.plan, max = 16 }
 
 const approve = (staged, plan = staged.plan) => ship("plan-land", plan, ["--approve", "p@example.com"], staged.env);
 const sayOf = (steps) => steps.map((step) => (step.json?.say ?? []).join("\n")).join("\n");
+
+// A commit on plan/demo of `files`, recorded as the ship's own before it is
+// pushed — standing in for a spec's pull request merged by hand on GitHub past
+// the stop on spec pull requests, which the ship then takes in as its own.
+let byHand = 0;
+function onPlanByHand({ dir, origin, shipDir }, files) {
+  byHand += 1;
+  const clone = path.join(dir, `version-by-hand-${byHand}`);
+  git(dir, "clone", "-q", origin, clone);
+  git(clone, "checkout", "-q", "-B", "plan/demo", "origin/plan/demo");
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(clone, name), text);
+  git(clone, "add", "-A");
+  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "commit", "-q", "-m", `by hand ${byHand}`);
+  const oid = git(clone, "rev-parse", "HEAD");
+  setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, pendingOid: oid } }));
+  git(clone, "push", "-q", "origin", "HEAD:refs/heads/plan/demo");
+  return oid;
+}
 
 // --- one plan -------------------------------------------------------------------
 
@@ -327,6 +347,53 @@ test("'last' with an unmoved base: a whole-plan fix after the increase lands on 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a line moved above the ship's increase stops the landing, naming it and both values, and the run after it sets the line back in a version commit of the ship's", () => {
+  const staged = stageVersioned();
+  const { dir, plan, shipDir, origin } = staged;
+  assert.equal(reviewWholePlan(staged, ship("plan-check", plan, [], staged.env)).json.wholePlan.status, "clean");
+  assert.equal(walkToDialog(staged).dialog.json.planLanding.merge, true);
+  const bump = trainOf(shipDir).route.bump.oid;
+  const main = onOrigin(origin, "main");
+  const drifted = onPlanByHand(staged, { "package.json": manifests("0.1.2")["package.json"] });
+
+  const { stopped } = walkToDialog(staged, { untilStop: true });
+  assert.ok(stopped, "the landing went on over a line the increase no longer explains");
+  assert.match(stopped.stderr, /carries the increase this ship made, 0\.1\.0 → 0\.1\.1, at .*, and package\.json \(\/version\) reads 0\.1\.2, not 0\.1\.1 now/);
+  assert.match(stopped.stderr, /Nothing was landed/);
+  assert.doesNotMatch(stopped.stderr, /in a fix on plan\/demo/, "the stop asks for a fix no spec and no push can make");
+  assert.equal(onOrigin(origin, "main"), main);
+  assert.equal(landingRecordOf(shipDir).merged ?? null, null);
+  assert.equal(trainOf(shipDir).route.bump, null, "the increase the tip no longer carries is still counted as the plan's");
+
+  // Run again: the ship sets every line to one increase over main's value.
+  const { dialog, steps } = walkToDialog(staged);
+  assert.match(sayOf(steps), /package\.json \(\/version\) reads 0\.1\.2, not 0\.1\.0, .*: no increase this ship made explains it/);
+  const tip = onOrigin(origin, "plan/demo");
+  assert.equal(git(origin, "rev-parse", `${tip}^`), drifted);
+  assert.deepEqual([trainOf(shipDir).route.bump.oid, trainOf(shipDir).route.bump.value], [tip, "0.1.1"]);
+  assert.notEqual(tip, bump);
+  assert.deepEqual(linesAt(origin, tip), ["0.1.1", "0.1.1", "0.1.1"]);
+  assert.equal(dialog.json.planLanding.landsAs, "0.1.0 → 0.1.1");
+  assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan branch that holds the base and carries a line no increase of the ship's explains gets the version commit, which sets it with the rest", () => {
+  const staged = stageVersioned();
+  const { dir, plan, shipDir, origin } = staged;
+  const raised = onPlanByHand(staged, { "plugin.json": manifests("0.1.1")["plugin.json"] });
+  assert.equal(reviewWholePlan(staged, ship("plan-check", plan, [], staged.env)).json.wholePlan.status, "clean");
+  const { dialog, steps } = walkToDialog(staged);
+  assert.match(sayOf(steps), /already holds main at .*, and plugin\.json \(\/version\) reads 0\.1\.1, not 0\.1\.0: no increase this ship made explains it/);
+  const tip = onOrigin(origin, "plan/demo");
+  assert.equal(git(origin, "rev-parse", `${tip}^`), raised, "anything but the version commit sits on the plan's tip");
+  assert.equal(trainOf(shipDir).route.bump.oid, tip);
+  assert.deepEqual(linesAt(origin, tip), ["0.1.1", "0.1.1", "0.1.1"]);
+  assert.equal(dialog.json.planLanding.landsAs, "0.1.0 → 0.1.1");
+  assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a restart: the version commit pushed and its record not confirmed is the ship's, and one recorded and never pushed is made once — never a second increase, never a hand-push stop", () => {
   const staged = stageVersioned();
   const { dir, plan, shipDir, origin, env } = staged;
@@ -376,12 +443,12 @@ test("a plan that declares minor gets a minor increase, and the merge condition 
 
 // A plan route about to start, with main holding `files` and the configuration
 // naming `entries`.
-function startWith({ files = manifests("0.1.0"), entries = ENTRIES, planDocument = null } = {}) {
+function startWith({ files = manifests("0.1.0"), entries = ENTRIES, planDocument = null, limits = {} } = {}) {
   const staged = stagePlan();
   commitToMain(staged.repo, files, "the version");
   if (planDocument) commitToMain(staged.repo, { ".tagteam/plans/demo/plan.md": planDocument }, "the plan document");
   const config = JSON.parse(fs.readFileSync(staged.configPath, "utf8"));
-  fs.writeFileSync(staged.configPath, JSON.stringify({ ...config, versionFiles: entries }, null, 2));
+  fs.writeFileSync(staged.configPath, JSON.stringify({ ...config, versionFiles: entries, limits: { ...config.limits, ...limits } }, null, 2));
   return { ...staged, started: ship("start", staged.plan, [], staged.env) };
 }
 
@@ -393,7 +460,9 @@ test("start refuses a declaration it does not make, lines that disagree on the b
     [{ entries: [...ENTRIES, { file: "package.json", pointer: "/nope" }] }, /package\.json \(\/nope\) .*package\.json has nothing at \/nope/],
     [{ files: { ...manifests("0.1.0"), VERSION: "0.1.0\n0.1.0\n" }, entries: [...ENTRIES, { file: "VERSION", pattern: "^(\\d+\\.\\d+\\.\\d+)$" }] },
       /VERSION \(\^\(\\d\+\\\.\\d\+\\\.\\d\+\)\$\) .*matches 2 lines, not exactly one/],
-    [{ files: manifests("0.1.0-rc.1") }, /reads "0\.1\.0-rc\.1", which is not a MAJOR\.MINOR\.PATCH version/]
+    [{ files: manifests("0.1.0-rc.1") }, /reads "0\.1\.0-rc\.1", which is not a MAJOR\.MINOR\.PATCH version/],
+    [{ entries: [...ENTRIES, { file: "package.json", pointer: "/version" }] },
+      /package\.json \(\/version\) and package\.json \(\/version\) locate overlapping bytes in package\.json/]
   ];
   for (const [given, why] of cases) {
     const staged = startWith(given);
@@ -406,6 +475,40 @@ test("start refuses a declaration it does not make, lines that disagree on the b
   assert.equal(fine.started.status, 0, fine.started.stderr);
   assert.equal(trainOf(fine.shipDir).route.increase, "patch");
   fs.rmSync(fine.dir, { recursive: true, force: true });
+});
+
+test("a plan route recorded before it kept its kind of increase and its lines takes both at its next start, checks the base's lines then, and lands the declared increase", () => {
+  const forget = ({ shipDir }, keys) => setTrainRoute(shipDir, (train) => ({
+    ...train, route: Object.fromEntries(Object.entries(train.route).filter(([key]) => !keys.includes(key)))
+  }));
+  const staged = stageVersioned({ declare: "Version increase: minor" });
+  const { dir, plan, shipDir, env } = staged;
+  assert.equal(ship("end", plan, [], env).status, 0);
+  forget(staged, ["increase"]);
+  assert.equal(trainOf(shipDir).route.increase, undefined);
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(trainOf(shipDir).route.increase, "minor", "start did not read the plan document's kind of increase");
+  assert.deepEqual(trainOf(shipDir).route.versionFiles, ENTRIES);
+  assert.equal(reviewWholePlan(staged, ship("plan-check", plan, [], env)).json.wholePlan.status, "clean");
+  const { dialog, steps } = walkToDialog(staged);
+  assert.match(sayOf(steps), /a minor increase, as the plan declares: 0\.1\.0 → 0\.2\.0/);
+  assert.equal(dialog.json.planLanding.landsAs, "0.1.0 → 0.2.0");
+  assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  // The same route, missing either, on a base whose lines disagree: that start
+  // is where they are first checked, and it refuses.
+  for (const keys of [["increase"], ["versionFiles"]]) {
+    const split = stageVersioned();
+    assert.equal(ship("end", split.plan, [], split.env).status, 0);
+    forget(split, keys);
+    commitToMain(split.repo, { "plugin.json": manifests("0.2.0")["plugin.json"] }, "plugin.json, on its own");
+    const refused = ship("start", split.plan, [], split.env);
+    assert.notEqual(refused.status, 0, `start went on without ${keys}: ${refused.stdout}`);
+    assert.match(refused.stderr, /do not agree, so there is no one version to increase: .*plugin\.json \(\/version\) is 0\.2\.0/);
+    fs.rmSync(split.dir, { recursive: true, force: true });
+  }
 });
 
 // --- spec pull requests -----------------------------------------------------------
@@ -425,21 +528,29 @@ test("a spec or a whole-plan fix that changes a version line stops before it pub
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.match(stopped.json.ask, /01-a changes a version line on plan\/demo, which a spec of this plan never does/);
   assert.match(stopped.json.say.join("\n"), /package\.json line 3 \(\/version\) reads 0\.1\.1 at .* and 0\.1\.0 on plan\/demo/);
-  assert.match(stopped.json.ask, /Nothing was published/);
+  assert.match(stopped.json.ask, /Nothing was published, and no round was made for this commit/);
+  assert.match(stopped.json.ask, /the correction costs no fix round of its own/);
   assert.match(stopped.json.next, /end --plan /);
   assert.deepEqual(stopped.json.versionLines.map((line) => [line.file, line.base, line.candidate]), [["package.json", "0.1.0", "0.1.1"]]);
   assert.equal(onOrigin(origin, "tagteam/demo/01-a"), null, "the spec's branch was pushed");
   assert.ok(!fs.existsSync(env.GH_STUB_STATE) || pullsOf(env).length === 0, "a pull request was opened");
-  // Run again as it is, it stops again; the panel will not take it either.
+  const rounds = () => fs.readdirSync(path.join(shipDir, "01-a", "rounds")).filter((name) => /^\d+$/.test(name));
+  assert.deepEqual(fs.existsSync(path.join(shipDir, "01-a", "rounds")) ? rounds() : [], [], "a round was made for a commit that changes a version line");
+  // Run again as it is, it stops again, and still makes no round.
   assert.match(ship("snapshot", plan, ["--spec", "01-a"], env).json.ask, /changes a version line/);
-  assert.match(ship("panel", plan, ["--spec", "01-a"], env).json.ask, /changes a version line/);
+  assert.deepEqual(fs.existsSync(path.join(shipDir, "01-a", "rounds")) ? rounds() : [], []);
 
-  // The version put back, a dependency added to the same file: it goes on.
+  // The version put back, a dependency added to the same file: it goes on, as
+  // the round the stopped commit would have been — the implementation's, with
+  // no fix round spent.
   const dependency = manifests("0.1.0")["package.json"].replace("\"dependencies\": {}", "\"dependencies\": { \"left-pad\": \"^1.3.0\" }");
   fs.writeFileSync(path.join(worktree, "package.json"), dependency);
   const goes = ship("snapshot", plan, ["--spec", "01-a"], env);
   assert.equal(goes.status, 0, goes.stderr);
   assert.equal(goes.json.ask, undefined, goes.stdout);
+  assert.equal(goes.json.round, 1);
+  assert.match(goes.json.say.join("\n"), /is round 1; 0 of \d+ fix rounds spent in this cycle/);
+  assert.deepEqual(rounds(), ["1"]);
   assert.match(goes.json.next, /verify --plan /);
   fs.rmSync(dir, { recursive: true, force: true });
 
@@ -458,6 +569,106 @@ test("a spec or a whole-plan fix that changes a version line stops before it pub
   assert.match(held.json.ask, /plan-fix-1 changes a version line on plan\/demo, which a whole-plan fix of this plan never does/);
   assert.equal(onOrigin(fixing.origin, "tagteam/demo/plan-fix-1"), null);
   fs.rmSync(fixing.dir, { recursive: true, force: true });
+});
+
+test("a fixer that changes a version line on the cycle's last fix round is stopped before a round is made, and its correction is that round, not one past the limit", () => {
+  const staged = startWith({ limits: { fixRounds: 1 } });
+  const { dir, plan, shipDir, env } = staged;
+  assert.equal(staged.started.status, 0, staged.started.stderr);
+  const begun = ship("begin", plan, ["--spec", "01-a"], env);
+  const worktree = trainOf(shipDir).worktree;
+  fs.writeFileSync(path.join(worktree, "app.js"), A_CHANGE.replace("a - b", "a + b"));
+  write(outputOf(begun.json.dispatch[0]), { status: "complete", summary: "wrote app.js", unfinished: [] });
+  arriveAll(begun);
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).json.round, 1);
+  ship("verify", plan, ["--spec", "01-a"], env);
+  const panel = ship("panel", plan, ["--spec", "01-a"], env);
+  const first = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8")).candidateOid;
+  let raised = false;
+  for (const dispatch of panel.json.dispatch) {
+    if (dispatch.agent === "tagteam:codex-runner") { write(resultOf(dispatch), findings("codex", first)); continue; }
+    write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], first, raised ? [] : [major("app.js")]));
+    raised = true;
+  }
+  arriveAll(panel);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"], env).json.review, "open");
+  const fix = ship("fix", plan, ["--spec", "01-a"], env);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.equal(fix.json.dispatch[0].agent, "tagteam:fixer");
+
+  // The one fix round there is: the fixer mends app.js and raises the version.
+  fs.writeFileSync(path.join(worktree, "app.js"), A_CHANGE);
+  fs.writeFileSync(path.join(worktree, "package.json"), manifests("0.1.1")["package.json"]);
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [], notes: "", status: "complete", summary: "fixed sub", unfinished: [] });
+  arriveAll(fix);
+  const stopped = ship("snapshot", plan, ["--spec", "01-a"], env);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.json.ask, /changes a version line/);
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "rounds", "2")), "a round was made for the commit that raised the version");
+  assert.ok(fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")), "the fix the stopped commit was is no longer pending");
+
+  // Corrected as the stop says: the fix round's own snapshot, not a refusal.
+  fs.writeFileSync(path.join(worktree, "package.json"), manifests("0.1.0")["package.json"]);
+  const corrected = ship("snapshot", plan, ["--spec", "01-a"], env);
+  assert.equal(corrected.status, 0, corrected.stderr);
+  assert.equal(corrected.json.round, 2);
+  assert.match(corrected.json.say.join("\n"), /is round 2; 1 of 1 fix rounds spent in this cycle/);
+  assert.match(corrected.json.next, /verify --plan /);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a candidate that changes a version line and got past the snapshot is stopped by the panel, and by finish before the merge, with its pull request open", () => {
+  const staged = startWith();
+  const { dir, plan, shipDir, origin, env, body } = staged;
+  assert.equal(staged.started.status, 0, staged.started.stderr);
+  // The route's lines taken away while the cycle runs, as a route recorded with
+  // none would have them, and put back before the step under test.
+  const lines = (entries) => setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, versionFiles: entries } }));
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const begun = ship("begin", plan, ["--spec", "01-a"], env);
+  const worktree = trainOf(shipDir).worktree;
+  fs.writeFileSync(path.join(worktree, "app.js"), A_CHANGE);
+  fs.writeFileSync(path.join(worktree, "package.json"), manifests("0.1.1")["package.json"]);
+  write(outputOf(begun.json.dispatch[0]), { status: "complete", summary: "wrote app.js and raised the version", unfinished: [] });
+  arriveAll(begun);
+  lines([]);
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).json.round, 1);
+  assert.equal(ship("verify", plan, ["--spec", "01-a"], env).status, 0);
+  lines(ENTRIES);
+  const held = ship("panel", plan, ["--spec", "01-a"], env);
+  assert.equal(held.status, 0, held.stderr);
+  assert.match(held.json.ask, /01-a changes a version line on plan\/demo/);
+  assert.equal(held.json.dispatch, undefined, "a reviewer was sent for a candidate that changes a version line");
+
+  lines([]);
+  const panel = ship("panel", plan, ["--spec", "01-a"], env);
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch) {
+    if (dispatch.agent === "tagteam:codex-runner") write(resultOf(dispatch), findings("codex", oid));
+    else write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+  }
+  arriveAll(panel);
+  ship("collect", plan, ["--spec", "01-a"], env);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"], env);
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  arriveAll(recheck);
+  assert.equal(ship("settle", plan, ["--spec", "01-a"], env).json.review, "clean");
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", body], env).status, 0);
+  const tip = onOrigin(origin, "plan/demo");
+
+  lines(ENTRIES);
+  const finished = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.match(finished.json.ask, /01-a changes a version line on plan\/demo/);
+  assert.match(finished.json.ask, /Nothing was merged, and the pull request #\d+ stays open/);
+  assert.match(finished.json.say.join("\n"), /package\.json line 3 \(\/version\) reads 0\.1\.1 at .* and 0\.1\.0 on plan\/demo/);
+  assert.deepEqual(finished.json.versionLines.map((line) => [line.file, line.base, line.candidate]), [["package.json", "0.1.0", "0.1.1"]]);
+  assert.deepEqual(Object.keys(finished.json.answers), ["end"], "finish offers a snapshot, which a published pull request cannot take");
+  assert.equal(finished.json.pullRequest?.number, state().pr.number);
+  assert.equal(state().state, "awaiting-approval");
+  assert.equal(onOrigin(origin, "plan/demo"), tip, "the spec was merged into the plan branch");
+  assert.equal(pullsOf(env).find((pull) => pull.branch === "tagteam/demo/01-a").mergedAt ?? null, null, "the pull request was merged");
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("unchanged elsewhere: with the setting off, and on a one-spec plan, a spec that raises the version ships as before, with no version commit and no stop", () => {

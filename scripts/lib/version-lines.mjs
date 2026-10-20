@@ -200,7 +200,9 @@ export function readVersionLine(text, entry) {
  * `text` with the version of each of `entries` — all of one file — set to
  * `valueOf(entry)`, by replacing only those bytes; an entry whose value is null,
  * or that does not locate, is left as it is. `{ text, set }`, where `set` is the
- * entries whose bytes changed.
+ * entries whose bytes changed. Two entries whose bytes overlap are refused
+ * before anything is written: each edit is made at offsets read off the text as
+ * it was, so the second would cut the first's new value at the old boundary.
  */
 export function setVersionText(text, entries, valueOf) {
   const edits = [];
@@ -212,6 +214,10 @@ export function setVersionText(text, entries, valueOf) {
     edits.push({ entry, start: located.start, end: located.end, bytes: located.quoted ? JSON.stringify(value) : value });
   }
   edits.sort((left, right) => right.start - left.start);
+  for (let index = 1; index < edits.length; index += 1) {
+    const [later, earlier] = [edits[index - 1], edits[index]];
+    if (earlier.end > later.start) throw new Error(overlapSentence(earlier.entry, later.entry));
+  }
   let next = text;
   for (const edit of edits) next = `${next.slice(0, edit.start)}${edit.bytes}${next.slice(edit.end)}`;
   return { text: next, set: edits.map((edit) => edit.entry) };
@@ -220,6 +226,29 @@ export function setVersionText(text, entries, valueOf) {
 // The entries of one file, and every file the entries name, in order.
 const entriesOf = (entries, file) => entries.filter((entry) => entry.file === file);
 const filesOf = (entries) => [...new Set(entries.map((entry) => entry.file))];
+
+const overlapSentence = (first, second) => `${describeEntry(first)} and ${describeEntry(second)} locate overlapping bytes in `
+  + `${first.file}, and writing both would corrupt it: list each version line once`;
+
+/**
+ * Every pair of entries whose located bytes overlap at one commit — the same
+ * locator listed twice, or two that find the same value — each as a sentence
+ * naming both. Entries that do not locate are another problem's to name.
+ */
+export function overlappingEntries({ entries = [], read, oid }) {
+  const found = [];
+  for (const file of filesOf(entries)) {
+    const text = read(oid, file);
+    const located = entriesOf(entries, file).map((entry) => ({ entry, at: locateVersion(text, entry) })).filter(({ at }) => !at.problem);
+    for (let left = 0; left < located.length; left += 1) {
+      for (let right = left + 1; right < located.length; right += 1) {
+        const [a, b] = [located[left], located[right]];
+        if (a.at.start < b.at.end && b.at.start < a.at.end) found.push(overlapSentence(a.entry, b.entry));
+      }
+    }
+  }
+  return found;
+}
 
 /**
  * Every entry's line at one commit, from `read(oid, file)`: the entry, its
@@ -237,9 +266,10 @@ export function readLines({ entries = [], read, oid }) {
 
 /**
  * The one version the base carries: `{ value, lines }` when every entry names
- * exactly one MAJOR.MINOR.PATCH value there and they all agree, or `{ problem }`
- * — a sentence naming the entry that does not resolve, or each file and value
- * when they disagree. `where` is how the base is named in it.
+ * exactly one MAJOR.MINOR.PATCH value there, no two of them the same bytes, and
+ * they all agree, or `{ problem }` — a sentence naming the entry that does not
+ * resolve, both entries that overlap, or each file and value when they
+ * disagree. `where` is how the base is named in it.
  */
 export function baseVersion({ entries = [], read, baseOid, where }) {
   const lines = readLines({ entries, read, oid: baseOid });
@@ -252,6 +282,8 @@ export function baseVersion({ entries = [], read, baseOid, where }) {
         + `${broken.map((line) => line.problem).join("; ")}`
     };
   }
+  const overlaps = overlappingEntries({ entries, read, oid: baseOid });
+  if (overlaps.length > 0) return { lines, problem: `on ${where}, ${overlaps.join("; ")}` };
   const values = [...new Set(lines.map((line) => line.value))];
   if (values.length > 1) {
     return {

@@ -525,11 +525,14 @@ The increase is decided by comparing values, never by waiting for a version
 line to conflict: two plans raising the same number write identical lines,
 which merge cleanly. The base's value now is held against the increase the
 route recorded. Recorded from that value, nothing is done, whatever landed on
-top — a whole-plan fix after the increase sits on it. Recorded from another
-value, the base's version moved, and the base is merged in first. None recorded
-and the tip's lines are the base's: the version commit, written by replacing
-only the version strings' bytes, recorded with the base value before its push.
-None recorded and the lines differ: the base is merged in first. A merge of the
+top — a whole-plan fix after the increase sits on it; a tip whose lines no
+longer read the increase stops once, and the increase is let go so the next run
+makes it again. Recorded from another value, the base's version moved, and the
+base is merged in first. None recorded and the tip's lines are the base's: the
+version commit, written by replacing only the version strings' bytes, recorded
+with the base value before its push. None recorded and the lines differ: the
+base is merged in first, unless the tip holds it already — then the version
+commit sets the lines whatever they read. A merge of the
 base clears the recorded increase, and an increase with a merge of the base
 above it on the plan branch's first-parent line is gone whether or not the
 record says so, so a run that died between a push and its record never reads a

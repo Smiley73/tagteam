@@ -69,8 +69,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  baseVersion, changedLines, declaredIncrease, locateVersion, nextVersion, resetVersionLines, scriptedMergeProblem, setVersionText,
-  versionOnly
+  baseVersion, changedLines, declaredIncrease, locateVersion, nextVersion, overlappingEntries, resetVersionLines, scriptedMergeProblem,
+  setVersionText, versionOnly
 } from "../scripts/lib/version-lines.mjs";
 
 test("a value is written by its own bytes: indentation, key order, line endings and every other byte are kept", () => {
@@ -114,6 +114,27 @@ test("the base's one version: every line resolves to a plain version and they ag
   assert.match(baseVersion({ entries, read, baseOid: "split", where: "main" }).problem, /do not agree.*a\.json \(\/version\) is 1\.2\.3, B \(\^\(\\d\.\*\)\$\) is 1\.3\.0/);
   assert.match(baseVersion({ entries, read, baseOid: "pre", where: "main" }).problem, /a\.json \(\/version\) reads "1\.2\.3-beta\.1", which is not a MAJOR\.MINOR\.PATCH version/);
   assert.match(baseVersion({ entries: [{ file: "a.json", pointer: "/nope" }], read, baseOid: "good", where: "main" }).problem, /a\.json has nothing at \/nope/);
+});
+
+test("two entries that find the same bytes are refused, naming both, before a write could cut one value at the other's old boundary", () => {
+  const twice = [{ file: "package.json", pointer: "/version" }, { file: "package.json", pointer: "/version" }];
+  // As it was: both edits at the offsets of the text before either, so the
+  // second cut the first's longer value short.
+  assert.throws(() => setVersionText("{\"version\":\"9.9.9\"}\n", twice, () => "9.9.10"),
+    /package\.json \(\/version\) and package\.json \(\/version\) locate overlapping bytes in package\.json/);
+  // A pattern and a pointer that find the same value overlap as well; two that
+  // find different values in one file do not.
+  const files = { good: { "package.json": "{\n  \"version\": \"1.2.3\",\n  \"x\": {\"version\": \"1.2.3\"}\n}\n" } };
+  const read = (oid, file) => files[oid]?.[file] ?? null;
+  const both = [{ file: "package.json", pointer: "/version" }, { file: "package.json", pattern: "^  \"version\": \"([^\"]+)\"" }];
+  assert.equal(overlappingEntries({ entries: both, read, oid: "good" }).length, 1);
+  assert.match(baseVersion({ entries: both, read, baseOid: "good", where: "main" }).problem,
+    /^on main, package\.json \(\/version\) and package\.json \(\^ {2}"version": "\(\[\^"\]\+\)"\) locate overlapping bytes/);
+  assert.match(baseVersion({ entries: twice, read, baseOid: "good", where: "main" }).problem, /locate overlapping bytes.*list each version line once/);
+  const apart = [{ file: "package.json", pointer: "/version" }, { file: "package.json", pointer: "/x/version" }];
+  assert.deepEqual(overlappingEntries({ entries: apart, read, oid: "good" }), []);
+  assert.equal(baseVersion({ entries: apart, read, baseOid: "good", where: "main" }).value, "1.2.3");
+  assert.equal(setVersionText(files.good["package.json"], apart, () => "1.2.4").text, files.good["package.json"].replaceAll("1.2.3", "1.2.4"));
 });
 
 test("a change is a version change by its values, not its paths, and version-only only when the lines are all it changes", () => {

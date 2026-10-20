@@ -2246,8 +2246,8 @@ function afterSpecs(ctx, from = null) {
 
 /**
  * A spec or a whole-plan fix on the plan branch that changes a configured
- * version line stops here, before its panel is sent and again before it
- * merges: the plan's one increase is the ship's, made once the whole plan is
+ * version line stops here — at its snapshot before a round is made for it, before
+ * its panel is sent, and again before it merges: the plan's one increase is the ship's, made once the whole plan is
  * checked, and a spec that raised it too would land two. Each line is compared
  * by its value at the reviewed base and at the candidate, never by the paths the
  * change touches, so a dependency added to `package.json` goes on. A spec on the
@@ -2271,9 +2271,9 @@ function versionLineStop(ctx, id, state, step) {
     ? `Nothing was merged, and the pull request${state.pr?.number ? ` #${state.pr.number}` : ""} stays open. It cannot merge while it `
       + `changes the version: the change has to come out of ${state.branch}, and is then a new commit the cycle reviews. Offer: stop `
       + `the train (run ${end}) and take the version change out of the pull request.`
-    : `Nothing was published. Set ${back} again in the worktree at ${ctx.worktree}, keep the rest of the change, and run snapshot again `
-      + `(${snapshotCommand}): the corrected commit is the one reviewed. Offer: correct it and run `
-      + `snapshot, or stop the train (run ${end}).`;
+    : `Nothing was published, and no round was made for this commit. Set ${back} again in the worktree at ${ctx.worktree}, keep the `
+      + `rest of the change, and run snapshot again (${snapshotCommand}): the corrected commit is the round this one would have been, `
+      + `so the correction costs no fix round of its own. Offer: correct it and run snapshot, or stop the train (run ${end}).`;
   return {
     say: [`${id} changes ${changed.length > 1 ? "version lines" : "a version line"}: ${what.join("; ")}.`],
     ask: `${id} changes ${changed.length > 1 ? "version lines" : "a version line"} on ${route.branch}, which a ${unit} of this plan never `
@@ -2420,6 +2420,14 @@ async function snapshot(options) {
   }
   const oid = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
 
+  // A commit that changes a version line on the plan branch is stopped before a
+  // round is allocated for it, so the correction the stop asks for is the round
+  // this commit would have been — never a fix round of its own, and never one
+  // the cycle's budget no longer has. The fix marker and the report stay where
+  // they are for the snapshot that takes the correction.
+  const versionStop = versionLineStop(ctx, id, { ...state, baseOid: ctx.baseOid, candidateOid: oid }, "snapshot");
+  if (versionStop) return done({ ...versionStop, candidate: oid });
+
   // Every snapshot rebuilds a review — a new commit's, or a re-entered round's
   // — and an accept was about the review as it stood when it was given. A
   // resumed run that re-enters the round would otherwise carry the accept into
@@ -2470,10 +2478,6 @@ async function snapshot(options) {
     }
   }
   say.push(...recorded.stdout.trim().split("\n"));
-  // The round is recorded either way; what it holds is not reviewed while it
-  // changes a version line on the plan branch.
-  const versionStop = versionLineStop(ctx, id, readState(ctx, id), "snapshot");
-  if (versionStop) return done({ ...versionStop, say: [...say, ...versionStop.say], round, candidate: oid });
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
@@ -4349,13 +4353,16 @@ function makeVersionCommit(ctx, tip, entries, value) {
  * from git objects at `origin/<base>`, against the increase the route recorded:
  *
  *   1  recorded, from the base's value now: nothing to do, whatever landed on
- *      top since — a whole-plan fix after the increase sits on top of it
+ *      top since — a whole-plan fix after the increase sits on top of it. A tip
+ *      whose lines no longer read the increase stops, with the increase let go,
+ *      so the next pass makes it again
  *   2  recorded, from another value: the base's version moved, so the base is
  *      merged in first, whatever the tip's lines read
  *   3  none recorded, and the tip's lines are the base's: the version commit,
  *      recorded with the base value before its push
  *   4  none recorded, and the tip's lines are not the base's: the base is merged
- *      in first
+ *      in first — unless the tip holds it already, and then the version commit
+ *      of case 3 sets the lines whatever they read
  *
  * After a merge-in the check runs on the merge, and the next pass is case 3.
  * Returns the payload that moves the plan on, or null when the tip did not move.
@@ -4386,10 +4393,17 @@ async function finalTipStep(ctx, record, tip, options, say) {
   if (bump && bump.base === base.value) {
     const off = lines.filter((line) => line.value !== bump.value);
     if (off.length > 0) {
+      // Neither a spec nor a fix can set the line back — the stop on spec pull
+      // requests refuses any change to one, and a push of a person's own is the
+      // hand-push stop — so the ship does: the increase it recorded is let go,
+      // and the next pass makes the plan's one increase over this tip.
+      clearIncrease(ctx.trainPath);
       throw new Stop(`${route.branch} at ${short(tip)} carries the increase this ship made, ${bump.base} → ${bump.value}, at `
-        + `${short(bump.oid)}, and ${listOf(off.map((line) => `${describeEntry(line.entry)} reads ${line.value ?? "nothing"}`))} now. `
-        + "Something above that commit changed a version line, which the stop on spec pull requests should have caught. Nothing "
-        + `was landed. Set ${off.length > 1 ? "them" : "it"} back to ${bump.value} in a fix on ${route.branch}, then run this again.`);
+        + `${short(bump.oid)}, and ${listOf(off.map((line) => `${describeEntry(line.entry)} reads ${line.value ?? "nothing"}, not ${bump.value}`))} `
+        + "now. Something above that commit changed a version line — most likely a pull request merged by hand on GitHub, past the "
+        + "stop on spec pull requests. Nothing was landed. The ship no longer counts that commit as the plan's increase: run this "
+        + `again, and it makes the plan's one increase over ${route.base}'s ${base.value} itself, in a version commit of its own that `
+        + `sets every line, merging ${route.base} in first if it has moved.`);
     }
     say.push(`${route.branch} carries its one version increase, ${bump.base} → ${bump.value}, made from ${route.base}'s version as it `
       + "still is; nothing about it changes.");
@@ -4402,8 +4416,26 @@ async function finalTipStep(ctx, record, tip, options, say) {
       + "which sets the version lines to its values, and the increase is made again on top once the plan is checked again.");
     return mergeForVersion(ctx, record, tip, baseOid, options, say);
   }
-  if (lines.every((line) => line.value === base.value)) {
+  // The plan never had the base's latest version, unless the base is merged in
+  // already: then a line the plan changed itself is what differs — a pull
+  // request merged by hand past the stop on spec pull requests, which no spec
+  // or fix can undo, since that stop refuses any change to a line — and the
+  // version commit sets it with the rest.
+  const off = lines.filter((line) => line.value !== base.value);
+  if (off.length === 0 || git(ctx.repo, ["merge-base", "--is-ancestor", baseOid, tip], { allowFailure: true }).status === 0) {
     const value = nextVersion(base.value, kind);
+    const lost = off.filter((line) => line.value === null);
+    if (lost.length > 0) {
+      throw new Stop(`${route.branch} at ${short(tip)} already holds ${where}, and ${listOf(lost.map((line) => `${describeEntry(line.entry)} `
+        + `finds nothing (${line.problem})`))} there, so the ship has no line to write the plan's increase into. Nothing was committed `
+        + `or landed. The lines are the ones this train recorded when it started, and a change of this plan took ${lost.length > 1 ? "them" : "it"} `
+        + `away; the ship cannot put a line back. Offer: stop the train (run ${nextCommand(ctx, "end", null)}).`);
+    }
+    if (off.length > 0) {
+      say.push(`${route.branch} at ${short(tip)} already holds ${where}, and ${listOf(off.map((line) => `${describeEntry(line.entry)} reads `
+        + `${line.value}, not ${base.value}`))}: no increase this ship made explains it — most likely a pull request merged by hand on `
+        + `GitHub, past the stop on spec pull requests. The version commit sets ${off.length > 1 ? "them" : "it"} with the rest.`);
+    }
     const oid = makeVersionCommit(ctx, tip, entries, value);
     const outcome = "the version commit was not pushed, and the plan was not landed";
     await planTipCheck(ctx, outcome);
@@ -4423,17 +4455,6 @@ async function finalTipStep(ctx, record, tip, options, say) {
       + "else, pushed by the driver itself; its whole-plan check keeps the review of the commit under it, and verify and the landing "
       + "check run on it.");
     return { say, next: nextCommand(ctx, "plan-check", null, " --why version") };
-  }
-  // The plan never had the base's latest version. Merged in, its lines are the
-  // base's; merged in already, there is nothing to merge, and a line the plan
-  // changed itself is what is in the way.
-  if (git(ctx.repo, ["merge-base", "--is-ancestor", baseOid, tip], { allowFailure: true }).status === 0) {
-    const off = lines.filter((line) => line.value !== base.value);
-    throw new Stop(`${route.branch} at ${short(tip)} already holds ${where}, and its version lines are not ${route.base}'s: `
-      + `${listOf(off.map((line) => `${describeEntry(line.entry)} reads ${line.value ?? "nothing"}, not ${base.value}`))}. No increase `
-      + "this ship made explains it, so a spec or a fix of this plan changed a version line, which the stop on spec pull requests "
-      + `should have caught. Nothing was landed. Set ${off.length > 1 ? "them" : "it"} back to ${base.value} in a fix on ${route.branch}, `
-      + "and the ship makes the plan's one increase itself.");
   }
   say.push(`${route.branch}'s version lines are not ${route.base}'s ${base.value}: the plan has not taken ${route.base}'s latest version `
     + `in. ${route.base} is merged in first, and the plan's one increase is made from its value once the plan is checked again.`);
