@@ -360,15 +360,17 @@ Dispatch one spec writer per deliverable, at the `spec-write` job's settings,
 **all in one message**, as `plan.mjs dispatch … --kind spec-writers` prints
 them with one `--spec <id>` per deliverable: each labelled `Write spec <id>` and
 writing exactly `$D/specs/<id>.md`. Give each one the goal path, the plan path, the
-exploration path, its own row, and the configured default lens set so it knows
-what it is naming exceptions to. Record them all as one `spec-writers` set, one
+exploration path, the conventions document as `$R/<conventionsPath>` (or "none"),
+its own row, and the configured default lens set so it knows what it is naming
+exceptions to. Record them all as one `spec-writers` set, one
 `--agent "Write spec <id>" "$D/specs/<id>.md"` each.
 
 The last arrival names the validation:
 `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json" --enforce-size`. It
 refuses until the spec writers' set is in. Then it checks front matter, refuses
-a spec over the 18 KB ceiling by name, resolves each spec's lenses against the
-default set, and returns dependency order. Fix what it reports by re-dispatching
+a spec over the 18 KB ceiling or without a `## Sign-offs` section by name,
+resolves each spec's lenses against the default set, and returns dependency
+order. Fix what it reports by re-dispatching
 that spec's writer with what it said, as `--kind spec-writers-resend --spec <id>`
 prints it, labelled `Write spec <id> again`, as a `spec-writers-resend` set of
 its own; its arrival runs the validation again.
@@ -392,6 +394,18 @@ can come from. Read it to describe the lens; do not infer what it reads for from
 its name. Give each lens as what it reads for *and* by name — "a reader checking
 that the system behaves under conditions the spec doesn't enumerate
 (`resilience`)".
+
+Then each spec's `signOffs`, as `specs.mjs` returned them: the dependencies,
+top-level files or directories and the like that the repository's conventions
+say to ask about first, which the specs need. Say them plainly, per spec, in
+what they let the product do ("a PDF library, so statements can be exported"),
+and say that approving the plan approves them, so shipping will not stop to ask
+about them — a change to the CI workflows still stops before it merges. A spec
+with none needs no mention. A sign-off the person strikes under *Adjust* goes
+back to that spec's writer as step 6 re-sends one (`spec-writers-resend`), told
+what was struck, to cut or redo the work that needed it rather than leave it
+for the implementer to trip over; its arrival runs the validation again, and
+you ask again.
 
 Say nothing about how large anything is: the ceilings are enforced in code, and
 by the time a person is deciding whether to approve, a byte count is noise.

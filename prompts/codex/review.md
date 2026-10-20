@@ -28,6 +28,11 @@ The spec this change was implementing:
 
 {{SPEC}}
 
+Its `## Sign-offs`, where it has one, names what a person approved with the
+plan: that the change does what it lists is not a finding; how it does it still
+is. A change of that kind that the repository's conventions say to ask about
+first and the list leaves out is.
+
 The change:
 
 {{DIFF}}

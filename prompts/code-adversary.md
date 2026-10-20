@@ -38,6 +38,11 @@ Where this usually hides:
 
 ## Discipline
 
+The spec's `## Sign-offs` names what a person approved with the plan, such as a
+new dependency or a new top-level directory. That the change does what it lists
+is not a finding; how it does it still is. A change of that kind that the
+repository's conventions say to ask about first and the list leaves out is.
+
 Name the inputs and the wrong result. "This could be racy" is not a finding;
 "two calls to X between the read at line 40 and the write at line 47 lose the
 first update" is.

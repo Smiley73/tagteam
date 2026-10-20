@@ -91,7 +91,7 @@ flowchart TD
     answer["Answer — the drafter applies each blocking or major finding<br>or rejects it with a reason you read at approval"]
     owner["A finding against the goal itself: you answer,<br>goal.md changes, the gate re-closes, the plan is revised once more"]
     specs["Specs — one spec-writer per deliverable, in parallel, each under 18 KB"]
-    approve["Approve — deliverables, lenses, the rejected findings, one question"]
+    approve["Approve — deliverables, lenses, sign-offs, the rejected findings, one question"]
 
     orient --> interview
     interview --> goal
@@ -134,7 +134,11 @@ flowchart TD
    for the implementer that will receive it. A plan is an index and a spec says
    what the repository cannot; both have a size the run enforces.
 5. **Approve.** Deliverables in dependency order, the lenses each will get, the
-   findings the drafter declined and why, and one question.
+   findings the drafter declined and why, and one question. Anything a spec
+   needs that the repository's conventions say to ask about first — a new
+   dependency, a new top-level directory — is listed there as that spec's
+   sign-off and approved with the plan, so shipping does not stop to ask (a change
+   to the CI workflows still does).
 
 ### Shipping
 
