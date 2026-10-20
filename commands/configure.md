@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 9. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 10. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -273,10 +273,19 @@ Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; there is no fallback anywhere, so an omitted key is an invalid
 file rather than an unused feature.
 
-An older configuration is not upgraded — each version is a different shape, not
-an extension, and there is no migration. Say that the old file is being replaced,
-and what version 9 changes: `effort` is one setting per job rather than one per
-role, so a re-check can think less than the reviewer whose finding it judges; and
-`limits.planReviewRounds` is gone, because the plan is reviewed once and its
-findings answered rather than re-reviewed. Everything else carries the same
-meaning it had.
+Write `planBranch` as `false` and `versionFiles` as `[]`, explicitly and without
+asking about either: this version of the command has no question for them. Under
+`--reconfigure` of a version-10 file both keep the values the file already has,
+so a setting or a list someone wrote in by hand is not reset.
+
+A version-9 configuration is carried forward, not replaced. Run the interview as
+`--reconfigure` does, with every value the file holds offered back as the
+default, and say what version 10 adds: `planBranch`, whether a plan of two or
+more specs collects its specs' pull requests on a branch of its own before
+anything reaches the base, written off; and `versionFiles`, the lines that carry
+this repository's version, written empty. Off and empty, nothing about how a
+plan ships changes. Answering every question as before writes the old file with
+those two keys added and nothing else different.
+
+A configuration older than version 9 is not upgraded — each of those versions is
+a different shape, not an extension. Say that the old file is being replaced.

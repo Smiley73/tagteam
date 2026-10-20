@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 9",
+  "title": "tagteam project configuration, version 10",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "autoMerge", "worktree", "reviewExclude",
-    "maxConcurrentCodex", "limits", "escalation", "plan"
+    "maxConcurrentCodex", "limits", "escalation", "plan", "planBranch", "versionFiles"
   ],
   "properties": {
-    "version": { "const": 9, "type": "integer" },
+    "version": { "const": 10, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -166,6 +166,36 @@
           "$ref": "#/$defs/jobEffort",
           "description": "The $ref is the whole rule here; a keyword placed beside it is discarded."
         }
+      }
+    },
+    "planBranch": {
+      "type": "boolean",
+      "description": "When true, a plan of two or more specs collects its spec pull requests on a branch of its own, plan/<slug>, and nothing from it reaches base until the plan is complete; false ships every spec straight to base."
+    },
+    "versionFiles": {
+      "type": "array",
+      "description": "The lines that carry this repository's version, each a repository-relative file and one place in it — a JSON Pointer into a JSON file, or a line pattern with exactly one capture group — where one file may appear more than once, and an empty list means a ship never makes a version increase.",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "pointer"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "pointer": { "type": "string", "pattern": "^(/([^~/]|~[01])*)+$" }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "pattern"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "pattern": { "type": "string", "minLength": 1 }
+            }
+          }
+        ]
       }
     }
   },

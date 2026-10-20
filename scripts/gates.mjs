@@ -738,7 +738,9 @@ function readLimits(file) {
 
 // The one place this file talks to the network, kept out of `adoptMerge` so the
 // decision stays a pure function of facts that can be handed to it in a test.
-function readMergedPr(repo, number) {
+// Exported for the ship driver, which reads the same facts to follow a merge
+// into a plan branch before it adopts it.
+export function readMergedPr(repo, number) {
   const view = spawnSync("gh", ["pr", "view", String(number), "--json", "state,mergedAt,mergeCommit,headRefOid,baseRefName"], {
     cwd: path.resolve(repo), encoding: "utf8", shell: false
   });

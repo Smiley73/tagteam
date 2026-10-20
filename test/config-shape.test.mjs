@@ -21,6 +21,19 @@ const root = path.resolve(import.meta.dirname, "..");
 const example = JSON.parse(fs.readFileSync(path.join(root, "examples", "config.json"), "utf8"));
 const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.schema.json"), "utf8"));
 
+// This repository's own configuration, as `/tagteam:configure` would leave it.
+// The file is untracked, and every ship of this repository copies it from the
+// primary checkout into its worktree, so while the plan that introduces version
+// 10 is itself being shipped the copy is still at version 9: bumping it there
+// would break the run reviewing the change. A version-9 file is read the way
+// configure carries one forward — every value kept, the two version-10 keys
+// written off — and anything else is held to the schema exactly as it is.
+function ownConfiguration() {
+  const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
+  if (own.version !== 9) return own;
+  return { ...own, version: 10, planBranch: false, versionFiles: [] };
+}
+
 // Every dotted key a script dereferences off the config object, and where.
 const CONSUMED = [
   ["scripts/worktree-setup.mjs", ["worktree.setup", "worktree.copyUntracked", "worktree.setupTimeoutSec"]],
@@ -36,7 +49,7 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "planBranch"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
@@ -172,14 +185,14 @@ test("a version-5 configuration reports stale rather than invalid", async () => 
   assert.match(result.stdout, /run \/tagteam:configure/);
 });
 
-test("a version-9 configuration carrying the old role-keyed effort map is invalid", async () => {
+test("a current-version configuration carrying the old role-keyed effort map is invalid", async () => {
   // The version-8 shape keyed effort by role. A file that kept it under the new
   // version has to fail on the old keys and on the missing new ones, or the
   // resolver reads `effort.reviewer` as undefined and dispatches at nothing.
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 9,
+    version: 10,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { lead: "high", worker: "high", codex: "high" }
   };
@@ -270,8 +283,8 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
     `expected effort.codex: "ultra" to be refused, got: ${codexErrors.join("; ")}`
   );
   const { CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(CONFIG_VERSION, 9, "a Codex effort word joining the ladder is not a new configuration shape");
-  assert.equal(schema.properties?.version?.const, 9);
+  assert.equal(CONFIG_VERSION, 10, "a Codex effort word joining the ladder is not a new configuration shape");
+  assert.equal(schema.properties?.version?.const, 10);
 
   const recheckMax = { ...example, effort: { ...example.effort, recheck: "max" } };
   const recheckErrors = validateJson(schema, recheckMax).filter((error) => error.includes("effort.recheck"));
@@ -372,7 +385,7 @@ test("this repository's own configuration is valid against the current schema", 
   // just shipped the change. tagteam configures itself with tagteam, so its own
   // file is a consumer like any other, and a schema bump has to carry it.
   const { validateJson, semanticErrors } = await import("../scripts/validate-json.mjs");
-  const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
+  const own = ownConfiguration();
   assert.deepEqual(validateJson(schema, own), [], "run /tagteam:configure, or update .tagteam/config.json by hand");
   assert.deepEqual(semanticErrors("config.schema.json", own, {}), []);
   assert.equal(own.version, schema.properties.version.const);
@@ -680,10 +693,12 @@ test("validating the shipped configuration prints the cost note on stderr", () =
   // semanticErrors, or sending it to stdout, leaves every other test in this
   // file green — and commands/configure.md tells the model to show "the validator's
   // own line" rather than restate the arithmetic, so the line has to exist.
+  const carried = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-own-")), "config.json");
+  fs.writeFileSync(carried, JSON.stringify(ownConfiguration()));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"), "--repo", root,
     path.join(root, "schemas", "config.schema.json"),
-    path.join(root, ".tagteam", "config.json")
+    carried
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
   assert.match(result.stdout, /valid/);
@@ -1064,4 +1079,92 @@ test("a version-8 configuration reports stale rather than invalid", () => {
   ], { encoding: "utf8" });
   assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
   assert.match(result.stdout, /run \/tagteam:configure/);
+});
+
+// --- version 10: the plan-branch setting and the version lines ---
+
+const validateFile = (dir, document) => {
+  const file = path.join(dir, "config.json");
+  fs.writeFileSync(file, JSON.stringify(document));
+  return spawnSync("node", [
+    path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
+    path.join(root, "schemas", "config.schema.json"), file
+  ], { encoding: "utf8" });
+};
+
+// A repository holding what the example and the entries below name: the
+// conventions document, a manifest, a changelog, and a symlinked directory.
+function versionRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-v10-"));
+  spawnSync("git", ["-C", dir, "init", "-q"]);
+  fs.writeFileSync(path.join(dir, "CONTRIBUTING.md"), "# Contributing\n");
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ version: "1.2.3" }));
+  fs.mkdirSync(path.join(dir, "real"));
+  fs.writeFileSync(path.join(dir, "real", "VERSION"), "1.2.3\n");
+  fs.symlinkSync(path.join(dir, "real"), path.join(dir, "linked"));
+  return dir;
+}
+
+test("a version-9 configuration is refused as older, with the run-configure exit", () => {
+  // The whole of what version 9 lacks is the two new keys; it is old, not broken.
+  const { planBranch, versionFiles, ...nine } = example;
+  const result = validateFile(versionRepo(), { ...nine, version: 9 });
+  assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stdout, /run \/tagteam:configure/);
+});
+
+test("the example validates at version 10 with the setting off and no version lines", async () => {
+  const { validateJson, CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
+  assert.equal(example.version, 10);
+  assert.equal(CONFIG_VERSION, 10);
+  assert.equal(example.planBranch, false, "examples/config.json must ship the setting off");
+  assert.deepEqual(example.versionFiles, [], "examples/config.json must ship no version lines");
+  assert.deepEqual(validateJson(schema, example), []);
+  assert.equal(validateFile(versionRepo(), example).status, 0);
+});
+
+test("planBranch and versionFiles are required keys, and planBranch is a boolean", () => {
+  const dir = versionRepo();
+  for (const key of ["planBranch", "versionFiles"]) {
+    const { [key]: removed, ...without } = example;
+    const result = validateFile(dir, without);
+    assert.equal(result.status, 1, `a version-10 file without ${key} must be invalid: ${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`\\$\\.${key}: is required`));
+  }
+  for (const wrong of ["true", 1, null]) {
+    const result = validateFile(dir, { ...example, planBranch: wrong });
+    assert.equal(result.status, 1, `planBranch: ${JSON.stringify(wrong)} must be invalid`);
+    assert.match(result.stderr, /planBranch/);
+  }
+});
+
+test("a version line names one file and exactly one locator: a JSON Pointer or a line pattern", () => {
+  const dir = versionRepo();
+  const valid = [
+    { file: "package.json", pointer: "/version" },
+    { file: "package.json", pointer: "/plugins/0/version" },
+    { file: "real/VERSION", pattern: "^(\\d+\\.\\d+\\.\\d+)$" },
+    { file: "real/VERSION", pattern: "^v?(?<version>[0-9.]+)" }
+  ];
+  const ok = validateFile(dir, { ...example, versionFiles: valid });
+  assert.equal(ok.status, 0, `one file may appear more than once, with either locator: ${ok.stderr}`);
+
+  const invalid = [
+    [{ file: "package.json", pointer: "/version", pattern: "(x)" }, "both locators"],
+    [{ file: "package.json" }, "no locator"],
+    [{ pointer: "/version" }, "no file"],
+    [{ file: "package.json", pointer: "version" }, "a pointer that is not a JSON Pointer"],
+    [{ file: "../outside.json", pointer: "/version" }, "a path that leaves the repository"],
+    [{ file: path.join(dir, "package.json"), pointer: "/version" }, "an absolute path"],
+    [{ file: "linked/VERSION", pattern: "(.*)" }, "a path through a symlink"],
+    [{ file: "missing.json", pointer: "/version" }, "a file that is not there"],
+    [{ file: "real/VERSION", pattern: "^\\d+\\.\\d+$" }, "a pattern with no capture group"],
+    [{ file: "real/VERSION", pattern: "^(\\d+)\\.(\\d+)$" }, "a pattern with two capture groups"],
+    [{ file: "real/VERSION", pattern: "^(\\d+" }, "a pattern that does not compile"]
+  ];
+  for (const [entry, why] of invalid) {
+    const result = validateFile(dir, { ...example, versionFiles: [entry] });
+    assert.equal(result.status, 1, `${why} must be invalid: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /versionFiles/, `${why}: the refusal names the key`);
+  }
 });
