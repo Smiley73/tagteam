@@ -365,43 +365,34 @@ test("a differing landing dispatches no resolver either: the base is merged in, 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("the version condition: no lines holds, a plan with no increase waits without Merge, and exactly one increase over the base is Merge", () => {
-  const withVersion = (bump) => stageClean({
-    a: bump ? { "app.js": A_CHANGE, "package.json": "{\n  \"version\": \"1.0.1\"\n}\n" } : { "app.js": A_CHANGE },
+test("the version condition: no lines holds, a plan whose lines are configured is offered Merge only once the ship made its one increase, and the lines are the route's", () => {
+  const staged = stageClean({
     prepare: ({ repo }, config) => {
       commitToMain(repo, { "package.json": "{\n  \"version\": \"1.0.0\"\n}\n" }, "the version");
       config.versionFiles = [{ file: "package.json", pointer: "/version" }];
     }
   });
-  const none = withVersion(false);
-  const waiting = toDialog(none);
-  assert.equal(waiting.json.planLanding.merge, false);
-  assert.equal(waiting.json.planLanding.results.version.status, "failed");
-  assert.match(waiting.json.ask, /package\.json \(\/version\) is 1\.0\.0 here and on main: the plan carries no increase/);
-  assert.match(waiting.json.ask, /Merge is not offered: the version lines are not exactly one increase/);
-  assert.doesNotMatch(waiting.json.ask, /Offer: Merge/);
-  const refusedApproval = ship("plan-land", none.plan, ["--approve", "p@example.com"], none.env);
-  assert.match(refusedApproval.json.say.join("\n"), /Not recording p@example\.com's Merge: .*version lines/);
-  assert.equal(landingRecordOf(none.shipDir).confirmation ?? null, null);
+  const { dir, plan, shipDir, env, configPath } = staged;
   // The lines are the ones the route recorded when it was decided: emptied in
   // the configuration mid-train, they still hold the plan to its increase.
-  assert.deepEqual(trainOf(none.shipDir).route.versionFiles, [{ file: "package.json", pointer: "/version" }]);
-  const emptied = JSON.parse(fs.readFileSync(none.configPath, "utf8"));
-  fs.writeFileSync(none.configPath, JSON.stringify({ ...emptied, versionFiles: [] }, null, 2));
-  const still = ship("plan-land", none.plan, [], none.env);
-  assert.equal(still.status, 0, still.stderr);
-  assert.equal(still.json.planLanding.merge, false, "emptying versionFiles mid-train lifted the version condition");
-  assert.equal(still.json.planLanding.results.version.status, "failed");
-  fs.rmSync(none.dir, { recursive: true, force: true });
-
-  const one = withVersion(true);
-  const offered = toDialog(one);
+  assert.deepEqual(trainOf(shipDir).route.versionFiles, [{ file: "package.json", pointer: "/version" }]);
+  const emptied = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...emptied, versionFiles: [] }, null, 2));
+  // The tip carries no increase yet: the ship makes it before anything about
+  // landing is shown, and the check of that tip follows.
+  const bumped = ship("plan-land", plan, [], env);
+  assert.equal(bumped.status, 0, bumped.stderr);
+  assert.equal(bumped.json.ask, undefined, "the question was put over a tip with no increase");
+  assert.match(bumped.json.next, /plan-check --plan .* --why version$/);
+  assert.equal(ship("plan-check", plan, ["--why", "version"], env).json.wholePlan.status, "clean");
+  const offered = toDialog(staged);
   assert.equal(offered.json.planLanding.merge, true, offered.json.planLanding.withheld.join("; "));
+  assert.equal(offered.json.planLanding.results.version.status, "passed");
   assert.match(offered.json.ask, /package\.json \(\/version\) is 1\.0\.1 here and 1\.0\.0 on main: one patch increase/);
-  const merged = ship("plan-land", one.plan, ["--approve", "p@example.com"], one.env);
+  const merged = ship("plan-land", plan, ["--approve", "p@example.com"], env);
   assert.equal(merged.status, 0, merged.stderr);
-  assert.equal(landingRecordOf(one.shipDir).merged?.by, "ship", merged.stdout);
-  fs.rmSync(one.dir, { recursive: true, force: true });
+  assert.equal(landingRecordOf(shipDir).merged?.by, "ship", merged.stdout);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("the reviewed base is the merge base: a plan that took the base in, and saw it move cleanly again, lands as passed and not as differing", () => {

@@ -290,6 +290,55 @@ flowchart TD
     evaluate -->|"the agent that wrote it never confirmed it finished"| wait
 ```
 
+### Shipping a plan as one
+
+By default every spec of a plan merges into the base branch as soon as its own
+gates allow, so a plan half-shipped is half on `main`. Turn on `planBranch` in
+`/tagteam:configure` and a plan of two or more specs ships as one instead:
+
+- Its specs collect on a branch of their own, `plan/<slug>`. Each is still its
+  own pull request, into that branch, reviewed and gated exactly as above, and
+  `autoMerge` still decides those merges. Nothing from the plan reaches the base
+  until the end.
+- Before each spec starts, the base is tried against the plan's branch. When it
+  no longer merges cleanly, an agent resolves that one merge, the review panel
+  reads what it resolved, and the ship pushes the merge commit itself. The plan's
+  branch is never rebased.
+- After the last spec, the whole plan is checked as one change: every verify
+  command, and one reviewer reading how the specs fit together. What it finds is
+  fixed as one more small pull request into the plan's branch.
+- Then the plan reaches the base through one final pull request, merged with a
+  merge commit at exactly the commit that was checked, so each spec keeps its own
+  commit in the base's history. **A person confirms that merge every time**,
+  whatever `autoMerge` says: you are shown what lands, the plan's checks, the
+  check against the base as it is now, and what the plan lands as, and you
+  answer Merge, Leave open, or Stop. Merge is offered only when nothing shown
+  fails. Leaving it open ends the run, and `/tagteam:ship` on the plan brings the
+  same question back.
+
+The repository has to allow merge commits into the base, and its checks have to
+run on pull requests into the plan's branch; the ship says so plainly when
+either is not the case, and changing it is a repository setting for you.
+
+**The version.** List the lines that carry your version in `versionFiles` —
+configure proposes them — and a plan of two or more specs carries exactly one
+increase of them: a patch, unless the plan document says `Version increase:
+minor` under its title. The ship makes it itself, as the last commit on the
+plan's branch, once the whole plan is checked, from the base's version at that
+moment, and the question names it ("lands as 0.10.6 → 0.10.7"). A spec that
+changes a version line on the plan's branch stops before it is published, since
+the increase is the ship's. If another plan lands first, the ship notices that
+the base's version moved — it compares the numbers, because two plans raising
+the same number merge without any conflict — merges the base in, and makes the
+increase again over it. So two plans of two or more specs that land one after
+the other never land the same number. A plan of one spec goes straight to the
+base, as it always did, and keeps your repository's own habit for its version:
+it is outside that guarantee and can collide with a plan landing beside it. The
+guarantee is one checkout's: two people confirming two plans from two machines
+within seconds are guarded only by your repository's own rule that a branch be
+up to date before it merges, a setting you change on GitHub. An empty
+`versionFiles` makes no increase at all.
+
 After each spec, `/tagteam:status` can say what it cost: tagteam reads the
 session transcripts Claude Code keeps and reports the spend as input-token
 equivalents, split between the orchestrating agent and the agents it dispatched.
@@ -399,7 +448,8 @@ The diagrams in this file are Mermaid source. GitHub renders them, and changing
 one is a text edit here, with no image files to regenerate.
 
 A repository that calibrates its own lenses needs plugin 0.8.2 or newer
-**everywhere it is run**, and one configured at version 9 needs 0.9.0 or newer.
+**everywhere it is run**, one configured at version 9 needs 0.9.0 or newer, and
+one configured at version 10 needs 0.10.6 or newer.
 Commit a brief and the roster entry that names it in the same commit, and
 refresh the plugin below.
 

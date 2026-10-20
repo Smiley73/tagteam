@@ -57,6 +57,15 @@ worded as a review would word it.
   `AGENTS.md`, or `docs/` equivalents.
 - **reviewExclude** — lock files, snapshots, and generated directories present in
   the tree.
+- **versionFiles** — the lines that carry this repository's version, for
+  question 11 to propose. Read the manifests the repository has — `package.json`,
+  `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
+  `pyproject.toml`, `Cargo.toml`, a bare `VERSION` file — and keep those whose
+  versions agree with each other. A JSON file is named by a JSON Pointer:
+  `/version`, or into a plugin manifest's list, `/plugins/0/version`. Any other
+  file by a line pattern with exactly one capture group, such as
+  `^version = "([^"]+)"$` or `^(\d+\.\d+\.\d+)$`. Each must find exactly one
+  plain `MAJOR.MINOR.PATCH` value; a pre-release or build suffix is not one.
 - **ciWaitSec** — `0` unless `.github/workflows/` holds at least one workflow.
   There is no CI to wait for in a repository that has none, and a non-zero value
   there makes every single pull request stop for a person on
@@ -166,6 +175,26 @@ names, internal ids. See *Asking* in the skill.
 
     This is a question, not a default, because it is the only setting that
     decides what the tool spends and how often it hands work back.
+11. `planBranch` — whether a plan of two or more specs ships as one: its specs
+    collect on a branch of its own, each still its own reviewed pull request
+    into that branch, the whole plan is checked as one change after its last
+    spec, and it lands on the base through one final pull request that a person
+    confirms every time, whatever `autoMerge` says. Off, every spec merges into
+    the base as soon as it is ready, as now. Say that a plan of one spec goes
+    straight to the base either way, that a plan already started keeps the route
+    it started with, and that the repository has to allow merge commits and run
+    its checks on pull requests into the plan's branch. Offer off first.
+
+    When it is on, the version files ride in the next call, as a follow-up only
+    that answer needs: show what *Infer first* found for `versionFiles` and ask
+    whether those are the lines that carry this repository's version. Each line
+    listed gets the plan's one increase — a patch, or a minor one when the plan
+    says so — made by the ship once the plan is checked, and a spec that changes
+    one of them stops; an empty list means a plan makes no increase. Say that two
+    plans of two or more specs never land the same number, and that a plan of
+    one spec keeps this repository's own habit for its version and can collide.
+    With the setting off, nothing is asked: write the list the file already
+    has, or an empty one.
 
 Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
@@ -212,8 +241,9 @@ anything, so those files stay in history until someone runs `git rm --cached` on
 them, and this command will not do that on its own.
 
 Then show the file and say what it means: which commands prove a candidate, which
-lenses read every spec, which jobs think how hard, and whether merges happen
-without asking. The validator prints a `note:` line giving the worst-case cost
+lenses read every spec, which jobs think how hard, whether merges happen
+without asking, and whether a plan ships as one — and if it does, which lines
+carry its one version increase. The validator prints a `note:` line giving the worst-case cost
 the limits commit this repository to; show that line as it came out rather than
 restating the arithmetic. It prints a second `note:` when this repository
 calibrates lenses of its own, and `warning:` lines for each one that replaces a
@@ -273,19 +303,20 @@ Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; there is no fallback anywhere, so an omitted key is an invalid
 file rather than an unused feature.
 
-Write `planBranch` as `false` and `versionFiles` as `[]`, explicitly and without
-asking about either: this version of the command has no question for them. Under
-`--reconfigure` of a version-10 file both keep the values the file already has,
-so a setting or a list someone wrote in by hand is not reset.
+Write `planBranch` and `versionFiles` as question 11 answered them, explicitly:
+there is no fallback for either. Under `--reconfigure` of a version-10 file both
+are offered back with the values the file already has, so a setting or a list
+someone wrote in by hand is not reset.
 
 A version-9 configuration is carried forward, not replaced. Run the interview as
 `--reconfigure` does, with every value the file holds offered back as the
 default, and say what version 10 adds: `planBranch`, whether a plan of two or
 more specs collects its specs' pull requests on a branch of its own before
-anything reaches the base, written off; and `versionFiles`, the lines that carry
-this repository's version, written empty. Off and empty, nothing about how a
-plan ships changes. Answering every question as before writes the old file with
-those two keys added and nothing else different.
+anything reaches the base, offered off; and `versionFiles`, the lines that carry
+this repository's version, asked about only when that is on. Off and empty,
+nothing about how a plan ships changes. Answering every question as before, and
+leaving the setting off, writes the old file with those two keys added and
+nothing else different.
 
 A configuration older than version 9 is not upgraded — each of those versions is
 a different shape, not an extension. Say that the old file is being replaced.

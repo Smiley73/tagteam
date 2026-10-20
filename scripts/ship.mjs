@@ -58,7 +58,10 @@ import {
 import {
   checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, planBodyPath, readPlanLanding, resultsFor, savePlanLanding, withholding
 } from "./lib/plan-landing.mjs";
-import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
+import {
+  baseVersionAt, changedLinesAt, declaredIncrease, describeEntry, nextVersion, readLinesAt, resetValuesAt, scriptedMergeProblem,
+  setVersionText, versionConditionAt, versionLines, versionOnlyAt
+} from "./lib/version-lines.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
@@ -69,7 +72,8 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import {
-  confirmPending, decideRoute, isPlanRoute, judgeTip, landingBranch, recordMerge, recordPending, versionFilesOf, writeRoute
+  clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
+  recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
 } from "./lib/plan-route.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -942,8 +946,10 @@ async function originTipOf(ctx, branch) {
  * without knowing what it was. A run that dies after the push finds its own
  * commit on origin and `judgeTip` settles it.
  */
-async function pushToPlanBranch(ctx, oid) {
-  recordPending(ctx.trainPath, oid);
+async function pushToPlanBranch(ctx, oid, { recorded = false } = {}) {
+  // `recorded` is a commit already written down as pending, with whatever else
+  // that one write had to carry — the version commit and its increase.
+  if (!recorded) recordPending(ctx.trainPath, oid);
   ctx.train = readJson(ctx.trainPath);
   await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["push", "origin", `${oid}:refs/heads/${routeOf(ctx).branch}`]));
   confirmPending(ctx.trainPath, oid);
@@ -1200,8 +1206,9 @@ function mergeCommitRefusals(ctx, base, say) {
 // plan's final merge commit, and — for a route not yet recorded — a branch of
 // the same name already on origin. Run on every start of a plan-route train,
 // because a repository's settings can change in the middle of a plan.
-async function planRouteRefusals(ctx, order, route, fresh, say) {
+async function planRouteRefusals(ctx, order, route, fresh, say, { reads = false } = {}) {
   planRefRefusals(ctx, order, route, fresh);
+  if (reads) await versionListRefusals(ctx, route);
   const reasons = mergeCommitRefusals(ctx, route.base, say);
   if (reasons.length > 0) {
     throw new Stop(`${route.branch} could never land on ${route.base}: ${reasons.join("; ")}. A plan branch reaches ${route.base} `
@@ -1311,6 +1318,80 @@ function settleWorktree(ctx) {
   if (exists(ctx.worktree) && mergeInProgress(ctx)) git(ctx.worktree, ["merge", "--abort"]);
 }
 
+// The version lines this train's route recorded; none for a route that has none.
+const routeEntries = (ctx) => versionFilesOf(routeOf(ctx)) ?? [];
+
+/**
+ * The one place every merge of the base into the plan branch starts: the
+ * worktree detached at the plan tip, `merge --no-ff --no-commit <baseOid>`, and
+ * the version step before anything reads what the merge left. A resolve
+ * attempt, the merge of the base after a failed or differing landing, and the
+ * merge the version increase needs first all begin here, so every one of them
+ * has its version lines set to the base's values by the script, and none by a
+ * resolver. Returns what still conflicts, with the merge left in progress, and
+ * what the version step did.
+ */
+function startBaseMerge(ctx, { tip, baseOid }) {
+  git(ctx.worktree, ["checkout", "--detach", tip]);
+  const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", baseOid], { allowFailure: true });
+  if (!mergeInProgress(ctx)) {
+    throw new Stop(`git merge of ${short(baseOid)} into ${short(tip)} did not start: ${(merging.stderr || merging.stdout || "").trim()}`);
+  }
+  let reset;
+  try { reset = versionStep({ worktree: ctx.worktree, entries: routeEntries(ctx), baseOid }); } catch (error) {
+    settleWorktree(ctx);
+    throw new Stop(error.message);
+  }
+  const unmerged = git(ctx.worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
+  return { unmerged, reset };
+}
+
+// What the version step did to a merge, in a person's terms, or nothing.
+function resetLine(ctx, reset) {
+  const route = routeOf(ctx);
+  const touched = [...(reset?.settled ?? []), ...(reset?.set ?? [])];
+  if (touched.length === 0) return "";
+  const settled = reset.settled ?? [];
+  return ` The version lines in ${listOf(touched)} are set to ${route.base}'s values by the ship`
+    + (settled.length > 0 ? `, which is all that conflicted in ${listOf(settled)}` : "")
+    + "; the plan's one increase goes back on top once the plan is checked again.";
+}
+
+/**
+ * Commit a merge of the base that nothing is left conflicted in, with no
+ * resolver, from the index: tracked paths only, through guard-staged, and with
+ * `commit-tree`, so the commit is named by the call that made it. Before it is
+ * made, its tree is checked to be exactly git's own merge with the configured
+ * version lines set to the base's values — the remerge view of the commit,
+ * touching nothing but those lines — and anything more is a stop, never a
+ * commit. Returns the merge commit, with the worktree on it.
+ */
+function commitScriptedMerge(ctx, { tip, baseOid }, outcome) {
+  const route = routeOf(ctx);
+  git(ctx.worktree, ["add", "-u"]);
+  node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
+  const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
+  const problem = scriptedMergeProblem(ctx.repo, { entries: routeEntries(ctx), tipOid: tip, baseOid, tree });
+  if (problem) {
+    settleWorktree(ctx);
+    throw new Stop(`the merge of ${route.base} at ${short(baseOid)} into ${route.branch} at ${short(tip)} was to be committed with no `
+      + `resolver, as git's own merge with the version lines set to ${route.base}'s values, and it is not only that: ${problem}. `
+      + `Nothing was committed or pushed, and ${outcome}.`);
+  }
+  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", `Merge ${route.base} into ${route.branch}`]).stdout.trim();
+  git(ctx.worktree, ["merge", "--quit"]);
+  git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
+  return oid;
+}
+
+// After a merge of the base is on the plan branch: the version lines are the
+// base's, and no increase is on it any more.
+function forgetIncrease(ctx) {
+  if (!routeOf(ctx).bump) return;
+  clearIncrease(ctx.trainPath);
+  ctx.train = readJson(ctx.trainPath);
+}
+
 // What the person is told when a round stops, said again word for word when
 // `begin` meets a spent round's pair a second time. A stop with attempts left
 // says that `begin` takes the next one; a spent one, that it does not.
@@ -1370,7 +1451,9 @@ function previousLines(previous) {
         ? `a reviewer produced no usable evidence about it; the review is ${previous.carry.file}`
         : kind === "stopped"
           ? `the round stopped on it for a person, who then had this attempt taken — ${previous.carry.explanation.replace(/\.$/, "")}`
-          : `it left ${(previous.carry?.paths ?? []).join(", ")} unresolved — committed with conflict markers still in it`;
+          : kind === "version"
+            ? `it changed ${(previous.carry.lines ?? []).join(", ")} away from the value the ship had set, and version lines are the ship's`
+            : `it left ${(previous.carry?.paths ?? []).join(", ")} unresolved — committed with conflict markers still in it`;
   return [`Attempt ${previous.k} was thrown away: ${what}. This attempt starts again from the plan tip.${commit}`];
 }
 
@@ -1387,6 +1470,11 @@ function resolverDispatch(ctx, record, attempt, job, previous) {
         + "and do not switch anything: the run commits the merge itself.",
       `Conflicted paths (resolve exactly these, and leave every other file as the merge left it): ${attempt.conflicts.join(", ")}`,
       `The plan's specs: ${specsInOrder(ctx).map((spec) => spec.path).join(", ")}`,
+      ...(routeEntries(ctx).length > 0
+        ? [`The configured version lines — ${routeEntries(ctx).map(describeEntry).join(", ")} — are the ship's, and this merge already `
+          + `has each set to ${record.base}'s value: leave every one exactly as it is, inside a conflict you resolve as well. An `
+          + "attempt that changes one fails."]
+        : []),
       `Brief (what the reviewers are told this change is): ${resolveBriefPath(ctx, record.n)}`,
       ...previousLines(previous),
       `Worktree (work only beneath this path): ${ctx.worktree}`,
@@ -1422,10 +1510,17 @@ async function openRound(ctx, {
   // The brief first: a record saved before it would name a file that a crash in
   // between left absent, for the resolver and every reader to be pointed at.
   const merged = new Set(specsInOrder(ctx).filter((entry) => exists(statePath(ctx, entry.id)) && readState(ctx, entry.id).state === "merged").map((entry) => entry.id));
+  const entries = routeEntries(ctx);
   const brief = resolveBrief({
     base: record.base, baseOid, branch: record.branch, planTip, conflicts,
     specs: specsInOrder(ctx).map((entry) => ({ id: entry.id, path: entry.path, merged: merged.has(entry.id) })),
-    ...(purpose ? { held: purpose } : {})
+    ...(purpose ? { held: purpose } : {}),
+    extra: entries.length > 0
+      ? [`The configured version lines — ${entries.map(describeEntry).join(", ")} — are the ship's. In every merge of ${record.base} `
+        + `into ${record.branch} it sets them to ${record.base}'s values before anything else is resolved, and puts the plan's one `
+        + `increase back on top once the plan is checked again. A hunk in this view that sets one of them to ${record.base}'s value `
+        + "is the ship's and is not a finding."]
+      : []
   });
   fs.mkdirSync(resolveDirOf(ctx, n), { recursive: true, mode: 0o700 });
   fs.writeFileSync(resolveBriefPath(ctx, n), brief, { mode: 0o600 });
@@ -1474,24 +1569,24 @@ async function takeAttempt(ctx, record, say = []) {
     throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and resolve round ${record.n} has to start a merge `
       + "there; commit it through the spec that owns it or clear it, then run begin again");
   }
-  git(ctx.worktree, ["checkout", "--detach", record.planTip]);
-  const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", record.baseOid], { allowFailure: true });
-  if (!mergeInProgress(ctx)) {
-    throw new Stop(`git merge of ${record.baseOid.slice(0, 12)} into ${record.planTip.slice(0, 12)} did not start: `
-      + `${(merging.stderr || merging.stdout || "").trim()}`);
-  }
-  try { versionStep({ worktree: ctx.worktree }); } catch (error) {
-    settleWorktree(ctx);
-    throw new Stop(error.message);
-  }
   // Read after the version step and never from the dry run: what the resolver is
   // handed, and what coverage is checked against, is what the index still has
   // unmerged once the ship has set what is the ship's to set.
-  attempt.conflicts = git(ctx.worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
+  const started = startBaseMerge(ctx, { tip: record.planTip, baseOid: record.baseOid });
+  attempt.conflicts = started.unmerged;
   if (attempt.conflicts.length === 0) {
-    settleWorktree(ctx);
-    throw new Stop(`the version step left nothing conflicted in the merge of ${record.base} into ${record.branch}, and what `
-      + "happens then is not decided yet; nothing was committed or pushed");
+    // Only version lines conflicted, and the version step settled them to the
+    // base's side: there is nothing for a resolver, and no resolution for a
+    // panel to read. The merge is the script's, checked to be git's own merge
+    // with those lines set; verify and the whole-plan check of the tip it makes
+    // stand in for the panel, since a version line has one right answer.
+    attempt.mergeOid = commitScriptedMerge(ctx, { tip: record.planTip, baseOid: record.baseOid }, record.held);
+    attempt.scripted = true;
+    attempt.phase = "pushing";
+    saveRecord(ctx, record);
+    say.push(`Resolve attempt ${attempt.k}: nothing but version lines conflicted, and the ship set them to ${record.base}'s values `
+      + `itself, so no resolver is sent.${resetLine(ctx, started.reset)}`);
+    return pushResolution(ctx, record, attempt, say);
   }
   // Which of them git wrote markers into, read off the worktree as the merge left
   // it: only those have an unresolved form for coverage to find. A binary file or
@@ -1581,6 +1676,7 @@ async function pushResolution(ctx, record, attempt, say) {
         + `${record.branch} on origin is still where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
     }
   }
+  forgetIncrease(ctx);
   record.status = "passed";
   record.pushed = attempt.mergeOid;
   record.closedAt = new Date().toISOString();
@@ -1694,6 +1790,55 @@ function sessionOf(ctx) {
   }
 }
 
+// The route `decideRoute` gives, with the kind of increase the plan document
+// declares read the first time a plan route needs it — a new route, or one
+// recorded before routes kept it — and never again: a plan document edited
+// mid-train does not change the increase an earlier spec was checked under.
+// `reads` says whether this decision takes the version lines and the
+// declaration for the first time, which is when the lines are checked.
+function decideTrainRoute(ctx, order) {
+  const recorded = ctx.train?.route ?? null;
+  const decided = decideRoute({
+    recorded, planBranch: ctx.config.planBranch, specCount: order.length,
+    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base,
+    versionFiles: ctx.config.versionFiles
+  });
+  if (!isPlanRoute(decided.route)) return { ...decided, reads: false };
+  const reads = decided.why === "new" || versionFilesOf(recorded) === null || declaredIncreaseOfRoute(recorded) === null;
+  if (declaredIncreaseOfRoute(decided.route) !== null) return { ...decided, reads };
+  return { ...decided, route: withIncrease(decided.route, planDeclaration(ctx)), reads };
+}
+
+// The plan document's one line about its version increase, e.g.
+// `Version increase: minor`; none is a patch increase, and anything else stops.
+function planDeclaration(ctx) {
+  const file = path.join(ctx.plan, "plan.md");
+  let text = "";
+  try { text = fs.readFileSync(file, "utf8"); } catch {}
+  const declared = declaredIncrease(text);
+  if (declared.problem) {
+    throw new Stop(`${file} cannot ship through a plan branch as it is: ${declared.problem}. Nothing was created; correct that line and `
+      + "run start again.");
+  }
+  return declared.kind;
+}
+
+// The version lines a plan route is about to take, checked where they are read
+// from: on the base, each has to name exactly one MAJOR.MINOR.PATCH value, and
+// they have to agree. A schema cannot see any of that; found out at the increase,
+// it would be a plan that cannot land, with every spec of it already merged.
+async function versionListRefusals(ctx, route) {
+  const entries = versionFilesOf(route) ?? [];
+  if (entries.length === 0) return;
+  await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["fetch", "origin", "--prune"]));
+  const baseOid = git(ctx.repo, ["rev-parse", `origin/${route.base}`]).stdout.trim();
+  const found = baseVersionAt(ctx.repo, { entries, baseOid, where: `${route.base} at ${short(baseOid)}` });
+  if (found.problem) {
+    throw new Stop(`${route.branch} would carry this plan's one version increase, and ${found.problem}. The lines are versionFiles in `
+      + ".tagteam/config.json: correct the entry, or the files on the base, and run start again. Nothing was created.");
+  }
+}
+
 // The route as far as it can be told before the lock, and its refusals when it is
 // a plan branch. Nothing is read for a train that can only be on the base — the
 // setting off and nothing recorded, or the base recorded — so a repository that
@@ -1703,13 +1848,9 @@ async function routePreflight(ctx, say) {
   const recorded = ctx.train?.route ?? null;
   if (recorded ? !isPlanRoute(recorded) : ctx.config.planBranch !== true) return null;
   const order = specsInOrder(ctx);
-  const { route, why } = decideRoute({
-    recorded, planBranch: ctx.config.planBranch, specCount: order.length,
-    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base,
-    versionFiles: ctx.config.versionFiles
-  });
+  const { route, why, reads } = decideTrainRoute(ctx, order);
   if (!isPlanRoute(route)) return null;
-  await planRouteRefusals(ctx, order, route, why === "new", say);
+  await planRouteRefusals(ctx, order, route, why === "new", say, { reads });
   return route;
 }
 
@@ -1839,13 +1980,9 @@ async function start(options) {
   // The route, decided once and from then on read back: whatever `start` wrote
   // the first time is what every later `start` writes again. Decided from the
   // train as it is now, past the lock, for the same reason as the session.
-  const decided = decideRoute({
-    recorded: ctx.train?.route ?? null, planBranch: ctx.config.planBranch, specCount: order.length,
-    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base,
-    versionFiles: ctx.config.versionFiles
-  });
+  const decided = decideTrainRoute(ctx, order);
   if (isPlanRoute(decided.route) && !isPlanRoute(preflight)) {
-    await planRouteRefusals(ctx, order, decided.route, decided.why === "new", say);
+    await planRouteRefusals(ctx, order, decided.route, decided.why === "new", say, { reads: decided.reads });
   }
   // A new plan branch is recorded before it is pushed, at the commit it is about
   // to be created at, so a run that dies in between creates it on the rerun.
@@ -2107,6 +2244,47 @@ function afterSpecs(ctx, from = null) {
   return nextCommand(ctx, "plan-check", null, why);
 }
 
+/**
+ * A spec or a whole-plan fix on the plan branch that changes a configured
+ * version line stops here — at its snapshot before a round is made for it, before
+ * its panel is sent, and again before it merges: the plan's one increase is the ship's, made once the whole plan is
+ * checked, and a spec that raised it too would land two. Each line is compared
+ * by its value at the reviewed base and at the candidate, never by the paths the
+ * change touches, so a dependency added to `package.json` goes on. A spec on the
+ * base never comes here. Returns the payload that stops it, or null.
+ */
+function versionLineStop(ctx, id, state, step) {
+  const route = routeOf(ctx);
+  if (!isPlanRoute(route) || state.base !== route.branch || !state.candidateOid || !state.baseOid) return null;
+  const entries = versionFilesOf(route) ?? [];
+  if (entries.length === 0) return null;
+  const changed = changedLinesAt(ctx.repo, { entries, fromOid: state.baseOid, toOid: state.candidateOid });
+  if (changed.length === 0) return null;
+  const what = changed.map((line) => `${line.file} line ${line.line ?? "?"} (${line.locator}) reads ${line.after ?? "nothing"} at `
+    + `${short(state.candidateOid)} and ${line.before ?? "nothing"} on ${route.branch} at ${short(state.baseOid)}, where ${id} began`);
+  const unit = isFixUnitId(id) ? "whole-plan fix" : "spec";
+  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "it changes a version line"], { stdio: "ignore" });
+  const back = listOf(changed.map((line) => `${line.file} (${line.locator}) to ${line.before ?? "what it was"}`));
+  const snapshotCommand = nextCommand(ctx, "snapshot", id);
+  const end = nextCommand(ctx, "end", null);
+  const remedy = step === "finish"
+    ? `Nothing was merged, and the pull request${state.pr?.number ? ` #${state.pr.number}` : ""} stays open. It cannot merge while it `
+      + `changes the version: the change has to come out of ${state.branch}, and is then a new commit the cycle reviews. Offer: stop `
+      + `the train (run ${end}) and take the version change out of the pull request.`
+    : `Nothing was published, and no round was made for this commit. Set ${back} again in the worktree at ${ctx.worktree}, keep the `
+      + `rest of the change, and run snapshot again (${snapshotCommand}): the corrected commit is the round this one would have been, `
+      + `so the correction costs no fix round of its own. Offer: correct it and run snapshot, or stop the train (run ${end}).`;
+  return {
+    say: [`${id} changes ${changed.length > 1 ? "version lines" : "a version line"}: ${what.join("; ")}.`],
+    ask: `${id} changes ${changed.length > 1 ? "version lines" : "a version line"} on ${route.branch}, which a ${unit} of this plan never `
+      + "does: the plan's one version increase is the ship's own, made once the whole plan is checked, and a change that raised it "
+      + `too would land two. ${remedy}`,
+    versionLines: changed.map(({ file, locator, line, before, after }) => ({ file, locator, line, base: before, candidate: after })),
+    answers: step === "finish" ? { end } : { snapshot: snapshotCommand, end },
+    next: end
+  };
+}
+
 function fixReportLines(report) {
   const lines = [];
   for (const outcome of report.outcomes ?? []) lines.push(`  ${outcome.id}: ${outcome.outcome} — ${outcome.note}`);
@@ -2242,6 +2420,14 @@ async function snapshot(options) {
   }
   const oid = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
 
+  // A commit that changes a version line on the plan branch is stopped before a
+  // round is allocated for it, so the correction the stop asks for is the round
+  // this commit would have been — never a fix round of its own, and never one
+  // the cycle's budget no longer has. The fix marker and the report stay where
+  // they are for the snapshot that takes the correction.
+  const versionStop = versionLineStop(ctx, id, { ...state, baseOid: ctx.baseOid, candidateOid: oid }, "snapshot");
+  if (versionStop) return done({ ...versionStop, candidate: oid });
+
   // Every snapshot rebuilds a review — a new commit's, or a re-entered round's
   // — and an accept was about the review as it stood when it was given. A
   // resumed run that re-enters the round would otherwise carry the accept into
@@ -2344,6 +2530,8 @@ async function panel(options) {
   const spec = specById(ctx, id);
   let state = readState(ctx, id);
   refuseWhileWaiting(id, state, "panel");
+  const versionStop = versionLineStop(ctx, id, state, "panel");
+  if (versionStop) return emit(versionStop);
   if (state.state !== "reviewing") transition(ctx, id, "reviewing");
   state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
@@ -3094,6 +3282,17 @@ async function resolveCommit(options) {
     // a rerun finds changed since is what an interrupted verify run wrote.
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", merge]);
 
+    // The version lines were set to the base's values before the resolver was
+    // sent, and they are the ship's: an attempt that moved one is thrown away.
+    const values = resetValuesAt(ctx.repo, { entries: routeEntries(ctx), baseOid: record.baseOid });
+    const moved = readLinesAt(ctx.repo, { entries: routeEntries(ctx), oid: merge })
+      .filter((line) => values.get(line.entry) !== null && line.value !== values.get(line.entry))
+      .map((line) => `${describeEntry(line.entry)}, which reads ${line.value ?? "nothing"} and not ${values.get(line.entry)}`);
+    if (moved.length > 0) {
+      return emit(await failAttempt(ctx, record, attempt, { kind: "version", lines: moved },
+        `it changed ${listOf(moved)} — a version line the ship had set to ${record.base}'s value, which no resolution changes`, say));
+    }
+
     // A merge whose tree is the plan tip's brings nothing of the base in: every
     // change the base made is dropped or was already there. There is no change
     // for verify to select on or for a round to hold, and the snapshot would
@@ -3315,6 +3514,26 @@ async function sendWholePlanReviewer(ctx, record, { resend = false } = {}) {
   return { dispatch, sent, job };
 }
 
+/**
+ * Whether `tip` is the ship's version commit and nothing else over a tip with a
+ * clean whole-plan check: the increase the route recorded is that commit, it has
+ * one parent, that parent's check is clean, and the change between the two is
+ * the configured version lines and not a byte more. Then the parent's review
+ * speaks for the tip, and `{ from, check }` names it; otherwise null, and the
+ * tip is checked in full. A fix on top of the increase is not this, and is.
+ */
+function versionCarry(ctx, tip, records) {
+  const route = routeOf(ctx);
+  const entries = versionFilesOf(route) ?? [];
+  if (entries.length === 0 || route.bump?.oid !== tip) return null;
+  const parents = git(ctx.repo, ["rev-parse", `${tip}^@`]).stdout.split("\n").filter(Boolean);
+  if (parents.length !== 1) return null;
+  const clean = records.filter((entry) => isCleanFor(entry, parents[0])).at(-1);
+  if (!clean) return null;
+  if (!versionOnlyAt(ctx.repo, { entries, fromOid: parents[0], toOid: tip }).versionOnly) return null;
+  return { from: parents[0], check: clean.n };
+}
+
 // Why a check runs when nobody said: the first is the last spec's, one after a
 // fix unit that merged is that unit's, and anything else is a tip that moved.
 function whyNow(ctx, records) {
@@ -3506,7 +3725,7 @@ async function planCheck(options) {
     record = saveCheck(ctx.shipDir, {
       n: nextCheckNumber(ctx.shipDir), branch: route.branch, base: route.base, tip, baseOid, mergeBase: found.stdout.trim(),
       why: options.why ?? whyNow(ctx, records), phase: "started", verify: null, review: null, units: [], status: null, reason: null,
-      startedAt: new Date().toISOString()
+      carry: versionCarry(ctx, tip, records), startedAt: new Date().toISOString()
     });
     say.push(`Whole-plan check ${record.n} of ${route.branch} at ${tip.slice(0, 12)} — ${WHY[record.why]}: every verify command, whatever `
       + `its \`when\`, and one reviewer over the plan's combined change since ${record.mergeBase.slice(0, 12)}, where it last met ${route.base}.`);
@@ -3554,6 +3773,23 @@ async function planCheck(options) {
   }
   say.push(`Verification of the plan's tip, every command: ${record.verify.status}${record.verify.status === "not-applicable" ? " — none is configured, which is recorded as that and not as a pass" : ""}.`);
   for (const command of record.verify.commands ?? []) say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+
+  // The ship's version commit and nothing else, over a tip whose check is clean:
+  // that check's review speaks for this tip too, and names the tip it read. Only
+  // verify ran again, here, on this tip; the landing check runs on it as well.
+  // A verify that did not pass gets the reviewer like any other tip.
+  if (record.carry && record.verify?.tip === tip && ["passed", "not-applicable"].includes(record.verify.status)) {
+    const clean = records.find((entry) => entry.n === record.carry.check);
+    record.review = {
+      lens: WHOLE_PLAN_LENS, tip: record.carry.from, status: "clean", set: null, resendSet: null,
+      findings: clean?.review?.findings ?? null, toFix: clean?.review?.toFix ?? null, counts: clean?.review?.counts ?? null,
+      carried: { check: record.carry.check, tip: record.carry.from }
+    };
+    say.push(`${short(tip)} is the ship's version commit and nothing else, over ${short(record.carry.from)}, whose whole-plan check `
+      + `${record.carry.check} is clean: that review is carried to this tip and no reviewer is sent, since a version line is the ship's `
+      + "and has one right answer. Every verify command ran on this tip, and the landing check runs on it too.");
+    return emit(closeCheck(ctx, record, "clean", null, say));
+  }
 
   const { dispatch, sent, job } = await sendWholePlanReviewer(ctx, record);
   record.review = { lens: WHOLE_PLAN_LENS, tip, status: null, set: sent.id, resendSet: null, findings: null, toFix: null, counts: null };
@@ -3618,7 +3854,8 @@ async function planCollect(options) {
 //
 //   1  every spec merged, the hand-push check on the tip, and a clean
 //      whole-plan result for that tip — without one, the check runs first
-//   2  the one step where the tip becomes final (empty here; see `finalTipStep`)
+//   2  the one step where the tip becomes final: the plan's one version
+//      increase, or the merge of the base it needs first (see `finalTipStep`)
 //   3  the plan pull request opened or updated, heading at the tip
 //   4  its checks waited for, as a spec's are; a red one is a whole-plan fix
 //   5  the landing check of the tip against the base as it now stands, routed
@@ -3653,10 +3890,10 @@ function saveLanding(ctx, record) {
   return record;
 }
 
-// The kind of the plan's one version increase. Patch until the plan's own
-// increase records another; the dialog, `merge.mjs` and the increase read it
-// from the same record.
-const increaseOf = (record) => record.increase ?? "patch";
+// The kind of the plan's one version increase, as the route recorded it when the
+// train started: the dialog, `merge.mjs` and the increase read it from the same
+// record, and never from the plan document as it is now.
+const increaseOf = (ctx) => declaredIncreaseOfRoute(routeOf(ctx)) ?? "patch";
 
 // Where the base is right now, fetched first under the primary checkout's mutex.
 async function currentBase(ctx) {
@@ -3736,11 +3973,37 @@ function bodyFacts(ctx, file) {
     if ((state.fixRoundsUsed ?? 0) >= limits.fixRounds) spent.push(`${unit.id} used every fix round limits.fixRounds allows`);
   }
   if (fixes.length >= limits.ciRepairs) spent.push(`the plan made every whole-plan fix limits.ciRepairs allows (${fixes.join(", ")})`);
+  // What the plan lands as is said in the body by the ship itself, under the
+  // Summary heading, as the increase stands when the body is sent: a body
+  // written before the base moved and the increase was made again would
+  // otherwise name a number the plan no longer lands as.
+  const landsAs = landsAsOf(ctx, routeOf(ctx).tipOid);
   return {
     path: file, shape: ["## Summary", "## What you can now do", "## Risk"],
     goal: path.join(ctx.plan, "goal.md"), plan: path.join(ctx.plan, "plan.md"),
-    lands: landsList(ctx), spent
+    lands: landsList(ctx), spent,
+    ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {})
   };
+}
+
+// The line the plan pull request's body carries about the version it lands as.
+const landsAsLine = (landsAs) => `This plan lands as version ${landsAs}.`;
+
+// The body as it is sent: the orchestrator's, with the version line under its
+// Summary heading — or above everything, when it has none — while the plan
+// carries an increase. Written beside the orchestrator's file, which is left as
+// it was written.
+function sentBody(ctx, text, tip) {
+  const landsAs = landsAsOf(ctx, tip);
+  if (!landsAs) return { text, file: planBodyPath(ctx.shipDir) };
+  const line = landsAsLine(landsAs);
+  const summary = /^## Summary[ \t]*\r?$/m.exec(text);
+  const composed = summary
+    ? `${text.slice(0, summary.index + summary[0].length)}\n\n${line}\n${text.slice(summary.index + summary[0].length).replace(/^\r?\n?/, "\n")}`
+    : `${line}\n\n${text}`;
+  const file = path.join(landingRoot(ctx.shipDir), "pr-body.sent.md");
+  fs.writeFileSync(file, composed, { mode: 0o600 });
+  return { text: composed, file };
 }
 
 /**
@@ -3762,17 +4025,17 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
       body: bodyFacts(ctx, file), next: nextCommand(ctx, "plan-land", null)
     };
   }
-  const text = fs.readFileSync(file, "utf8");
-  const hash = createHash("sha256").update(text).digest("hex");
+  const sent = sentBody(ctx, fs.readFileSync(file, "utf8"), tip);
+  const hash = createHash("sha256").update(sent.text).digest("hex");
   const title = options.title ?? record.title ?? defaultTitle(ctx);
   let view = record.pr?.number ? viewPlanPr(ctx, record.pr.number) : viewPlanPr(ctx, route.branch, { allowMissing: true });
   if (view && (view.state !== "OPEN" || view.baseRefName !== route.base)) view = null;
   if (!view) {
-    gh(ctx.repo, ["pr", "create", "--base", route.base, "--head", route.branch, "--title", title, "--body-file", file]);
+    gh(ctx.repo, ["pr", "create", "--base", route.base, "--head", route.branch, "--title", title, "--body-file", sent.file]);
     view = viewPlanPr(ctx, route.branch);
     say.push(`Opened the plan's pull request #${view.number} from ${route.branch} into ${route.base}: ${view.url}`);
   } else if (record.bodySent !== hash || record.title !== title) {
-    const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", file], { allowFailure: true });
+    const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", sent.file], { allowFailure: true });
     say.push(edited.status === 0
       ? `The plan's pull request #${view.number} now carries the body and title as written.`
       : `The plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body it had.`);
@@ -3926,20 +4189,24 @@ async function planLandingCheck(ctx, record, tip, check, say) {
 }
 
 /**
- * The one merge of the base into the plan branch that adds no code: after a
- * landing check came back failed or differing, there is nothing to resolve —
- * the merged tree is clean — and the question is whether the plan still holds
- * on the base as it is, which is the whole-plan check's. So the base commit the
- * check was against is merged in as a real two-parent commit, the plan tip
- * first, and pushed by the ship itself onto this plan's branch, recorded as its
- * own before the push and confirmed after it; the whole-plan check then reviews
- * and verifies that tip, and a real problem is fixed through its fix units.
+ * A merge of the base into the plan branch the ship commits itself, with no
+ * resolver, when nothing in it is left to resolve. After a landing check came
+ * back failed or differing the merged tree is clean, and the question is whether
+ * the plan still holds on the base as it is, which is the whole-plan check's;
+ * the version increase merges the base in first whenever the base's version
+ * moved; and a landing that conflicted only in version lines is settled by the
+ * version step. So the base commit is merged in as a real two-parent commit,
+ * the plan tip first, through `startBaseMerge` like every merge of the base —
+ * which sets the version lines to the base's values — and committed by
+ * `commitScriptedMerge`, which checks that it is git's own merge with only those
+ * lines set. It is pushed by the ship itself onto this plan's branch, recorded as
+ * its own before the push and confirmed after it; the whole-plan check then
+ * reviews and verifies that tip, and a real problem is fixed through its fix
+ * units.
  *
- * Every merge of the base into the plan branch runs the version step at one
- * point, after the merge is in progress and before anything reads what it
- * holds — `versionStep`, the same step a resolve attempt runs. The commit is
- * made from the index with `commit-tree`, so the merge commit is named by the
- * call that made it rather than read back off HEAD.
+ * Returns `{ oid }` for the merge pushed, or `{ conflicts }` — with nothing
+ * committed and no merge left in progress — when something other than a version
+ * line still conflicts, which is a resolve round's.
  */
 async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
   const route = routeOf(ctx);
@@ -3949,33 +4216,17 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
     throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the merge of ${route.base} into ${route.branch} has to `
       + "be made there; clear it, then run this again");
   }
-  git(ctx.worktree, ["checkout", "--detach", tip]);
-  const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", baseOid], { allowFailure: true });
-  if (!mergeInProgress(ctx)) {
-    throw new Stop(`git merge of ${short(baseOid)} into ${short(tip)} did not start: ${(merging.stderr || merging.stdout || "").trim()}`);
-  }
-  try { versionStep({ worktree: ctx.worktree }); } catch (error) {
+  const started = startBaseMerge(ctx, { tip, baseOid });
+  if (started.unmerged.length > 0) {
     settleWorktree(ctx);
-    throw new Stop(error.message);
-  }
-  const unmerged = git(ctx.worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
-  if (unmerged.length > 0) {
-    settleWorktree(ctx);
-    throw new Stop(`the merge of ${route.base} at ${short(baseOid)} into ${route.branch} conflicts in ${unmerged.join(", ")}, though the `
-      + "landing check found it clean; nothing was committed or pushed. Run this again: the landing check sees the conflict and "
-      + "a resolve round takes it.");
+    return { conflicts: started.unmerged };
   }
   // Tracked paths only: the merge has already staged what it brought in, and the
   // version step only edits lines in tracked files. The landing check that sent
   // the plan here ran every verify command in this worktree, and anything they
   // wrote and left untracked is nobody's change — `-A` would commit it into a
   // merge that adds no code of its own, and push it.
-  git(ctx.worktree, ["add", "-u"]);
-  node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
-  const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
-  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", `Merge ${route.base} into ${route.branch}`]).stdout.trim();
-  git(ctx.worktree, ["merge", "--quit"]);
-  git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
+  const oid = commitScriptedMerge(ctx, { tip, baseOid }, outcome);
   record.mergeIn = { tip: oid, from: tip, baseOid, why, at: new Date().toISOString() };
   saveLanding(ctx, record);
   // Immediately before the push, as for a resolved merge: a plain push goes
@@ -3991,59 +4242,235 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
         + `this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
     }
   }
+  forgetIncrease(ctx);
   say.push(`${route.base} at ${short(baseOid)} is merged into ${route.branch}: ${short(oid)}, whose first parent is the plan tip `
     + `${short(tip)} and whose second is ${route.base}. It adds no code of its own, and the driver pushed it itself; the whole-plan `
-    + "check now reviews and verifies the plan on that tip, and fixes what it finds as it fixes anything.");
-  return oid;
+    + `check now reviews and verifies the plan on that tip, and fixes what it finds as it fixes anything.${resetLine(ctx, started.reset)}`);
+  return { oid };
+}
+
+/**
+ * The base merged into the plan branch at `tip`, by whichever route the merge
+ * needs: the ship's own commit when nothing but version lines conflicts, and
+ * otherwise 02's resolve round, opened without a spec about to begin — or the
+ * round already there for the same pair, picked up as it stands. Null when that
+ * round is spent, or passed, and nothing more can be done for this pair; the
+ * dialog then shows what is in the way, with Merge withheld.
+ */
+async function mergeBaseOrResolve(ctx, record, { tip, baseOid, why, conflicts = [] }, options, say) {
+  const route = routeOf(ctx);
+  const same = resolveRounds(ctx).find((entry) => entry.record.baseOid === baseOid && entry.record.planTip === tip)?.record ?? null;
+  if (same?.status === "open") return resumeRound(ctx, same, options, say);
+  if (same?.status === "stopped") {
+    if (attemptsLeft(same)) return reopenRound(ctx, same, say);
+    say.push(`Every resolve attempt limits.ciRepairs allows for merging ${route.base} at ${short(baseOid)} into ${route.branch} `
+      + `at ${short(tip)} has been taken (resolve round ${same.n}; its record is ${recordPathOf(ctx, same.n)}), so the conflict `
+      + "stays and Merge is not offered.");
+    return null;
+  }
+  if (same) return null;
+  const merged = await mergeInBase(ctx, record, { tip, baseOid, why }, say);
+  if (merged.oid) return { say, next: nextCommand(ctx, "plan-check", null, " --why merge-in") };
+  return openRound(ctx, {
+    baseOid, planTip: tip, conflicts: conflicts.length > 0 ? conflicts : merged.conflicts, spec: null,
+    handBack: nextCommand(ctx, "plan-land", null), before: "the plan lands", held: "the plan was not landed",
+    purpose: `the plan's pull request into ${route.base} does not merge until they do`
+  }, say);
 }
 
 /**
  * The one place a landing result decides where the plan goes. Null when it
  * passed, or when nothing can be done about it within the budgets — the dialog
  * then shows it, with Merge withheld; otherwise the payload that moves the plan
- * on. Only a conflict has anything for a resolver: 02's round, opened without a
- * spec about to begin. A failed or differing result is a clean merged tree, so
- * the base is merged in and the whole-plan check reads that tip.
+ * on. Every result that did not pass is a merge of the base: a failed or
+ * differing one is a clean merged tree, merged in by the ship, and the
+ * whole-plan check reads that tip; a conflict that is only version lines is
+ * the ship's too, and any other conflict is 02's round.
  */
 async function routeLanding(ctx, record, tip, landing, options, say) {
   if (landing.status === "passed") return null;
-  const route = routeOf(ctx);
-  if (landing.status === "conflict") {
-    const same = resolveRounds(ctx).find((entry) => entry.record.baseOid === landing.baseOid && entry.record.planTip === tip)?.record ?? null;
-    if (same?.status === "open") return resumeRound(ctx, same, options, say);
-    if (same?.status === "stopped") {
-      if (attemptsLeft(same)) return reopenRound(ctx, same, say);
-      say.push(`Every resolve attempt limits.ciRepairs allows for merging ${route.base} at ${short(landing.baseOid)} into ${route.branch} `
-        + `at ${short(tip)} has been taken (resolve round ${same.n}; its record is ${recordPathOf(ctx, same.n)}), so the conflict `
-        + "stays and Merge is not offered.");
-      return null;
-    }
-    if (same) return null;
-    return openRound(ctx, {
-      baseOid: landing.baseOid, planTip: tip, conflicts: landing.conflicts ?? [], spec: null,
-      handBack: nextCommand(ctx, "plan-land", null), before: "the plan lands", held: "the plan was not landed",
-      purpose: `the plan's pull request into ${route.base} does not merge until they do`
-    }, say);
-  }
-  await mergeInBase(ctx, record, { tip, baseOid: landing.baseOid, why: landing.status }, say);
-  return { say, next: nextCommand(ctx, "plan-check", null, " --why merge-in") };
+  return mergeBaseOrResolve(ctx, record, { tip, baseOid: landing.baseOid, why: landing.status, conflicts: landing.conflicts ?? [] }, options, say);
 }
 
 /**
- * The one empty step, between "the whole-plan check is clean for this tip" and
- * "open the pull request, wait for its checks, run the landing check": where the
- * tip becomes final. The plan's version increase is made here by a later change,
- * as a commit the ship puts on the plan branch through `pushToPlanBranch`, and
- * judged as the ship's through the recorded tip like every other. Anything it
- * commits moves the tip, and the step starts again. Returns the new tip, or null
- * when the tip did not move — always, here.
+ * Whether the increase this route recorded is still the one on the plan branch
+ * at `tip`: its version commit is `tip`, or is on `tip`'s first-parent line with
+ * no merge of the base above it. A merge of the base resets every version line,
+ * so an increase under one is gone, whether or not the record was cleared — a
+ * run that died after pushing the merge and before recording it never reads a
+ * reset line as an increase. Returns the recorded increase, or null.
  */
-async function finalTipStep(ctx, record, tip, say) {
-  return null;
+function currentIncrease(ctx, tip) {
+  const bump = routeOf(ctx).bump;
+  if (!bump?.oid || !tip) return null;
+  if (bump.oid === tip) return bump;
+  const listed = git(ctx.repo, ["rev-list", "--first-parent", "--parents", `${bump.oid}..${tip}`], { allowFailure: true });
+  if (listed.status !== 0) return null;
+  const rows = listed.stdout.trim().split("\n").filter(Boolean).map((row) => row.split(" "));
+  if (rows.length === 0 || rows.some((row) => row.length > 2)) return null;
+  return rows.at(-1)[1] === bump.oid ? bump : null;
+}
+
+// "0.10.6 → 0.10.7", what the plan lands as, while its increase is current.
+const landsAsOf = (ctx, tip) => {
+  const bump = currentIncrease(ctx, tip);
+  return bump ? `${bump.base} → ${bump.value}` : null;
+};
+
+// The version commit: each configured line set to `value` in the worktree at
+// the tip, by its own bytes, through the add → guard-staged chain, and made with
+// `commit-tree`, so the commit is named by the call that made it.
+function makeVersionCommit(ctx, tip, entries, value) {
+  const route = routeOf(ctx);
+  settleWorktree(ctx);
+  if (git(ctx.worktree, ["status", "--porcelain", "--untracked-files=no"]).stdout.trim() !== "") {
+    throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the plan's version increase has to be made there; `
+      + "clear it, then run this again");
+  }
+  git(ctx.worktree, ["checkout", "--detach", tip]);
+  const files = [...new Set(entries.map((entry) => entry.file))];
+  for (const file of files) {
+    const where = path.join(ctx.worktree, file);
+    const text = fs.readFileSync(where, "utf8");
+    const next = setVersionText(text, entries.filter((entry) => entry.file === file), () => value);
+    fs.writeFileSync(where, next.text);
+  }
+  git(ctx.worktree, ["add", "--", ...files]);
+  node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
+  const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
+  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-m", `Version ${value}\n\nThe one version increase of ${route.branch}, made by the ship.`]).stdout.trim();
+  git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
+  return oid;
+}
+
+/**
+ * The one step between "the whole-plan check is clean for this tip" and "open
+ * the pull request, wait for its checks, run the landing check": where the tip
+ * becomes final, by the plan's one version increase. Whether to make it, keep
+ * it, or merge the base in first is decided by comparing values, never by
+ * waiting for a version line to conflict — two plans increasing from the same
+ * value write identical lines, which merge cleanly. The base's value now, read
+ * from git objects at `origin/<base>`, against the increase the route recorded:
+ *
+ *   1  recorded, from the base's value now: nothing to do, whatever landed on
+ *      top since — a whole-plan fix after the increase sits on top of it. A tip
+ *      whose lines no longer read the increase stops, with the increase let go,
+ *      so the next pass makes it again
+ *   2  recorded, from another value: the base's version moved, so the base is
+ *      merged in first, whatever the tip's lines read
+ *   3  none recorded, and the tip's lines are the base's: the version commit,
+ *      recorded with the base value before its push
+ *   4  none recorded, and the tip's lines are not the base's: the base is merged
+ *      in first — unless the tip holds it already, and then the version commit
+ *      of case 3 sets the lines whatever they read
+ *
+ * After a merge-in the check runs on the merge, and the next pass is case 3.
+ * Returns the payload that moves the plan on, or null when the tip did not move.
+ */
+async function finalTipStep(ctx, record, tip, options, say) {
+  const route = routeOf(ctx);
+  const entries = versionFilesOf(route);
+  if (!entries) {
+    throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be made against the `
+      + "list it was routed under; run start again, which records them");
+  }
+  if (entries.length === 0) return null;
+  const kind = declaredIncreaseOfRoute(route);
+  if (!kind) {
+    throw new Stop(`${ctx.trainPath} records no kind of increase for ${route.branch}, so the plan's increase cannot be made; run start `
+      + "again, which reads it from the plan document");
+  }
+  const baseOid = await currentBase(ctx);
+  const where = `${route.base} at ${short(baseOid)}`;
+  const base = baseVersionAt(ctx.repo, { entries, baseOid, where });
+  if (base.problem) {
+    throw new Stop(`the plan's version increase is made from ${route.base}'s version, and ${base.problem}. Nothing was committed or `
+      + `pushed, and the plan was not landed. The lines are the ones this train recorded when it started; once ${route.base} carries `
+      + "one version in every one of them, run this again.");
+  }
+  const lines = readLinesAt(ctx.repo, { entries, oid: tip });
+  const bump = currentIncrease(ctx, tip);
+  if (bump && bump.base === base.value) {
+    const off = lines.filter((line) => line.value !== bump.value);
+    if (off.length > 0) {
+      // Neither a spec nor a fix can set the line back — the stop on spec pull
+      // requests refuses any change to one, and a push of a person's own is the
+      // hand-push stop — so the ship does: the increase it recorded is let go,
+      // and the next pass makes the plan's one increase over this tip.
+      clearIncrease(ctx.trainPath);
+      throw new Stop(`${route.branch} at ${short(tip)} carries the increase this ship made, ${bump.base} → ${bump.value}, at `
+        + `${short(bump.oid)}, and ${listOf(off.map((line) => `${describeEntry(line.entry)} reads ${line.value ?? "nothing"}, not ${bump.value}`))} `
+        + "now. Something above that commit changed a version line — most likely a pull request merged by hand on GitHub, past the "
+        + "stop on spec pull requests. Nothing was landed. The ship no longer counts that commit as the plan's increase: run this "
+        + `again, and it makes the plan's one increase over ${route.base}'s ${base.value} itself, in a version commit of its own that `
+        + `sets every line, merging ${route.base} in first if it has moved.`);
+    }
+    say.push(`${route.branch} carries its one version increase, ${bump.base} → ${bump.value}, made from ${route.base}'s version as it `
+      + "still is; nothing about it changes.");
+    return null;
+  }
+  const kindLine = kind === "minor" ? "a minor increase, as the plan declares" : "a patch increase";
+  if (bump) {
+    say.push(`${route.base}'s version is ${base.value} now, not ${bump.base}, the value ${route.branch}'s increase to ${bump.value} `
+      + `was made from: another plan landed, or this one was left open while ${route.base} moved. ${route.base} is merged in first, `
+      + "which sets the version lines to its values, and the increase is made again on top once the plan is checked again.");
+    return mergeForVersion(ctx, record, tip, baseOid, options, say);
+  }
+  // The plan never had the base's latest version, unless the base is merged in
+  // already: then a line the plan changed itself is what differs — a pull
+  // request merged by hand past the stop on spec pull requests, which no spec
+  // or fix can undo, since that stop refuses any change to a line — and the
+  // version commit sets it with the rest.
+  const off = lines.filter((line) => line.value !== base.value);
+  if (off.length === 0 || git(ctx.repo, ["merge-base", "--is-ancestor", baseOid, tip], { allowFailure: true }).status === 0) {
+    const value = nextVersion(base.value, kind);
+    const lost = off.filter((line) => line.value === null);
+    if (lost.length > 0) {
+      throw new Stop(`${route.branch} at ${short(tip)} already holds ${where}, and ${listOf(lost.map((line) => `${describeEntry(line.entry)} `
+        + `finds nothing (${line.problem})`))} there, so the ship has no line to write the plan's increase into. Nothing was committed `
+        + `or landed. The lines are the ones this train recorded when it started, and a change of this plan took ${lost.length > 1 ? "them" : "it"} `
+        + `away; the ship cannot put a line back. Offer: stop the train (run ${nextCommand(ctx, "end", null)}).`);
+    }
+    if (off.length > 0) {
+      say.push(`${route.branch} at ${short(tip)} already holds ${where}, and ${listOf(off.map((line) => `${describeEntry(line.entry)} reads `
+        + `${line.value}, not ${base.value}`))}: no increase this ship made explains it — most likely a pull request merged by hand on `
+        + `GitHub, past the stop on spec pull requests. The version commit sets ${off.length > 1 ? "them" : "it"} with the rest.`);
+    }
+    const oid = makeVersionCommit(ctx, tip, entries, value);
+    const outcome = "the version commit was not pushed, and the plan was not landed";
+    await planTipCheck(ctx, outcome);
+    // Recorded with the value it was computed from before the push, in one write:
+    // a run that dies after the push finds its own commit on origin and the
+    // increase it made, and makes no second one.
+    recordIncrease(ctx.trainPath, { oid, base: base.value, value, baseOid, at: new Date().toISOString() });
+    try {
+      await pushToPlanBranch(ctx, oid, { recorded: true });
+    } catch (error) {
+      await planTipCheck(ctx, outcome);
+      throw new Stop(`the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still `
+        + `where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
+    }
+    say.push(`The plan's one version increase, ${kindLine}: ${base.value} → ${value} in ${listOf(entries.map(describeEntry))}, from `
+      + `${route.base}'s version at ${short(baseOid)}. It is ${short(oid)} on ${route.branch}, a commit of the version lines and nothing `
+      + "else, pushed by the driver itself; its whole-plan check keeps the review of the commit under it, and verify and the landing "
+      + "check run on it.");
+    return { say, next: nextCommand(ctx, "plan-check", null, " --why version") };
+  }
+  say.push(`${route.branch}'s version lines are not ${route.base}'s ${base.value}: the plan has not taken ${route.base}'s latest version `
+    + `in. ${route.base} is merged in first, and the plan's one increase is made from its value once the plan is checked again.`);
+  return mergeForVersion(ctx, record, tip, baseOid, options, say);
+}
+
+// The merge the increase needs first, through the same route as every merge of
+// the base. With nothing to be done for this pair, the step goes on and the
+// dialog shows what is in the way.
+async function mergeForVersion(ctx, record, tip, baseOid, options, say) {
+  return mergeBaseOrResolve(ctx, record, { tip, baseOid, why: "version" }, options, say);
 }
 
 // What a check of a tip made by the ship is answering, when the ship knows.
 function whyFor(ctx, record, tip) {
+  if (routeOf(ctx).bump?.oid === tip) return " --why version";
   if (record.mergeIn?.tip === tip) return " --why merge-in";
   if (resolveRounds(ctx).some((entry) => entry.record.status === "passed" && entry.record.pushed === tip)) return " --why resolve";
   return "";
@@ -4068,7 +4495,7 @@ function resultLines(route, record, results) {
   lines.push(landing.status === "not-run"
     ? `the landing check of ${at} against ${route.base} as it stands, at ${short(results.baseOid)}, has not run — not run`
     : `the landing check of ${at} against ${route.base} at ${short(landing.baseOid)} ${landing.status === "passed" ? "passed" : `came back ${landing.outcome}`}`);
-  const condition = { lines: version.lines, kind: version.kind ?? increaseOf(record) };
+  const condition = { lines: version.lines, kind: version.kind ?? declaredIncreaseOfRoute(route) ?? "patch" };
   lines.push(version.status === "not-run"
     ? `the version lines were not read for ${at} — not run`
     : `the version lines at ${at} against ${route.base} at ${short(results.baseOid)}: ${versionLines(condition, route.base).join("; ")}`);
@@ -4108,7 +4535,7 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
     throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be judged against the `
       + `list it was routed under, and the configuration as it is now is not that list; run start again, which records them`);
   }
-  const version = versionConditionAt(ctx.repo, { entries, tipOid: tip, baseOid, kind: increaseOf(record) });
+  const version = versionConditionAt(ctx.repo, { entries, tipOid: tip, baseOid, kind: increaseOf(ctx) });
   record.version = { tip, baseOid, holds: version.holds, kind: version.kind, lines: version.lines, at: new Date().toISOString() };
   saveLanding(ctx, record);
   const results = resultsFor(ctx.shipDir, record, { tip, baseOid, version });
@@ -4128,9 +4555,11 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
   // else by the plan or the base changing.
   const spent = results.wholePlan.status === "failed" && results.wholePlan.reason === "spent";
   const moves = `${spent ? "limits.ciRepairs raised, as said above, or " : ""}the plan or the base changing`;
+  const landsAs = version.holds && version.lines.length > 0 ? `${version.lines[0].base} → ${version.lines[0].tip}` : null;
   const text = [
     `What lands on ${route.base}: ${landsText(lands)}. ${pr} would merge ${route.branch} at ${short(tip)} with one merge commit, `
-      + `which keeps each spec's own commit on ${route.base}'s history. The plan as a whole is ${path.join(ctx.plan, "plan.md")}.`,
+      + `which keeps each spec's own commit on ${route.base}'s history. The plan as a whole is ${path.join(ctx.plan, "plan.md")}.`
+      + (landsAs ? ` It lands as version ${landsAs}.` : ""),
     `Checked against ${short(tip)}: ${lines.join("; ")}.`,
     offered
       ? `Offer: Merge (run ${merge}) — merges it now, at exactly ${short(tip)}, after checking the base once more, and then deletes `
@@ -4145,7 +4574,7 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
     say, ask: text,
     answers: { ...(offered ? { merge } : {}), leaveOpen: leave, stop },
     planLanding: {
-      ...landingSummary(ctx, record), lands, baseOid, results, merge: offered, withheld
+      ...landingSummary(ctx, record), lands, baseOid, results, merge: offered, withheld, ...(landsAs ? { landsAs } : {})
     },
     next: leave
   };
@@ -4176,7 +4605,13 @@ async function confirmAndMerge(ctx, record, tip, by, say) {
         { allow: [BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE] });
       if (result.status === 0) return { merged: lastJson(result.stdout) };
       const why = result.stderr.trim().split("\n")[0];
-      if (result.status === VERSION_NOT_ONE_INCREASE) return { stop: `The merge was refused on the version lines, read again against the base as it now stands: ${why}.` };
+      // Back into the landing loop, without spending a landing attempt: the base's
+      // version moved past the one the increase was made from, and the next pass
+      // merges it in and makes the increase again.
+      if (result.status === VERSION_NOT_ONE_INCREASE) {
+        return { stop: `The merge was refused on the version lines, read again against the base as it now stands: ${why}. The next `
+          + `run merges ${route.base} in and makes the plan's increase again over its version.` };
+      }
       say.push(`${route.base} moved again between the check and the merge, so the merge was refused: ${why}. Checking the plan against the base as it now stands.`);
       return {};
     }
@@ -4294,7 +4729,8 @@ async function landingStep(ctx, record, options, say) {
     return { say, next: nextCommand(ctx, "plan-check", null, whyFor(ctx, record, tip)) };
   }
   // 2. Where the tip becomes final.
-  if (await finalTipStep(ctx, record, tip, say)) return { say, next: nextCommand(ctx, "plan-land", null) };
+  const moved = await finalTipStep(ctx, record, tip, options, say);
+  if (moved) return moved;
   // 3. The plan pull request, at the tip.
   const body = openPlanPullRequest(ctx, record, tip, options, say);
   if (body) return body;
@@ -4558,6 +4994,11 @@ async function finish(options) {
     if (reconciled.adopted.has(id)) return finishNext(ctx, id, say);
     await planTipCheck(ctx, "nothing was merged");
     state = readState(ctx, id);
+    const versionStop = versionLineStop(ctx, id, state, "finish");
+    if (versionStop) {
+      if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
+      return emit({ ...versionStop, pullRequest: state.pr });
+    }
   }
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
@@ -4841,7 +5282,7 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       on a plan branch with every spec merged: verify the branch's tip with every
                                       command and send one reviewer over the plan's combined change; reuses a
                                       decided result for the same tip. --why is last-spec, fix-unit, merge-in,
-                                      resolve or tip-moved, and says what the result answers
+                                      resolve, version or tip-moved, and says what the result answers
   plan-collect                        judge that reviewer; clean, a fix unit to ship, or a stop for a person
   plan-land [--title <t>] [--approve <email> | --stop] [--run-gone | --run-live]
                                       on a plan branch whose tip is clean: open the plan's pull request, wait for its

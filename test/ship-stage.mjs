@@ -213,6 +213,18 @@ if (argv[1] === "create") {
   save(state);
   process.stdout.write("Merged pull request #" + pull.number + "\\n");
 } else if (argv[1] === "checks") {
+  // GH_STUB_ON_CHECKS: a shell command run the first time checks are asked
+  // for, so a test can have something happen elsewhere — another plan landing —
+  // while a ship waits for its pull request's checks.
+  // What it printed, or how it failed, is left beside the state file.
+  const once = statePath + ".on-checks";
+  if (process.env.GH_STUB_ON_CHECKS && !fs.existsSync(once)) {
+    try {
+      fs.writeFileSync(once, execFileSync("/bin/sh", ["-c", process.env.GH_STUB_ON_CHECKS], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+    } catch (error) {
+      fs.writeFileSync(once, "failed: " + (error.stderr || error.message));
+    }
+  }
   // No workflow runs for this pull request: nothing registered — unless
   // GH_STUB_CHECKS names the rows to answer with.
   process.stdout.write((process.env.GH_STUB_CHECKS ?? "[]") + "\\n");

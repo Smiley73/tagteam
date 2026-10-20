@@ -195,6 +195,14 @@ does not start. When the `ask` says attempts are left, `begin` for the same spec
 takes the next one, and only the person's answer runs it; when every attempt is
 spent, `begin` asks the same again until the base moves on.
 
+On a plan branch with version lines configured, a spec — or a whole-plan fix —
+that changes one of them stops at `snapshot`, before anything is published, and
+returns `ask`: which file, which line, and both values. The plan's increase is
+the ship's own, made once the whole plan is checked. Say so, and ask; what the
+person can do is set the line back in the worktree, keeping the rest of the
+change, and run `snapshot` again, or stop the train. A dependency added to the
+same file is not a version change and does not stop.
+
 You do not choose the route; `next` does. Three steps `next` never prints,
 because only a person decides them: `revisit`, which looks at a spec that
 stopped for a person again — see *Looking again* below — and `redesign` and
@@ -553,6 +561,20 @@ same way as for `publish`; without one, the plan document's heading is used.
 
 **What it does on the way**, each step said in `say` — relay it plainly:
 
+- With version lines configured, the plan gets its one version increase first:
+  a patch, or a minor one when the plan document declares it. The driver makes
+  it as one commit of the version lines and nothing else, on the plan's branch,
+  from the base's version as it is at that moment, and pushes that commit
+  itself; `next` is the whole-plan check of it, which sends no reviewer — the
+  review of the commit under it still stands — and runs every verify command. If
+  the base's version has moved since the increase was made — another plan
+  landed, or this one was left open while the base moved — the driver merges the
+  base in first, which puts every version line back to the base's value, and the
+  increase is made again on top once the plan is checked again. Nobody is asked
+  to choose a number, and no resolver ever sees a version line: the driver sets
+  them in every merge of the base, and a resolve attempt that changes one fails.
+  The question says what the plan lands as ("0.10.6 → 0.10.7"), and so does the
+  plan's pull request, in a line the driver puts under its `## Summary`.
 - The pull request's checks are waited for as a spec's are. Checks that never
   ran are said to have not run, and never count as passed — and are waited for
   again on every later run, since they may have started since. A check that failed
@@ -574,9 +596,11 @@ same way as for `publish`; without one, the plan document's heading is used.
   starts again from the whole-plan check. A run where nothing moved reuses what
   it already found and runs no verify command twice.
 
-The ship pushing its own merge commit onto the plan's branch is a new kind of
-push, and the session's permission checks may refuse it. If one is refused, say
-so, and say what was refused; do not try another way to make the push.
+The ship pushing its own merge commit or its version commit onto the plan's
+branch is a new kind of push, and the session's permission checks may refuse
+it. That push is the driver's step and nothing wider: it goes to this plan's
+branch only, and nothing in this file runs git. If one is refused, say so, and
+say what was refused; do not try another way to make the push.
 
 **The question.** When the step gets there it returns `ask`: what lands — the
 specs and fixes by name and pull request, from the records — and every result

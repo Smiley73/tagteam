@@ -8,15 +8,20 @@
 //
 // - `{ kind: "base" }` — every spec branches from the configured base and
 //   merges back into it, as every train did before plan branches existed.
-// - `{ kind: "plan", branch, base, createdOid, tipOid, pendingOid, versionFiles }`
-//   — the specs branch from, target and squash into `plan/<slug>`, which was
-//   created on origin from `base` at `createdOid`. `tipOid` is the commit the ship
-//   last recorded putting at the branch's tip on origin, and `pendingOid` a commit
-//   it is about to push or has pushed and not yet confirmed; null for "none".
-//   `versionFiles` is the configuration's list of version lines as it was when
-//   the route was decided: the plan's one increase is judged against that list,
-//   so a configuration changed mid-train neither removes the condition nor
-//   adds one the plan was never routed under.
+// - `{ kind: "plan", branch, base, createdOid, tipOid, pendingOid, versionFiles,
+//   increase, bump }` — the specs branch from, target and squash into
+//   `plan/<slug>`, which was created on origin from `base` at `createdOid`.
+//   `tipOid` is the commit the ship last recorded putting at the branch's tip on
+//   origin, and `pendingOid` a commit it is about to push or has pushed and not
+//   yet confirmed; null for "none". `versionFiles` is the configuration's list of
+//   version lines as it was when the route was decided, and `increase` the kind
+//   of increase the plan document declared then, patch or minor: the plan's one
+//   increase is made and judged against those, so a configuration or a plan
+//   document changed mid-train neither removes the condition, nor adds one the
+//   plan was never routed under, nor changes its kind. `bump` is the increase
+//   the ship last made — `{ oid, base, value, baseOid }`, the version commit, the
+//   base's value it was computed from, the value it wrote and the base commit it
+//   was read at — or null. A merge of the base resets the lines, and clears it.
 //
 // The record is the ship's answer to one question — is what is on origin a
 // commit the ship made? — and it is general on purpose: any commit the ship
@@ -58,10 +63,22 @@ export function decideRoute({ recorded, planBranch, specCount, started, slug, ba
   if (planBranch !== true) return { route: { kind: "base" }, why: "setting-off" };
   if (specCount < 2) return { route: { kind: "base" }, why: "one-spec" };
   return {
-    route: { kind: "plan", branch: planBranchOf(slug), base, createdOid: null, tipOid: null, pendingOid: null, versionFiles: asList(versionFiles) },
+    route: {
+      kind: "plan", branch: planBranchOf(slug), base, createdOid: null, tipOid: null, pendingOid: null, versionFiles: asList(versionFiles),
+      bump: null
+    },
     why: "new"
   };
 }
+
+/**
+ * The kind of increase a plan route recorded, or null for one that recorded
+ * none — a route decided before it kept one, which takes it at its next start.
+ */
+export const increaseOf = (route) => (route?.increase === "patch" || route?.increase === "minor" ? route.increase : null);
+
+/** A plan route that has not recorded its kind of increase, taking `kind` once. */
+export const withIncrease = (route, kind) => (isPlanRoute(route) && increaseOf(route) === null ? { ...route, increase: kind } : route);
 
 const asList = (versionFiles) => (Array.isArray(versionFiles) ? versionFiles : []);
 
@@ -115,6 +132,15 @@ export function withConfirmed(route, oid) {
 // A squash GitHub made, seen at the tip of origin's plan branch.
 export const withMerge = (route, oid) => ({ ...route, tipOid: oid, pendingOid: null });
 
+// The version commit the ship is about to push, and the increase it makes: one
+// write, so a run that dies after the push finds both the commit and what it
+// was computed from, and never makes a second.
+export const withIncreaseMade = (route, bump) => ({ ...withPending(route, bump.oid), bump });
+
+// A merge of the base has set every version line to the base's values: there is
+// no increase on the plan branch any more.
+export const withoutIncrease = (route) => ({ ...route, bump: null });
+
 // --- the record on disk ----------------------------------------------------------
 
 // The record lives in `train.json` beside the other train fields, and only its
@@ -147,3 +173,9 @@ export const confirmPending = (trainPath, oid) => writeRoute(trainPath, withConf
 
 /** A squash merge GitHub made, once origin's plan branch is seen at it. */
 export const recordMerge = (trainPath, oid) => writeRoute(trainPath, withMerge(requirePlanRoute(trainPath), oid)).route;
+
+/** Before pushing the version commit: it and the increase it makes, recorded as the ship's. */
+export const recordIncrease = (trainPath, bump) => writeRoute(trainPath, withIncreaseMade(requirePlanRoute(trainPath), bump)).route;
+
+/** After a merge of the base is pushed: the increase it reset is gone. */
+export const clearIncrease = (trainPath) => writeRoute(trainPath, withoutIncrease(requirePlanRoute(trainPath))).route;

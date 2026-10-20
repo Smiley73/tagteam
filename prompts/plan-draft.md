@@ -43,6 +43,19 @@ section when there are none worth naming.>
 <Cut work belonging to excluded or deferred decisions. Omit when there is none.>
 ```
 
+A plan of two or more specs shipped through a branch of its own carries one
+version increase, which the ship makes itself once the plan is done: a patch
+increase, unless the plan declares a minor one with a line of its own directly
+under the title, before the paragraph:
+
+```markdown
+Version increase: minor
+```
+
+Leave the line out for a patch increase. Declare minor only when `goal.md` or
+the person asks for one; `minor` is the one value the line takes, and any other
+stops the ship before it starts. No deliverable raises the version itself.
+
 ## Choosing deliverables
 
 A deliverable is one shippable pull request: something that can be implemented,
