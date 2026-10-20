@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isMain } from "./lib/is-main.mjs";
 import { repairScope } from "./gates.mjs";
+import { readPlanLanding, resultsFor } from "./lib/plan-landing.mjs";
 
 function directories(root) {
   try {
@@ -180,6 +181,39 @@ function landingOf(state) {
   };
 }
 
+// The plan's own pull request, for a ship on a plan branch, or null for one that
+// ships each spec to the base. Its `state` is one of `not-opened`, `open`,
+// `stopped` and `merged`, and each result is `passed`, `failed` or `not-run` for
+// the tip the train last recorded — a result about any other tip is `not-run`
+// here, never a pass, and so is a version condition last read against a base
+// that has moved since. Nothing here calls git: the version condition is the one
+// the landing step last read, with the tip and base it read it against.
+//
+// The plan-level directories — `plan-landing/`, `whole-plan/`, `resolve/` —
+// hold no `state.json`, so the spec count above never sees them.
+function planLandingOf(root) {
+  try {
+    const train = json(path.join(root, "train.json"));
+    if (train?.route?.kind !== "plan") return null;
+    const record = readPlanLanding(root);
+    if (record.unreadable) return { branch: train.route.branch ?? null, base: train.route.base ?? null, state: "unreadable", reason: record.unreadable };
+    const tip = typeof train.route.tipOid === "string" ? train.route.tipOid : null;
+    const baseOid = record.version?.tip === tip ? record.version.baseOid ?? null : record.landing?.tip === tip ? record.landing.baseOid : null;
+    const results = tip ? resultsFor(root, record, { tip, baseOid, version: record.version ?? null }) : null;
+    return {
+      branch: train.route.branch ?? null, base: train.route.base ?? null, tip,
+      pr: record.pr?.number ?? record.merged?.pr ?? null, url: record.pr?.url ?? null,
+      state: record.merged ? "merged" : record.stopped ? "stopped" : record.pr ? "open" : "not-opened",
+      results: results
+        ? { wholePlan: results.wholePlan.status, ci: results.ci.status, landing: results.landing.status, version: results.version.status }
+        : { wholePlan: "not-run", ci: "not-run", landing: "not-run", version: "not-run" },
+      ...(record.merged ? { mergedBy: record.merged.by ?? null, mergedAtCheckedTip: record.merged.checkedTip ?? null } : {})
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Everything `/tagteam:status` renders: the plans, the ships, and how much
  * iteration budget each thing still in flight has left before it stops.
@@ -232,12 +266,19 @@ export function inventory(repoRoot) {
     const waiting = specs.filter((spec) => spec.state === "awaiting-approval");
     const merged = specs.filter((spec) => spec.state === "merged");
     const failed = specs.filter((spec) => spec.state === "failed");
+    // On a plan branch every spec merged is not the plan landed: it is complete
+    // once its own pull request into the base has merged, and not before.
+    const planLanding = planLandingOf(root);
+    const allMerged = specs.length > 0 && merged.length === specs.length;
+    const landed = planLanding === null || planLanding.state === "merged";
     return {
       slug,
       status: failed.length > 0 ? "stopped"
         : waiting.length > 0 ? "waiting for you"
-          : specs.length > 0 && merged.length === specs.length ? "complete"
-            : "in progress",
+          : allMerged && landed ? "complete"
+            : allMerged && planLanding.state === "stopped" ? "stopped"
+              : allMerged && planLanding.state === "open" ? "waiting for you"
+                : "in progress",
       merged: merged.length,
       started: specs.length,
       waitingOn: waiting.map((spec) => ({ spec: spec.spec, pr: spec.pr?.number ?? null, branch: spec.branch })),
@@ -245,6 +286,7 @@ export function inventory(repoRoot) {
       usage,
       codexUsage,
       landing,
+      ...(planLanding ? { planLanding } : {}),
       // One entry per spec that could still spend something. A merged or failed
       // spec has no budget, so it has no entry — and a spec waiting for a person
       // does have one, because sending it back spends a CI repair and hands it a

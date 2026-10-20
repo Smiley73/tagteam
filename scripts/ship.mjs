@@ -29,13 +29,13 @@
 // tests prove hold here by construction.
 import fs from "node:fs";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
 import { adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
-import { BASE_NOT_ACCEPTED } from "./merge.mjs";
+import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
   restoreWorktree
@@ -52,9 +52,13 @@ import { recordedIn } from "./record-round-report.mjs";
 import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
   BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
-  fixUnitIds, isFixUnitId, listChecks, nextCheckNumber, nextUnitId, saveCheck, unitDir, unitDocument, unitDocumentPath,
+  fixUnitIds, isCleanFor, isFixUnitId, listChecks, nextCheckNumber, nextUnitId, saveCheck, unitDir, unitDocument, unitDocumentPath,
   verdict, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
+import {
+  checkFor, landingBegun, landingRecordPath, landingRoot, planBodyPath, readPlanLanding, resultsFor, savePlanLanding, withholding
+} from "./lib/plan-landing.mjs";
+import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
@@ -1280,10 +1284,20 @@ function resolveJobs(ctx) {
 
 const openResolveRound = (ctx) => resolveRounds(ctx).find((entry) => entry.record.status === "open")?.record ?? null;
 
+// The step that opened a round and picks it up again: `begin` for the spec it
+// was opened before, or — for a round opened to land the plan, which has no spec
+// about to begin — the plan's landing step. Its own steps take `--spec` only
+// when the round has one.
+const roundEntry = (record) => (record.spec ? `begin --spec ${record.spec}` : "plan-land");
+const roundStep = (ctx, record, step) => nextCommand(ctx, step, record.spec ?? null);
+
 function requireOpenRound(ctx, id, step) {
   const record = openResolveRound(ctx);
-  if (!record) throw new Stop(`no resolve round is open for this plan, so there is nothing for ${step} to do; run begin --spec ${id}`);
-  if (record.spec !== id) throw new Stop(`resolve round ${record.n} is open for ${record.spec}, not ${id}; run ${step} --spec ${record.spec}`);
+  if (!record) throw new Stop(`no resolve round is open for this plan, so there is nothing for ${step} to do; run ${id ? `begin --spec ${id}` : "plan-land"}`);
+  if ((record.spec ?? null) !== (id ?? null)) {
+    throw new Stop(`resolve round ${record.n} is open ${record.spec ? `for ${record.spec}` : "to land the plan"}, not ${id ? `for ${id}` : "to land the plan"}; `
+      + `run ${step}${record.spec ? ` --spec ${record.spec}` : ""}`);
+  }
   return record;
 }
 
@@ -1302,12 +1316,17 @@ function settleWorktree(ctx) {
 // says that `begin` takes the next one; a spent one, that it does not.
 function resolveStopAsk(ctx, record) {
   const left = attemptsLeft(record);
+  const entry = record.spec ? "begin" : "plan-land";
   const after = left
-    ? `Running begin again takes attempt ${record.attempts.length + 1} of the ${record.limit} allowed, from the plan tip again, `
-      + "and tells the resolver why this one stopped. Offer: try again (run begin), or stop the train (run end)."
-    : `Running begin again stops here again while ${record.base} and ${record.branch} are where they are; once `
-      + `${record.base} moves on, it opens a fresh round against it. Taking a resolution of your own onto the plan branch `
-      + "is not something the ship does yet. Offer: stop the train (run end).";
+    ? `Running ${entry} again takes attempt ${record.attempts.length + 1} of the ${record.limit} allowed, from the plan tip again, `
+      + `and tells the resolver why this one stopped. Offer: try again (run ${entry}), or stop the train (run end).`
+    : record.spec
+      ? `Running begin again stops here again while ${record.base} and ${record.branch} are where they are; once `
+        + `${record.base} moves on, it opens a fresh round against it. Taking a resolution of your own onto the plan branch `
+        + "is not something the ship does yet. Offer: stop the train (run end)."
+      : `Running plan-land again shows what would land, without Merge, while ${record.base} and ${record.branch} are where they `
+        + `are; once ${record.base} moves on, it opens a fresh round against it. Taking a resolution of your own onto the plan `
+        + "branch is not something the ship does yet. Offer: see what would land (run plan-land), or stop the train (run end).";
   return `${record.stop.explanation} The conflicted paths: ${record.dryRun.join(", ")}. The round's record is `
     + `${recordPathOf(ctx, record.n)}. Nothing was pushed to ${record.branch}, and ${record.held}. ${after}`;
 }
@@ -1387,7 +1406,10 @@ function resolverDispatch(ctx, record, attempt, job, previous) {
  * about to begin, and whatever the caller opening it says otherwise. Returns the
  * payload to print.
  */
-async function openRound(ctx, { baseOid, planTip, conflicts, spec, handBack, before = `${spec} begins`, held = `${spec} was not begun` }, say = []) {
+async function openRound(ctx, {
+  baseOid, planTip, conflicts, spec, handBack, before = `${spec} begins`, held = `${spec} was not begun`,
+  purpose = undefined
+}, say = []) {
   const route = routeOf(ctx);
   // Past every directory there, read or not, so a round is never opened over
   // another's attempts.
@@ -1402,7 +1424,8 @@ async function openRound(ctx, { baseOid, planTip, conflicts, spec, handBack, bef
   const merged = new Set(specsInOrder(ctx).filter((entry) => exists(statePath(ctx, entry.id)) && readState(ctx, entry.id).state === "merged").map((entry) => entry.id));
   const brief = resolveBrief({
     base: record.base, baseOid, branch: record.branch, planTip, conflicts,
-    specs: specsInOrder(ctx).map((entry) => ({ id: entry.id, path: entry.path, merged: merged.has(entry.id) }))
+    specs: specsInOrder(ctx).map((entry) => ({ id: entry.id, path: entry.path, merged: merged.has(entry.id) })),
+    ...(purpose ? { held: purpose } : {})
   });
   fs.mkdirSync(resolveDirOf(ctx, n), { recursive: true, mode: 0o700 });
   fs.writeFileSync(resolveBriefPath(ctx, n), brief, { mode: 0o600 });
@@ -1484,7 +1507,7 @@ async function takeAttempt(ctx, record, say = []) {
   fs.rmSync(resolverReportPath(ctx, record.n), { force: true });
   const job = resolveJobs(ctx).jobs.resolve;
   const dispatch = resolverDispatch(ctx, record, attempt, job, record.attempts.at(-2) ?? null);
-  const sent = await sendSet(ctx, record.spec, {
+  const sent = await sendSet(ctx, record.spec ?? null, {
     kind: "resolve", round: attempt.k, agents: [{ dispatch, job }], step: "resolve-commit",
     closing: "Committing the merge now.", home: resolveDirOf(ctx, record.n)
   });
@@ -1492,7 +1515,7 @@ async function takeAttempt(ctx, record, say = []) {
   attempt.phase = "dispatched";
   saveRecord(ctx, record);
   say.push(`Resolve attempt ${attempt.k} of the ${record.limit} allowed: ${attempt.conflicts.join(", ")} to resolve; resolver ${settings(job)}.`);
-  return { say, dispatch: [dispatch], set: setPayload(sent), next: nextCommand(ctx, "resolve-commit", record.spec) };
+  return { say, dispatch: [dispatch], set: setPayload(sent), next: roundStep(ctx, record, "resolve-commit") };
 }
 
 // The attempt is thrown away and the next one taken, or the round stops when
@@ -1602,16 +1625,19 @@ async function resumeRound(ctx, record, options, say) {
     : attempt.phase === "panel" ? { set: attempt.resendSet ?? attempt.panelSet, step: "resolve-collect" }
       : { set: null, step: "resolve-commit" };
   if (out.set) {
-    const restarted = await restartPointed(ctx, record.spec, [{ set: out.set, step: out.step, dir: setDir(ctx, record.spec, out.set, home) }], options);
+    // The question a restart may put is answered through whatever opened the
+    // round: `begin` for its spec, or the plan's landing step.
+    const retry = (flag) => (record.spec ? nextCommand(ctx, "begin", record.spec, flag) : nextCommand(ctx, "plan-land", null, flag));
+    const restarted = await restartPointed(ctx, record.spec ?? null, [{ set: out.set, step: out.step, dir: setDir(ctx, record.spec, out.set, home) }], options, retry);
     say.push(...restarted.say);
     if (restarted.ask) return { say, ask: restarted.ask, answers: restarted.answers };
     if (restarted.waiting) {
       const { set, step, missing, dir } = restarted.waiting;
       say.push(`${listOf(missing.map((entry) => entry.name))} has not reported yet; nothing was committed or judged, and ${step} takes it once it has.`);
-      return { say, set: { id: set, labels: missing.map((entry) => entry.label), arrive: arriveCommand(dir, set) }, next: nextCommand(ctx, step, record.spec) };
+      return { say, set: { id: set, labels: missing.map((entry) => entry.label), arrive: arriveCommand(dir, set) }, next: roundStep(ctx, record, step) };
     }
   }
-  return { say, next: nextCommand(ctx, out.step, record.spec) };
+  return { say, next: roundStep(ctx, record, out.step) };
 }
 
 // --- subcommands -----------------------------------------------------------
@@ -2033,10 +2059,11 @@ function followingCommand(ctx, id) {
   return following ? nextCommand(ctx, "begin", following) : afterSpecs(ctx, id);
 }
 
-// What a clean whole-plan check is followed by on the plan route. The one place
-// it is said: what lands the plan replaces it here, without touching the check
-// or its decision.
-const afterCleanCheck = (ctx) => nextCommand(ctx, "end", null);
+// What a clean whole-plan check is followed by on the plan route: the plan's
+// landing, which opens the plan's pull request and asks a person whether it
+// merges. The one place it is said, so the check and its decision never change
+// for it.
+const afterCleanCheck = (ctx) => nextCommand(ctx, "plan-land", null);
 
 /**
  * What follows the specs. Off the plan route, `end`, as it always was. On it,
@@ -2051,10 +2078,17 @@ function afterSpecs(ctx, from = null) {
   const end = nextCommand(ctx, "end", null);
   const route = routeOf(ctx);
   if (!isPlanRoute(route)) return end;
+  // A plan whose pull request has merged is done, whatever is on disk beside it.
+  if (readPlanLanding(ctx.shipDir).merged) return end;
   if (specsInOrder(ctx).some((spec) => stateOf(ctx, spec.id) !== "merged")) return end;
   const unit = fixUnitSpecs(ctx).find((entry) => stateOf(ctx, entry.id) !== "merged");
   if (unit) return ["awaiting-approval", "failed"].includes(stateOf(ctx, unit.id)) ? end : nextCommand(ctx, "begin", unit.id);
   if (cleanResultFor(ctx.shipDir, route.tipOid)) return afterCleanCheck(ctx);
+  // A check of this tip that stopped, once the landing has begun: the dialog
+  // shows it, with Merge withheld, rather than the check saying it again. Its
+  // pull request is open, and the person is asked about it.
+  const stopped = checkFor(ctx.shipDir, route.tipOid);
+  if (landingBegun(ctx.shipDir) && stopped?.status && stopped.status !== "open" && stopped.status !== "clean") return nextCommand(ctx, "plan-land", null);
   const why = from === null ? "" : ` --why ${isFixUnitId(from) ? "fix-unit" : "last-spec"}`;
   return nextCommand(ctx, "plan-check", null, why);
 }
@@ -3004,7 +3038,7 @@ async function resolveCommit(options) {
   const record = requireOpenRound(ctx, id, "resolve-commit");
   const attempt = record.attempts.at(-1);
   if (!["dispatched", "committing", "committed", "verified"].includes(attempt?.phase)) {
-    throw new Stop(`attempt ${attempt?.k ?? "?"} of resolve round ${record.n} is ${attempt?.phase ?? "not taken"}, not waiting on its commit; run begin --spec ${id}, which resumes it`);
+    throw new Stop(`attempt ${attempt?.k ?? "?"} of resolve round ${record.n} is ${attempt?.phase ?? "not taken"}, not waiting on its commit; run ${roundEntry(record)}, which resumes it`);
   }
   const home = resolveDirOf(ctx, record.n);
   if (attempt.phase === "dispatched") requireSetIn(ctx, id, attempt.set, "resolve-commit", home);
@@ -3072,7 +3106,7 @@ async function resolveCommit(options) {
     const recorded = node("record-round-report.mjs", ["--dir", home, "--out", path.join(dir, ROUND_REPORT)], { allow: [2] });
     if (recorded.status === 2) {
       throw new Stop(`the resolver's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) `
-        + `and rerun resolve-commit --spec ${id}; the merge commit stays as it is.`, 2);
+        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.`, 2);
     }
     say.push(...recorded.stdout.trim().split("\n"));
     const report = readJson(path.join(dir, ROUND_REPORT));
@@ -3157,7 +3191,7 @@ async function resolveCollect(options) {
   const say = [];
   if (attempt?.phase === "pushing") return emit(await pushResolution(ctx, record, attempt, say));
   if (attempt?.phase !== "panel") {
-    throw new Stop(`attempt ${attempt?.k ?? "?"} of resolve round ${record.n} is ${attempt?.phase ?? "not taken"}, not under review; run begin --spec ${id}, which resumes it`);
+    throw new Stop(`attempt ${attempt?.k ?? "?"} of resolve round ${record.n} is ${attempt?.phase ?? "not taken"}, not under review; run ${roundEntry(record)}, which resumes it`);
   }
   const home = resolveDirOf(ctx, record.n);
   const judged = attempt.resendSet ?? attempt.panelSet;
@@ -3287,9 +3321,10 @@ function ensureUnitDocument(ctx, record, id) {
   const failedVerify = record.verify?.status === "failed"
     ? (record.verify.commands ?? []).find((command) => command.status === "failed") ?? { command: "a verify command", logPath: record.verify.result }
     : null;
+  const failedChecks = record.ci?.status === "failed" ? { pr: record.ci.pr, names: record.ci.failed ?? [], result: record.ci.result } : null;
   const text = unitDocument({
     id, slug: ctx.slug, branch: record.branch, tip: record.tip, check: record.n, recordPath: checkRecordPath(ctx.shipDir, record.n),
-    findings, failedVerify, goalPath: path.join(ctx.plan, "goal.md"), planPath: path.join(ctx.plan, "plan.md"),
+    findings, failedVerify, failedChecks, goalPath: path.join(ctx.plan, "goal.md"), planPath: path.join(ctx.plan, "plan.md"),
     diffPath: path.join(round, "review.diff")
   });
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -3309,6 +3344,9 @@ function foundLine(ctx, record) {
   if (record.review?.status === "open") {
     const count = (record.review.counts?.blocking ?? 0) + (record.review.counts?.major ?? 0);
     parts.push(`the reviewer found ${count} blocking or major finding(s) in how the plan's specs fit together — they are ${record.review.toFix}`);
+  }
+  if (record.ci?.status === "failed") {
+    parts.push(`a check on the plan's pull request #${record.ci.pr} failed${(record.ci.failed ?? []).length > 0 ? ` (${record.ci.failed.join(", ")})` : ""} — what was recorded is ${record.ci.result}`);
   }
   return parts.join(", and ");
 }
@@ -3363,10 +3401,14 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   const raise = record.reason === "spent" ? " Raising limits.ciRepairs in .tagteam/config.json and running this check again would let the ship make another fix." : "";
   say.push(`The whole-plan check of ${at} stopped: ${why}. Its record is ${where}. The work stays on ${record.branch}, nothing of it `
     + `reached ${record.base}, and the plan is recorded as not clean for this tip.${raise}`);
+  // Once the plan's landing has begun, a check that stopped is shown as the
+  // landing dialog shows it — what would land, with Merge withheld — and the
+  // person can ask for that; before it, there is nothing to show.
+  const landing = landingBegun(ctx.shipDir) ? ", or see what would land, without Merge (run plan-land)" : "";
   return {
     say, wholePlan,
     ask: `The whole-plan check of ${at} is not clean, and the train stops here for you; what it found and where its record is are `
-      + `said above. Offer: stop the train (run end)${raise ? ", or raise limits.ciRepairs and run plan-check again" : ""}.`,
+      + `said above. Offer: stop the train (run end)${raise ? ", or raise limits.ciRepairs and run plan-check again" : ""}${landing}.`,
     ...(record.reason === "spent" ? { budget: "spent" } : {}),
     next: nextCommand(ctx, "end", null)
   };
@@ -3550,6 +3592,685 @@ async function planCollect(options) {
   if (units.length >= ctx.config.limits.ciRepairs) return emit(closeCheck(ctx, record, "failed", "spent", say));
   record.units = [...(record.units ?? []), nextUnitId(units)];
   emit(closeCheck(ctx, record, "open", null, say));
+}
+
+// --- the plan's landing ----------------------------------------------------------
+
+// Once every spec and fix unit is merged into the plan branch and the
+// whole-plan check is clean for its tip, the plan reaches its base through one
+// pull request from `plan/<slug>`, and only on a person's word — see
+// `scripts/lib/plan-landing.mjs` for its record. `plan-land` takes `--plan` and
+// no `--spec`, and is one re-enterable step that loops over the branch's tip:
+//
+//   1  every spec merged, the hand-push check on the tip, and a clean
+//      whole-plan result for that tip — without one, the check runs first
+//   2  the one step where the tip becomes final (empty here; see `finalTipStep`)
+//   3  the plan pull request opened or updated, heading at the tip
+//   4  its checks waited for, as a spec's are; a red one is a whole-plan fix
+//   5  the landing check of the tip against the base as it now stands, routed
+//      by `routeLanding`: a conflict to a resolve round, anything else that did
+//      not pass to `mergeInBase` and the whole-plan check of the tip it makes
+//   6  any tip move, by any of those, starts again from 1: every result is
+//      bound to a tip, and none of them speaks for another
+//   7  the dialog: what lands, every result with the tip it is for, and Merge
+//      only when every one is for this tip and none fails
+//
+// Nothing here reads `autoMerge` or asks `evaluate`: `autoMerge: true` makes a
+// spec's verdict ready, and `finish` merges a spec on ready. The plan's merge has
+// one authority, a person's Merge for the tip in front of them, and `merge.mjs`
+// re-reads that and every result itself before it merges anything.
+
+const short = (oid) => String(oid ?? "").slice(0, 12);
+const TITLE = /^[A-Za-z0-9 ._:-]{1,70}$/;
+
+function readLanding(ctx) {
+  const record = readPlanLanding(ctx.shipDir);
+  if (record.unreadable) {
+    throw new Stop(`the plan's landing record at ${landingRecordPath(ctx.shipDir)} cannot be read (${record.unreadable}), so what `
+      + "was checked, confirmed or merged is unknown and nothing is decided from it. Restore it, or move it aside if the plan's "
+      + "landing is to start over, and run this again.");
+  }
+  return record;
+}
+
+// Saved in place: every step below works on the one record it was handed.
+function saveLanding(ctx, record) {
+  Object.assign(record, savePlanLanding(ctx.shipDir, record));
+  return record;
+}
+
+// The kind of the plan's one version increase. Patch until the plan's own
+// increase records another; the dialog, `merge.mjs` and the increase read it
+// from the same record.
+const increaseOf = (record) => record.increase ?? "patch";
+
+// Where the base is right now, fetched first under the primary checkout's mutex.
+async function currentBase(ctx) {
+  const route = routeOf(ctx);
+  await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["fetch", "origin", "--prune"]));
+  return git(ctx.repo, ["rev-parse", `origin/${route.base}`]).stdout.trim();
+}
+
+// The plan pull request as GitHub has it now, or a stop: read as "not there",
+// a merged plan would be opened again.
+function viewPlanPr(ctx, selector, { allowMissing = false } = {}) {
+  const result = gh(ctx.repo, ["pr", "view", String(selector), "--json", "number,url,state,headRefOid,baseRefName,mergeCommit"], { allowFailure: true });
+  if (result.status !== 0) {
+    if (allowMissing) return null;
+    throw new Stop(`could not read the plan's pull request #${selector} from GitHub (${(result.stderr || result.stdout || "").trim().split("\n")[0]}), `
+      + "so whether it is open or merged is unknown, and nothing was decided from it; run this again.");
+  }
+  try { return JSON.parse(result.stdout); } catch (error) { throw new Stop(`gh pr view printed no document for the plan's pull request: ${error.message}`); }
+}
+
+// What a person is told the plan pull request is, and what `end` and the
+// payloads carry about it.
+function landingSummary(ctx, record) {
+  const route = routeOf(ctx);
+  return {
+    branch: route.branch, base: route.base, tip: route.tipOid ?? null,
+    pr: record.pr?.number ?? record.merged?.pr ?? null, url: record.pr?.url ?? null,
+    state: record.merged ? "merged" : record.stopped ? "stopped" : record.pr ? "open" : "not-opened",
+    ...(record.merged ? { merged: record.merged } : {}),
+    record: landingRecordPath(ctx.shipDir)
+  };
+}
+
+// What lands, from the records and never from a walk of commits: every spec
+// and every whole-plan fix, merged into the plan branch, with its pull request
+// and whether a person accepted it with findings open.
+function landsList(ctx) {
+  return unitsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) === "merged").map((unit) => {
+    const state = readState(ctx, unit.id);
+    const accepted = readJson(acceptedPath(ctx, unit.id), null);
+    return {
+      id: unit.id, fixUnit: unit.fixUnit === true, pr: state.pr?.number ?? null,
+      accepted: accepted && accepted.candidate === state.candidateOid ? (accepted.ids ?? []).length : 0,
+      prBody: prBodyPath(ctx, unit.id)
+    };
+  });
+}
+
+function landsText(lands) {
+  const one = (entry) => {
+    const notes = [entry.pr ? `#${entry.pr}` : null, entry.accepted > 0 ? `with ${entry.accepted} finding(s) a person accepted open` : null].filter(Boolean);
+    return `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.id}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
+  };
+  return lands.length > 0 ? listOf(lands.map(one)) : "nothing";
+}
+
+// The plan pull request's title: the plan document's own heading, cut to what a
+// title may hold, or one made from the plan's name.
+function defaultTitle(ctx) {
+  let heading = "";
+  try { heading = /^#\s+(.+)$/m.exec(fs.readFileSync(path.join(ctx.plan, "plan.md"), "utf8"))?.[1] ?? ""; } catch {}
+  const clean = (text) => text.replace(/[^A-Za-z0-9 ._:-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 70).trim();
+  return clean(heading) || clean(`Land plan ${ctx.slug}`) || "Land plan";
+}
+
+// What the orchestrator writes the plan's pull request body from: the shape,
+// what lands, and where each spec's own body is, whose `## Risk` is what carries
+// over — a finding a person accepted, one disclosed when a fix budget ran out.
+// The budgets spent at plan level are said here, since no spec's body has them.
+function bodyFacts(ctx, file) {
+  const limits = ctx.config.limits;
+  const fixes = fixUnitIds(ctx.shipDir);
+  const spent = [];
+  for (const unit of unitsInOrder(ctx)) {
+    if (!exists(statePath(ctx, unit.id))) continue;
+    const state = readState(ctx, unit.id);
+    if ((state.fixRoundsUsed ?? 0) >= limits.fixRounds) spent.push(`${unit.id} used every fix round limits.fixRounds allows`);
+  }
+  if (fixes.length >= limits.ciRepairs) spent.push(`the plan made every whole-plan fix limits.ciRepairs allows (${fixes.join(", ")})`);
+  return {
+    path: file, shape: ["## Summary", "## What you can now do", "## Risk"],
+    goal: path.join(ctx.plan, "goal.md"), plan: path.join(ctx.plan, "plan.md"),
+    lands: landsList(ctx), spent
+  };
+}
+
+/**
+ * The plan pull request, opened or brought up to date for `tip`: head
+ * `plan/<slug>`, base the one the train recorded. Its body is the file the
+ * orchestrator writes beside the landing record; until it exists the step says
+ * so and nothing is opened. A head that is not the tip is a stop.
+ */
+function openPlanPullRequest(ctx, record, tip, options, say) {
+  const route = routeOf(ctx);
+  if (options.title !== undefined && !TITLE.test(options.title)) {
+    throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -", 2);
+  }
+  const file = planBodyPath(ctx.shipDir);
+  if (!exists(file)) {
+    return {
+      say: [...say, `The plan's pull request into ${route.base} opens next, and its body is needed first: write ${file} in the `
+        + "Summary / What you can now do / Risk shape, for the plan as a whole, then run next."],
+      body: bodyFacts(ctx, file), next: nextCommand(ctx, "plan-land", null)
+    };
+  }
+  const text = fs.readFileSync(file, "utf8");
+  const hash = createHash("sha256").update(text).digest("hex");
+  const title = options.title ?? record.title ?? defaultTitle(ctx);
+  let view = record.pr?.number ? viewPlanPr(ctx, record.pr.number) : viewPlanPr(ctx, route.branch, { allowMissing: true });
+  if (view && (view.state !== "OPEN" || view.baseRefName !== route.base)) view = null;
+  if (!view) {
+    gh(ctx.repo, ["pr", "create", "--base", route.base, "--head", route.branch, "--title", title, "--body-file", file]);
+    view = viewPlanPr(ctx, route.branch);
+    say.push(`Opened the plan's pull request #${view.number} from ${route.branch} into ${route.base}: ${view.url}`);
+  } else if (record.bodySent !== hash || record.title !== title) {
+    const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", file], { allowFailure: true });
+    say.push(edited.status === 0
+      ? `The plan's pull request #${view.number} now carries the body and title as written.`
+      : `The plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body it had.`);
+  }
+  if (view.baseRefName !== route.base) throw new Stop(`the plan's pull request #${view.number} targets ${view.baseRefName}, not ${route.base}; nothing else was done`);
+  if (view.headRefOid !== tip) {
+    throw new Stop(`the plan's pull request #${view.number} heads at ${short(view.headRefOid)}, not ${short(tip)}, the tip this ship `
+      + `recorded on ${route.branch}; nothing else was done. Run this again once GitHub shows the branch where origin has it.`);
+  }
+  record.pr = { number: view.number, url: view.url, head: tip, base: route.base };
+  record.bodySent = hash;
+  record.title = title;
+  saveLanding(ctx, record);
+  return null;
+}
+
+// The checks on the plan pull request at `tip`, waited for as `publish` waits
+// for a spec's: one classified result, `not-run` kept apart from `passed`. A
+// result already recorded for this tip is the answer, and nothing is waited for
+// twice.
+function waitPlanChecks(ctx, record, tip, say) {
+  if (record.ci?.tip === tip) {
+    say.push(`The checks on pull request #${record.pr.number} at ${short(tip)} were already waited for: ${record.ci.status} — ${record.ci.reason}.`);
+    return record.ci;
+  }
+  const out = path.join(landingRoot(ctx.shipDir), `ci-${short(tip)}.json`);
+  const ran = node("ci-wait.mjs", ["--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec), "--out", out], { allow: [1] });
+  const outcome = readJson(out);
+  const failed = (outcome.checks ?? []).filter((check) => /fail|timed|action/i.test(check.bucket ?? check.state ?? "")).map((check) => check.name);
+  record.ci = { tip, pr: record.pr.number, status: outcome.status, reason: outcome.reason, result: out, failed, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  say.push(...ran.stdout.trim().split("\n").filter(Boolean));
+  return record.ci;
+}
+
+/**
+ * A red check on the plan pull request is fixed the way the whole-plan check
+ * fixes what it finds: one more fix unit into the plan branch, out of the same
+ * `limits.ciRepairs`, counted from disk. The check record of this tip is the one
+ * that answers it — open, with the failed checks beside what it found — so the
+ * fix unit's document names them and the count is the check's own. With the
+ * budget spent there is no fix: null, and the dialog shows the red check with
+ * Merge withheld.
+ */
+function routeRedChecks(ctx, record, tip, check, say) {
+  const units = fixUnitIds(ctx.shipDir, wholePlanChecks(ctx));
+  if (units.length >= ctx.config.limits.ciRepairs) {
+    say.push(`A check on the plan's pull request failed at ${short(tip)}, and every whole-plan fix limits.ciRepairs allows has been `
+      + `made (${units.join(", ") || "none"}), so it is not fixed and Merge is not offered.`);
+    return null;
+  }
+  check.ci = { ...record.ci };
+  check.units = [...(check.units ?? []), nextUnitId(units)];
+  check.status = "open";
+  check.reason = "checks-failed";
+  check.reopenedAt = new Date().toISOString();
+  saveCheck(ctx.shipDir, check);
+  return decidedPayload(ctx, check, say);
+}
+
+// A copy of the combined change for a merge base 03's snapshot of this tip was
+// not taken against — a base that had taken some of the plan's own commits in
+// since — so the landing check compares the change against what it really is.
+function landingSnapshot(ctx, tip, mergeBase) {
+  const dir = path.join(landingRoot(ctx.shipDir), "snapshots", `${short(tip)}-${short(mergeBase)}`);
+  node("snapshot-candidate.mjs", [
+    "--primary", ctx.repo, "--worktree", ctx.worktree, "--base", mergeBase, "--candidate", tip, "--out-dir", dir, "--config", ctx.configPath
+  ]);
+  return path.join(dir, "candidate.json");
+}
+
+// What a landing result is, in a person's terms, naming the tip and the base.
+function landingLine(route, landing) {
+  const at = `${route.branch} at ${short(landing.tip)}`;
+  const base = `${route.base} at ${short(landing.baseOid)}`;
+  if (landing.on === "whole-plan") {
+    return `${base} has not moved past where ${at} last met it, so the landing check is the whole-plan check's own run of every `
+      + `verify command on this tip: ${landing.verify?.status === "passed" ? "passed" : "nothing to run, which is not a failure"}.`;
+  }
+  const moved = `${route.base} moved to ${short(landing.baseOid)} since ${at} last met it at ${short(landing.mergeBase)}`;
+  if (landing.status === "passed") return `${moved}; the plan merges into it cleanly, lands as the same change, and every verify command passes on the merged result.`;
+  if (landing.status === "conflict") return `${moved}, and the plan no longer merges into it cleanly (${(landing.conflicts ?? []).join(", ")}).`;
+  if (landing.status === "differs") {
+    return `${moved}. The plan still merges cleanly, but what would land on ${base} is not the plan's change — part of it is `
+      + `already there, or the merge resolved it into something else; both normalized diffs are at ${landing.dir}.`;
+  }
+  const failed = (landing.verify?.commands ?? []).find((command) => command.status === "failed");
+  return `${moved}. The plan merges cleanly and lands as the same change, but on that base it fails `
+    + `${failed ? `\`${failed.command}\`${failed.logPath ? ` (log at ${failed.logPath})` : ""}` : "a verify command"}.`;
+}
+
+/**
+ * The landing check of `tip` against the base as it stands, recorded for that
+ * pair. The reviewed base is the merge base of the tip and the base, worked out
+ * for this tip — never the commit the branch was cut from, or every plan that
+ * once took the base in would come back as differing. A result already recorded
+ * for the same tip and base is reused, and spends no verify time. A base the tip
+ * already contains has nothing new to check: the result is the whole-plan
+ * check's own verify of this tip, as a spec's unmoved base is its own.
+ */
+async function planLandingCheck(ctx, record, tip, check, say) {
+  const route = routeOf(ctx);
+  const baseOid = await currentBase(ctx);
+  if (record.landing?.tip === tip && record.landing?.baseOid === baseOid) {
+    say.push(`The landing check of ${short(tip)} against ${route.base} at ${short(baseOid)} already ran: ${record.landing.status}; it is not run again.`);
+    return record.landing;
+  }
+  const found = git(ctx.repo, ["merge-base", tip, baseOid], { allowFailure: true });
+  if (found.status !== 0) throw new Stop(`${route.branch} at ${short(tip)} and ${route.base} at ${short(baseOid)} have no commit in common; nothing was landed`);
+  const mergeBase = found.stdout.trim();
+  let landing;
+  if (mergeBase === baseOid) {
+    landing = {
+      tip, baseOid, mergeBase, status: "passed", on: "whole-plan", check: check.n,
+      verify: { status: check.verify.status }, resultPath: check.verify.result, conflicts: null, dir: null
+    };
+  } else {
+    if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") {
+      throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the landing check of ${route.branch} has to check the `
+        + "merged tree out there; clear it, then run this again");
+    }
+    git(ctx.worktree, ["checkout", "--detach", tip]);
+    // The whole-plan check's snapshot of this tip is the reviewed change when it
+    // was taken from the same merge base, which it is unless the base took some
+    // of the plan's own commits in since.
+    const candidatePath = check.mergeBase === mergeBase
+      ? path.join(checkRoundDir(ctx.shipDir, check.n), "candidate.json")
+      : landingSnapshot(ctx, tip, mergeBase);
+    let outcome;
+    try {
+      outcome = checkLanding({
+        repo: ctx.repo, worktree: ctx.worktree, branch: null, config: ctx.config, configPath: ctx.configPath,
+        baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
+        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all"
+      });
+    } catch (error) { throw new Stop(error.message); }
+    landing = {
+      tip, baseOid, mergeBase, status: outcome.status, conflicts: outcome.conflicts ?? null,
+      verify: outcome.verify ? { status: outcome.verify.status, commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath }) => ({ command, status, timedOut, logPath })) } : null,
+      resultPath: outcome.resultPath ?? null, dir: outcome.dir ?? null, mergedCommit: outcome.mergedCommit ?? null
+    };
+  }
+  record.landing = { ...landing, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  say.push(landingLine(route, record.landing));
+  return record.landing;
+}
+
+/**
+ * The one merge of the base into the plan branch that adds no code: after a
+ * landing check came back failed or differing, there is nothing to resolve —
+ * the merged tree is clean — and the question is whether the plan still holds
+ * on the base as it is, which is the whole-plan check's. So the base commit the
+ * check was against is merged in as a real two-parent commit, the plan tip
+ * first, and pushed by the ship itself onto this plan's branch, recorded as its
+ * own before the push and confirmed after it; the whole-plan check then reviews
+ * and verifies that tip, and a real problem is fixed through its fix units.
+ *
+ * Every merge of the base into the plan branch runs the version step at one
+ * point, after the merge is in progress and before anything reads what it
+ * holds — `versionStep`, the same step a resolve attempt runs. The commit is
+ * made from the index with `commit-tree`, so the merge commit is named by the
+ * call that made it rather than read back off HEAD.
+ */
+async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
+  const route = routeOf(ctx);
+  const outcome = `the merge of ${route.base} into ${route.branch} was not pushed, and the plan was not landed`;
+  settleWorktree(ctx);
+  if (git(ctx.worktree, ["status", "--porcelain", "--untracked-files=no"]).stdout.trim() !== "") {
+    throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the merge of ${route.base} into ${route.branch} has to `
+      + "be made there; clear it, then run this again");
+  }
+  git(ctx.worktree, ["checkout", "--detach", tip]);
+  const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", baseOid], { allowFailure: true });
+  if (!mergeInProgress(ctx)) {
+    throw new Stop(`git merge of ${short(baseOid)} into ${short(tip)} did not start: ${(merging.stderr || merging.stdout || "").trim()}`);
+  }
+  try { versionStep({ worktree: ctx.worktree }); } catch (error) {
+    settleWorktree(ctx);
+    throw new Stop(error.message);
+  }
+  const unmerged = git(ctx.worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
+  if (unmerged.length > 0) {
+    settleWorktree(ctx);
+    throw new Stop(`the merge of ${route.base} at ${short(baseOid)} into ${route.branch} conflicts in ${unmerged.join(", ")}, though the `
+      + "landing check found it clean; nothing was committed or pushed. Run this again: the landing check sees the conflict and "
+      + "a resolve round takes it.");
+  }
+  git(ctx.worktree, ["add", "-A"]);
+  node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
+  const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
+  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", `Merge ${route.base} into ${route.branch}`]).stdout.trim();
+  git(ctx.worktree, ["merge", "--quit"]);
+  git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
+  record.mergeIn = { tip: oid, from: tip, baseOid, why, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  // Immediately before the push, as for a resolved merge: a plain push goes
+  // over any ancestor of the merge, so a branch moved or rewound meanwhile is
+  // the hand-push stop, said by its own check, and never pushed over or forced.
+  await planTipCheck(ctx, outcome);
+  if (routeOf(ctx).tipOid !== oid) {
+    try {
+      await pushToPlanBranch(ctx, oid);
+    } catch (error) {
+      await planTipCheck(ctx, outcome);
+      throw new Stop(`the push of the merge ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still where `
+        + `this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
+    }
+  }
+  say.push(`${route.base} at ${short(baseOid)} is merged into ${route.branch}: ${short(oid)}, whose first parent is the plan tip `
+    + `${short(tip)} and whose second is ${route.base}. It adds no code of its own, and the driver pushed it itself; the whole-plan `
+    + "check now reviews and verifies the plan on that tip, and fixes what it finds as it fixes anything.");
+  return oid;
+}
+
+/**
+ * The one place a landing result decides where the plan goes. Null when it
+ * passed, or when nothing can be done about it within the budgets — the dialog
+ * then shows it, with Merge withheld; otherwise the payload that moves the plan
+ * on. Only a conflict has anything for a resolver: 02's round, opened without a
+ * spec about to begin. A failed or differing result is a clean merged tree, so
+ * the base is merged in and the whole-plan check reads that tip.
+ */
+async function routeLanding(ctx, record, tip, landing, options, say) {
+  if (landing.status === "passed") return null;
+  const route = routeOf(ctx);
+  if (landing.status === "conflict") {
+    const same = resolveRounds(ctx).find((entry) => entry.record.baseOid === landing.baseOid && entry.record.planTip === tip)?.record ?? null;
+    if (same?.status === "open") return resumeRound(ctx, same, options, say);
+    if (same?.status === "stopped") {
+      if (attemptsLeft(same)) return reopenRound(ctx, same, say);
+      say.push(`Every resolve attempt limits.ciRepairs allows for merging ${route.base} at ${short(landing.baseOid)} into ${route.branch} `
+        + `at ${short(tip)} has been taken (resolve round ${same.n}; its record is ${recordPathOf(ctx, same.n)}), so the conflict `
+        + "stays and Merge is not offered.");
+      return null;
+    }
+    if (same) return null;
+    return openRound(ctx, {
+      baseOid: landing.baseOid, planTip: tip, conflicts: landing.conflicts ?? [], spec: null,
+      handBack: nextCommand(ctx, "plan-land", null), before: "the plan lands", held: "the plan was not landed",
+      purpose: `the plan's pull request into ${route.base} does not merge until they do`
+    }, say);
+  }
+  await mergeInBase(ctx, record, { tip, baseOid: landing.baseOid, why: landing.status }, say);
+  return { say, next: nextCommand(ctx, "plan-check", null, " --why merge-in") };
+}
+
+/**
+ * The one empty step, between "the whole-plan check is clean for this tip" and
+ * "open the pull request, wait for its checks, run the landing check": where the
+ * tip becomes final. The plan's version increase is made here by a later change,
+ * as a commit the ship puts on the plan branch through `pushToPlanBranch`, and
+ * judged as the ship's through the recorded tip like every other. Anything it
+ * commits moves the tip, and the step starts again. Returns the new tip, or null
+ * when the tip did not move — always, here.
+ */
+async function finalTipStep(ctx, record, tip, say) {
+  return null;
+}
+
+// What a check of a tip made by the ship is answering, when the ship knows.
+function whyFor(ctx, record, tip) {
+  if (record.mergeIn?.tip === tip) return " --why merge-in";
+  if (resolveRounds(ctx).some((entry) => entry.record.status === "passed" && entry.record.pushed === tip)) return " --why resolve";
+  return "";
+}
+
+// One sentence per result, each naming the commit it is about.
+function resultLines(route, record, results) {
+  const at = short(results.tip);
+  const lines = [];
+  const { wholePlan, ci, landing, version } = results;
+  lines.push(wholePlan.status === "passed"
+    ? `the whole-plan check of ${at} is clean (check ${wholePlan.check}: every verify command ${wholePlan.verify === "passed" ? "passed" : "had nothing to run"}, and its reviewer found nothing blocking or major)`
+    : wholePlan.status === "failed"
+      ? `the whole-plan check of ${at} is ${wholePlan.outcome}, not clean (check ${wholePlan.check})`
+      : `no whole-plan check has run on ${at} — not run`);
+  const pr = record.pr?.number ? `pull request #${record.pr.number}` : "the plan's pull request";
+  lines.push(!ci.recorded
+    ? `the checks on ${pr} were not waited for at ${at} — not run, which is not passed`
+    : ci.status === "passed" ? `the checks on ${pr} passed at ${at}`
+      : ci.status === "failed" ? `a check on ${pr} failed at ${at}`
+        : `the checks on ${pr} did not run at ${at} (${ci.reason}) — not run, which is not passed`);
+  lines.push(landing.status === "not-run"
+    ? `the landing check of ${at} against ${route.base} as it stands, at ${short(results.baseOid)}, has not run — not run`
+    : `the landing check of ${at} against ${route.base} at ${short(landing.baseOid)} ${landing.status === "passed" ? "passed" : `came back ${landing.outcome}`}`);
+  const condition = { lines: version.lines, kind: version.kind ?? increaseOf(record) };
+  lines.push(version.status === "not-run"
+    ? `the version lines were not read for ${at} — not run`
+    : `the version lines at ${at} against ${route.base} at ${short(results.baseOid)}: ${versionLines(condition, route.base).join("; ")}`);
+  return lines;
+}
+
+/**
+ * The dialog: what lands, every result with the commit it is for, and the
+ * three answers. Merge is offered only when nothing withholds it, whatever
+ * `autoMerge` says. With `--approve` and nothing withholding, the person's Merge
+ * is recorded for this tip and the plan merges; with anything withholding,
+ * nothing is recorded — no approval clears a blocker.
+ */
+async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []) {
+  const route = routeOf(ctx);
+  const version = versionConditionAt(ctx.repo, { entries: ctx.config.versionFiles ?? [], tipOid: tip, baseOid, kind: increaseOf(record) });
+  record.version = { tip, baseOid, holds: version.holds, kind: version.kind, lines: version.lines, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  const results = resultsFor(ctx.shipDir, record, { tip, baseOid, version });
+  const withheld = withholding(ctx.shipDir, record, results);
+  const lands = landsList(ctx);
+  if (options.approve && withheld.length === 0) return confirmAndMerge(ctx, record, tip, options.approve, say);
+  if (options.approve) say.push(`Not recording ${options.approve}'s Merge: ${withheld.join("; ")}. No approval clears a blocker.`);
+  say.push(...notes);
+  const lines = resultLines(route, record, results);
+  const pr = record.pr?.number ? `The plan's pull request #${record.pr.number} (${record.pr.url})` : "The plan's pull request, not opened yet,";
+  const offered = withheld.length === 0;
+  const merge = nextCommand(ctx, "plan-land", null, " --approve \"<their email>\"");
+  const stop = nextCommand(ctx, "plan-land", null, " --stop");
+  const leave = nextCommand(ctx, "end", null);
+  const text = [
+    `What lands on ${route.base}: ${landsText(lands)}. ${pr} would merge ${route.branch} at ${short(tip)} with one merge commit, `
+      + `which keeps each spec's own commit on ${route.base}'s history. The plan as a whole is ${path.join(ctx.plan, "plan.md")}.`,
+    `Checked against ${short(tip)}: ${lines.join("; ")}.`,
+    offered
+      ? `Offer: Merge (run ${merge}) — merges it now, at exactly ${short(tip)}, after checking the base once more, and then deletes `
+        + `${route.branch}; Leave open (run ${leave}) — the pull request stays open, and /tagteam:ship ${ctx.plan} brings this `
+        + `question back; or Stop (run ${stop}) — the same, recorded as stopped by them.`
+      : `Merge is not offered: ${withheld.join("; ")}. No approval clears these; what moves them is the plan or the base changing. `
+        + `Offer: Leave open (run ${leave}) — the pull request stays as it is, and /tagteam:ship ${ctx.plan} looks again; or Stop `
+        + `(run ${stop}) — the same, recorded as stopped by them.`
+  ].join(" ");
+  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} needs you`, offered ? "the plan is ready to land" : "the plan cannot land yet"], { stdio: "ignore" });
+  return {
+    say, ask: text,
+    answers: { ...(offered ? { merge } : {}), leaveOpen: leave, stop },
+    planLanding: {
+      ...landingSummary(ctx, record), lands, baseOid, results, merge: offered, withheld
+    },
+    next: leave
+  };
+}
+
+/**
+ * A person's Merge, for `tip`: recorded, and then the merge through `merge.mjs`
+ * inside the landing retry — which re-checks a base that moved between the check
+ * and the merge, within its bound, and stops on anything else. The confirmation
+ * is bound to the tip; when the loop ends without a merge it is withdrawn, so the
+ * dialog that comes back asks again.
+ */
+async function confirmAndMerge(ctx, record, tip, by, say) {
+  const route = routeOf(ctx);
+  record.confirmation = { tip, by, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  say.push(`Merge confirmed by ${by} for ${route.branch} at ${short(tip)}.`);
+  const check = checkFor(ctx.shipDir, tip);
+  const landed = await mergeWithLanding({
+    check: async () => {
+      const at = await planTipCheck(ctx, "nothing was merged");
+      if (at !== tip) return { stop: `${route.branch} moved to ${short(at)} after the Merge was given for ${short(tip)}, so nothing was merged.` };
+      const landing = await planLandingCheck(ctx, record, tip, check, say);
+      return landing.status === "passed" ? null : { stop: `The landing check came back ${landing.status} against the base as it now stands, so nothing was merged.` };
+    },
+    merge: () => {
+      const result = node("merge.mjs", ["--plan-ship", ctx.shipDir, "--repo", ctx.repo, "--config", ctx.configPath],
+        { allow: [BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE] });
+      if (result.status === 0) return { merged: lastJson(result.stdout) };
+      const why = result.stderr.trim().split("\n")[0];
+      if (result.status === VERSION_NOT_ONE_INCREASE) return { stop: `The merge was refused on the version lines, read again against the base as it now stands: ${why}.` };
+      say.push(`${route.base} moved again between the check and the merge, so the merge was refused: ${why}. Checking the plan against the base as it now stands.`);
+      return {};
+    }
+  });
+  if (!landed.merged) {
+    record.confirmation = null;
+    saveLanding(ctx, record);
+    say.push(landed.stop, "The Merge given for this tip is withdrawn; what would land is shown again.");
+    return { say, next: nextCommand(ctx, "plan-land", null) };
+  }
+  record.merged = { by: "ship", pr: record.pr.number, head: tip, baseOid: landed.merged.baseOid ?? null, confirmedBy: by, checkedTip: true, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  return finishLanded(ctx, record, say, `Merged the plan's pull request #${record.pr.number} into ${route.base} at ${short(tip)}, as one merge commit.`);
+}
+
+// After the plan's merge, by the ship or by hand: its merge commit if GitHub
+// says, then the plan branch deleted — a failed delete is said, never a stop —
+// and the train ends.
+function finishLanded(ctx, record, say, line) {
+  const route = routeOf(ctx);
+  say.push(line);
+  if (!record.merged.mergeCommit) {
+    const view = viewPlanPr(ctx, record.merged.pr, { allowMissing: true });
+    if (view?.mergeCommit?.oid) {
+      record.merged.mergeCommit = view.mergeCommit.oid;
+      saveLanding(ctx, record);
+    }
+  }
+  const deleted = git(ctx.repo, ["push", "origin", "--delete", route.branch], { allowFailure: true });
+  record.branchDeleted = deleted.status === 0;
+  saveLanding(ctx, record);
+  say.push(deleted.status === 0
+    ? `Deleted ${route.branch} from origin.`
+    : `${route.branch} could not be deleted from origin (${(deleted.stderr || "").trim().split("\n")[0]}); it is left there, and deleting it is yours.`);
+  return { say, planLanding: landingSummary(ctx, record), next: nextCommand(ctx, "end", null) };
+}
+
+// A plan pull request GitHub says is merged that this ship did not record
+// merging: a person merged it, or this ship did and died before saying so.
+// Recorded with whether its head was the tip the ship checked.
+function mergedByHand(ctx, record, view, say) {
+  const route = routeOf(ctx);
+  const checkedTip = view.headRefOid === route.tipOid;
+  record.merged = {
+    by: record.confirmation?.tip === view.headRefOid ? "ship" : "hand", pr: view.number ?? record.pr.number, head: view.headRefOid,
+    mergeCommit: view.mergeCommit?.oid ?? null, checkedTip, at: new Date().toISOString()
+  };
+  saveLanding(ctx, record);
+  return finishLanded(ctx, record, say, `The plan's pull request #${record.merged.pr} is already merged into ${route.base}, `
+    + (checkedTip
+      ? `at ${short(view.headRefOid)}, the tip this ship checked; recorded.`
+      : `at ${short(view.headRefOid)}, which is not ${short(route.tipOid)}, the tip this ship checked — what merged is a commit it did not check. Recorded as merged.`));
+}
+
+async function landingStep(ctx, record, options, say) {
+  const route = routeOf(ctx);
+  if (record.merged) {
+    say.push(`The plan's pull request #${record.merged.pr} is already merged into ${route.base}; nothing is left to land.`);
+    return { say, planLanding: landingSummary(ctx, record), next: nextCommand(ctx, "end", null) };
+  }
+  if (record.pr?.number) {
+    const view = viewPlanPr(ctx, record.pr.number);
+    if (view.state === "MERGED") return mergedByHand(ctx, record, view, say);
+    if (view.state !== "OPEN") {
+      say.push(`The plan's pull request #${record.pr.number} is ${String(view.state).toLowerCase()} on GitHub; a new one is opened when the plan is ready.`);
+      record.pr = null;
+      saveLanding(ctx, record);
+    }
+  }
+  if (options.stop) {
+    record.stopped = { tip: route.tipOid ?? null, at: new Date().toISOString() };
+    record.confirmation = null;
+    saveLanding(ctx, record);
+    say.push(`Stopped by the person: ${record.pr ? `the plan's pull request #${record.pr.number} stays open` : "nothing is opened"}, nothing `
+      + `merges, and /tagteam:ship ${ctx.plan} picks the plan up again.`);
+    return { say, planLanding: landingSummary(ctx, record), next: nextCommand(ctx, "end", null) };
+  }
+  if (record.stopped) {
+    record.stopped = null;
+    saveLanding(ctx, record);
+    say.push("The plan was stopped by the person; it is picked up again.");
+  }
+
+  // 1. Every spec and fix unit merged, the tip one the ship recorded, and a
+  // clean whole-plan result for it.
+  say.push(...(await reconcileMerged(ctx)).say);
+  const unmerged = specsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) !== "merged");
+  if (unmerged.length > 0) {
+    throw new Stop(`${listOf(unmerged.map((unit) => unit.id))} ${unmerged.length > 1 ? "are" : "is"} not merged into ${route.branch} yet, so `
+      + `the plan does not land; run ${nextCommand(ctx, "begin", unmerged[0].id)}`);
+  }
+  // A whole-plan fix still to ship goes first, as it does after the check that
+  // made it; one waiting for a person holds the plan, as a waiting spec does.
+  const fixing = fixUnitSpecs(ctx).find((unit) => stateOf(ctx, unit.id) !== "merged");
+  if (fixing) {
+    say.push(`The whole-plan fix ${fixing.id} is not merged into ${route.branch} yet, so the plan does not land before it.`);
+    return { say, next: afterSpecs(ctx) };
+  }
+  const tip = await planTipCheck(ctx, "the plan was not landed");
+  const open = openResolveRound(ctx);
+  if (open) return resumeRound(ctx, open, options, say);
+  const check = checkFor(ctx.shipDir, tip);
+  if (!isCleanFor(check, tip)) {
+    if (check?.status && check.status !== "open") {
+      return landingDialog(ctx, record, tip, await currentBase(ctx), options, say,
+        [`The whole-plan check of ${route.branch} at ${short(tip)} stopped ${check.status}; its record is ${checkRecordPath(ctx.shipDir, check.n)}.`]);
+    }
+    say.push(`No clean whole-plan check describes ${route.branch} at ${short(tip)}, so it is checked before anything about landing it.`);
+    return { say, next: nextCommand(ctx, "plan-check", null, whyFor(ctx, record, tip)) };
+  }
+  // 2. Where the tip becomes final.
+  if (await finalTipStep(ctx, record, tip, say)) return { say, next: nextCommand(ctx, "plan-land", null) };
+  // 3. The plan pull request, at the tip.
+  const body = openPlanPullRequest(ctx, record, tip, options, say);
+  if (body) return body;
+  // 4. Its checks.
+  const ci = waitPlanChecks(ctx, record, tip, say);
+  if (ci.status === "failed") {
+    const fixing = routeRedChecks(ctx, record, tip, check, say);
+    if (fixing) return fixing;
+  }
+  // 5. The landing check, routed.
+  const landing = await planLandingCheck(ctx, record, tip, check, say);
+  const routed = await routeLanding(ctx, record, tip, landing, options, say);
+  if (routed) return routed;
+  // 7. What lands, and the question.
+  return landingDialog(ctx, record, tip, landing.baseOid, options, say);
+}
+
+async function planLand(options) {
+  const ctx = context(options);
+  if (!isPlanRoute(routeOf(ctx))) {
+    throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no plan pull request to open or land; nothing was done`);
+  }
+  if (options.approve && options.stop) throw new Stop("--approve and --stop are two answers to one question; give one", 2);
+  const say = [];
+  const payload = await landingStep(ctx, readLanding(ctx), options, say);
+  // A Merge given where the step never reached the question for this tip is
+  // not recorded either, and says so: a merge-in, a fix or a check was due first.
+  if (options.approve && !readPlanLanding(ctx.shipDir).confirmation && !readPlanLanding(ctx.shipDir).merged
+    && !(payload.say ?? []).some((line) => line.startsWith(`Not recording ${options.approve}'s Merge`))
+    && !(payload.say ?? []).some((line) => line.startsWith("Merge confirmed by"))) {
+    (payload.say ?? (payload.say = [])).unshift(`Not recording ${options.approve}'s Merge: the plan is not at its question for this tip `
+      + "yet — what is due first is below. No approval clears a blocker.");
+  }
+  emit(payload);
 }
 
 const REASONS = {
@@ -3968,8 +4689,22 @@ async function end(options) {
   });
   const summary = specsInOrder(ctx).map((spec) => ({ id: spec.id, state: exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "not started" }));
   const route = routeOf(ctx);
-  if (isPlanRoute(route)) {
+  // The plan's pull request, as the landing record has it — read tolerantly,
+  // since `end` is how a train stops and it does not stop on a record.
+  const landing = isPlanRoute(route) ? readPlanLanding(ctx.shipDir) : {};
+  const planLanding = isPlanRoute(route) && landingBegun(ctx.shipDir) && !landing.unreadable ? landingSummary(ctx, landing) : null;
+  if (isPlanRoute(route) && landing.merged) {
+    say.push(`This plan landed on ${route.base} through its pull request #${landing.merged.pr}, one merge commit of ${route.branch} at `
+      + `${short(landing.merged.head)}${landing.merged.by === "hand" ? ", merged on GitHub by a person" : ""}`
+      + `${landing.merged.checkedTip === false ? " — not the tip this ship checked" : ""}.`
+      + (landing.branchDeleted === false ? ` ${route.branch} is still on origin.` : ""));
+  } else if (isPlanRoute(route)) {
     say.push(`This plan's merged work is on ${route.branch} on origin, not on ${route.base}: ${route.base} has none of it.`);
+    if (landing.unreadable) say.push(`The plan's landing record cannot be read (${landing.unreadable}); it is ${landingRecordPath(ctx.shipDir)}.`);
+    else if (landing.pr?.number) {
+      say.push(`The plan's pull request #${landing.pr.number} into ${route.base} is open${landing.stopped ? ", stopped by the person" : ""}; `
+        + `nothing of it merges until a person says Merge, and /tagteam:ship ${ctx.plan} brings back what would land.`);
+    }
   }
   // A resolve round that did not pass is named, so that a train ended on one is
   // not read as a train that simply ran out of specs.
@@ -3996,18 +4731,25 @@ async function end(options) {
     say.push(`The whole-plan check last ran on ${record.branch} at ${record.tip.slice(0, 12)}, after ${WHY[record.why] ?? record.why}, `
       + `and is ${record.status ?? "not decided yet"}${record.status && record.status !== "clean" ? " — not clean" : ""}; its record is ${wholePlan.record}.${moved}`);
   }
-  emit({ say, specs: summary, ...(unresolved.length > 0 ? { resolve: unresolved } : {}), ...(wholePlan ? { wholePlan } : {}) });
+  emit({
+    say, specs: summary, ...(unresolved.length > 0 ? { resolve: unresolved } : {}), ...(wholePlan ? { wholePlan } : {}),
+    ...(planLanding ? { planLanding } : {})
+  });
 }
 
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
   start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, repair, revisit, finish, end,
-  "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect
+  "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect,
+  "plan-land": planLand
 };
 
-// The steps that belong to the plan rather than to one of its specs.
-const PLAN_LEVEL = new Set(["start", "end", "plan-check", "plan-collect"]);
+// The steps that belong to the plan rather than to one of its specs, and those
+// that take `--spec` only when what they resume has one: a resolve round opened
+// to land the plan has no spec about to begin.
+const PLAN_LEVEL = new Set(["start", "end", "plan-check", "plan-collect", "plan-land"]);
+const SPEC_WHEN_ANY = new Set(["resolve-commit", "resolve-collect"]);
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
@@ -4034,15 +4776,19 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   repair  --spec <id>                 spend a CI repair and dispatch the fixer
   revisit --spec <id>                 from awaiting-approval: the reviewed commit through the cycle again, spending nothing
   finish  --spec <id> [--approve <email>]   merge when ready, otherwise stop for a person
-  resolve-commit --spec <id>          on a plan branch, before <id> begins: commit the resolved merge of the base,
-                                      check it, verify it, and send the panel
-  resolve-collect --spec <id>         judge the panel on that merge; push it onto the plan branch, or try again
+  resolve-commit [--spec <id>]        on a plan branch, before <id> begins — or, with no --spec, before the plan
+                                      lands: commit the resolved merge of the base, check it, verify it, and send the panel
+  resolve-collect [--spec <id>]       judge the panel on that merge; push it onto the plan branch, or try again
   plan-check [--why <reason>] [--run-gone | --run-live]
                                       on a plan branch with every spec merged: verify the branch's tip with every
                                       command and send one reviewer over the plan's combined change; reuses a
                                       decided result for the same tip. --why is last-spec, fix-unit, merge-in,
                                       resolve or tip-moved, and says what the result answers
   plan-collect                        judge that reviewer; clean, a fix unit to ship, or a stop for a person
+  plan-land [--title <t>] [--approve <email> | --stop] [--run-gone | --run-live]
+                                      on a plan branch whose tip is clean: open the plan's pull request, wait for its
+                                      checks, check it against the base, and ask what lands; --approve is the person's
+                                      Merge, the only thing that merges a plan, and --stop records that they stopped it
   end                                 release the lock and remove the worktree
 `;
 
@@ -4055,6 +4801,7 @@ function parseArgs(argv) {
     if (key === "--reclaim") { options.reclaim = true; continue; }
     if (key === "--run-gone") { options.runGone = true; continue; }
     if (key === "--run-live") { options.runLive = true; continue; }
+    if (key === "--stop") { options.stop = true; continue; }
     const value = rest[++index];
     if (value === undefined) throw new Stop(`${key} requires a value\n${USAGE}`, 2);
     options[key.slice(2)] = value;
@@ -4068,7 +4815,7 @@ async function main() {
     const { sub, options } = parseArgs(process.argv.slice(2));
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
-    if (!PLAN_LEVEL.has(sub) && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
+    if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
     await run(options);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

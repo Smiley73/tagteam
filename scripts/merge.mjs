@@ -20,6 +20,9 @@
 // "the base moved again while I was checking" from every other reason a merge
 // does not happen. Nothing in here rebases, amends or re-commits anything: what
 // merges is the reviewed commit and only ever the reviewed commit.
+//
+// A spec merges as a squash. A plan on its own branch merges once more at the
+// end, as a merge commit, and only on a person's word — see `mergePlan`.
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -27,12 +30,22 @@ import { evaluate } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
+import { isPlanRoute } from "./lib/plan-route.mjs";
+import { checkFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
+import { isCleanFor } from "./lib/whole-plan.mjs";
+import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
 
 // The base is neither the reviewed base nor a base this candidate's landing
 // check cleared. Its own code because the caller retries exactly this one and
 // stops on everything else: 4 is a spent budget, 3 stale configuration, 2 usage
 // and 1 the rest, by the driver's conventions.
 export const BASE_NOT_ACCEPTED = 5;
+
+// A plan's version lines are not exactly one increase over the base as it was
+// read under the lock. Its own code because it is never retried: the base moved
+// past the value the increase was made from, and only a new increase — a new
+// tip, put to the person again — answers it.
+export const VERSION_NOT_ONE_INCREASE = 6;
 
 export async function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
   const resolved = path.resolve(statePath);
@@ -144,6 +157,115 @@ export async function mergeSpec(statePath, { repo, configPath, dryRun = false } 
   return { ok: true, merged: true, pr: pr.number, candidateOid, branch };
 }
 
+const OID = /^[0-9a-f]{40,64}$/;
+const short = (oid) => String(oid ?? "").slice(0, 12);
+const refuse = (message, exitCode = 1) => Object.assign(new Error(`${message}; nothing was merged`), { exitCode });
+const readJsonFile = (file, what) => {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (error) { throw refuse(`could not read ${what} at ${file} (${error.message})`); }
+};
+
+/**
+ * Merges a plan's pull request — `plan/<slug>` into the base its train
+ * recorded — with a merge commit pinned to the plan branch's recorded tip.
+ *
+ * Nothing about `autoMerge`, and nothing of `evaluate`'s ready-or-approval
+ * logic, reaches this: `autoMerge: true` makes a spec's verdict ready, and the
+ * plan's merge is never a spec's. The one authority is a person's Merge, and it
+ * is read here off the record, bound to the tip, never taken from the caller.
+ * Then, for that exact tip, every other thing the dialog showed is re-read and
+ * refused on: a clean whole-plan result, no merge of the base still under way,
+ * no failed check recorded on the pull request, the version condition against
+ * the base this has just read, a landing check that passed against that base —
+ * or a base the tip already contains — and the live pull request aimed at the
+ * recorded base and heading at the tip.
+ *
+ * All of it under the primary checkout's lock, from the fetch to `gh pr merge`.
+ * For version lines that window is the collision itself: two plans increasing
+ * from one value write identical lines, GitHub merges the second cleanly onto
+ * the first, and both land one number. Held across the merge, a second plan's
+ * merge waits here, fetches a base that carries the first, fails the version
+ * condition and merges nothing. The lock is one checkout's: two people
+ * confirming two plans from two machines within seconds can still land one
+ * number, and the guard there is the repository's own rule that a branch be up
+ * to date before it merges — a setting the person changes, never this.
+ */
+export async function mergePlan(shipDir, { repo, configPath, dryRun = false } = {}) {
+  const ship = path.resolve(shipDir);
+  return withPrimaryGitLock(repo, async () => {
+    const config = readJsonFile(path.resolve(configPath), "the configuration");
+    const train = readJsonFile(path.join(ship, "train.json"), "the train");
+    const route = train.route;
+    if (!isPlanRoute(route)) throw refuse(`${ship} is not a train on a plan branch, so it has no plan pull request`);
+    const tip = route.tipOid;
+    if (!OID.test(tip ?? "")) throw refuse(`${route.branch} has no tip the ship recorded putting there`);
+    const record = readPlanLanding(ship);
+    if (record.unreadable) throw refuse(`the plan's landing record cannot be read (${record.unreadable})`);
+    if (record.merged) throw refuse(`the plan's pull request #${record.merged.pr ?? record.pr?.number ?? "?"} is already recorded as merged`);
+    if (record.confirmation?.tip !== tip) {
+      throw refuse(record.confirmation
+        ? `the person's Merge was given at ${short(record.confirmation.tip)}, and ${route.branch} has moved to ${short(tip)} since; only a Merge given for this tip lands it`
+        : `no person has confirmed merging ${route.branch} at ${short(tip)}, and nothing else authorises the plan's merge — autoMerge reaches a spec of this plan, never the plan`);
+    }
+    const pr = record.pr;
+    if (!pr?.number) throw refuse("the landing record names no plan pull request");
+    if (pr.head !== tip) throw refuse(`the plan pull request #${pr.number} was recorded at ${short(pr.head)}, not the tip ${short(tip)}`);
+    const check = checkFor(ship, tip);
+    if (!isCleanFor(check, tip)) {
+      throw refuse(check?.status
+        ? `the whole-plan check of ${short(tip)} is ${check.status}, not clean`
+        : `no whole-plan check is recorded clean for ${short(tip)}`);
+    }
+    const round = openResolveRoundIn(ship);
+    if (round) throw refuse(`resolve round ${round.n}, merging ${route.base} into ${route.branch}, is still open`);
+    if (record.ci?.tip === tip && record.ci.status === "failed") throw refuse(`a check on pull request #${pr.number} failed at ${short(tip)}`);
+
+    // Fetched first, inside the lock: the base read here is the one the version
+    // condition and the landing check are held to, and nothing can move it on
+    // this checkout's side before `gh pr merge` has gone through.
+    const fetched = spawnSync("git", ["-C", repo, "fetch", "origin", "--prune"], { encoding: "utf8", shell: false });
+    if (fetched.status !== 0) throw refuse(`could not fetch origin: ${(fetched.stderr || "").trim()}`);
+    const current = spawnSync("git", ["-C", repo, "rev-parse", `origin/${route.base}`], { encoding: "utf8", shell: false });
+    const baseOid = current.stdout?.trim();
+    if (current.status !== 0 || !baseOid) throw refuse(`could not read origin/${route.base}: ${(current.stderr || "").trim()}`);
+    const found = spawnSync("git", ["-C", repo, "cat-file", "-e", `${tip}^{commit}`], { encoding: "utf8", shell: false });
+    if (found.status !== 0) throw refuse(`${short(tip)} is not in this checkout after the fetch`);
+
+    const version = versionConditionAt(repo, { entries: config.versionFiles ?? [], tipOid: tip, baseOid, kind: record.increase ?? "patch" });
+    if (!version.holds) {
+      throw refuse(`the version lines at ${short(tip)} are not exactly one increase over origin/${route.base} at ${short(baseOid)}: `
+        + versionLines(version, route.base).join("; "), VERSION_NOT_ONE_INCREASE);
+    }
+
+    // The reviewed base is where the tip last met the base. A base the tip
+    // already contains is that base unchanged; any other base is one a landing
+    // check of this tip passed against, or it is the retry the caller makes.
+    const mergeBase = spawnSync("git", ["-C", repo, "merge-base", tip, baseOid], { encoding: "utf8", shell: false }).stdout?.trim();
+    const unchanged = mergeBase === baseOid;
+    const cleared = record.landing?.tip === tip && record.landing?.status === "passed" && record.landing?.baseOid === baseOid;
+    if (!unchanged && !cleared) {
+      const about = record.landing?.tip === tip ? ` the landing check of this tip is about ${short(record.landing.baseOid)} (${record.landing.status})` : " no landing check of this tip cleared it";
+      throw refuse(`origin/${route.base} is at ${short(baseOid)}, which ${route.branch} at ${short(tip)} does not contain, and${about}`, BASE_NOT_ACCEPTED);
+    }
+
+    const view = spawnSync("gh", ["pr", "view", String(pr.number), "--json", "baseRefName,headRefOid,state"], { cwd: repo, encoding: "utf8", shell: false });
+    if (view.status !== 0) throw refuse(`could not read PR #${pr.number}: ${(view.stderr || view.stdout || "").trim()}`);
+    let live;
+    try { live = JSON.parse(view.stdout); } catch { throw refuse(`could not parse PR #${pr.number} metadata`); }
+    if (live.state && live.state !== "OPEN") throw refuse(`PR #${pr.number} is ${live.state}, not open`);
+    if (live.baseRefName !== route.base) throw refuse(`PR #${pr.number} targets ${live.baseRefName}, not ${route.base}, the base this train recorded`);
+    if (live.headRefOid !== tip) throw refuse(`PR #${pr.number} now heads at ${short(live.headRefOid)}, not the confirmed tip ${short(tip)}`);
+
+    // A real merge commit, never a squash: each spec's own commit stays on the
+    // base's history, and the commit that merges is the tip that was checked.
+    // The branch is deleted afterwards by the driver, never by the merge.
+    const argv = ["pr", "merge", String(pr.number), "--merge", "--match-head-commit", tip, "--delete-branch=false"];
+    if (dryRun) return { ok: true, dryRun: true, argv, tip, baseOid, pr: pr.number };
+    const merged = spawnSync("gh", argv, { cwd: repo, encoding: "utf8", shell: false });
+    if (merged.status !== 0) throw refuse(`gh pr merge refused PR #${pr.number}: ${(merged.stderr || merged.stdout || "").trim()}`);
+    return { ok: true, merged: true, pr: pr.number, tip, baseOid, branch: route.branch, base: route.base };
+  });
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes("--dry-run");
@@ -153,15 +275,22 @@ async function main() {
   };
   const repo = flagValue("--repo") ? path.resolve(flagValue("--repo")) : process.cwd();
   const configPath = flagValue("--config") ?? path.join(repo, ".tagteam", "config.json");
+  // `--plan-ship <ship-dir>` is the plan's own merge, from its records; without
+  // it this is a spec's, from its state file, exactly as it always was.
+  const planShip = flagValue("--plan-ship");
   const statePath = argv.find((entry, index) =>
     !entry.startsWith("--") && !argv[index - 1]?.startsWith("--"));
-  if (!statePath) {
-    process.stderr.write("usage: merge.mjs <state.json> [--repo <path>] [--config <path>] [--dry-run]\n");
+  if (!statePath && !planShip) {
+    process.stderr.write("usage: merge.mjs <state.json> [--repo <path>] [--config <path>] [--dry-run]\n"
+      + "       merge.mjs --plan-ship <ship-dir> [--repo <path>] [--config <path>] [--dry-run]\n");
     process.exitCode = 2;
     return;
   }
   try {
-    process.stdout.write(`${JSON.stringify(await mergeSpec(statePath, { repo, configPath, dryRun }))}\n`);
+    const result = planShip
+      ? await mergePlan(planShip, { repo, configPath, dryRun })
+      : await mergeSpec(statePath, { repo, configPath, dryRun });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = error.exitCode ?? 1;

@@ -127,6 +127,39 @@ about the base went wrong:
   plainly that approving it is not one of the options, because the check ran
   after the verdict an approval changes and no approval reaches past it.
 
+**A plan on a branch of its own lands through one pull request of its own**, and
+a ship shipping that way carries `planLanding`. Until that pull request merges,
+the plan is not done, however many of its specs have merged: the ship's status
+is "waiting for you" while it is open and waiting for a person's answer,
+"stopped" when the person stopped it, "in progress" before it opens, and
+"complete" only once it has merged. Give its number, link and `state`, said as
+what it means:
+
+- `"not-opened"` — "every spec is in the plan's branch, and the plan's own pull
+  request into the base has not been opened yet".
+- `"open"` — "the plan's pull request is open, and nothing of it reaches the base
+  until a person says Merge; running `/tagteam:ship` on the plan brings back what
+  would land".
+- `"stopped"` — "a person stopped the plan's pull request; it stays open, and
+  running `/tagteam:ship` on the plan picks it up again".
+- `"merged"` — "the plan landed on the base as one merge commit". When
+  `mergedBy` is `"hand"` it was merged on GitHub by a person, and when
+  `mergedAtCheckedTip` is false what merged was not the commit the ship checked —
+  say both.
+- `"unreadable"` — "the plan's landing record could not be read, so whether its
+  pull request is open, stopped or merged is not known".
+
+Its `results` are about the plan branch's current tip and nothing else — the
+whole-plan check, the checks on the pull request, the landing check against the
+base, and the version lines — each one of three values:
+
+- `"passed"` — that result was recorded for this very commit, and passed.
+- `"failed"` — it was recorded for this commit, and does not pass, which keeps
+  Merge from being offered.
+- `"not-run"` — nothing was recorded for this commit: it never ran here, or what
+  ran was about an earlier commit of the plan's branch. Say "not run", never
+  "passed": checks that never ran prove nothing.
+
 ## Which plugin is running
 
 Claude Code runs an installed *copy* of this plugin, not the working tree it was

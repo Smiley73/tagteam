@@ -250,14 +250,14 @@ export function versionStep({ worktree, env = process.env }) {
  * a later change saying the version lines were set by the ship says it once, in
  * `extra`.
  */
-export function resolveBrief({ base, baseOid, branch, planTip, specs, conflicts, extra = [] }) {
+export function resolveBrief({ base, baseOid, branch, planTip, specs, conflicts, extra = [], held = "the next spec of the plan does not begin until they do" }) {
   const short = (oid) => String(oid).slice(0, 12);
   const carried = specs.filter((spec) => spec.merged);
   return [
     `# Resolving ${base} into ${branch}`,
     "",
     `This change is a merge of ${base} at ${short(baseOid)} into this plan's branch, ${branch}, at ${short(planTip)}: `
-      + `the two no longer merged cleanly, and the next spec of the plan does not begin until they do.`,
+      + `the two no longer merged cleanly, and ${held}.`,
     "",
     "## What the plan carries",
     "",
