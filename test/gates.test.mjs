@@ -697,9 +697,9 @@ test("escalation fires past `after`, not at it, and never without an escalation 
 // and `recheck-codex` appear in none of them — so `implement` rewired to the
 // lead's settings, or the Codex re-check handed a Claude model name, dispatched
 // every run wrong with nothing erroring. One deepEqual of the whole `jobs`
-// object pins the count (nine), every job name, and every job-to-role mapping
+// object pins the count (ten), every job name, and every job-to-role mapping
 // in a single assertion, on both sides of the line.
-test("the resolver emits exactly nine jobs, each mapped to its role's settings", () => {
+test("the resolver emits exactly ten jobs, each mapped to its role's settings", () => {
   const worker = { model: "sonnet", effort: "medium", escalated: false };
   const lead = { model: "opus", effort: "high", escalated: false };
   const codex = { model: "gpt-5-codex", effort: "medium", escalated: false };
@@ -712,11 +712,12 @@ test("the resolver emits exactly nine jobs, each mapped to its role's settings",
     "recheck-lens": lead,
     "recheck-adversary": lead,
     "recheck-codex": codex,
-    "repair-fix": worker
+    "repair-fix": worker,
+    resolve: worker
   }, "an ordinary round runs every job at its role's base settings");
 
   // A raised round moves the five escalating jobs to the escalation block's
-  // settings for their roles and leaves the other four exactly where they were.
+  // settings for their roles and leaves the other five exactly where they were.
   assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs, {
     implement: worker,
     "review-lens": lead,
@@ -726,7 +727,8 @@ test("the resolver emits exactly nine jobs, each mapped to its role's settings",
     "recheck-lens": { model: "opus", effort: "max", escalated: true },
     "recheck-adversary": { model: "opus", effort: "max", escalated: true },
     "recheck-codex": { model: "gpt-5-codex", effort: "high", escalated: true },
-    "repair-fix": { model: "opus", effort: "high", escalated: true }
+    "repair-fix": { model: "opus", effort: "high", escalated: true },
+    resolve: worker
   }, "a raised round moves exactly the escalating five");
 });
 

@@ -2807,13 +2807,16 @@ function mergingEnv(dir) {
 
 // One spec of one plan, from `begin` to the point where its gates are satisfied
 // and the pull request is the only thing left. No findings anywhere, so it takes
-// the shortest route a real spec takes.
+// the shortest route a real spec takes. `file` is one path with `contents`, or an
+// object of paths to contents for a spec that writes several.
 function driveToPublishable({ plan, shipDir }, id, file, contents, env = {}) {
   const begin = ship("begin", plan, ["--spec", id], env);
   assert.equal(begin.status, 0, begin.stderr);
+  assert.equal(begin.json.dispatch?.[0]?.agent, "tagteam:implementer", `begin did not start ${id}: ${begin.stdout}`);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
-  fs.writeFileSync(path.join(worktree, file), contents);
-  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${file}`, unfinished: [] });
+  const files = typeof file === "string" ? { [file]: contents } : file;
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(worktree, name), text);
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${Object.keys(files).join(", ")}`, unfinished: [] });
   arriveAll(begin);
   ship("snapshot", plan, ["--spec", id], env);
   ship("verify", plan, ["--spec", id], env);
@@ -4000,6 +4003,7 @@ test("with the setting on, a two-spec plan collects both squashes on plan/<slug>
   assert.equal(b.finished.status, 0, b.finished.stderr);
   assert.equal(b.finished.json.ask, undefined, JSON.stringify(b.finished.json.ask ?? ""));
   assert.equal(b.state().baseOid, first, "the second spec did not start from the first one's merge commit");
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve")), "a base that never moved opened a resolve round");
   const second = onOrigin(origin, "plan/demo");
   assert.equal(git(origin, "rev-parse", `${second}^`), first, "the squashes did not land in order");
   assert.equal(trainOf(shipDir).route.tipOid, second);
@@ -4474,5 +4478,361 @@ test("a pull request GitHub cannot be read for is its own stop, never a hand pus
   assert.match(resumed.json.say.join("\n"), /01-a was found merged into plan\/demo/);
   assert.equal(a.state().state, "merged");
   assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- the resolve round -------------------------------------------------------
+
+const MAIN_ADD = "export const add = (a, b) => a + b;\nexport const mul = (a, b) => a * b;\n";
+const BOTH_ADD = "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n";
+const PLAN_LIB = "export const lib = 'plan';\n";
+const MAIN_LIB = "export const lib = 'main';\n";
+const BOTH_LIB = "export const lib = 'plan';\nexport const other = 'main';\n";
+const UNRELATED = "export const unrelated = true;\n";
+
+// A commit on main, from the primary checkout, touching exactly `files`.
+function commitToMain(repo, files, message = "someone else, on main") {
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(repo, name), text);
+  git(repo, "add", "--", ...Object.keys(files));
+  git(repo, "commit", "-m", message);
+  git(repo, "push", "origin", "main");
+  return git(repo, "rev-parse", "HEAD");
+}
+
+// The plan route with 01-a merged into plan/demo, and then a commit on main that
+// really conflicts with it — the same lines of the same file, or of both files
+// with `two` — beside an unrelated file of its own.
+function stageConflict({ two = false, ciRepairs = 1, verifyCommand = null } = {}) {
+  const staged = stagePlan();
+  const { plan, configPath, env, repo, origin, shipDir } = staged;
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.limits = { ...config.limits, ciRepairs };
+  if (verifyCommand) config.verify = [{ command: verifyCommand, when: { globs: [], keywords: [] }, timeoutSec: 60 }];
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = two
+    ? shipThrough(staged, "01-a", { "app.js": A_CHANGE, "lib.js": PLAN_LIB })
+    : shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.state().state, "merged");
+  const planTip = onOrigin(origin, "plan/demo");
+  const baseOid = commitToMain(repo, { "app.js": MAIN_ADD, ...(two ? { "lib.js": MAIN_LIB } : {}), "other.js": UNRELATED });
+  return { ...staged, a, planTip, baseOid, worktree: trainOf(shipDir).worktree };
+}
+
+const recordOf = (shipDir, n = 1) => JSON.parse(fs.readFileSync(path.join(shipDir, "resolve", String(n), "record.json"), "utf8"));
+const attemptDirIn = (shipDir, k, n = 1) => path.join(shipDir, "resolve", String(n), "attempts", String(k));
+const mergeInProgress = (worktree) => spawnSync("git", ["-C", worktree, "rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).status === 0;
+const conflictedLine = (dispatch) => /^Conflicted paths [^:]*: (.*)$/m.exec(dispatch.prompt)?.[1];
+const RESOLVED = { outcomes: [], notes: "", status: "complete", summary: "resolved the merge", unfinished: [] };
+
+// What the resolver does: writes `files` into the worktree and its report, and
+// is recorded as arrived; then the driver's commit step.
+function resolveAs(staged, payload, files, env = staged.env) {
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(staged.worktree, name), text);
+  write(outputOf(payload.json.dispatch[0]), RESOLVED);
+  arriveAll(payload);
+  return ship("resolve-commit", staged.plan, ["--spec", "02-b"], env);
+}
+
+// Every reader of a resolution answers — `raised` by lens, nothing otherwise —
+// and the driver collects. A panel a restart released takes no arrivals, and is
+// judged from disk.
+function reviewResolution(staged, panel, raised = {}, { released = false } = {}) {
+  const merge = recordOf(staged.shipDir).attempts.at(-1).mergeOid;
+  for (const dispatch of panel.json.dispatch) {
+    if (dispatch.agent === "tagteam:codex-runner") write(resultOf(dispatch), findings("codex", merge, raised.codex ?? []));
+    else {
+      const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+      write(outputOf(dispatch), findings(lens, merge, raised[lens] ?? []));
+    }
+  }
+  if (!released) arriveAll(panel);
+  return ship("resolve-collect", staged.plan, ["--spec", "02-b"], staged.env);
+}
+
+test("a base that moved without touching the plan's change opens no round: begin starts the spec at once and plan/<slug> is unchanged", () => {
+  const staged = stagePlan();
+  const { dir, repo, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
+  const tip = onOrigin(origin, "plan/demo");
+  const moved = commitToMain(repo, { "other.js": UNRELATED });
+
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(begun.json.dispatch[0].agent, "tagteam:implementer");
+  assert.match(begun.json.say.join("\n"), new RegExp(`Starting 02-b .* from plan/demo at ${tip.slice(0, 12)}`));
+  assert.equal(onOrigin(origin, "plan/demo"), tip, "the plan branch moved for a base that merged cleanly");
+  assert.notEqual(spawnSync("git", ["-C", origin, "merge-base", "--is-ancestor", moved, "plan/demo"]).status, 0, "main was merged into the plan branch");
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve")), "a clean dry run opened a resolve round");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a base that conflicts is resolved before the next spec: a two-parent merge reviewed as its remerge view, verified, pushed by the driver, and the spec branches from it", async () => {
+  const staged = stageConflict();
+  const { dir, repo, plan, shipDir, origin, env, planTip, baseOid, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  const [resolver] = begun.json.dispatch;
+  assert.equal(resolver.agent, "tagteam:fixer", "the resolver is the fixer agent");
+  assertEffort(resolver, "high", "the resolver passes effort.fixer");
+  assert.equal(conflictedLine(resolver), "app.js");
+  assert.ok(resolver.prompt.includes(path.join(plan, "specs", "01-a.md")), "the resolver is not given the plan's specs");
+  assert.match(resolver.prompt, /leave the result uncommitted/);
+  assert.match(begun.json.next, /resolve-commit --plan .* --spec 02-b$/);
+  assert.match(begun.json.say.join("\n"), /resolve round 1 runs before 02-b begins/);
+  assert.ok(!fs.existsSync(path.join(shipDir, "02-b", "state.json")), "02-b was begun before the base was resolved");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), planTip);
+  assert.ok(mergeInProgress(worktree));
+  assert.deepEqual(recordOf(shipDir).dryRun, ["app.js"]);
+  assert.equal(recordOf(shipDir).baseOid, baseOid);
+
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.match(committed.json.say.join("\n"), /Verification of the merge: passed/, JSON.stringify(committed.json, null, 2));
+  assert.deepEqual(committed.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"],
+    "the configured default lenses plus Codex");
+  const brief = path.join(shipDir, "resolve", "1", "brief.md");
+  for (const dispatch of committed.json.dispatch.slice(0, 2)) assert.match(dispatch.prompt, /^Spec: .*\/resolve\/1\/brief\.md$/m, "the brief does not stand in for the spec");
+  assert.match(fs.readFileSync(brief, "utf8"), /keep both sides' intent/);
+  const merge = recordOf(shipDir).attempts[0].mergeOid;
+  const round = attemptDirIn(shipDir, 1);
+  const reviewDiff = fs.readFileSync(path.join(round, "review.diff"), "utf8");
+  assert.match(reviewDiff, /^diff --git a\/app\.js b\/app\.js$/m, "the review diff does not name the conflicted file");
+  assert.doesNotMatch(reviewDiff, /other\.js|unrelated/, "the review diff carries the base's unrelated change");
+  const candidate = JSON.parse(fs.readFileSync(path.join(round, "candidate.json"), "utf8"));
+  assert.deepEqual([candidate.baseOid, candidate.candidateOid, candidate.reviewView], [planTip, merge, "remerge"]);
+  assert.ok(candidate.changedPaths.includes("other.js"), "verify does not select on the first-parent change");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(round, "verify.json"), "utf8")).status, "passed", "verify did not run against the merge commit");
+
+  const collected = reviewResolution(staged, committed);
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.match(collected.json.next, /begin --plan .* --spec 02-b$/);
+  assert.match(collected.json.say.join("\n"), /not through a pull request/);
+  const tip = onOrigin(origin, "plan/demo");
+  assert.equal(tip, merge, "the resolved merge is not on the plan branch");
+  assert.deepEqual(git(origin, "rev-parse", `${tip}^@`).split("\n"), [planTip, baseOid], "the parents are not the plan tip then the base");
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [merge, null], "the merge is not recorded as the ship's");
+  assert.equal(recordOf(shipDir).status, "passed");
+  assert.equal(onOrigin(origin, "main"), baseOid, "main moved");
+  assert.equal(pullsOf(env).length, 1, "the merge went through a pull request");
+
+  const b = shipThrough(staged, "02-b", "b.js", B_CHANGE);
+  assert.equal(b.finished.status, 0, b.finished.stderr);
+  assert.equal(b.state().baseOid, merge, "the second spec did not branch from the merge commit");
+  assert.equal(b.state().state, "merged");
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve", "2")), "a second round opened against a base already merged in");
+  const { inventory } = await import("../scripts/status.mjs");
+  const [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.status, shipped.started, shipped.merged], ["complete", 2, 2], "the resolve directory was read as a spec");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resolution that drops the base's change shows in the review, a blocking finding throws it away, and the next attempt starts from the plan tip with the findings", () => {
+  const staged = stageConflict({ ciRepairs: 2 });
+  const { dir, plan, shipDir, origin, env, planTip, baseOid, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  // Keeps the plan's side and drops main's.
+  const committed = resolveAs(staged, begun, { "app.js": A_CHANGE });
+  assert.equal(committed.status, 0, committed.stderr);
+  const first = recordOf(shipDir).attempts[0].mergeOid;
+  assert.match(fs.readFileSync(path.join(attemptDirIn(shipDir, 1), "review.diff"), "utf8"), /^-export const mul = \(a, b\) => a \* b;$/m,
+    "the dropped side is not in the review diff");
+
+  const blocking = { severity: "blocking", file: "app.js", line: 2, title: "main's mul is gone", detail: "the resolution keeps only the plan's side", fix: null };
+  const retried = reviewResolution(staged, committed, { correctness: [blocking] });
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.match(retried.json.say.join("\n"), /Resolve attempt 1 failed: the reviewers found something blocking or major/);
+  const [again] = retried.json.dispatch;
+  assert.equal(again.agent, "tagteam:fixer");
+  assert.match(again.description, /attempt 2$/);
+  assert.match(again.prompt, /Attempt 1 was thrown away: the reviewers found something blocking or major in it; their findings are .*attempts\/1\/to-fix\.json/);
+  assert.ok(again.prompt.includes(first), "the next attempt is not told the previous attempt's commit");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), planTip, "the next attempt did not start again from the plan tip");
+  assert.ok(mergeInProgress(worktree));
+  assert.equal(onOrigin(origin, "plan/demo"), planTip, "a failed attempt was pushed");
+  assert.deepEqual(recordOf(shipDir).attempts.map((attempt) => attempt.phase), ["failed", "dispatched"]);
+
+  const second = resolveAs(staged, retried, { "app.js": BOTH_ADD });
+  assert.equal(second.status, 0, second.stderr);
+  const passed = reviewResolution(staged, second);
+  assert.equal(passed.status, 0, passed.stderr);
+  const tip = onOrigin(origin, "plan/demo");
+  assert.notEqual(tip, first);
+  assert.deepEqual(git(origin, "rev-parse", `${tip}^@`).split("\n"), [planTip, baseOid]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a failing verify throws the attempt away before any panel, and with limits.ciRepairs spent the ship stops, pushes nothing, begins nothing, and stops again", () => {
+  const staged = stageConflict({
+    ciRepairs: 2, verifyCommand: "node -e \"process.exit(require('fs').readFileSync('app.js','utf8').includes('BROKEN') ? 1 : 0)\""
+  });
+  const { dir, repo, plan, shipDir, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const first = resolveAs(staged, begun, { "app.js": `${BOTH_ADD}BROKEN\n` });
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.json.say.join("\n"), /Resolve attempt 1 failed: .* failed on it/);
+  assert.equal(first.json.dispatch[0].agent, "tagteam:fixer", "a failing verify was sent to the panel");
+  assert.ok(!fs.existsSync(path.join(attemptDirIn(shipDir, 1), "findings")), "a failing verify cost a panel");
+  assert.match(first.json.dispatch[0].prompt, /verify commands failed on it; the log is .*attempts\/1\/verify\/1\.log/);
+  assert.ok(first.json.dispatch[0].prompt.includes(recordOf(shipDir).attempts[0].mergeOid));
+  assert.equal(git(worktree, "rev-parse", "HEAD"), planTip);
+
+  const spent = resolveAs(staged, first, { "app.js": `${BOTH_ADD}BROKEN\n` });
+  assert.equal(spent.status, 0, spent.stderr);
+  assert.equal(spent.json.dispatch, undefined);
+  assert.equal(spent.json.budget, "spent");
+  assert.match(spent.json.ask, /Every one of the 2 resolve attempt\(s\) limits\.ciRepairs allows/);
+  assert.match(spent.json.ask, /The conflicted paths: app\.js/);
+  assert.ok(spent.json.ask.includes(path.join(shipDir, "resolve", "1", "record.json")), "the stop does not name the round's record");
+  assert.match(spent.json.next, / end /);
+  assert.equal(onOrigin(origin, "plan/demo"), planTip, "something was pushed");
+  assert.ok(!mergeInProgress(worktree), "the stop left a merge in progress");
+  assert.notEqual(spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/tagteam/demo/02-b"]).status, 0, "02-b has a branch");
+  assert.ok(!fs.existsSync(path.join(shipDir, "02-b", "state.json")), "02-b was begun");
+  assert.equal(recordOf(shipDir).status, "stopped");
+
+  const again = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(again.json.ask, spent.json.ask, "the second begin did not stop with the same explanation");
+  assert.equal(again.json.dispatch, undefined);
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve", "2")), "a spent round's pair opened a fresh round");
+
+  const ended = ship("end", plan, [], env);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.match(ended.json.say.join("\n"), /Resolve round 1, merging main into plan\/demo before 02-b begins, is stopped/);
+  assert.match(ended.json.say.join("\n"), /Removed the worktree/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a conflicted file committed with its markers still in it is an empty view: a stop, never a pass, with nothing pushed", () => {
+  const staged = stageConflict({ ciRepairs: 2 });
+  const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const committed = resolveAs(staged, begun, {});
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.json.dispatch, undefined, "an empty view went on to the panel or another attempt");
+  assert.equal(committed.json.resolve.reason, "empty");
+  assert.match(committed.json.ask, /resolution view of .* is empty/);
+  assert.equal(recordOf(shipDir).attempts.length, 1, "an empty view was counted as a failed attempt");
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  assert.ok(!mergeInProgress(worktree));
+  const again = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(again.json.ask, committed.json.ask);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("with two files conflicted and only one resolved, the attempt fails on the one left unresolved", () => {
+  const staged = stageConflict({ two: true, ciRepairs: 2 });
+  const { dir, plan, shipDir, origin, env, planTip } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(conflictedLine(begun.json.dispatch[0]), "app.js, lib.js");
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.match(committed.json.say.join("\n"), /Resolve attempt 1 failed: lib\.js is not in the resolution view, so it was not resolved/);
+  assert.doesNotMatch(committed.json.say.join("\n"), /app\.js is not in the resolution view/);
+  assert.equal(committed.json.dispatch[0].agent, "tagteam:fixer", "the attempt did not fail into the next one");
+  assert.match(committed.json.dispatch[0].prompt, /it left lib\.js unresolved/);
+  assert.deepEqual(recordOf(shipDir).attempts[0].carry, { kind: "uncovered", paths: ["lib.js"] });
+  assert.equal(onOrigin(origin, "plan/demo"), planTip);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the version step's place: a stand-in that settles one of two conflicted files leaves only the other to the resolver and to coverage", () => {
+  const staged = stageConflict({ two: true });
+  const { dir, plan, shipDir, env } = staged;
+  const standIn = { ...env, TAGTEAM_TEST_VERSION_STEP: `printf "${BOTH_LIB.replace(/\n/g, "\\n")}" > lib.js && git add lib.js` };
+  const begun = ship("begin", plan, ["--spec", "02-b"], standIn);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(conflictedLine(begun.json.dispatch[0]), "app.js", "the resolver was handed the dry run's list, not what the step left");
+  assert.deepEqual(recordOf(shipDir).dryRun, ["app.js", "lib.js"]);
+  assert.deepEqual(recordOf(shipDir).attempts[0].conflicts, ["app.js"]);
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD }, standIn);
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.doesNotMatch(committed.json.say.join("\n"), /lib\.js is not in the resolution view/, "the settled file was reported unresolved");
+  assert.deepEqual(committed.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resolve round interrupted mid-attempt resumes without spending another, and one interrupted between the push and its record accepts its own push", () => {
+  // One attempt allowed: an attempt taken on resume would be a stop.
+  const staged = stageConflict();
+  const { dir, plan, shipDir, origin, env, planTip } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  const resumed = ship("begin", plan, ["--spec", "02-b", "--run-gone"], env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(resumed.json.dispatch, undefined, "a resume dispatched another resolver");
+  assert.match(resumed.json.next, /resolve-commit --plan .* --spec 02-b$/);
+  assert.equal(recordOf(shipDir).attempts.length, 1, "a resume took another attempt");
+
+  fs.writeFileSync(path.join(staged.worktree, "app.js"), BOTH_ADD);
+  write(outputOf(begun.json.dispatch[0]), RESOLVED);
+  arrive(begun, [begun.json.dispatch[0].description]);
+  const committed = ship("resolve-commit", plan, ["--spec", "02-b"], env);
+  assert.equal(committed.status, 0, committed.stderr);
+  // A rerun of the commit step once it has moved on re-enters nothing.
+  const midPanel = ship("begin", plan, ["--spec", "02-b", "--run-gone"], env);
+  assert.equal(midPanel.status, 0, midPanel.stderr);
+  assert.match(midPanel.json.next, /resolve-collect --plan .* --spec 02-b$/);
+  assert.equal(recordOf(shipDir).attempts.length, 1);
+  // The same session keeps waiting on the panel; another, or a person's yes,
+  // released it.
+  const collected = reviewResolution(staged, committed, {}, { released: !midPanel.json.set });
+  assert.equal(collected.status, 0, collected.stderr);
+  const merge = onOrigin(origin, "plan/demo");
+
+  // As if the run died after the push and before anything was recorded.
+  setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, tipOid: planTip, pendingOid: merge } }));
+  const record = recordOf(shipDir);
+  record.status = "open";
+  record.pushed = null;
+  record.attempts[0].phase = "pushing";
+  fs.writeFileSync(path.join(shipDir, "resolve", "1", "record.json"), JSON.stringify(record, null, 2));
+  const after = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(after.status, 0, after.stderr);
+  assert.doesNotMatch(after.stderr, /did not record making/);
+  assert.match(after.json.next, /begin --plan .* --spec 02-b$/);
+  assert.equal(recordOf(shipDir).status, "passed");
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [merge, null]);
+  const started = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(started.json.dispatch[0].agent, "tagteam:implementer");
+  assert.match(started.json.say.join("\n"), new RegExp(`from plan/demo at ${merge.slice(0, 12)}`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan branch moved while the round was out refuses the push, which is the hand-push stop, and nothing is forced", () => {
+  const staged = stageConflict();
+  const { dir, plan, shipDir, origin, env, planTip } = staged;
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const committed = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(committed.status, 0, committed.stderr);
+  const stray = commitByHand(staged, "plan/demo").oid;
+  const refused = reviewResolution(staged, committed);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /plan\/demo on origin is at .*, a commit this ship did not record making/);
+  assert.equal(onOrigin(origin, "plan/demo"), stray, "the push was forced over the moved branch");
+  const merge = recordOf(shipDir).attempts[0].mergeOid;
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [planTip, merge]);
+  assert.equal(recordOf(shipDir).status, "open");
+  const again = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(again.status, 1, again.stdout);
+  assert.match(again.stderr, /did not record making/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("on the direct route there is no dry run and no resolve round", () => {
+  const staged = stagePlan({ planBranch: false });
+  const { dir, repo, plan, shipDir, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
+  git(repo, "pull", "-q", "origin", "main");
+  commitToMain(repo, { "app.js": BOTH_ADD, "other.js": UNRELATED });
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(begun.json.dispatch[0].agent, "tagteam:implementer");
+  assert.ok(!fs.existsSync(path.join(shipDir, "resolve")));
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -257,7 +257,11 @@ export const SHIP_JOBS = {
   "recheck-lens": { role: "lead", effort: "recheck" },            // step 7
   "recheck-adversary": { role: "lead", effort: "recheck" },       // step 7
   "recheck-codex": { role: "codex", effort: "codex" },            // step 7
-  "repair-fix": { role: "worker", effort: "fixer" }               // step 8
+  "repair-fix": { role: "worker", effort: "fixer" },              // step 8
+  // The fixer handed a merge of the base into a plan branch to resolve, before a
+  // spec of that plan begins. Not escalating: a resolve round has no spec state,
+  // so there is no fix counter for escalation to read.
+  resolve: { role: "worker", effort: "fixer" }
 };
 
 // Which jobs escalate: the fixer and the three re-checks, and nothing else.
@@ -317,6 +321,27 @@ export function resolveRoles(state, config) {
   // both — so the model, the effort and the brief a reviewer is given all come
   // off the same read and cannot drift apart.
   return { spec: state?.spec ?? null, fixRoundsUsed, jobs, briefs: state?.briefs ?? {} };
+}
+
+/**
+ * The brief each lens is reviewed through, by lens, or a refusal naming every
+ * lens nothing calibrates. `init` freezes this into a spec's state; a review
+ * with no spec state behind it — the plan route's resolve round — resolves its
+ * lenses through the same call, so the two can never be calibrated differently.
+ */
+export function resolveLensBriefs(lenses, { repo } = {}) {
+  const briefs = {};
+  const uncalibrated = [];
+  for (const lens of lenses) {
+    const brief = lensBrief(lens, { repo });
+    if (brief.path) briefs[lens] = brief.path;
+    else uncalibrated.push(brief.problems.length > 0 ? `${lens} (${brief.problems[0].reason})` : lens);
+  }
+  if (uncalibrated.length > 0) {
+    throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:configure, or write `
+      + `${REPO_LENS_DIR}/<lens>.md in this repository`);
+  }
+  return briefs;
 }
 
 export function transition(state, next, { limits } = {}) {
@@ -899,20 +924,7 @@ async function main() {
     // needs it. A lens nothing calibrates is a reviewer that invents the lens
     // and files findings nothing can tell from a real one — and finding that out
     // in step 5 costs an implementer, a commit and a verify run first.
-    const resolveBriefs = (lenses) => {
-      const briefs = {};
-      const uncalibrated = [];
-      for (const lens of lenses) {
-        const brief = lensBrief(lens, { repo });
-        if (brief.path) briefs[lens] = brief.path;
-        else uncalibrated.push(brief.problems.length > 0 ? `${lens} (${brief.problems[0].reason})` : lens);
-      }
-      if (uncalibrated.length > 0) {
-        throw new Error(`no lens brief for ${uncalibrated.join(", ")} — run /tagteam:configure, or write `
-          + `${REPO_LENS_DIR}/<lens>.md in this repository`);
-      }
-      return briefs;
-    };
+    const resolveBriefs = (lenses) => resolveLensBriefs(lenses, { repo });
 
     // Refuses to overwrite. A resumed ship re-runs this step, and a spec that was
     // mid-flight — a pull request open, waiting for a person — would otherwise

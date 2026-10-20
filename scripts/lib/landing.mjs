@@ -294,6 +294,24 @@ function conflictPaths(stdout) {
 }
 
 /**
+ * Would `theirs` merge into `ours` cleanly? `merge-tree --write-tree` answers
+ * without a worktree or an index: exit 0 is a clean merge and prints its tree,
+ * exit 1 is a conflict and prints the conflicted stages, and anything else is
+ * git failing to answer, which is thrown. The one reading of that output, shared
+ * by the landing check and the plan route's dry run of the base against the plan
+ * branch, so the two can never disagree about what conflicts.
+ */
+export function dryRunMerge(repo, ours, theirs) {
+  const merged = git(repo, ["merge-tree", "--write-tree", ours, theirs], { allowFailure: true });
+  if (merged.status === 1) return { clean: false, conflicts: conflictPaths(merged.stdout) };
+  if (merged.status !== 0) {
+    throw new Error(`git merge-tree could not test the merge of ${String(theirs).slice(0, 12)} into `
+      + `${String(ours).slice(0, 12)}: ${(merged.stderr || merged.stdout || "").trim()}`);
+  }
+  return { clean: true, tree: merged.stdout.split("\n")[0].trim(), conflicts: [] };
+}
+
+/**
  * The whole check, for one base.
  *
  * Returns an outcome — `passed`, `failed`, `conflict` or `differs` — and never
@@ -321,13 +339,9 @@ export function checkLanding({
   const exclusions = pathExclusions(config?.reviewExclude);
   const base = { reviewedBaseOid: baseOid, baseOid: newBaseOid, candidateOid };
 
-  const merged = git(repo, ["merge-tree", "--write-tree", newBaseOid, candidateOid], { allowFailure: true });
-  if (merged.status === 1) return { ...base, status: "conflict", conflicts: conflictPaths(merged.stdout) };
-  if (merged.status !== 0) {
-    throw new Error(`git merge-tree could not test the merge of ${candidateOid.slice(0, 12)} into `
-      + `${newBaseOid.slice(0, 12)}: ${(merged.stderr || merged.stdout || "").trim()}`);
-  }
-  const mergedTree = merged.stdout.split("\n")[0].trim();
+  const merged = dryRunMerge(repo, newBaseOid, candidateOid);
+  if (!merged.clean) return { ...base, status: "conflict", conflicts: merged.conflicts };
+  const mergedTree = merged.tree;
   const mergedCommit = git(repo, [
     "commit-tree", mergedTree, "-p", newBaseOid, "-p", candidateOid,
     "-m", `tagteam landing check: ${candidateOid} onto ${newBaseOid}`
