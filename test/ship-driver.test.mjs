@@ -2728,7 +2728,10 @@ if (argv[0] === "api") {
 }
 if (argv[0] !== "pr") die("gh stub: unsupported command " + argv.join(" "));
 const state = load();
-const find = (selector) => state.pulls.find((pull) => pull.branch === selector || String(pull.number) === String(selector))
+// By branch, the open pull request when there is one, as gh answers: a branch
+// whose first pull request was closed and replaced names the replacement.
+const find = (selector) => state.pulls.find((pull) => pull.branch === selector && pull.state === "OPEN")
+  ?? state.pulls.find((pull) => pull.branch === selector || String(pull.number) === String(selector))
   ?? die("gh stub: no pull request for " + selector);
 
 if (argv[1] === "create") {
@@ -5753,6 +5756,60 @@ test("stale and failing results withhold Merge, --approve records nothing, and m
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+const RED_CHECK = JSON.stringify([{ name: "test", state: "FAILURE", bucket: "fail", link: "https://example.invalid/run/1" }]);
+const GREEN_CHECK = JSON.stringify([{ name: "test", state: "SUCCESS", bucket: "pass", link: "https://example.invalid/run/2" }]);
+const waitForChecks = ({ configPath }) => {
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, ciWaitSec: 30 }, null, 2));
+};
+
+test("checks that proved nothing are waited for again: one that goes red after the wait withholds Merge on the next run", () => {
+  const staged = stageClean();
+  const { dir, plan, shipDir, origin, env } = staged;
+  waitForChecks(staged);
+  const main = onOrigin(origin, "main");
+  // Nothing registered yet when the pull request opened: not run, and Merge is offered.
+  const first = toDialog(staged);
+  assert.equal(first.json.planLanding.merge, true, first.json.planLanding.withheld.join("; "));
+  assert.deepEqual([landingRecordOf(shipDir).ci.status, landingRecordOf(shipDir).ci.reason], ["not-run", "no checks were registered"]);
+
+  // The person leaves it open; the workflow then runs, and fails.
+  const approved = ship("plan-land", plan, ["--approve", "p@example.com"], { ...env, GH_STUB_CHECKS: RED_CHECK });
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.doesNotMatch(approved.json.say.join("\n"), /were already waited for/, "a result that proved nothing was reused");
+  assert.match(approved.json.say.join("\n"), /Not recording p@example\.com's Merge/);
+  assert.equal(landingRecordOf(shipDir).ci.status, "failed");
+  assert.equal(landingRecordOf(shipDir).confirmation ?? null, null, "a Merge was recorded over a red check");
+  assert.equal(onOrigin(origin, "main"), main, "the plan merged with a red check on its pull request");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a pull request opened in place of a closed one, at the same tip, waits for its own checks and not the closed one's", () => {
+  const staged = stageClean();
+  const { dir, plan, shipDir, origin, env } = staged;
+  waitForChecks(staged);
+  const main = onOrigin(origin, "main");
+  const first = toDialog(staged, [], { ...env, GH_STUB_CHECKS: GREEN_CHECK });
+  assert.equal(first.json.planLanding.merge, true, first.json.planLanding.withheld.join("; "));
+  const closed = landingRecordOf(shipDir).pr.number;
+  assert.deepEqual([landingRecordOf(shipDir).ci.status, landingRecordOf(shipDir).ci.pr], ["passed", closed]);
+
+  // Someone closes it on GitHub; the next run opens a new one at the same tip,
+  // whose checks fail.
+  const pulls = JSON.parse(fs.readFileSync(env.GH_STUB_STATE, "utf8"));
+  pulls.pulls.find((pull) => pull.number === closed).state = "CLOSED";
+  fs.writeFileSync(env.GH_STUB_STATE, JSON.stringify(pulls, null, 2));
+  const approved = ship("plan-land", plan, ["--approve", "p@example.com"], { ...env, GH_STUB_CHECKS: RED_CHECK });
+  assert.equal(approved.status, 0, approved.stderr);
+  const record = landingRecordOf(shipDir);
+  assert.notEqual(record.pr.number, closed, "no replacement pull request was opened");
+  assert.deepEqual([record.ci.pr, record.ci.status], [record.pr.number, "failed"], "the closed pull request's checks were taken for the new one's");
+  assert.match(approved.json.say.join("\n"), /Not recording p@example\.com's Merge/);
+  assert.equal(record.confirmation ?? null, null);
+  assert.equal(onOrigin(origin, "main"), main, "the replacement merged on the closed pull request's checks");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a landing conflict starts the resolve round, opened with no spec about to begin, and its merge lands back on the landing", () => {
   const staged = stageClean();
   const { dir, repo, plan, shipDir, origin, env, worktree } = staged;
@@ -5817,6 +5874,26 @@ test("a failed landing dispatches no resolver: the ship merges the base in, the 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("the merge of the base in after a failed landing commits nothing the landing check's verify commands left behind", () => {
+  // Fails on the merged tree, and writes a report there first — untracked, and
+  // nobody's change.
+  const REPORTS_THEN_FAILS = "node -e \"const fs=require('fs');if(fs.existsSync('other.js')&&fs.readFileSync('other.js','utf8').includes('unrelated')){fs.writeFileSync('verify-report.txt','failed');process.exit(1)}\"";
+  const staged = stageClean({ verify: [{ command: REPORTS_THEN_FAILS, when: { globs: [], keywords: [] }, timeoutSec: 60 }] });
+  const { dir, repo, shipDir, origin } = staged;
+  const tip = onOrigin(origin, "plan/demo");
+  const baseOid = commitToMain(repo, { "other.js": UNRELATED });
+  const failed = toDialog(staged);
+  assert.equal(landingRecordOf(shipDir).landing.status, "failed");
+  assert.match(failed.json.next, /plan-check --plan .* --why merge-in$/);
+  const merge = onOrigin(origin, "plan/demo");
+  assert.deepEqual(git(origin, "rev-parse", `${merge}^@`).split("\n"), [tip, baseOid]);
+  assert.ok(!git(origin, "ls-tree", "-r", "--name-only", merge).split("\n").includes("verify-report.txt"),
+    "a file the verify commands wrote was committed into the merge of the base and pushed");
+  assert.equal(git(origin, "rev-parse", `${merge}^{tree}`), git(origin, "merge-tree", "--write-tree", tip, baseOid),
+    "the merge of the base carries something the merge itself did not make");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a differing landing dispatches no resolver either: the base is merged in, the check reads the plan's change against it, and the landing passes", () => {
   const staged = stageClean();
   const { dir, repo, plan, shipDir, origin, env } = staged;
@@ -5853,6 +5930,15 @@ test("the version condition: no lines holds, a plan with no increase waits witho
   const refusedApproval = ship("plan-land", none.plan, ["--approve", "p@example.com"], none.env);
   assert.match(refusedApproval.json.say.join("\n"), /Not recording p@example\.com's Merge: .*version lines/);
   assert.equal(landingRecordOf(none.shipDir).confirmation ?? null, null);
+  // The lines are the ones the route recorded when it was decided: emptied in
+  // the configuration mid-train, they still hold the plan to its increase.
+  assert.deepEqual(trainOf(none.shipDir).route.versionFiles, [{ file: "package.json", pointer: "/version" }]);
+  const emptied = JSON.parse(fs.readFileSync(none.configPath, "utf8"));
+  fs.writeFileSync(none.configPath, JSON.stringify({ ...emptied, versionFiles: [] }, null, 2));
+  const still = ship("plan-land", none.plan, [], none.env);
+  assert.equal(still.status, 0, still.stderr);
+  assert.equal(still.json.planLanding.merge, false, "emptying versionFiles mid-train lifted the version condition");
+  assert.equal(still.json.planLanding.results.version.status, "failed");
   fs.rmSync(none.dir, { recursive: true, force: true });
 
   const one = withVersion(true);

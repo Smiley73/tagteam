@@ -554,7 +554,8 @@ same way as for `publish`; without one, the plan document's heading is used.
 **What it does on the way**, each step said in `say` — relay it plainly:
 
 - The pull request's checks are waited for as a spec's are. Checks that never
-  ran are said to have not run, and never count as passed. A check that failed
+  ran are said to have not run, and never count as passed — and are waited for
+  again on every later run, since they may have started since. A check that failed
   is fixed the way the whole-plan check fixes what it finds: `next` is `begin`
   for one more fix unit.
 - The landing check runs the plan's tip against the base as it is now: does it

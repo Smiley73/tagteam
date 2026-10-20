@@ -30,8 +30,8 @@ import { evaluate } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
-import { isPlanRoute } from "./lib/plan-route.mjs";
-import { checkFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
+import { isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
+import { checkFor, ciFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
 import { isCleanFor } from "./lib/whole-plan.mjs";
 import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
 
@@ -174,8 +174,9 @@ const readJsonFile = (file, what) => {
  * is read here off the record, bound to the tip, never taken from the caller.
  * Then, for that exact tip, every other thing the dialog showed is re-read and
  * refused on: a clean whole-plan result, no merge of the base still under way,
- * no failed check recorded on the pull request, the version condition against
- * the base this has just read, a landing check that passed against that base —
+ * the checks waited for on this pull request at this tip and none failed, the
+ * version condition — over the lines the route recorded — against the base
+ * this has just read, a landing check that passed against that base —
  * or a base the tip already contains — and the live pull request aimed at the
  * recorded base and heading at the tip.
  *
@@ -189,10 +190,9 @@ const readJsonFile = (file, what) => {
  * number, and the guard there is the repository's own rule that a branch be up
  * to date before it merges — a setting the person changes, never this.
  */
-export async function mergePlan(shipDir, { repo, configPath, dryRun = false } = {}) {
+export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
   const ship = path.resolve(shipDir);
   return withPrimaryGitLock(repo, async () => {
-    const config = readJsonFile(path.resolve(configPath), "the configuration");
     const train = readJsonFile(path.join(ship, "train.json"), "the train");
     const route = train.route;
     if (!isPlanRoute(route)) throw refuse(`${ship} is not a train on a plan branch, so it has no plan pull request`);
@@ -217,7 +217,16 @@ export async function mergePlan(shipDir, { repo, configPath, dryRun = false } = 
     }
     const round = openResolveRoundIn(ship);
     if (round) throw refuse(`resolve round ${round.n}, merging ${route.base} into ${route.branch}, is still open`);
-    if (record.ci?.tip === tip && record.ci.status === "failed") throw refuse(`a check on pull request #${pr.number} failed at ${short(tip)}`);
+    // Checks waited for at this tip on this very pull request, as the dialog
+    // requires before it offers Merge: a wait on a closed pull request that was
+    // replaced at the same tip is not a wait on this one's checks.
+    const ci = ciFor(record, tip);
+    if (!ci) throw refuse(`the checks on pull request #${pr.number} were not waited for at ${short(tip)}`);
+    if (ci.status === "failed") throw refuse(`a check on pull request #${pr.number} failed at ${short(tip)}`);
+    // The version lines the route recorded when it was decided, never the
+    // configuration as it is now: a list emptied mid-train would pass trivially.
+    const entries = versionFilesOf(route);
+    if (!entries) throw refuse(`the train records no version lines for ${route.branch}, so the plan's increase cannot be judged against the list it was routed under`);
 
     // Fetched first, inside the lock: the base read here is the one the version
     // condition and the landing check are held to, and nothing can move it on
@@ -230,7 +239,7 @@ export async function mergePlan(shipDir, { repo, configPath, dryRun = false } = 
     const found = spawnSync("git", ["-C", repo, "cat-file", "-e", `${tip}^{commit}`], { encoding: "utf8", shell: false });
     if (found.status !== 0) throw refuse(`${short(tip)} is not in this checkout after the fetch`);
 
-    const version = versionConditionAt(repo, { entries: config.versionFiles ?? [], tipOid: tip, baseOid, kind: record.increase ?? "patch" });
+    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: record.increase ?? "patch" });
     if (!version.holds) {
       throw refuse(`the version lines at ${short(tip)} are not exactly one increase over origin/${route.base} at ${short(baseOid)}: `
         + versionLines(version, route.base).join("; "), VERSION_NOT_ONE_INCREASE);
@@ -288,7 +297,7 @@ async function main() {
   }
   try {
     const result = planShip
-      ? await mergePlan(planShip, { repo, configPath, dryRun })
+      ? await mergePlan(planShip, { repo, dryRun })
       : await mergeSpec(statePath, { repo, configPath, dryRun });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {

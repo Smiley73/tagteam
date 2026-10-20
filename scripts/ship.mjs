@@ -56,7 +56,7 @@ import {
   verdict, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
 import {
-  checkFor, landingBegun, landingRecordPath, landingRoot, planBodyPath, readPlanLanding, resultsFor, savePlanLanding, withholding
+  checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, planBodyPath, readPlanLanding, resultsFor, savePlanLanding, withholding
 } from "./lib/plan-landing.mjs";
 import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
@@ -69,7 +69,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import {
-  confirmPending, decideRoute, isPlanRoute, judgeTip, landingBranch, recordMerge, recordPending, writeRoute
+  confirmPending, decideRoute, isPlanRoute, judgeTip, landingBranch, recordMerge, recordPending, versionFilesOf, writeRoute
 } from "./lib/plan-route.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1705,7 +1705,8 @@ async function routePreflight(ctx, say) {
   const order = specsInOrder(ctx);
   const { route, why } = decideRoute({
     recorded, planBranch: ctx.config.planBranch, specCount: order.length,
-    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base
+    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base,
+    versionFiles: ctx.config.versionFiles
   });
   if (!isPlanRoute(route)) return null;
   await planRouteRefusals(ctx, order, route, why === "new", say);
@@ -1840,7 +1841,8 @@ async function start(options) {
   // train as it is now, past the lock, for the same reason as the session.
   const decided = decideRoute({
     recorded: ctx.train?.route ?? null, planBranch: ctx.config.planBranch, specCount: order.length,
-    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base
+    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base,
+    versionFiles: ctx.config.versionFiles
   });
   if (isPlanRoute(decided.route) && !isPlanRoute(preflight)) {
     await planRouteRefusals(ctx, order, decided.route, decided.why === "new", say);
@@ -3777,12 +3779,16 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
 
 // The checks on the plan pull request at `tip`, waited for as `publish` waits
 // for a spec's: one classified result, `not-run` kept apart from `passed`. A
-// result already recorded for this tip is the answer, and nothing is waited for
-// twice.
+// final result — passed or failed — already recorded for this tip on this pull
+// request is the answer, and is not waited for twice. A `not-run` is not final:
+// the checks had not registered yet, or were still running, so they are waited
+// for again, or a check that went red after the wait would never withhold Merge.
+// Checks waited for on a pull request since closed are not this one's.
 function waitPlanChecks(ctx, record, tip, say) {
-  if (record.ci?.tip === tip) {
-    say.push(`The checks on pull request #${record.pr.number} at ${short(tip)} were already waited for: ${record.ci.status} — ${record.ci.reason}.`);
-    return record.ci;
+  const recorded = ciFor(record, tip);
+  if (recorded && (recorded.status === "passed" || recorded.status === "failed")) {
+    say.push(`The checks on pull request #${record.pr.number} at ${short(tip)} were already waited for: ${recorded.status} — ${recorded.reason}.`);
+    return recorded;
   }
   const out = path.join(landingRoot(ctx.shipDir), `ci-${short(tip)}.json`);
   const ran = node("ci-wait.mjs", ["--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec), "--out", out], { allow: [1] });
@@ -3947,7 +3953,12 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
       + "landing check found it clean; nothing was committed or pushed. Run this again: the landing check sees the conflict and "
       + "a resolve round takes it.");
   }
-  git(ctx.worktree, ["add", "-A"]);
+  // Tracked paths only: the merge has already staged what it brought in, and the
+  // version step only edits lines in tracked files. The landing check that sent
+  // the plan here ran every verify command in this worktree, and anything they
+  // wrote and left untracked is nobody's change — `-A` would commit it into a
+  // merge that adds no code of its own, and push it.
+  git(ctx.worktree, ["add", "-u"]);
   node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
   const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
   const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", `Merge ${route.base} into ${route.branch}`]).stdout.trim();
@@ -4061,7 +4072,12 @@ function resultLines(route, record, results) {
  */
 async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []) {
   const route = routeOf(ctx);
-  const version = versionConditionAt(ctx.repo, { entries: ctx.config.versionFiles ?? [], tipOid: tip, baseOid, kind: increaseOf(record) });
+  const entries = versionFilesOf(route);
+  if (!entries) {
+    throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be judged against the `
+      + `list it was routed under, and the configuration as it is now is not that list; run start again, which records them`);
+  }
+  const version = versionConditionAt(ctx.repo, { entries, tipOid: tip, baseOid, kind: increaseOf(record) });
   record.version = { tip, baseOid, holds: version.holds, kind: version.kind, lines: version.lines, at: new Date().toISOString() };
   saveLanding(ctx, record);
   const results = resultsFor(ctx.shipDir, record, { tip, baseOid, version });

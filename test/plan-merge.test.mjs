@@ -91,7 +91,8 @@ function stage(plans = ["p1"]) {
   git(repo, "push", "-q", "-u", "origin", "main");
   const base = git(repo, "rev-parse", "HEAD");
   const configPath = path.join(repo, ".tagteam", "config.json");
-  write(configPath, { versionFiles: [{ file: "package.json", pointer: "/version" }] });
+  const versionFiles = [{ file: "package.json", pointer: "/version" }];
+  write(configPath, { versionFiles });
 
   const pulls = [];
   const ships = {};
@@ -106,12 +107,12 @@ function stage(plans = ["p1"]) {
     const number = index + 1;
     pulls.push({ number, branch: `plan/${slug}`, base: "main", state: "OPEN" });
     const shipDir = path.join(repo, ".tagteam", "ships", slug);
-    write(path.join(shipDir, "train.json"), { slug, route: { kind: "plan", branch: `plan/${slug}`, base: "main", tipOid: tip, pendingOid: null } });
+    write(path.join(shipDir, "train.json"), { slug, route: { kind: "plan", branch: `plan/${slug}`, base: "main", tipOid: tip, pendingOid: null, versionFiles } });
     write(path.join(shipDir, "whole-plan", "1", "record.json"), {
       n: 1, tip, mergeBase: base, status: "clean", verify: { tip, status: "passed" }, review: { status: "clean", tip }, units: []
     });
     write(path.join(shipDir, "plan-landing", "record.json"), {
-      pr: { number, head: tip, base: "main" }, ci: { tip, status: "not-run", reason: "no checks were registered" },
+      pr: { number, head: tip, base: "main" }, ci: { tip, pr: number, status: "not-run", reason: "no checks were registered" },
       landing: { tip, baseOid: base, mergeBase: base, status: "passed", on: "whole-plan" },
       confirmation: { tip, by: "p@example.com", at: "2026-01-01T00:00:00Z" }
     });
@@ -141,6 +142,11 @@ function stage(plans = ["p1"]) {
   };
   const record = (slug) => JSON.parse(fs.readFileSync(path.join(ships[slug].shipDir, "plan-landing", "record.json"), "utf8"));
   const setRecord = (slug, change) => write(path.join(ships[slug].shipDir, "plan-landing", "record.json"), change(record(slug)));
+  const trainFile = (slug) => path.join(ships[slug].shipDir, "train.json");
+  const setRoute = (slug, change) => {
+    const train = JSON.parse(fs.readFileSync(trainFile(slug), "utf8"));
+    write(trainFile(slug), { ...train, route: change(train.route) });
+  };
   const main = () => git(origin, "rev-parse", "refs/heads/main");
   const merges = () => (fs.existsSync(env.GH_STUB_LOG) ? fs.readFileSync(env.GH_STUB_LOG, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [])
     .filter((argv) => argv[1] === "merge");
@@ -154,7 +160,7 @@ function stage(plans = ["p1"]) {
     git(clone, "push", "-q", "origin", "HEAD:refs/heads/main");
     return git(clone, "rev-parse", "HEAD");
   };
-  return { dir, repo, origin, base, ships, run, start, record, setRecord, main, merges, pushToMain, configPath };
+  return { dir, repo, origin, base, ships, run, start, record, setRecord, setRoute, main, merges, pushToMain, configPath };
 }
 
 test("the lock covers the window: two plans with the same increase, both confirmed, merged at once — the second reads the base only after the first merged, and refuses", async () => {
@@ -235,6 +241,9 @@ test("merge.mjs refuses the plan without a Merge for its tip, over a check that 
     ["a whole-plan check of an earlier tip", (s) => write(path.join(s.ships.p1.shipDir, "whole-plan", "1", "record.json"),
       { n: 1, tip: "d".repeat(40), status: "clean", verify: { tip: "d".repeat(40), status: "passed" }, review: { status: "clean", tip: "d".repeat(40) }, units: [] }), /no whole-plan check is recorded clean/],
     ["a red check on the pull request", (s) => s.setRecord("p1", (record) => ({ ...record, ci: { ...record.ci, status: "failed" } })), /a check on pull request #1 failed/],
+    ["checks waited for on a pull request since replaced", (s) => s.setRecord("p1", (record) => ({ ...record, ci: { ...record.ci, pr: 7 } })), /checks on pull request #1 were not waited for at/],
+    ["no checks waited for at the tip", (s) => s.setRecord("p1", (record) => ({ ...record, ci: { ...record.ci, tip: "a".repeat(40) } })), /checks on pull request #1 were not waited for at/],
+    ["a route that recorded no version lines", (s) => s.setRoute("p1", ({ versionFiles, ...route }) => route), /records no version lines for plan\/p1/],
     ["a pull request recorded at another head", (s) => s.setRecord("p1", (record) => ({ ...record, pr: { ...record.pr, head: "e".repeat(40) } })), /recorded at eeeeeeeeeeee/],
     ["a pull request aimed elsewhere", (s) => write(path.join(s.dir, "pulls.json"), { pulls: [{ number: 1, branch: "plan/p1", base: "release", state: "OPEN" }] }), /targets release, not main/],
     ["a merge of the base still under way", (s) => write(path.join(s.ships.p1.shipDir, "resolve", "1", "record.json"), { n: 1, status: "open", attempts: [] }), /resolve round 1, .* is still open/]
@@ -252,11 +261,39 @@ test("merge.mjs refuses the plan without a Merge for its tip, over a check that 
   }
 });
 
-test("with no version lines configured the condition holds, and a plan confirmed for its tip merges", () => {
+test("with no version lines recorded on the route the condition holds, and a plan confirmed for its tip merges", () => {
   const staged = stage(["p1"]);
-  write(staged.configPath, { versionFiles: [] });
+  staged.setRoute("p1", (route) => ({ ...route, versionFiles: [] }));
   const merged = staged.run("p1");
   assert.equal(merged.status, 0, merged.stderr);
   assert.equal(staged.merges().length, 1);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("the version lines are the ones the route recorded: emptying them in the configuration mid-train does not lift the condition", () => {
+  const staged = stage(["p1"]);
+  const base = staged.pushToMain({ "package.json": version("1.0.1") });
+  staged.setRecord("p1", (record) => ({ ...record, landing: { ...record.landing, baseOid: base, status: "passed", on: null } }));
+  write(staged.configPath, { versionFiles: [] });
+  const refused = staged.run("p1");
+  assert.equal(refused.status, 6, refused.stderr);
+  assert.match(refused.stderr, /is 1\.0\.1 here and on main: the plan carries no increase/);
+  assert.equal(staged.merges().length, 0);
+  assert.equal(staged.main(), base);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a landing check that passed against the base as it now stands, but for an earlier tip, does not let the merge through", () => {
+  const staged = stage(["p1"]);
+  // Everything else is for the tip: the Merge, the pull request's head and the
+  // whole-plan check. Only the landing check is about another commit.
+  const base = staged.pushToMain({ "other.js": "export const other = 1;\n" });
+  staged.setRecord("p1", (record) => ({ ...record, landing: { ...record.landing, tip: "f".repeat(40), baseOid: base, status: "passed", on: null } }));
+  const refused = staged.run("p1");
+  assert.equal(refused.status, 5, refused.stderr);
+  assert.match(refused.stderr, /no landing check of this tip cleared it/);
+  assert.match(refused.stderr, /nothing was merged/);
+  assert.equal(staged.merges().length, 0, "gh pr merge ran for a landing check of another tip");
+  assert.equal(staged.main(), base);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });

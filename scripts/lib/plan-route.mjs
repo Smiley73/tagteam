@@ -8,11 +8,15 @@
 //
 // - `{ kind: "base" }` — every spec branches from the configured base and
 //   merges back into it, as every train did before plan branches existed.
-// - `{ kind: "plan", branch, base, createdOid, tipOid, pendingOid }` — the
-//   specs branch from, target and squash into `plan/<slug>`, which was created
-//   on origin from `base` at `createdOid`. `tipOid` is the commit the ship last
-//   recorded putting at the branch's tip on origin, and `pendingOid` a commit it
-//   is about to push or has pushed and not yet confirmed; null for "none".
+// - `{ kind: "plan", branch, base, createdOid, tipOid, pendingOid, versionFiles }`
+//   — the specs branch from, target and squash into `plan/<slug>`, which was
+//   created on origin from `base` at `createdOid`. `tipOid` is the commit the ship
+//   last recorded putting at the branch's tip on origin, and `pendingOid` a commit
+//   it is about to push or has pushed and not yet confirmed; null for "none".
+//   `versionFiles` is the configuration's list of version lines as it was when
+//   the route was decided: the plan's one increase is judged against that list,
+//   so a configuration changed mid-train neither removes the condition nor
+//   adds one the plan was never routed under.
 //
 // The record is the ship's answer to one question — is what is on origin a
 // commit the ship made? — and it is general on purpose: any commit the ship
@@ -43,16 +47,30 @@ export const landingBranch = (route, configBase) => (isPlanRoute(route) ? route.
  * spec, is the base too; the setting on with two or more specs is a plan branch,
  * not yet created.
  */
-export function decideRoute({ recorded, planBranch, specCount, started, slug, base }) {
-  if (recorded && typeof recorded === "object" && typeof recorded.kind === "string") return { route: recorded, why: "recorded" };
+export function decideRoute({ recorded, planBranch, specCount, started, slug, base, versionFiles = [] }) {
+  if (recorded && typeof recorded === "object" && typeof recorded.kind === "string") {
+    // A plan route recorded before it kept its version lines takes them now, once,
+    // and keeps them from then on like everything else it recorded.
+    if (isPlanRoute(recorded) && versionFilesOf(recorded) === null) return { route: { ...recorded, versionFiles: asList(versionFiles) }, why: "recorded" };
+    return { route: recorded, why: "recorded" };
+  }
   if (started) return { route: { kind: "base" }, why: "under-way" };
   if (planBranch !== true) return { route: { kind: "base" }, why: "setting-off" };
   if (specCount < 2) return { route: { kind: "base" }, why: "one-spec" };
   return {
-    route: { kind: "plan", branch: planBranchOf(slug), base, createdOid: null, tipOid: null, pendingOid: null },
+    route: { kind: "plan", branch: planBranchOf(slug), base, createdOid: null, tipOid: null, pendingOid: null, versionFiles: asList(versionFiles) },
     why: "new"
   };
 }
+
+const asList = (versionFiles) => (Array.isArray(versionFiles) ? versionFiles : []);
+
+/**
+ * The version lines a plan route recorded when it was decided, or null for a
+ * route that recorded none. Never the configuration as it is now: the readers
+ * that judge the plan's increase take this, and refuse on null.
+ */
+export const versionFilesOf = (route) => (Array.isArray(route?.versionFiles) ? route.versionFiles : null);
 
 const oidOf = (value) => (typeof value === "string" && value.length > 0 ? value : null);
 

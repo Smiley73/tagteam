@@ -16,7 +16,8 @@
 //
 //   pr            the plan pull request: number, url, the head it was last seen
 //                 at, and the base it targets
-//   ci            its checks, as `ci-wait.mjs` classified them, for one tip
+//   ci            its checks, as `ci-wait.mjs` classified them, for one tip and
+//                 one pull request number
 //   landing       the landing check of one tip against one base commit
 //   version       the version condition last read, for one tip and one base
 //   mergeIn       the last merge of the base into the plan branch the ship made
@@ -67,6 +68,14 @@ export function checkFor(shipDir, tip) {
   return listChecks(shipDir).map((entry) => entry.record).filter((record) => record && !record.unreadable && record.tip === tip).at(-1) ?? null;
 }
 
+/**
+ * The checks recorded for `tip` on the plan pull request the record names now,
+ * or null. A replacement pull request at the same tip triggers checks of its
+ * own, so checks waited for on a closed one are not about it.
+ */
+export const ciFor = (record, tip) =>
+  (record.ci && record.ci.tip === tip && record.pr?.number && record.ci.pr === record.pr.number ? record.ci : null);
+
 /** A resolve round still open — a merge of the base under way — or null. */
 export const openResolveRoundIn = (shipDir) =>
   listResolveRounds(path.join(shipDir, RESOLVE_DIR)).find((entry) => entry.record?.status === "open")?.record ?? null;
@@ -85,9 +94,15 @@ export function resultsFor(shipDir, record, { tip, baseOid, version = null }) {
     : check?.status
       ? { status: "failed", tip, check: check.n, outcome: check.status, reason: check.reason ?? null }
       : { status: "not-run", tip: null, check: check?.n ?? null };
-  const ci = record.ci?.tip === tip
-    ? { status: record.ci.status === "failed" ? "failed" : record.ci.status === "passed" ? "passed" : "not-run", tip, recorded: true, reason: record.ci.reason ?? null }
-    : { status: "not-run", tip: null, recorded: false, reason: record.ci ? `the checks last waited for were on ${String(record.ci.tip).slice(0, 12)}` : "not waited for yet" };
+  const own = ciFor(record, tip);
+  const ci = own
+    ? { status: own.status === "failed" ? "failed" : own.status === "passed" ? "passed" : "not-run", tip, recorded: true, reason: own.reason ?? null }
+    : {
+      status: "not-run", tip: null, recorded: false,
+      reason: !record.ci ? "not waited for yet"
+        : record.ci.tip !== tip ? `the checks last waited for were on ${String(record.ci.tip).slice(0, 12)}`
+          : `the checks last waited for were on pull request #${record.ci.pr ?? "?"}, not #${record.pr?.number ?? "?"}`
+    };
   const landing = record.landing?.tip === tip && record.landing?.baseOid === baseOid
     ? { status: record.landing.status === "passed" ? "passed" : "failed", outcome: record.landing.status, tip, baseOid }
     : { status: "not-run", outcome: null, tip: null, baseOid: null };
