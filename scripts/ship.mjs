@@ -49,7 +49,12 @@ import {
   versionStep, writeRecord
 } from "./lib/resolve.mjs";
 import { recordedIn } from "./record-round-report.mjs";
-import { readSpecs } from "./specs.mjs";
+import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
+import {
+  BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
+  fixUnitIds, isFixUnitId, listChecks, nextCheckNumber, nextUnitId, saveCheck, unitDir, unitDocument, unitDocumentPath,
+  verdict, ROUND as CHECK_ROUND
+} from "./lib/whole-plan.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
@@ -160,17 +165,49 @@ function context(options, { requireTrain = true } = {}) {
   };
 }
 
-const specDir = (ctx, id) => path.join(ctx.shipDir, id);
+// A spec's directory, or — for a whole-plan fix unit, which runs the same cycle
+// under an id of its own — the unit's, under `whole-plan/units/`, where
+// `status.mjs` does not count it as a spec. Everything keyed by a spec id goes
+// through here, so a fix unit's state, rounds, sets and reports land beside its
+// generated document and nowhere else.
+const specDir = (ctx, id) => (isFixUnitId(id) ? unitDir(ctx.shipDir, id) : path.join(ctx.shipDir, id));
 const statePath = (ctx, id) => path.join(specDir(ctx, id), "state.json");
 const roundsRoot = (ctx, id) => path.join(specDir(ctx, id), "rounds");
 const roundDir = (ctx, id, round) => path.join(roundsRoot(ctx, id), String(round));
 const readState = (ctx, id) => readJson(statePath(ctx, id));
+const stateOf = (ctx, id) => (exists(statePath(ctx, id)) ? readJson(statePath(ctx, id), {}).state ?? null : null);
 
 function specsInOrder(ctx) {
   return readSpecs(ctx.plan, ctx.config, path.join(PLUGIN, "schemas", "spec.schema.json"));
 }
 
+// A fix unit as the cycle reads a spec, from the document the whole-plan check
+// wrote for it: not user-visible, no dependencies, the default reviewers.
+function fixUnitSpec(ctx, id) {
+  const file = unitDocumentPath(ctx.shipDir, id);
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch {
+    throw new Stop(`${id} is not a spec of ${ctx.plan}, and no whole-plan check made a fix unit of that name (${file} is not there)`);
+  }
+  let front;
+  try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw new Stop(error.message); }
+  if (front.id !== id) throw new Stop(`${file} names ${front.id}, not ${id}`);
+  return {
+    id, path: file, dependsOn: [], userVisible: false,
+    reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], fixUnit: true
+  };
+}
+
+// Every fix unit the whole-plan check has made whose document is there, in the
+// order they were made.
+const fixUnitSpecs = (ctx) => fixUnitIds(ctx.shipDir).filter((id) => exists(unitDocumentPath(ctx.shipDir, id))).map((id) => fixUnitSpec(ctx, id));
+
+// The specs and then the fix units: everything of this train that becomes a pull
+// request into its landing branch.
+const unitsInOrder = (ctx) => [...specsInOrder(ctx), ...fixUnitSpecs(ctx)];
+
 function specById(ctx, id) {
+  if (isFixUnitId(id)) return fixUnitSpec(ctx, id);
   const spec = specsInOrder(ctx).find((entry) => entry.id === id);
   if (!spec) throw new Stop(`${id} is not a spec of ${ctx.plan}`);
   return spec;
@@ -734,7 +771,7 @@ const setPayload = ({ id, dir, labels }) => ({ id, labels, arrive: arriveCommand
  */
 function requireSetIn(ctx, id, set, step, home = undefined) {
   const dir = setDir(ctx, id, set, home);
-  if (!readSet(dir, set)) throw new Stop(`the set ${set} that ${step} judges for ${id} is not on disk`);
+  if (!readSet(dir, set)) throw new Stop(`the set ${set} that ${step} judges for ${id ?? "this plan"} is not on disk`);
   const answer = readiness({ dir, id: set });
   if (answer.answer !== "refused") return answer;
   throw new Stop(`Not judged yet: ${answer.reason}. Nothing was read and nothing changed. This is not a stop: end the turn and `
@@ -1034,8 +1071,9 @@ function unplacedStop(ctx, walk, unplaced) {
 }
 
 /**
- * Every spec of this plan whose pull request into the plan branch is already
- * merged at the reviewed commit — by a person on GitHub, or by this ship in a run
+ * Every spec of this plan, and every whole-plan fix unit, whose pull request
+ * into the plan branch is already merged at the reviewed commit — by a person
+ * on GitHub, or by this ship in a run
  * that died before recording it — is adopted, and the record follows its merge
  * commit. Done before the tip is compared: compared first, every crash between
  * a squash and its record would be a false stop.
@@ -1058,7 +1096,7 @@ async function reconcileMerged(ctx, { own = null, landed = false } = {}) {
   const route = routeOf(ctx);
   const result = { say: [], adopted: new Set() };
   const found = [];
-  for (const spec of specsInOrder(ctx)) {
+  for (const spec of unitsInOrder(ctx)) {
     if (!exists(statePath(ctx, spec.id))) continue;
     const state = readState(ctx, spec.id);
     if (!state.pr || state.state === "merged" || state.base !== route.branch) continue;
@@ -1800,7 +1838,7 @@ async function start(options) {
   say.push(`${specs.length} specs in dependency order; ${specs.filter((spec) => spec.state === "merged").length} already merged.`);
   emit({
     say, snapshot, specs,
-    next: first ? nextCommand(ctx, "begin", first.id) : nextCommand(ctx, "end", null)
+    next: first ? nextCommand(ctx, "begin", first.id) : afterSpecs(ctx)
   });
 }
 
@@ -1948,9 +1986,11 @@ async function setsOnRestart(ctx, id, state, options) {
 }
 
 // The restart rule over the sets `pointed` names — each `{ dir, set, step }` —
-// and the one question it may put, answered through `begin` for spec `id`.
+// and the one question it may put, answered through `begin` for spec `id`, or
+// through whatever command `retry` builds from the answer's flag — the
+// whole-plan check, which belongs to no spec, is answered through itself.
 // `waiting` is the first set still out, with the step that judges it.
-async function restartPointed(ctx, id, pointed, options) {
+async function restartPointed(ctx, id, pointed, options, retry = (flag) => nextCommand(ctx, "begin", id, flag)) {
   const result = { say: [], ask: null, answers: null, waiting: null };
   const waiting = [];
   const unconfirmed = [];
@@ -1970,8 +2010,8 @@ async function restartPointed(ctx, id, pointed, options) {
     }
   }
   if (unconfirmed.length > 0 && !options.runLive) {
-    const gone = nextCommand(ctx, "begin", id, " --run-gone");
-    const live = nextCommand(ctx, "begin", id, " --run-live");
+    const gone = retry(" --run-gone");
+    const live = retry(" --run-live");
     result.ask = `${questions.join(" ")} If they say the earlier run is gone, run ${gone}. If they say it is still going, `
       + `or are not sure, run ${live}, and the run keeps waiting.`;
     result.answers = { gone, live };
@@ -1982,10 +2022,41 @@ async function restartPointed(ctx, id, pointed, options) {
 }
 
 function finishNext(ctx, id, say) {
-  const order = specsInOrder(ctx);
-  const after = order.slice(order.findIndex((spec) => spec.id === id) + 1)
-    .find((spec) => !exists(statePath(ctx, spec.id)) || readJson(statePath(ctx, spec.id)).state !== "merged");
-  emit({ say, next: after ? nextCommand(ctx, "begin", after.id) : nextCommand(ctx, "end", null) });
+  emit({ say, next: followingCommand(ctx, id) });
+}
+
+// What runs after `id`: the next spec in order that is not merged, and once
+// there is none, whatever follows the specs on this train's route. A fix unit
+// has no place in the spec order; every spec was merged before it was made.
+function followingCommand(ctx, id) {
+  const following = isFixUnitId(id) ? null : nextSpecAfter(ctx, id);
+  return following ? nextCommand(ctx, "begin", following) : afterSpecs(ctx, id);
+}
+
+// What a clean whole-plan check is followed by on the plan route. The one place
+// it is said: what lands the plan replaces it here, without touching the check
+// or its decision.
+const afterCleanCheck = (ctx) => nextCommand(ctx, "end", null);
+
+/**
+ * What follows the specs. Off the plan route, `end`, as it always was. On it,
+ * `end` only once every spec and every whole-plan fix unit is merged and the
+ * check has a clean result for the tip the record holds; before that, the fix
+ * unit still to ship, or the check. A spec or a fix unit waiting for a person
+ * holds everything: nothing is checked over work that has not landed, and the
+ * `next` it gets is `end`, as a waiting last spec's always was. `from` is the
+ * spec or unit that just merged, which is why the check would run.
+ */
+function afterSpecs(ctx, from = null) {
+  const end = nextCommand(ctx, "end", null);
+  const route = routeOf(ctx);
+  if (!isPlanRoute(route)) return end;
+  if (specsInOrder(ctx).some((spec) => stateOf(ctx, spec.id) !== "merged")) return end;
+  const unit = fixUnitSpecs(ctx).find((entry) => stateOf(ctx, entry.id) !== "merged");
+  if (unit) return ["awaiting-approval", "failed"].includes(stateOf(ctx, unit.id)) ? end : nextCommand(ctx, "begin", unit.id);
+  if (cleanResultFor(ctx.shipDir, route.tipOid)) return afterCleanCheck(ctx);
+  const why = from === null ? "" : ` --why ${isFixUnitId(from) ? "fix-unit" : "last-spec"}`;
+  return nextCommand(ctx, "plan-check", null, why);
 }
 
 function fixReportLines(report) {
@@ -2886,7 +2957,7 @@ function revisit(options) {
   // the train's base at this spec's, would corrupt its next snapshot.
   const current = git(ctx.worktree, ["branch", "--show-current"]).stdout.trim();
   if (current && current !== state.branch) {
-    const other = specsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
+    const other = unitsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
     const otherState = other && exists(statePath(ctx, other.id)) ? readJson(statePath(ctx, other.id)).state : null;
     if (["implementing", "reviewing", "fixing", "verifying"].includes(otherState)) {
       throw new Stop(`the worktree is on ${current}, and ${other.id} is still ${otherState} there; bring that spec to a stop before revisiting ${id}`);
@@ -3122,6 +3193,365 @@ async function resolveCollect(options) {
   emit(await pushResolution(ctx, record, attempt, say));
 }
 
+// --- the whole-plan check ------------------------------------------------------
+
+// Once every spec of a plan on the plan route is merged into its branch, the
+// branch's tip is checked as one change — see `scripts/lib/whole-plan.mjs` for
+// what a check is and how it is laid out on disk. Two steps, each taking
+// `--plan` and no `--spec`: `plan-check` runs on whatever tip the branch is at,
+// once the hand-push check accepts it, and `plan-collect` judges the one reviewer
+// and decides. A check's record says which phase it reached:
+//
+//   started      the record is made, bound to its tip, merge base and base
+//   snapshotted  the round holds the combined change; verify follows, from a
+//                re-entered round when an earlier run was interrupted in it
+//   verified     verify ran for this tip; the reviewer follows
+//   review       the reviewer is out; `plan-collect` judges it
+//
+// and once decided its status is `clean`, `open` (a fix unit answers it),
+// `failed` (none can, within limits.ciRepairs) or `incomplete` (the review could
+// not be completed, or there was nothing to review). A decided record is reused
+// for its tip whenever the check is asked again, and dispatches nothing; a new
+// tip gets a new record and never inherits an earlier one's.
+
+const checkHome = (ctx, n) => checkDir(ctx.shipDir, n);
+
+// Every check this plan has, or a stop naming the one whose record does not
+// parse: read as absent, a decided check would run again, and the fix units it
+// named would drop out of nothing — they are counted from their directories too.
+function wholePlanChecks(ctx) {
+  const checks = listChecks(ctx.shipDir);
+  const torn = checks.find((entry) => entry.record.unreadable);
+  if (torn) {
+    throw new Stop(`the record of whole-plan check ${torn.n} at ${checkRecordPath(ctx.shipDir, torn.n)} cannot be read `
+      + `(${torn.record.unreadable}), so what it decided is unknown and nothing is decided from it. Restore it, or move the `
+      + "check's directory aside if it is to be forgotten, and run this again.");
+  }
+  return checks.map((entry) => entry.record);
+}
+
+// What a check's result is, for whoever reads it after: `end`, status, and what
+// lands the plan.
+function wholePlanSummary(ctx, record) {
+  return {
+    check: record.n, tip: record.tip, mergeBase: record.mergeBase, baseOid: record.baseOid, why: record.why,
+    status: record.status ?? null, reason: record.reason ?? null, verify: record.verify?.status ?? null,
+    review: record.review?.status ?? null, reviewedTip: record.review?.tip ?? null,
+    units: (record.units ?? []).map((id) => ({ id, state: stateOf(ctx, id) ?? "not started" })),
+    record: checkRecordPath(ctx.shipDir, record.n)
+  };
+}
+
+// The reviewer reads the plan's combined change against the plan's goal and its
+// deliverables, through a brief no roster can name.
+function wholePlanTarget(ctx, record) {
+  return {
+    label: `${record.branch} at ${record.tip.slice(0, 12)}`,
+    specPath: `${path.join(ctx.plan, "goal.md")} and ${path.join(ctx.plan, "plan.md")}`,
+    dir: checkRoundDir(ctx.shipDir, record.n)
+  };
+}
+
+// One reviewer, never a panel and never Codex: every line was already read by a
+// full panel in its own spec, and what none of them could see is how the specs
+// fit together. At the lens reviewer's model and effort, off the resolver, and
+// through prompts/whole-plan.md, which is not a lens brief.
+async function sendWholePlanReviewer(ctx, record, { resend = false } = {}) {
+  const job = resolveJobs(ctx).jobs["review-lens"];
+  const dispatch = reviewerDispatch(ctx, wholePlanTarget(ctx, record), record.tip, WHOLE_PLAN_LENS,
+    path.join(PLUGIN, "prompts", WHOLE_PLAN_BRIEF), job);
+  const sent = await sendSet(ctx, null, {
+    kind: resend ? "whole-plan-resend" : "whole-plan", agents: [{ dispatch, job, name: "the whole-plan reviewer" }],
+    step: "plan-collect", home: checkHome(ctx, record.n)
+  });
+  return { dispatch, sent, job };
+}
+
+// Why a check runs when nobody said: the first is the last spec's, one after a
+// fix unit that merged is that unit's, and anything else is a tip that moved.
+function whyNow(ctx, records) {
+  const previous = records.at(-1);
+  if (!previous) return "last-spec";
+  const unit = previous.units?.at(-1);
+  return unit && stateOf(ctx, unit) === "merged" ? "fix-unit" : "tip-moved";
+}
+
+// A fix unit's document, written from the check that made it — what it found
+// is on disk, so a run that died between the decision and the document writes
+// the same one again.
+function ensureUnitDocument(ctx, record, id) {
+  const file = unitDocumentPath(ctx.shipDir, id);
+  if (exists(file)) return file;
+  const round = checkRoundDir(ctx.shipDir, record.n);
+  const findings = record.review?.status === "open" ? readJson(path.join(round, "to-fix.json"), { findings: [] }).findings ?? [] : [];
+  const failedVerify = record.verify?.status === "failed"
+    ? (record.verify.commands ?? []).find((command) => command.status === "failed") ?? { command: "a verify command", logPath: record.verify.result }
+    : null;
+  const text = unitDocument({
+    id, slug: ctx.slug, branch: record.branch, tip: record.tip, check: record.n, recordPath: checkRecordPath(ctx.shipDir, record.n),
+    findings, failedVerify, goalPath: path.join(ctx.plan, "goal.md"), planPath: path.join(ctx.plan, "plan.md"),
+    diffPath: path.join(round, "review.diff")
+  });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, text, { mode: 0o600 });
+  fs.renameSync(temporary, file);
+  return file;
+}
+
+// What a check that is not clean found, in one sentence.
+function foundLine(ctx, record) {
+  const parts = [];
+  if (record.verify?.status === "failed") {
+    const failed = (record.verify.commands ?? []).find((command) => command.status === "failed");
+    parts.push(`${failed ? `\`${failed.command}\`` : "a verify command"} failed on the plan's tip${failed?.timedOut ? " (timed out)" : ""} — its log is ${failed?.logPath ?? record.verify.result}`);
+  }
+  if (record.review?.status === "open") {
+    const count = (record.review.counts?.blocking ?? 0) + (record.review.counts?.major ?? 0);
+    parts.push(`the reviewer found ${count} blocking or major finding(s) in how the plan's specs fit together — they are ${record.review.toFix}`);
+  }
+  return parts.join(", and ");
+}
+
+/**
+ * Decide a check, once its review is in or it cannot go on, and print what
+ * follows from that. `reason` is why a check that is not clean stopped.
+ */
+function closeCheck(ctx, record, status, reason, say) {
+  record.status = status;
+  record.reason = reason;
+  record.phase = "decided";
+  record.decidedAt = new Date().toISOString();
+  saveCheck(ctx.shipDir, record);
+  return decidedPayload(ctx, record, say);
+}
+
+// What a decided check prints, whether it was decided now or is being reused for
+// its tip: on clean, what follows the check on this route; on a fix unit, that
+// unit's `begin`; on a stop, `ask` and `end`, with the work left on the branch.
+function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
+  const at = `${record.branch} at ${record.tip.slice(0, 12)}`;
+  const where = checkRecordPath(ctx.shipDir, record.n);
+  const wholePlan = wholePlanSummary(ctx, record);
+  const limit = ctx.config.limits.ciRepairs;
+  if (reused) say.push(`Whole-plan check ${record.n} already decided ${at}; its result is reused, and nothing is dispatched.`);
+  if (record.status === "clean") {
+    const minor = Object.entries(record.review?.counts ?? {}).filter(([severity]) => severity === "minor" || severity === "nit")
+      .reduce((sum, [, count]) => sum + count, 0);
+    say.push(`The whole-plan check of ${at} is clean: verify ${record.verify.status === "passed" ? "passed" : "had nothing to run, which is recorded as that and not as a pass"}, `
+      + `and the reviewer found nothing blocking or major${minor > 0 ? ` (${minor} minor or nit finding(s) recorded in ${record.review.findings}, and nothing fixed for them)` : ""}. `
+      + `Its record is ${where}.`);
+    return { say, wholePlan, next: afterCleanCheck(ctx) };
+  }
+  if (record.status === "open") {
+    const id = record.units.at(-1);
+    const document = ensureUnitDocument(ctx, record, id);
+    const made = fixUnitIds(ctx.shipDir).indexOf(id) + 1;
+    say.push(`The whole-plan check of ${at} is not clean: ${foundLine(ctx, record)}. It is fixed as ${id}, one more pull request into `
+      + `${record.branch} through the same cycle, review and gates as a spec — whole-plan fix ${made} of the ${limit} limits.ciRepairs allows. `
+      + `Its document is ${document}, and the check's record ${where}. Once it is merged, the check runs again on the new tip.`);
+    return { say, wholePlan, next: nextCommand(ctx, "begin", id) };
+  }
+  const why = record.reason === "spent"
+    ? `every one of the ${limit} whole-plan fix(es) limits.ciRepairs allows has been made (${fixUnitIds(ctx.shipDir).join(", ")}), and the plan is still not clean: ${foundLine(ctx, record)}`
+    : record.reason === "empty"
+      ? `the plan's combined change, from ${record.mergeBase.slice(0, 12)} where it last met ${record.base} to its tip, is empty, so there is nothing to review and nothing that says the plan holds — an empty change is never clean`
+      : `the whole-plan reviewer produced no usable evidence twice, which is not a clean review${record.review?.findings ? `; the review is ${record.review.findings}` : ""}`;
+  if (!reused) {
+    spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} needs you`, "the whole-plan check is not clean"], { stdio: "ignore" });
+  }
+  const raise = record.reason === "spent" ? " Raising limits.ciRepairs in .tagteam/config.json and running this check again would let the ship make another fix." : "";
+  say.push(`The whole-plan check of ${at} stopped: ${why}. Its record is ${where}. The work stays on ${record.branch}, nothing of it `
+    + `reached ${record.base}, and the plan is recorded as not clean for this tip.${raise}`);
+  return {
+    say, wholePlan,
+    ask: `The whole-plan check of ${at} is not clean, and the train stops here for you; what it found and where its record is are `
+      + `said above. Offer: stop the train (run end)${raise ? ", or raise limits.ciRepairs and run plan-check again" : ""}.`,
+    ...(record.reason === "spent" ? { budget: "spent" } : {}),
+    next: nextCommand(ctx, "end", null)
+  };
+}
+
+// A check whose reviewer is still out when the check is asked again: nothing is
+// sent a second time. The restart rule decides as it does for a spec — waited on
+// from this session, released from another, asked about when no session can be
+// told — and the question is answered through the check itself.
+async function reviewStillOut(ctx, record, options, say) {
+  const judged = record.review.resendSet ?? record.review.set;
+  const dir = setDir(ctx, null, judged, checkHome(ctx, record.n));
+  const next = nextCommand(ctx, "plan-collect", null);
+  say.push(`Whole-plan check ${record.n} of ${record.branch} at ${record.tip.slice(0, 12)} already has its reviewer out; nothing is sent again.`);
+  const restarted = await restartPointed(ctx, null, [{ set: judged, step: "plan-collect", dir }], options,
+    (flag) => nextCommand(ctx, "plan-check", null, flag));
+  say.push(...restarted.say);
+  if (restarted.ask) return { say, ask: restarted.ask, answers: restarted.answers };
+  if (restarted.waiting) {
+    const { set, missing, dir: at } = restarted.waiting;
+    return { say, set: { id: set, labels: missing.map((entry) => entry.label), arrive: arriveCommand(at, set) }, next };
+  }
+  return { say, next };
+}
+
+async function planCheck(options) {
+  const ctx = context(options);
+  const route = routeOf(ctx);
+  if (!isPlanRoute(route)) {
+    throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no plan branch for a whole-plan check to read; nothing was done`);
+  }
+  if (options.why !== undefined && !Object.hasOwn(WHY, options.why)) {
+    throw new Stop(`--why is one of ${Object.keys(WHY).join(", ")}, not ${q(options.why)}`, 2);
+  }
+  if ((ctx.config.reviewers?.roster ?? []).includes(WHOLE_PLAN_LENS)) {
+    throw new Stop(`reviewers.roster names a lens called ${WHOLE_PLAN_LENS}, which is the name the whole-plan reviewer is dispatched `
+      + "under; its findings could not be told from that lens's. Rename the lens in .tagteam/config.json and run this again.");
+  }
+  const say = [];
+  say.push(...(await reconcileMerged(ctx)).say);
+  const tip = await planTipCheck(ctx, "the whole-plan check did not run");
+  const records = wholePlanChecks(ctx);
+  const existing = records.filter((entry) => entry.tip === tip).at(-1) ?? null;
+  if (existing?.status) {
+    // A check that stopped for want of a fix, asked again after a person raised
+    // the limit, is answered by one: the stop said that is what raising it does.
+    const units = fixUnitIds(ctx.shipDir, records);
+    if (existing.status === "failed" && existing.reason === "spent" && units.length < ctx.config.limits.ciRepairs) {
+      existing.units = [...(existing.units ?? []), nextUnitId(units)];
+      existing.status = "open";
+      existing.reason = null;
+      existing.reopenedAt = new Date().toISOString();
+      saveCheck(ctx.shipDir, existing);
+      say.push(`limits.ciRepairs now allows ${ctx.config.limits.ciRepairs} whole-plan fix(es) and ${units.length} have been made, so `
+        + `check ${existing.n}, which stopped for want of one, is answered by another.`);
+      return emit(decidedPayload(ctx, existing, say));
+    }
+    return emit(decidedPayload(ctx, existing, say, { reused: true }));
+  }
+  const unmerged = unitsInOrder(ctx).filter((entry) => stateOf(ctx, entry.id) !== "merged");
+  if (unmerged.length > 0) {
+    throw new Stop(`${listOf(unmerged.map((entry) => entry.id))} ${unmerged.length > 1 ? "are" : "is"} not merged into ${route.branch} `
+      + `yet, so the plan is not whole and the whole-plan check did not run; run ${nextCommand(ctx, "begin", unmerged[0].id)}`);
+  }
+  if (existing?.phase === "review") return emit(await reviewStillOut(ctx, existing, options, say));
+
+  let record = existing;
+  if (record) {
+    say.push(`Whole-plan check ${record.n} of ${route.branch} at ${tip.slice(0, 12)} was interrupted; picking it up where its record says it was.`);
+  } else {
+    const baseOid = git(ctx.repo, ["rev-parse", `origin/${route.base}`]).stdout.trim();
+    const found = git(ctx.repo, ["merge-base", tip, baseOid], { allowFailure: true });
+    if (found.status !== 0) {
+      throw new Stop(`${route.branch} at ${tip.slice(0, 12)} and ${route.base} at ${baseOid.slice(0, 12)} have no commit in common, so `
+        + "there is no combined change to check; nothing was done");
+    }
+    // The merge base, never the base's tip: diffed against the tip of a base
+    // that moved, every later commit of the base would read as a change the plan
+    // made. After a merge-in it is the base commit merged in, so the diff is the
+    // plan's whole change against it, which is what has to be read again.
+    record = saveCheck(ctx.shipDir, {
+      n: nextCheckNumber(ctx.shipDir), branch: route.branch, base: route.base, tip, baseOid, mergeBase: found.stdout.trim(),
+      why: options.why ?? whyNow(ctx, records), phase: "started", verify: null, review: null, units: [], status: null, reason: null,
+      startedAt: new Date().toISOString()
+    });
+    say.push(`Whole-plan check ${record.n} of ${route.branch} at ${tip.slice(0, 12)} — ${WHY[record.why]}: every verify command, whatever `
+      + `its \`when\`, and one reviewer over the plan's combined change since ${record.mergeBase.slice(0, 12)}, where it last met ${route.base}.`);
+  }
+
+  if (record.phase === "started" || record.phase === "snapshotted") {
+    const [tipTree, baseTree] = git(ctx.repo, ["rev-parse", `${tip}^{tree}`, `${record.mergeBase}^{tree}`]).stdout.trim().split("\n");
+    if (tipTree === baseTree) return emit(closeCheck(ctx, record, "incomplete", "empty", say));
+    // The ship's one worktree is checked out at the tip. Nothing of this plan is
+    // in flight in it — every spec and fix unit is merged — so anything
+    // uncommitted there is someone's work, except after an interrupted verify,
+    // whose leavings are the verify commands' own and are discarded.
+    if (record.phase === "snapshotted") git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip]);
+    else {
+      if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") {
+        throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the whole-plan check has to check ${route.branch} `
+          + "out there; commit it through the spec that owns it or clear it, then run this again");
+      }
+      git(ctx.worktree, ["checkout", "--detach", tip]);
+    }
+    const dir = checkRoundDir(ctx.shipDir, record.n);
+    node("snapshot-candidate.mjs", [
+      "--primary", ctx.repo, "--worktree", ctx.worktree, "--base", record.mergeBase, "--candidate", tip,
+      "--out-dir", dir, "--config", ctx.configPath
+    ]);
+    record.phase = "snapshotted";
+    saveCheck(ctx.shipDir, record);
+    // Every configured command, regardless of `when`, through verify-run's own
+    // mode for it, so the record says what ran.
+    const verified = node("verify-run.mjs", [
+      "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"), "--select", "all",
+      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+    ], { allow: [1] });
+    if (!exists(path.join(dir, "verify.json"))) {
+      throw new Stop(`verify could not run against ${tip.slice(0, 12)}: ${(verified.stderr || verified.stdout || "").trim()}`);
+    }
+    git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip]);
+    const outcome = readJson(path.join(dir, "verify.json"));
+    record.verify = {
+      tip, status: outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
+      commands: (outcome.commands ?? []).map(({ command, status, timedOut, logPath }) => ({ command, status, timedOut, logPath }))
+    };
+    record.phase = "verified";
+    saveCheck(ctx.shipDir, record);
+  }
+  say.push(`Verification of the plan's tip, every command: ${record.verify.status}${record.verify.status === "not-applicable" ? " — none is configured, which is recorded as that and not as a pass" : ""}.`);
+  for (const command of record.verify.commands ?? []) say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+
+  const { dispatch, sent, job } = await sendWholePlanReviewer(ctx, record);
+  record.review = { lens: WHOLE_PLAN_LENS, tip, status: null, set: sent.id, resendSet: null, findings: null, toFix: null, counts: null };
+  record.phase = "review";
+  saveCheck(ctx.shipDir, record);
+  say.push(`One reviewer reads the plan's combined change for how its specs fit together (${settings(job)}): not a panel and not Codex, `
+    + "since every line was read by a full panel in its own spec. A blocking or major finding, or a failed verify, is fixed as one more pull request into the plan branch.");
+  emit({ say, dispatch: [dispatch], set: setPayload(sent), wholePlan: wholePlanSummary(ctx, record), next: nextCommand(ctx, "plan-collect", null) });
+}
+
+async function planCollect(options) {
+  const ctx = context(options);
+  if (!isPlanRoute(routeOf(ctx))) {
+    throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no whole-plan check to judge; nothing was done`);
+  }
+  const records = wholePlanChecks(ctx);
+  const record = records.at(-1) ?? null;
+  if (record?.status) return emit(decidedPayload(ctx, record, [], { reused: true }));
+  if (record?.phase !== "review") {
+    throw new Stop(`no whole-plan review is out for this plan, so there is nothing for plan-collect to judge; run ${nextCommand(ctx, "plan-check", null)}`);
+  }
+  const home = checkHome(ctx, record.n);
+  const judged = record.review.resendSet ?? record.review.set;
+  requireSetIn(ctx, null, judged, "plan-collect", home);
+  const dir = checkRoundDir(ctx.shipDir, record.n);
+  const result = node("collect-findings.mjs", [
+    "--dir", path.join(dir, "findings"), "--candidate", record.review.tip, "--expect", WHOLE_PLAN_LENS,
+    "--round", String(CHECK_ROUND), "--out", path.join(dir, "review.json")
+  ], { allow: [1] });
+  const review = readJson(path.join(dir, "review.json"));
+  const say = result.stdout.trim().split("\n");
+  if (review.status === "incomplete" && !record.review.resendSet) {
+    const { dispatch, sent } = await sendWholePlanReviewer(ctx, record, { resend: true });
+    record.review.resendSet = sent.id;
+    saveCheck(ctx.shipDir, record);
+    await closeSet({ dir: setDir(ctx, null, judged, home), id: judged });
+    say.push("The whole-plan reviewer produced no usable evidence; re-dispatching it, once.");
+    return emit({ say, dispatch: [dispatch], set: setPayload(sent), next: nextCommand(ctx, "plan-collect", null) });
+  }
+  await closeSet({ dir: setDir(ctx, null, judged, home), id: judged });
+  record.review = {
+    ...record.review, status: review.status, findings: path.join(dir, "review.json"), toFix: path.join(dir, "to-fix.json"), counts: review.counts ?? null
+  };
+  if (review.status === "incomplete") return emit(closeCheck(ctx, record, "incomplete", "review-incomplete", say));
+  if (verdict(record) === "clean") return emit(closeCheck(ctx, record, "clean", null, say));
+  // Not clean: a fix unit, while limits.ciRepairs allows one. Every unit this
+  // plan has made counts, whatever tip or trigger made it, and the count is
+  // what is on disk — never a counter beside it.
+  const units = fixUnitIds(ctx.shipDir, records);
+  if (units.length >= ctx.config.limits.ciRepairs) return emit(closeCheck(ctx, record, "failed", "spent", say));
+  record.units = [...(record.units ?? []), nextUnitId(units)];
+  emit(closeCheck(ctx, record, "open", null, say));
+}
+
 const REASONS = {
   "review-not-recorded": "no review was recorded against this commit",
   "review-open": "a reviewer found something that is still there",
@@ -3214,7 +3644,7 @@ function borrowWorktree(ctx, id, state) {
     git(ctx.worktree, ["switch", state.branch]);
     return state.branch;
   }
-  const other = specsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
+  const other = unitsInOrder(ctx).find((spec) => branchOf(ctx, spec.id) === current);
   const otherState = other && exists(statePath(ctx, other.id)) ? readJson(statePath(ctx, other.id)).state : null;
   if (["implementing", "reviewing", "fixing", "verifying"].includes(otherState)) {
     throw new Stop(`the worktree is on ${current}, and ${other.id} is still ${otherState} there; ${state.base} moved `
@@ -3389,10 +3819,9 @@ async function finish(options) {
     if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
     spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "the base moved"], { stdio: "ignore" });
     say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
-    const following = nextSpecAfter(ctx, id);
     return emit({
       say, ask: landed.stop, landing: landed.landing ?? null, pullRequest: state.pr,
-      next: following ? nextCommand(ctx, "begin", following) : nextCommand(ctx, "end", null)
+      next: followingCommand(ctx, id)
     });
   }
   state = readState(ctx, id);
@@ -3408,14 +3837,13 @@ async function finish(options) {
     .filter((report) => report && report.status !== "complete")
     .map((report) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part) => `left undone: ${part.part} — ${part.reason}`).join("; ")}`);
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
-  const following = nextSpecAfter(ctx, id);
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
   emit({
     say,
     ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null), ...(cause ? [cause] : [])].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
-    next: following ? nextCommand(ctx, "begin", following) : nextCommand(ctx, "end", null)
+    next: followingCommand(ctx, id)
   });
 }
 
@@ -3553,15 +3981,33 @@ async function end(options) {
   for (const entry of unresolved) {
     say.push(`Resolve round ${entry.round}, merging ${route.base} into ${route.branch} before ${entry.before}, is ${entry.status}; its record is ${entry.record}.`);
   }
-  emit({ say, specs: summary, ...(unresolved.length > 0 ? { resolve: unresolved } : {}) });
+  // The latest whole-plan result beside the specs, and what it answers. Read
+  // tolerantly: `end` is how a train stops, and it does not stop on a record.
+  const latest = listChecks(ctx.shipDir).at(-1) ?? null;
+  let wholePlan = null;
+  if (latest?.record.unreadable) {
+    wholePlan = { check: latest.n, status: "unreadable", record: checkRecordPath(ctx.shipDir, latest.n) };
+    say.push(`The record of whole-plan check ${latest.n} cannot be read (${latest.record.unreadable}); it is ${wholePlan.record}.`);
+  } else if (latest) {
+    wholePlan = wholePlanSummary(ctx, latest.record);
+    const { record } = latest;
+    const moved = route.tipOid && route.tipOid !== record.tip
+      ? ` ${route.branch} has moved on since, to ${route.tipOid.slice(0, 12)}, and no check describes that tip.` : "";
+    say.push(`The whole-plan check last ran on ${record.branch} at ${record.tip.slice(0, 12)}, after ${WHY[record.why] ?? record.why}, `
+      + `and is ${record.status ?? "not decided yet"}${record.status && record.status !== "clean" ? " — not clean" : ""}; its record is ${wholePlan.record}.${moved}`);
+  }
+  emit({ say, specs: summary, ...(unresolved.length > 0 ? { resolve: unresolved } : {}), ...(wholePlan ? { wholePlan } : {}) });
 }
 
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
   start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, repair, revisit, finish, end,
-  "resolve-commit": resolveCommit, "resolve-collect": resolveCollect
+  "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect
 };
+
+// The steps that belong to the plan rather than to one of its specs.
+const PLAN_LEVEL = new Set(["start", "end", "plan-check", "plan-collect"]);
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
@@ -3591,6 +4037,12 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   resolve-commit --spec <id>          on a plan branch, before <id> begins: commit the resolved merge of the base,
                                       check it, verify it, and send the panel
   resolve-collect --spec <id>         judge the panel on that merge; push it onto the plan branch, or try again
+  plan-check [--why <reason>] [--run-gone | --run-live]
+                                      on a plan branch with every spec merged: verify the branch's tip with every
+                                      command and send one reviewer over the plan's combined change; reuses a
+                                      decided result for the same tip. --why is last-spec, fix-unit, merge-in,
+                                      resolve or tip-moved, and says what the result answers
+  plan-collect                        judge that reviewer; clean, a fix unit to ship, or a stop for a person
   end                                 release the lock and remove the worktree
 `;
 
@@ -3616,7 +4068,7 @@ async function main() {
     const { sub, options } = parseArgs(process.argv.slice(2));
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
-    if (sub !== "start" && sub !== "end" && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
+    if (!PLAN_LEVEL.has(sub) && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
     await run(options);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

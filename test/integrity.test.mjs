@@ -415,6 +415,15 @@ test("every dispatching step of the driver reads the resolver, and the driver na
   for (const step of ["begin", "panel", "fix", "redesign", "recheck", "repair"]) {
     assert.match(driverFunction(step), /roles\(ctx, id\)/, `${step} dispatches without reading the resolver`);
   }
+  // The plan-level dispatches have no spec state for `roles` to read, and go
+  // through the same resolver with none rather than inventing one on disk.
+  assert.match(driverFunction("resolveJobs"), /resolveRoles\(\{\}, ctx\.config\)/, "the plan-level jobs are not resolved off the resolver");
+  for (const step of ["takeAttempt", "resolvePanel", "sendWholePlanReviewer"]) {
+    assert.match(driverFunction(step), /resolveJobs\(ctx\)/, `${step} dispatches without reading the resolver`);
+  }
+  for (const step of ["planCheck", "planCollect"]) {
+    assert.match(driverFunction(step), /sendWholePlanReviewer\(ctx, record/, `${step} dispatches the whole-plan reviewer some other way`);
+  }
 });
 
 test("every reporting dispatch the driver prints names the path its agent must write, with no round number in it", () => {
