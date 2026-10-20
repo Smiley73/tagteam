@@ -368,8 +368,9 @@ exceptions to. Record them all as one `spec-writers` set, one
 The last arrival names the validation:
 `node "$P/scripts/specs.mjs" "$D" "$R/.tagteam/config.json" --enforce-size`. It
 refuses until the spec writers' set is in. Then it checks front matter, refuses
-a spec over the 18 KB ceiling by name, resolves each spec's lenses against the
-default set, and returns dependency order. Fix what it reports by re-dispatching
+a spec over the 18 KB ceiling or without a `## Sign-offs` section by name,
+resolves each spec's lenses against the default set, and returns dependency
+order. Fix what it reports by re-dispatching
 that spec's writer with what it said, as `--kind spec-writers-resend --spec <id>`
 prints it, labelled `Write spec <id> again`, as a `spec-writers-resend` set of
 its own; its arrival runs the validation again.

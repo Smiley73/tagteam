@@ -35,7 +35,8 @@ defect — file it at `nit` or not at all.
 
 The spec's `## Sign-offs` names what a person approved with the plan — a new
 dependency, a new top-level directory, and the like. That the change does what
-it lists is not a finding; how it does it still is.
+it lists is not a finding; how it does it still is. A change of that kind that
+the repository's conventions say to ask about first and the list leaves out is.
 
 Propose a repair in `fix` only when the repair is obvious. For anything else,
 name the defect and stop: a finding that proposes no repair is complete, and it

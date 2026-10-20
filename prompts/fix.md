@@ -59,6 +59,10 @@ were asked for and did not attempt is. An honest `unfinished` and a report that
 never arrives both stop the pull request for a person — only the first one tells
 them what is missing.
 
+**Do not add what the repository's conventions say to ask about first** — a
+dependency, a new top-level file or directory — to fix a finding. That repair is
+a person's decision: answer the finding `wont-fix` and say so in the note.
+
 ## Repairs
 
 Fix the cause, not the symptom. A finding that says a value can be null is not

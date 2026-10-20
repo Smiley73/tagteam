@@ -47,25 +47,41 @@ export function parseFrontMatter(text, file) {
   return { front, body: text.slice(match[0].length) };
 }
 
-// The entries of a spec's `## Sign-offs`: what the repository's conventions say
-// to ask about first, which the person approving the plan approves with it.
-// Returned so that approval can show them without anyone reading a spec body.
-// `None.` and a missing section — a spec written before the section existed —
-// both come back empty. A line that is not a list item continues the one above.
-export function readSignOffs(body) {
-  const match = /^## Sign-offs[ \t]*\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(body);
-  if (!match) return [];
-  const entries = [];
-  let open = false;
-  for (const raw of match[1].split("\n")) {
-    const line = raw.trim();
-    if (line === "") { open = false; continue; }
-    const item = /^[-*+]\s+(.*)$/.exec(line) ?? /^\d+[.)]\s+(.*)$/.exec(line);
-    if (item || !open) entries.push(item ? item[1] : line);
-    else entries[entries.length - 1] += ` ${line}`;
-    open = true;
+// A spec's `## Sign-offs`: what the repository's conventions say to ask about
+// first, which the person approving the plan approves with it. Returned so that
+// approval can show them without anyone reading a spec body. The body is read a
+// line at a time so that a heading quoted inside a code fence is not mistaken
+// for the section, and a section is the lines up to the next heading or rule.
+// Entries are the top-level list items, an indented line continuing the item
+// above, and any plain text besides lines that introduce a list (ending in a
+// colon), as one more entry. An entry that is only "None" in one of its dresses,
+// and a missing section — a spec written before the section existed — come back
+// with no entries; an entry that says anything more is shown, because hiding a
+// sign-off from the person approving is worse than showing one that was not.
+// A second section is refused.
+const FENCE = /^\s*(```|~~~)/;
+const NOTHING = /^[*_`\s]*(none|n\/a|nothing|no sign-offs?)(\s+(needed|required))?[*_`.\s]*$/i;
+
+export function parseSignOffs(body, file = "the spec") {
+  let fenced = false;
+  let sections = 0;
+  let inside = false;
+  const items = [];
+  const prose = [];
+  for (const raw of body.split(/\r?\n/)) {
+    if (FENCE.test(raw)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    if (/^## Sign-offs[ \t]*$/.test(raw)) { sections += 1; inside = true; continue; }
+    if (/^#{1,2}\s/.test(raw) || /^(-{3,}|\*{3,}|_{3,})\s*$/.test(raw)) { inside = false; continue; }
+    if (!inside || raw.trim() === "") continue;
+    const item = /^(?:[-*+]|\d+[.)])\s+(.*)$/.exec(raw);
+    if (item) items.push(item[1].replace(/^\[[ xX]\]\s+/, "").trim());
+    else if (/^\s/.test(raw) && items.length > 0) items[items.length - 1] += ` ${raw.trim()}`;
+    else if (!raw.trimEnd().endsWith(":")) prose.push(raw.trim());
   }
-  return entries.filter((entry) => !/^none\.?$/i.test(entry));
+  if (sections > 1) throw new Error(`${file} has ${sections} "## Sign-offs" sections; a spec has one`);
+  const entries = [...items, ...(prose.length > 0 ? [prose.join(" ")] : [])].filter((entry) => !NOTHING.test(entry));
+  return { present: sections === 1, entries };
 }
 
 // The default set applies to every spec. A spec names only its differences:
@@ -129,6 +145,13 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
         + "the implementer can read out of the repository");
     }
     const { front, body } = parseFrontMatter(text, name);
+    // Same rule as the size: enforced where a spec is written. A plan approved
+    // before the section existed ships from specs without it, approving nothing.
+    const signOffs = parseSignOffs(body, name);
+    if (enforceSize && !signOffs.present) {
+      throw new Error(`${name} has no "## Sign-offs" section — re-dispatch its writer to add it, `
+        + "listing what the conventions say to ask about first, or `None.`");
+    }
     const errors = validateJson(schema, front);
     if (errors.length > 0) throw new Error(`${name}: ${errors.join("; ")}`);
     if (front.id !== name.replace(/\.md$/, "")) {
@@ -140,7 +163,7 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
       dependsOn: front.depends_on,
       userVisible: front.user_visible,
       reviewers: resolveReviewers(front.reviewers, config, { file: name }),
-      signOffs: readSignOffs(body)
+      signOffs: signOffs.entries
     });
   }
   if (specs.length === 0) throw new Error(`${specsDir} holds no spec files`);

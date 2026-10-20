@@ -59,9 +59,9 @@ names, in any document it defers to for them, and in the instruction files you
 were given, then walk Changes against them. One list item each: what, and why
 this spec cannot be done without it. The person approving the plan approves
 this list with it; the implementer does what it lists without stopping, and
-leaves undone anything it does not. Write `None.` when there is nothing. A dependency or
-directory that an existing helper or a neighbouring spec makes unnecessary is
-not a sign-off; it is a design to cut.
+leaves undone anything it does not. Write `None.` when there is nothing. A
+dependency or directory that an existing helper or a neighbouring spec makes
+unnecessary is not a sign-off; it is a design to cut.
 **Out of scope** — what belongs to a neighbouring spec, so two implementers do
 not both write it.
 

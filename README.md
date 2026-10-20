@@ -137,7 +137,8 @@ flowchart TD
    findings the drafter declined and why, and one question. Anything a spec
    needs that the repository's conventions say to ask about first — a new
    dependency, a new top-level directory — is listed there as that spec's
-   sign-off and approved with the plan, so shipping does not stop to ask.
+   sign-off and approved with the plan, so shipping does not stop to ask (a change
+   to the CI workflows still does).
 
 ### Shipping
 

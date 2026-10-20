@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.5
+
+- Ask for the approvals a repository's conventions require (a new dependency, a new top-level file or directory, and the like) when the plan is approved, instead of stopping at ship time. Each spec now lists them under `Sign-offs`, and the plan approval shows them per spec.
+- Refuse a newly written spec that has no `Sign-offs` section. Specs written before this change are not refused and approve nothing.
+- Let the implementer do what a spec's `Sign-offs` lists without stopping. Anything else the conventions say to ask about first is still left undone and reported.
+- Tell reviewers that a change doing what its `Sign-offs` lists is not a finding, and that one the list leaves out is.
+- A change to the CI workflows still stops before it merges, whatever the plan approved.
+
 ## 0.10.4
 
 - When a spec runs out of fix rounds while the same file keeps drawing new serious findings, ask before publishing instead of publishing on its own, with three answers: redesign the files, publish it as it is with what is open disclosed, or stop.

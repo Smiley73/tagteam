@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseFrontMatter, resolveReviewers, readSpecs } from "../scripts/specs.mjs";
+import { parseFrontMatter, parseSignOffs, resolveReviewers, readSpecs } from "../scripts/specs.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SCHEMA = path.join(root, "schemas", "spec.schema.json");
@@ -93,4 +93,32 @@ test("each spec's sign-offs ride along, and None or no section at all is none", 
     "03-c": [],
     "04-d": ["upgrading the date library, for time zones"]
   });
+});
+
+test("a spec written now must have a Sign-offs section, and an older plan's specs need not", () => {
+  const without = planWith({ "01-a.md": spec("01-a") });
+  assert.throws(() => readSpecs(without, CONFIG, SCHEMA, { enforceSize: true }), /01-a\.md has no "## Sign-offs" section/);
+  assert.equal(readSpecs(without, CONFIG, SCHEMA).length, 1);
+  const none = planWith({ "01-a.md": `${spec("01-a")}\n## Sign-offs\nNone.\n` });
+  assert.deepEqual(readSpecs(none, CONFIG, SCHEMA, { enforceSize: true })[0].signOffs, []);
+});
+
+test("sign-offs are read around code fences, nesting, prose and the ways of saying none", () => {
+  const entries = (text) => parseSignOffs(text).entries;
+  const quoted = "## Context\n```markdown\n## Sign-offs\n- example item\n```\n\n";
+  assert.deepEqual(parseSignOffs(`${quoted}## Sign-offs\n- a YAML parser\n`), { present: true, entries: ["a YAML parser"] });
+  assert.deepEqual(parseSignOffs(quoted), { present: false, entries: [] }, "a heading inside a fence is not the section");
+  assert.deepEqual(entries("## Sign-offs\n- dep A, because\n  - sub reason\n- dep B\n```\nstray\n```\n"), ["dep A, because - sub reason", "dep B"]);
+  assert.deepEqual(entries("## Sign-offs\nThe conventions say to ask about:\n- dep A\n\n# Next\n- not mine\n"), ["dep A"]);
+  assert.deepEqual(entries("## Sign-offs\n- [ ] dep A\n---\n- not mine\n"), ["dep A"]);
+  assert.deepEqual(entries("## Sign-offs\na PDF library,\nfor exports\n"), ["a PDF library, for exports"]);
+  for (const none of ["None.", "**None.**", "`None.`", "None needed.", "No sign-offs needed.", "N/A", "- None"]) {
+    assert.deepEqual(entries(`## Sign-offs\n${none}\n\n## Out of scope\nx\n`), [], none);
+  }
+  for (const hedged of ["None beyond a new `exports/` directory.", "**None** \u2014 but note the new `exports/` dir.", "- None of the libraries parse PDFs, so add `pdfkit`."]) {
+    assert.equal(entries(`## Sign-offs\n${hedged}\n`).length, 1, hedged);
+  }
+  assert.deepEqual(entries("## Sign-offs\n- pdfkit\n\nThe spec also adds a top-level `exports/` directory.\n"), ["pdfkit", "The spec also adds a top-level `exports/` directory."]);
+  assert.equal(parseSignOffs("## Sign-offs\r\n- dep A\r\n").entries[0], "dep A");
+  assert.throws(() => parseSignOffs("## Sign-offs\n- a\n## Sign-offs\n- b\n", "01-a.md"), /01-a\.md has 2 "## Sign-offs" sections/);
 });
