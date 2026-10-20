@@ -34,7 +34,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
-import { repairScope } from "./gates.mjs";
+import { adoptMerge, readMergedPr, repairScope } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
@@ -54,6 +54,10 @@ import { codexSpend, codexUsageLine, recordCodexUsage } from "./codex-usage.mjs"
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
+import { refNameErrors } from "./lib/ref-name.mjs";
+import {
+  confirmPending, decideRoute, isPlanRoute, judgeTip, landingBranch, recordMerge, recordPending, writeRoute
+} from "./lib/plan-route.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -845,6 +849,241 @@ function openAt(ctx, id, round) {
   return { settled, recordPath, record, ids };
 }
 
+// --- the route ---------------------------------------------------------------
+
+// Where this train's specs go, as `train.json` recorded it the first time the
+// train started — see `scripts/lib/plan-route.mjs`. A train with nothing
+// recorded was started before routes existed, and went to the base.
+const routeOf = (ctx) => ctx.train?.route ?? { kind: "base" };
+
+// Where this train's specs land: the branch each one branches from, opens its
+// pull request against, and merges into. The one place `begin` asks, so a spec's
+// state is initialised with the branch its train actually builds on; everything
+// after `begin` reads the spec's own `state.base`.
+const landsOn = (ctx) => landingBranch(routeOf(ctx), ctx.config.base);
+
+// A route `judgeTip` settled, written back. After this and after every move of
+// the record, the train in hand is read again from disk: a step that writes the
+// train later — `begin` records the base it read — must not write back a route
+// from before the move.
+function saveRoute(ctx, route) {
+  ctx.train = writeRoute(ctx.trainPath, route);
+  return route;
+}
+
+// Where `branch` is on origin right now, fetched first and under the primary
+// checkout's mutex like every other fetch; null when origin has no such branch.
+async function originTipOf(ctx, branch) {
+  return withPrimaryGitLock(ctx.repo, () => {
+    git(ctx.repo, ["fetch", "origin", "--prune"]);
+    const found = git(ctx.repo, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`], { allowFailure: true });
+    return found.status === 0 ? found.stdout.trim() : null;
+  });
+}
+
+/**
+ * Push a commit the ship made to the plan branch, and record it as the ship's:
+ * pending before the push, confirmed after it. Whatever kind of commit it is —
+ * the branch's first commit here, and every later commit the ship puts on the
+ * plan branch itself — it goes through this, so the check below accepts it
+ * without knowing what it was. A run that dies after the push finds its own
+ * commit on origin and `judgeTip` settles it.
+ */
+async function pushToPlanBranch(ctx, oid) {
+  recordPending(ctx.trainPath, oid);
+  ctx.train = readJson(ctx.trainPath);
+  await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["push", "origin", `${oid}:refs/heads/${routeOf(ctx).branch}`]));
+  confirmPending(ctx.trainPath, oid);
+  ctx.train = readJson(ctx.trainPath);
+}
+
+// The sentence a plan branch that is not where the record says stops with.
+function planTipStop(route, origin, reason, outcome) {
+  const short = (oid) => String(oid).slice(0, 12);
+  if (reason === "not-created") {
+    return `${route.branch} has not been created on origin yet, so ${outcome}. Run start again: it creates the branch from `
+      + `${route.base} at ${short(route.createdOid ?? route.pendingOid)}, as this train recorded.`;
+  }
+  if (reason === "missing") {
+    return `${route.branch} is gone from origin, so ${outcome}. This ship last put ${short(route.tipOid)} there, and every spec `
+      + `of this plan merged so far is on it. Push it back (git push origin ${route.tipOid}:refs/heads/${route.branch}) and run this again.`;
+  }
+  if (!route.tipOid) {
+    return `${route.branch} is already on origin at ${short(origin)}, and this ship did not put it there — most likely a `
+      + `branch left over from an earlier plan with the same name. Nothing was pushed. Delete it on origin, or rename this `
+      + "plan's directory so its branch has a name of its own, and run start again.";
+  }
+  return `${route.branch} on origin is at ${short(origin)}, a commit this ship did not record making: it last put `
+    + `${short(route.tipOid)} there${route.pendingOid ? `, and was about to push ${short(route.pendingOid)}` : ""}. Someone pushed `
+    + `to the plan branch by hand, and the ship does not build on or merge into a commit nobody reviewed, so ${outcome}. `
+    + `To go on, put ${route.branch} on origin back at ${short(route.tipOid)} — keep the commit on a branch of its own if you `
+    + "want it — and run this again. Taking a commit of your own onto the plan branch is not something the ship does yet.";
+}
+
+/**
+ * The plan branch on origin is at a commit this ship recorded putting there, or
+ * this is a stop. Run from `begin` before anything is created or switched, and
+ * from `finish` before the landing check — a commit pushed by hand between a
+ * spec's review and its merge moves the plan branch, and the landing check would
+ * re-verify the spec on top of it and squash it onto a commit nobody reviewed.
+ * Returns where the branch is.
+ */
+async function planTipCheck(ctx, outcome) {
+  const route = routeOf(ctx);
+  const origin = await originTipOf(ctx, route.branch);
+  const judged = judgeTip(route, origin);
+  if (!judged.ok) throw new Stop(planTipStop(route, origin, judged.reason, outcome));
+  if (judged.route !== route) saveRoute(ctx, judged.route);
+  return origin;
+}
+
+// What GitHub says about a pull request's merge, as adoption reads it, or null
+// when it cannot be read.
+function mergeFactsOf(ctx, number) {
+  try { return readMergedPr(ctx.repo, number); } catch { return null; }
+}
+
+/**
+ * A spec's squash, made by GitHub, becomes the recorded tip — once origin's plan
+ * branch is seen at exactly that commit. Anything else at the tip is a commit
+ * the ship did not record making, and a stop. Recording a tip the record already
+ * holds changes nothing, so a run resumed after the record moved and before the
+ * spec's own state did passes straight through.
+ */
+async function followMerge(ctx, id, mergeOid) {
+  const route = routeOf(ctx);
+  if (mergeOid && route.tipOid === mergeOid) return;
+  const origin = await originTipOf(ctx, route.branch);
+  if (mergeOid && origin === mergeOid) {
+    recordMerge(ctx.trainPath, mergeOid);
+    ctx.train = readJson(ctx.trainPath);
+    return;
+  }
+  const short = (oid) => String(oid).slice(0, 12);
+  throw new Stop(`${id}'s pull request is merged into ${route.branch}, but `
+    + (mergeOid ? `${route.branch} on origin is at ${origin ? short(origin) : "nothing — the branch is gone"}, not at ${short(mergeOid)}, the commit that merge made`
+      : "GitHub reported no merge commit for it, so the ship cannot tell its own commit from anyone else's")
+    + ". A commit this ship did not record making is on the plan branch — pushed by hand, or another pull request merged "
+    + "into it at the same time — and the ship records nothing further until the plan branch holds only commits it "
+    + `recorded. Put ${route.branch} on origin back at ${mergeOid ? short(mergeOid) : "the merge commit of this pull request"} and run this again.`);
+}
+
+/**
+ * Every spec of this plan whose pull request into the plan branch is already
+ * merged at the reviewed commit — by a person on GitHub, or by this ship in a run
+ * that died before recording it — is adopted, and the record follows its merge
+ * commit. Done before the tip is compared: compared first, every crash between
+ * a squash and its record would be a false stop.
+ *
+ * The record moves first and the spec's state second. Whether the merge is one
+ * adoption would take is asked of `adoptMerge` itself on the facts GitHub gives,
+ * before anything is written; a pull request merged at a head nobody reviewed is
+ * never adopted, so its commit is never recorded as the ship's and the tip check
+ * stops on it. A run that dies between the two finds the record already at the
+ * merge commit, which `followMerge` passes, and adopts. Returns what to say and
+ * which specs were adopted.
+ */
+async function reconcileMerged(ctx) {
+  const route = routeOf(ctx);
+  const result = { say: [], adopted: new Set() };
+  for (const spec of specsInOrder(ctx)) {
+    if (!exists(statePath(ctx, spec.id))) continue;
+    const state = readState(ctx, spec.id);
+    if (!state.pr || state.state === "merged" || state.base !== route.branch) continue;
+    const facts = mergeFactsOf(ctx, state.pr.number);
+    if (!facts?.merged) continue;
+    try { adoptMerge(state, facts); } catch { continue; }
+    await followMerge(ctx, spec.id, facts.mergeCommitOid);
+    node("gates.mjs", ["adopt-merge", statePath(ctx, spec.id), "--repo", ctx.repo]);
+    result.adopted.add(spec.id);
+    result.say.push(`${spec.id} was found merged into ${route.branch} at the reviewed commit; recorded, and the plan branch's record follows it.`);
+  }
+  return result;
+}
+
+// Why this plan's branch could not be made: its name is not a Git branch, or a
+// spec branch would sit inside it — `plan/<slug>` and `plan/<slug>/<id>` cannot
+// both exist in Git. Checked before anything is pushed.
+function planRefRefusals(ctx, order, route, fresh) {
+  const reasons = [];
+  if (refNameErrors("plan branch", route.branch).length > 0) {
+    reasons.push(`this plan's directory is named ${q(ctx.slug)}, which makes its branch ${q(route.branch)}, and that is not a `
+      + "valid Git branch name; rename the plan directory");
+  }
+  const nested = order.map((spec) => branchOf(ctx, spec.id))
+    .find((branch) => branch === route.branch || branch.startsWith(`${route.branch}/`) || route.branch.startsWith(`${branch}/`));
+  if (nested) {
+    reasons.push(`branchPrefix ${q(ctx.config.branchPrefix)} makes a spec branch ${nested}, which Git cannot hold beside `
+      + `${route.branch}; choose another branchPrefix in .tagteam/config.json`);
+  }
+  if (reasons.length === 0) return;
+  throw new Stop(`${route.branch} cannot be created: ${reasons.join("; and ")}. Nothing was pushed.`
+    + (fresh ? " Turning planBranch off ships this plan one spec at a time to the base instead." : "") + " Then run start again.");
+}
+
+// The repository's answer on whether a merge commit may land on `base`, from
+// every place GitHub keeps one: the repository setting, the rulesets on the
+// branch, and classic branch protection, which only an admin can read. A source
+// that forbids it is a reason; one that could not be read is a line saying it
+// was not checked, which is neither a stop nor a clean answer.
+function mergeCommitRefusals(ctx, base, say) {
+  const read = (endpoint) => {
+    const result = gh(ctx.repo, ["api", endpoint], { allowFailure: true });
+    const error = (result.stderr || result.stdout || "").trim().split("\n")[0];
+    if (result.status !== 0) return { error: error || `gh api exited ${result.status}` };
+    try { return { body: JSON.parse(result.stdout) }; } catch { return { error: "gh api printed no document" }; }
+  };
+  const reasons = [];
+  const unchecked = (what, why) => say.push(`Whether ${what} allows merge commits into ${base} was not checked: ${why}.`);
+
+  const repository = read("repos/{owner}/{repo}");
+  if (repository.error) unchecked("this repository", `its settings could not be read (${repository.error})`);
+  else if (typeof repository.body?.allow_merge_commit !== "boolean") unchecked("this repository", "its settings do not say");
+  else if (repository.body.allow_merge_commit === false) reasons.push("the repository does not allow merge commits (Settings → General → Pull Requests)");
+
+  const rules = read(`repos/{owner}/{repo}/rules/branches/${base}`);
+  if (rules.error || !Array.isArray(rules.body)) unchecked(`the rulesets on ${base}`, `they could not be read (${rules.error ?? "not a list"})`);
+  else {
+    if (rules.body.some((rule) => rule?.type === "required_linear_history")) reasons.push(`a ruleset on ${base} requires linear history`);
+    const methods = rules.body.filter((rule) => rule?.type === "pull_request" && Array.isArray(rule.parameters?.allowed_merge_methods))
+      .map((rule) => rule.parameters.allowed_merge_methods);
+    for (const allowed of methods.filter((list) => !list.includes("merge"))) {
+      reasons.push(`a ruleset on ${base} allows only ${listOf(allowed.map(String))} for pull requests`);
+    }
+  }
+
+  const protection = read(`repos/{owner}/{repo}/branches/${base}/protection`);
+  if (protection.error) {
+    if (!/Branch not protected/i.test(protection.error)) {
+      unchecked(`the branch protection on ${base}`, `only an admin can read it, and it could not be read here (${protection.error})`);
+    }
+  } else if (protection.body?.required_linear_history?.enabled === true) {
+    reasons.push(`the branch protection on ${base} requires linear history`);
+  }
+  return reasons;
+}
+
+// Everything that stops a plan-route train at `start`, before anything is
+// created: a branch name Git refuses, a repository that will never take the
+// plan's final merge commit, and — for a route not yet recorded — a branch of
+// the same name already on origin. Run on every start of a plan-route train,
+// because a repository's settings can change in the middle of a plan.
+async function planRouteRefusals(ctx, order, route, fresh, say) {
+  planRefRefusals(ctx, order, route, fresh);
+  const reasons = mergeCommitRefusals(ctx, route.base, say);
+  if (reasons.length > 0) {
+    throw new Stop(`${route.branch} could never land on ${route.base}: ${reasons.join("; ")}. A plan branch reaches ${route.base} `
+      + `through one merge commit at the end, so this repository has to allow merge commits for pull requests into ${route.base}. `
+      + "Change that setting on GitHub"
+      + (fresh ? ", or turn planBranch off in .tagteam/config.json to ship this plan one spec at a time," : "")
+      + ` and run start again. Nothing was created${fresh ? "" : ", and the specs already merged into the plan branch stay there"}.`);
+  }
+  if (fresh) {
+    const origin = await originTipOf(ctx, route.branch);
+    if (origin) throw new Stop(planTipStop(route, origin, "unrecorded", "nothing was pushed"));
+  }
+}
+
 // --- subcommands -----------------------------------------------------------
 
 // Which Claude Code session this ship is running in, for the cost report to
@@ -899,6 +1138,60 @@ function sessionOf(ctx) {
   }
 }
 
+// The route as far as it can be told before the lock, and its refusals when it is
+// a plan branch. Nothing is read for a train that can only be on the base — the
+// setting off and nothing recorded, or the base recorded — so a repository that
+// has not turned the setting on makes no call it did not make before. Returns
+// the plan route it checked, or null.
+async function routePreflight(ctx, say) {
+  const recorded = ctx.train?.route ?? null;
+  if (recorded ? !isPlanRoute(recorded) : ctx.config.planBranch !== true) return null;
+  const order = specsInOrder(ctx);
+  const { route, why } = decideRoute({
+    recorded, planBranch: ctx.config.planBranch, specCount: order.length,
+    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base
+  });
+  if (!isPlanRoute(route)) return null;
+  await planRouteRefusals(ctx, order, route, why === "new", say);
+  return route;
+}
+
+// What `start` says about the route, and — for a plan branch not yet confirmed on
+// origin — the branch made. Nothing at all for a train on the base with the
+// setting off: that train ships exactly as it did before routes existed.
+async function routeLines(ctx, decided) {
+  const route = routeOf(ctx);
+  const base = ctx.config.base;
+  if (!isPlanRoute(route)) {
+    if (ctx.config.planBranch !== true) return [];
+    if (decided.why === "under-way") {
+      return [`planBranch is on, but this plan already had a spec under way before it recorded a route, so it keeps shipping each spec straight to ${base}.`];
+    }
+    if (decided.why === "one-spec") return [`planBranch is on, but this plan has one spec, so it ships straight to ${base}: there is nothing to collect.`];
+    return [`This plan recorded shipping each spec straight to ${base} when it first started, and keeps doing so; planBranch applies to plans that have not started yet.`];
+  }
+  const lines = [];
+  if (!route.tipOid) {
+    const origin = await originTipOf(ctx, route.branch);
+    const created = route.pendingOid ?? route.createdOid;
+    if (origin === null) {
+      await pushToPlanBranch(ctx, created);
+      lines.push(`Created ${route.branch} on origin from ${route.base} at ${created.slice(0, 12)}.`);
+    } else {
+      const judged = judgeTip(route, origin);
+      if (!judged.ok) throw new Stop(planTipStop(route, origin, judged.reason, "nothing was pushed"));
+      saveRoute(ctx, judged.route);
+      lines.push(`${route.branch} was already on origin at ${created.slice(0, 12)}, the commit this train was creating it at; nothing was pushed.`);
+    }
+  }
+  lines.push(`This plan ships through ${route.branch}: each spec branches from it, opens its pull request against it and merges `
+    + `into it, and nothing from the plan reaches ${route.base}.`);
+  if (decided.why === "recorded" && ctx.config.planBranch !== true) {
+    lines.push("planBranch is off now, which applies to plans that have not started; this one keeps the route it started with.");
+  }
+  return lines;
+}
+
 async function start(options) {
   const ctx = context(options, { requireTrain: false });
   const say = [];
@@ -937,6 +1230,11 @@ async function start(options) {
   }
 
   const snapshot = lastJson(node("running-plugin.mjs", [ctx.repo], { allow: [1] }).stdout);
+
+  // A train that may ship through a plan branch is refused, when it is, before
+  // it takes the lock: a refusal here is the person's to put right, and a lock
+  // left held behind it would greet their rerun as a run still going.
+  const preflight = await routePreflight(ctx, say);
 
   fs.mkdirSync(ctx.shipDir, { recursive: true, mode: 0o700 });
   const lock = node("ship-lock.mjs", ["acquire", ctx.repo, ctx.slug, ...(options.reclaim ? ["--force"] : [])], { allow: [1] });
@@ -981,10 +1279,26 @@ async function start(options) {
   // finished cycle's scope to this one. Read it again, here, past the mutex.
   ctx.train = exists(ctx.trainPath) ? readJson(ctx.trainPath) : null;
 
+  // The route, decided once and from then on read back: whatever `start` wrote
+  // the first time is what every later `start` writes again. Decided from the
+  // train as it is now, past the lock, for the same reason as the session.
+  const decided = decideRoute({
+    recorded: ctx.train?.route ?? null, planBranch: ctx.config.planBranch, specCount: order.length,
+    started: order.some((spec) => exists(statePath(ctx, spec.id))), slug: ctx.slug, base: ctx.config.base
+  });
+  if (isPlanRoute(decided.route) && !isPlanRoute(preflight)) {
+    await planRouteRefusals(ctx, order, decided.route, decided.why === "new", say);
+  }
+  // A new plan branch is recorded before it is pushed, at the commit it is about
+  // to be created at, so a run that dies in between creates it on the rerun.
+  const route = decided.why === "new" ? { ...decided.route, createdOid: baseOid, pendingOid: baseOid } : decided.route;
+
   writeJson(ctx.trainPath, {
     repo: ctx.repo, plan: ctx.plan, slug: ctx.slug, worktree, base: ctx.config.base, baseOid,
-    configPath: ctx.configPath, plugin: PLUGIN, session: sessionOf(ctx), startedAt: new Date().toISOString()
+    configPath: ctx.configPath, plugin: PLUGIN, session: sessionOf(ctx), startedAt: new Date().toISOString(), route
   });
+  ctx.train = readJson(ctx.trainPath);
+  say.push(...await routeLines(ctx, decided));
 
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
@@ -1005,6 +1319,15 @@ async function begin(options) {
   const say = [];
   const branch = branchOf(ctx, id);
 
+  // On a plan branch, before anything is created or switched: what is already
+  // merged is taken in, and then the branch on origin has to be where the ship
+  // last recorded putting it — this spec would otherwise start from a commit
+  // nobody reviewed.
+  const planRoute = isPlanRoute(routeOf(ctx));
+  const reconciled = planRoute ? await reconcileMerged(ctx) : { say: [], adopted: new Set() };
+  say.push(...reconciled.say);
+  const planTip = planRoute ? await planTipCheck(ctx, `${id} was not begun`) : null;
+
   // A detached worktree is where an interrupted landing check leaves it: `finish`
   // checks the merged tree out to verify it and switches back, and a run that
   // died in between left the ship's one worktree pointing at a throwaway commit.
@@ -1022,19 +1345,24 @@ async function begin(options) {
       + `leaves it; it is back on ${branch}.`);
   }
 
-  const baseOid = await withPrimaryGitLock(ctx.repo, () => {
+  // The plan branch was fetched and read a moment ago by the check above, and is
+  // exactly where the record says.
+  const lands = landsOn(ctx);
+  const baseOid = planTip ?? await withPrimaryGitLock(ctx.repo, () => {
     git(ctx.repo, ["fetch", "origin", "--prune"]);
-    return git(ctx.repo, ["rev-parse", `origin/${ctx.config.base}`]).stdout.trim();
+    return git(ctx.repo, ["rev-parse", `origin/${lands}`]).stdout.trim();
   });
   writeJson(ctx.trainPath, { ...ctx.train, baseOid });
   ctx.baseOid = baseOid;
 
   const init = lastJson(node("gates.mjs", [
-    "init", statePath(ctx, id), id, ctx.slug, branch, ctx.config.base, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
+    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
   ]).stdout);
   let state = readState(ctx, id);
 
-  if (state.pr && state.state !== "merged") {
+  if (reconciled.adopted.has(id)) return finishNext(ctx, id, say);
+  // On a plan branch every merged pull request was looked for above.
+  if (!planRoute && state.pr && state.state !== "merged") {
     const adopted = node("gates.mjs", ["adopt-merge", statePath(ctx, id), "--repo", ctx.repo], { allow: [1] });
     if (adopted.status === 0) {
       say.push(`${id} was merged by a person at the reviewed commit; recorded and skipped.`);
@@ -1043,7 +1371,7 @@ async function begin(options) {
     state = readState(ctx, id);
   }
 
-  if (state.state === "merged") return finishNext(ctx, id, [`${id} is already merged.`]);
+  if (state.state === "merged") return finishNext(ctx, id, [...reconciled.say, `${id} is already merged.`]);
   if (state.state === "failed") {
     emit({ say, ask: `${id} is recorded as failed. Say what it set out to deliver and what stopped it, and ask before doing anything with it. To retry from scratch: \`gates.mjs state ... pending\` by hand, then rerun begin.`, state: state.state });
     return;
@@ -1084,7 +1412,7 @@ async function begin(options) {
   git(ctx.worktree, ["switch", "-c", branch]);
   transition(ctx, id, "implementing");
   const job = roles(ctx, id).jobs.implement;
-  say.push(`Starting ${id} on ${branch} from ${ctx.config.base} at ${baseOid.slice(0, 12)}; implementer ${settings(job)}.`);
+  say.push(`Starting ${id} on ${branch} from ${lands} at ${baseOid.slice(0, 12)}; implementer ${settings(job)}.`);
   const dispatch = implementerDispatch(ctx, spec, job);
   const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
@@ -1976,7 +2304,9 @@ function publish(options) {
   const republish = Boolean(state.pr);
   git(ctx.worktree, ["push", ...(republish ? ["--force-with-lease"] : ["-u"]), "origin", state.branch]);
   if (!republish) {
-    gh(ctx.repo, ["pr", "create", "--base", ctx.config.base, "--head", state.branch, "--title", options.title, "--body-file", path.resolve(options.body)]);
+    // Where this spec's state says it lands, which `begin` set from the train's
+    // route: the plan branch on a plan route, the configured base otherwise.
+    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", path.resolve(options.body)]);
   } else {
     gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", path.resolve(options.body)], { allowFailure: true });
   }
@@ -2137,6 +2467,21 @@ function stopAsk(id, { blockers, approvals }, accepted = null) {
   return text.join(" ");
 }
 
+// The likely cause, when the checks on a pull request into a plan branch proved
+// nothing. The gate's own sentence stays general, because the same gate stops a
+// spec on the base too; what only the plan branch adds is the usual reason —
+// workflows filtered to pull requests into the base never start for a pull
+// request into anything else. Null everywhere else.
+function checksCause(ctx, id, state, verdict) {
+  const route = routeOf(ctx);
+  if (!isPlanRoute(route) || state.base !== route.branch || !verdict.approvals.includes("continuous-integration-inconclusive")) return null;
+  const ci = readJson(path.join(specDir(ctx, id), "ci.json"), null);
+  return `The checks on this pull request proved nothing${ci?.reason ? ` (${ci.reason})` : ""}, and it targets ${route.branch}, `
+    + `not ${route.base}: the likely cause is workflows that only run for pull requests into ${route.base} — an `
+    + `\`on: pull_request: branches:\` filter. Letting them run for pull requests into ${route.branch} is a change to those `
+    + "workflows, and it is yours to make; until then a spec of this plan is not checked by them.";
+}
+
 // The landing check borrows the ship's one worktree to check a throwaway merge
 // commit out in, and this decides what it may borrow and what branch it owes
 // back. Nothing uncommitted in it, first of all. A worktree on another spec's
@@ -2270,6 +2615,19 @@ async function finish(options) {
   const id = options.spec;
   let state = readState(ctx, id);
   const say = [];
+  // On a plan branch, before anything else and so before the landing check: a
+  // pull request already merged is taken in, and the plan branch on origin has
+  // to be where the ship last recorded putting it. A commit pushed by hand onto
+  // it after this spec was reviewed would otherwise be re-verified under it by
+  // the landing check, pass, and have this spec squashed on top of it.
+  const planRoute = isPlanRoute(routeOf(ctx));
+  if (planRoute) {
+    const reconciled = await reconcileMerged(ctx);
+    say.push(...reconciled.say);
+    if (reconciled.adopted.has(id)) return finishNext(ctx, id, say);
+    await planTipCheck(ctx, "nothing was merged");
+    state = readState(ctx, id);
+  }
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
   if (options.approve) {
@@ -2289,6 +2647,10 @@ async function finish(options) {
   if (verdict.ready) {
     const landed = await landAndMerge(ctx, id, state, say);
     if (landed.merged) {
+      // The squash GitHub just made becomes the plan branch's recorded tip before
+      // the spec is recorded as merged, so a run that dies in between finds the
+      // pull request merged and the spec not, which `reconcileMerged` takes in.
+      if (planRoute) await followMerge(ctx, id, mergeFactsOf(ctx, landed.merged.pr)?.mergeCommitOid ?? null);
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
@@ -2324,9 +2686,10 @@ async function finish(options) {
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const following = nextSpecAfter(ctx, id);
   const accepted = readJson(acceptedPath(ctx, id), null);
+  const cause = checksCause(ctx, id, state, verdict);
   emit({
     say,
-    ask: stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null),
+    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null), ...(cause ? [cause] : [])].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: following ? nextCommand(ctx, "begin", following) : nextCommand(ctx, "end", null)
   });
@@ -2452,6 +2815,10 @@ async function end(options) {
     say.push(removed.status === 0 ? "Removed the worktree." : `The worktree would not come out cleanly and was left in place: ${removed.stderr.trim()}`);
   });
   const summary = specsInOrder(ctx).map((spec) => ({ id: spec.id, state: exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "not started" }));
+  const route = routeOf(ctx);
+  if (isPlanRoute(route)) {
+    say.push(`This plan's merged work is on ${route.branch} on origin, not on ${route.base}: ${route.base} has none of it.`);
+  }
   emit({ say, specs: summary });
 }
 

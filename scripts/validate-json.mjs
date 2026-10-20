@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.mjs";
+import { refNameErrors } from "./lib/ref-name.mjs";
 import { REPO_LENS_DIR, RESERVED_ROLES, lensBrief, lensInventory, shippedLenses, untrackedBriefs } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
@@ -120,16 +121,18 @@ export function validateJson(schema, value) {
   return errors;
 }
 
-// The configuration version the current plugin writes. Version 9 keys `effort`
-// by job rather than by role, drops `limits.planReviewRounds` (the plan is
-// reviewed once and answered, never re-reviewed), and no key in this project has
-// a fallback in a script: the file is the whole configuration, so a missing key is
-// a hard error rather than a silently-assumed value — which is why `escalation`
-// and `plan` are written as an explicit `null` when unused rather than omitted.
-// That makes an older configuration incomplete rather than upgradable — there is
-// nothing to read the old file for — so it is reported stale and `/tagteam:configure`
-// writes a new one.
-export const CONFIG_VERSION = 9;
+// The configuration version the current plugin writes. Version 10 adds
+// `planBranch`, whether a plan of two or more specs collects its specs on a
+// branch of its own, and `versionFiles`, the lines that carry the repository's
+// version — both required, and both written explicitly when unused (`false`,
+// `[]`), because no key in this project has a fallback in a script: the file is
+// the whole configuration, so a missing key is a hard error rather than a
+// silently-assumed value — which is also why `escalation` and `plan` are written
+// as an explicit `null` when unused rather than omitted. An older configuration
+// is therefore incomplete, so it is reported stale and `/tagteam:configure`
+// writes the current one; from version 9 it carries every value forward and adds
+// the two keys.
+export const CONFIG_VERSION = 10;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.
@@ -421,26 +424,47 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   // would otherwise validate.
   for (const [label, ref] of [["base", value.base], ["branchPrefix", value.branchPrefix]]) {
     if (typeof ref !== "string") continue;
-    if (ref.startsWith("/") || ref.startsWith("-") || ref.split("/").includes("..")) {
-      errors.push(`${label} must be a conventional relative Git ref without traversal`);
-    }
-    // git-check-ref-format: no space, no ~^:?*[\, no control characters, no
-    // "..", no "@{", no trailing ".lock". Everything a shell would act on is
-    // already excluded by that set.
-    // A branch prefix legitimately ends in "/", so it is checked as the ref it
-    // will become rather than as one itself.
-    const name = label === "branchPrefix" ? ref.replace(/\/$/, "") : ref;
-    if (/[\u0000- ~^:?*[\]\\]/.test(name)
-      || name.includes("..") || name.includes("@{") || name.includes("//")
-      || name === "@" || name.endsWith(".") || name.endsWith("/")
-      || name.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock") || part === "")) {
-      errors.push(`${label} is not a valid Git ref name: ${JSON.stringify(ref)}`);
-    }
-    if (/[$`"'&;|<>(){}!#]/.test(ref)) {
-      errors.push(`${label} may not contain shell metacharacters: ${JSON.stringify(ref)}`);
-    }
-    if (ref.endsWith(".lock")) errors.push(`${label} may not end in .lock`);
+    errors.push(...refNameErrors(label, ref, { prefix: label === "branchPrefix" }));
   }
+
+  // Where the repository's version is written. Only what needs no version read
+  // is judged here: that each file is a safe path inside the repository — the
+  // same checks `copyUntracked` gets, so a file outside the checkout or behind a
+  // symlink is never read or written — and that a line pattern compiles with
+  // exactly one capture group, the one the version is in. Whether a locator finds
+  // exactly one version is found out where the line is read, so a file that
+  // validates now still validates once something reads it.
+  (Array.isArray(value.versionFiles) ? value.versionFiles : []).forEach((entry, index) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return;
+    const label = `versionFiles[${index}].file`;
+    if (typeof entry.file === "string" && entry.file.length > 0) {
+      const problems = repositoryPathErrors(label, entry.file, { repo, mustBeFile: true });
+      errors.push(...problems);
+      if (problems.length === 0 && repo) {
+        try {
+          assertNoSymlinkedSegment(repo, assertSafeRelativePath(entry.file), label);
+        } catch (error) {
+          errors.push(error.message);
+        }
+      }
+    }
+    if (typeof entry.pattern === "string") {
+      let groups;
+      try {
+        new RegExp(entry.pattern);
+        // An alternative that matches the empty string makes every group of the
+        // pattern take part in the match, unmatched, so the match's length is
+        // the number of capture groups plus one.
+        groups = new RegExp(`${entry.pattern}|`).exec("").length - 1;
+      } catch (error) {
+        errors.push(`versionFiles[${index}].pattern does not compile as a regular expression: ${error.message}`);
+        return;
+      }
+      if (groups !== 1) {
+        errors.push(`versionFiles[${index}].pattern has ${groups} capture groups and needs exactly one, around the version: ${JSON.stringify(entry.pattern)}`);
+      }
+    }
+  });
 
   for (const configuredPath of value.worktree?.copyUntracked ?? []) {
     let safePath;

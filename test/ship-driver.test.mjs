@@ -27,7 +27,7 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-// A repository with a bare "origin", a version-9 configuration, and an approved
+// A repository with a bare "origin", a version-10 configuration, and an approved
 // plan holding one spec that wants two lenses.
 function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ship-"));
@@ -2708,7 +2708,24 @@ const flag = (argv, name) => { const at = argv.indexOf(name); return at === -1 ?
 const die = (message) => { process.stderr.write(message + "\\n"); process.exit(1); };
 
 const argv = process.argv.slice(2);
+// Every call, one JSON line each, so a test can say what was never asked.
+if (process.env.GH_STUB_LOG) fs.appendFileSync(process.env.GH_STUB_LOG, JSON.stringify(argv) + "\\n");
 if (argv[0] === "auth") process.exit(0);
+// The repository's merge settings, from GH_STUB_API when a test names an answer
+// for the endpoint — { body } to print, or { error } to fail with — and
+// otherwise a repository that allows merge commits and protects nothing.
+if (argv[0] === "api") {
+  const answers = (() => { try { return JSON.parse(fs.readFileSync(process.env.GH_STUB_API, "utf8")); } catch { return {}; } })();
+  const endpoint = argv[1];
+  const fallback = endpoint === "repos/{owner}/{repo}" ? { body: { allow_merge_commit: true } }
+    : endpoint.startsWith("repos/{owner}/{repo}/rules/branches/") ? { body: [] }
+    : endpoint.endsWith("/protection") ? { error: "gh: Branch not protected (HTTP 404)" }
+    : { error: "gh stub: unknown endpoint " + endpoint };
+  const answer = answers[endpoint] ?? fallback;
+  if (answer.error) die(answer.error);
+  process.stdout.write(JSON.stringify(answer.body) + "\\n");
+  process.exit(0);
+}
 if (argv[0] !== "pr") die("gh stub: unsupported command " + argv.join(" "));
 const state = load();
 const find = (selector) => state.pulls.find((pull) => pull.branch === selector || String(pull.number) === String(selector))
@@ -2733,7 +2750,8 @@ if (argv[1] === "create") {
   const pull = find(argv[2]);
   const everything = {
     number: pull.number, url: pull.url, title: pull.title, body: pull.body,
-    baseRefName: pull.base, state: pull.state, headRefOid: git("rev-parse", "refs/heads/" + pull.branch)
+    baseRefName: pull.base, state: pull.state, headRefOid: git("rev-parse", "refs/heads/" + pull.branch),
+    mergedAt: pull.mergedAt ?? null, mergeCommit: pull.mergeCommit ? { oid: pull.mergeCommit } : null
   };
   const asked = (flag(argv, "--json") ?? "").split(",").filter(Boolean);
   process.stdout.write(JSON.stringify(Object.fromEntries(asked.map((field) => [field, everything[field]]))) + "\\n");
@@ -2755,8 +2773,13 @@ if (argv[1] === "create") {
   }).trim();
   git("update-ref", "refs/heads/" + pull.base, merged);
   pull.state = "MERGED";
+  pull.mergeCommit = merged;
+  pull.mergedAt = new Date().toISOString();
   save(state);
   process.stdout.write("Merged pull request #" + pull.number + "\\n");
+} else if (argv[1] === "checks") {
+  // No workflow runs for this pull request: nothing registered.
+  process.stdout.write("[]\\n");
 } else die("gh stub: unsupported command " + argv.join(" "));
 `;
 
@@ -2768,7 +2791,10 @@ function mergingEnv(dir) {
   fs.writeFileSync(script, MERGING_GH, { mode: 0o755 });
   fs.writeFileSync(path.join(dir, "bin", "gh"),
     `#!/bin/sh\nexec ${process.execPath} ${JSON.stringify(script)} "$@"\n`, { mode: 0o755 });
-  return { PATH, GH_STUB_ORIGIN: path.join(dir, "origin.git"), GH_STUB_STATE: path.join(dir, "pulls.json") };
+  return {
+    PATH, GH_STUB_ORIGIN: path.join(dir, "origin.git"), GH_STUB_STATE: path.join(dir, "pulls.json"),
+    GH_STUB_LOG: path.join(dir, "gh-calls.jsonl"), GH_STUB_API: path.join(dir, "gh-api.json")
+  };
 }
 
 // One spec of one plan, from `begin` to the point where its gates are satisfied
@@ -3856,4 +3882,466 @@ test("a Claude dispatch with no effort, or one off the ladder, is a stop naming 
   assert.equal(panel.status, 0, panel.stderr);
   assert.deepEqual(labelsOf(panel), PANEL_LABELS);
   assert.equal(fs.readdirSync(path.join(shipDir, "01-a", "sets")).length, 2, "the panel's set, once the configuration is right");
+});
+
+// --- the plan route --------------------------------------------------------------
+
+// `stage()`'s repository with `planBranch` as given, and a second spec that
+// depends on the first unless `specs` is 1, committed and pushed so the primary
+// checkout stays clean for every snapshot after it. The merging `gh` is on the
+// PATH every call here is made with, so every call the ship makes to it is in
+// its log.
+function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge = true, branchPrefix = null } = {}) {
+  const staged = stage();
+  const { repo, plan } = staged;
+  const configPath = path.join(repo, ".tagteam", "config.json");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  Object.assign(config, { planBranch, ciWaitSec, autoMerge }, branchPrefix ? { branchPrefix } : {});
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  if (specs >= 2) {
+    fs.writeFileSync(path.join(plan, "specs", "02-b.md"),
+      "---\nid: 02-b\ndepends_on: [01-a]\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nb works.\n");
+    fs.writeFileSync(path.join(plan, "approved.json"), JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug: "demo", specs: ["01-a", "02-b"] }));
+  }
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "the plan as approved");
+  git(repo, "push", "origin", "main");
+  const body = path.join(staged.dir, "body.md");
+  fs.writeFileSync(body, "What this changes.\n");
+  return { ...staged, configPath, env: mergingEnv(staged.dir), origin: path.join(staged.dir, "origin.git"), body };
+}
+
+// Where a branch is on origin, or null.
+const onOrigin = (origin, branch) =>
+  spawnSync("git", ["-C", origin, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { encoding: "utf8" }).stdout.trim() || null;
+const planRefs = (origin) => git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/plan/");
+const ghCalls = (env) => (fs.existsSync(env.GH_STUB_LOG)
+  ? fs.readFileSync(env.GH_STUB_LOG, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : []);
+const apiCalls = (env) => ghCalls(env).filter((argv) => argv[0] === "api");
+const pullsOf = (env) => JSON.parse(fs.readFileSync(env.GH_STUB_STATE, "utf8")).pulls;
+const trainOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8"));
+const setTrainRoute = (shipDir, change) => {
+  const train = trainOf(shipDir);
+  fs.writeFileSync(path.join(shipDir, "train.json"), JSON.stringify(change(train), null, 2));
+};
+
+// A commit somebody makes on `branch` from a clone of their own. Pushed unless
+// `push` is false, so a test can record it before it is pushed.
+let handCount = 0;
+function commitByHand({ dir, origin }, branch, { push = true, from = branch } = {}) {
+  handCount += 1;
+  const clone = path.join(dir, `hand-${handCount}`);
+  git(dir, "clone", "-q", origin, clone);
+  git(clone, "checkout", "-q", "-B", branch, `origin/${from}`);
+  fs.writeFileSync(path.join(clone, `hand-${handCount}.txt`), `by hand ${handCount}\n`);
+  git(clone, "add", "-A");
+  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "commit", "-q", "-m", `by hand ${handCount}`);
+  const oid = git(clone, "rev-parse", "HEAD");
+  const pushIt = () => git(clone, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+  if (push) pushIt();
+  return { oid, push: pushIt };
+}
+
+// One spec from `begin` through `finish`.
+function shipThrough(staged, id, file, contents) {
+  const driven = driveToPublishable(staged, id, file, contents, staged.env);
+  const published = ship("publish", staged.plan, ["--spec", id, "--title", `Ship ${id}`, "--body", staged.body], staged.env);
+  assert.equal(published.status, 0, published.stderr);
+  const finished = ship("finish", staged.plan, ["--spec", id], staged.env);
+  return { ...driven, published, finished };
+}
+
+const A_CHANGE = "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n";
+const B_CHANGE = "export const twice = (n) => n * 2;\n";
+
+test("start refuses a version-9 configuration with the run-configure exit", () => {
+  const { dir, repo, plan } = stage();
+  const configPath = path.join(repo, ".tagteam", "config.json");
+  const { planBranch, versionFiles, ...nine } = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...nine, version: 9 }, null, 2));
+  const started = ship("start", plan);
+  assert.equal(started.status, 3, started.stderr);
+  assert.match(started.stderr, /run \/tagteam:configure/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("with the setting on, a two-spec plan collects both squashes on plan/<slug> in order, and the base never moves", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  const mainBefore = onOrigin(origin, "main");
+
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(onOrigin(origin, "plan/demo"), mainBefore, "the plan branch is created at the base's tip");
+  const route = trainOf(shipDir).route;
+  assert.deepEqual([route.kind, route.branch, route.base, route.createdOid, route.tipOid, route.pendingOid],
+    ["plan", "plan/demo", "main", mainBefore, mainBefore, null]);
+  assert.match(started.json.say.join("\n"), /Created plan\/demo on origin from main/);
+
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.finished.json.ask, undefined, JSON.stringify(a.finished.json.ask ?? ""));
+  assert.equal(a.state().state, "merged");
+  assert.equal(a.state().base, "plan/demo");
+  const first = onOrigin(origin, "plan/demo");
+  assert.notEqual(first, mainBefore, "01-a's squash did not land on the plan branch");
+  assert.equal(git(origin, "rev-parse", `${first}^`), mainBefore);
+  assert.equal(trainOf(shipDir).route.tipOid, first, "the record does not follow the squash GitHub made");
+
+  const b = shipThrough(staged, "02-b", "b.js", B_CHANGE);
+  assert.equal(b.finished.status, 0, b.finished.stderr);
+  assert.equal(b.finished.json.ask, undefined, JSON.stringify(b.finished.json.ask ?? ""));
+  assert.equal(b.state().baseOid, first, "the second spec did not start from the first one's merge commit");
+  const second = onOrigin(origin, "plan/demo");
+  assert.equal(git(origin, "rev-parse", `${second}^`), first, "the squashes did not land in order");
+  assert.equal(trainOf(shipDir).route.tipOid, second);
+
+  assert.deepEqual(pullsOf(env).map((pull) => pull.base), ["plan/demo", "plan/demo"]);
+  assert.equal(onOrigin(origin, "main"), mainBefore, "something from the plan reached the base");
+  assert.match(git(origin, "show", `plan/demo:app.js`), /export const sub/);
+  assert.match(git(origin, "show", `plan/demo:b.js`), /export const twice/);
+
+  const ended = ship("end", plan, [], env);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.match(ended.json.say.join("\n"), /merged work is on plan\/demo on origin, not on main: main has none of it/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("with the setting on, a one-spec plan ships straight to the base and is never asked about merge commits", () => {
+  const staged = stagePlan({ specs: 1 });
+  const { dir, plan, shipDir, origin, env } = staged;
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.match(started.json.say.join("\n"), /planBranch is on, but this plan has one spec/);
+  assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.state().state, "merged");
+  assert.deepEqual(pullsOf(env).map((pull) => pull.base), ["main"]);
+  assert.match(git(origin, "show", "main:app.js"), /export const sub/);
+  assert.equal(planRefs(origin), "", "a plan branch appeared for a one-spec plan");
+  assert.deepEqual(apiCalls(env), []);
+  const ended = ship("end", plan, [], env);
+  assert.doesNotMatch(ended.json.say.join("\n"), /plan\//);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("with the setting off, a two-spec plan ships each spec to the base with no gh api call and no plan branch", () => {
+  const staged = stagePlan({ planBranch: false });
+  const { dir, plan, shipDir, origin, env } = staged;
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.deepEqual(started.json.say.filter((line) => !/^(note|warning):/.test(line)), ["2 specs in dependency order; 0 already merged."],
+    "start said something new with the setting off");
+  assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.finished.json.ask, undefined);
+  const afterA = onOrigin(origin, "main");
+  const b = shipThrough(staged, "02-b", "b.js", B_CHANGE);
+  assert.equal(b.finished.status, 0, b.finished.stderr);
+  assert.equal(b.state().baseOid, afterA, "the second spec did not start from the base as the first left it");
+  assert.deepEqual([a.state().state, b.state().state], ["merged", "merged"]);
+  assert.deepEqual([a.state().base, b.state().base], ["main", "main"]);
+  assert.deepEqual(pullsOf(env).map((pull) => pull.base), ["main", "main"]);
+  assert.match(git(origin, "show", "main:b.js"), /export const twice/);
+  assert.equal(planRefs(origin), "");
+  assert.deepEqual(apiCalls(env), [], "the setting off made a gh api call");
+  assert.deepEqual([...new Set(ghCalls(env).map((argv) => `${argv[0]} ${argv[1]}`))].sort(),
+    ["pr create", "pr merge", "pr view"], "the setting off made a gh call it did not make before");
+  const ended = ship("end", plan, [], env);
+  assert.doesNotMatch(ended.json.say.join("\n"), /plan\//);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a train with a spec under way and no route recorded stays on the base when the setting is turned on", () => {
+  const staged = stagePlan({ planBranch: false });
+  const { dir, plan, shipDir, origin, env, configPath } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(ship("begin", plan, ["--spec", "01-a"], env).status, 0);
+  // What a train started before routes existed looks like: no route at all.
+  setTrainRoute(shipDir, ({ route, ...train }) => train);
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, planBranch: true }, null, 2));
+
+  const restarted = ship("start", plan, ["--reclaim"], env);
+  assert.equal(restarted.status, 0, restarted.stderr);
+  assert.match(restarted.json.say.join("\n"), /already had a spec under way/);
+  assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
+  const resumed = ship("begin", plan, ["--spec", "01-a"], env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8")).base, "main");
+  assert.equal(planRefs(origin), "");
+  assert.deepEqual(apiCalls(env), []);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a train recorded on the plan route keeps it across a restart after the setting is turned off", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env, configPath } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const recorded = trainOf(shipDir).route;
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, planBranch: false }, null, 2));
+
+  const restarted = ship("start", plan, ["--reclaim"], env);
+  assert.equal(restarted.status, 0, restarted.stderr);
+  assert.deepEqual(trainOf(shipDir).route, recorded, "a restart worked the route out again from the setting");
+  assert.match(restarted.json.say.join("\n"), /keeps the route it started with/);
+  const begun = ship("begin", plan, ["--spec", "01-a"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.match(begun.json.say.join("\n"), /from plan\/demo at/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8")).base, "plan/demo");
+  assert.equal(onOrigin(origin, "plan/demo"), recorded.tipOid);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a start interrupted around creating the plan branch creates it on the rerun, or accepts its own push", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const created = trainOf(shipDir).route.createdOid;
+  const interrupted = (train) => ({ ...train, route: { ...train.route, tipOid: null, pendingOid: created } });
+
+  // Recorded, and the push never happened.
+  git(origin, "update-ref", "-d", "refs/heads/plan/demo");
+  setTrainRoute(shipDir, interrupted);
+  const recreated = ship("start", plan, ["--reclaim"], env);
+  assert.equal(recreated.status, 0, recreated.stderr);
+  assert.match(recreated.json.say.join("\n"), /Created plan\/demo on origin/);
+  assert.equal(onOrigin(origin, "plan/demo"), created);
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [created, null]);
+
+  // The push happened, and the run died before confirming it.
+  setTrainRoute(shipDir, interrupted);
+  const accepted = ship("start", plan, ["--reclaim"], env);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.json.say.join("\n"), /already on origin at .*nothing was pushed/);
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [created, null]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan/<slug> already on origin at another commit stops the first start before anything is recorded or pushed", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  const leftover = commitByHand(staged, "plan/demo", { from: "main" }).oid;
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 1, started.stdout);
+  assert.match(started.stderr, /plan\/demo is already on origin at .*did not put it there/);
+  assert.equal(onOrigin(origin, "plan/demo"), leftover, "the leftover branch was moved");
+  assert.ok(!fs.existsSync(path.join(shipDir, "train.json")), "a route was recorded for a branch the ship could not create");
+  assert.ok(!fs.existsSync(path.join(shipDir, "lock-token")), "the refusal left the lock held for the rerun to trip over");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a squash merged into the plan branch before the record moved is adopted on the rerun, and nothing stops", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  // What merge.mjs does, and then the run dies before anything is recorded.
+  const merged = spawnSync(process.execPath, [path.join(dir, "gh-stub.mjs"), "pr", "merge", "1", "--squash",
+    "--match-head-commit", a.state().candidateOid], { encoding: "utf8", env: { ...process.env, ...env } });
+  assert.equal(merged.status, 0, merged.stderr);
+  const squash = onOrigin(origin, "plan/demo");
+
+  const restarted = ship("start", plan, ["--reclaim"], env);
+  assert.equal(restarted.status, 0, restarted.stderr);
+  assert.match(restarted.json.next, /begin .* --spec 01-a$/);
+  const resumed = ship("begin", plan, ["--spec", "01-a"], env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.json.say.join("\n"), /01-a was found merged into plan\/demo/);
+  assert.match(resumed.json.next, /--spec 02-b$/);
+  assert.equal(a.state().state, "merged");
+  assert.equal(trainOf(shipDir).route.tipOid, squash);
+  const next = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(next.status, 0, next.stderr);
+  assert.match(next.json.say.join("\n"), new RegExp(`from plan/demo at ${squash.slice(0, 12)}`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("any commit pushed through the pending and confirm calls is the ship's own, whether or not the confirm happened", async () => {
+  const { recordPending, confirmPending } = await import("../scripts/lib/plan-route.mjs");
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  const trainPath = path.join(shipDir, "train.json");
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
+
+  // A plain commit standing in for a later step's own, pushed and never
+  // confirmed: the next begin accepts it, and the confirm that comes late is
+  // harmless.
+  const first = commitByHand(staged, "plan/demo", { push: false });
+  recordPending(trainPath, first.oid);
+  first.push();
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.match(begun.json.say.join("\n"), new RegExp(`from plan/demo at ${first.oid.slice(0, 12)}`));
+  confirmPending(trainPath, first.oid);
+  assert.equal(trainOf(shipDir).route.tipOid, first.oid);
+
+  // Recorded and not yet pushed: the tip before it is still the ship's.
+  const second = commitByHand(staged, "plan/demo", { push: false });
+  recordPending(trainPath, second.oid);
+  const before = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(before.status, 0, before.stderr);
+  // Pushed and confirmed: the new tip is.
+  second.push();
+  confirmPending(trainPath, second.oid);
+  const after = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(after.status, 0, after.stderr);
+  assert.deepEqual([trainOf(shipDir).route.tipOid, trainOf(shipDir).route.pendingOid], [second.oid, null]);
+
+  // The same kind of commit, with nothing recorded, is not.
+  const stray = commitByHand(staged, "plan/demo");
+  const stopped = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(stopped.status, 1, stopped.stdout);
+  assert.match(stopped.stderr, new RegExp(`plan/demo on origin is at ${stray.oid.slice(0, 12)}, a commit this ship did not record making`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a commit pushed by hand to the plan branch between two specs stops begin before it branches", () => {
+  const staged = stagePlan();
+  const { dir, repo, plan, shipDir, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
+  const tip = trainOf(shipDir).route.tipOid;
+  commitByHand(staged, "plan/demo");
+  const stopped = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(stopped.status, 1, stopped.stdout);
+  assert.match(stopped.stderr, /a commit this ship did not record making/);
+  assert.match(stopped.stderr, new RegExp(`back at ${tip.slice(0, 12)}`));
+  assert.ok(!fs.existsSync(path.join(shipDir, "02-b", "state.json")), "02-b was begun on a commit nobody reviewed");
+  assert.notEqual(spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/tagteam/demo/02-b"]).status, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a commit pushed by hand to the plan branch after publish stops finish before the landing check, and nothing merges", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  // Unrelated to the change, so the landing check would pass it.
+  const stray = commitByHand(staged, "plan/demo").oid;
+  const stopped = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(stopped.status, 1, stopped.stdout);
+  assert.match(stopped.stderr, /did not record making.*nothing was merged/);
+  assert.notEqual(a.state().state, "merged");
+  assert.equal(a.state().landing ?? null, null, "the landing check ran on a commit nobody reviewed");
+  assert.equal(pullsOf(env)[0].state, "OPEN");
+  assert.equal(onOrigin(origin, "plan/demo"), stray);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a spec a person merged at the reviewed head is adopted, the record follows, and the next begin goes on", () => {
+  const staged = stagePlan({ autoMerge: false });
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.match(a.finished.json.ask, /auto-merge is off/);
+  // They merge it on GitHub, and say to carry on with the next spec.
+  const merged = spawnSync(process.execPath, [path.join(dir, "gh-stub.mjs"), "pr", "merge", "1", "--squash",
+    "--match-head-commit", a.state().candidateOid], { encoding: "utf8", env: { ...process.env, ...env } });
+  assert.equal(merged.status, 0, merged.stderr);
+  const squash = onOrigin(origin, "plan/demo");
+  const next = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(next.status, 0, next.stderr);
+  assert.match(next.json.say.join("\n"), /01-a was found merged into plan\/demo/);
+  assert.equal(a.state().state, "merged");
+  assert.equal(trainOf(shipDir).route.tipOid, squash);
+  assert.match(next.json.say.join("\n"), new RegExp(`Starting 02-b .* from plan/demo at ${squash.slice(0, 12)}`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a repository that forbids merge commits stops start before any branch exists, and an unreadable source is said and does not stop", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  const forbidding = [
+    [{ "repos/{owner}/{repo}": { body: { allow_merge_commit: false } } }, /does not allow merge commits/],
+    [{ "repos/{owner}/{repo}/rules/branches/main": { body: [{ type: "required_linear_history" }] } }, /ruleset on main requires linear history/],
+    [{ "repos/{owner}/{repo}/rules/branches/main": { body: [{ type: "pull_request", parameters: { allowed_merge_methods: ["squash", "rebase"] } }] } },
+      /ruleset on main allows only squash and rebase/],
+    [{ "repos/{owner}/{repo}/branches/main/protection": { body: { required_linear_history: { enabled: true } } } }, /protection on main requires linear history/]
+  ];
+  for (const [answers, reason] of forbidding) {
+    fs.writeFileSync(env.GH_STUB_API, JSON.stringify(answers));
+    const refused = ship("start", plan, [], env);
+    assert.equal(refused.status, 1, refused.stdout);
+    assert.match(refused.stderr, /plan\/demo could never land on main/);
+    assert.match(refused.stderr, reason);
+    assert.match(refused.stderr, /turn planBranch off/);
+    assert.equal(planRefs(origin), "", "a branch was created for a plan that could never land");
+    assert.ok(!fs.existsSync(path.join(shipDir, "train.json")));
+  }
+
+  fs.writeFileSync(env.GH_STUB_API, JSON.stringify({
+    "repos/{owner}/{repo}": { error: "gh: Resource not accessible (HTTP 403)" },
+    "repos/{owner}/{repo}/branches/main/protection": { error: "gh: Must have admin rights to Repository. (HTTP 403)" }
+  }));
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  const said = started.json.say.join("\n");
+  assert.match(said, /Whether this repository allows merge commits into main was not checked/);
+  assert.match(said, /Whether the branch protection on main allows merge commits into main was not checked: only an admin can read it/);
+  assert.equal(onOrigin(origin, "plan/demo"), onOrigin(origin, "main"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a pull request into the plan branch whose checks never ran stops for a person and names the workflow cause", () => {
+  const staged = stagePlan({ ciWaitSec: 5 });
+  const { dir, plan, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.state().gates.ci.status, "not-run", "checks that never ran were recorded as something else");
+  assert.equal(a.state().state, "awaiting-approval");
+  assert.match(a.finished.json.ask, /the checks proved nothing either way/);
+  assert.match(a.finished.json.ask, /it targets plan\/demo, not main: the likely cause is workflows that only run for pull requests into main/);
+  assert.equal(pullsOf(env)[0].state, "OPEN");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("checks that never ran on a pull request into the base name no plan-branch cause", () => {
+  const staged = stagePlan({ planBranch: false, ciWaitSec: 5 });
+  const { dir, plan, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.match(a.finished.json.ask, /the checks proved nothing either way/);
+  assert.doesNotMatch(a.finished.json.ask, /likely cause/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan directory whose name is not a branch, and a branchPrefix that nests spec branches under the plan branch, are refused at start", () => {
+  const staged = stagePlan();
+  const { dir, repo, origin, env, configPath } = staged;
+  const bad = path.join(repo, ".tagteam", "plans", "demo.lock");
+  fs.cpSync(staged.plan, bad, { recursive: true });
+  const refused = ship("start", bad, [], env);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /plan\/demo\.lock cannot be created: .* not a valid Git branch name/);
+
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, branchPrefix: "plan/" }, null, 2));
+  const nested = ship("start", staged.plan, [], env);
+  assert.equal(nested.status, 1, nested.stdout);
+  assert.match(nested.stderr, /branchPrefix "plan\/" makes a spec branch plan\/demo\/01-a, which Git cannot hold beside plan\/demo/);
+  assert.equal(planRefs(origin), "");
+  assert.deepEqual(apiCalls(env), [], "a refused name was checked against GitHub first");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan branch gone from origin after its creation was confirmed stops begin", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const tip = trainOf(shipDir).route.tipOid;
+  git(origin, "update-ref", "-d", "refs/heads/plan/demo");
+  const stopped = ship("begin", plan, ["--spec", "01-a"], env);
+  assert.equal(stopped.status, 1, stopped.stdout);
+  assert.match(stopped.stderr, new RegExp(`plan/demo is gone from origin, so 01-a was not begun.*${tip}:refs/heads/plan/demo`));
+  assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "state.json")));
+  fs.rmSync(dir, { recursive: true, force: true });
 });

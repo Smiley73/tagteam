@@ -138,14 +138,15 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 9, validated by
+`.tagteam/config.json`, version 10, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. There is no migration: version 9
-keys `effort` by job and drops `limits.planReviewRounds`, and no key has a
-fallback in a script, so an older configuration is incomplete rather than
-upgradable.
+tell the person to run `/tagteam:configure` and stop. No key has a fallback in a
+script, so an older configuration is incomplete. Configure carries a version-9
+file forward: every value it holds is offered back, and version 10's two keys,
+`planBranch` and `versionFiles`, are written `false` and `[]`. Anything older is
+a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -352,6 +353,27 @@ git -C "$R" commit-tree <mergedTree> -p <newBaseOid> -p <candidateOid> -m "<mess
 git -C "$W" checkout --detach <mergedCommit>
 git -C "$W" switch --discard-changes "<branch>"
 ```
+
+On a plan branch — `planBranch` on and a plan of two or more specs, as the train
+recorded when it first started — each spec branches from `plan/<slug>`, opens its
+pull request against it and squash-merges into it, and these join the forms
+above:
+
+```bash
+git -C "$R" rev-parse --verify --quiet refs/remotes/origin/plan/<slug>  # read-only, after the fetch: where the plan branch is
+git -C "$R" push origin <oid>:refs/heads/plan/<slug>                    # a commit the ship made: recorded before, confirmed after
+gh api repos/{owner}/{repo}                                             # read-only: whether merge commits are allowed
+gh api repos/{owner}/{repo}/rules/branches/<base>                       # read-only: rulesets on the base
+gh api repos/{owner}/{repo}/branches/<base>/protection                  # read-only: classic protection, admins only
+gh pr create --base plan/<slug> --head "<branch>" --title "<title>" --body-file <file>
+gh pr view <number> --json state,mergedAt,mergeCommit,headRefOid,baseRefName  # read-only: the merge commit a squash made
+```
+
+The push creates the plan branch at `start` and is never forced. Every commit the
+ship records putting on the plan branch is its own, whatever kind of commit it
+is; anything else at the tip on origin stops `begin` before it branches and
+`finish` before the landing check. The `gh api` reads run on every `start` of
+such a train; a source that cannot be read is said and not taken as clean.
 
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —
