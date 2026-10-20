@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Reads a plan's spec files, validates their front matter, resolves each one's
 // review lenses against the configured default set, and returns them in
-// dependency order.
+// dependency order with each one's sign-offs.
 //
 // Shipping calls this once and works from the answer, so the order a train runs
 // in is decided arithmetically rather than by reading a table in a plan.
@@ -45,6 +45,27 @@ export function parseFrontMatter(text, file) {
     }
   }
   return { front, body: text.slice(match[0].length) };
+}
+
+// The entries of a spec's `## Sign-offs`: what the repository's conventions say
+// to ask about first, which the person approving the plan approves with it.
+// Returned so that approval can show them without anyone reading a spec body.
+// `None.` and a missing section — a spec written before the section existed —
+// both come back empty. A line that is not a list item continues the one above.
+export function readSignOffs(body) {
+  const match = /^## Sign-offs[ \t]*\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(body);
+  if (!match) return [];
+  const entries = [];
+  let open = false;
+  for (const raw of match[1].split("\n")) {
+    const line = raw.trim();
+    if (line === "") { open = false; continue; }
+    const item = /^[-*+]\s+(.*)$/.exec(line) ?? /^\d+[.)]\s+(.*)$/.exec(line);
+    if (item || !open) entries.push(item ? item[1] : line);
+    else entries[entries.length - 1] += ` ${line}`;
+    open = true;
+  }
+  return entries.filter((entry) => !/^none\.?$/i.test(entry));
 }
 
 // The default set applies to every spec. A spec names only its differences:
@@ -107,7 +128,7 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
         + `${SPEC_MAX_BYTES / 1000} KB ceiling — re-dispatch its writer to cut it to the target, dropping anything `
         + "the implementer can read out of the repository");
     }
-    const { front } = parseFrontMatter(text, name);
+    const { front, body } = parseFrontMatter(text, name);
     const errors = validateJson(schema, front);
     if (errors.length > 0) throw new Error(`${name}: ${errors.join("; ")}`);
     if (front.id !== name.replace(/\.md$/, "")) {
@@ -118,7 +139,8 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
       path: file,
       dependsOn: front.depends_on,
       userVisible: front.user_visible,
-      reviewers: resolveReviewers(front.reviewers, config, { file: name })
+      reviewers: resolveReviewers(front.reviewers, config, { file: name }),
+      signOffs: readSignOffs(body)
     });
   }
   if (specs.length === 0) throw new Error(`${specsDir} holds no spec files`);

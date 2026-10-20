@@ -77,3 +77,20 @@ test("resolved lenses and user-visibility ride along with the order", () => {
   assert.equal(entry.userVisible, true);
   assert.deepEqual(entry.reviewers, ["code-quality", "correctness", "experience"]);
 });
+
+test("each spec's sign-offs ride along, and None or no section at all is none", () => {
+  const head = (id) => spec(id).replace("## Outcome\nSomething.\n", "");
+  const dir = planWith({
+    "01-a.md": `${head("01-a")}## Done when\nTests pass.\n\n## Sign-offs\n- a PDF library, so statements\n  can be exported\n- a top-level \`exports/\` directory\n\n## Out of scope\n- the CSV path\n`,
+    "02-b.md": `${head("02-b")}## Sign-offs\nNone.\n\n## Out of scope\nNothing.\n`,
+    "03-c.md": spec("03-c"),
+    "04-d.md": `${head("04-d")}## Sign-offs\n1. upgrading the date library, for time zones`
+  });
+  const signOffs = Object.fromEntries(readSpecs(dir, CONFIG, SCHEMA).map((entry) => [entry.id, entry.signOffs]));
+  assert.deepEqual(signOffs, {
+    "01-a": ["a PDF library, so statements can be exported", "a top-level `exports/` directory"],
+    "02-b": [],
+    "03-c": [],
+    "04-d": ["upgrading the date library, for time zones"]
+  });
+});

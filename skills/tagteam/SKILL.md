@@ -451,7 +451,7 @@ a new commit appears — and every fix round makes one.
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
-| `specs.mjs` | Validate spec front matter and size, resolve lenses, return dependency order |
+| `specs.mjs` | Validate spec front matter and size, resolve lenses, return dependency order with each spec's sign-offs |
 | `deliverables.mjs` | Extract the plan's deliverables table as data, refusing a plan over its ceiling |
 | `goal-gate.mjs` | Record and verify the hash of the goal a person approved |
 | `validate-json.mjs` | Schema validation and config checks |

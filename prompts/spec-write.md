@@ -23,6 +23,7 @@ reviewers: [experience]
 ## Changes
 ## Tests
 ## Done when
+## Sign-offs
 ## Out of scope
 ```
 
@@ -50,6 +51,17 @@ in advance, and it becomes the thing reviewers then grade compliance against.
 **Tests** — what behaviour must be proved and what a passing test would fail to
 catch. Not the test code, not the test names.
 **Done when** — the observable criteria, and which verify commands must pass.
+**Sign-offs** — what this spec needs that the repository's conventions say to
+ask a person about first: typically a new or upgraded dependency, a new
+top-level file or directory, a schema-breaking migration, production
+configuration or CI. Find those rules in the conventions document the run
+names, in any document it defers to for them, and in the instruction files you
+were given, then walk Changes against them. One list item each: what, and why
+this spec cannot be done without it. The person approving the plan approves
+this list with it; the implementer does what it lists without stopping, and
+leaves undone anything it does not. Write `None.` when there is nothing. A dependency or
+directory that an existing helper or a neighbouring spec makes unnecessary is
+not a sign-off; it is a design to cut.
 **Out of scope** — what belongs to a neighbouring spec, so two implementers do
 not both write it.
 

@@ -16,6 +16,13 @@ notice on the way: an unrelated change costs a reviewer's attention, and the
 reviewers looking at your diff have a bounded number of fix rounds between them
 and a merge.
 
+`## Sign-offs` lists what a person approved with the plan that the repository's
+conventions would otherwise make you ask about — a new dependency, a new
+top-level file or directory, and the like. Do those without stopping. Anything
+else they say to ask about first — everything, in a spec with no such section —
+is not approved: do not do it, finish what does not need it, and report the
+rest as unfinished with the reason.
+
 `## Out of scope` names work that belongs to a neighbouring spec. Leave it alone
 even when it is one line and you are already in the file.
 
