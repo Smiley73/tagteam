@@ -47,6 +47,16 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    attempts/<k>/ laid out as a round — its review diff is the
                    remerge view, and its candidate.json records what the
                    attempt resolved. Never a state.json: it is not a spec    ignored
+  whole-plan/<n>/  on a plan branch, one whole-plan check of one tip: record.json
+                   (the tip, its merge base with the base and the base commit it
+                   was taken against, why it ran, verify bound to the tip, the
+                   review and the tip it read, the fix units it made, and one
+                   status: clean, open, failed or incomplete), sets/, and
+                   rounds/1/ laid out as a round — its review diff is the
+                   plan's combined change. Never a state.json               ignored
+  whole-plan/units/plan-fix-<k>/  one fix a whole-plan check needed, shipped as
+                   one more pull request into the plan branch: spec.md (its
+                   generated document) and everything a <spec-id>/ holds     ignored
   <spec-id>/
     state.json     the state machine, the reviewed commit, the gates, and the
                    landing check bound to the current candidate             ignored
@@ -419,6 +429,23 @@ does not apply to it. The plan branch is checked against the record immediately
 before the push, so a branch someone moved, rewound or deleted is the stop above
 rather than something a fast-forward goes over; a push refused all the same is
 that stop too, never retried and never forced.
+
+Once every spec of such a train is merged, the whole-plan check reads the plan
+branch's tip as one change: every verify command, whatever its `when`, and one
+reviewer over the diff from where the tip last met the base. Beside the hand-push
+check above and the snapshot's own reads, these are its forms:
+
+```bash
+git -C "$R" merge-base <planTip> <baseOid>                    # read-only: where the plan branch last met the base
+git -C "$R" rev-parse <planTip>^{tree} <mergeBase>^{tree}     # read-only: whether the combined change is empty
+git -C "$W" status --porcelain                                # read-only: nothing uncommitted before the tip is checked out
+git -C "$W" checkout --detach <planTip>                       # the tip the check snapshots and verifies
+git -C "$W" switch --discard-changes --detach <planTip>       # what the verify commands wrote on the tip
+git -C "$W" diff --no-ext-diff <mergeBase>..<planTip>         # read-only: the combined change the reviewer reads
+```
+
+A fix the check needs is a pull request like any spec's, through the forms
+above; the check itself commits and pushes nothing.
 
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —

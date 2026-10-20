@@ -362,3 +362,20 @@ test("a counter no budget can be enforced against reports unknown", () => {
   assert.equal(budget.fixRoundsRemaining, null);
   assert.equal(budget.ciRepairsRemaining, null);
 });
+
+// A whole-plan fix unit runs the spec cycle, with a state.json of its own, but it
+// is not one of the plan's specs: counted as one, a plan of two specs with a fix
+// in flight would read as three started and never complete. Its state lives
+// under the ship's `whole-plan/units/`, and the check beside it under
+// `whole-plan/<n>/`, and neither is a spec.
+test("a whole-plan fix unit and the check that made it are not counted as specs", () => {
+  const repo = repository();
+  ship(repo, "01-a", { state: "merged" });
+  ship(repo, "02-b", { state: "merged" });
+  write(path.join(repo, ".tagteam", "ships", "s", "whole-plan", "units", "plan-fix-1", "state.json"),
+    { spec: "plan-fix-1", slug: "s", branch: "tagteam/s/plan-fix-1", state: "reviewing", fixRoundsUsed: 1, ciRepairsUsed: 0 });
+  write(path.join(repo, ".tagteam", "ships", "s", "whole-plan", "1", "record.json"), { n: 1, tip: "a".repeat(40), status: "open", units: ["plan-fix-1"] });
+  const [shipped] = inventory(repo).ships;
+  assert.deepEqual([shipped.started, shipped.merged, shipped.status], [2, 2, "complete"]);
+  assert.equal(budgetFor(inventory(repo), "plan-fix-1"), null, "the fix unit was given a spec's budget line");
+});

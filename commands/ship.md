@@ -46,8 +46,8 @@ Run the command the previous step printed as `next`. It prints one JSON object:
 A non-zero exit is a stop. Say what stderr says, in plain words, and stop —
 except exit 3, which means the configuration is older than this plugin: tell
 them to run `/tagteam:configure` and stop; and exit 5, which is not a stop at
-all: `collect`, `settle`, `snapshot`, `resolve-commit` or `resolve-collect`
-refused because the set it judges is not all in yet — see *Sets*. A spent
+all: `collect`, `settle`, `snapshot`, `resolve-commit`, `resolve-collect` or
+`plan-collect` refused because the set it judges is not all in yet — see *Sets*. A spent
 budget never exits: the driver prints where the spec goes instead and says so
 in `say`.
 
@@ -82,8 +82,8 @@ when that agent finishes.
   was compressed, say — record it anyway. A label that is already in is refused
   by name and changes nothing. A label refused as not in the set was copied
   wrong; the refusal lists the labels still out, so correct it in the same turn.
-- **`collect`, `settle`, `snapshot`, `resolve-commit` or `resolve-collect`
-  exiting 5** says "Not judged yet: still waiting on the security reviewer and
+- **`collect`, `settle`, `snapshot`, `resolve-commit`, `resolve-collect` or
+  `plan-collect` exiting 5** says "Not judged yet: still waiting on the security reviewer and
   Codex", or "still waiting on Fix 01-a".
   It is not a stop and nothing changed — nothing was committed and no fix round
   was lost: tell the person who is still out, end the turn, and keep waiting for
@@ -386,8 +386,9 @@ pull requests each waiting for a keystroke. When a person should decide, the
 gates say so — that is what they are for.
 
 That authorizes exactly one thing: `merge.mjs`, through `finish`, on a `ready`
-verdict, for a spec of this plan. Not `gh pr merge` by hand, not merging when
-`merge.mjs` refuses, not loosening a gate that fired. A refused merge — a
+verdict, for a spec of this plan — a whole-plan fix unit, below, is one. Not
+`gh pr merge` by hand, not merging when `merge.mjs` refuses, not loosening a
+gate that fired. A refused merge — a
 protection rule, a failing check, a change that no longer lands as what was
 reviewed — is a stop: say what it said.
 
@@ -479,6 +480,46 @@ cycle's budget, which a spec that stopped on an open finding has usually spent
 — so a finding the readers still see leaves the spec waiting again, with the
 same offer. A commit the person added by hand is not a revisit: `revisit`
 refuses it and says so.
+
+## The whole-plan check
+
+On a plan branch, once every spec is merged into it, `next` after the last
+spec's `finish` is not `end` but the whole-plan check:
+
+```bash
+node "$P/scripts/ship.mjs" plan-check --plan "$D"
+```
+
+It works like every other step: run it, dispatch the set it prints, record each
+arrival, and run the `next` the last arrival names, which is `plan-collect`. The
+set is one reviewer — not a panel, not Codex — reading the plan's whole change
+for how its specs fit together, while every verify command runs on the plan
+branch's tip, whatever its `when`. Say what `say` says: which tip is checked,
+what verify found, and at what model and effort the reviewer runs.
+
+`plan-collect` ends in one of three ways, and `next` already says which:
+
+- **Clean** — `say` says so, and `next` is `end`.
+- **A real problem** — a failed verify command, or something blocking or
+  major — is fixed as one more small pull request into the plan's branch, a
+  *fix unit*, and `next` is `begin` for it. A fix unit ships exactly like a
+  spec: the same steps, sets, review, gates and `finish`, and the same answers
+  to every question on the way. Its records are under `$S/whole-plan/units/<id>/`,
+  so its pull request body is `$S/whole-plan/units/<id>/pr-body.md`; write it as
+  the pull request body section says, about what the fix changes for the person
+  using the software. Once it is merged, `next` is the check again, on the new
+  tip.
+- **A stop** — every fix `limits.ciRepairs` allows already made and still not
+  clean, a reviewer that produced nothing usable twice, or a plan whose combined
+  change is empty — returns `ask`. Say what `say` says — what failed, and where
+  the record is — then ask it. The work stays on the plan's branch.
+
+A spec or a fix unit waiting for a person holds the check back: its `next` is
+`end`, as it always was, and the check runs once it is merged. Running
+`plan-check` again on a tip whose check is decided dispatches nothing and prints
+that result again; run on a tip whose reviewer is still out, it sends nothing new
+and works as *When a ship restarts while agents are out* says, its answers being
+`plan-check` with `--run-gone` or `--run-live` instead of `begin`.
 
 ## Stopping between specs
 

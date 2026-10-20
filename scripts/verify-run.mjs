@@ -43,21 +43,32 @@ async function runCommand(command, cwd, timeoutSec, logPath) {
   return { command, exitCode, timedOut, status: !timedOut && exitCode === 0 ? "passed" : "failed", logPath };
 }
 
-export async function verify({ config, candidate, worktree, outDir }) {
+// `select` is which commands run: "when", the default, runs those whose `when`
+// matches the change; "all" runs every configured command whatever its `when`,
+// which is the whole-plan check's question — does the plan hold as one change —
+// and is said in the result so the record shows what ran. Either way commands
+// stop at the first failure, and nothing to run is `not-applicable`, never a
+// pass.
+export const SELECTIONS = ["when", "all"];
+
+export async function verify({ config, candidate, worktree, outDir, select = "when" }) {
+  if (!SELECTIONS.includes(select)) throw new Error(`--select is ${SELECTIONS.join(" or ")}, not ${JSON.stringify(select)}`);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
-  const applicable = config.verify.filter((entry) =>
+  const every = select === "all";
+  const applicable = every ? [...config.verify] : config.verify.filter((entry) =>
     matchWhen(entry.when, candidate.changedPaths, candidate.addedLines).matched
   );
-  if (applicable.length === 0) return { status: "not-applicable", commands: [] };
+  const done = (result) => (every ? { ...result, select } : result);
+  if (applicable.length === 0) return done({ status: "not-applicable", commands: [] });
   const results = [];
   for (let index = 0; index < applicable.length; index += 1) {
     const entry = applicable[index];
     const logPath = path.join(outDir, `${index + 1}.log`);
     const result = await runCommand(entry.command, worktree, entry.timeoutSec, logPath);
     results.push(result);
-    if (result.status === "failed") return { status: "failed", commands: results };
+    if (result.status === "failed") return done({ status: "failed", commands: results });
   }
-  return { status: "passed", commands: results };
+  return done({ status: "passed", commands: results });
 }
 
 async function main() {
@@ -82,7 +93,8 @@ async function main() {
       config: JSON.parse(fs.readFileSync(args.config, "utf8")),
       candidate,
       worktree: path.resolve(args.worktree),
-      outDir: path.resolve(args["out-dir"])
+      outDir: path.resolve(args["out-dir"]),
+      ...(args.select === undefined ? {} : { select: args.select })
     });
     if (args.out) writeRoundFile(args.out, JSON.stringify(result, null, 2) + "\n");
     process.stdout.write(JSON.stringify(result) + "\n");
