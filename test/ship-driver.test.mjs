@@ -3754,6 +3754,7 @@ test("a clean spec that merges straight into the base stops at finish for that r
   const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
   assert.equal(a.finished.status, 0, a.finished.stderr);
   assert.equal(a.state().base, "main");
+  assert.equal(a.state().planRouteBranch, null, "a train with no plan route recorded one");
   assert.equal(a.state().state, "awaiting-approval");
   assert.deepEqual(a.finished.json.blockers, []);
   assert.deepEqual(a.finished.json.reasons, ["straight-to-base"]);
@@ -3786,9 +3787,36 @@ test("on a plan route a spec whose state was frozen user-visible merges at finis
   assert.equal(a.finished.status, 0, a.finished.stderr);
   assert.equal(a.state().planUserVisible, true, "the mark was not frozen into the state, so this proves nothing");
   assert.equal(a.state().base, "plan/demo");
+  assert.equal(a.state().planRouteBranch, "plan/demo");
   assert.equal(a.finished.json.ask, undefined, JSON.stringify(a.finished.json.ask ?? ""));
   assert.equal(a.state().state, "merged");
   assert.equal(a.state().gates.human, null, "it merged on a person's approval, not on its own");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a spec begun before its plan route was recorded takes it from the train's route at finish, and merges", () => {
+  // What a spec already under way when the verdict began to read the plan route
+  // carries: a state frozen user-visible, and no plan route at all. `finish`
+  // gives it the plan branch the train's route recorded — not anything the
+  // configuration says — and it merges as a spec begun today would.
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const driven = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const published = ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env);
+  assert.equal(published.status, 0, published.stderr);
+  const file = path.join(shipDir, "01-a", "state.json");
+  const { planRouteBranch, ...legacy } = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(planRouteBranch, "plan/demo", "begin recorded no plan route, so removing it proves nothing");
+  fs.writeFileSync(file, `${JSON.stringify({ ...legacy, planUserVisible: true }, null, 2)}\n`);
+
+  const finished = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(finished.json.ask, undefined, JSON.stringify(finished.json.ask ?? ""));
+  assert.equal(driven.state().planRouteBranch, "plan/demo");
+  assert.equal(driven.state().state, "merged");
+  assert.equal(driven.state().gates.human, null, "it merged on a person's approval, not on its own");
   assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
   fs.rmSync(dir, { recursive: true, force: true });
 });

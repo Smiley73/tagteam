@@ -149,17 +149,12 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-export function initState({ spec, slug, branch, base, configuredBase = null, userVisible, reviewers, briefs = {} }) {
+export function initState({ spec, slug, branch, base, userVisible, reviewers, briefs = {} }) {
   return {
     spec,
     slug,
     branch,
     base,
-    // The repository's base branch as configured when this spec began, frozen
-    // beside `base` for the verdict. A spec shipped straight to a base that is
-    // itself named `plan/<slug>` records exactly the base a plan-branch spec
-    // would; this is what still tells the two apart after the setting changes.
-    configuredBase,
     planUserVisible: Boolean(userVisible),
     reviewers,
     // The brief that calibrates each lens, absolute, resolved once here and
@@ -188,6 +183,24 @@ export function initState({ spec, slug, branch, base, configuredBase = null, use
     [GRANT]: null,
     history: []
   };
+}
+
+/**
+ * The plan route this spec was begun on, frozen into its state for the verdict:
+ * the plan branch its train's route recorded, or null for a train that ships
+ * each spec straight to the base. Written once — a state that records it, null
+ * included, keeps what it records whatever it is handed later.
+ *
+ * Kept apart from `initState` so that there is one way in for every state. A
+ * spec begun before the verdict read this has no such key, and it takes it the
+ * same way a new spec does: from the route `train.json` recorded the first time
+ * the train started, which nothing changes afterwards, and never from the
+ * configuration as it is now. Until it is written, the verdict reads the spec
+ * as going straight to the base.
+ */
+export function recordPlanRoute(state, planBranch) {
+  if (Object.hasOwn(state, "planRouteBranch")) return state;
+  return { ...state, planRouteBranch: typeof planBranch === "string" && planBranch.length > 0 ? planBranch : null };
 }
 
 // A fix round and a CI repair both arrive here as "a new candidate was bound",
@@ -663,25 +676,24 @@ export function evaluate(state, config) {
 
   // (a) Where this lands. Nothing reaches the base without a person, and a plan
   // branch is the one target where the plan's own pull request is that person's
-  // look. So anything not confirmed as merging into this plan's own plan branch
-  // waits. The proof is the base recorded when the spec began against the slug
-  // it began under, and against the configured base recorded beside it — never
-  // the route. It fails closed: a missing or empty base, slug or recorded
-  // configured base, another plan's branch, and a configured base that is itself
-  // named like a plan branch all count as straight to the base. The recorded
-  // configured base is the one that decides, because the setting can change
-  // under a spec already running; the current one is checked as well, and can
-  // only ever add a wait.
+  // look. So a candidate merges with nobody asked only when its state confirms
+  // that its pull request merges into this plan's own plan branch, and anything
+  // else waits.
   //
-  // A state with no `configuredBase` key at all was written before the key
-  // existed, by a spec already under way when this rule landed. It is judged by
-  // the slug, the base and the current setting alone, so that it merges as it
-  // would have. A key that is present but not a branch name still fails closed.
+  // The confirmation is read off the state alone, and each part of it was frozen
+  // when the spec began: the base its pull request targets is exactly
+  // `planBranchOf(slug)`, and the plan route recorded beside it names that same
+  // branch. Neither is enough on its own. The base cannot say it, because a
+  // repository whose base branch is itself called `plan/<slug>` records that very
+  // base on a train that goes straight to it; and the configuration cannot say
+  // it, because it can change under a spec already running. So every part has
+  // to be there and agree — anything missing, empty or naming another branch,
+  // however the state came to be that way, counts as straight to the base. The
+  // configured base as it is now is compared as well, and can only add a wait.
   const isBranchName = (value) => typeof value === "string" && value.length > 0;
-  const recordsConfiguredBase = Object.hasOwn(state, "configuredBase");
   const onPlanBranch = isBranchName(state.slug)
     && state.base === planBranchOf(state.slug)
-    && (!recordsConfiguredBase || (isBranchName(state.configuredBase) && state.base !== state.configuredBase))
+    && state.planRouteBranch === state.base
     && !(isBranchName(config?.base) && state.base === config.base);
   if (!onPlanBranch) approvals.push("straight-to-base");
 
@@ -732,7 +744,8 @@ function writeJson(file, value) {
 }
 
 const USAGE = `usage:
-  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--configured-base <branch>] [--force]
+  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--force]
+  gates.mjs plan-route <state.json> [<plan-branch>]
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs grant    <state.json> <rounds-root> <config.json>
@@ -756,6 +769,10 @@ const USAGE = `usage:
 
   \`init\` needs the repository to resolve each lens's brief, and refuses a lens
   nothing calibrates rather than letting a reviewer invent one in step 5.
+
+  \`plan-route\` records the plan branch the train's route names, or none for a
+  train that ships straight to the base, once: a state that records one keeps it.
+  Until it is recorded, \`evaluate\` reads the spec as going straight to the base.
 
   \`landing\` records what the landing check found when \`origin/<base>\` had moved
   under the reviewed candidate: \`{status, baseOid, mergedTree, mergedCommit,
@@ -968,21 +985,17 @@ async function main() {
     }
     const reviewers = (values[6] ?? "").split(",").filter(Boolean);
     const briefs = resolveBriefs(reviewers);
-    // Optional, and nothing is filled in when it is absent: a state without it
-    // is never taken for one merging into its plan branch, so every spec it
-    // carries waits for a person rather than for a guess at the setting.
-    const configuredBaseIndex = values.indexOf("--configured-base");
-    const configuredBase = configuredBaseIndex >= 0 ? values[configuredBaseIndex + 1] || null : null;
     next = initState({
       spec: values[1],
       slug: values[2],
       branch: values[3],
       base: values[4],
-      configuredBase,
       userVisible: values[5] === "true",
       reviewers,
       briefs
     });
+  } else if (action === "plan-route") {
+    next = recordPlanRoute(readJson(values[0]), values[1]);
   } else if (action === "state") {
     const before = readJson(values[0]);
     const limits = values[2] ? readLimits(values[2]) : undefined;

@@ -919,6 +919,18 @@ const routeOf = (ctx) => ctx.train?.route ?? { kind: "base" };
 // after `begin` reads the spec's own `state.base`.
 const landsOn = (ctx) => landingBranch(routeOf(ctx), ctx.config.base);
 
+// The plan route a spec was begun on, frozen into its state for the verdict: the
+// route's plan branch, or none on a train that goes straight to the base. Taken
+// from the route above and never from the configuration, and written once —
+// `gates.mjs` keeps whatever a state already records. `begin` writes it for a
+// new spec; `finish` asks again before it asks for the verdict, which is what
+// gives a spec begun before the verdict read this the same record rather than a
+// wait on a key it could not have written.
+function freezePlanRoute(ctx, id) {
+  const route = routeOf(ctx);
+  node("gates.mjs", ["plan-route", statePath(ctx, id), ...(isPlanRoute(route) ? [route.branch] : [])]);
+}
+
 // A route `judgeTip` settled, written back. After this and after every move of
 // the record, the train in hand is read again from disk: a step that writes the
 // train later — `begin` records the base it read — must not write back a route
@@ -2060,9 +2072,9 @@ async function begin(options) {
   ctx.baseOid = baseOid;
 
   const init = lastJson(node("gates.mjs", [
-    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo,
-    "--configured-base", ctx.config.base
+    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
   ]).stdout);
+  freezePlanRoute(ctx, id);
   let state = readState(ctx, id);
 
   if (reconciled.adopted.has(id)) return finishNext(ctx, id, say);
@@ -5001,6 +5013,7 @@ async function finish(options) {
       return emit({ ...versionStop, pullRequest: state.pr });
     }
   }
+  freezePlanRoute(ctx, id);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
   if (options.approve) {

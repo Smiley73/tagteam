@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  initState, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope,
+  initState, recordPlanRoute, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope,
   budgetTaken, resolveRoles, grantFixRound
 } from "../scripts/gates.mjs";
 import { allocateRound, listRounds } from "../scripts/lib/rounds.mjs";
@@ -30,16 +30,20 @@ const CONFIG = { base: "main" };
 const LIMITS = { fixRounds: 1, ciRepairs: 1 };
 const step = (state, next, limits = LIMITS) => transition(state, next, { limits });
 
-// Every candidate below records its plan's own plan branch as its base unless it
-// says otherwise: that is the one target where a clean candidate merges with
-// nobody asked, so it is where removing one cause shows that cause alone held
-// the verdict. `straight()` is the same candidate aimed at the base, where
+// Every candidate below records its plan's own plan branch as its base, and the
+// plan route that names it, unless it says otherwise: that is the one target
+// where a clean candidate merges with nobody asked, so it is where removing one
+// cause shows that cause alone held the verdict. `straight()` is the same
+// candidate aimed at the base by a train with no plan route, where
 // `straight-to-base` is always there as well.
 const PLAN_BASE = "plan/s";
 
+// A state as `begin` leaves it: initialised, then given the plan route.
+const begun = (fields, planBranch = PLAN_BASE) => recordPlanRoute(initState(fields), planBranch);
+
 function reviewed(overrides = {}) {
-  let state = initState({
-    spec: "01-x", slug: "s", branch: "tagteam/s/01-x", base: PLAN_BASE, configuredBase: "main", userVisible: false,
+  let state = begun({
+    spec: "01-x", slug: "s", branch: "tagteam/s/01-x", base: PLAN_BASE, userVisible: false,
     reviewers: ["correctness"]
   });
   state = { ...state, ...overrides };
@@ -97,11 +101,20 @@ test("a review that is incomplete is not a review that is clean", () => {
 // --- where the candidate lands ---
 //
 // Nothing reaches the base without a person. The verdict knows where a spec
-// lands only from the base its state recorded when it began, compared with the
-// slug it began under, so anything it cannot confirm as this plan's own plan
-// branch is treated as going straight to the base.
+// lands only from its state: the base it recorded when it began, the slug it
+// began under, and the plan route recorded beside them. Anything it cannot
+// confirm from those as this plan's own plan branch is treated as going
+// straight to the base.
 
-const straight = (overrides = {}) => reviewed({ base: "main", ...overrides });
+const straight = (overrides = {}) => reviewed({ base: "main", planRouteBranch: null, ...overrides });
+
+// What a state written before the plan route was recorded looks like: no such
+// key at all.
+const withoutPlanRoute = (state) => {
+  const { planRouteBranch, ...legacy } = state;
+  assert.equal(typeof planRouteBranch, "string", "control: the fixture records one to remove");
+  return legacy;
+};
 
 test("a clean candidate on its plan's own plan branch merges with nobody asked", () => {
   const verdict = evaluate(reviewed(), CONFIG);
@@ -117,14 +130,16 @@ test("a clean candidate that is not confirmed as on its plan branch waits for a 
     ["an empty base", reviewed({ base: "" })],
     ["a base that is not a string", reviewed({ base: ["plan/s"] })],
     ["the base branch", straight()],
-    ["another plan's branch", reviewed({ base: "plan/other" })],
+    ["another plan's branch, on that plan's route", reviewed({ base: "plan/other", planRouteBranch: "plan/other" })],
     ["no slug recorded", reviewed({ slug: undefined })],
     ["an empty slug", reviewed({ slug: "" })],
-    ["a slug that is not a string", reviewed({ slug: 7, base: "plan/7" })],
-    ["a configured base recorded as undefined", reviewed({ configuredBase: undefined })],
-    ["a configured base recorded as null", reviewed({ configuredBase: null })],
-    ["an empty configured base recorded", reviewed({ configuredBase: "" })],
-    ["a configured base recorded that is not a string", reviewed({ configuredBase: ["main"] })]
+    ["a slug that is not a string", reviewed({ slug: 7, base: "plan/7", planRouteBranch: "plan/7" })],
+    ["no plan route recorded at all", withoutPlanRoute(reviewed())],
+    ["a plan route recorded as undefined", reviewed({ planRouteBranch: undefined })],
+    ["a train that recorded no plan route", reviewed({ planRouteBranch: null })],
+    ["an empty plan route", reviewed({ planRouteBranch: "" })],
+    ["another plan's route", reviewed({ planRouteBranch: "plan/other" })],
+    ["a plan route that is not a string", reviewed({ planRouteBranch: ["plan/s"] })]
   ];
   for (const [what, state] of cases) {
     const verdict = evaluate(state, CONFIG);
@@ -138,7 +153,7 @@ test("a clean candidate that is not confirmed as on its plan branch waits for a 
 test("a configured base named like a plan branch is still the base", () => {
   // The slug test alone would wave this through: the recorded base is exactly
   // `plan/<slug>`, and it is also the branch the repository releases from.
-  const state = reviewed({ slug: "release", base: "plan/release" });
+  const state = reviewed({ slug: "release", base: "plan/release", planRouteBranch: "plan/release" });
   assert.equal(evaluate(state, { base: "main" }).ready, true, "control: the same state is ready when it is not the base");
   const verdict = evaluate(state, { base: "plan/release" });
   assert.deepEqual(verdict.approvals, ["straight-to-base"]);
@@ -149,35 +164,60 @@ test("a configured base named like a plan branch is still the base", () => {
 });
 
 test("a spec that began straight to a base named like a plan branch stays there when the setting changes", () => {
-  // Begun on the base route with `plan/release` as the configured base, so the
-  // recorded base is `plan/release` — exactly what a plan-branch spec of the
-  // slug `release` records. Moving the setting to `main` afterwards changes
-  // nothing about where this pull request merges, and no later plan pull
-  // request will put it in front of a person.
-  const state = reviewed({ slug: "release", base: "plan/release", configuredBase: "plan/release" });
+  // Begun on a train with no plan route while the configured base was
+  // `plan/release`, so the recorded base is `plan/release` — exactly what a
+  // plan-branch spec of the slug `release` records. Moving the setting to `main`
+  // afterwards changes nothing about where this pull request merges, and no later
+  // plan pull request will put it in front of a person.
+  const state = reviewed({ slug: "release", base: "plan/release", planRouteBranch: null });
   for (const config of [{ base: "plan/release" }, { base: "main" }, {}, undefined]) {
     const verdict = evaluate(state, config);
     assert.deepEqual(verdict.approvals, ["straight-to-base"], JSON.stringify(config));
     assert.equal(verdict.ready, false, JSON.stringify(config));
   }
-  // The same slug and base begun on a plan route, with `main` configured, is the
-  // plan branch.
-  assert.equal(evaluate({ ...state, configuredBase: "main" }, { base: "main" }).ready, true);
+  // The same slug and base begun on that plan's route, with `main` configured,
+  // is the plan branch.
+  assert.equal(evaluate({ ...state, planRouteBranch: "plan/release" }, { base: "main" }).ready, true);
 });
 
-test("a state written before the configured base was recorded is judged by its slug, base and the setting", () => {
-  // A spec already under way when the configured base began to be recorded has
-  // no such key at all, and a resumed begin does not add one. It merges into its
-  // plan branch as it would have, and the current setting still stops it.
-  const { configuredBase, ...legacy } = reviewed();
-  assert.equal(configuredBase, "main", "control: the fixture records one to remove");
-  assert.equal(Object.hasOwn(legacy, "configuredBase"), false);
-  const verdict = evaluate(legacy, { ...CONFIG, base: "main" });
+test("the plan route is recorded once, and a state that records one keeps it", () => {
+  const fresh = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  assert.equal(Object.hasOwn(fresh, "planRouteBranch"), false, "initState records no route of its own");
+  assert.equal(recordPlanRoute(fresh, PLAN_BASE).planRouteBranch, PLAN_BASE);
+  for (const nothing of [undefined, null, ""]) assert.equal(recordPlanRoute(fresh, nothing).planRouteBranch, null);
+  // Never changed afterwards, whatever it is handed: not by a plan branch
+  // offered to a state that recorded none, and not by another one.
+  assert.equal(recordPlanRoute(recordPlanRoute(fresh, null), PLAN_BASE).planRouteBranch, null);
+  assert.equal(recordPlanRoute(recordPlanRoute(fresh, PLAN_BASE), "plan/other").planRouteBranch, PLAN_BASE);
+  assert.equal(recordPlanRoute(recordPlanRoute(fresh, PLAN_BASE), undefined).planRouteBranch, PLAN_BASE);
+});
+
+test("a state written before the plan route was recorded takes it from the train's route, never from the setting", () => {
+  // A spec already under way when the verdict began to read the plan route has
+  // no such key. Until it is given one it waits, whatever the setting says.
+  const legacy = withoutPlanRoute(reviewed());
+  for (const config of [CONFIG, { base: "plan/s" }, {}, undefined]) {
+    assert.deepEqual(evaluate(legacy, config).approvals, ["straight-to-base"], JSON.stringify(config));
+  }
+
+  // On a plan route, the train's route names its plan branch, and it merges as
+  // a spec begun today would — the user-visible mark it was frozen with included.
+  const onPlan = recordPlanRoute({ ...legacy, planUserVisible: true }, PLAN_BASE);
+  const verdict = evaluate(onPlan, CONFIG);
   assert.deepEqual(verdict.approvals, []);
   assert.equal(verdict.ready, true);
   assert.equal(verdict.needsHuman, false);
-  assert.deepEqual(evaluate(legacy, { ...CONFIG, base: "plan/s" }).approvals, ["straight-to-base"]);
-  assert.deepEqual(evaluate({ ...legacy, base: "plan/other" }, CONFIG).approvals, ["straight-to-base"]);
+
+  // A train that went straight to a base then named `plan/release` has no plan
+  // route to give it. The setting moving to `main` since then does not make it
+  // one, because nothing here reads it to decide.
+  const renamed = withoutPlanRoute(reviewed({ slug: "release", base: "plan/release", planRouteBranch: "plan/release" }));
+  const settled = recordPlanRoute(renamed, null);
+  for (const config of [{ base: "plan/release" }, { base: "main" }, {}, undefined]) {
+    const stopped = evaluate(settled, config);
+    assert.deepEqual(stopped.approvals, ["straight-to-base"], JSON.stringify(config));
+    assert.equal(stopped.ready, false, JSON.stringify(config));
+  }
 });
 
 test("a person's approval of this candidate clears straight-to-base, and of an earlier one does not", () => {
@@ -279,7 +319,7 @@ test("a change to CI is a change to what every other gate is worth", () => {
 });
 
 test("nothing executable having run is not the same as having passed", () => {
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, configuredBase: "main", userVisible: false, reviewers: [] });
+  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "not-applicable" });
@@ -453,7 +493,7 @@ test("both review outcomes converge on verifying before publishing", () => {
 
 test("a repository that waits for CI must have CI evidence recorded", () => {
   const withCi = { ...CONFIG, ciWaitSec: 1800 };
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, configuredBase: "main", userVisible: false, reviewers: [] });
+  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "passed" });
@@ -490,27 +530,32 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).pr.number, 9);
 });
 
-test("init freezes the configured base it is given, and records none when it is given none", async () => {
+test("plan-route records the train's plan branch once, and init records none", async () => {
   const { spawnSync } = await import("node:child_process");
   const os = await import("node:os");
   const fsm = await import("node:fs");
   const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
   const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
-  const init = (file, ...extra) => spawnSync("node", [
-    script, "init", file, "01-x", "s", "b", "plan/s", "false", "correctness", "--repo", root, ...extra
-  ], { encoding: "utf8" });
+  const run = (...args) => spawnSync("node", [script, ...args], { encoding: "utf8" });
+  const init = (file) => run("init", file, "01-x", "s", "b", "plan/s", "false", "correctness", "--repo", root);
+  const read = (file) => JSON.parse(fsm.readFileSync(file, "utf8"));
 
-  const given = path.join(dir, "given.json");
-  assert.equal(init(given, "--configured-base", "main").status, 0);
-  assert.equal(JSON.parse(fsm.readFileSync(given, "utf8")).configuredBase, "main");
+  const onPlan = path.join(dir, "plan.json");
+  assert.equal(init(onPlan).status, 0);
+  assert.equal(Object.hasOwn(read(onPlan), "planRouteBranch"), false);
+  assert.deepEqual(evaluate(read(onPlan), CONFIG).approvals.includes("straight-to-base"), true,
+    "a state with no plan route recorded is taken for one merging into its plan branch");
+  assert.equal(run("plan-route", onPlan, "plan/s").status, 0);
+  assert.equal(read(onPlan).planRouteBranch, "plan/s");
+  assert.equal(run("plan-route", onPlan).status, 0);
+  assert.equal(read(onPlan).planRouteBranch, "plan/s", "asking again without a plan branch took it away");
 
-  // Without it the state can never be taken for one merging into its plan
-  // branch, whatever the setting says later.
-  const none = path.join(dir, "none.json");
-  assert.equal(init(none).status, 0);
-  const state = JSON.parse(fsm.readFileSync(none, "utf8"));
-  assert.equal(state.configuredBase, null);
-  assert.deepEqual(evaluate(state, CONFIG).approvals.includes("straight-to-base"), true);
+  const onBase = path.join(dir, "base.json");
+  assert.equal(init(onBase).status, 0);
+  assert.equal(run("plan-route", onBase).status, 0);
+  assert.equal(read(onBase).planRouteBranch, null);
+  assert.equal(run("plan-route", onBase, "plan/s").status, 0);
+  assert.equal(read(onBase).planRouteBranch, null, "a state that recorded no plan route was given one afterwards");
 });
 
 test("init resolves each lens's brief and freezes it into the state file", async () => {
