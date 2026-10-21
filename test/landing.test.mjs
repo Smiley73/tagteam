@@ -424,7 +424,7 @@ test("the git this needs is named by version, and an unreadable version is not n
 test("a landing record is bound to the candidate it was about, and a bind clears it", () => {
   const candidateOid = "a".repeat(40);
   const baseOid = "b".repeat(40);
-  const state = { ...initState({ spec: "01-a", slug: "demo", branch: BRANCH, base: "main", userVisible: false, reviewers: [] }), candidateOid };
+  const state = { ...initState({ spec: "01-a", slug: "demo", branch: BRANCH, base: "main", reviewers: [] }), candidateOid };
   assert.equal(state.landing, null, "a fresh state carries no landing record");
 
   const recorded = recordLanding(state, candidateOid, { status: "passed", baseOid });
@@ -477,7 +477,7 @@ function stageMerge({ landing, candidateOid, baseMoves = true, approved = true }
   const candidate = candidateOid ?? "a".repeat(40);
   const gate = (status) => ({ status, candidateOid: candidate });
   const state = {
-    spec: "01-a", slug: "demo", branch: BRANCH, base: "main", planUserVisible: false, reviewers: [], briefs: {},
+    spec: "01-a", slug: "demo", branch: BRANCH, base: "main", reviewers: [], briefs: {},
     state: "publishing", baseOid: reviewedBase, candidateOid: candidate, changedPaths: ["app.js"],
     pr: { number: 7, url: "https://example.invalid/7", headOid: candidate },
     gates: {

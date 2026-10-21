@@ -95,7 +95,8 @@ test("a fix unit's document is in spec shape and lists every gating finding and 
     failedVerify: { command: "npm test", logPath: "/s/whole-plan/2/rounds/1/verify/1.log" },
     goalPath: "/p/goal.md", planPath: "/p/plan.md", diffPath: "/s/whole-plan/2/rounds/1/review.diff"
   });
-  assert.match(text, /^---\nid: plan-fix-1\ndepends_on: \[\]\nuser_visible: false\nreviewers: \[\]\n---\n/);
+  assert.match(text, /^---\nid: plan-fix-1\ndepends_on: \[\]\nreviewers: \[\]\n---\n/);
+  assert.doesNotMatch(text, /user_visible/);
   assert.match(text, /- major, b\.js:3: wrong — breaks the add/);
   assert.match(text, /`npm test` failed on the plan's tip\. Its log is \/s\/whole-plan\/2\/rounds\/1\/verify\/1\.log/);
   assert.match(text, /## Out of scope\n\nNothing else changes\./);

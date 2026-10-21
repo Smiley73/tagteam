@@ -134,11 +134,11 @@ export function cleanResultFor(shipDir, tip) {
 const short = (oid) => String(oid ?? "").slice(0, 12);
 
 /**
- * A fix unit's document, in a spec's shape: not user-visible, no dependencies,
- * the default reviewers. Its Outcome lists exactly what the check found that
- * gates — each blocking or major finding with its file, line and detail, and the
- * failing verify command with its log, and any check that failed on the plan's
- * own pull request — and its Out of scope says nothing else changes.
+ * A fix unit's document, in a spec's shape: no dependencies, the default
+ * reviewers. Its Outcome lists exactly what the check found that gates — each
+ * blocking or major finding with its file, line and detail, and the failing
+ * verify command with its log, and any check that failed on the plan's own pull
+ * request — and its Out of scope says nothing else changes.
  */
 export function unitDocument({ id, slug, branch, tip, check, recordPath, findings, failedVerify, failedChecks = null, goalPath, planPath, diffPath }) {
   const where = (finding) => (finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ""}` : "the whole change");
@@ -147,7 +147,6 @@ export function unitDocument({ id, slug, branch, tip, check, recordPath, finding
     "---",
     `id: ${id}`,
     "depends_on: []",
-    "user_visible: false",
     "reviewers: []",
     "---",
     "",

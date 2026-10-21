@@ -191,7 +191,7 @@ function specsInOrder(ctx) {
 }
 
 // A fix unit as the cycle reads a spec, from the document the whole-plan check
-// wrote for it: not user-visible, no dependencies, the default reviewers.
+// wrote for it: no dependencies, the default reviewers.
 function fixUnitSpec(ctx, id) {
   const file = unitDocumentPath(ctx.shipDir, id);
   let text;
@@ -202,7 +202,7 @@ function fixUnitSpec(ctx, id) {
   try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw new Stop(error.message); }
   if (front.id !== id) throw new Stop(`${file} names ${front.id}, not ${id}`);
   return {
-    id, path: file, dependsOn: [], userVisible: false,
+    id, path: file, dependsOn: [],
     reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], fixUnit: true
   };
 }
@@ -2010,7 +2010,7 @@ async function start(options) {
 
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
-    return { id: spec.id, state, lenses: spec.reviewers, userVisible: spec.userVisible };
+    return { id: spec.id, state, lenses: spec.reviewers };
   });
   const first = specs.find((spec) => spec.state !== "merged");
   say.push(`${specs.length} specs in dependency order; ${specs.filter((spec) => spec.state === "merged").length} already merged.`);
@@ -2073,7 +2073,7 @@ async function begin(options) {
   ctx.baseOid = baseOid;
 
   const init = lastJson(node("gates.mjs", [
-    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
+    "init", statePath(ctx, id), id, ctx.slug, branch, lands, spec.reviewers.join(","), "--repo", ctx.repo
   ]).stdout);
   freezePlanRoute(ctx, id);
   let state = readState(ctx, id);

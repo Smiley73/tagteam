@@ -43,7 +43,7 @@ const begun = (fields, planBranch = PLAN_BASE) => recordPlanRoute(initState(fiel
 
 function reviewed(overrides = {}) {
   let state = begun({
-    spec: "01-x", slug: "s", branch: "tagteam/s/01-x", base: PLAN_BASE, userVisible: false,
+    spec: "01-x", slug: "s", branch: "tagteam/s/01-x", base: PLAN_BASE,
     reviewers: ["correctness"]
   });
   state = { ...state, ...overrides };
@@ -181,7 +181,7 @@ test("a spec that began straight to a base named like a plan branch stays there 
 });
 
 test("the plan route is recorded once, and a state that records one keeps it", () => {
-  const fresh = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  const fresh = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, reviewers: [] });
   assert.equal(Object.hasOwn(fresh, "planRouteBranch"), false, "initState records no route of its own");
   assert.equal(recordPlanRoute(fresh, PLAN_BASE).planRouteBranch, PLAN_BASE);
   for (const nothing of [undefined, null, ""]) assert.equal(recordPlanRoute(fresh, nothing).planRouteBranch, null);
@@ -319,7 +319,7 @@ test("a change to CI is a change to what every other gate is worth", () => {
 });
 
 test("nothing executable having run is not the same as having passed", () => {
-  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "not-applicable" });
@@ -351,13 +351,13 @@ test("a pull request opened at the pre-fix head is refused", () => {
 });
 
 test("states advance only along declared edges", () => {
-  const state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: [] });
+  const state = initState({ spec: "01-x", slug: "s", branch: "b", reviewers: [] });
   assert.equal(transition(state, "implementing").state, "implementing");
   assert.throws(() => transition(state, "merged"), /invalid state transition/);
 });
 
 test("binding refuses anything that is not a commit id", () => {
-  const state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: [] });
+  const state = initState({ spec: "01-x", slug: "s", branch: "b", reviewers: [] });
   assert.throws(() => bindCandidate(state, "HEAD", BASE), /candidate OID is required/);
   assert.throws(() => bindCandidate(state, A, ""), /base OID is required/);
 });
@@ -459,7 +459,7 @@ test("a report recorded against an older candidate accounts for nothing here", (
 // --- regressions from the Codex review of this rewrite ---
 
 test("a round that found something reaches publishing through fixing", () => {
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", reviewers: [] });
   for (const next of ["implementing", "verifying", "reviewing", "fixing", "verifying", "publishing", "merged"]) {
     state = step(state, next);
   }
@@ -469,7 +469,7 @@ test("a round that found something reaches publishing through fixing", () => {
 test("a red CI sends the spec back for a full review round", () => {
   // The repair makes a new candidate, and a new candidate is reviewed like any
   // other — publishing -> reviewing is the edge that says so.
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", reviewers: [] });
   for (const next of ["implementing", "verifying", "reviewing", "verifying", "publishing"]) state = step(state, next);
   for (const next of ["reviewing", "fixing", "verifying", "publishing", "merged"]) state = step(state, next);
   assert.equal(state.state, "merged");
@@ -481,7 +481,7 @@ test("both review outcomes converge on verifying before publishing", () => {
   // The clean path sits at `reviewing` and the fixed path at `fixing`; only
   // `verifying` is reachable from both, and publishing from either directly is
   // not declared. The fixed path used to be stranded.
-  const start = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  const start = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", reviewers: [] });
   const walk = (steps) => steps.reduce((state, next) => step(state, next), start);
   assert.equal(walk(["implementing", "verifying", "reviewing", "verifying", "publishing"]).state, "publishing");
   // And nothing reaches publishing any other way: an edge straight from
@@ -493,7 +493,7 @@ test("both review outcomes converge on verifying before publishing", () => {
 
 test("a repository that waits for CI must have CI evidence recorded", () => {
   const withCi = { ...CONFIG, ciWaitSec: 1800 };
-  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "passed" });
@@ -514,7 +514,7 @@ test("a repository that waits for CI must have CI evidence recorded", () => {
 
 test("checks that never started ask a person once, as their own reason, and block nothing", () => {
   const withCi = { ...CONFIG, ciWaitSec: 1800 };
-  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  let state = begun({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "passed" });
@@ -562,7 +562,7 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
   const file = path.join(dir, "state.json");
   const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
-  const init = () => spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
+  const init = () => spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "correctness", "--repo", root], { encoding: "utf8" });
 
   init();
   const advanced = { ...JSON.parse(fsm.readFileSync(file, "utf8")), state: "awaiting-approval", pr: { number: 9 } };
@@ -573,6 +573,44 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).pr.number, 9);
 });
 
+test("a new state carries no user-visible mark, and an older state that has one is left exactly as it was", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const fsm = await import("node:fs");
+  const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
+  const script = path.join(root, "scripts", "gates.mjs");
+  const init = (file) => spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "correctness", "--repo", root], { encoding: "utf8" });
+
+  assert.equal(Object.hasOwn(initState({ spec: "01-x", slug: "s", branch: "b", base: "main", reviewers: [] }), "planUserVisible"), false);
+  const fresh = path.join(dir, "fresh.json");
+  assert.equal(init(fresh).status, 0);
+  assert.equal(Object.hasOwn(JSON.parse(fsm.readFileSync(fresh, "utf8")), "planUserVisible"), false);
+
+  // Stands for a state frozen mid-train before the mark was retired. Nothing
+  // migrates it: init finds it and leaves every byte alone.
+  const old = path.join(dir, "old.json");
+  const frozen = `${JSON.stringify({ ...JSON.parse(fsm.readFileSync(fresh, "utf8")), planUserVisible: true, state: "reviewing" }, null, 2)}\n`;
+  fsm.writeFileSync(old, frozen);
+  const again = init(old);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /"existing":true/);
+  assert.equal(fsm.readFileSync(old, "utf8"), frozen);
+});
+
+test("an init in the old shape, with a user-visible positional, is refused rather than read", async () => {
+  // The positional is gone, so a stray `false` lands where the lens list goes
+  // and is refused as a lens nothing calibrates.
+  const { spawnSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const fsm = await import("node:fs");
+  const file = path.join(fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-")), "state.json");
+  const script = path.join(root, "scripts", "gates.mjs");
+  const run = spawnSync("node", [script, "init", file, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /false/);
+  assert.equal(fsm.existsSync(file), false);
+});
+
 test("plan-route records the train's plan branch once, and init records none", async () => {
   const { spawnSync } = await import("node:child_process");
   const os = await import("node:os");
@@ -580,7 +618,7 @@ test("plan-route records the train's plan branch once, and init records none", a
   const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
   const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
   const run = (...args) => spawnSync("node", [script, ...args], { encoding: "utf8" });
-  const init = (file) => run("init", file, "01-x", "s", "b", "plan/s", "false", "correctness", "--repo", root);
+  const init = (file) => run("init", file, "01-x", "s", "b", "plan/s", "correctness", "--repo", root);
   const read = (file) => JSON.parse(fsm.readFileSync(file, "utf8"));
 
   const onPlan = path.join(dir, "plan.json");
@@ -617,7 +655,7 @@ test("init resolves each lens's brief and freezes it into the state file", async
   const script = path.join(root, "scripts", "gates.mjs");
 
   const run = spawnSync("node", [
-    script, "init", file, "01-x", "s", "b", "main", "false", "financial,correctness", "--repo", dir
+    script, "init", file, "01-x", "s", "b", "main", "financial,correctness", "--repo", dir
   ], { encoding: "utf8" });
   assert.equal(run.status, 0, run.stderr);
 
@@ -644,7 +682,7 @@ test("init refuses a lens nothing calibrates rather than letting step 5 invent i
   const script = path.join(root, "scripts", "gates.mjs");
 
   const run = spawnSync("node", [
-    script, "init", file, "01-x", "s", "b", "main", "false", "telepathy", "--repo", dir
+    script, "init", file, "01-x", "s", "b", "main", "telepathy", "--repo", dir
   ], { encoding: "utf8" });
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /telepathy/);
@@ -652,7 +690,7 @@ test("init refuses a lens nothing calibrates rather than letting step 5 invent i
 
   // And without a repository to look in, it refuses to guess at all.
   const noRepo = spawnSync("node", [
-    script, "init", file, "01-x", "s", "b", "main", "false", "correctness"
+    script, "init", file, "01-x", "s", "b", "main", "correctness"
   ], { encoding: "utf8" });
   assert.notEqual(noRepo.status, 0);
   assert.match(noRepo.stderr, /--repo/);
@@ -699,7 +737,7 @@ test("adoption refuses an open pull request, and one that does not exist", () =>
 test("adoption records which gates had no evidence, rather than implying they passed", () => {
   // The case that motivated this had a null review gate: the owner merged before
   // the re-check finished. Recording `merged` must not quietly suggest otherwise.
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", userVisible: false, reviewers: ["correctness"] });
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", reviewers: ["correctness"] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "verify", A, { status: "passed" });
   const adopted = adoptMerge(withPr(state), asMerged());
@@ -738,7 +776,7 @@ test("adoption refuses a pull request that merged into some other branch", () =>
 // English. These are the first stops that ever existed, so the cases that matter
 // are the ones where a budget quietly comes back.
 
-const fresh = () => initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+const fresh = () => initState({ spec: "01-x", slug: "s", branch: "b", base: "main", reviewers: [] });
 const at = (name, extra = {}) => ({ ...fresh(), state: name, ...extra });
 
 test("a fresh state starts both budgets at zero", () => {
@@ -1033,7 +1071,7 @@ test("gates.mjs state takes the budgeted edge through the CLI with the configure
   const stateFile = path.join(dir, "state.json");
   const configFile = path.join(dir, "config.json");
   fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1 } }));
-  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
+  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "correctness", "--repo", root], { encoding: "utf8" });
 
   const to = (next) => spawnSync("node", [script, "state", stateFile, next, configFile], { encoding: "utf8" });
   const read = () => JSON.parse(fsm.readFileSync(stateFile, "utf8"));
@@ -1071,7 +1109,7 @@ test("gates.mjs round reconciles, allocates and writes the state file in one cal
   const rounds = path.join(dir, "rounds");
   const configFile = path.join(dir, "config.json");
   fsm.writeFileSync(configFile, JSON.stringify({ limits: { fixRounds: 1, ciRepairs: 1 } }));
-  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root], { encoding: "utf8" });
+  spawnSync("node", [script, "init", stateFile, "01-x", "s", "b", "main", "correctness", "--repo", root], { encoding: "utf8" });
 
   const round = (candidate, config = configFile) =>
     spawnSync("node", [script, "round", stateFile, rounds, candidate, config], { encoding: "utf8" });
@@ -1118,13 +1156,13 @@ test("a state file written before briefs were recorded gets them on resume, and 
   const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-resume-"));
   const stateFile = path.join(dir, "state.json");
   const before = {
-    ...initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: ["correctness"] }),
+    ...initState({ spec: "01-x", slug: "s", branch: "b", base: "main", reviewers: ["correctness"] }),
     state: "reviewing"
   };
   delete before.briefs;
   fsm.writeFileSync(stateFile, JSON.stringify(before));
 
-  const argv = [script, "init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root];
+  const argv = [script, "init", stateFile, "01-x", "s", "b", "main", "correctness", "--repo", root];
   const run = spawnSync("node", argv, { encoding: "utf8" });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(JSON.parse(run.stdout).briefsRecorded, true);
@@ -1182,7 +1220,7 @@ function grantFixture({ fixRounds = 2, ciRepairs = 1 } = {}) {
   const limits = { fixRounds, ciRepairs };
   fs.writeFileSync(configFile, JSON.stringify({ limits }));
   const run = (...args) => spawnSync("node", [GATES_SCRIPT, ...args], { encoding: "utf8" });
-  assert.equal(run("init", stateFile, "01-x", "s", "b", "main", "false", "correctness", "--repo", root).status, 0);
+  assert.equal(run("init", stateFile, "01-x", "s", "b", "main", "correctness", "--repo", root).status, 0);
   const ok = (result) => {
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
