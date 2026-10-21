@@ -265,8 +265,9 @@ test("every command that asks a person something points at the Asking rule", () 
   }
 });
 
-test("the configure command asks about both of the settings a person can only get here", () => {
-  const init = read("commands", "configure.md");
+// The numbered questions of configure's *Then ask*, each with its indented
+// continuation lines.
+function thenAskItems(init) {
   const start = init.indexOf("## Then ask");
   assert.ok(start > -1, "configure.md no longer has a Then ask section");
   const section = init.slice(start, init.indexOf("\n## ", start + 1));
@@ -278,6 +279,12 @@ test("the configure command asks about both of the settings a person can only ge
     else break;
   }
   assert.ok(items.length > 4, `only ${items.length} numbered questions were found in Then ask`);
+  return items;
+}
+
+test("the configure command asks about both of the settings a person can only get here", () => {
+  const init = read("commands", "configure.md");
+  const items = thenAskItems(init);
   for (const key of ["escalation", "plan", "effort"]) {
     const where = items.filter((item) => item.includes(`\`${key}\``));
     assert.ok(where.length > 0, `no numbered question in configure.md asks about ${key}`);
@@ -291,6 +298,22 @@ test("the configure command asks about both of the settings a person can only ge
   const jobs = Object.keys(JSON.parse(read("schemas", "config.schema.json")).$defs.jobEffort.properties);
   const effortItem = items.find((item) => item.includes("`effort`"));
   for (const job of jobs) assert.ok(effortItem.includes(`\`${job}\``), `configure.md's effort question never names ${job}`);
+});
+
+// `autoMerge` does nothing, so no question may ask about it, and a configuration
+// that still carries it has to hear that from configure itself: the validator's
+// note never shows there, because configure validates the file it has just
+// written without the key.
+test("configure never asks about autoMerge, and tells a configuration carrying it that planBranch replaced it", () => {
+  const init = read("commands", "configure.md");
+  const asking = thenAskItems(init).filter((item) => item.includes("`autoMerge`"));
+  assert.deepEqual(asking, [], `a numbered question in configure.md names autoMerge:\n${asking.join("\n")}`);
+  const write = init.slice(init.indexOf("## Write"));
+  assert.match(write, /Never write `autoMerge`/, "configure.md does not say the file it writes leaves autoMerge out");
+  const told = write.replace(/\s+/g, " ");
+  assert.match(told, /when it has `autoMerge`, say all of it yourself/, "configure.md does not tell a configuration carrying autoMerge about it");
+  assert.match(told, /no longer does anything/, "configure.md does not say autoMerge does nothing");
+  assert.match(told, /`planBranch` is how specs merge without waiting/, "configure.md does not say planBranch replaced autoMerge");
 });
 
 // The reviewed commit is read out of state.json everywhere except the places
@@ -936,4 +959,263 @@ test("the Codex transport guard fails on the prose as it read before app-server,
     "a session whose transcript is gone is reported repository-wide"
   ];
   for (const text of claudeCode) assert.deepEqual(codexTransportProblems("claude", text), [], `the guard refuses: ${text}`);
+});
+
+// --- who a merge waits for ---
+
+// What tagteam used to say about merging: that a user-visible spec always
+// waited, that `autoMerge` decided whether anything merged unattended, and that
+// a spec merged into the base as soon as its gates allowed. None of it is true
+// any more — only a person's approval or Merge reaches the base, and a plan
+// branch is how specs merge without waiting — and every one of these sentences
+// would send a reader looking for a setting or a mark that decides nothing. Each
+// phrase is distinctive of the old account and matched something in the tree
+// before it was retired; the bare `autoMerge` and "user-visible" are never on
+// the list, because the notice that `autoMerge` does nothing and the exceptions
+// that keep old files valid still need them.
+const RETIRED_MERGE_CLAIMS = [
+  "changes always wait",
+  "always stops for the owner",
+  "stops for the owner before it merges",
+  "whatever `autoMerge` says",
+  "`autoMerge` notwithstanding",
+  "`autoMerge` still decides",
+  "`autoMerge` does not reach",
+  "`autoMerge` and a `ready` verdict",
+  "autoMerge reaches a spec",
+  "makes a spec's verdict ready",
+  "makes every pull request wait",
+  "every pull request waits for approval",
+  "True always waits for approval",
+  "changes something people will see",
+  "waits for you by design",
+  "auto-merge off",
+  "auto-merge is off",
+  "setting `autoMerge`",
+  "set `autoMerge",
+  "as soon as its own gates allow",
+  "merges into the base as soon as it is ready",
+  "merges into `base` as it is ready",
+  "need no human judgement",
+  "need no judgement from you",
+  "merges unattended unless",
+  "the spec is marked user-visible",
+  "the spec is user-visible",
+  "stop for them because they are user-visible",
+  "User-visibility is the plan's judgement"
+];
+
+// Every surface a person or the orchestrator reads, built from directories so
+// that a new command file or script is in scope the day it is added. Scripts are
+// in because a driver's sentence is what a person reads at a stop. `test/` holds
+// the list itself, and `.tagteam/` holds old plans that quote the old account on
+// purpose; neither is read.
+const MERGE_STORY_ROOTS = ["skills", "commands", "prompts", "agents", "schemas", "examples", "scripts"];
+const MERGE_STORY_FILES = ["README.md"];
+
+function filesUnder(dir) {
+  return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? filesUnder(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
+}
+
+// The changelog up to the first entry that shipped the old account, 0.10.6, and
+// nothing below it: that entry and the ones before it describe what each release
+// did at the time, and stay as written. Every newer entry, this release's
+// included, is scanned. A changelog with no such entry is scanned whole.
+const LAST_OLD_ACCOUNT_RELEASE = [0, 10, 6];
+function changelogScanned(text) {
+  for (const match of text.matchAll(/^## (\d+)\.(\d+)\.(\d+)\b/gm)) {
+    const version = match.slice(1, 4).map(Number);
+    const newer = version.findIndex((part, index) => part !== LAST_OLD_ACCOUNT_RELEASE[index]);
+    if (newer === -1 || version[newer] < LAST_OLD_ACCOUNT_RELEASE[newer]) return text.slice(0, match.index);
+  }
+  return text;
+}
+
+function mergeStorySurfaces() {
+  const files = [...MERGE_STORY_FILES, ...MERGE_STORY_ROOTS.flatMap((dir) => filesUnder(dir))].sort();
+  return [
+    ...files.map((file) => [file, read(file)]),
+    ["CHANGELOG.md (entries newer than 0.10.6)", changelogScanned(read("CHANGELOG.md"))]
+  ];
+}
+
+// Whitespace flattened, the gutter of a code comment dropped and a string
+// concatenated across lines joined, so that a claim reworded across a line break,
+// in prose or in a script, is still the claim.
+function flattenForClaims(text) {
+  return text
+    .replace(/\n[ \t]*(?:\/\/+|\*(?![*/]))?[ \t]*/g, "\n")
+    .replace(/\s+/g, " ")
+    .replace(/["'`] \+ ["'`]/g, "");
+}
+
+function retiredMergeClaims(surfaces) {
+  return surfaces.flatMap(([file, text]) => {
+    const flat = flattenForClaims(text);
+    return RETIRED_MERGE_CLAIMS.filter((claim) => flat.includes(claim)).map((claim) => `${file} still says "${claim}"`);
+  });
+}
+
+test("nothing a person or the orchestrator reads still says who a merge waits for the old way", () => {
+  const surfaces = mergeStorySurfaces();
+  const problems = retiredMergeClaims(surfaces);
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the retired-merge-claims guard reads every file under its directories, and the newer changelog entries only", () => {
+  const names = mergeStorySurfaces().map(([file]) => file);
+  for (const dir of MERGE_STORY_ROOTS) {
+    for (const file of filesUnder(dir)) assert.ok(names.includes(file), `${file} is not scanned`);
+  }
+  for (const file of ["README.md", "commands/ship.md", "commands/status.md", "skills/tagteam/SKILL.md", "scripts/ship.mjs",
+    "scripts/merge.mjs", "scripts/gates.mjs", "schemas/config.schema.json", "schemas/spec.schema.json", "prompts/plan-draft.md"]) {
+    assert.ok(names.includes(file), `${file} is not scanned`);
+  }
+  assert.ok(!names.some((file) => file.startsWith("test") || file.startsWith(".tagteam")), names.join("\n"));
+
+  const changelog = read("CHANGELOG.md");
+  const scanned = changelogScanned(changelog);
+  const headings = [...changelog.matchAll(/^## (\d+\.\d+\.\d+)\b/gm)].map(([, version]) => version);
+  assert.ok(headings.length > 1, "CHANGELOG.md has no release entries to cut between");
+  assert.ok(scanned.includes(`## ${headings[0]}`), "the newest changelog entry is not scanned");
+  for (const version of headings) {
+    const [major, minor, patch] = version.split(".").map(Number);
+    const older = major * 1e6 + minor * 1e3 + patch <= 10006;
+    assert.equal(scanned.includes(`## ${version}\n`), !older, `## ${version} is ${older ? "" : "not "}scanned`);
+  }
+
+  // The cut is the one the guard reads by: an old claim in a newer entry fails,
+  // and one in 0.10.6 or earlier does not.
+  const synthetic = "# Changelog\n\n## 0.12.0\n\n- NEW\n\n## 0.10.7\n\n- MIDDLE\n\n## 0.10.6\n\n- OLD\n\n## 0.10.5\n\n- OLDER\n";
+  const claim = "Land it whatever `autoMerge` says.";
+  for (const [slot, fires] of [["NEW", true], ["MIDDLE", true], ["OLD", false], ["OLDER", false]]) {
+    const problems = retiredMergeClaims([["CHANGELOG.md", changelogScanned(synthetic.replace(slot, claim))]]);
+    assert.equal(problems.length > 0, fires, `an old claim in the ${slot} entry ${fires ? "passes" : "fails"}`);
+  }
+});
+
+test("the retired-merge-claims guard fails on each claim wherever it is, and not on what is still true", () => {
+  // Each claim, broken across a line, in a markdown file, a script comment and a
+  // driver sentence concatenated across lines.
+  for (const claim of RETIRED_MERGE_CLAIMS) {
+    const words = claim.split(" ");
+    const broken = words.length > 1 ? `${words.slice(0, 1).join(" ")}\n  ${words.slice(1).join(" ")}` : claim;
+    const texts = [
+      ["commands/new-command.md", `Something before.\n${broken} and after.\n`],
+      ["scripts/new-script.mjs", `// Something before\n// ${broken.replace("\n  ", "\n// ")}\nconst x = 1;\n`],
+      ["scripts/ship.mjs", `const REASONS = {\n  "x": "${words.slice(0, 1).join(" ")} "\n    + "${words.slice(1).join(" ")}"\n};\n`]
+    ];
+    for (const [file, text] of texts) {
+      assert.ok(retiredMergeClaims([[file, text]]).length > 0, `the guard passes "${claim}" in ${file}:\n${text}`);
+    }
+  }
+
+  // A guard over the README and the skill alone would pass while a command file or
+  // a driver sentence still said the old thing.
+  const surfaces = mergeStorySurfaces();
+  const withOld = (file, sentence) => surfaces.map(([name, text]) => [name, name === file ? `${text}\n${sentence}\n` : text]);
+  assert.ok(retiredMergeClaims(withOld("commands/ship.md", "Merge is offered whatever `autoMerge` says.")).length > 0);
+  assert.ok(retiredMergeClaims(withOld("scripts/ship.mjs", '"user-visible": "this changes something people will see, so it waits for you by design",')).length > 0);
+
+  // What is still true, read from where it lives, is not a retired claim.
+  const notice = (/note: autoMerge no longer does anything[\s\S]*?\]/.exec(read("scripts", "validate-json.mjs")) ?? [])[0];
+  assert.ok(notice, "the autoMerge notice was not found in validate-json.mjs");
+  const configProps = JSON.parse(read("schemas", "config.schema.json")).properties;
+  const specProps = JSON.parse(read("schemas", "spec.schema.json")).properties;
+  const changelog = read("CHANGELOG.md");
+  const newest = changelog.slice(changelog.indexOf("\n## "), changelog.indexOf("\n## ", changelog.indexOf("\n## ") + 1));
+  const stillTrue = [
+    ["the autoMerge notice", notice],
+    ["the autoMerge schema description", configProps.autoMerge.description],
+    ["the planBranch schema description", configProps.planBranch.description],
+    ["the user_visible schema description", specProps.user_visible.description],
+    ["the newest changelog entry", newest],
+    ["a stop that is still real", "a reader that fails a second time leaves the review incomplete, and it never merges unattended."]
+  ];
+  for (const [what, text] of stillTrue) {
+    assert.ok(text && text.length > 20, `${what} was not found`);
+    assert.deepEqual(retiredMergeClaims([[what, text]]), [], `the guard fires on ${what}`);
+  }
+});
+
+// The orchestrator's standing permission to merge a `ready` spec without asking.
+// Without it the orchestrator pauses at every plan-branch merge and a plan branch
+// stops being how specs merge without waiting; without its limit it reads as
+// licence to merge onto the base. So each passage has to say both: into the plan
+// branch it rests on `planBranch` being on, and onto the base only a person's
+// approval or Merge authorizes anything. Anchored on a few phrases, never a whole
+// sentence.
+const PERMISSION_PASSAGES = [
+  { file: "commands/ship.md", section: "## Merge or stop", permission: /it merges without asking, and so do you/i },
+  { file: "skills/tagteam/SKILL.md", section: "## Gates", permission: /acts on it without asking/i }
+];
+
+function standingPermissionProblems(file, text, { section, permission }) {
+  const at = text.indexOf(`${section}\n`);
+  if (at === -1) return [`${file} has no ${section} section`];
+  const end = text.indexOf("\n## ", at + section.length);
+  const paragraphs = text.slice(at, end === -1 ? undefined : end).split(/\n\s*\n/).map((paragraph) => paragraph.replace(/\s+/g, " "));
+  const granted = paragraphs.find((paragraph) => permission.test(paragraph));
+  if (!granted) return [`${file} ${section} no longer says the orchestrator merges a ready spec without asking`];
+  const problems = [];
+  if (!/`planBranch` on/.test(granted)) {
+    problems.push(`${file} ${section} grants the merge without asking, but no longer grounds it in the owner turning \`planBranch\` on`);
+  }
+  if (/`autoMerge`/.test(granted)) problems.push(`${file} ${section} still grounds the merge without asking in \`autoMerge\``);
+  if (!paragraphs.some((paragraph) => /only a person's approval or Merge/.test(paragraph) && /\bbase\b/.test(paragraph))) {
+    problems.push(`${file} ${section} no longer says only a person's approval or Merge authorizes a merge onto the base`);
+  }
+  return problems;
+}
+
+test("the orchestrator may merge a ready spec into the plan branch without asking, and onto the base only on a person's word", () => {
+  const problems = PERMISSION_PASSAGES.flatMap((passage) => standingPermissionProblems(passage.file, read(passage.file), passage));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the standing-permission guard fails when the passage, its planBranch ground, or the base rule goes missing", () => {
+  for (const passage of PERMISSION_PASSAGES) {
+    const text = read(passage.file);
+    const flatCase = (mutated, why) => {
+      assert.ok(standingPermissionProblems(passage.file, mutated, passage).length > 0, `${passage.file}: the guard passes ${why}`);
+    };
+    // The whole permission paragraph deleted.
+    const paragraphs = text.split(/\n\s*\n/);
+    const granted = paragraphs.findIndex((paragraph) => passage.permission.test(paragraph.replace(/\s+/g, " ")));
+    assert.ok(granted > -1, `${passage.file} has no permission paragraph to delete`);
+    flatCase(paragraphs.filter((_, index) => index !== granted).join("\n\n"), "with the permission deleted");
+    // The permission kept, its plan-branch ground lost: the regression it exists for.
+    const groundless = paragraphs.map((paragraph, index) =>
+      index === granted ? paragraph.replace(/`planBranch`(\s+)on/g, "`autoMerge`$1set") : paragraph).join("\n\n");
+    assert.notEqual(groundless, text, `${passage.file}'s permission paragraph names no \`planBranch\` ground to remove`);
+    flatCase(groundless, "with the planBranch ground removed");
+    // The rule that the base needs a person deleted.
+    const baseRule = paragraphs.map((paragraph) => paragraph.replace(/only a person's approval or Merge/g, "a ready verdict")).join("\n\n");
+    assert.notEqual(baseRule, text, `${passage.file} has no base rule to remove`);
+    flatCase(baseRule, "with the base rule removed");
+  }
+});
+
+// Where the README and the skill first introduce the plan branch, they say it is
+// the familiar feature branch — before they use the name — and what tagteam does
+// that is particular to it.
+test("the README and the skill introduce the plan branch as the familiar feature branch", () => {
+  const readmeSection = readme.slice(readme.indexOf("### Shipping a plan as one"));
+  const passages = [
+    ["README.md *Shipping a plan as one*", readmeSection.slice(0, readmeSection.indexOf("\n#", 1))],
+    ["skills/tagteam/SKILL.md overview", skill.slice(0, skill.indexOf("\n## "))]
+  ];
+  for (const [where, raw] of passages) {
+    const passage = raw.replace(/\s+/g, " ");
+    const feature = passage.indexOf("feature branch");
+    assert.ok(feature > -1, `${where} never calls the plan branch the familiar feature branch`);
+    const named = passage.search(/plan branch|plan\/<slug>|plan's branch/i);
+    assert.ok(named > -1, `${where} never names the plan branch`);
+    assert.ok(feature < named, `${where} names the plan branch before it says it is the familiar feature branch`);
+    assert.match(passage, /creates it and deletes it/, `${where} does not say tagteam creates and deletes the plan branch`);
+    assert.match(passage, /combined change once/, `${where} does not say the combined change is checked once`);
+  }
+  const firstInSkill = skill.replace(/\s+/g, " ").search(/plan branch|plan\/<slug>/i);
+  assert.ok(skill.replace(/\s+/g, " ").indexOf("feature branch") < firstInSkill, "SKILL.md names the plan branch before its overview introduces it");
 });

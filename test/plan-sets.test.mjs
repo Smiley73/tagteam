@@ -36,10 +36,10 @@ const resume = (ws, session, flags = []) => runScript(ws, "plan.mjs", ["resume",
 
 const PLAN = [
   "# A plan", "", "## Deliverables", "",
-  "| # | spec | delivers | depends on | user-visible |", "|---|------|----------|------------|--------------|",
-  "| 1 | 01-a | a | — | no |", "| 2 | 01-b | b | 01-a | no |", ""
+  "| # | spec | delivers | depends on |", "|---|------|----------|------------|",
+  "| 1 | 01-a | a | — |", "| 2 | 01-b | b | 01-a |", ""
 ].join("\n");
-const spec = (id, depends = "[]") => `---\nid: ${id}\ndepends_on: ${depends}\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nSomething.\n\n## Sign-offs\nNone.\n`;
+const spec = (id, depends = "[]") => `---\nid: ${id}\ndepends_on: ${depends}\nreviewers: []\n---\n\n## Outcome\nSomething.\n\n## Sign-offs\nNone.\n`;
 
 function reviewOut(ws, session = null) {
   stageExplored(ws, session);

@@ -191,7 +191,7 @@ function specsInOrder(ctx) {
 }
 
 // A fix unit as the cycle reads a spec, from the document the whole-plan check
-// wrote for it: not user-visible, no dependencies, the default reviewers.
+// wrote for it: no dependencies, the default reviewers.
 function fixUnitSpec(ctx, id) {
   const file = unitDocumentPath(ctx.shipDir, id);
   let text;
@@ -202,7 +202,7 @@ function fixUnitSpec(ctx, id) {
   try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw new Stop(error.message); }
   if (front.id !== id) throw new Stop(`${file} names ${front.id}, not ${id}`);
   return {
-    id, path: file, dependsOn: [], userVisible: false,
+    id, path: file, dependsOn: [],
     reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], fixUnit: true
   };
 }
@@ -919,6 +919,18 @@ const routeOf = (ctx) => ctx.train?.route ?? { kind: "base" };
 // state is initialised with the branch its train actually builds on; everything
 // after `begin` reads the spec's own `state.base`.
 const landsOn = (ctx) => landingBranch(routeOf(ctx), ctx.config.base);
+
+// The plan route a spec was begun on, frozen into its state for the verdict: the
+// route's plan branch, or none on a train that goes straight to the base. Taken
+// from the route above and never from the configuration, and written once —
+// `gates.mjs` keeps whatever a state already records. `begin` writes it for a
+// new spec; `finish` asks again before it asks for the verdict, which is what
+// gives a spec begun before the verdict read this the same record rather than a
+// wait on a key it could not have written.
+function freezePlanRoute(ctx, id) {
+  const route = routeOf(ctx);
+  node("gates.mjs", ["plan-route", statePath(ctx, id), ...(isPlanRoute(route) ? [route.branch] : [])]);
+}
 
 // A route `judgeTip` settled, written back. After this and after every move of
 // the record, the train in hand is read again from disk: a step that writes the
@@ -1857,17 +1869,21 @@ async function routePreflight(ctx, say) {
 
 // What `start` says about the route, and — for a plan branch not yet confirmed on
 // origin — the branch made. Nothing at all for a train on the base with the
-// setting off: that train ships exactly as it did before routes existed.
+// setting off: that train takes the only route there is, and says nothing about
+// routes. A line
+// that names the base as the route also says each spec will wait for the
+// person's approval, which is what going straight to the base means now.
 async function routeLines(ctx, decided) {
   const route = routeOf(ctx);
   const base = ctx.config.base;
   if (!isPlanRoute(route)) {
     if (ctx.config.planBranch !== true) return [];
+    const waits = `Each spec will wait for your approval before it merges into ${base}.`;
     if (decided.why === "under-way") {
-      return [`planBranch is on, but this plan already had a spec under way before it recorded a route, so it keeps shipping each spec straight to ${base}.`];
+      return [`planBranch is on, but this plan already had a spec under way before it recorded a route, so it keeps shipping each spec straight to ${base}. ${waits}`];
     }
-    if (decided.why === "one-spec") return [`planBranch is on, but this plan has one spec, so it ships straight to ${base}: there is nothing to collect.`];
-    return [`This plan recorded shipping each spec straight to ${base} when it first started, and keeps doing so; planBranch applies to plans that have not started yet.`];
+    if (decided.why === "one-spec") return [`planBranch is on, but this plan has one spec, so it ships straight to ${base}: there is nothing to collect. ${waits}`];
+    return [`This plan recorded shipping each spec straight to ${base} when it first started, and keeps doing so; planBranch applies to plans that have not started yet. ${waits}`];
   }
   const lines = [];
   if (!route.tipOid) {
@@ -1998,7 +2014,7 @@ async function start(options) {
 
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
-    return { id: spec.id, state, lenses: spec.reviewers, userVisible: spec.userVisible };
+    return { id: spec.id, state, lenses: spec.reviewers };
   });
   const first = specs.find((spec) => spec.state !== "merged");
   say.push(`${specs.length} specs in dependency order; ${specs.filter((spec) => spec.state === "merged").length} already merged.`);
@@ -2061,8 +2077,9 @@ async function begin(options) {
   ctx.baseOid = baseOid;
 
   const init = lastJson(node("gates.mjs", [
-    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
+    "init", statePath(ctx, id), id, ctx.slug, branch, lands, spec.reviewers.join(","), "--repo", ctx.repo
   ]).stdout);
+  freezePlanRoute(ctx, id);
   let state = readState(ctx, id);
 
   if (reconciled.adopted.has(id)) return finishNext(ctx, id, say);
@@ -3905,10 +3922,10 @@ async function planCollect(options) {
 //   7  the dialog: what lands, every result with the tip it is for, and Merge
 //      only when every one is for this tip and none fails
 //
-// Nothing here reads `autoMerge` or asks `evaluate`: `autoMerge: true` makes a
-// spec's verdict ready, and `finish` merges a spec on ready. The plan's merge has
-// one authority, a person's Merge for the tip in front of them, and `merge.mjs`
-// re-reads that and every result itself before it merges anything.
+// Nothing here asks `evaluate`: a spec's verdict, ready or approved, authorises
+// that spec's merge and never the plan's. The plan's merge has one authority, a
+// person's Merge for the tip in front of them, and `merge.mjs` re-reads that and
+// every result itself before it merges anything.
 
 const short = (oid) => String(oid ?? "").slice(0, 12);
 const TITLE = /^[A-Za-z0-9 ._:-]{1,70}$/;
@@ -4594,10 +4611,10 @@ function stoppedCheckNote(ctx, check) {
 
 /**
  * The dialog: what lands, every result with the commit it is for, and the
- * three answers. Merge is offered only when nothing withholds it, whatever
- * `autoMerge` says. With `--approve` and nothing withholding, the person's Merge
- * is recorded for this tip and the plan merges; with anything withholding,
- * nothing is recorded — no approval clears a blocker.
+ * three answers. Merge is offered only when nothing withholds it, and no spec's
+ * verdict stands in for it. With `--approve` and nothing withholding, the
+ * person's Merge is recorded for this tip and the plan merges; with anything
+ * withholding, nothing is recorded — no approval clears a blocker.
  */
 async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []) {
   const route = routeOf(ctx);
@@ -4848,11 +4865,11 @@ const REASONS = {
   "continuous-integration-not-recorded": "this repository waits for checks and none were recorded",
   "continuous-integration-inconclusive": "the checks proved nothing either way",
   "continuous-integration-not-started": "CI never started: no check appeared on the pull request within the start wait (ciStartWaitSec), so nothing was proven either way",
-  "user-visible": "this changes something people will see, so it waits for you by design",
+  "straight-to-base": "this merges straight into the base branch, and everything that lands there waits for your approval; "
+    + "that is the normal wait for it, not a sign that anything is wrong",
   "workflow-change": "it changes the CI workflows, which every later gate depends on",
   "work-not-accounted-for": "the agent that wrote this never confirmed it finished what it was given",
-  "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one",
-  "auto-merge-disabled": "auto-merge is off in this repository's configuration"
+  "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one"
 };
 
 // What moves a blocker: the step that records it, run again against this commit,
@@ -5092,6 +5109,7 @@ async function finish(options) {
       return emit({ ...versionStop, pullRequest: state.pr });
     }
   }
+  freezePlanRoute(ctx, id);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
   if (options.approve) {

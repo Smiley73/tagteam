@@ -14,7 +14,6 @@ Write exactly one file, at the path you are given.
 ---
 id: 03-recovery-ui
 depends_on: [02-recovery-api]
-user_visible: true
 reviewers: [experience]
 ---
 
@@ -29,11 +28,7 @@ reviewers: [experience]
 
 `id` matches the file name without `.md`. `depends_on` names spec ids that must
 be merged first — copy them from the plan's table, and add one only if you found
-a real dependency the plan missed. `user_visible` copies the plan's judgement;
-change it only when you are sure the plan was wrong — a surface it missed that a
-person will plainly see, or a "yes" for something no person will ever notice.
-Unsure is not yes: a user-visible spec always stops for the owner before it
-merges. `reviewers` names only the lenses this spec needs *beyond* the
+a real dependency the plan missed. `reviewers` names only the lenses this spec needs *beyond* the
 configured default set, or a lens prefixed with `-` to drop a default that does
 not apply (a docs-only spec has nothing for `code-quality` to say). Leave it
 `[]` when the defaults are right, which is most of the time.

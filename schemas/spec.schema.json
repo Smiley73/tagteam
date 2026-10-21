@@ -3,7 +3,7 @@
   "title": "The front matter of one spec file",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "depends_on", "user_visible", "reviewers"],
+  "required": ["id", "depends_on", "reviewers"],
   "properties": {
     "id": {
       "type": "string",
@@ -17,7 +17,7 @@
     },
     "user_visible": {
       "type": "boolean",
-      "description": "True when a person using the product would notice this change. True always waits for approval before merging."
+      "description": "Retired. Accepted only so that specs written before it was retired still validate; its value is ignored."
     },
     "reviewers": {
       "type": "array",

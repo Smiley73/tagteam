@@ -32,6 +32,13 @@ function cells(line) {
 
 const isSeparator = (line) => /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(line) && line.includes("-");
 
+// A plan drafted before the user-visible mark was retired still has a column for
+// it. That column is dropped as the table is read, so nothing downstream — not
+// even the row a spec writer is handed — can tell an old plan from a new one.
+// Matched by a header naming visibility and nothing looser: a header that merely
+// contains "ui", like "build" or "guidance", is an ordinary column and stays.
+const isRetiredMark = (header) => /visib/.test(header);
+
 export function readDeliverables(planPath) {
   const resolved = path.resolve(planPath);
   let text;
@@ -62,7 +69,9 @@ export function readDeliverables(planPath) {
       header = parsed.map((cell) => cell.toLocaleLowerCase());
       continue;
     }
-    rows.push(Object.fromEntries(header.map((key, position) => [key, parsed[position] ?? ""])));
+    rows.push(Object.fromEntries(header
+      .map((key, position) => [key, parsed[position] ?? ""])
+      .filter(([key]) => !isRetiredMark(key))));
   }
   if (!header) throw new Error(`the Deliverables section of ${path.basename(resolved)} holds no table`);
   if (rows.length === 0) throw new Error(`the Deliverables table of ${path.basename(resolved)} holds no rows`);
@@ -84,12 +93,10 @@ export function readDeliverables(planPath) {
     const dependsOn = /^(—|-|none|n\/a)?$/i.test(dependsRaw.trim())
       ? []
       : dependsRaw.split(/[,;]/).map((entry) => entry.replace(/`/g, "").trim()).filter(Boolean);
-    const visible = column(row, "user-visible", "visible", "ui").trim().toLocaleLowerCase();
     return {
       id: spec,
       delivers: column(row, "deliver", "what"),
       dependsOn,
-      userVisible: ["yes", "true", "y"].includes(visible),
       row: Object.entries(row).map(([key, value]) => `${key}: ${value}`).join(" · ")
     };
   });

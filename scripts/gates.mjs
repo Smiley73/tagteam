@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { planBranchOf } from "./lib/plan-route.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
 
@@ -148,13 +149,12 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-export function initState({ spec, slug, branch, base, userVisible, reviewers, briefs = {} }) {
+export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) {
   return {
     spec,
     slug,
     branch,
     base,
-    planUserVisible: Boolean(userVisible),
     reviewers,
     // The brief that calibrates each lens, absolute, resolved once here and
     // frozen for the whole spec — the same treatment `reviewers` gets, and for
@@ -182,6 +182,24 @@ export function initState({ spec, slug, branch, base, userVisible, reviewers, br
     [GRANT]: null,
     history: []
   };
+}
+
+/**
+ * The plan route this spec was begun on, frozen into its state for the verdict:
+ * the plan branch its train's route recorded, or null for a train that ships
+ * each spec straight to the base. Written once — a state that records it, null
+ * included, keeps what it records whatever it is handed later.
+ *
+ * Kept apart from `initState` so that there is one way in for every state. A
+ * spec begun before the verdict read this has no such key, and it takes it the
+ * same way a new spec does: from the route `train.json` recorded the first time
+ * the train started, which nothing changes afterwards, and never from the
+ * configuration as it is now. Until it is written, the verdict reads the spec
+ * as going straight to the base.
+ */
+export function recordPlanRoute(state, planBranch) {
+  if (Object.hasOwn(state, "planRouteBranch")) return state;
+  return { ...state, planRouteBranch: typeof planBranch === "string" && planBranch.length > 0 ? planBranch : null };
 }
 
 // A fix round and a CI repair both arrive here as "a new candidate was bound",
@@ -659,12 +677,28 @@ export function evaluate(state, config) {
     else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
-  // (a) User-visible. This is the plan's judgement, made per spec and approved by
-  // a person, and raised by the spec writer if writing the spec revealed a
-  // surface the plan missed. There is deliberately no diff-derived signal: a
-  // reliable one needs per-project path conventions, and an unreliable one
-  // reading as authoritative is worse than none.
-  if (state.planUserVisible) approvals.push("user-visible");
+  // (a) Where this lands. Nothing reaches the base without a person, and a plan
+  // branch is the one target where the plan's own pull request is that person's
+  // look. So a candidate merges with nobody asked only when its state confirms
+  // that its pull request merges into this plan's own plan branch, and anything
+  // else waits.
+  //
+  // The confirmation is read off the state alone, and each part of it was frozen
+  // when the spec began: the base its pull request targets is exactly
+  // `planBranchOf(slug)`, and the plan route recorded beside it names that same
+  // branch. Neither is enough on its own. The base cannot say it, because a
+  // repository whose base branch is itself called `plan/<slug>` records that very
+  // base on a train that goes straight to it; and the configuration cannot say
+  // it, because it can change under a spec already running. So every part has
+  // to be there and agree — anything missing, empty or naming another branch,
+  // however the state came to be that way, counts as straight to the base. The
+  // configured base as it is now is compared as well, and can only add a wait.
+  const isBranchName = (value) => typeof value === "string" && value.length > 0;
+  const onPlanBranch = isBranchName(state.slug)
+    && state.base === planBranchOf(state.slug)
+    && state.planRouteBranch === state.base
+    && !(isBranchName(config?.base) && state.base === config.base);
+  if (!onPlanBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
@@ -688,7 +722,6 @@ export function evaluate(state, config) {
   if (verify?.status === "not-applicable" && (!ci || ci.status === "not-run" || ci.status === "not-started")) {
     approvals.push("no-executable-evidence");
   }
-  if (config?.autoMerge === false) approvals.push("auto-merge-disabled");
 
   const uniqueApprovals = [...new Set(approvals)];
   const uniqueBlockers = [...new Set(blockers)];
@@ -714,7 +747,8 @@ function writeJson(file, value) {
 }
 
 const USAGE = `usage:
-  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--force]
+  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <lens,lens,...> --repo <repo> [--force]
+  gates.mjs plan-route <state.json> [<plan-branch>]
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs grant    <state.json> <rounds-root> <config.json>
@@ -738,6 +772,10 @@ const USAGE = `usage:
 
   \`init\` needs the repository to resolve each lens's brief, and refuses a lens
   nothing calibrates rather than letting a reviewer invent one in step 5.
+
+  \`plan-route\` records the plan branch the train's route names, or none for a
+  train that ships straight to the base, once: a state that records one keeps it.
+  Until it is recorded, \`evaluate\` reads the spec as going straight to the base.
 
   \`landing\` records what the landing check found when \`origin/<base>\` had moved
   under the reviewed candidate: \`{status, baseOid, mergedTree, mergedCommit,
@@ -948,17 +986,18 @@ async function main() {
       })}\n`);
       return;
     }
-    const reviewers = (values[6] ?? "").split(",").filter(Boolean);
+    const reviewers = (values[5] ?? "").split(",").filter(Boolean);
     const briefs = resolveBriefs(reviewers);
     next = initState({
       spec: values[1],
       slug: values[2],
       branch: values[3],
       base: values[4],
-      userVisible: values[5] === "true",
       reviewers,
       briefs
     });
+  } else if (action === "plan-route") {
+    next = recordPlanRoute(readJson(values[0]), values[1]);
   } else if (action === "state") {
     const before = readJson(values[0]);
     const limits = values[2] ? readLimits(values[2]) : undefined;

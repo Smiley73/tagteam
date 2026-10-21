@@ -13,7 +13,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, ship, write, outputOf, arriveAll, findings, major, resultOf, onOrigin, pullsOf, trainOf, setTrainRoute,
   A_CHANGE, B_CHANGE, MAIN_ADD, BOTH_ADD, commitToMain, recordOf, conflictedLine, resolvedReport, stagePlan, stageMerged,
-  reviewWholePlan, shipUnit, shipThrough, unitStateOf } from "./ship-stage.mjs";
+  reviewWholePlan, shipUnit, shipThrough, unitStateOf, approveFinish } from "./ship-stage.mjs";
 
 const PLAN_BODY = "## Summary\nAdd and double.\n## What you can now do\nSubtract, and double a number.\n## Risk\nnothing known\n";
 const landingRecordOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "plan-landing", "record.json"), "utf8"));
@@ -671,7 +671,7 @@ test("a candidate that changes a version line and got past the snapshot is stopp
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("unchanged elsewhere: with the setting off, and on a one-spec plan, a spec that raises the version ships as before, with no version commit and no stop", () => {
+test("unchanged elsewhere: with the setting off, and on a one-spec plan, a spec that raises the version ships as before, with no version commit and no version stop", () => {
   for (const options of [{ planBranch: false }, { planBranch: true, specs: 1 }]) {
     const staged = stagePlan(options);
     const { dir, repo, plan, shipDir, origin, configPath } = staged;
@@ -682,7 +682,10 @@ test("unchanged elsewhere: with the setting off, and on a one-spec plan, a spec 
     assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
     const shipped = shipThrough(staged, "01-a", { "app.js": A_CHANGE, ...manifests("0.1.1") });
     assert.equal(shipped.finished.status, 0, shipped.finished.stderr);
-    assert.equal(shipped.finished.json.ask, undefined, shipped.finished.stdout);
+    // It lands on the base, so it waits for a person, and for nothing else.
+    assert.deepEqual(shipped.finished.json.reasons, ["straight-to-base"], shipped.finished.stdout);
+    const approved = approveFinish(plan, "01-a", staged.env);
+    assert.equal(approved.json.ask, undefined, approved.stdout);
     const main = onOrigin(origin, "main");
     assert.deepEqual(linesAt(origin, main), ["0.1.1", "0.1.1", "0.1.1"], "the spec's own increase did not land as the repository's habit has it");
     assert.equal(git(origin, "log", "-1", "--format=%s", main), "Ship 01-a", "the ship made a commit of its own on the base");
@@ -692,7 +695,7 @@ test("unchanged elsewhere: with the setting off, and on a one-spec plan, a spec 
 
 // --- two plans ------------------------------------------------------------------------
 
-const OTHER_SPEC = (id, deps) => `---\nid: ${id}\ndepends_on: [${deps}]\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\n${id} of another plan.\n`;
+const OTHER_SPEC = (id, deps) => `---\nid: ${id}\ndepends_on: [${deps}]\nreviewers: []\n---\n\n## Outcome\n${id} of another plan.\n`;
 
 // Two plans in one repository, both on the plan route with the same version
 // lines: `demo` (B) with both specs merged into its branch, and `other` (A),

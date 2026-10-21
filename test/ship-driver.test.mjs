@@ -19,7 +19,7 @@ import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET, lastJson } from "../scripts/s
 import { projectDirectoryFor } from "../scripts/usage.mjs";
 import { root, git, stage, ship, write, outputOf, arrive, arriveAll, findings, major, quietPath,
   mergingEnv, driveToPublishable, resultOf, stagePlan, ghCalls, pullsOf, shipThrough, A_CHANGE,
-  assertEffort, sessionsFor } from "./ship-stage.mjs";
+  assertEffort, sessionsFor, approveFinish } from "./ship-stage.mjs";
 
 const A = "a".repeat(40);
 
@@ -665,11 +665,13 @@ test("a fix round whose report is refused reruns into the same round, is verifie
 
   // The verdict carries a non-empty approvals array — the round has no account,
   // which is right — and that alone used to crash finish. Verification is not
-  // among the reasons the spec stops.
+  // among the reasons the spec stops. A one-spec plan lands on the base, so the
+  // person's wait for that is the one other reason.
   const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
   assert.equal(finish.status, 0, finish.stderr);
-  assert.deepEqual(finish.json.reasons, ["work-not-accounted-for"], "the only reason to stop is the account the fixer never gave");
-  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["work-not-accounted-for"]]);
+  assert.deepEqual(finish.json.reasons, ["straight-to-base", "work-not-accounted-for"],
+    "the only reasons to stop are where it lands and the account the fixer never gave");
+  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["straight-to-base", "work-not-accounted-for"]]);
   assert.match(finish.json.ask, /never confirmed it finished/);
   assert.match(finish.json.ask, /--approve/, "nothing is blocked, so approving is offered: evaluate honours it");
   assert.equal(finish.json.unaccounted.length, 1);
@@ -1205,7 +1207,10 @@ const GATES = path.join(root, "scripts", "gates.mjs");
 // findings anywhere. `publish` needs `gh` and this suite has no stub for one, so
 // the two state edges it would take are taken through `gates.mjs` itself —
 // nothing else about the spec differs from a published one, and `finish` reads
-// the gates rather than the state.
+// the gates rather than the state. A one-spec plan lands on the base, so a
+// person's approval of the candidate is among those gates: these tests are about
+// what the landing check does after the verdict, and without it they would stop
+// at the verdict instead.
 function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
   const { repo, plan, shipDir } = staged;
   if (verifyCommand) {
@@ -1239,6 +1244,10 @@ function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
     const moved = spawnSync(process.execPath, [GATES, "state", path.join(shipDir, "01-a", "state.json"), next], { encoding: "utf8" });
     assert.equal(moved.status, 0, moved.stderr);
   }
+  const approval = path.join(shipDir, "01-a", "human.json");
+  write(approval, { approved: true, approvedBy: "owner@example.com", approvedAt: new Date().toISOString(), note: "approved in the test" });
+  const approved = spawnSync(process.execPath, [GATES, "record", path.join(shipDir, "01-a", "state.json"), "human", oid, approval], { encoding: "utf8" });
+  assert.equal(approved.status, 0, approved.stderr);
   return { worktree, state, oid };
 }
 
@@ -2496,7 +2505,7 @@ function addPlan(repo, slug, id, outcome) {
   const plan = path.join(repo, ".tagteam", "plans", slug);
   fs.mkdirSync(path.join(plan, "specs"), { recursive: true });
   fs.writeFileSync(path.join(plan, "specs", `${id}.md`),
-    `---\nid: ${id}\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
+    `---\nid: ${id}\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
   fs.writeFileSync(path.join(plan, "approved.json"),
     JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug, specs: [id] }));
   return { slug, plan, shipDir: path.join(repo, ".tagteam", "ships", slug) };
@@ -2589,8 +2598,8 @@ test("end removes the worktree only when this plan's lock was still this run's t
 
 // The demonstration this whole change is for: two trains in one repository, both
 // to their merge. Ship A merges; ship B's already-reviewed commit then merges on
-// a base that moved under it, with no new review round, no new commit and no
-// person.
+// a base that moved under it, with no new review round, no new commit and
+// nothing asked of a person beyond the approval every merge into the base takes.
 test("two ships in one repository both merge, and the second spends no round on the base the first moved", () => {
   const staged = stage();
   const { dir, repo, plan } = staged;
@@ -2623,13 +2632,13 @@ test("two ships in one repository both merge, and the second spends no round on 
   }
 
   const before = { candidate: b.state().candidateOid, rounds: rounds({ ...second, id: "01-b" }), tip: git(b.worktree, "rev-parse", "HEAD") };
-  const mergedA = ship("finish", plan, ["--spec", "01-a"], env);
+  const mergedA = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], env);
   assert.equal(mergedA.status, 0, mergedA.stderr);
   assert.equal(mergedA.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(mergedA.json.ask ?? "")}`);
   assert.equal(a.state().state, "merged");
   assert.match(show("app.js"), /export const sub/, "the base did not take A's change");
 
-  const mergedB = ship("finish", second.plan, ["--spec", "01-b"], env);
+  const mergedB = ship("finish", second.plan, ["--spec", "01-b", "--approve", "owner@example.com"], env);
   assert.equal(mergedB.status, 0, mergedB.stderr);
   assert.equal(mergedB.json.ask, undefined, `01-b stopped for a person: ${JSON.stringify(mergedB.json.ask ?? "")}`);
   assert.equal(b.state().state, "merged");
@@ -2691,7 +2700,8 @@ test("an agent that ran at another effort is named in finish's say, and the spec
   assert.ok(count >= 4, "the spec sent out fewer agents than its route does");
 
   assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", body], env).status, 0);
-  const finish = ship("finish", plan, ["--spec", "01-a"], env);
+  // A one-spec plan lands on the base, so the person's approval comes with it.
+  const finish = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], env);
   assert.equal(finish.status, 0, finish.stderr);
   assert.equal(finish.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(finish.json.ask ?? "")}`);
   assert.equal(state().state, "merged");
@@ -2723,7 +2733,7 @@ test("the landing check's fetch waits on the primary checkout's mutex rather tha
   // `withPrimaryGitLock` resolves the repository the way `repoOf` does, so this
   // is the same lock path the driver and `merge.mjs` take.
   const held = await acquireLock(path.join(fs.realpathSync(repo), ".tagteam", "locks"), "primary-git.lock");
-  const blocked = ship("finish", plan, ["--spec", "01-a"], { ...env, TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1500" });
+  const blocked = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], { ...env, TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1500" });
   held.release();
   assert.notEqual(blocked.status, 0, "finish fetched the primary checkout while another ship held its mutex");
   assert.match(blocked.stderr, /timed out waiting .*for lock git in/);
@@ -2731,7 +2741,7 @@ test("the landing check's fetch waits on the primary checkout's mutex rather tha
   assert.notEqual(a.state().state, "merged");
 
   // Nothing is spent by the wait: with the mutex free, the same finish merges.
-  const merged = ship("finish", plan, ["--spec", "01-a"], env);
+  const merged = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], env);
   assert.equal(merged.status, 0, merged.stderr);
   assert.equal(merged.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(merged.json.ask ?? "")}`);
   assert.equal(a.state().state, "merged");
@@ -3682,7 +3692,8 @@ test("checks that appear only after an empty first answer are waited for when th
 
   const finished = ship("finish", staged.plan, ["--spec", "01-a"], env);
   assert.equal(finished.status, 0, finished.stderr);
-  assert.deepEqual(finished.json.approvals, ["workflow-change"], "only the workflow change stops it, and no CI reason");
+  // A one-spec plan lands on the base, so the person's wait for that stands beside it.
+  assert.deepEqual(finished.json.approvals, ["straight-to-base", "workflow-change"], "only the workflow change and the base stop it, and no CI reason");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -3708,7 +3719,8 @@ test("checks that never start within the start wait stop for a person, spend no 
   const stopped = ship("finish", staged.plan, ["--spec", "01-a"], env);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.deepEqual(stopped.json.blockers, []);
-  assert.deepEqual(stopped.json.approvals, ["continuous-integration-not-started"]);
+  // A one-spec plan lands on the base, so the person's wait for that stands beside it.
+  assert.deepEqual(stopped.json.approvals, ["continuous-integration-not-started", "straight-to-base"]);
   assert.ok(!stopped.json.approvals.includes("continuous-integration-inconclusive"), "one reason, not two");
   assert.match(stopped.json.ask, /CI never started: no check appeared on the pull request within 1 second, the start wait ciStartWaitSec gave it/);
   assert.doesNotMatch(stopped.json.ask, /300/);
@@ -3755,12 +3767,15 @@ test("no start wait without a pull-request workflow, with ciStartWaitSec 0, or w
     assert.equal(checksAsked(env), asked, `${name}: gh pr checks was asked ${checksAsked(env)} times`);
     assert.doesNotMatch(published.json.say.join("\n"), /for checks to start/, `${name}: a start wait was announced`);
     const finished = ship("finish", staged.plan, ["--spec", "01-a"], env);
+    // A one-spec plan lands on the base, so each stops for that as well.
     if (asked === 0) {
       assert.equal(state().gates.ci ?? null, null, `${name}: a CI result was recorded`);
-      assert.equal(state().state, "merged", `${name}: ${finished.stdout}`);
+      assert.deepEqual(finished.json.approvals, ["straight-to-base"], `${name}: ${finished.stdout}`);
+      approveFinish(staged.plan, "01-a", env);
+      assert.equal(state().state, "merged", `${name}: not merged once approved`);
     } else {
       assert.equal(state().gates.ci.status, "not-run", `${name}: today's result`);
-      assert.deepEqual(finished.json.approvals, ["continuous-integration-inconclusive"], `${name}: today's stop`);
+      assert.deepEqual(finished.json.approvals, ["continuous-integration-inconclusive", "straight-to-base"], `${name}: today's stop`);
     }
     fs.rmSync(dir, { recursive: true, force: true });
   }
