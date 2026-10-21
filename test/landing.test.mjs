@@ -478,6 +478,7 @@ function stageMerge({ landing, candidateOid, baseMoves = true, approved = true }
   git(repo, "init", "-q", "-b", "main", ".");
   git(repo, "config", "user.email", "t@example.com");
   git(repo, "config", "user.name", "t");
+  git(repo, "config", "commit.gpgsign", "false");
   fs.writeFileSync(path.join(repo, "app.js"), "one\n");
   git(repo, "add", "-A");
   git(repo, "commit", "-qm", "base");

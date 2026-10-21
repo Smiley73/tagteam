@@ -394,7 +394,7 @@ export function commitByHand({ dir, origin }, branch, { push = true, from = bran
   git(clone, "checkout", "-q", "-B", branch, `origin/${from}`);
   fs.writeFileSync(path.join(clone, `hand-${handCount}.txt`), `by hand ${handCount}\n`);
   git(clone, "add", "-A");
-  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "commit", "-q", "-m", `by hand ${handCount}`);
+  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "-c", "commit.gpgsign=false", "commit", "-q", "-m", `by hand ${handCount}`);
   const oid = git(clone, "rev-parse", "HEAD");
   const pushIt = () => git(clone, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
   if (push) pushIt();
@@ -527,7 +527,7 @@ export function mergeBaseIn({ dir, origin, shipDir }) {
   const clone = path.join(dir, `merge-in-${mergeIns}`);
   git(dir, "clone", "-q", origin, clone);
   git(clone, "checkout", "-q", "-B", "plan/demo", "origin/plan/demo");
-  git(clone, "-c", "user.email=s@example.com", "-c", "user.name=s", "merge", "--no-ff", "-q", "-m", "Merge main into plan/demo", "origin/main");
+  git(clone, "-c", "user.email=s@example.com", "-c", "user.name=s", "-c", "commit.gpgsign=false", "merge", "--no-ff", "-q", "-m", "Merge main into plan/demo", "origin/main");
   const oid = git(clone, "rev-parse", "HEAD");
   setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, pendingOid: oid } }));
   git(clone, "push", "-q", "origin", "HEAD:refs/heads/plan/demo");
