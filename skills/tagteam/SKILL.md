@@ -177,10 +177,13 @@ Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** 
 tell the person to run `/tagteam:configure` and stop. No key but one has a
 fallback in a script, so an older configuration is incomplete. The one is
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the
-version-10 files written before it existed stay current. Configure carries a version-9
-file forward: every value it holds is offered back, and version 10's two keys,
-`planBranch` and `versionFiles`, are asked about — off and empty change nothing
-about how a plan ships. Anything older is a different shape and is replaced.
+version-10 files written before it existed stay current. `autoMerge` is the one
+key the schema accepts without requiring and without a fallback, because nothing
+reads it: it stays declared so the version-10 files that carry it stay valid and
+current. Configure carries a version-9 file forward: every value it holds but
+`autoMerge` is offered back, and version 10's two keys, `planBranch` and
+`versionFiles`, are asked about — off and empty change nothing about how a plan
+ships. Anything older is a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -194,7 +197,7 @@ about how a plan ships. Anything older is a different shape and is replaced.
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
 | `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |
-| `autoMerge` | False makes every pull request wait |
+| `autoMerge` | Accepted and ignored, in either value: nothing reads it, and the validator prints a `note:` saying so. `planBranch` replaced it as the setting that lets specs merge without waiting; a spec that merges straight into `base` always waits for a person. Configure no longer writes it |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |

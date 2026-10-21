@@ -265,8 +265,9 @@ test("every command that asks a person something points at the Asking rule", () 
   }
 });
 
-test("the configure command asks about both of the settings a person can only get here", () => {
-  const init = read("commands", "configure.md");
+// The numbered questions of configure's *Then ask*, each with its indented
+// continuation lines.
+function thenAskItems(init) {
   const start = init.indexOf("## Then ask");
   assert.ok(start > -1, "configure.md no longer has a Then ask section");
   const section = init.slice(start, init.indexOf("\n## ", start + 1));
@@ -278,6 +279,12 @@ test("the configure command asks about both of the settings a person can only ge
     else break;
   }
   assert.ok(items.length > 4, `only ${items.length} numbered questions were found in Then ask`);
+  return items;
+}
+
+test("the configure command asks about both of the settings a person can only get here", () => {
+  const init = read("commands", "configure.md");
+  const items = thenAskItems(init);
   for (const key of ["escalation", "plan", "effort"]) {
     const where = items.filter((item) => item.includes(`\`${key}\``));
     assert.ok(where.length > 0, `no numbered question in configure.md asks about ${key}`);
@@ -291,6 +298,22 @@ test("the configure command asks about both of the settings a person can only ge
   const jobs = Object.keys(JSON.parse(read("schemas", "config.schema.json")).$defs.jobEffort.properties);
   const effortItem = items.find((item) => item.includes("`effort`"));
   for (const job of jobs) assert.ok(effortItem.includes(`\`${job}\``), `configure.md's effort question never names ${job}`);
+});
+
+// `autoMerge` does nothing, so no question may ask about it, and a configuration
+// that still carries it has to hear that from configure itself: the validator's
+// note never shows there, because configure validates the file it has just
+// written without the key.
+test("configure never asks about autoMerge, and tells a configuration carrying it that planBranch replaced it", () => {
+  const init = read("commands", "configure.md");
+  const asking = thenAskItems(init).filter((item) => item.includes("`autoMerge`"));
+  assert.deepEqual(asking, [], `a numbered question in configure.md names autoMerge:\n${asking.join("\n")}`);
+  const write = init.slice(init.indexOf("## Write"));
+  assert.match(write, /Never write `autoMerge`/, "configure.md does not say the file it writes leaves autoMerge out");
+  const told = write.replace(/\s+/g, " ");
+  assert.match(told, /when it has `autoMerge`, say all of it yourself/, "configure.md does not tell a configuration carrying autoMerge about it");
+  assert.match(told, /no longer does anything/, "configure.md does not say autoMerge does nothing");
+  assert.match(told, /`planBranch` is how specs merge without waiting/, "configure.md does not say planBranch replaced autoMerge");
 });
 
 // The reviewed commit is read out of state.json everywhere except the places

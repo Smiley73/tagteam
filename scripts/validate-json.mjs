@@ -139,6 +139,17 @@ export function validateJson(schema, value) {
 // version bump, and every existing file reported stale for one number. The rule
 // is unchanged for every other key, and `/tagteam:configure` still writes this
 // one.
+//
+// `autoMerge` is the one key the schema accepts without requiring and without a
+// fallback, because nothing reads it: no script assumes a value for it, so its
+// absence is not a value anyone silently gets. It used to decide whether a pull
+// request waited; a spec that merges straight into the base now always waits for
+// a person, and `planBranch` is what lets specs merge without waiting. It stays
+// declared because the root of the schema refuses keys it does not declare, so
+// deleting it would make every version-10 file that carries it invalid, and
+// bumping the version would report every one of them stale for a setting that
+// does nothing. `autoMergeNotices` says so out loud instead, and
+// `/tagteam:configure` no longer writes it.
 export const CONFIG_VERSION = 10;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
@@ -253,6 +264,23 @@ export function escalationNotices(config) {
   }
 
   return notices;
+}
+
+// A configuration that still carries `autoMerge`, in either value, is told the
+// key does nothing any more and what does. Information only: the file is valid
+// and current, and the line is the same for `true` and `false` because neither
+// value reaches anything.
+//
+// Pure and total, like the helpers above: `semanticErrors` runs on documents
+// whose shape has not validated, so anything that is not a map returns nothing.
+export function autoMergeNotices(config) {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return [];
+  if (!Object.hasOwn(config, "autoMerge")) return [];
+  return [
+    "note: autoMerge no longer does anything, whatever it is set to: a spec that merges straight into the base "
+    + "always waits for a person, and planBranch is the setting that lets specs merge without waiting, into the "
+    + "plan's branch; /tagteam:configure writes the file without it"
+  ];
 }
 
 // A path named in configuration is read by a model, rendered into a prompt, or
@@ -512,6 +540,9 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   // What calibrates the reviewers, and what a repository committed only half of.
   // First, because the cost note is deliberately the last line printed.
   for (const notice of lensNotices(value, { repo })) process.stderr.write(`${notice}\n`);
+
+  // A key that is accepted and ignored. Before the limits, for the same reason.
+  for (const notice of autoMergeNotices(value)) process.stderr.write(`${notice}\n`);
 
   // Advice, not correctness: an escalation that buys nothing is legal, and a
   // configuration with `escalation: null` says nothing here at all. Emitted

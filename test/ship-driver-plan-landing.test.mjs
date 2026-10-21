@@ -59,7 +59,9 @@ function shipCommitOnPlan(staged) {
 }
 
 test("autoMerge: true never merges the plan: a clean tip gets the dialog and nothing moves the base, and merge.mjs refuses without a person's Merge", () => {
-  const staged = stageClean();
+  // Staged with the key on purpose: a leftover `autoMerge: true` is the one
+  // configuration that could plausibly be read as consent, and it reaches nothing.
+  const staged = stageClean({ autoMerge: true });
   const { dir, plan, shipDir, origin, env, configPath } = staged;
   assert.equal(JSON.parse(fs.readFileSync(configPath, "utf8")).autoMerge, true, "the test proves nothing with autoMerge off");
   const main = onOrigin(origin, "main");
