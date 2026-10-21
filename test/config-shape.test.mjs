@@ -49,7 +49,7 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "planBranch"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
@@ -913,6 +913,8 @@ test("the shipped example states today's behaviour", () => {
 test("the schema declares no default anywhere", () => {
   // The whole refuse-don't-migrate decision rests on this: a default makes a
   // missing key invisible, and the file stops being the whole configuration.
+  // `ciStartWaitSec`, the one key that may be missing, is no exception here:
+  // its 120 lives in `scripts/ship.mjs`, and the schema only describes it.
   const defaults = [];
   // `reviewers.default` is a property *name*, not the keyword; only the map a
   // `properties` or `$defs` holds may legitimately contain one.
@@ -1167,4 +1169,40 @@ test("a version line names one file and exactly one locator: a JSON Pointer or a
     assert.equal(result.status, 1, `${why} must be invalid: ${result.stdout}${result.stderr}`);
     assert.match(result.stderr, /versionFiles/, `${why}: the refusal names the key`);
   }
+});
+
+// --- the start wait: the one key that may be missing ---
+
+test("a version-10 file without ciStartWaitSec is valid and current, not stale", async () => {
+  // The key was added without a version bump so that every version-10 file
+  // already written stays current; reporting one stale would send its owner to
+  // /tagteam:configure for a number the ship reads as 120.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const { ciStartWaitSec, ...without } = example;
+  assert.equal(ciStartWaitSec, 120, "examples/config.json states the start wait it documents");
+  assert.deepEqual(validateJson(schema, without), []);
+  const result = validateFile(versionRepo(), without);
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+});
+
+test("ciStartWaitSec is an integer from 0 to 3600", () => {
+  const dir = versionRepo();
+  for (const good of [0, 3600]) {
+    const result = validateFile(dir, { ...example, ciStartWaitSec: good });
+    assert.equal(result.status, 0, `ciStartWaitSec: ${good} must validate: ${result.stderr}`);
+  }
+  for (const bad of [-1, 3601, 1.5, "120"]) {
+    const result = validateFile(dir, { ...example, ciStartWaitSec: bad });
+    assert.equal(result.status, 1, `ciStartWaitSec: ${JSON.stringify(bad)} must be invalid`);
+    assert.match(result.stderr, /ciStartWaitSec/, `ciStartWaitSec: ${JSON.stringify(bad)}: the refusal names the key`);
+  }
+});
+
+test("ciStartWaitSec is the only root property missing from required", () => {
+  // The exception is one key wide. Another key quietly going optional would be
+  // a missing key read as something nobody wrote down.
+  const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
+  assert.deepEqual(optional, ["ciStartWaitSec"]);
+  assert.equal(schema.properties.version.const, 10, "the optional key came without a version bump");
 });

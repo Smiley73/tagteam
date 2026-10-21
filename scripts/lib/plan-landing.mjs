@@ -86,6 +86,12 @@ export const openResolveRoundIn = (shipDir) =>
  * another tip — or a landing check against another base — is `not-run` here, and
  * says which commit it was about, so a stale pass is never shown as one.
  * `version` is the condition the caller just read, or null when it was not.
+ *
+ * The checks on the pull request have one value more: `not-started`, when no
+ * check appeared on it within the start wait, carried through as recorded — with
+ * the poller's reason and the limit it ran with — so the question can say CI never
+ * started rather than that it did not run. Like `not-run` it proves nothing, and
+ * withholds Merge no more than checks that never ran do.
  */
 export function resultsFor(shipDir, record, { tip, baseOid, version = null }) {
   const check = checkFor(shipDir, tip);
@@ -96,7 +102,9 @@ export function resultsFor(shipDir, record, { tip, baseOid, version = null }) {
       : { status: "not-run", tip: null, check: check?.n ?? null };
   const own = ciFor(record, tip);
   const ci = own
-    ? { status: own.status === "failed" ? "failed" : own.status === "passed" ? "passed" : "not-run", tip, recorded: true, reason: own.reason ?? null }
+    ? own.status === "not-started"
+      ? { status: "not-started", tip, recorded: true, reason: own.reason ?? null, startWaitSec: Number.isFinite(own.startWaitSec) ? own.startWaitSec : null }
+      : { status: own.status === "failed" ? "failed" : own.status === "passed" ? "passed" : "not-run", tip, recorded: true, reason: own.reason ?? null }
     : {
       status: "not-run", tip: null, recorded: false,
       reason: !record.ci ? "not waited for yet"
@@ -117,8 +125,9 @@ export function resultsFor(shipDir, record, { tip, baseOid, version = null }) {
  * What withholds Merge for `tip`, as sentences; an empty list is Merge offered.
  * Every result has to be for this tip, and none may fail. The checks on the pull
  * request are the one result that may have proved nothing and still not
- * withhold it — shown as not run, never as passed — but only checks waited for
- * on this very tip: a wait on an earlier tip is not a wait on this one.
+ * withhold it — shown as not run or never started, never as passed — but only
+ * checks waited for on this very tip: a wait on an earlier tip is not a wait on
+ * this one.
  */
 export function withholding(shipDir, record, results, { openRound = openResolveRoundIn(shipDir) } = {}) {
   const reasons = [];

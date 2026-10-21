@@ -668,9 +668,13 @@ export function evaluate(state, config) {
   // A repository that waits for checks must actually have them looked at. An
   // unrecorded CI gate means the step was skipped, which is the same class of
   // hole as an unrecorded review — and `not-run` covers a cancelled check, which
-  // proves nothing and so cannot be carried by a green one beside it.
+  // proves nothing and so cannot be carried by a green one beside it. Checks
+  // that never started within the start wait prove nothing either, and are
+  // their own reason rather than a second one beside inconclusive: what a person
+  // looks into is different.
   else if (config?.ciWaitSec > 0) {
     if (!ci) blockers.push("continuous-integration-not-recorded");
+    else if (ci.status === "not-started") approvals.push("continuous-integration-not-started");
     else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
@@ -716,7 +720,7 @@ export function evaluate(state, config) {
   }
 
   // Nothing actually ran. Not a failure, and not evidence either.
-  if (verify?.status === "not-applicable" && (!ci || ci.status === "not-run")) {
+  if (verify?.status === "not-applicable" && (!ci || ci.status === "not-run" || ci.status === "not-started")) {
     approvals.push("no-executable-evidence");
   }
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.7
+
+- Wait for a pull request's checks to appear before judging them. Right after a pull request opens GitHub shows no checks yet, and that used to read at once as "no checks were registered", so a spec whose checks started a little late stopped for a person. Now the ship keeps looking, for a bounded time, and the time waited for the checks to finish only starts once one appears.
+- Add a `ciStartWaitSec` setting: how long to wait for that first check, two minutes when the setting is missing, and 0 to not wait at all. Existing version-10 configurations stay valid without it.
+- Wait only when the commit being published has a workflow that runs on pull requests. A repository without one gets no extra wait.
+- When no check appears in time, stop for a person with a reason of its own, saying CI never started within the time waited and naming `ciStartWaitSec`. It spends no CI repair, and approving it merges as approving checks that proved nothing does.
+- `/tagteam:configure` offers the setting alongside the CI wait, in repositories that have workflows.
+- The plan's own pull request gets the same wait, when the plan's branch has a workflow that runs on pull requests. If no check appears in time, the landing question says CI never started within the time waited, naming `ciStartWaitSec`; it spends no whole-plan fix, does not keep Merge from being offered, and the next run waits for the checks again.
+
 ## 0.10.6
 
 - Add a `planBranch` setting. With it on, a plan of two or more specs collects its specs on a branch of its own, `plan/<slug>`, and nothing from it reaches the base until the whole plan is done. Each spec is still its own pull request, into that branch, reviewed and gated as before. A plan of one spec, and a plan already started, ship as they did.

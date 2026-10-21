@@ -257,10 +257,17 @@ adversary at high effort by default, lens reviewers at medium, and re-checks —
 which only have to say whether one fix landed — at low. Every one of those is a
 setting in `.tagteam/config.json`.
 
+Publishing waits for CI, for up to `ciWaitSec` once the checks have started.
+Right after a pull request opens GitHub shows no checks on it yet, so when the
+branch has workflows that run on pull requests, `publish` first waits up to
+`ciStartWaitSec` — two minutes unless you set it, 0 to not wait — for checks to
+appear, and stops for you if none do. A repository with no such workflows gets
+no extra wait.
+
 A pull request merges unattended unless: the spec is marked user-visible,
-verification failed or CI proved nothing, a finding is still open, **a reviewer
-produced no usable evidence**, `.github/workflows/` changed, or the agent that
-wrote it never confirmed it finished what it was given.
+verification failed or CI proved nothing or never started, a finding is still
+open, **a reviewer produced no usable evidence**, `.github/workflows/` changed,
+or the agent that wrote it never confirmed it finished what it was given.
 
 That fourth one matters more than it sounds: an absent or malformed findings file
 yields an empty finding set, and an empty finding set otherwise reads as a clean
@@ -314,7 +321,10 @@ gates allow, so a plan half-shipped is half on `main`. Turn on `planBranch` in
   check against the base as it is now, and what the plan lands as, and you
   answer Merge, Leave open, or Stop. Merge is offered only when nothing shown
   fails. Leaving it open ends the run, and `/tagteam:ship` on the plan brings the
-  same question back.
+  same question back. That pull request's checks get the same `ciStartWaitSec`
+  to appear as a spec's, when the plan's branch has workflows that run on pull
+  requests; if none appears, the question says CI never started, and the next
+  run waits for them again.
 
 The repository has to allow merge commits into the base, and its checks have to
 run on pull requests into the plan's branch; the ship says so plainly when

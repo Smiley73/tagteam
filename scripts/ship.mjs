@@ -71,6 +71,7 @@ import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from 
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
+import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import {
   clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
   recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
@@ -3121,6 +3122,36 @@ async function settle(options) {
   emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
 }
 
+// How long checks get to appear when `ciStartWaitSec` is missing from the
+// configuration — the one key that may be, so that the version-10 files written
+// before it existed stay current. Nothing else in the plugin reads the key.
+const CI_START_WAIT_SEC = 120;
+
+/**
+ * The start limit for the checks of a pull request whose head is `commit`: how
+ * many seconds `ci-wait.mjs` waits for a first check to appear before it judges
+ * the checks, or 0 for no start wait — and `files`, the workflows at that commit
+ * that decided it. On only when CI is waited for at all, the start wait is not
+ * configured off, and the commit itself holds a workflow a pull request would
+ * start; without one an empty answer is the true answer, and waiting for it
+ * would only delay a stop that happens anyway. Asked of the commit and never of
+ * the base or a checkout, because a change that adds the repository's first
+ * workflow is exactly the one whose checks start late.
+ */
+function ciStartLimit(ctx, commit) {
+  const off = { seconds: 0, files: [] };
+  if (!(ctx.config.ciWaitSec > 0)) return off;
+  const seconds = ctx.config.ciStartWaitSec ?? CI_START_WAIT_SEC;
+  if (seconds === 0) return off;
+  let workflows;
+  try {
+    workflows = hasPullRequestWorkflow(ctx.repo, commit);
+  } catch (error) {
+    throw new Stop(`could not read the workflow files at ${short(commit)} to decide whether to wait for checks to start: ${error.message}`);
+  }
+  return workflows.found ? { seconds, files: workflows.files } : off;
+}
+
 function publish(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -3144,7 +3175,15 @@ function publish(options) {
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
   if (ctx.config.ciWaitSec > 0) {
-    const ci = node("ci-wait.mjs", ["--repo", ctx.repo, "--pr", String(view.number), "--wait-sec", String(ctx.config.ciWaitSec), "--out", path.join(specDir(ctx, id), "ci.json")], { allow: [1] });
+    const start = ciStartLimit(ctx, state.candidateOid);
+    if (start.seconds > 0) {
+      say.push(`Waiting up to ${start.seconds}s for checks to start on #${view.number} (ciStartWaitSec): at ${short(state.candidateOid)}, ${start.files.join(", ")} can run on a pull request.`);
+    }
+    const ci = node("ci-wait.mjs", [
+      "--repo", ctx.repo, "--pr", String(view.number), "--wait-sec", String(ctx.config.ciWaitSec),
+      ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
+      "--out", path.join(specDir(ctx, id), "ci.json")
+    ], { allow: [1] });
     record(ctx, id, "ci", state.candidateOid, path.join(specDir(ctx, id), "ci.json"));
     say.push(...ci.stdout.trim().split("\n"));
     const outcome = readJson(path.join(specDir(ctx, id), "ci.json"));
@@ -4071,18 +4110,37 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
 // request is the answer, and is not waited for twice. A `not-run` is not final:
 // the checks had not registered yet, or were still running, so they are waited
 // for again, or a check that went red after the wait would never withhold Merge.
+// A `not-started` is not final either: no check had appeared within the start
+// wait, and CI that starts after it would stay hidden behind a reused timeout.
 // Checks waited for on a pull request since closed are not this one's.
+//
+// The start wait is `publish`'s, decided the same way and about `tip` itself —
+// the plan's branch may carry the repository's first workflow, which neither the
+// base nor any checkout does. The limit it ran with is recorded beside the
+// result, so the question names it even after the configuration was edited.
 function waitPlanChecks(ctx, record, tip, say) {
   const recorded = ciFor(record, tip);
   if (recorded && (recorded.status === "passed" || recorded.status === "failed")) {
     say.push(`The checks on pull request #${record.pr.number} at ${short(tip)} were already waited for: ${recorded.status} — ${recorded.reason}.`);
     return recorded;
   }
+  const start = ciStartLimit(ctx, tip);
+  if (start.seconds > 0) {
+    say.push(`Waiting up to ${start.seconds}s for checks to start on #${record.pr.number} (ciStartWaitSec): at ${short(tip)}, ${start.files.join(", ")} can run on a pull request.`);
+  }
   const out = path.join(landingRoot(ctx.shipDir), `ci-${short(tip)}.json`);
-  const ran = node("ci-wait.mjs", ["--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec), "--out", out], { allow: [1] });
+  const ran = node("ci-wait.mjs", [
+    "--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec),
+    ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
+    "--out", out
+  ], { allow: [1] });
   const outcome = readJson(out);
   const failed = (outcome.checks ?? []).filter((check) => /fail|timed|action/i.test(check.bucket ?? check.state ?? "")).map((check) => check.name);
-  record.ci = { tip, pr: record.pr.number, status: outcome.status, reason: outcome.reason, result: out, failed, at: new Date().toISOString() };
+  record.ci = {
+    tip, pr: record.pr.number, status: outcome.status, reason: outcome.reason, result: out, failed,
+    ...(Number.isFinite(outcome.startWaitSec) ? { startWaitSec: outcome.startWaitSec } : {}),
+    at: new Date().toISOString()
+  };
   saveLanding(ctx, record);
   say.push(...ran.stdout.trim().split("\n").filter(Boolean));
   return record.ci;
@@ -4489,6 +4547,18 @@ function whyFor(ctx, record, tip) {
   return "";
 }
 
+// The checks on the plan's pull request that never started: the limit is the one
+// the wait recorded, never the configuration, which a person may have edited
+// since; a record without one gives the poller's own reason, which names it too.
+// Not passed, and not a failure either — nothing was there to fail.
+function notStartedLine(pr, at, ci) {
+  const seconds = ci.startWaitSec;
+  return Number.isFinite(seconds)
+    ? `CI on ${pr} never started within ${seconds} second${seconds === 1 ? "" : "s"} at ${at}, the start wait ciStartWaitSec gave it `
+      + "— never started, which is not passed, and the next run waits for it again"
+    : `CI on ${pr} never started at ${at} (${ci.reason}) — never started, which is not passed, and the next run waits for it again`;
+}
+
 // One sentence per result, each naming the commit it is about.
 function resultLines(route, record, results) {
   const at = short(results.tip);
@@ -4504,7 +4574,8 @@ function resultLines(route, record, results) {
     ? `the checks on ${pr} were not waited for at ${at} — not run, which is not passed`
     : ci.status === "passed" ? `the checks on ${pr} passed at ${at}`
       : ci.status === "failed" ? `a check on ${pr} failed at ${at}`
-        : `the checks on ${pr} did not run at ${at} (${ci.reason}) — not run, which is not passed`);
+        : ci.status === "not-started" ? notStartedLine(pr, at, ci)
+          : `the checks on ${pr} did not run at ${at} (${ci.reason}) — not run, which is not passed`);
   lines.push(landing.status === "not-run"
     ? `the landing check of ${at} against ${route.base} as it stands, at ${short(results.baseOid)}, has not run — not run`
     : `the landing check of ${at} against ${route.base} at ${short(landing.baseOid)} ${landing.status === "passed" ? "passed" : `came back ${landing.outcome}`}`);
@@ -4789,6 +4860,7 @@ const REASONS = {
   "continuous-integration-failed": "a check on the pull request failed",
   "continuous-integration-not-recorded": "this repository waits for checks and none were recorded",
   "continuous-integration-inconclusive": "the checks proved nothing either way",
+  "continuous-integration-not-started": "CI never started: no check appeared on the pull request within the start wait (ciStartWaitSec), so nothing was proven either way",
   "straight-to-base": "this merges straight into the base branch, and everything that lands there waits for your approval; "
     + "that is the normal wait for it, not a sign that anything is wrong",
   "workflow-change": "it changes the CI workflows, which every later gate depends on",
@@ -4819,7 +4891,10 @@ const sentence = (reason) => REASONS[reason] ?? reason;
 // so approving is offered only when it would change the verdict. Offered for a
 // blocker, it was taken: the approval was recorded, printed as "Approved by",
 // and `finish` asked again with the same reasons.
-function stopAsk(id, { blockers, approvals }, accepted = null) {
+// `words` replaces a reason's fixed sentence with one this stop worked out —
+// the start wait's, which carries the limit publish recorded.
+function stopAsk(id, { blockers, approvals }, accepted = null, words = {}) {
+  const sentence = (reason) => words[reason] ?? REASONS[reason] ?? reason;
   const text = [`${id} stops and waits.`];
   if (accepted && blockers.length > 0) {
     text.push(`You accepted this at round ${accepted.round} with what was open disclosed, so it waits for you to merge it on GitHub — or to look at it again once a reader would withdraw what it found.`);
@@ -4835,16 +4910,33 @@ function stopAsk(id, { blockers, approvals }, accepted = null) {
   return text.join(" ");
 }
 
+// The sentence for checks that never started, naming the limit the wait ran
+// with. Taken from the `ci` gate publish recorded for this commit and never from
+// the configuration, which a person may have edited since; null when the gate
+// carries no limit, and the fixed sentence stands.
+function notStartedWords(state) {
+  const ci = state.gates?.ci?.candidateOid === state.candidateOid ? state.gates.ci : null;
+  const seconds = ci?.startWaitSec;
+  if (ci?.status !== "not-started" || !Number.isFinite(seconds)) return {};
+  return {
+    "continuous-integration-not-started": `CI never started: no check appeared on the pull request within ${seconds} second${seconds === 1 ? "" : "s"}, `
+      + "the start wait ciStartWaitSec gave it when it was published, so nothing was proven either way — a revisit publishes it again and waits again"
+  };
+}
+
 // The likely cause, when the checks on a pull request into a plan branch proved
-// nothing. The gate's own sentence stays general, because the same gate stops a
-// spec on the base too; what only the plan branch adds is the usual reason —
-// workflows filtered to pull requests into the base never start for a pull
-// request into anything else. Null everywhere else.
+// nothing or never started. The gate's own sentence stays general, because the
+// same gate stops a spec on the base too; what only the plan branch adds is the
+// usual reason — workflows filtered to pull requests into the base never start
+// for a pull request into anything else, and the start wait counts them as
+// workflows that would. Null everywhere else.
 function checksCause(ctx, id, state, verdict) {
   const route = routeOf(ctx);
-  if (!isPlanRoute(route) || state.base !== route.branch || !verdict.approvals.includes("continuous-integration-inconclusive")) return null;
+  if (!isPlanRoute(route) || state.base !== route.branch) return null;
+  const notStarted = verdict.approvals.includes("continuous-integration-not-started");
+  if (!notStarted && !verdict.approvals.includes("continuous-integration-inconclusive")) return null;
   const ci = readJson(path.join(specDir(ctx, id), "ci.json"), null);
-  return `The checks on this pull request proved nothing${ci?.reason ? ` (${ci.reason})` : ""}, and it targets ${route.branch}, `
+  return `The checks on this pull request ${notStarted ? "never started" : "proved nothing"}${ci?.reason ? ` (${ci.reason})` : ""}, and it targets ${route.branch}, `
     + `not ${route.base}: the likely cause is workflows that only run for pull requests into ${route.base} — an `
     + `\`on: pull_request: branches:\` filter. Letting them run for pull requests into ${route.branch} is a change to those `
     + "workflows, and it is yours to make; until then a spec of this plan is not checked by them.";
@@ -5075,7 +5167,7 @@ async function finish(options) {
   const cause = checksCause(ctx, id, state, verdict);
   emit({
     say,
-    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null), ...(cause ? [cause] : [])].join(" "),
+    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state)), ...(cause ? [cause] : [])].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: followingCommand(ctx, id)
   });
