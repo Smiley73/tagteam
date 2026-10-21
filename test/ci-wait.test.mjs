@@ -25,8 +25,9 @@ const skipped = [{ name: "test", state: "SKIPPED", bucket: "skipping" }];
 
 // A clock that only sleep moves, and a reader that answers from `answers` in
 // turn (the last one repeating), recording when each read was made and how long
-// it was given. A null answer is a read killed at its bound.
-function harness(answers) {
+// it was given. A null answer is a read killed at its bound. `took` is how long
+// each read in turn takes to answer (none, past its end).
+function harness(answers, took = []) {
   let clock = 1_000_000;
   const reads = [];
   const sleeps = [];
@@ -41,6 +42,7 @@ function harness(answers) {
     },
     read: (repo, pr, { timeoutMs }) => {
       reads.push({ at: clock - 1_000_000, timeoutMs });
+      clock += took[reads.length - 1] ?? 0;
       return answers[Math.min(reads.length - 1, answers.length - 1)];
     }
   };
@@ -120,6 +122,16 @@ test("waiting for a start does not shorten the running budget", async () => {
   assert.match(result.reason, /still running after 100s/);
   assert.equal(h.elapsed(), 160_000, "the running budget was counted from the call, not from the first row");
   assert.deepEqual(h.reads.map((read) => read.at), [0, 20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 160_000]);
+});
+
+test("a slow first answer does not come out of the running budget", async () => {
+  // The read that first sees rows takes 4s; the running budget starts when it returns.
+  const h = harness([running], [4_000]);
+  const result = await run(h, { waitSec: 10, startWaitSec: 5 });
+  assert.equal(result.status, "not-run");
+  assert.match(result.reason, /still running after 10s/);
+  assert.equal(h.elapsed(), 14_000, "the running budget was counted from when the first read began, not when it returned");
+  assert.deepEqual(h.reads.map((read) => read.at), [0, 14_000]);
 });
 
 test("a killed read is no rows before any row was seen, and no new information after", async () => {

@@ -16,8 +16,8 @@
 // "no checks were registered" on the first read. With `--start-wait-sec` above
 // 0 the poller keeps polling an empty answer until a row appears or the start
 // limit passes; a row hands over to the loop above unchanged, with the
-// `--wait-sec` budget counted from the read that first saw it, so waiting for a
-// start never shortens it. No row by the limit is not-started: a time
+// `--wait-sec` budget counted from when the read that first saw it returned, so
+// waiting for a start never shortens it. No row by the limit is not-started: a time
 // judgement, not a classification of rows, so it lives here and not in
 // lib/ci-state.mjs. It never says the repository has no CI — a `gh` that fails
 // with nothing on stdout looks exactly like one with no checks yet.
@@ -85,7 +85,8 @@ export async function waitForChecks({
   const starting = startWaitSec > 0;
   const startDeadline = calledAt + startWaitSec * 1000;
   // With the start wait off the running budget counts from the call, as it
-  // always has; with it on, from the read that first returned a row.
+  // always has; with it on, from when the read that first returned a row came
+  // back.
   let deadline = starting ? null : calledAt + waitSec * 1000;
   let checks = null;
   while (true) {
@@ -105,7 +106,9 @@ export async function waitForChecks({
         await sleep(Math.min(poll, Math.max(0, startDeadline - now())));
         continue;
       }
-      deadline ??= readAt + waitSec * 1000;
+      // From when the read came back, not when it began: a slow first answer is
+      // still start-wait time, and must not come out of the running budget.
+      deadline ??= now() + waitSec * 1000;
       checks = rows;
     } else if (answered !== null) {
       checks = answered;
