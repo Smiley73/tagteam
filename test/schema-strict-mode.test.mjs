@@ -78,10 +78,18 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 });
 
 // Not Codex-bound, but the same discipline: an optional property in a schema
-// validate-json enforces is a shape nothing actually requires.
+// validate-json enforces is a shape nothing actually requires. One property is
+// optional on purpose: `ciStartWaitSec` at the configuration's root, which may be
+// missing so that the version-10 files written before it existed stay current.
+// The exception is that one violation exactly; `test/config-shape.test.mjs`
+// holds it to being the only optional root key.
+const DELIBERATELY_OPTIONAL = { "config.schema.json": ["/ omits ciStartWaitSec from required"] };
+
 test("every schema in the directory is strict-mode legal", () => {
   for (const name of fs.readdirSync(path.join(root, "schemas"))) {
-    const violations = strictViolations(JSON.parse(fs.readFileSync(path.join(root, "schemas", name), "utf8")));
+    const allowed = DELIBERATELY_OPTIONAL[name] ?? [];
+    const violations = strictViolations(JSON.parse(fs.readFileSync(path.join(root, "schemas", name), "utf8")))
+      .filter((violation) => !allowed.includes(violation));
     assert.deepEqual(violations, [], `${name}:\n${violations.join("\n")}`);
   }
 });

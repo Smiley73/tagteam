@@ -71,6 +71,12 @@ worded as a review would word it.
   there makes every single pull request stop for a person on
   `continuous-integration-inconclusive` — a gate firing on the absence of a system
   the repository never had. Only propose a wait when there are workflows.
+- **ciStartWaitSec** — `120` when `.github/workflows/` holds a workflow. Right
+  after a pull request is opened GitHub has no checks on it yet, and on its own
+  that reads as "no checks were registered" at once; this is how long the ship
+  keeps looking for the first check to appear, on a pull request whose commit
+  has a workflow that runs on pull requests, before it stops to ask. `0` turns
+  that wait off. With no workflows it is not asked, and is written as `120`.
 
 ## Then ask
 
@@ -129,8 +135,12 @@ names, internal ids. See *Asking* in the skill.
    briefs plus anything this repository calibrates in `.tagteam/lenses/`, which
    are equally selectable and, on a reconfigure, are usually the ones this
    project cares most about.
-7. `autoMerge`, and `ciWaitSec` only if the repository has workflows. No
-   workflows, no question — it is 0.
+7. `autoMerge`, and `ciWaitSec` and `ciStartWaitSec` only if the repository has
+   workflows. Ask the start wait alongside the CI wait, as behaviour: "how long
+   should a new pull request wait for its checks to start before this stops to
+   ask you?" — `ciStartWaitSec`, proposed at 120 seconds, 0 to not wait. No
+   workflows, no question — `ciWaitSec` is 0 and `ciStartWaitSec` is written as
+   120.
 8. Any ignored file a build needs copied into a worktree
    (`worktree.copyUntracked`) — most repositories have none.
 9. What of tagteam's own output belongs in this repository's history. Machine
@@ -300,8 +310,15 @@ Say two things afterwards, because neither is visible from the file:
   refresh commands.
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
-configured them; there is no fallback anywhere, so an omitted key is an invalid
-file rather than an unused feature.
+configured them; there is no fallback for any key but `ciStartWaitSec`, so an
+omitted key is an invalid file rather than an unused feature.
+
+Always write `ciStartWaitSec`: the answer when question 7 asked it, 120 when it
+did not. It is the one key that may be missing — the ship reads a missing one as
+120, so the version-10 files written before it existed stay current — but a file
+this command writes is complete. Under `--reconfigure`, and when a version-9
+file is carried forward, offer back the value the file holds, or 120 when it has
+none.
 
 Write `planBranch` and `versionFiles` as question 11 answered them, explicitly:
 there is no fallback for either. Under `--reconfigure` of a version-10 file both
