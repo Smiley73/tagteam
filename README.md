@@ -257,7 +257,8 @@ adversary at high effort by default, lens reviewers at medium, and re-checks —
 which only have to say whether one fix landed — at low. Every one of those is a
 setting in `.tagteam/config.json`.
 
-A pull request merges unattended unless: the spec is marked user-visible,
+A pull request merges unattended unless: the spec is marked as the one after
+which a person can try something new, so it waits for manual testing,
 verification failed or CI proved nothing, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
 wrote it never confirmed it finished what it was given.
@@ -266,8 +267,9 @@ That fourth one matters more than it sounds: an absent or malformed findings fil
 yields an empty finding set, and an empty finding set otherwise reads as a clean
 review.
 
-A person can approve past some of those stops and not others. User-visible, a
-workflow change, and an unconfirmed account are theirs to accept; a failed
+A person can approve past some of those stops and not others. A spec waiting
+for manual testing, a workflow change, and an unconfirmed account are theirs to
+accept; a failed
 verification, an open finding, and a reviewer that produced no usable evidence
 are cleared only by new evidence, and `finish` offers approval only when it
 would count.
@@ -282,7 +284,7 @@ flowchart TD
     wait["Stops and waits — approve and merge, leave it open, or stop the train"]
 
     evaluate -->|"every gate satisfied"| merge
-    evaluate -->|"the spec is user-visible"| wait
+    evaluate -->|"once merged, a person can try something new"| wait
     evaluate -->|"verification failed or proved nothing"| wait
     evaluate -->|"a finding is still open"| wait
     evaluate -->|"a reviewer produced no usable evidence"| wait
@@ -401,7 +403,10 @@ does not.
   check that does not pass, and any other merge failure, stops and reports.
 - A commit is only made through `git add -A && guard-staged && git commit`, which
   refuses to commit a copied ignored file.
-- User-visible changes always wait.
+- A spec after which a person can try something new waits for them to try it
+  before it merges. The plan marks which specs those are; the person approving
+  it sees the marking and can change it in each spec's front matter until that
+  spec begins shipping.
 
 ## Reference
 

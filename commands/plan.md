@@ -350,8 +350,9 @@ node "$P/scripts/deliverables.mjs" "$D/plan.md"
 ```
 
 That returns one object per deliverable — id, what it delivers, dependencies,
-user-visibility, and the row verbatim. It is how you dispatch without reading
-`plan.md`. It refuses while any set is still out. It refuses a plan over the
+whether a person can try something new once it merges, and the row verbatim. It
+is how you dispatch without reading `plan.md`. It refuses while any set is still
+out. It refuses a plan over the
 12 KB ceiling, naming the size: re-dispatch the drafter to cut it to the target,
 as `--kind draft --purpose cut` prints it, labelled `Cut the plan`, as a `draft`
 set; its arrival runs this again.
@@ -382,11 +383,25 @@ its own; its arrival runs the validation again.
 
 Show: the deliverables in dependency order, the lenses `specs.mjs` resolved for
 each one, the note that Codex and the adversary run on every spec regardless,
-which specs will stop for them because they are user-visible, and **the review
-findings the drafter rejected, with its reasons** — `plan.mjs check` printed
-them, and this is where the person sees what was declined on their behalf. Say
-that the lens selection lives in each spec's front matter and is editable there,
-the way `goal.md` was.
+and **the review findings the drafter rejected, with its reasons** — `plan.mjs
+check` printed them, and this is where the person sees what was declined on
+their behalf. Say that the lens selection lives in each spec's front matter and
+is editable there, the way `goal.md` was.
+
+Then two lists, each as spec ids with what they deliver, filtered from the
+`userVisible` that `specs.mjs` returned: the specs that will **stop for manual
+testing** — once each merges, a person can try something new, so it waits for
+them to try it — and the specs that will **merge on their checks without one**,
+because nothing new is reachable from them yet. Say that the marking is
+`user_visible` in each spec's front matter and is editable there, as the lenses
+are, until that spec begins shipping: from then on an edit changes nothing for
+it. When no spec is marked, say so plainly: no spec in this plan will stop for
+manual testing, because none of them adds a way in to try what it builds. Say
+too that every other stop is unchanged — a failed check, an open finding or a
+workflow change still stops a spec for them, and a plan shipped through a branch
+of its own still asks them before it lands — and do not present any of those as
+the place to try the feature. This is shown, not asked; an edited marking is
+validated by re-running `specs.mjs`, as any front-matter edit is.
 
 A lens this repository calibrates itself has its brief at
 `$R/.tagteam/lenses/<lens>.md`, and that file is the only place its description

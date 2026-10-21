@@ -655,9 +655,11 @@ export function evaluate(state, config) {
     else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
-  // (a) User-visible. This is the plan's judgement, made per spec and approved by
-  // a person, and raised by the spec writer if writing the spec revealed a
-  // surface the plan missed. There is deliberately no diff-derived signal: a
+  // (a) User-visible: once this merges, a person can try something new. This is
+  // the plan's judgement, made per spec and approved by a person, and corrected
+  // by the spec writer toward reachability when writing the spec showed the way
+  // in lands elsewhere, or that the spec adds a flag, a setting or a changed
+  // default the plan missed. There is deliberately no diff-derived signal: a
   // reliable one needs per-project path conventions, and an unreliable one
   // reading as authoritative is worse than none.
   if (state.planUserVisible) approvals.push("user-visible");

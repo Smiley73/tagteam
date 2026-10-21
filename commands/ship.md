@@ -431,9 +431,9 @@ wrong and for whom — see *Asking* in the skill. Then ask one question, with th
 answers `ask` offers.
 
 The two halves take different answers. A person's approval is what `evaluate`
-honours for `approvals` — user-visible, a workflow change, a round nobody
-accounted for, nothing executable having run, inconclusive checks, auto-merge
-off — and for nothing in `blockers`: a reviewer that produced no usable
+honours for `approvals` — a spec marked as one a person can try once it merges,
+a workflow change, a round nobody accounted for, nothing executable having run,
+inconclusive checks, auto-merge off — and for nothing in `blockers`: a reviewer that produced no usable
 evidence, a finding still open, a verification or check that failed or never
 ran. **No approval clears a blocker.** `finish --approve` given while one is
 open records nothing and says so; what clears it is the step that records it,

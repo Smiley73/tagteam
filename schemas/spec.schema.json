@@ -17,7 +17,7 @@
     },
     "user_visible": {
       "type": "boolean",
-      "description": "True when a person using the product would notice this change. True always waits for approval before merging."
+      "description": "True when, once this spec merges, a person can try something new: a typed flag, an opt-in setting, a changed default, or a screen, message or document they can reach, even when what is behind it is off by default. False for a helper nothing calls yet, plumbing, or a surface whose way in comes from a later spec. A true spec waits for manual testing before it merges."
     },
     "reviewers": {
       "type": "array",

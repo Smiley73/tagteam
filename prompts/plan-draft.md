@@ -69,12 +69,26 @@ If a goal genuinely needs more than about eight, say so in the Order section:
 that is usually two plans, and it is better to say it now than to discover it
 during shipping.
 
-Mark a deliverable **user-visible** only when you are sure a person using the
-product will see or do something different once it lands: a screen, a message,
-a flow, a document they read. A user-visible deliverable always stops for the
-owner before it merges, so marking one you are unsure about is not caution — it
-is a stop nobody asked for. When you are unsure, mark it no and name the doubt
-in Risks, where the spec writer will see it.
+Mark a deliverable **user-visible** when, the moment it merges, a person can see
+or do something new: the question is whether they can try it then, not whether
+they would notice it eventually. A typed command flag, a setting someone can
+turn on, a changed default, or a screen, message or document a person can reach
+counts. A helper nothing calls yet, plumbing, or a screen or command whose only
+way in comes from a later deliverable does not. A marked deliverable stops for
+manual testing before it merges; an unmarked one merges on its checks.
+
+When a feature is built across several deliverables, mark the one after which a
+person can first reach it, and mark the ones before it no. Say so in each row's
+`delivers` — "wired up by 3", "adds the way in to 1 and 2" — so the spec writer
+and the person approving can see why an early deliverable does not stop.
+
+A deliverable that itself adds a flag, a setting or a changed default is always
+reachable, so mark it yes: "it is behind a flag" and "it is off by default" are
+never reasons for no. Beyond those, when you are genuinely unsure whether any
+way in exists once it lands, mark it no and name the doubt in Risks, where the
+spec writer will see it — a stop nobody can test is not caution. When the way in
+is not part of this plan at all, every row is correctly no: say so under Risks
+or Out of scope, and name where the way in will come from.
 
 Before writing, ask of every deliverable and supporting item — metric, alarm,
 guard, record field, version bump, harness, flag — **what already serves this purpose?**
