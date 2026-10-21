@@ -919,6 +919,18 @@ const routeOf = (ctx) => ctx.train?.route ?? { kind: "base" };
 // after `begin` reads the spec's own `state.base`.
 const landsOn = (ctx) => landingBranch(routeOf(ctx), ctx.config.base);
 
+// The plan route a spec was begun on, frozen into its state for the verdict: the
+// route's plan branch, or none on a train that goes straight to the base. Taken
+// from the route above and never from the configuration, and written once —
+// `gates.mjs` keeps whatever a state already records. `begin` writes it for a
+// new spec; `finish` asks again before it asks for the verdict, which is what
+// gives a spec begun before the verdict read this the same record rather than a
+// wait on a key it could not have written.
+function freezePlanRoute(ctx, id) {
+  const route = routeOf(ctx);
+  node("gates.mjs", ["plan-route", statePath(ctx, id), ...(isPlanRoute(route) ? [route.branch] : [])]);
+}
+
 // A route `judgeTip` settled, written back. After this and after every move of
 // the record, the train in hand is read again from disk: a step that writes the
 // train later — `begin` records the base it read — must not write back a route
@@ -2062,6 +2074,7 @@ async function begin(options) {
   const init = lastJson(node("gates.mjs", [
     "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
   ]).stdout);
+  freezePlanRoute(ctx, id);
   let state = readState(ctx, id);
 
   if (reconciled.adopted.has(id)) return finishNext(ctx, id, say);
@@ -3866,10 +3879,10 @@ async function planCollect(options) {
 //   7  the dialog: what lands, every result with the tip it is for, and Merge
 //      only when every one is for this tip and none fails
 //
-// Nothing here reads `autoMerge` or asks `evaluate`: `autoMerge: true` makes a
-// spec's verdict ready, and `finish` merges a spec on ready. The plan's merge has
-// one authority, a person's Merge for the tip in front of them, and `merge.mjs`
-// re-reads that and every result itself before it merges anything.
+// Nothing here asks `evaluate`: a spec's verdict, ready or approved, authorises
+// that spec's merge and never the plan's. The plan's merge has one authority, a
+// person's Merge for the tip in front of them, and `merge.mjs` re-reads that and
+// every result itself before it merges anything.
 
 const short = (oid) => String(oid ?? "").slice(0, 12);
 const TITLE = /^[A-Za-z0-9 ._:-]{1,70}$/;
@@ -4523,10 +4536,10 @@ function stoppedCheckNote(ctx, check) {
 
 /**
  * The dialog: what lands, every result with the commit it is for, and the
- * three answers. Merge is offered only when nothing withholds it, whatever
- * `autoMerge` says. With `--approve` and nothing withholding, the person's Merge
- * is recorded for this tip and the plan merges; with anything withholding,
- * nothing is recorded — no approval clears a blocker.
+ * three answers. Merge is offered only when nothing withholds it, and no spec's
+ * verdict stands in for it. With `--approve` and nothing withholding, the
+ * person's Merge is recorded for this tip and the plan merges; with anything
+ * withholding, nothing is recorded — no approval clears a blocker.
  */
 async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []) {
   const route = routeOf(ctx);
@@ -4776,11 +4789,11 @@ const REASONS = {
   "continuous-integration-failed": "a check on the pull request failed",
   "continuous-integration-not-recorded": "this repository waits for checks and none were recorded",
   "continuous-integration-inconclusive": "the checks proved nothing either way",
-  "user-visible": "this changes something people will see, so it waits for you by design",
+  "straight-to-base": "this merges straight into the base branch, and everything that lands there waits for your approval; "
+    + "that is the normal wait for it, not a sign that anything is wrong",
   "workflow-change": "it changes the CI workflows, which every later gate depends on",
   "work-not-accounted-for": "the agent that wrote this never confirmed it finished what it was given",
-  "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one",
-  "auto-merge-disabled": "auto-merge is off in this repository's configuration"
+  "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one"
 };
 
 // What moves a blocker: the step that records it, run again against this commit,
@@ -5000,6 +5013,7 @@ async function finish(options) {
       return emit({ ...versionStop, pullRequest: state.pr });
     }
   }
+  freezePlanRoute(ctx, id);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
   if (options.approve) {

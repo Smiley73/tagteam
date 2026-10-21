@@ -169,10 +169,10 @@ const readJsonFile = (file, what) => {
  * Merges a plan's pull request — `plan/<slug>` into the base its train
  * recorded — with a merge commit pinned to the plan branch's recorded tip.
  *
- * Nothing about `autoMerge`, and nothing of `evaluate`'s ready-or-approval
- * logic, reaches this: `autoMerge: true` makes a spec's verdict ready, and the
- * plan's merge is never a spec's. The one authority is a person's Merge, and it
- * is read here off the record, bound to the tip, never taken from the caller.
+ * Nothing of `evaluate`'s ready-or-approval logic reaches this: a spec's
+ * verdict, ready or approved, authorises that spec's merge and never the
+ * plan's. The one authority is a person's Merge, and it is read here off the
+ * record, bound to the tip, never taken from the caller.
  * Then, for that exact tip, every other thing the dialog showed is re-read and
  * refused on: a clean whole-plan result, no merge of the base still under way,
  * the checks waited for on this pull request at this tip and none failed, the
@@ -205,7 +205,7 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
     if (record.confirmation?.tip !== tip) {
       throw refuse(record.confirmation
         ? `the person's Merge was given at ${short(record.confirmation.tip)}, and ${route.branch} has moved to ${short(tip)} since; only a Merge given for this tip lands it`
-        : `no person has confirmed merging ${route.branch} at ${short(tip)}, and nothing else authorises the plan's merge — autoMerge reaches a spec of this plan, never the plan`);
+        : `no person has confirmed merging ${route.branch} at ${short(tip)}, and nothing else authorises the plan's merge — a spec's verdict authorises that spec's merge, never the plan's`);
     }
     const pr = record.pr;
     if (!pr?.number) throw refuse("the landing record names no plan pull request");

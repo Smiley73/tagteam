@@ -255,7 +255,7 @@ export function driveToPublishable({ plan, shipDir }, id, file, contents, env = 
   assert.equal(begin.json.dispatch?.[0]?.agent, "tagteam:implementer", `begin did not start ${id}: ${begin.stdout}`);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   const files = typeof file === "string" ? { [file]: contents } : file;
-  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(worktree, name), text);
+  for (const [name, text] of Object.entries(files)) write(path.join(worktree, name), text);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${Object.keys(files).join(", ")}`, unfinished: [] });
   arriveAll(begin);
   ship("snapshot", plan, ["--spec", id], env);
@@ -344,6 +344,16 @@ export function shipThrough(staged, id, file, contents) {
   assert.equal(published.status, 0, published.stderr);
   const finished = ship("finish", staged.plan, ["--spec", id], staged.env);
   return { ...driven, published, finished };
+}
+
+// A person's approval given at `finish`: what a spec that merges straight into
+// the base waits for once nothing else stops it. `--approve` records it against
+// the current candidate and merges in the same call.
+export function approveFinish(plan, id, env = {}, by = "owner@example.com") {
+  const approved = ship("finish", plan, ["--spec", id, "--approve", by], env);
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.match(approved.json.say.join("\n"), new RegExp(`Approved by ${by.replace(/\./g, "\\.")}`));
+  return approved;
 }
 
 export const A_CHANGE = "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n";
