@@ -10,8 +10,11 @@ You describe what you want, however roughly. Tagteam interviews you until the
 outcome is concrete, writes a plan, has it read once by three independent
 reviewers whose findings the drafter answers in writing, and breaks it into spec
 files. Then it implements those specs one at a time — each in its own branch,
-each reviewed by a cross-engine panel, each verified — and merges the ones that
-need no judgement from you. The ones that do stop and wait.
+each reviewed by a cross-engine panel, each verified. Nothing reaches your base
+branch without your approval or your Merge. Ship a plan as one, on a branch of
+its own, and its specs merge there without waiting once their checks are clean,
+and you judge the plan as one change in its own pull request; otherwise each
+spec waits for your approval before it merges into the base.
 
 It is for changes big enough that you want them delegated and not so opaque that
 you cannot check them. Every decision you make is written to a file you can edit.
@@ -264,20 +267,26 @@ branch has workflows that run on pull requests, `publish` first waits up to
 appear, and stops for you if none do. A repository with no such workflows gets
 no extra wait.
 
-A pull request merges unattended unless: the spec is marked user-visible,
-verification failed or CI proved nothing or never started, a finding is still
-open, **a reviewer produced no usable evidence**, `.github/workflows/` changed,
-or the agent that wrote it never confirmed it finished what it was given.
+Where a spec merges decides whether it waits for you. A spec that merges
+straight into the base — a plan of one spec, or any plan with `planBranch` off —
+waits for your approval every time: that is the approval every change reaching
+the base needs, not a sign that anything went wrong. A spec on a plan branch
+(*Shipping a plan as one*, below) merges into it unattended once every gate is
+satisfied, because the plan's own pull request is where you judge the combined
+change. On either route, a pull request also stops when verification failed or
+CI proved nothing or never started, a finding is still open, **a reviewer
+produced no usable evidence**, `.github/workflows/` changed, or the agent that
+wrote it never confirmed it finished what it was given.
 
-That fourth one matters more than it sounds: an absent or malformed findings file
-yields an empty finding set, and an empty finding set otherwise reads as a clean
-review.
+The missing evidence matters more than it sounds: an absent or malformed findings
+file yields an empty finding set, and an empty finding set otherwise reads as a
+clean review.
 
-A person can approve past some of those stops and not others. User-visible, a
-workflow change, and an unconfirmed account are theirs to accept; a failed
-verification, an open finding, and a reviewer that produced no usable evidence
-are cleared only by new evidence, and `finish` offers approval only when it
-would count.
+A person can approve past some of those stops and not others. Merging straight
+into the base, a workflow change, and an unconfirmed account are theirs to
+accept; a failed verification, an open finding, and a reviewer that produced no
+usable evidence are cleared only by new evidence, and `finish` offers approval
+only when it would count.
 
 ```mermaid
 ---
@@ -285,11 +294,13 @@ title: Merge or stop
 ---
 flowchart TD
     evaluate{"gates.mjs evaluate — code, not judgement"}
-    merge["Merged unattended, at exactly the reviewed commit"]
+    route{"Where does it merge?"}
+    merge["Merged into the plan branch unattended, at exactly the reviewed commit"]
     wait["Stops and waits — approve and merge, leave it open, or stop the train"]
 
-    evaluate -->|"every gate satisfied"| merge
-    evaluate -->|"the spec is user-visible"| wait
+    evaluate -->|"every gate satisfied"| route
+    route -->|"into a plan branch"| merge
+    route -->|"straight into the base: waits for you"| wait
     evaluate -->|"verification failed or proved nothing"| wait
     evaluate -->|"a finding is still open"| wait
     evaluate -->|"a reviewer produced no usable evidence"| wait
@@ -299,14 +310,21 @@ flowchart TD
 
 ### Shipping a plan as one
 
-By default every spec of a plan merges into the base branch as soon as its own
-gates allow, so a plan half-shipped is half on `main`. Turn on `planBranch` in
-`/tagteam:configure` and a plan of two or more specs ships as one instead:
+A plan shipped as one goes on the familiar feature branch: the branch one feature
+— here, one plan — is collected on before it reaches the base through a single
+pull request. Tagteam calls it the plan branch. What is particular to it is that
+tagteam creates it and deletes it for you, and checks the combined change once
+before that final pull request.
+
+Without `planBranch`, every spec of a plan merges straight into the base branch,
+and each waits for your approval before it does. Turn on `planBranch` in
+`/tagteam:configure` and a plan of two or more specs ships as one instead, and
+the wait for your approval moves to the plan's own pull request:
 
 - Its specs collect on a branch of their own, `plan/<slug>`. Each is still its
   own pull request, into that branch, reviewed and gated exactly as above, and
-  `autoMerge` still decides those merges. Nothing from the plan reaches the base
-  until the end.
+  merged into it without asking you once every gate is satisfied. Nothing from
+  the plan reaches the base until the end.
 - Before each spec starts, the base is tried against the plan's branch. When it
   no longer merges cleanly, an agent resolves that one merge, the review panel
   reads what it resolved, and the ship pushes the merge commit itself. The plan's
@@ -316,8 +334,8 @@ gates allow, so a plan half-shipped is half on `main`. Turn on `planBranch` in
   fixed as one more small pull request into the plan's branch.
 - Then the plan reaches the base through one final pull request, merged with a
   merge commit at exactly the commit that was checked, so each spec keeps its own
-  commit in the base's history. **A person confirms that merge every time**,
-  whatever `autoMerge` says: you are shown what lands, the plan's checks, the
+  commit in the base's history. **A person confirms that merge every time**, and
+  no setting stands in for them: you are shown what lands, the plan's checks, the
   check against the base as it is now, and what the plan lands as, and you
   answer Merge, Leave open, or Stop. Merge is offered only when nothing shown
   fails. Leaving it open ends the run, and `/tagteam:ship` on the plan brings the
@@ -411,7 +429,9 @@ does not.
   check that does not pass, and any other merge failure, stops and reports.
 - A commit is only made through `git add -A && guard-staged && git commit`, which
   refuses to commit a copied ignored file.
-- User-visible changes always wait.
+- Nothing reaches the base without a person: a spec that merges straight into it
+  waits for your approval, and a plan branch reaches it only through the pull
+  request you say Merge to.
 
 ## Reference
 

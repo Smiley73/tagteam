@@ -18,6 +18,15 @@ head, and this command exists to be read at a glance. A `state.json` written by
 an older version can hold `planUserVisible`; that key is never a reason a spec
 waits, and is not mentioned.
 
+A spec waiting for `straight-to-base` is waiting for the approval every change
+that merges straight into the base needs: "waiting for your approval, as every
+change merging straight into the base does". Say it as that ordinary wait, never
+as something that went wrong, and never as caused by a plan branch — a plan
+branch is how specs merge without waiting. On a plan branch, no spec waits for
+this: its specs merge into the plan's branch once their checks are clean, and
+the plan's own pull request, below, is the one thing that always waits for a
+person.
+
 **Say what is left before each thing stops**, in one short clause, led by what it
 means rather than by the number. Every spec still running has a `budgets` entry
 under its ship:
