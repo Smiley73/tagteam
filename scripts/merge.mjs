@@ -28,6 +28,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { evaluate } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
+import { correctionSentence } from "./lib/reachability.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
@@ -62,7 +63,10 @@ export async function mergeSpec(statePath, { repo, configPath, dryRun = false } 
   const verdict = evaluate(state, config);
   if (!verdict.ready) {
     const reasons = [...verdict.blockers, ...verdict.approvals].join(", ") || "the gates were never recorded";
-    throw new Error(`the gates for ${state.spec} are not satisfied (${reasons}); nothing was merged`);
+    // The builder's correction is read off the same verdict `finish` reads, so a
+    // refusal here names it the way the stop did.
+    const corrected = verdict.correction ? `. ${correctionSentence(state.spec, verdict.correction)}` : "";
+    throw new Error(`the gates for ${state.spec} are not satisfied (${reasons}); nothing was merged${corrected}`);
   }
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) {
     throw new Error(`${resolved} holds no reviewed candidate commit; nothing was merged`);

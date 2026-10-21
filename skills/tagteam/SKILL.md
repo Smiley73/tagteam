@@ -609,7 +609,8 @@ for a person, and no approval reaches the last of them.
 
 A pull request stops and waits when: the spec is marked user-visible, meaning
 that once it merges a person can try something new, so it waits for manual
-testing; verification failed, or CI failed or proved nothing; a finding is still open
+testing — the plan's marking, as the builder corrected it, if it did;
+verification failed, or CI failed or proved nothing; a finding is still open
 after the re-check; **a selected reviewer produced no usable evidence**;
 `.github/workflows/**` changed; or the agent that wrote the code never confirmed
 it finished what it was given.
@@ -627,6 +628,25 @@ third of all specs — but "unsure" means real doubt that any way in exists, and
 spec unmarked. The spec writer corrects the marking only when sure. It is
 editable in the spec's front matter until that spec begins shipping; the first
 `begin` freezes it into `state.json`, and a later edit changes nothing for it.
+
+What `begin` froze is the plan's marking, not the last word. The builder — the
+first implementer, or a redesign implementer that rebuilds the spec — can
+correct it in its report, in either direction, only when it is certain and
+always with a one-line reason: "nothing here is reachable yet" takes a marked
+spec off the manual-testing stop, and "a person can reach this now" puts an
+unmarked one on it, which an approval clears like any other. It judges by the
+same rule as the plan, so a flag, a setting or a changed default is always
+reachable and never a reason for "nothing here is reachable yet". A builder
+that is not sure makes no claim, and the plan's marking stands. Fixers, CI and
+landing repairs, and whole-plan fix units make none. `snapshot` applies the
+claim with `gates.mjs claim`, which records it beside `planUserVisible` rather
+than over it, so it survives every new commit and both evaluations — `finish`'s
+and `merge.mjs`'s — read it the same way; the latest builder's claim wins, a
+silent report leaves an earlier one standing, and a claim with no reason counts
+as none and is said to. The reason is carried by the scripts as the builder's
+quoted words: `finish` reports it whether the spec merged or stopped, and
+`publish` puts it in a block at the end of the pull request body. It moves the
+manual-testing stop and no other.
 
 That fourth one is the important one. An absent, unparseable, or wrongly-bound
 findings file yields an empty finding set, and an empty finding set is
@@ -658,7 +678,7 @@ a new commit appears — and every fix round makes one.
 | `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
-| `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `grant`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
+| `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `grant`, `bind`, `record`, `claim`, `evaluate`, `roles`, `adopt-merge` |
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |

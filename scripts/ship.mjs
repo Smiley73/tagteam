@@ -34,7 +34,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
-import { adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
+import { adoptMerge, correctionOf, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
+import { claimWords, composeBody, correctionSentence, quoteReason } from "./lib/reachability.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
@@ -2463,6 +2464,7 @@ async function snapshot(options) {
     throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
+  const claimed = builderClaimLines(ctx, id, spec, round, path.join(dir, "report.json"));
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
 
   say.push(allocation.granted
@@ -2477,8 +2479,47 @@ async function snapshot(options) {
       say.push(`${file} was to be redesigned and was not changed; its count is not reset.`);
     }
   }
-  say.push(...recorded.stdout.trim().split("\n"));
+  say.push(...recorded.stdout.trim().split("\n"), ...claimed);
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
+}
+
+/**
+ * The builder's claim about manual testing in the report this round just
+ * recorded, applied to the spec's state by `gates.mjs claim`, and what the
+ * person is told about it. Nothing is said for a report that makes no claim,
+ * which is most of them; everything else is said, applied or not, with the
+ * builder's reason quoted as its words.
+ *
+ * Every round's report comes through here — a fix or a repair round's too —
+ * and only an implement report can carry a claim, so a fixer's round says
+ * nothing and leaves an earlier claim where it was. A whole-plan fix unit is
+ * dispatched as an implementer but is not a plan spec: it is never held for
+ * manual testing, and its claim is said to be ignored and never applied.
+ */
+function builderClaimLines(ctx, id, spec, round, reportFile) {
+  const wrapper = readJson(reportFile, null);
+  const reachability = wrapper?.kind === "implement" ? wrapper.report?.reachability : null;
+  if (!reachability || reachability.claim === "none") return [];
+  const words = claimWords(reachability.claim);
+  if (spec.fixUnit || isFixUnitId(id)) {
+    return [`The report claims ${words}; that is ignored. ${id} is a whole-plan fix, which never stops for manual testing — `
+      + "what it changes reaches the base only through the plan's own pull request, which always asks a person."];
+  }
+  const { outcome, correction } = lastJson(node("gates.mjs", ["claim", statePath(ctx, id), String(round), reportFile]).stdout);
+  if (outcome.status === "blank") {
+    return [`The builder claims ${words} and gives no reason, so the claim is ignored and the plan's marking stands: a claim `
+      + "is applied only with a reason a person can read."];
+  }
+  if (outcome.status === "earlier") {
+    return [`This round's report claims ${words} (the builder's words: ${quoteReason(outcome.reason)}), but round `
+      + `${outcome.standing} made a later claim, and that one stands.`];
+  }
+  if (outcome.status === "agrees") {
+    return [`The builder says ${words}, which agrees with the plan's marking, so the marking stands`
+      + `${outcome.cancelled ? " and the earlier correction no longer applies" : ""} (the builder's words: ${quoteReason(outcome.reason)}).`];
+  }
+  return [`${correctionSentence(id, correction)} This holds for the rest of ${id}'s run, through every fix round and repair, `
+    + "unless a later builder's report says otherwise."];
 }
 
 function verify(options) {
@@ -3116,6 +3157,22 @@ function publish(options) {
   if (!/^[A-Za-z0-9 ._:-]{1,70}$/.test(options.title)) throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -");
   if (!exists(options.body)) throw new Stop(`the body file ${options.body} does not exist`);
   const say = [];
+  // The builder's correction to the manual-testing marking is put in the body
+  // here, by the run, and never by the orchestrator: its reason is untrusted
+  // text, and the prose path that would copy it is the untested one. Any block
+  // an earlier publish wrote is taken out first — a revisited body starts from
+  // the live one, which carries it — and a fresh one goes at the end while a
+  // correction is in force. The result is written back to the file it came
+  // from, so the draft and the live body agree once this has run and readers
+  // are not handed the draft as a body still to be published.
+  const correction = correctionOf(state);
+  const drafted = fs.readFileSync(options.body, "utf8");
+  const composed = composeBody(drafted, correction);
+  if (composed !== drafted) fs.writeFileSync(options.body, composed);
+  if (correction) {
+    say.push(`The pull request body ends with the builder's ${correction.direction === "removed" ? "removal of" : "addition of"} the `
+      + "manual-testing stop and its reason, which the run added and keeps up to date; it is not yours to write or remove.");
+  }
   const republish = Boolean(state.pr);
   git(ctx.worktree, ["push", ...(republish ? ["--force-with-lease"] : ["-u"]), "origin", state.branch]);
   if (!republish) {
@@ -4997,7 +5054,11 @@ async function finish(options) {
     const versionStop = versionLineStop(ctx, id, state, "finish");
     if (versionStop) {
       if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
-      return emit({ ...versionStop, pullRequest: state.pr });
+      const correction = correctionOf(state);
+      return emit({
+        ...versionStop, ...(correction ? { say: [...versionStop.say, correctionSentence(id, correction)] } : {}),
+        pullRequest: state.pr, correction
+      });
     }
   }
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
@@ -5028,6 +5089,7 @@ async function finish(options) {
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
+      if (verdict.correction) say.push(correctionSentence(id, verdict.correction));
       say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
       return finishNext(ctx, id, say);
     }
@@ -5038,9 +5100,10 @@ async function finish(options) {
     state = readState(ctx, id);
     if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
     spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "the base moved"], { stdio: "ignore" });
+    if (verdict.correction) say.push(correctionSentence(id, verdict.correction));
     say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
     return emit({
-      say, ask: landed.stop, landing: landed.landing ?? null, pullRequest: state.pr,
+      say, ask: landed.stop, landing: landed.landing ?? null, pullRequest: state.pr, correction: verdict.correction ?? null,
       next: followingCommand(ctx, id)
     });
   }
@@ -5056,13 +5119,22 @@ async function finish(options) {
     .map((entry) => readJson(path.join(entry.dir, "report.json"), null))
     .filter((report) => report && report.status !== "complete")
     .map((report) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part) => `left undone: ${part.part} — ${part.reason}`).join("; ")}`);
+  // The correction in force, said as the builder's words on every stop: a
+  // removed stop explains why manual testing is not among the reasons, and an
+  // added one is named in the question as the builder's, not the plan's.
+  const correction = verdict.correction ?? null;
+  if (correction) say.push(correctionSentence(id, correction));
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
+  const added = correction?.direction === "added" && verdict.approvals.includes("user-visible")
+    ? `The manual-testing stop is the builder's, not the plan's: the plan did not mark ${id}, and the agent that built it said `
+      + `${claimWords(correction.claim)} — in its words: ${quoteReason(correction.reason)}.`
+    : null;
   emit({
     say,
-    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null), ...(cause ? [cause] : [])].join(" "),
-    reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
+    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null), ...(added ? [added] : []), ...(cause ? [cause] : [])].join(" "),
+    reasons, blockers: verdict.blockers, approvals: verdict.approvals, correction, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: followingCommand(ctx, id)
   });
 }

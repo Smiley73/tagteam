@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { claimReason, correctingClaim } from "./lib/reachability.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
 
@@ -101,6 +102,104 @@ function grantOf(state) {
       + "grant of one fix round — it can neither be honoured nor replaced, so fix the state file by hand before continuing");
   }
   return value;
+}
+
+// The latest claim a builder of this spec made about the plan's manual-testing
+// marking, with the round it came from: `{claim, reason, round, at}`, where
+// `claim` is `not-reachable-yet` or `reachable-now` and `reason` is the builder's
+// reason as `claimReason` normalised it.
+//
+// Here, beside `planUserVisible`, because `evaluate` reads nothing but this file
+// and `merge.mjs` calls it again right before `gh` merges: a correction applied
+// only where `finish` evaluates would be undone by that second evaluation. A
+// top-level key rather than a gate, because `bindCandidate` clears every gate on
+// each new commit and the claim has to hold for the rest of the spec's run; and
+// never written over `planUserVisible`, which stays as `begin` froze it so the
+// run can say which way the marking moved. A claim that agrees with the plan is
+// kept too, with its round: it is what cancelled an earlier correction, and what
+// stops a re-entered earlier round from bringing that correction back.
+const BUILDER_CLAIM = "builderClaim";
+
+// Absent or null is no claim — the state file of a ship already in flight has no
+// key. Anything else present has to be a claim: read as "none" it would quietly
+// drop a correction, and read as one it would move a stop nobody claimed.
+function claimOf(state) {
+  const value = state?.[BUILDER_CLAIM];
+  if (value === undefined || value === null) return null;
+  const wellFormed = typeof value === "object" && !Array.isArray(value)
+    && ["not-reachable-yet", "reachable-now"].includes(value.claim)
+    && typeof value.reason === "string" && claimReason(value.reason) !== ""
+    && Number.isSafeInteger(value.round) && value.round >= 1;
+  if (!wellFormed) {
+    throw new Error(`${state?.spec ?? "this spec"} has ${BUILDER_CLAIM} set to ${JSON.stringify(value)}, which is not a `
+      + "builder's claim about manual testing — it can neither be honoured nor replaced, so fix the state file by hand before continuing");
+  }
+  return value;
+}
+
+/**
+ * The correction to the plan's manual-testing marking in force for this spec,
+ * or null: `{direction, claim, reason, round}`, where `direction` is `removed`
+ * when the builder took a marked spec off the stop and `added` when it put an
+ * unmarked one on it. A claim that agrees with the plan is no correction.
+ */
+export function correctionOf(state) {
+  const stored = claimOf(state);
+  if (!stored || stored.claim !== correctingClaim(Boolean(state.planUserVisible))) return null;
+  return {
+    direction: state.planUserVisible ? "removed" : "added",
+    claim: stored.claim,
+    reason: claimReason(stored.reason),
+    round: stored.round
+  };
+}
+
+/**
+ * Apply the claim in one round's recorded report — the wrapper
+ * `record-round-report.mjs` wrote — to the state, and say what came of it.
+ *
+ * Returns `{state, outcome}`, where `outcome.status` is one of:
+ *   none     the report makes no claim, or is not a builder's: the state is
+ *            unchanged, so a silent report leaves an earlier claim in place
+ *   blank    a claim with no reason, which counts as none and is said aloud
+ *   earlier  a claim from a round before the one the stored claim came from —
+ *            an earlier round re-entered after a later one exists — which must
+ *            never overwrite the later claim
+ *   applied  the claim moves the marking, and is now the correction in force
+ *   agrees   the claim matches the plan's marking; it is stored, and cancels a
+ *            correction that was in force (`cancelled`)
+ * `repeated` marks a claim already stored from this very round, which a resumed
+ * snapshot re-reads off the held wrapper.
+ *
+ * Only an implement report carries a claim. Fixers and repairs write fix
+ * reports, so their rounds are `none` here by construction. A whole-plan fix
+ * unit is not a plan spec, and the caller does not apply its claim at all.
+ */
+export function applyBuilderClaim(state, round, wrapper) {
+  if (!Number.isSafeInteger(round) || round < 1) throw new Error(`a claim is applied from a round, got: ${round}`);
+  const stored = claimOf(state);
+  const reachability = wrapper?.kind === "implement" ? wrapper.report?.reachability : null;
+  const claim = reachability?.claim;
+  if (!claim || claim === "none") return { state, outcome: { status: "none" } };
+  if (!["not-reachable-yet", "reachable-now"].includes(claim)) {
+    throw new Error(`a builder's claim is not-reachable-yet, reachable-now or none, not ${JSON.stringify(claim)}`);
+  }
+  const reason = claimReason(reachability.reason);
+  if (reason === "") return { state, outcome: { status: "blank", claim } };
+  if (stored && round < stored.round) {
+    return { state, outcome: { status: "earlier", claim, reason, round, standing: stored.round } };
+  }
+  const before = correctionOf(state);
+  const repeated = Boolean(stored && stored.round === round && stored.claim === claim && claimReason(stored.reason) === reason);
+  const at = repeated ? stored.at : new Date().toISOString();
+  const next = repeated ? state : {
+    ...state,
+    [BUILDER_CLAIM]: { claim, reason, round, at },
+    history: [...(state.history ?? []), { builderClaim: { claim, round }, at }]
+  };
+  const after = correctionOf(next);
+  if (after) return { state: next, outcome: { status: "applied", claim, reason, round, direction: after.direction, repeated } };
+  return { state: next, outcome: { status: "agrees", claim, reason, round, cancelled: before !== null, repeated } };
 }
 
 const currentScope = (state) => repairScope(counterOf(state, REPAIR_COUNTER));
@@ -512,6 +611,10 @@ export function reconcileBudgets(state, rounds) {
 // the fixer commits, and a bind falls between the two. It is not evidence about
 // a commit either — it is a record of what this cycle may spend, and it stops
 // counting by itself once the cycle's scope moves on.
+//
+// The builder's claim about manual testing survives a bind the same way, and has
+// to: it is made once, by the implementer of the first round or a redesign, and
+// holds through every fix round, CI or landing repair and revisit after it.
 export function bindCandidate(state, candidateOid, baseOid, changedPaths = null) {
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) throw new Error(`candidate OID is required, got: ${candidateOid}`);
   if (!/^[0-9a-f]{40,64}$/.test(baseOid ?? "")) throw new Error(`base OID is required, got: ${baseOid}`);
@@ -659,10 +762,18 @@ export function evaluate(state, config) {
   // the plan's judgement, made per spec and approved by a person, and corrected
   // by the spec writer toward reachability when writing the spec showed the way
   // in lands elsewhere, or that the spec adds a flag, a setting or a changed
-  // default the plan missed. There is deliberately no diff-derived signal: a
-  // reliable one needs per-project path conventions, and an unreliable one
-  // reading as authoritative is worse than none.
-  if (state.planUserVisible) approvals.push("user-visible");
+  // default the plan missed. At ship time the builder may correct it in either
+  // direction, only when certain and always with a reason — "nothing here is
+  // reachable yet" on a marked spec, "a person can reach this now" on an
+  // unmarked one — and the marking this reads is the plan's with that
+  // correction applied. The correction moves this one reason and nothing else:
+  // every other clause here reads exactly what it read before. There is
+  // deliberately no diff-derived signal: a reliable one needs per-project path
+  // conventions, and an unreliable one reading as authoritative is worse than
+  // none.
+  const correction = correctionOf(state);
+  const marked = correction ? correction.direction === "added" : Boolean(state.planUserVisible);
+  if (marked) approvals.push("user-visible");
 
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
@@ -697,7 +808,10 @@ export function evaluate(state, config) {
     blockers: uniqueBlockers,
     approvals: uniqueApprovals,
     ready: uniqueBlockers.length === 0 && satisfied,
-    needsHuman: uniqueBlockers.length > 0 || !satisfied
+    needsHuman: uniqueBlockers.length > 0 || !satisfied,
+    // The builder's correction in force, whatever the verdict, so that `finish`
+    // and `merge.mjs` report it from this one reading of the state.
+    correction
   };
 }
 
@@ -720,6 +834,7 @@ const USAGE = `usage:
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs landing  <state.json> <candidateOid> <record.json>
   gates.mjs pr       <state.json> <number> <url> <headOid>
+  gates.mjs claim    <state.json> <round> <report.json>
   gates.mjs evaluate <state.json> <config.json>
   gates.mjs roles    <state.json> <config.json>
   gates.mjs adopt-merge <state.json> --repo <repo>
@@ -743,6 +858,15 @@ const USAGE = `usage:
   approval is weighed against it and \`evaluate\` never reads it — and only a
   \`passed\` record lets \`merge.mjs\` accept a base other than the reviewed one.
   Binding a new candidate clears it.
+
+  \`claim\` applies the builder's claim about manual testing from one round's
+  recorded report — the wrapper \`record-round-report.mjs\` wrote into that
+  round — and prints an \`outcome\`. Only an implement report carries one. A
+  claim with no reason, and one from a round before the round the standing
+  claim came from, change nothing. The claim survives every bind, and
+  \`evaluate\` reads the plan's marking with it applied: the verdict's
+  \`correction\` names the correction in force, or is null. It moves the
+  manual-testing stop and no other.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -800,6 +924,18 @@ async function main() {
     // refusing a configuration for a reason unrelated to what was asked would
     // stop a dispatch that had nothing to do with a budget.
     process.stdout.write(`${JSON.stringify(resolveRoles(readJson(stateFile), readJson(configFile)), null, 2)}\n`);
+    return;
+  }
+  if (action === "claim") {
+    const [stateFile, round, reportFile] = values;
+    if (!stateFile || !/^[0-9]+$/.test(round ?? "") || !reportFile) {
+      const error = new Error(USAGE.trimEnd());
+      error.exitCode = 2;
+      throw error;
+    }
+    const { state: next, outcome } = applyBuilderClaim(readJson(stateFile), Number(round), readJson(reportFile));
+    if (["applied", "agrees"].includes(outcome.status) && !outcome.repeated) writeJson(stateFile, next);
+    process.stdout.write(`${JSON.stringify({ ok: true, spec: next.spec, outcome, correction: correctionOf(next) })}\n`);
     return;
   }
   if (action === "adopt-merge") {

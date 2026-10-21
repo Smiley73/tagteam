@@ -381,6 +381,27 @@ test("no document a person or a model reads still says a user-visible change alw
   }
 });
 
+// A presence guard, unlike the one above, and on purpose. "Nothing here is
+// reachable yet" removes a stop with no review and no person after it, and the
+// one thing between an opt-in flag and an unattended merge is the builder being
+// told, where it reads, that a flag or an off-by-default setting is a way in.
+// Dropping that leaves every other test green. Matched on the ideas — a flag,
+// a default, "never", and the claim it rules out, in one sentence — so that
+// rewording passes and removing the rule does not.
+test("the builder is still told that behind a flag and off by default are never reasons for not reachable yet", () => {
+  const schema = JSON.parse(read("schemas", "implement-report.schema.json"));
+  const sources = [
+    ["prompts/implement.md", read("prompts", "implement.md")],
+    ["the implement report's claim description", schema.properties.reachability?.properties?.claim?.description ?? ""]
+  ];
+  for (const [name, text] of sources) {
+    const sentences = text.replace(/\s+/g, " ").split(/(?<=[.!?])\s+(?=[A-Z"*`-])/);
+    const rule = sentences.find((sentence) => /\bflag\b/i.test(sentence) && /\bdefault\b/i.test(sentence)
+      && /\bnever\b/i.test(sentence) && /not[ -]reachable[ -]yet/i.test(sentence));
+    assert.ok(rule, `${name} no longer says that "behind a flag" and "off by default" are never reasons for not reachable yet`);
+  }
+});
+
 // --- the driver's routes, decided statically where the driver test cannot reach ---
 
 const driverFunction = (name) => {

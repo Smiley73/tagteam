@@ -16,6 +16,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET, lastJson } from "../scripts/ship.mjs";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
 import { EFFORT_LADDER } from "../scripts/lib/effort-ladder.mjs";
+import { BLOCK_START } from "../scripts/lib/reachability.mjs";
 import { root, git, stage, ship, write, outputOf, arrive, arriveAll, findings, major, quietPath,
   mergingEnv, driveToPublishable, resultOf, stagePlan, onOrigin, ghCalls, pullsOf, trainOf,
   setTrainRoute, commitByHand, shipThrough, A_CHANGE, B_CHANGE, MAIN_ADD, BOTH_ADD, UNRELATED,
@@ -968,7 +969,9 @@ test("a redesign implementer that changes nothing makes no round, keeps its repo
   const { shipDir, plan } = staged;
   const { state, run } = driveToRecurrence(staged);
   const redesign = run("redesign");
-  write(outputOf(redesign.json.dispatch[0]), { status: "unfinished", summary: "the area does not need a rewrite", unfinished: [{ part: "rewrite", reason: "nothing in app.js warrants one" }] });
+  // Its claim about manual testing goes aside with the rest of its report: a
+  // redesign that changed nothing contributes no claim.
+  write(outputOf(redesign.json.dispatch[0]), { status: "unfinished", summary: "the area does not need a rewrite", unfinished: [{ part: "rewrite", reason: "nothing in app.js warrants one" }], reachability: { claim: "reachable-now", reason: "sub is exported" } });
   arriveAll(redesign);
   const snapshot = run("snapshot");
   assert.match(snapshot.json.say.join("\n"), /The redesign implementer changed nothing[\s\S]*the area does not need a rewrite[\s\S]*left undone: rewrite/);
@@ -977,6 +980,8 @@ test("a redesign implementer that changes nothing makes no round, keeps its repo
   assert.match(snapshot.json.next, /fix --plan/);
   assert.equal(state().state, "reviewing");
   assert.equal(state().fixRoundsUsed, 3, "the round it spent stays spent");
+  assert.equal(state().builderClaim, undefined, "a redesign that changed nothing had its claim applied");
+  assert.doesNotMatch(snapshot.json.say.join("\n"), /manual testing/);
   const declined = fs.readdirSync(path.join(shipDir, "01-a", "declined"));
   assert.equal(declined.length, 1);
   assert.match(declined[0], /^redesign-round-3-\d{8}T\d{6}Z\.json$/);
@@ -5140,4 +5145,149 @@ test("a last spec waiting for approval holds the whole-plan check back", () => {
   assert.match(refused.stderr, /02-b is not merged into plan\/demo yet/);
   assert.ok(!fs.existsSync(path.join(shipDir, "whole-plan")), "a refused check left a record behind");
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- the builder's correction to the manual-testing marking -----------------
+
+// A spec's front matter marked as stopping for manual testing, committed and
+// pushed before the train starts, as the plan's approval would leave it.
+function markStopping({ repo, plan }, id) {
+  const file = path.join(plan, "specs", `${id}.md`);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("user_visible: false", "user_visible: true"));
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", `${id} stops for manual testing`);
+  git(repo, "push", "origin", "main");
+}
+
+const claim = (kind, reason) => ({ reachability: { claim: kind, reason } });
+const REACHABLE = "twice is exported and the docs page links it";
+const UNREACHABLE = "nothing calls twice until a later plan wires it up";
+const bodyOf = (env, id) => pullsOf(env).filter((pull) => pull.branch.endsWith(`/${id}`)).at(-1).body;
+const blocksIn = (text) => text.split(BLOCK_START).length - 1;
+
+test("on the plan route, a person can reach this now makes an unmarked last spec wait and hold the whole-plan check back, and an approval clears it", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, env, body } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
+  const waiting = shipThrough(staged, "02-b", "b.js", B_CHANGE, claim("reachable-now", REACHABLE));
+  assert.match(waiting.snapshotted.json.say.join("\n"), /did not mark 02-b[\s\S]*a person can reach this now[\s\S]*twice is exported/);
+  const { finished } = waiting;
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(waiting.state().state, "awaiting-approval");
+  assert.equal(waiting.state().planUserVisible, false, "the plan's marking was overwritten");
+  assert.deepEqual(finished.json.approvals, ["user-visible"], "the correction moved some other stop too");
+  assert.deepEqual(finished.json.blockers, []);
+  assert.deepEqual([finished.json.correction.direction, finished.json.correction.claim, finished.json.correction.reason],
+    ["added", "reachable-now", REACHABLE]);
+  assert.ok(finished.json.say.some((line) => line.includes(`builder's words: ${JSON.stringify(REACHABLE)}`)), finished.json.say.join("\n"));
+  assert.match(finished.json.ask, /the manual-testing stop is the builder's, not the plan's/i);
+  assert.ok(finished.json.ask.includes(JSON.stringify(REACHABLE)), "the ask does not quote the builder");
+  assert.match(finished.json.next, /end --plan /, "a waiting last spec was followed by the check");
+  const refused = ship("plan-check", plan, [], env);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /02-b is not merged into plan\/demo yet/);
+  assert.ok(!fs.existsSync(path.join(shipDir, "whole-plan")));
+  // The pull request carries the block once, and the draft is what was sent.
+  assert.equal(blocksIn(bodyOf(env, "02-b")), 1);
+  assert.match(bodyOf(env, "02-b"), /Held for manual testing/);
+  assert.equal(fs.readFileSync(body, "utf8"), bodyOf(env, "02-b"), "the draft differs from the live body");
+
+  const approved = ship("finish", plan, ["--spec", "02-b", "--approve", "t@example.com"], env);
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.equal(waiting.state().state, "merged");
+  assert.match(approved.json.next, /plan-check --plan .* --why last-spec$/);
+  assert.ok(approved.json.say.some((line) => line.includes(JSON.stringify(REACHABLE))), "the merge line does not carry the correction");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("on the plan route, nothing here is reachable yet lets a marked last spec merge into the plan branch, and the run moves on to the check", () => {
+  const staged = stagePlan();
+  const { dir, plan, env, origin } = staged;
+  markStopping(staged, "02-b");
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const main = onOrigin(origin, "main");
+  assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
+  const tip = onOrigin(origin, "plan/demo");
+  const merged = shipThrough(staged, "02-b", "b.js", B_CHANGE, claim("not-reachable-yet", UNREACHABLE));
+  assert.equal(merged.finished.status, 0, merged.finished.stderr);
+  assert.equal(merged.state().state, "merged");
+  assert.equal(merged.state().planUserVisible, true);
+  assert.match(merged.finished.json.next, /plan-check --plan .* --why last-spec$/);
+  const said = merged.finished.json.say.join("\n");
+  assert.match(said, /The plan marked 02-b[\s\S]*nothing here is reachable yet[\s\S]*does not wait for manual testing/);
+  assert.ok(said.includes(JSON.stringify(UNREACHABLE)), said);
+  assert.match(bodyOf(env, "02-b"), /Not held for manual testing/);
+  assert.notEqual(onOrigin(origin, "plan/demo"), tip, "02-b did not merge into the plan branch");
+  assert.equal(onOrigin(origin, "main"), main, "something reached the base");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("on the base route, a person can reach this now makes an unmarked spec wait, and nothing here is reachable yet lets a marked one merge", () => {
+  {
+    const staged = stagePlan({ planBranch: false });
+    const { dir, plan, env } = staged;
+    assert.equal(ship("start", plan, [], env).status, 0);
+    const waiting = shipThrough(staged, "01-a", "app.js", A_CHANGE, claim("reachable-now", REACHABLE));
+    assert.equal(waiting.finished.status, 0, waiting.finished.stderr);
+    assert.equal(waiting.state().state, "awaiting-approval");
+    assert.deepEqual(waiting.finished.json.approvals, ["user-visible"]);
+    assert.equal(waiting.finished.json.correction.direction, "added");
+    assert.ok(waiting.finished.json.say.some((line) => line.includes(JSON.stringify(REACHABLE))));
+    assert.match(waiting.finished.json.next, /begin --plan .* --spec 02-b$/, "the run did not move on past a waiting spec");
+    assert.deepEqual(pullsOf(env).map((pull) => pull.base), ["main"]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  {
+    const staged = stagePlan({ planBranch: false });
+    const { dir, plan, env, origin, body } = staged;
+    markStopping(staged, "01-a");
+    assert.equal(ship("start", plan, [], env).status, 0);
+    const before = onOrigin(origin, "main");
+    const merged = shipThrough(staged, "01-a", "app.js", A_CHANGE, claim("not-reachable-yet", UNREACHABLE));
+    assert.equal(merged.finished.status, 0, merged.finished.stderr);
+    assert.equal(merged.state().state, "merged");
+    assert.notEqual(onOrigin(origin, "main"), before, "nothing reached the base");
+    assert.match(merged.finished.json.next, /begin --plan .* --spec 02-b$/);
+    assert.ok(merged.finished.json.say.some((line) => line.includes(JSON.stringify(UNREACHABLE))));
+    assert.equal(blocksIn(bodyOf(env, "01-a")), 1);
+    // The next spec makes no claim, and its body — the same draft file — goes
+    // out without the earlier spec's block.
+    const next = shipThrough(staged, "02-b", "b.js", B_CHANGE);
+    assert.equal(next.finished.status, 0, next.finished.stderr);
+    assert.equal(blocksIn(bodyOf(env, "02-b")), 0, "a block outlived the correction it was about");
+    assert.equal(blocksIn(fs.readFileSync(body, "utf8")), 0);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a claim with no reason is ignored and said to be, and a whole-plan fix's claim changes nothing", () => {
+  {
+    const staged = stage();
+    const { dir, plan, shipDir } = staged;
+    ship("start", plan);
+    const begin = ship("begin", plan, ["--spec", "01-a"]);
+    const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+    fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+    write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [], ...claim("reachable-now", "  \n ") });
+    arriveAll(begin);
+    const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+    assert.equal(snapshot.status, 0, snapshot.stderr);
+    assert.match(snapshot.json.say.join("\n"), /gives no reason, so the claim is ignored and the plan's marking stands/);
+    const state = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+    assert.equal(state.builderClaim, undefined, "a claim with no reason was recorded");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  {
+    const staged = stageMerged();
+    const { dir, plan, shipDir, env } = staged;
+    const collected = reviewWholePlan(staged, ship("plan-check", plan, [], env), [major("b.js")]);
+    assert.match(collected.json.next, /begin --plan .* --spec plan-fix-1$/);
+    const finished = shipUnit(staged, "plan-fix-1", { "b.js": "export const twice = (n) => n + n;\n" }, claim("reachable-now", REACHABLE));
+    assert.match(finished.snapshotted.json.say.join("\n"), /claims a person can reach this now; that is ignored\. plan-fix-1 is a whole-plan fix/);
+    assert.equal(finished.json.ask, undefined, "a fix unit's claim stopped it");
+    assert.equal(unitStateOf(shipDir, "plan-fix-1").builderClaim, undefined);
+    assert.equal(unitStateOf(shipDir, "plan-fix-1").state, "merged");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

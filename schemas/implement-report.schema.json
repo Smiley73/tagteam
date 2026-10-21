@@ -4,7 +4,7 @@
   "description": "The round's account of its own work. A round that records none, and a round that records unfinished work, both stop the pull request for a person to read — so an honest `unfinished` costs nothing that silence does not cost too.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "summary", "unfinished"],
+  "required": ["status", "summary", "unfinished", "reachability"],
   "properties": {
     "status": {
       "type": "string",
@@ -34,6 +34,23 @@
             "minLength": 1,
             "description": "Why it was left undone, in a sentence a person can act on."
           }
+        }
+      }
+    },
+    "reachability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim", "reason"],
+      "description": "Whether the spec's manual-testing marking is right for what you actually built. The marking is `user_visible` in the spec's front matter: true means the spec stops for a person to try it before it merges, because once it merges a person can see or do something new; false means it merges on its checks. Correct it only when you are certain, in either direction, and otherwise make no claim: the plan's marking then stands. Every other reason a pull request waits is untouched by what you say here.",
+      "properties": {
+        "claim": {
+          "type": "string",
+          "enum": ["none", "not-reachable-yet", "reachable-now"],
+          "description": "none makes no claim, and is the answer whenever you are not certain, whichever way the marking points. not-reachable-yet is only for a spec marked user_visible: true, and only when you are certain no person can reach anything it adds once it merges: nothing calls it yet, or its only way in comes from a later spec. Reachable means any way in at all: a typed command flag, a setting someone can turn on and a changed default can all be tried today, so \"it is behind a flag\" and \"it is off by default\" are never reasons for not-reachable-yet. reachable-now is only for a spec marked user_visible: false, and only when you are certain a person can see or do something new the moment it merges, by any way in at all — including a flag, a setting or a changed default. A claim that agrees with the marking changes nothing."
+        },
+        "reason": {
+          "type": "string",
+          "description": "One line a person will read in the pull request and in the run's report, quoted as your words: what can or cannot be reached once this merges, and how. An empty string with none. A claim with an empty reason is ignored."
         }
       }
     }

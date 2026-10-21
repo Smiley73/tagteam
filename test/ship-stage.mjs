@@ -248,17 +248,18 @@ export function mergingEnv(dir) {
 // One spec of one plan, from `begin` to the point where its gates are satisfied
 // and the pull request is the only thing left. No findings anywhere, so it takes
 // the shortest route a real spec takes. `file` is one path with `contents`, or an
-// object of paths to contents for a spec that writes several.
-export function driveToPublishable({ plan, shipDir }, id, file, contents, env = {}) {
+// object of paths to contents for a spec that writes several. `report` is laid
+// over the implementer's report — a builder's claim about manual testing, say.
+export function driveToPublishable({ plan, shipDir }, id, file, contents, env = {}, report = {}) {
   const begin = ship("begin", plan, ["--spec", id], env);
   assert.equal(begin.status, 0, begin.stderr);
   assert.equal(begin.json.dispatch?.[0]?.agent, "tagteam:implementer", `begin did not start ${id}: ${begin.stdout}`);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   const files = typeof file === "string" ? { [file]: contents } : file;
   for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(worktree, name), text);
-  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${Object.keys(files).join(", ")}`, unfinished: [] });
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${Object.keys(files).join(", ")}`, unfinished: [], ...report });
   arriveAll(begin);
-  ship("snapshot", plan, ["--spec", id], env);
+  const snapshotted = ship("snapshot", plan, ["--spec", id], env);
   ship("verify", plan, ["--spec", id], env);
   const panel = ship("panel", plan, ["--spec", id], env);
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, id, "state.json"), "utf8"));
@@ -274,7 +275,7 @@ export function driveToPublishable({ plan, shipDir }, id, file, contents, env = 
   arriveAll(recheck);
   const settled = ship("settle", plan, ["--spec", id], env);
   assert.equal(settled.json.review, "clean", settled.stderr);
-  return { worktree, state };
+  return { worktree, state, snapshotted };
 }
 
 // Where an agent of a review set writes: the file its prompt names, or for the
@@ -337,9 +338,10 @@ export function commitByHand({ dir, origin }, branch, { push = true, from = bran
   return { oid, push: pushIt };
 }
 
-// One spec from `begin` through `finish`.
-export function shipThrough(staged, id, file, contents) {
-  const driven = driveToPublishable(staged, id, file, contents, staged.env);
+// One spec from `begin` through `finish`, with `report` laid over its
+// implementer's report.
+export function shipThrough(staged, id, file, contents, report = {}) {
+  const driven = driveToPublishable(staged, id, file, contents, staged.env, report);
   const published = ship("publish", staged.plan, ["--spec", id, "--title", `Ship ${id}`, "--body", staged.body], staged.env);
   assert.equal(published.status, 0, published.stderr);
   const finished = ship("finish", staged.plan, ["--spec", id], staged.env);
@@ -414,17 +416,20 @@ export function reviewWholePlan(staged, check, list = [], env = staged.env) {
 }
 
 // A fix unit from `begin` through `finish`, as `next` walks it: the same cycle as
-// a spec, with its records under the unit's own directory.
-export function shipUnit(staged, id, files) {
+// a spec, with its records under the unit's own directory. `report` is laid over
+// its implementer's report, and what its snapshot printed comes back beside
+// what `finish` printed.
+export function shipUnit(staged, id, files, report = {}) {
   const { plan, env, body, shipDir } = staged;
   const begin = ship("begin", plan, ["--spec", id], env);
   assert.equal(begin.status, 0, begin.stderr);
   assert.equal(begin.json.dispatch?.[0]?.agent, "tagteam:implementer", begin.stdout);
   const worktree = trainOf(shipDir).worktree;
   for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(worktree, name), text);
-  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `fixed ${Object.keys(files).join(", ")}`, unfinished: [] });
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `fixed ${Object.keys(files).join(", ")}`, unfinished: [], ...report });
   arriveAll(begin);
-  assert.equal(ship("snapshot", plan, ["--spec", id], env).status, 0);
+  const snapshotted = ship("snapshot", plan, ["--spec", id], env);
+  assert.equal(snapshotted.status, 0, snapshotted.stderr);
   assert.equal(ship("verify", plan, ["--spec", id], env).json.verify, "passed");
   const panel = ship("panel", plan, ["--spec", id], env);
   const oid = unitStateOf(shipDir, id).candidateOid;
@@ -441,7 +446,7 @@ export function shipUnit(staged, id, files) {
   assert.equal(ship("publish", plan, ["--spec", id, "--title", `Ship ${id}`, "--body", body], env).status, 0);
   const finished = ship("finish", plan, ["--spec", id], env);
   assert.equal(finished.status, 0, finished.stderr);
-  return finished;
+  return { ...finished, snapshotted };
 }
 
 // origin/main merged into plan/demo as a two-parent commit, recorded as the

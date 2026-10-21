@@ -62,6 +62,7 @@ import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { roundRootForWrite, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { claimReason, claimWords, quoteReason } from "./lib/reachability.mjs";
 
 // The two reports a round can carry, and the schema each is validated against.
 // Both are considered every time: which one a round holds is a fact about the
@@ -105,6 +106,48 @@ function parseArgs(argv) {
 // whitespace.
 const serialize = (document) => `${JSON.stringify(document, null, 2)}\n`;
 
+// The keys a report may leave out and still be recorded, each filled the way the
+// round's copy records it — `filled` lists them, and the summary says so.
+//
+// A fix report whose only defect is a missing `notes` is recorded with an empty
+// one. `notes` is optional in every sense but the schema's — "anything the
+// re-checker needs that the diff does not say", and usually nothing — and this
+// refusal arrives after the fix is committed and bound, so the round it stops is
+// one whose work is already done. The schema keeps the key required because
+// every schema here is held to strict structured output, where an optional
+// property is a shape nothing requires.
+//
+// An implement report without `reachability` is recorded as making no claim
+// about manual testing, for the same reason: the builder's work is committed by
+// the time this runs, and saying nothing about the marking is exactly what an
+// implementer that is not certain is told to say.
+const FILLS = {
+  fix: { notes: () => "" },
+  implement: { reachability: () => ({ claim: "none", reason: "" }) }
+};
+
+function withFills(kind, parsed) {
+  const filled = [];
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { document: parsed, filled };
+  let document = parsed;
+  for (const [key, value] of Object.entries(FILLS[kind] ?? {})) {
+    if (Object.hasOwn(document, key)) continue;
+    document = { ...document, [key]: value() };
+    filled.push(key);
+  }
+  return { document, filled };
+}
+
+// Whether a round already holds this report, as the agent wrote it or as it
+// would have been recorded with its missing keys filled — the round's copy is
+// the filled one, and the scratch file the agent wrote is not.
+function heldRound(held, kind, parsed) {
+  const raw = held.get(serialize(parsed));
+  if (raw !== undefined) return raw;
+  const { document, filled } = withFills(kind, parsed);
+  return filled.length > 0 ? held.get(serialize(document)) : undefined;
+}
+
 // Every other round's report, by the bytes of the document it recorded. The
 // rounds root is derived from `--out` the way `recheck.mjs` derives it from a
 // round directory: the round's parent. The round being written into is left out —
@@ -142,7 +185,12 @@ function recordedElsewhere(roundsRoot, ownRound) {
  * the one place that knows rather than re-serializing on its own.
  */
 export function recordedIn(roundsRoot, document) {
-  return recordedElsewhere(path.resolve(roundsRoot), null).get(serialize(document)) ?? null;
+  const held = recordedElsewhere(path.resolve(roundsRoot), null);
+  for (const { kind } of KINDS) {
+    const round = heldRound(held, kind, document);
+    if (round !== undefined) return round;
+  }
+  return null;
 }
 
 // The wrapper the round already holds at `out`, or null when there is none or
@@ -197,24 +245,16 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     } catch (error) {
       throw new Error(`the report at ${file} is unreadable: ${error.message}\n${CORRECT_IT_NOW}`);
     }
-    const round = held.get(serialize(parsed));
+    const round = heldRound(held, candidate.kind, parsed);
     if (round !== undefined) {
       considered.push(`${file} (already recorded in round ${round})`);
       continue;
     }
     considered.push(`${file} (new)`);
-    // A fix report whose only defect is a missing `notes` is recorded with an
-    // empty one, and the wrapper says so. `notes` is optional in every sense but
-    // the schema's — "anything the re-checker needs that the diff does not say",
-    // and usually nothing — and this refusal arrives after the fix is committed
-    // and bound, so the round it stops is one whose work is already done. The
-    // schema keeps the key required because every schema here is held to strict
-    // structured output, where an optional property is a shape nothing requires.
-    const filled = [];
-    if (candidate.kind === "fix" && parsed && typeof parsed === "object" && !Array.isArray(parsed) && !Object.hasOwn(parsed, "notes")) {
-      parsed = { ...parsed, notes: "" };
-      filled.push("notes");
-    }
+    // The keys a report may leave out are filled, and the wrapper says so — see
+    // `FILLS`.
+    const { document, filled } = withFills(candidate.kind, parsed);
+    parsed = document;
     // Validated here, before anything is counted, and not after one report has
     // been singled out. Two new reports are recorded as an absence below, and an
     // absence is approvable — so validating only the singled-out one would let a
@@ -267,6 +307,20 @@ export function recordRoundReport({ dir, out, schemaDir }) {
   return record;
 }
 
+const FILLED_AS = { reachability: "making no claim about manual testing" };
+
+// What a builder's report says about the plan's manual-testing marking, with
+// its reason quoted as the builder's words — never as the run's. Whether it is
+// applied is `gates.mjs claim`'s to decide and `snapshot`'s to say.
+function claimLines(record) {
+  const reachability = record.kind === "implement" ? record.report?.reachability : null;
+  if (!reachability || reachability.claim === "none") return [];
+  const reason = claimReason(reachability.reason);
+  return [reason === ""
+    ? `  manual testing: claims ${claimWords(reachability.claim)}, with no reason`
+    : `  manual testing: claims ${claimWords(reachability.claim)} — the builder's words: ${quoteReason(reason)}`];
+}
+
 export function summaryLines(record, file) {
   if (record.status === "missing") {
     return [`report: missing — recorded at ${file}`, `  ${record.reason}`];
@@ -291,7 +345,8 @@ export function summaryLines(record, file) {
       : `${record.kind} report: ${record.status} — recorded at ${file}`,
     ...outcomes.map((entry) => `  ${entry.id.padEnd(22)} ${entry.outcome.padEnd(column)} ${entry.note}`),
     `  ${report.summary}`,
-    ...(record.filled ?? []).map((field) => `  the report had no \`${field}\`; recorded as empty`),
+    ...claimLines(record),
+    ...(record.filled ?? []).map((field) => `  the report had no \`${field}\`; recorded as ${FILLED_AS[field] ?? "empty"}`),
     ...(report.status === "complete" && record.status === "unfinished"
       ? ["  this report claims complete and lists unfinished work; it is recorded as unfinished"]
       : []),

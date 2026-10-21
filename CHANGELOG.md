@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.7
+
+- Stop a spec for manual testing only when, once it merges, a person can actually try something new. A helper nothing calls yet, plumbing, or a screen or command whose way in comes from a later spec now merges on its checks; a typed flag, a setting someone can turn on and a changed default still stop, even when off by default.
+- When a feature is built across several specs, put the stop on the spec after which a person can first reach it, rather than on the specs before it.
+- At plan approval, show which specs will stop for manual testing and which will merge on their checks, say that the marking can be edited in each spec until it starts shipping, and say plainly when no spec in the plan will stop.
+- Let the agent that builds a spec correct the plan's marking at ship time, in either direction, only when it is certain: "nothing here is reachable yet" takes a spec off the manual-testing stop, and "a person can reach this now" puts one on it, where an approval clears it as usual. A builder that is not sure says nothing, and the plan's marking stands.
+- Show the builder's one-line reason, quoted as its words, in the pull request and in what the ship reports, whether the spec merged or stopped. A correction with no reason is ignored and said to be.
+- Keep a correction for the rest of the spec's run, through fix rounds, repairs and a second look. It moves the manual-testing stop and no other.
+
 ## 0.10.6
 
 - Add a `planBranch` setting. With it on, a plan of two or more specs collects its specs on a branch of its own, `plan/<slug>`, and nothing from it reaches the base until the whole plan is done. Each spec is still its own pull request, into that branch, reviewed and gated as before. A plan of one spec, and a plan already started, ship as they did.

@@ -395,12 +395,15 @@ them to try it — and the specs that will **merge on their checks without one**
 because nothing new is reachable from them yet. Say that the marking is
 `user_visible` in each spec's front matter and is editable there, as the lenses
 are, until that spec begins shipping: from then on an edit changes nothing for
-it. When no spec is marked, say so plainly: no spec in this plan will stop for
-manual testing, because none of them adds a way in to try what it builds. Say
-too that every other stop is unchanged — a failed check, an open finding or a
-workflow change still stops a spec for them, and a plan shipped through a branch
-of its own still asks them before it lands — and do not present any of those as
-the place to try the feature. This is shown, not asked; an edited marking is
+it. Say too that the agent that builds a spec may still correct its marking, in
+either direction, only when certain and always with a reason they will see in
+the pull request and in what the ship reports. When no spec is marked, say so
+plainly: no spec in this plan will stop for manual testing, because none of
+them adds a way in to try what it builds. Say too that every other stop is
+unchanged — a failed check, an open finding or a workflow change still stops a
+spec for them, and a plan shipped through a branch of its own still asks them
+before it lands — and do not present any of those as the place to try the
+feature. This is shown, not asked; an edited marking is
 validated by re-running `specs.mjs`, as any front-matter edit is.
 
 A lens this repository calibrates itself has its brief at

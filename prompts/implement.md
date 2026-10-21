@@ -52,12 +52,45 @@ Implement everything that is unambiguous, leave the contested part undone, and
 put it in your report as an unfinished part with the reason. A spec that was
 wrong is worth knowing about; a spec that was quietly worked around is not.
 
+## Manual testing
+
+This applies to a first implementation and a redesign alike. `user_visible` in
+the spec's front matter is the plan's marking: true means that once this spec
+merges a person can see or do something new, so it stops for manual testing
+before it merges; false means it merges on its checks. The plan made that call
+before the code existed. You have just built it, and your report's
+`reachability` lets you correct it, in either direction.
+
+Reachable means any way in at all, the moment this merges. A typed command
+flag, a setting someone can turn on, a changed default, or a screen, message or
+document a person can reach all count: they can be tried today. A helper
+nothing calls yet, plumbing, or a surface whose only way in comes from a later
+spec does not. "It is behind a flag" and "it is off by default" are never
+reasons for "not reachable yet": a flag or a setting is a way in.
+
+- **`not-reachable-yet`**, on a spec marked true, only when you are certain no
+  person can reach anything this change adds once it merges. The spec then
+  merges without anyone trying it, and nothing reviews that decision after you.
+- **`reachable-now`**, on a spec marked false, only when you are certain a person
+  can see or do something new once it merges. The spec then waits for a person
+  to try it.
+- **`none`** whenever you are not certain, whichever way the marking points. The
+  plan's marking then stands. Guessing is worse than saying nothing: the person
+  approved the plan's marking, and only certainty moves it.
+
+With a claim, write a one-line `reason` a person will read, quoted as your words,
+in the pull request and in what the run reports: what can or cannot be reached,
+and how. A claim with no reason is ignored. With `none`, the reason is an empty
+string. What you claim moves the manual-testing stop and nothing else — every
+other reason a pull request waits still applies.
+
 ## Report
 
 Write your report at the path you are given, matching
 `schemas/implement-report.schema.json`, before you return: whether you finished
-the spec, one or two sentences on what you changed, and every part you left
-undone with the reason.
+the spec, one or two sentences on what you changed, every part you left undone
+with the reason, and your `reachability` claim as *Manual testing* describes —
+`none` unless you are certain.
 
 **An honest `unfinished` costs you nothing, and a false `complete` costs the
 change.** The run stops for a person whichever of the two you write — an

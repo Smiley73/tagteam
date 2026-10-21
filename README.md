@@ -258,7 +258,8 @@ which only have to say whether one fix landed — at low. Every one of those is 
 setting in `.tagteam/config.json`.
 
 A pull request merges unattended unless: the spec is marked as the one after
-which a person can try something new, so it waits for manual testing,
+which a person can try something new — by the plan, or by the agent that built
+it, when it is certain the plan got it wrong — so it waits for manual testing,
 verification failed or CI proved nothing, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
 wrote it never confirmed it finished what it was given.
@@ -407,6 +408,16 @@ does not.
   before it merges. The plan marks which specs those are; the person approving
   it sees the marking and can change it in each spec's front matter until that
   spec begins shipping.
+- The agent that builds a spec can correct that marking at ship time, in either
+  direction, but only when it is certain: "nothing here is reachable yet" takes
+  a marked spec off the manual-testing stop, and "a person can reach this now"
+  puts an unmarked one on it, where an approval clears it as usual. Either way
+  it gives a one-line reason, which the pull request and the ship's report show
+  as the builder's own words, whether the spec merged or stopped. A builder that
+  is not sure says nothing and the plan's marking stands. A flag, a setting or a
+  changed default is always reachable, so being behind one is never a reason to
+  skip the stop. The correction holds for the rest of the spec's run and moves
+  no other stop.
 
 ## Reference
 
