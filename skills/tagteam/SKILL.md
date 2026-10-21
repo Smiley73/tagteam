@@ -565,6 +565,16 @@ one worktree lent to the check and given back. The discard is what the verify
 commands wrote while the worktree sat on that throwaway commit, proved clean
 before the check began, and nothing else.
 
+Before checks are waited on for a commit — a spec's candidate at publish, the
+plan's tip at landing — the workflow files are read from that commit, in any
+checkout or worktree that holds it, never from disk:
+
+```bash
+git -C "$R" rev-parse --verify --quiet <commit>^{commit}                  # read-only: the commit is there; one that is not stops the read
+git -C "$R" ls-tree -z --full-tree <commit> -- .github/workflows/         # read-only: the workflow files at that commit
+git -C "$R" cat-file blob <commit>:<file>                                 # read-only: each one's text
+```
+
 **Never:** amend, interactive-rebase, `push --force` without a lease,
 `reset --hard` over committed work, commit or check out in the primary checkout,
 merge without `--match-head-commit`, delete a branch inside a merge command,
