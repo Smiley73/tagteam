@@ -32,7 +32,7 @@ function onPlanByHand({ dir, origin, shipDir }, files) {
   git(clone, "checkout", "-q", "-B", "plan/demo", "origin/plan/demo");
   for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(clone, name), text);
   git(clone, "add", "-A");
-  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "commit", "-q", "-m", `by hand ${byHand}`);
+  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "-c", "commit.gpgsign=false", "commit", "-q", "-m", `by hand ${byHand}`);
   const oid = git(clone, "rev-parse", "HEAD");
   setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, pendingOid: oid } }));
   git(clone, "push", "-q", "origin", "HEAD:refs/heads/plan/demo");

@@ -346,7 +346,9 @@ the wait for your approval moves to the plan's own pull request:
 
 The repository has to allow merge commits into the base, and its checks have to
 run on pull requests into the plan's branch; the ship says so plainly when
-either is not the case, and changing it is a repository setting for you.
+either is not the case, and changing it is a repository setting for you. When
+your git signs commits, the commits the ship makes on the plan's branch itself
+are signed with your own git signing setup.
 
 **The version.** List the lines that carry your version in `versionFiles` —
 configure proposes them — and a plan of two or more specs carries exactly one

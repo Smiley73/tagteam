@@ -22,6 +22,7 @@ import {
 } from "../scripts/lib/landing.mjs";
 import { snapshotCandidate } from "../scripts/snapshot-candidate.mjs";
 import { bindCandidate, initState, recordLanding } from "../scripts/gates.mjs";
+import { signWith } from "./ship-stage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const MERGE = path.join(root, "scripts", "merge.mjs");
@@ -53,6 +54,9 @@ function stage({ reviewExclude = [], command = PASSING, extra = {} } = {}) {
   git(repo, "init", "-q", "-b", "main", ".");
   git(repo, "config", "user.email", "t@example.com");
   git(repo, "config", "user.name", "t");
+  // Pinned off, so that no commit here reaches a developer's signer; a test that
+  // needs signing sets it, with a stand-in signer, itself.
+  git(repo, "config", "commit.gpgsign", "false");
   fs.writeFileSync(path.join(repo, "app.js"), lines(20));
   fs.writeFileSync(path.join(repo, "lock.txt"), lines(4));
   // Anything else the reviewed base has to carry — a `.gitattributes` among it.
@@ -136,6 +140,21 @@ test("a base that moved with an unrelated change passes, and the merged tree was
   assert.match(said, new RegExp(`moved from ${staged.baseOid.slice(0, 12)} to ${newBase.slice(0, 12)}`));
   assert.match(said, /re-verified against the new base \(passed\) before merging/);
   assert.match(said, /nothing was rebased and nothing was re-reviewed/);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("under a configuration that signs, the throwaway merge commit is never signed and never reaches the signer", () => {
+  const staged = stage();
+  const candidate = commitCandidate(staged, (tree) => write(path.join(tree, "app.js"), lines(20, { 15: "CANDIDATE" })));
+  const newBase = moveBase(staged, (tree) => write(path.join(tree, "other.js"), "export const other = 1;\n"));
+  // A signer that fails and keeps what it is handed: had the throwaway gone to
+  // it, the check would have failed, and the payload would be here.
+  const handed = signWith(staged, { works: false });
+
+  const outcome = check(staged, candidate, newBase);
+  assert.equal(outcome.status, "passed");
+  assert.equal(outcome.verify.status, "passed");
+  assert.deepEqual(handed(), [], "the landing check's throwaway reached the signer");
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
@@ -459,6 +478,7 @@ function stageMerge({ landing, candidateOid, baseMoves = true, approved = true }
   git(repo, "init", "-q", "-b", "main", ".");
   git(repo, "config", "user.email", "t@example.com");
   git(repo, "config", "user.name", "t");
+  git(repo, "config", "commit.gpgsign", "false");
   fs.writeFileSync(path.join(repo, "app.js"), "one\n");
   git(repo, "add", "-A");
   git(repo, "commit", "-qm", "base");
