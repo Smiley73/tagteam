@@ -1869,17 +1869,21 @@ async function routePreflight(ctx, say) {
 
 // What `start` says about the route, and — for a plan branch not yet confirmed on
 // origin — the branch made. Nothing at all for a train on the base with the
-// setting off: that train ships exactly as it did before routes existed.
+// setting off: that train takes the only route there is, and says nothing about
+// routes. A line
+// that names the base as the route also says each spec will wait for the
+// person's approval, which is what going straight to the base means now.
 async function routeLines(ctx, decided) {
   const route = routeOf(ctx);
   const base = ctx.config.base;
   if (!isPlanRoute(route)) {
     if (ctx.config.planBranch !== true) return [];
+    const waits = `Each spec will wait for your approval before it merges into ${base}.`;
     if (decided.why === "under-way") {
-      return [`planBranch is on, but this plan already had a spec under way before it recorded a route, so it keeps shipping each spec straight to ${base}.`];
+      return [`planBranch is on, but this plan already had a spec under way before it recorded a route, so it keeps shipping each spec straight to ${base}. ${waits}`];
     }
-    if (decided.why === "one-spec") return [`planBranch is on, but this plan has one spec, so it ships straight to ${base}: there is nothing to collect.`];
-    return [`This plan recorded shipping each spec straight to ${base} when it first started, and keeps doing so; planBranch applies to plans that have not started yet.`];
+    if (decided.why === "one-spec") return [`planBranch is on, but this plan has one spec, so it ships straight to ${base}: there is nothing to collect. ${waits}`];
+    return [`This plan recorded shipping each spec straight to ${base} when it first started, and keeps doing so; planBranch applies to plans that have not started yet. ${waits}`];
   }
   const lines = [];
   if (!route.tipOid) {

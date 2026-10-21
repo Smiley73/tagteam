@@ -9,7 +9,19 @@ Tagteam takes a vague goal to merged pull requests. `/tagteam:plan` interviews
 you until the outcome is concrete, drafts a plan, has it reviewed once by three
 independent readers whose findings the drafter answers, and expands it into spec
 files. `/tagteam:ship` implements those specs one at a time, reviews each with a
-cross-engine panel, and merges the ones that need no human judgement.
+cross-engine panel, and brings each to a merge. Nothing reaches `base` without a
+person's approval or Merge. A spec that merges straight into `base` — a one-spec
+plan, or any plan with `planBranch` off — always waits for that approval; it is
+the approval every such spec needs, not a fault.
+
+With `planBranch` on, a plan of two or more specs ships on the familiar feature
+branch: the branch one feature, here one plan, is collected on before it reaches
+`base` through a single pull request. Here it is called the plan branch,
+`plan/<slug>`, and what is particular to it is that tagteam creates it and
+deletes it, and checks the combined change once before that final pull request.
+Its specs merge into it without waiting once every gate is satisfied, and the
+plan's own pull request is the one place a person judges the combined change and
+says Merge.
 
 **The orchestrator is the main agent.** It runs the scripts in this plugin
 directly through Bash and dispatches subagents only for model work. Subagents
@@ -204,7 +216,7 @@ ships. Anything older is a different shape and is replaced.
 | `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when a person answers the Recurring question at the cap with `redesign`), `ciRepairs` (repairs of a red pull request). Each at least 1 |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
-| `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms, `autoMerge` notwithstanding. False: every spec merges into `base` as it is ready. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
+| `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms; its specs merge into `plan/<slug>` without waiting once every gate is satisfied. False: every spec merges straight into `base`, and each waits for a person's approval. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
 | `versionFiles[]` | The lines that carry this repository's version, each `{file, pointer}` (a JSON Pointer, such as `/version` or `/plugins/0/version`) or `{file, pattern}` (a line pattern with one capture group). On a plan branch, each gets the plan's one increase — patch, or minor when `plan.md` says `Version increase: minor` — made by the ship after the whole-plan check, from the base's version then; a spec that changes one stops. Each must name exactly one `MAJOR.MINOR.PATCH` value on the base, and they must agree. Empty: no increase. A one-spec plan is outside this and keeps the repository's own habit, so it can collide |
 
 `examples/config.json` is a complete file.
@@ -592,19 +604,26 @@ merge without `--match-head-commit`, delete a branch inside a merge command,
 `node $P/scripts/gates.mjs evaluate <state.json> <config.json>` decides whether a
 pull request merges unattended. It is code because it is silent when it is wrong.
 
-**A `ready` verdict is the owner's authorization to merge a spec of this plan,
-and `ship.mjs finish` acts on it without asking.** Merging is outward-facing and
-hard to reverse, so the instinct to confirm is right in general and wrong here:
-the owner already confirmed, by setting `autoMerge` and running the command, and
-`ready` is the condition they attached. When a person really should decide,
-`evaluate` returns `needsHuman` and names why.
+**A `ready` verdict is the owner's authorization to merge a spec into its plan
+branch, and `ship.mjs finish` acts on it without asking.** Merging is
+outward-facing and hard to reverse, so the instinct to confirm is right in
+general and wrong here: the owner already confirmed, by turning `planBranch` on
+and running the command, and `ready` is the condition they attached. When a
+person really should decide, `evaluate` returns `needsHuman` and names why.
 
-That is a spec's merge, and a whole-plan fix's, and nothing more. On a plan
-branch the plan's own pull request into the base is never merged on a verdict:
-`evaluate` is not asked about it and `autoMerge` does not reach it. The one
-authority for that merge is the person's Merge, given in the ship session for
-the exact tip they were shown, and `merge.mjs` re-reads it — with every result
-the person was shown — before it merges anything.
+That is a spec's merge into the plan branch, and a whole-plan fix's, and nothing
+more. **Onto `base`, only a person's approval or Merge for that change, given in
+this session, authorizes a merge.** A spec that merges straight into `base` never
+comes back `ready` on its own: `evaluate` names `straight-to-base` among its
+approvals, and `finish` merges it only with `--approve` carrying the address the
+person gave in answer to that question. Running the command is not that
+approval, and `finish` refuses without one anyway; ask plainly, because this is
+the expected stop for every such spec, not a fault. On a plan branch the plan's
+own pull request into the base is never merged on a verdict: `evaluate` is not
+asked about it and no spec's verdict reaches it. The one authority for that
+merge is the person's Merge, given in the ship session for the exact tip they
+were shown, and `merge.mjs` re-reads it — with every result the person was shown
+— before it merges anything.
 
 **It authorizes `merge.mjs`, and nothing else.** `merge.mjs` re-fetches,
 compares `origin/<base>` against the base the review was bound to, and re-reads
@@ -623,17 +642,16 @@ check of an earlier commit never speaks for a later one. A conflict, a change
 that would land as something else, and a failure on the new base are all stops
 for a person, and no approval reaches the last of them.
 
-A pull request stops and waits when: the spec is marked user-visible;
-verification failed, or CI failed, proved nothing or never started; a finding is still open
-after the re-check; **a selected reviewer produced no usable evidence**;
-`.github/workflows/**` changed; or the agent that wrote the code never confirmed
-it finished what it was given.
+A pull request stops and waits when: it merges straight into `base` rather than
+into its plan branch; verification failed, or CI failed, proved nothing or never
+started; a finding is still open after the re-check; **a selected reviewer
+produced no usable evidence**; `.github/workflows/**` changed; or the agent that
+wrote the code never confirmed it finished what it was given.
 
-User-visibility is the plan's judgement, settled per spec by the person who
-approved it. A plan marks a deliverable user-visible only when it is sure a
-person will see or do something different; unsure is not yes, because every
-user-visible spec stops for the owner, and in the runs before this rule the flag
-alone stopped a third of all specs.
+The first is read off the spec's state alone: a spec merges with nobody asked
+only when the base it recorded is exactly its plan's plan branch, and anything
+else — no recorded base included — counts as straight to `base` and waits for a
+person's approval.
 
 That fourth one is the important one. An absent, unparseable, or wrongly-bound
 findings file yields an empty finding set, and an empty finding set is

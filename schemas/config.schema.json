@@ -176,7 +176,7 @@
     },
     "planBranch": {
       "type": "boolean",
-      "description": "When true, a plan of two or more specs collects its spec pull requests on a branch of its own, plan/<slug>, and nothing from it reaches base until the plan is complete; false ships every spec straight to base."
+      "description": "When true, a plan of two or more specs collects its spec pull requests on a branch of its own, plan/<slug>, each merging into it without waiting once its checks are clean, and nothing from it reaches base until a person merges the plan's own pull request; false ships every spec straight to base, where each waits for a person's approval."
     },
     "versionFiles": {
       "type": "array",

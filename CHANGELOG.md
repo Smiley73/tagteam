@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- Merge a spec into its plan's branch once its checks are clean, whether or not it changes something a person will notice. A spec on a plan branch no longer stops for that; the plan's own pull request is where you judge the combined change.
+- Wait for your approval before every spec that merges straight into the base branch, as a plan of one spec does, or any plan with `planBranch` off. Nothing reaches the base without your approval or your Merge, and the wait says it is the normal one, not a sign that anything went wrong.
+- Turn on `planBranch` to have specs merge without waiting: they collect on the plan's branch, and you merge the plan once.
+- Accept `autoMerge` in the configuration and do nothing with it, in either value. The configuration check says so once, and that `planBranch` replaced it; `/tagteam:configure` no longer asks about it or writes it.
+- Keep every existing configuration current: one that still sets `autoMerge` is not reported as written by an older plugin.
+- Stop asking plans and specs to mark whether people will notice a change. Plans and specs written with the mark still ship, and the mark is ignored.
+- Keep every other reason a spec stops exactly as it was, on either route.
+
 ## 0.10.7
 
 - Wait for a pull request's checks to appear before judging them. Right after a pull request opens GitHub shows no checks yet, and that used to read at once as "no checks were registered", so a spec whose checks started a little late stopped for a person. Now the ship keeps looking, for a bounded time, and the time waited for the checks to finish only starts once one appears.
