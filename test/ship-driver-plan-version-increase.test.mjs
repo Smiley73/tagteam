@@ -46,6 +46,7 @@ test("the increase is the ship's: one commit of the version lines, byte for byte
   // file whose one line is the version: the commit changes one line of each,
   // and nothing else.
   const odd = "{\n\t\"deps\": {\"a\": \"^1.0.0\"},\n      \"version\" :   \"0.1.0\" ,\r\n  \"name\":\"x\"\n}\n";
+  // Fresh: its files and version lines differ from the shared build's.
   const staged = stageVersioned({
     files: { "odd.json": odd, VERSION: "0.1.0\n" },
     entries: [...ENTRIES, { file: "odd.json", pointer: "/version" }, { file: "VERSION", pattern: "^(\\d+\\.\\d+\\.\\d+)$" }]
@@ -330,6 +331,7 @@ test("a restart: the version commit pushed and its record not confirmed is the s
 });
 
 test("a plan that declares minor gets a minor increase, and the merge condition holds it to minor", () => {
+  // Fresh: its plan declares the increase, which the shared build's does not.
   const staged = stageVersioned({ declare: "Version increase: minor" });
   const { dir, plan, shipDir, origin, env } = staged;
   assert.equal(trainOf(shipDir).route.increase, "minor");

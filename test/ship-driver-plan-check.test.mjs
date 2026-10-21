@@ -16,10 +16,15 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
 import { root, git, ship, major, stagePlan, onOrigin, pullsOf, trainOf, setTrainRoute, shipThrough,
-  A_CHANGE, B_CHANGE, UNRELATED, commitToMain, unitDirIn, unitStateOf, checkRoundIn, stageMerged,
-  reviewWholePlan, shipUnit, mergeBaseIn, assertEffort, sessionsFor } from "./ship-stage.mjs";
+  A_CHANGE, B_CHANGE, UNRELATED, commitToMain, unitDirIn, unitStateOf, checkRoundIn,
+  stageMerged as buildMerged, reviewWholePlan, shipUnit, mergeBaseIn, assertEffort, sessionsFor,
+  shareBuilds } from "./ship-stage.mjs";
 
 // --- the whole-plan check ------------------------------------------------------
+
+// `stageMerged` as this file calls it: with the defaults, a copy of one built
+// once in this file, as `shareBuilds` says.
+const stageMerged = shareBuilds(buildMerged);
 
 const checkRecordOf = (shipDir, n) => JSON.parse(fs.readFileSync(path.join(shipDir, "whole-plan", String(n), "record.json"), "utf8"));
 const checksIn = (shipDir) => {
@@ -87,6 +92,7 @@ test("the combined diff is from the merge base: a base that moved with an unrela
 test("a verify command whose when matches nothing in the plan still runs at the whole-plan check, and the record says every command ran", () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-when-"));
   const marker = path.join(scratch, "ran.txt");
+  // Fresh: its verify command writes outside the fixture's directory.
   const staged = stageMerged({
     verify: [
       { command: "node -e \"process.exit(0)\"", when: { globs: [], keywords: [] }, timeoutSec: 60 },
@@ -149,6 +155,7 @@ test("a gating finding becomes a fix unit into plan/<slug> whose document lists 
 });
 
 test("a merge-in tip is checked in full against the base merged in, never reuses the earlier clean result, and its verify failure is a fix unit naming the log", () => {
+  // Fresh: its verify command and limits.ciRepairs differ from the shared build's.
   const staged = stageMerged({ ciRepairs: 2, verify: [{ command: NO_OTHER, when: { globs: [], keywords: [] }, timeoutSec: 60 }] });
   const { dir, repo, plan, shipDir, env } = staged;
   assert.equal(reviewWholePlan(staged, ship("plan-check", plan, [], env)).json.wholePlan.status, "clean");
@@ -194,6 +201,7 @@ test("minor findings alone are clean: recorded, and nothing fixed", () => {
 });
 
 test("with limits.ciRepairs at 1, a second check that is not clean stops without another fix unit, though the first came after the last spec and the second from a merge-in", () => {
+  // Fresh: its verify command differs from the shared build's.
   const staged = stageMerged({ ciRepairs: 1, verify: [{ command: NO_OTHER, when: { globs: [], keywords: [] }, timeoutSec: 60 }] });
   const { dir, repo, plan, shipDir, env } = staged;
   const first = reviewWholePlan(staged, ship("plan-check", plan, [], env), [major("b.js")]);
@@ -257,6 +265,7 @@ test("an incomplete whole-plan review is re-sent once, and a second is a stop, n
 
 test("a plan whose combined change is empty stops at the check, before any reviewer", () => {
   const original = "export const add = (a, b) => a + b;\n";
+  // Fresh: what 02-b writes differs from the shared build's.
   const staged = stageMerged({ b: { "app.js": original } });
   const { dir, plan, shipDir, env } = staged;
   const check = ship("plan-check", plan, [], env);

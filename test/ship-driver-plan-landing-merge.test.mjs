@@ -105,6 +105,7 @@ test("Merge lands one merge commit on the base whose second parent is the checke
 });
 
 test("stale and failing results withhold Merge, --approve records nothing, and merge.mjs refuses each directly", () => {
+  // Fresh: its limits.ciRepairs differs from the shared build's.
   const staged = stageClean({ ciRepairs: 2 });
   const { dir, plan, shipDir, origin, env, configPath } = staged;
   const main = onOrigin(origin, "main");
@@ -269,6 +270,7 @@ test("a landing conflict starts the resolve round, opened with no spec about to 
 
 test("a failed landing dispatches no resolver: the ship merges the base in, the whole-plan check fixes what fails there, and the landing then passes", () => {
   const NOT_UNRELATED = "node -e \"const fs=require('fs');process.exit(fs.existsSync('other.js')&&fs.readFileSync('other.js','utf8').includes('unrelated')?1:0)\"";
+  // Fresh: its verify commands differ from the shared build's.
   const staged = stageClean({ verify: [{ command: NOT_UNRELATED, when: { globs: [], keywords: [] }, timeoutSec: 60 }] });
   const { dir, repo, plan, shipDir, origin, env } = staged;
   const tip = onOrigin(origin, "plan/demo");
@@ -299,6 +301,7 @@ test("the merge of the base in after a failed landing commits nothing the landin
   // Fails on the merged tree, and writes a report there first — untracked, and
   // nobody's change.
   const REPORTS_THEN_FAILS = "node -e \"const fs=require('fs');if(fs.existsSync('other.js')&&fs.readFileSync('other.js','utf8').includes('unrelated')){fs.writeFileSync('verify-report.txt','failed');process.exit(1)}\"";
+  // Fresh: its verify commands differ from the shared build's.
   const staged = stageClean({ verify: [{ command: REPORTS_THEN_FAILS, when: { globs: [], keywords: [] }, timeoutSec: 60 }] });
   const { dir, repo, shipDir, origin } = staged;
   const tip = onOrigin(origin, "plan/demo");
@@ -388,6 +391,7 @@ test("a check stopped on a spent budget after the landing began: the dialog name
 test("re-entry: after Leave open the same dialog comes back without verify running again, after Stop status says stopped, and a plan merged by hand ends the train", async () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-runs-"));
   const runs = path.join(scratch, "runs.txt");
+  // Fresh: its verify command writes outside the fixture's directory.
   const staged = stageClean({
     verify: [{ command: `node -e "require('fs').appendFileSync(${JSON.stringify(runs).replace(/"/g, "'")}, 'x')"`, when: { globs: [], keywords: [] }, timeoutSec: 60 }]
   });

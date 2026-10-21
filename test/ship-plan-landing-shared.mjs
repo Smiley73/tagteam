@@ -8,21 +8,23 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { ship, write, pullsOf, setTrainRoute, commitByHand, stageMerged,
-  reviewWholePlan } from "./ship-stage.mjs";
+  reviewWholePlan, shareBuilds } from "./ship-stage.mjs";
 
 export const landingRecordOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "plan-landing", "record.json"), "utf8"));
 export const planPullOf = (env) => pullsOf(env).find((pull) => pull.branch === "plan/demo") ?? null;
 export const PLAN_BODY = "## Summary\nAdd and double.\n## What you can now do\nSubtract, and double a number.\n## Risk\nnothing known\n";
 
 // `stageMerged`, then the whole-plan check of the tip, clean: next is the plan's
-// landing.
-export function stageClean(options = {}) {
+// landing. With the defaults — `ciRepairs: 1` is one — it is a copy of one
+// built once per file, as `shareBuilds` says.
+function buildClean(options = {}) {
   const staged = stageMerged(options);
   const collected = reviewWholePlan(staged, ship("plan-check", staged.plan, [], staged.env));
   assert.equal(collected.status, 0, collected.stderr);
   assert.match(collected.json.next, /plan-land --plan /, "a clean check is not followed by the plan's landing");
   return staged;
 }
+export const stageClean = shareBuilds(buildClean, { alike: [[{}, { ciRepairs: 1 }]] });
 
 // The landing step as the orchestrator runs it: the plan's body is written the
 // first time it is asked for, and the step runs again.

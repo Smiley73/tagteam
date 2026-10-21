@@ -16,7 +16,7 @@ import { spawnSync } from "node:child_process";
 import { git, ship, write, outputOf, arrive, arriveAll, findings, resultOf, stagePlan, onOrigin,
   pullsOf, trainOf, setTrainRoute, commitByHand, shipThrough, A_CHANGE, B_CHANGE, MAIN_ADD,
   BOTH_ADD, UNRELATED, commitToMain, recordOf, conflictedLine, RESOLVED, resolvedReport,
-  assertEffort } from "./ship-stage.mjs";
+  assertEffort, shareBuilds } from "./ship-stage.mjs";
 
 // --- the resolve round -------------------------------------------------------
 
@@ -28,8 +28,9 @@ const BOTH_LIB = "export const lib = 'plan';\nexport const other = 'main';\n";
 // really conflicts with it — the same lines of the same file, or of both files
 // with `two` — beside an unrelated file of its own. `planFiles`, `mainFiles` and
 // `mainRemoves` stage a conflict of another shape: what 01-a writes, what main's
-// commit writes, and what it deletes.
-function stageConflict({ two = false, ciRepairs = 1, verifyCommand = null, planFiles = null, mainFiles = null, mainRemoves = [] } = {}) {
+// commit writes, and what it deletes. With the defaults, or with `ciRepairs: 2`
+// alone, it is a copy of one built once in this file, as `shareBuilds` says.
+function buildConflict({ two = false, ciRepairs = 1, verifyCommand = null, planFiles = null, mainFiles = null, mainRemoves = [] } = {}) {
   const staged = stagePlan();
   const { plan, configPath, env, repo, origin, shipDir } = staged;
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -47,6 +48,11 @@ function stageConflict({ two = false, ciRepairs = 1, verifyCommand = null, planF
   const baseOid = commitToMain(repo, mainFiles ?? { "app.js": MAIN_ADD, ...(two ? { "lib.js": MAIN_LIB } : {}), "other.js": UNRELATED });
   return { ...staged, a, planTip, baseOid, worktree: trainOf(shipDir).worktree };
 }
+const stageConflict = shareBuilds(buildConflict, {
+  alike: [[{}, { ciRepairs: 1 }], [{ ciRepairs: 2 }]],
+  // 01-a's state, read from the copy's own ship directory.
+  rebind: { "a.state": ({ shipDir }) => () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8")) }
+});
 
 const attemptDirIn = (shipDir, k, n = 1) => path.join(shipDir, "resolve", String(n), "attempts", String(k));
 const mergeInProgress = (worktree) => spawnSync("git", ["-C", worktree, "rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).status === 0;
@@ -192,6 +198,7 @@ test("a resolution that drops the base's change shows in the review, a blocking 
 });
 
 test("a failing verify throws the attempt away before any panel, and with limits.ciRepairs spent the ship stops, pushes nothing, begins nothing, and stops again", () => {
+  // Fresh: its verify command differs from the shared build's.
   const staged = stageConflict({
     ciRepairs: 2, verifyCommand: "node -e \"process.exit(require('fs').readFileSync('app.js','utf8').includes('BROKEN') ? 1 : 0)\""
   });
@@ -260,6 +267,7 @@ test("a conflicted file committed with its markers still in it is an empty view:
 });
 
 test("with two files conflicted and only one resolved, the attempt fails on the one left unresolved", () => {
+  // Fresh: two files conflict, where the shared build's conflict is in one.
   const staged = stageConflict({ two: true, ciRepairs: 2 });
   const { dir, plan, shipDir, origin, env, planTip } = staged;
   const begun = ship("begin", plan, ["--spec", "02-b"], env);
@@ -276,6 +284,7 @@ test("with two files conflicted and only one resolved, the attempt fails on the 
 });
 
 test("a conflicted file with markers of its configured size, committed with them still in it, is an empty view", () => {
+  // Fresh: what 01-a writes differs from the shared build's.
   const staged = stageConflict({ planFiles: { "app.js": A_CHANGE, ".gitattributes": "app.js conflict-marker-size=32\n" } });
   const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
   const begun = ship("begin", plan, ["--spec", "02-b"], env);
@@ -292,6 +301,7 @@ test("a conflicted file with markers of its configured size, committed with them
 });
 
 test("a file one side deleted is kept as git left it, not unresolved: the attempt goes on with the text conflict beside it, and the panel reads which side it keeps", () => {
+  // Fresh: what 01-a and main's commit change differs from the shared build's.
   const staged = stageConflict({
     planFiles: { "app.js": A_CHANGE, "lib.js": PLAN_LIB }, mainRemoves: ["app.js"], mainFiles: { "lib.js": MAIN_LIB, "other.js": UNRELATED }
   });
@@ -325,6 +335,7 @@ test("a file one side deleted is kept as git left it, not unresolved: the attemp
 });
 
 test("a binary conflict committed as git left it is an empty view, said as that and not as markers left in", () => {
+  // Fresh: what 01-a and main's commit change differs from the shared build's.
   const staged = stageConflict({
     ciRepairs: 2, planFiles: { "logo.bin": "\0\x01plan\n" }, mainFiles: { "logo.bin": "\0\x01main\n", "other.js": UNRELATED }
   });
@@ -345,6 +356,7 @@ test("a binary conflict committed as git left it is an empty view, said as that 
 });
 
 test("the version step's place: a stand-in that settles one of two conflicted files leaves only the other to the resolver and to coverage", () => {
+  // Fresh: two files conflict, where the shared build's conflict is in one.
   const staged = stageConflict({ two: true });
   const { dir, plan, shipDir, env } = staged;
   const standIn = { ...env, TAGTEAM_TEST_VERSION_STEP: `printf "${BOTH_LIB.replace(/\n/g, "\\n")}" > lib.js && git add lib.js` };
@@ -530,6 +542,7 @@ test("a resolver that leaves no report, or reports itself unfinished, stops the 
 });
 
 test("a resolution whose tree is the plan tip's stops with its own explanation, before any snapshot", () => {
+  // Fresh: what main's commit changes differs from the shared build's.
   const staged = stageConflict({ mainFiles: { "app.js": MAIN_ADD } });
   const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;
   const begun = ship("begin", plan, ["--spec", "02-b"], env);

@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, write, commitToMain, stageMerged, reviewWholePlan } from "./ship-stage.mjs";
+import { git, ship, write, commitToMain, stageMerged, reviewWholePlan, shareBuilds } from "./ship-stage.mjs";
 
 export const PLAN_BODY = "## Summary\nAdd and double.\n## What you can now do\nSubtract, and double a number.\n## Risk\nnothing known\n";
 export const landingRecordOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "plan-landing", "record.json"), "utf8"));
@@ -46,8 +46,9 @@ export function increasesOn(origin, oid, stop) {
 
 // The plan route with both specs merged into its branch, the manifests at
 // `version` on main, and `prepare` for anything else main or the configuration
-// must hold before the train starts.
-export function stageVersioned({ version = "0.1.0", entries = ENTRIES, files = {}, prepare = null, declare = null, ...options } = {}) {
+// must hold before the train starts. With the defaults, or with `ciRepairs: 2`
+// alone, it is a copy of one built once per file, as `shareBuilds` says.
+function buildVersioned({ version = "0.1.0", entries = ENTRIES, files = {}, prepare = null, declare = null, ...options } = {}) {
   return stageMerged({
     ...options,
     prepare: (staged, config) => {
@@ -58,6 +59,7 @@ export function stageVersioned({ version = "0.1.0", entries = ENTRIES, files = {
     }
   });
 }
+export const stageVersioned = shareBuilds(buildVersioned, { alike: [[{}], [{ ciRepairs: 2 }]] });
 
 /**
  * The plan's landing as the orchestrator runs it, from wherever it is to the
