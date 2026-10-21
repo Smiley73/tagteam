@@ -48,10 +48,10 @@ function exists(file) {
 }
 
 // A configured limit, or null when there is none to read. **Never a default.**
-// No limit has a fallback anywhere in this plugin: a version-6 configuration is
-// refused by every command that enforces one, so a number invented here would
-// promise a round nothing will grant. Unknown is the honest answer, and the
-// command file says so rather than guessing.
+// No `limits.*` key has a fallback anywhere in this plugin: a version-6
+// configuration is refused by every command that enforces one, so a number
+// invented here would promise a round nothing will grant. Unknown is the honest
+// answer, and the command file says so rather than guessing.
 const limitOf = (limits, key) =>
   (Number.isInteger(limits?.[key]) && limits[key] >= 1 ? limits[key] : null);
 
@@ -186,7 +186,8 @@ function landingOf(state) {
 // `stopped` and `merged`, and each result is `passed`, `failed` or `not-run` for
 // the tip the train last recorded — a result about any other tip is `not-run`
 // here, never a pass, and so is a version condition last read against a base
-// that has moved since. Nothing here calls git: the version condition is the one
+// that has moved since. The checks on the pull request alone may also be
+// `not-started`: no check appeared within the start wait at this tip. Nothing here calls git: the version condition is the one
 // the landing step last read, with the tip and base it read it against.
 //
 // The plan-level directories — `plan-landing/`, `whole-plan/`, `resolve/` —

@@ -325,6 +325,17 @@ at each point:
   node "$P/scripts/ship.mjs" publish --plan "$D" --spec <id> --title "<title>" --body "$S/<id>/pr-body.md"
   ```
 
+  `publish` waits for the pull request's checks before it returns, and that can
+  take a long time: up to `ciStartWaitSec` for a first check to appear when the
+  commit has a workflow that runs on pull requests, then up to `ciWaitSec` for
+  the checks to finish, plus a few seconds — far past the limit of a foreground
+  Bash call. So run this one command as a background Bash call
+  (`run_in_background: true`), end your turn, and act on its output when its
+  completion notice arrives, exactly as if it had returned in the foreground.
+  Nothing in between: its own completion notice is what wakes you. When it
+  says `Waiting up to …s for checks to start`, relay that line. A spec's repair
+  and its revisit both come back through `publish`, and wait the same way.
+
 - **After `finish`**: see *Merge or stop* below.
 
 The driver's `snapshot` step commits through `git add -A`, `guard-staged.mjs`
@@ -432,8 +443,9 @@ answers `ask` offers.
 
 The two halves take different answers. A person's approval is what `evaluate`
 honours for `approvals` — user-visible, a workflow change, a round nobody
-accounted for, nothing executable having run, inconclusive checks, auto-merge
-off — and for nothing in `blockers`: a reviewer that produced no usable
+accounted for, nothing executable having run, inconclusive checks, checks that
+never started within `ciStartWaitSec`, auto-merge off — and for nothing in
+`blockers`: a reviewer that produced no usable
 evidence, a finding still open, a verification or check that failed or never
 ran. **No approval clears a blocker.** `finish --approve` given while one is
 open records nothing and says so; what clears it is the step that records it,
@@ -579,7 +591,22 @@ same way as for `publish`; without one, the plan document's heading is used.
   ran are said to have not run, and never count as passed — and are waited for
   again on every later run, since they may have started since. A check that failed
   is fixed the way the whole-plan check fixes what it finds: `next` is `begin`
-  for one more fix unit.
+  for one more fix unit. When the plan's branch, at its tip, has a workflow that
+  runs on pull requests, the checks are first given up to `ciStartWaitSec` to
+  appear, and `say` has the `Waiting up to …s for checks to start` line — relay
+  it. If none appears in that time, the question says CI on the plan's pull
+  request never started within that many seconds at that tip, naming
+  `ciStartWaitSec`: for the person, nothing was proven either way — the checks
+  may not run for this pull request at all, or GitHub was slow to start them.
+  It spends no whole-plan fix, does not keep Merge from being offered, is never
+  shown as passed, and is waited for again on the next run.
+
+  So `plan-land` can block for a long time: up to `ciStartWaitSec` plus
+  `ciWaitSec` plus a few seconds, and again on every run while the checks have
+  not passed or failed at that tip. Run it as `publish` is run — one background
+  Bash call (`run_in_background: true`), then end your turn and act on its
+  output when its completion notice arrives, exactly as if it had returned in
+  the foreground.
 - The landing check runs the plan's tip against the base as it is now: does it
   still merge cleanly, is it still the change that was reviewed, and does every
   verify command pass on the result. A conflict goes to a resolve round, exactly

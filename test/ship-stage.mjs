@@ -4,15 +4,17 @@
 //
 // They live outside any `*.test.mjs` for the reason `stage.mjs` gives:
 // importing a suite to borrow a helper runs that suite's tests a second time.
-// They are split out of `ship-driver.test.mjs` so the plan's landing can be a
-// suite of its own — node runs the files of `npm test` side by side but the
-// tests of one file in turn, and the driver's file is already the longest of
-// them.
+// They are split out of `ship-driver.test.mjs` so the plan's route and landing
+// can be suites of their own — node runs the files of `npm test` side by side
+// but the tests of one file in turn, and the driver's file is already the
+// longest of them.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { projectDirectoryFor } from "../scripts/usage.mjs";
+import { EFFORT_LADDER } from "../scripts/lib/effort-ladder.mjs";
 
 export const root = path.resolve(import.meta.dirname, "..");
 const SHIP = path.join(root, "scripts", "ship.mjs");
@@ -98,6 +100,32 @@ export function arriveAll(result, env = {}) {
 
 export const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
 export const major = (file) => ({ severity: "major", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
+
+// The effort an entry is printed with. There is one agent per role, so the
+// effort travels on the call alone: a name carrying one would be an agent that
+// does not exist. The runner carries its own pair, which no configuration reaches.
+export function assertEffort(entry, effort, why) {
+  assert.equal(entry.effort, effort, `${entry.description}: ${why}`);
+  if (entry.agent === "tagteam:codex-runner") {
+    assert.deepEqual([entry.model, entry.effort], ["haiku", "low"], `${entry.description}: the runner runs at its own pair`);
+    return;
+  }
+  assert.ok(!EFFORT_LADDER.some((level) => entry.agent.endsWith(`-${level}`)),
+    `${entry.description}: ${entry.agent} names an effort; the effort is passed on the call`);
+}
+
+// Sessions are staged the way `usage.mjs` identifies them: a HOME of the
+// test's own, a transcript in this repository's project directory, and the
+// session variables naming it — or naming nothing.
+export function sessionsFor(staged) {
+  const home = path.join(staged.dir, "home");
+  const projectDir = projectDirectoryFor(staged.repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  return {
+    as: (session) => ({ HOME: home, TAGTEAM_SESSION_ID: session ?? "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" }),
+    transcript: (session) => fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "")
+  };
+}
 
 // `finish` rings a desktop notification through osascript on macOS. A stub first
 // on PATH keeps the suite from posting one on every run; elsewhere it is inert.
@@ -226,8 +254,18 @@ if (argv[1] === "create") {
     }
   }
   // No workflow runs for this pull request: nothing registered — unless
-  // GH_STUB_CHECKS names the rows to answer with.
-  process.stdout.write((process.env.GH_STUB_CHECKS ?? "[]") + "\\n");
+  // GH_STUB_CHECKS names the rows to answer with. GH_STUB_CHECKS_BY_CALL is a
+  // JSON array of answers, one per call in turn and the last one repeated, so a
+  // test can have checks appear only after an empty first answer.
+  if (process.env.GH_STUB_CHECKS_BY_CALL) {
+    const answers = JSON.parse(process.env.GH_STUB_CHECKS_BY_CALL);
+    const counter = statePath + ".checks-calls";
+    const call = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+    fs.writeFileSync(counter, String(call + 1));
+    process.stdout.write(JSON.stringify(answers[Math.min(call, answers.length - 1)]) + "\\n");
+  } else {
+    process.stdout.write((process.env.GH_STUB_CHECKS ?? "[]") + "\\n");
+  }
 } else die("gh stub: unsupported command " + argv.join(" "));
 `;
 
@@ -255,7 +293,7 @@ export function driveToPublishable({ plan, shipDir }, id, file, contents, env = 
   assert.equal(begin.json.dispatch?.[0]?.agent, "tagteam:implementer", `begin did not start ${id}: ${begin.stdout}`);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   const files = typeof file === "string" ? { [file]: contents } : file;
-  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(worktree, name), text);
+  for (const [name, text] of Object.entries(files)) write(path.join(worktree, name), text);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${Object.keys(files).join(", ")}`, unfinished: [] });
   arriveAll(begin);
   ship("snapshot", plan, ["--spec", id], env);
