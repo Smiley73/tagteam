@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, shipThrough,
-  A_CHANGE } from "./ship-stage.mjs";
+  A_CHANGE, approveFinish } from "./ship-stage.mjs";
 
 // --- the start wait: checks that take a while to appear on a pull request ----
 
@@ -70,7 +70,8 @@ test("checks that appear only after an empty first answer are waited for when th
 
   const finished = ship("finish", staged.plan, ["--spec", "01-a"], env);
   assert.equal(finished.status, 0, finished.stderr);
-  assert.deepEqual(finished.json.approvals, ["workflow-change"], "only the workflow change stops it, and no CI reason");
+  // A one-spec plan lands on the base, so the person's wait for that stands beside it.
+  assert.deepEqual(finished.json.approvals, ["straight-to-base", "workflow-change"], "only the workflow change and the base stop it, and no CI reason");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -96,7 +97,8 @@ test("checks that never start within the start wait stop for a person, spend no 
   const stopped = ship("finish", staged.plan, ["--spec", "01-a"], env);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.deepEqual(stopped.json.blockers, []);
-  assert.deepEqual(stopped.json.approvals, ["continuous-integration-not-started"]);
+  // A one-spec plan lands on the base, so the person's wait for that stands beside it.
+  assert.deepEqual(stopped.json.approvals, ["continuous-integration-not-started", "straight-to-base"]);
   assert.ok(!stopped.json.approvals.includes("continuous-integration-inconclusive"), "one reason, not two");
   assert.match(stopped.json.ask, /CI never started: no check appeared on the pull request within 1 second, the start wait ciStartWaitSec gave it/);
   assert.doesNotMatch(stopped.json.ask, /300/);
@@ -143,12 +145,15 @@ test("no start wait without a pull-request workflow, with ciStartWaitSec 0, or w
     assert.equal(checksAsked(env), asked, `${name}: gh pr checks was asked ${checksAsked(env)} times`);
     assert.doesNotMatch(published.json.say.join("\n"), /for checks to start/, `${name}: a start wait was announced`);
     const finished = ship("finish", staged.plan, ["--spec", "01-a"], env);
+    // A one-spec plan lands on the base, so each stops for that as well.
     if (asked === 0) {
       assert.equal(state().gates.ci ?? null, null, `${name}: a CI result was recorded`);
-      assert.equal(state().state, "merged", `${name}: ${finished.stdout}`);
+      assert.deepEqual(finished.json.approvals, ["straight-to-base"], `${name}: ${finished.stdout}`);
+      approveFinish(staged.plan, "01-a", env);
+      assert.equal(state().state, "merged", `${name}: not merged once approved`);
     } else {
       assert.equal(state().gates.ci.status, "not-run", `${name}: today's result`);
-      assert.deepEqual(finished.json.approvals, ["continuous-integration-inconclusive"], `${name}: today's stop`);
+      assert.deepEqual(finished.json.approvals, ["continuous-integration-inconclusive", "straight-to-base"], `${name}: today's stop`);
     }
     fs.rmSync(dir, { recursive: true, force: true });
   }

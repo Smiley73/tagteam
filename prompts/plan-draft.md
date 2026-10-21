@@ -24,9 +24,9 @@ restating it.>
 
 ## Deliverables
 
-| # | spec | delivers | depends on | user-visible |
-|---|------|----------|------------|--------------|
-| 1 | 01-token-schema | ... | — | no |
+| # | spec | delivers | depends on |
+|---|------|----------|------------|
+| 1 | 01-token-schema | ... | — |
 
 ## Order
 
@@ -68,13 +68,6 @@ mergeable. Three well-cut deliverables beat seven that have to land together.
 If a goal genuinely needs more than about eight, say so in the Order section:
 that is usually two plans, and it is better to say it now than to discover it
 during shipping.
-
-Mark a deliverable **user-visible** only when you are sure a person using the
-product will see or do something different once it lands: a screen, a message,
-a flow, a document they read. A user-visible deliverable always stops for the
-owner before it merges, so marking one you are unsure about is not caution — it
-is a stop nobody asked for. When you are unsure, mark it no and name the doubt
-in Risks, where the spec writer will see it.
 
 Before writing, ask of every deliverable and supporting item — metric, alarm,
 guard, record field, version bump, harness, flag — **what already serves this purpose?**

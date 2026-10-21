@@ -395,14 +395,23 @@ The title is at most 70 characters of letters, digits, spaces and `. _ : -`.
 `finish` evaluates the gates and, when every one is satisfied, merges through
 `merge.mjs` at exactly the reviewed commit, then prints the next spec to begin.
 
-**It merges without asking, and so do you.** Merging is normally the kind of
-outward-facing act you would confirm — so this says plainly that the
-confirmation already happened: the owner set `autoMerge: true` in their own
-configuration and invoked this command, and a `ready` verdict is the condition
-they attached. Stopping to ask anyway is not the safe choice, it is a broken
-train: the owner walks away from an unattended run and comes back to a queue of
-pull requests each waiting for a keystroke. When a person should decide, the
-gates say so — that is what they are for.
+**Into the plan branch, it merges without asking, and so do you.** Merging is
+normally the kind of outward-facing act you would confirm — so this says plainly
+that the confirmation already happened: the owner turned `planBranch` on in their
+own configuration and invoked this command, and a `ready` verdict is the
+condition they attached. Stopping to ask anyway is not the safe choice, it is a
+broken train: the owner walks away from an unattended run and comes back to a
+queue of pull requests each waiting for a keystroke. When a person should
+decide, the gates say so — that is what they are for.
+
+**Onto the base, only a person's approval or Merge authorizes a merge** — one
+they gave for that change, in this session. A spec that merges straight into the
+base, on a one-spec plan or with `planBranch` off, always stops at `finish` with
+`straight-to-base` among its approvals: that is the approval every such spec
+needs, not a fault, so ask for it plainly; a plan branch is how specs merge
+without waiting, and never the cause of one. Pass `--approve` only with the address
+the person gave in answer to that question. Running this command is not that
+approval, and `finish` refuses to merge without one anyway.
 
 That authorizes exactly one thing: `merge.mjs`, through `finish`, on a `ready`
 verdict, for a spec of this plan — a whole-plan fix unit, below, is one. Not
@@ -412,9 +421,9 @@ protection rule, a failing check, a change that no longer lands as what was
 reviewed — is a stop: say what it said.
 
 It does not reach the plan's own pull request. On a plan branch the plan lands on
-the base through one pull request at the end, and `autoMerge` and a `ready`
-verdict have nothing to do with it: the person's **Merge**, answered in *Landing
-the plan* below, is the only authority for that merge, every time.
+the base through one pull request at the end, and no spec's verdict has anything
+to do with it: the person's **Merge**, answered in *Landing the plan* below, is
+the only authority for that merge, every time.
 
 A base branch that moved is not one of those refusals. `finish` checks the
 reviewed change against the base as it now stands and merges the reviewed commit
@@ -442,9 +451,9 @@ wrong and for whom — see *Asking* in the skill. Then ask one question, with th
 answers `ask` offers.
 
 The two halves take different answers. A person's approval is what `evaluate`
-honours for `approvals` — user-visible, a workflow change, a round nobody
-accounted for, nothing executable having run, inconclusive checks, checks that
-never started within `ciStartWaitSec`, auto-merge off — and for nothing in
+honours for `approvals` — merging straight into the base, a workflow change, a
+round nobody accounted for, nothing executable having run, inconclusive checks,
+checks that never started within `ciStartWaitSec` — and for nothing in
 `blockers`: a reviewer that produced no usable
 evidence, a finding still open, a verification or check that failed or never
 ran. **No approval clears a blocker.** `finish --approve` given while one is
@@ -647,7 +656,8 @@ the answers it offers — `answers` carries each command:
   that was checked, after checking the base once more, and then deletes the
   plan's branch. Offered only when every result is for that commit and none
   fails, and when each configured version line is exactly one increase over the
-  base's current value — whatever `autoMerge` says. When it is not offered, say
+  base's current value; it is the person's answer alone that merges it, and no
+  setting stands in for it. When it is not offered, say
   why, from what `ask` says; never offer an approval in its place. A Merge given
   anyway records nothing, and says so: **no approval clears a blocker**.
 - **Leave open** — run `end`. The pull request stays open, and `/tagteam:ship`

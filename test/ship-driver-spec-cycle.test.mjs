@@ -671,11 +671,13 @@ test("a fix round whose report is refused reruns into the same round, is verifie
 
   // The verdict carries a non-empty approvals array — the round has no account,
   // which is right — and that alone used to crash finish. Verification is not
-  // among the reasons the spec stops.
+  // among the reasons the spec stops. A one-spec plan lands on the base, so the
+  // person's wait for that is the one other reason.
   const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
   assert.equal(finish.status, 0, finish.stderr);
-  assert.deepEqual(finish.json.reasons, ["work-not-accounted-for"], "the only reason to stop is the account the fixer never gave");
-  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["work-not-accounted-for"]]);
+  assert.deepEqual(finish.json.reasons, ["straight-to-base", "work-not-accounted-for"],
+    "the only reasons to stop are where it lands and the account the fixer never gave");
+  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["straight-to-base", "work-not-accounted-for"]]);
   assert.match(finish.json.ask, /never confirmed it finished/);
   assert.match(finish.json.ask, /--approve/, "nothing is blocked, so approving is offered: evaluate honours it");
   assert.equal(finish.json.unaccounted.length, 1);

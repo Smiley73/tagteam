@@ -87,7 +87,10 @@ const GATES = path.join(root, "scripts", "gates.mjs");
 // findings anywhere. `publish` needs `gh` and this suite has no stub for one, so
 // the two state edges it would take are taken through `gates.mjs` itself —
 // nothing else about the spec differs from a published one, and `finish` reads
-// the gates rather than the state.
+// the gates rather than the state. A one-spec plan lands on the base, so a
+// person's approval of the candidate is among those gates: these tests are about
+// what the landing check does after the verdict, and without it they would stop
+// at the verdict instead.
 export function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
   const { repo, plan, shipDir } = staged;
   if (verifyCommand) {
@@ -121,6 +124,10 @@ export function driveToReadyAndWaiting(staged, { verifyCommand } = {}) {
     const moved = spawnSync(process.execPath, [GATES, "state", path.join(shipDir, "01-a", "state.json"), next], { encoding: "utf8" });
     assert.equal(moved.status, 0, moved.stderr);
   }
+  const approval = path.join(shipDir, "01-a", "human.json");
+  write(approval, { approved: true, approvedBy: "owner@example.com", approvedAt: new Date().toISOString(), note: "approved in the test" });
+  const approved = spawnSync(process.execPath, [GATES, "record", path.join(shipDir, "01-a", "state.json"), "human", oid, approval], { encoding: "utf8" });
+  assert.equal(approved.status, 0, approved.stderr);
   return { worktree, state, oid };
 }
 

@@ -161,7 +161,6 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
       id: front.id,
       path: file,
       dependsOn: front.depends_on,
-      userVisible: front.user_visible,
       reviewers: resolveReviewers(front.reviewers, config, { file: name }),
       signOffs: signOffs.entries
     });

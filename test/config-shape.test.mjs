@@ -48,7 +48,7 @@ const CONSUMED = [
   // resolves a dotted key through `?.` against `examples/config.json` and asserts
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
-  ["scripts/gates.mjs", ["autoMerge", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
+  ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
   ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
@@ -58,7 +58,42 @@ const CONSUMED = [
 // back — `limits` did — has to leave this list, or the guard below fails.
 const RETIRED = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "policyPaths", "limits.planReviewRounds"];
 
+// Keys the schema still accepts and nothing reads. Not retired — the root of the
+// schema refuses an undeclared key, so retiring one would make every file that
+// still carries it invalid — and not consumed: no script may read one, the
+// schema may not require one, and the example may not carry one, since it is a
+// new configuration and `/tagteam:configure` never writes these.
+const ACCEPTED_AND_IGNORED = ["autoMerge"];
+
 const resolve = (object, dotted) => dotted.split(".").reduce((node, key) => node?.[key], object);
+
+// The scripts a guard reads, as `[relative path, source]`.
+const scriptSources = () => ["scripts", "scripts/lib"].flatMap((dir) => fs.readdirSync(path.join(root, dir))
+  .filter((entry) => entry.endsWith(".mjs"))
+  .map((entry) => [`${dir}/${entry}`, fs.readFileSync(path.join(root, dir, entry), "utf8")]));
+
+// Everything wrong with an accepted-and-ignored key, given the schema, the
+// example and the script sources to judge. A function of its inputs so the test
+// below can show it notices each way the key could come back. The first pattern
+// is the one the retired-key guard uses; the other two are the destructuring and
+// bracket reads that one does not see.
+function ignoredKeyFailures(keys, { schema: judged, example: shipped, sources }) {
+  const failures = [];
+  for (const key of keys) {
+    if (!judged.properties?.[key]) failures.push(`the schema no longer declares ${key}, so a file carrying it is invalid`);
+    if ((judged.required ?? []).includes(key)) failures.push(`the schema requires ${key}, which nothing reads`);
+    if (Object.hasOwn(shipped, key)) failures.push(`examples/config.json carries ${key}, which nothing reads`);
+    const reads = [
+      new RegExp(`config(?:uration)?[\\w.]*\\.${key}\\b`),
+      new RegExp(`\\{[^}]*\\b${key}\\b[^}]*\\}\\s*=\\s*[\\w.]*config`),
+      new RegExp(`config(?:uration)?[\\w.]*\\[\\s*["'\`]${key}["'\`]\\s*\\]`)
+    ];
+    for (const [file, source] of sources) {
+      if (reads.some((pattern) => pattern.test(source))) failures.push(`${file} reads config.${key}, which is accepted and ignored`);
+    }
+  }
+  return failures;
+}
 
 test("every config key a script reads exists in the example and in the schema", () => {
   for (const [script, keys] of CONSUMED) {
@@ -80,6 +115,36 @@ test("no script still dereferences a key the schema removed", () => {
     }
   }
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("a key the schema accepts and ignores is declared, optional, absent from the example, and read by no script", () => {
+  const failures = ignoredKeyFailures(ACCEPTED_AND_IGNORED, { schema, example, sources: scriptSources() });
+  assert.deepEqual(failures, [], failures.join("\n"));
+  // Nor is it consumed or retired: either list naming it contradicts this one.
+  for (const key of ACCEPTED_AND_IGNORED) {
+    assert.ok(!CONSUMED.some(([, keys]) => keys.includes(key)), `CONSUMED says a script reads ${key}`);
+    assert.ok(!RETIRED.includes(key), `${key} is both retired and accepted`);
+  }
+});
+
+test("the accepted-and-ignored guard notices each way autoMerge could come back", () => {
+  // A guard that passes on the repository proves nothing unless it fails on the
+  // regressions it exists for.
+  const clean = { schema, example, sources: [] };
+  assert.deepEqual(ignoredKeyFailures(["autoMerge"], clean), []);
+  const failing = (overrides) => ignoredKeyFailures(["autoMerge"], { ...clean, ...overrides });
+  for (const source of [
+    "if (ctx.config.autoMerge === false) wait();",
+    "const ready = configuration.autoMerge;",
+    "const { base, autoMerge } = ctx.config;",
+    'const value = config["autoMerge"];'
+  ]) {
+    assert.equal(failing({ sources: [["scripts/x.mjs", source]] }).length, 1, `not caught: ${source}`);
+  }
+  assert.match(failing({ example: { ...example, autoMerge: true } }).join("\n"), /examples\/config\.json carries autoMerge/);
+  assert.match(failing({ schema: { ...schema, required: [...schema.required, "autoMerge"] } }).join("\n"), /requires autoMerge/);
+  const { autoMerge, ...undeclared } = schema.properties;
+  assert.match(failing({ schema: { ...schema, properties: undeclared } }).join("\n"), /no longer declares autoMerge/);
 });
 
 test("the example's unconditional verify command actually runs", () => {
@@ -296,28 +361,58 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
   assert.ok(missing.some((error) => error.includes("effort.recheck")), `expected effort.recheck to be required, got: ${missing.join("; ")}`);
 });
 
-test("the deliverables table comes out as data, without reading the plan", async () => {
-  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+// A plan whose Deliverables table has the given header and rows, each row a list
+// of cells.
+function planWithTable(header, rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-"));
   const plan = path.join(dir, "plan.md");
+  const line = (cells) => `| ${cells.join(" | ")} |`;
   fs.writeFileSync(plan, [
     "# Account recovery", "",
     "Prose the orchestrator never reads.", "",
     "## Deliverables", "",
-    "| # | spec | delivers | depends on | user-visible |",
-    "|---|------|----------|------------|--------------|",
-    "| 1 | 01-token-schema | the token table | — | no |",
-    "| 2 | 02-recovery-api | the endpoint | 01-token-schema | no |",
-    "| 3 | 03-recovery-ui | the entry point | 02-recovery-api | yes |", "",
+    line(header), line(header.map(() => "---")),
+    ...rows.map(line), "",
     "## Order", "", "Because the API needs the schema.", ""
   ].join("\n"));
+  return plan;
+}
 
-  const deliverables = readDeliverables(plan);
-  assert.equal(deliverables.length, 3);
-  assert.deepEqual(deliverables.map((entry) => entry.id), ["01-token-schema", "02-recovery-api", "03-recovery-ui"]);
-  assert.deepEqual(deliverables[1].dependsOn, ["01-token-schema"]);
-  assert.equal(deliverables[0].userVisible, false);
-  assert.equal(deliverables[2].userVisible, true);
+const RECOVERY = [
+  ["1", "01-token-schema", "the token table", "—"],
+  ["2", "02-recovery-api", "the endpoint", "01-token-schema"],
+  ["3", "03-recovery-ui", "the entry point", "02-recovery-api"]
+];
+
+test("the deliverables table comes out as data, without reading the plan", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const deliverables = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on"], RECOVERY));
+  assert.deepEqual(deliverables, [
+    { id: "01-token-schema", delivers: "the token table", dependsOn: [], row: "#: 1 · spec: 01-token-schema · delivers: the token table · depends on: —" },
+    { id: "02-recovery-api", delivers: "the endpoint", dependsOn: ["01-token-schema"], row: "#: 2 · spec: 02-recovery-api · delivers: the endpoint · depends on: 01-token-schema" },
+    { id: "03-recovery-ui", delivers: "the entry point", dependsOn: ["02-recovery-api"], row: "#: 3 · spec: 03-recovery-ui · delivers: the entry point · depends on: 02-recovery-api" }
+  ]);
+});
+
+test("an older plan's user-visible column is read without complaint and carried nowhere", async () => {
+  // Stands for a plan drafted while the user-visible mark existed: the column is
+  // there, with a yes and a no. What comes out is exactly what the same table
+  // without the column gives — no field for it, and no trace in the row.
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const without = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on"], RECOVERY));
+  for (const header of ["user-visible", "User visible", "visible"]) {
+    const marked = RECOVERY.map((cells, index) => [...cells, index === 2 ? "yes" : "no"]);
+    const old = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on", header], marked));
+    assert.deepEqual(old, without, header);
+  }
+});
+
+test("a column whose header merely contains ui is an ordinary column and stays in the row", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const rows = RECOVERY.map((cells) => [...cells, "yes"]);
+  const deliverables = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on", "build guidance"], rows));
+  assert.equal(deliverables[0].row, "#: 1 · spec: 01-token-schema · delivers: the token table · depends on: — · build guidance: yes");
+  assert.deepEqual(Object.keys(deliverables[0]).sort(), ["delivers", "dependsOn", "id", "row"]);
 });
 
 test("a deliverables table that cannot be dispatched from is refused", async () => {
@@ -574,8 +669,8 @@ test("a brief the roster needs and Git has never seen is a warning, not a refusa
 });
 
 test("the cost note stays the last line printed even when a repository calibrates lenses", () => {
-  // `semanticErrors` says so out loud, and the test that reads the cost note
-  // takes the first `note:` line off stderr.
+  // `semanticErrors` says so out loud, and the tests that read the cost note
+  // take the last `note:` line off stderr.
   const repo = repoCalibrating("financial");
   const configPath = path.join(repo, "config.json");
   fs.writeFileSync(configPath, JSON.stringify({ ...example, reviewers: { roster: ["financial"], default: [] } }));
@@ -702,7 +797,9 @@ test("validating the shipped configuration prints the cost note on stderr", () =
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
   assert.match(result.stdout, /valid/);
-  const note = result.stderr.split("\n").find((line) => line.startsWith("note:"));
+  // The last note, not the first: this repository's own file may still carry
+  // `autoMerge`, whose note comes before the cost note.
+  const note = result.stderr.split("\n").filter((line) => line.startsWith("note:")).at(-1);
   assert.ok(note, `expected a note: line on stderr, got: ${JSON.stringify(result.stderr)}`);
   // The count itself belongs to whatever this repository's limits happen to be,
   // and those are a live setting `/tagteam:configure` asks about. Pinning the number
@@ -1199,10 +1296,88 @@ test("ciStartWaitSec is an integer from 0 to 3600", () => {
   }
 });
 
-test("ciStartWaitSec is the only root property missing from required", () => {
-  // The exception is one key wide. Another key quietly going optional would be
-  // a missing key read as something nobody wrote down.
+test("ciStartWaitSec and the accepted-and-ignored keys are the only root properties missing from required", () => {
+  // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
+  // 120 when it is missing, and `autoMerge`, which nothing reads at all. Another
+  // key quietly going optional would be a missing key read as something nobody
+  // wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional, ["ciStartWaitSec"]);
-  assert.equal(schema.properties.version.const, 10, "the optional key came without a version bump");
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", ...ACCEPTED_AND_IGNORED].sort());
+  assert.equal(schema.properties.version.const, 10, "the optional keys came without a version bump");
+});
+
+// --- autoMerge: accepted, ignored, and said so ---
+
+// The lines a validator run printed, by stream: which stream a note is on is
+// part of the claim, since callers only look for notes on stderr.
+const notesOf = (text) => text.split("\n").filter((line) => line.startsWith("note:"));
+const autoMergeNote = (text) => notesOf(text).filter((line) => /\bautoMerge\b/.test(line));
+
+test("a version-10 file validates the same with autoMerge true, false or absent, and only the note differs", () => {
+  const dir = versionRepo();
+  assert.equal(Object.hasOwn(example, "autoMerge"), false, "the example is a configuration without the key");
+  const runs = [true, false, undefined].map((value) => {
+    const document = value === undefined ? example : { ...example, autoMerge: value };
+    return [value, validateFile(dir, document)];
+  });
+  for (const [value, result] of runs) {
+    assert.equal(result.status, 0, `autoMerge ${value}: expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout, "valid\n", `autoMerge ${value}: stdout carries more than the verdict`);
+    assert.doesNotMatch(result.stdout, /stale|run \/tagteam:configure/, `autoMerge ${value} reads as stale`);
+    assert.doesNotMatch(result.stderr, /^- /m, `autoMerge ${value} printed an error`);
+    assert.match(notesOf(result.stderr).at(-1), /full review panels/, `autoMerge ${value}: the cost note is not the last note`);
+    assert.match(result.stderr.trim().split("\n").at(-1), /^note:.*full review panels/, `autoMerge ${value}: the cost note is not the last line`);
+    if (value === undefined) {
+      assert.deepEqual(autoMergeNote(result.stderr), [], "a file without the key is told about it");
+    } else {
+      const [note, ...more] = autoMergeNote(result.stderr);
+      assert.ok(note, `autoMerge ${value}: no note on stderr: ${JSON.stringify(result.stderr)}`);
+      assert.deepEqual(more, [], `autoMerge ${value}: more than one note`);
+      assert.match(note, /no longer does anything/);
+      assert.match(note, /\bplanBranch\b/);
+      assert.match(note, /straight into the base always waits for a person/);
+    }
+  }
+  // The same sentence for both values: neither one reaches anything, so neither
+  // is told something the other is not.
+  assert.deepEqual(autoMergeNote(runs[0][1].stderr), autoMergeNote(runs[1][1].stderr));
+  // Apart from that one line, the three runs print exactly the same.
+  const without = (text) => text.split("\n").filter((line) => !/\bautoMerge\b/.test(line)).join("\n");
+  assert.equal(without(runs[0][1].stderr), runs[2][1].stderr);
+  assert.equal(without(runs[1][1].stderr), runs[2][1].stderr);
+});
+
+test("a version-9 file is stale whether or not it carries autoMerge", () => {
+  const dir = versionRepo();
+  const { planBranch, versionFiles, ...nine } = example;
+  for (const document of [{ ...nine, version: 9 }, { ...nine, version: 9, autoMerge: true }, { ...nine, version: 9, autoMerge: false }]) {
+    const result = validateFile(dir, document);
+    assert.equal(result.status, 3, `${JSON.stringify(document.autoMerge)}: expected exit 3, got ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /run \/tagteam:configure/);
+  }
+});
+
+test("autoMerge is still declared and typed: a value that is not a boolean is invalid", () => {
+  const dir = versionRepo();
+  for (const wrong of ["true", 1, null, {}]) {
+    const result = validateFile(dir, { ...example, autoMerge: wrong });
+    assert.equal(result.status, 1, `autoMerge: ${JSON.stringify(wrong)} must be invalid: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /\$\.autoMerge: expected boolean/);
+  }
+});
+
+test("autoMergeNotices is pure and total", async () => {
+  const { autoMergeNotices, semanticErrors } = await import("../scripts/validate-json.mjs");
+  for (const candidate of [undefined, null, 3, "autoMerge", [], ["autoMerge"], {}, example]) {
+    assert.deepEqual(autoMergeNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notice`);
+  }
+  // Present is present, whatever the value — the schema refuses the wrong ones.
+  for (const value of [true, false, null, "no", 0]) {
+    assert.equal(autoMergeNotices({ autoMerge: value }).length, 1, `autoMerge: ${JSON.stringify(value)}`);
+  }
+  const notice = autoMergeNotices({ ...example, autoMerge: false });
+  assert.deepEqual(notice, autoMergeNotices({ autoMerge: false }), "the note depends on the key alone");
+  assert.ok(notice[0].startsWith("note:"));
+  // Advice, never an error.
+  assert.deepEqual(semanticErrors("config.schema.json", { ...example, autoMerge: false }, {}), []);
 });

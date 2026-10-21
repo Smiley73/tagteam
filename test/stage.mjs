@@ -36,7 +36,7 @@ export function stagePlan() {
   const planDir = path.join(repo, "plan");
   fs.mkdirSync(path.join(planDir, "specs"), { recursive: true });
   fs.writeFileSync(path.join(planDir, "specs", "01-a.md"),
-    "---\nid: 01-a\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nSomething.\n");
+    "---\nid: 01-a\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\nSomething.\n");
   const configPath = path.join(repo, "config.json");
   fs.writeFileSync(configPath, fs.readFileSync(path.join(root, "examples", "config.json"), "utf8"));
   // The spec writer that wrote it, recorded and in: `specs.mjs`'s command line

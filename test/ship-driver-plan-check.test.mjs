@@ -18,7 +18,8 @@ import { HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
 import { root, git, ship, major, stagePlan, onOrigin, pullsOf, trainOf, setTrainRoute, shipThrough,
   A_CHANGE, B_CHANGE, UNRELATED, commitToMain, unitDirIn, unitStateOf, checkRoundIn,
   stageMerged as buildMerged, reviewWholePlan, shipUnit, mergeBaseIn, assertEffort, sessionsFor,
-  shareBuilds } from "./ship-stage.mjs";
+  shareBuilds, approveFinish } from "./ship-stage.mjs";
+import { WAITS } from "./ship-plan-route-shared.mjs";
 
 // --- the whole-plan check ------------------------------------------------------
 
@@ -124,17 +125,23 @@ test("a gating finding becomes a fix unit into plan/<slug> whose document lists 
   assert.deepEqual(checkRecordOf(shipDir, 1).units, ["plan-fix-1"]);
   const document = fs.readFileSync(path.join(unitDirIn(shipDir, "plan-fix-1"), "spec.md"), "utf8");
   assert.match(document, /^id: plan-fix-1$/m);
-  assert.match(document, /^user_visible: false$/m);
+  assert.doesNotMatch(document, /user_visible/);
   assert.match(document, /^depends_on: \[\]$/m);
   assert.match(document, /b\.js:1: wrong — twice shadows the add that 01-a exported/, "the document does not list the finding");
   assert.match(document, /## Out of scope\n\nNothing else changes/);
   assert.ok(!fs.existsSync(path.join(plan, "specs", "plan-fix-1.md")), "the fix unit was written into the plan's specs");
 
+  // Shipped as an older plugin generated it, with the retired `user_visible`
+  // line in its front matter: the unit is read past it and ships the same.
+  const documentPath = path.join(unitDirIn(shipDir, "plan-fix-1"), "spec.md");
+  fs.writeFileSync(documentPath, document.replace("depends_on: []\n", "depends_on: []\nuser_visible: false\n"));
   const finished = shipUnit(staged, "plan-fix-1", { "b.js": "export const twice = (n) => n + n;\n" });
+  assert.match(fs.readFileSync(documentPath, "utf8"), /^user_visible: false$/m, "the older document was rewritten, so this proves nothing");
   assert.equal(finished.json.ask, undefined, JSON.stringify(finished.json.ask ?? ""));
   assert.match(finished.json.next, /plan-check --plan .* --why fix-unit$/);
   const unit = unitStateOf(shipDir, "plan-fix-1");
   assert.deepEqual([unit.state, unit.base, unit.branch], ["merged", "plan/demo", "tagteam/demo/plan-fix-1"]);
+  assert.equal(unit.gates.human, null, "a clean fix unit into the plan branch merged on a person's approval, not unattended");
   assert.deepEqual(pullsOf(env).map((pull) => pull.base), ["plan/demo", "plan/demo", "plan/demo"], "the fix's pull request does not target the plan branch");
   const after = onOrigin(origin, "plan/demo");
   assert.notEqual(after, before);
@@ -331,8 +338,11 @@ test("nothing changes off the plan route: the setting off, a one-spec plan and a
     }
     let finished = null;
     for (const [id, file, contents] of variant.specs) {
-      finished = shipThrough(staged, id, file, contents).finished;
-      assert.equal(finished.status, 0, `${variant.name}: ${finished.stderr}`);
+      const stopped = shipThrough(staged, id, file, contents).finished;
+      assert.equal(stopped.status, 0, `${variant.name}: ${stopped.stderr}`);
+      // Every spec here lands on the base, so each waits for a person.
+      assert.deepEqual(stopped.json.reasons, ["straight-to-base"], `${variant.name}: ${id}`);
+      finished = approveFinish(plan, id, env);
     }
     assert.match(finished.json.next, /end --plan /, `${variant.name}: the last spec's next is not end`);
     assert.ok(!fs.existsSync(path.join(shipDir, "whole-plan")), `${variant.name}: a plan-level record was made`);
@@ -354,15 +364,10 @@ test("nothing changes off the plan route: the setting off, a one-spec plan and a
 
 test("a last spec waiting for approval holds the whole-plan check back", () => {
   const staged = stagePlan();
-  const { dir, repo, plan, shipDir, env } = staged;
-  const file = path.join(plan, "specs", "02-b.md");
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("user_visible: false", "user_visible: true"));
-  git(repo, "add", "-A");
-  git(repo, "commit", "-m", "02-b is user-visible");
-  git(repo, "push", "origin", "main");
+  const { dir, plan, shipDir, env } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
   assert.equal(shipThrough(staged, "01-a", "app.js", A_CHANGE).finished.status, 0);
-  const waiting = shipThrough(staged, "02-b", "b.js", B_CHANGE);
+  const waiting = shipThrough(staged, "02-b", { "b.js": B_CHANGE, ...WAITS });
   assert.equal(waiting.finished.status, 0, waiting.finished.stderr);
   assert.equal(waiting.state().state, "awaiting-approval");
   assert.match(waiting.finished.json.next, /end --plan /, "a waiting last spec was followed by the check");

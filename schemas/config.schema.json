@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
-    "reviewers", "verify", "ciWaitSec", "autoMerge", "worktree", "reviewExclude",
+    "reviewers", "verify", "ciWaitSec", "worktree", "reviewExclude",
     "maxConcurrentCodex", "limits", "escalation", "plan", "planBranch", "versionFiles"
   ],
   "properties": {
@@ -89,7 +89,7 @@
     },
     "autoMerge": {
       "type": "boolean",
-      "description": "When false every pull request waits for approval, whatever the gates say."
+      "description": "Accepted and has no effect: nothing reads it, in either value. A spec that merges straight into the base always waits for a person, and `planBranch` replaced this key as the setting that lets specs merge without waiting. It stays declared, and optional, so that the version-10 files that carry it stay valid and current."
     },
     "worktree": {
       "type": "object",
@@ -176,7 +176,7 @@
     },
     "planBranch": {
       "type": "boolean",
-      "description": "When true, a plan of two or more specs collects its spec pull requests on a branch of its own, plan/<slug>, and nothing from it reaches base until the plan is complete; false ships every spec straight to base."
+      "description": "When true, a plan of two or more specs collects its spec pull requests on a branch of its own, plan/<slug>, each merging into it without waiting once its checks are clean, and nothing from it reaches base until a person merges the plan's own pull request; false ships every spec straight to base, where each waits for a person's approval."
     },
     "versionFiles": {
       "type": "array",

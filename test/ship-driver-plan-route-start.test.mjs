@@ -15,7 +15,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, stage, ship, driveToPublishable, stagePlan, onOrigin, ghCalls, pullsOf, trainOf,
-  setTrainRoute, commitByHand, shipThrough, A_CHANGE, B_CHANGE } from "./ship-stage.mjs";
+  setTrainRoute, commitByHand, shipThrough, A_CHANGE, B_CHANGE, approveFinish } from "./ship-stage.mjs";
+import { WAITS } from "./ship-plan-route-shared.mjs";
 
 // --- the plan route --------------------------------------------------------------
 
@@ -85,6 +86,8 @@ test("with the setting on, a one-spec plan ships straight to the base and is nev
   assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
   const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
   assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.deepEqual(a.finished.json.reasons, ["straight-to-base"]);
+  approveFinish(plan, "01-a", env);
   assert.equal(a.state().state, "merged");
   assert.deepEqual(pullsOf(env).map((pull) => pull.base), ["main"]);
   assert.match(git(origin, "show", "main:app.js"), /export const sub/);
@@ -92,6 +95,146 @@ test("with the setting on, a one-spec plan ships straight to the base and is nev
   assert.deepEqual(apiCalls(env), []);
   const ended = ship("end", plan, [], env);
   assert.doesNotMatch(ended.json.say.join("\n"), /plan\//);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a clean spec that merges straight into the base stops at finish for that reason alone, and merges once a person approves it", () => {
+  // One spec, so the base whatever the setting says.
+  const staged = stagePlan({ specs: 1 });
+  const { dir, plan, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const mainBefore = onOrigin(origin, "main");
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.state().base, "main");
+  assert.equal(a.state().planRouteBranch, null, "a train with no plan route recorded one");
+  assert.equal(a.state().state, "awaiting-approval");
+  assert.deepEqual(a.finished.json.blockers, []);
+  assert.deepEqual(a.finished.json.reasons, ["straight-to-base"]);
+  assert.match(a.finished.json.ask, /this merges straight into the base branch, and everything that lands there waits for your approval/);
+  assert.match(a.finished.json.ask, /not a sign that anything is wrong/);
+  assert.match(a.finished.json.ask, /approve and merge \(rerun finish with --approve <email>\)/);
+  assert.doesNotMatch(a.finished.json.ask, /plan branch/, "the wait reads as if a plan branch caused it");
+  assert.equal(pullsOf(env)[0].state, "OPEN");
+  assert.equal(onOrigin(origin, "main"), mainBefore, "something reached the base with nobody asked");
+
+  const approved = approveFinish(plan, "01-a", env);
+  assert.equal(a.state().state, "merged");
+  assert.equal(a.state().gates.human.approved, true);
+  assert.match(approved.json.say.join("\n"), /Merged 01-a at/);
+  assert.equal(pullsOf(env)[0].state, "MERGED");
+  assert.match(git(origin, "show", "main:app.js"), /export const sub/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("on a plan route a spec whose state was frozen user-visible merges at finish without stopping", () => {
+  // Stands for a state frozen mid-train before the mark was retired: nothing
+  // writes `planUserVisible` any more, so it is put there by hand, where an
+  // older plugin left it.
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const file = path.join(shipDir, "01-a", "state.json");
+  fs.writeFileSync(file, `${JSON.stringify({ ...a.state(), planUserVisible: true }, null, 2)}\n`);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  const finished = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(a.state().planUserVisible, true, "the old mark is gone from the state, so this proves nothing");
+  assert.equal(a.state().base, "plan/demo");
+  assert.equal(a.state().planRouteBranch, "plan/demo");
+  assert.equal(finished.json.ask, undefined, JSON.stringify(finished.json.ask ?? ""));
+  assert.equal(a.state().state, "merged");
+  assert.equal(a.state().gates.human, null, "it merged on a person's approval, not on its own");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an older plan whose spec still carries user_visible: true starts and begins exactly as one without it", () => {
+  // Stands for a plan approved while the mark existed. Everything `start` says
+  // and `begin` dispatches and writes is compared whole, once what differs
+  // between any two staged repositories — their directory, commits, set ids and
+  // clock — is taken out, so the old value cannot ride along anywhere.
+  const run = (retired) => {
+    const staged = stagePlan();
+    const { dir, repo, plan, shipDir, env } = staged;
+    if (retired) {
+      const file = path.join(plan, "specs", "01-a.md");
+      fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("depends_on: []\n", "depends_on: []\nuser_visible: true\n"));
+      git(repo, "add", "-A");
+      git(repo, "commit", "-m", "01-a as an older plan wrote it");
+      git(repo, "push", "origin", "main");
+    }
+    const started = ship("start", plan, [], env);
+    assert.equal(started.status, 0, started.stderr);
+    const begun = ship("begin", plan, ["--spec", "01-a"], env);
+    assert.equal(begun.status, 0, begun.stderr);
+    const state = fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8");
+    const same = (text) => text.split(fs.realpathSync(dir)).join("<dir>").split(dir).join("<dir>")
+      .replace(/\b[0-9a-f]{40}\b|\b[0-9a-f]{12}\b/g, "<oid>")
+      .replace(/\d{8}T\d{6}Z-[0-9a-f]+/g, "<set>")
+      .replace(/\d{4}-\d\d-\d\dT[0-9:.]+Z/g, "<at>");
+    const seen = { specs: started.json.specs, start: same(JSON.stringify(started.json)), begin: same(JSON.stringify(begun.json)), state: same(state) };
+    fs.rmSync(dir, { recursive: true, force: true });
+    return seen;
+  };
+  const fresh = run(false);
+  const old = run(true);
+  for (const spec of old.specs) assert.equal(Object.hasOwn(spec, "userVisible"), false, spec.id);
+  assert.doesNotMatch(old.state, /planUserVisible/);
+  assert.equal(old.start, fresh.start);
+  assert.equal(old.begin, fresh.begin);
+  assert.equal(old.state, fresh.state);
+});
+
+test("a leftover autoMerge: false is told at start that it does nothing, and a clean spec still merges into the plan branch unasked", () => {
+  // The value an owner who wanted every pull request to wait would have left
+  // behind. It is information at start, never a stop, and it reaches nothing.
+  const staged = stagePlan({ autoMerge: false });
+  const { dir, plan, shipDir, origin, env, configPath } = staged;
+  assert.equal(JSON.parse(fs.readFileSync(configPath, "utf8")).autoMerge, false, "the test proves nothing without the key");
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(started.json.ask, undefined, JSON.stringify(started.json.ask ?? ""));
+  const said = started.json.say.filter((line) => /\bautoMerge\b/.test(line));
+  assert.equal(said.length, 1, `start did not pass the autoMerge note on: ${JSON.stringify(started.json.say)}`);
+  assert.match(said[0], /^note: autoMerge no longer does anything/);
+  assert.match(said[0], /\bplanBranch\b/);
+  assert.equal(trainOf(shipDir).route.kind, "plan");
+
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.finished.json.ask, undefined, JSON.stringify(a.finished.json.ask ?? ""));
+  assert.equal(a.state().base, "plan/demo");
+  assert.equal(a.state().state, "merged");
+  assert.equal(a.state().gates.human, null, "it merged on a person's approval, not on its own");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a spec begun before its plan route was recorded takes it from the train's route at finish, and merges", () => {
+  // What a spec already under way when the verdict began to read the plan route
+  // carries: a state frozen user-visible, and no plan route at all. `finish`
+  // gives it the plan branch the train's route recorded — not anything the
+  // configuration says — and it merges as a spec begun today would.
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const driven = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const published = ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env);
+  assert.equal(published.status, 0, published.stderr);
+  const file = path.join(shipDir, "01-a", "state.json");
+  const { planRouteBranch, ...legacy } = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(planRouteBranch, "plan/demo", "begin recorded no plan route, so removing it proves nothing");
+  fs.writeFileSync(file, `${JSON.stringify({ ...legacy, planUserVisible: true }, null, 2)}\n`);
+
+  const finished = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(finished.json.ask, undefined, JSON.stringify(finished.json.ask ?? ""));
+  assert.equal(driven.state().planRouteBranch, "plan/demo");
+  assert.equal(driven.state().state, "merged");
+  assert.equal(driven.state().gates.human, null, "it merged on a person's approval, not on its own");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -105,10 +248,13 @@ test("with the setting off, a two-spec plan ships each spec to the base with no 
   assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
   const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
   assert.equal(a.finished.status, 0, a.finished.stderr);
-  assert.equal(a.finished.json.ask, undefined);
+  assert.deepEqual(a.finished.json.reasons, ["straight-to-base"]);
+  assert.equal(approveFinish(plan, "01-a", env).json.ask, undefined);
   const afterA = onOrigin(origin, "main");
   const b = shipThrough(staged, "02-b", "b.js", B_CHANGE);
   assert.equal(b.finished.status, 0, b.finished.stderr);
+  assert.deepEqual(b.finished.json.reasons, ["straight-to-base"]);
+  approveFinish(plan, "02-b", env);
   assert.equal(b.state().baseOid, afterA, "the second spec did not start from the base as the first left it");
   assert.deepEqual([a.state().state, b.state().state], ["merged", "merged"]);
   assert.deepEqual([a.state().base, b.state().base], ["main", "main"]);
@@ -305,12 +451,12 @@ test("a commit pushed by hand to the plan branch after publish stops finish befo
 });
 
 test("a spec a person merged at the reviewed head is adopted, the record follows, and the next begin goes on", () => {
-  const staged = stagePlan({ autoMerge: false });
+  const staged = stagePlan();
   const { dir, plan, shipDir, origin, env } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
-  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  const a = shipThrough(staged, "01-a", { "app.js": A_CHANGE, ...WAITS });
   assert.equal(a.finished.status, 0, a.finished.stderr);
-  assert.match(a.finished.json.ask, /auto-merge is off/);
+  assert.match(a.finished.json.ask, /changes the CI workflows/);
   // They merge it on GitHub, and say to carry on with the next spec.
   const merged = spawnSync(process.execPath, [path.join(dir, "gh-stub.mjs"), "pr", "merge", "1", "--squash",
     "--match-head-commit", a.state().candidateOid], { encoding: "utf8", env: { ...process.env, ...env } });
@@ -442,11 +588,11 @@ test("a finish rerun after a squash the run died before recording adopts it, and
 });
 
 test("a reviewed spec merged on top of a commit pushed by hand is not recorded, and the next begin stops naming that commit", () => {
-  const staged = stagePlan({ autoMerge: false });
+  const staged = stagePlan();
   const { dir, plan, shipDir, origin, env } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
-  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
-  assert.match(a.finished.json.ask, /auto-merge is off/);
+  const a = shipThrough(staged, "01-a", { "app.js": A_CHANGE, ...WAITS });
+  assert.match(a.finished.json.ask, /changes the CI workflows/);
   const tip = trainOf(shipDir).route.tipOid;
   const stray = commitByHand(staged, "plan/demo").oid;
   mergeByHand(staged, 1, a.state().candidateOid);
@@ -462,13 +608,13 @@ test("a reviewed spec merged on top of a commit pushed by hand is not recorded, 
 });
 
 test("two spec pull requests merged into the plan branch one after the other are both adopted, and nothing stops", () => {
-  const staged = stagePlan({ autoMerge: false });
+  const staged = stagePlan();
   const { dir, plan, shipDir, origin, env } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
-  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
-  assert.match(a.finished.json.ask, /auto-merge is off/);
-  const b = shipThrough(staged, "02-b", "b.js", B_CHANGE);
-  assert.match(b.finished.json.ask, /auto-merge is off/);
+  const a = shipThrough(staged, "01-a", { "app.js": A_CHANGE, ...WAITS });
+  assert.match(a.finished.json.ask, /changes the CI workflows/);
+  const b = shipThrough(staged, "02-b", { "b.js": B_CHANGE, ".github/workflows/b.yml": "on: push\n" });
+  assert.match(b.finished.json.ask, /changes the CI workflows/);
   mergeByHand(staged, 1, a.state().candidateOid);
   const first = onOrigin(origin, "plan/demo");
   mergeByHand(staged, 2, b.state().candidateOid);

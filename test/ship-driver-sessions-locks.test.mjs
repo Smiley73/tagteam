@@ -387,7 +387,7 @@ function addPlan(repo, slug, id, outcome) {
   const plan = path.join(repo, ".tagteam", "plans", slug);
   fs.mkdirSync(path.join(plan, "specs"), { recursive: true });
   fs.writeFileSync(path.join(plan, "specs", `${id}.md`),
-    `---\nid: ${id}\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
+    `---\nid: ${id}\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
   fs.writeFileSync(path.join(plan, "approved.json"),
     JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug, specs: [id] }));
   return { slug, plan, shipDir: path.join(repo, ".tagteam", "ships", slug) };
@@ -480,8 +480,8 @@ test("end removes the worktree only when this plan's lock was still this run's t
 
 // The demonstration this whole change is for: two trains in one repository, both
 // to their merge. Ship A merges; ship B's already-reviewed commit then merges on
-// a base that moved under it, with no new review round, no new commit and no
-// person.
+// a base that moved under it, with no new review round, no new commit and
+// nothing asked of a person beyond the approval every merge into the base takes.
 test("two ships in one repository both merge, and the second spends no round on the base the first moved", () => {
   const staged = stage();
   const { dir, repo, plan } = staged;
@@ -514,13 +514,13 @@ test("two ships in one repository both merge, and the second spends no round on 
   }
 
   const before = { candidate: b.state().candidateOid, rounds: rounds({ ...second, id: "01-b" }), tip: git(b.worktree, "rev-parse", "HEAD") };
-  const mergedA = ship("finish", plan, ["--spec", "01-a"], env);
+  const mergedA = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], env);
   assert.equal(mergedA.status, 0, mergedA.stderr);
   assert.equal(mergedA.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(mergedA.json.ask ?? "")}`);
   assert.equal(a.state().state, "merged");
   assert.match(show("app.js"), /export const sub/, "the base did not take A's change");
 
-  const mergedB = ship("finish", second.plan, ["--spec", "01-b"], env);
+  const mergedB = ship("finish", second.plan, ["--spec", "01-b", "--approve", "owner@example.com"], env);
   assert.equal(mergedB.status, 0, mergedB.stderr);
   assert.equal(mergedB.json.ask, undefined, `01-b stopped for a person: ${JSON.stringify(mergedB.json.ask ?? "")}`);
   assert.equal(b.state().state, "merged");
@@ -582,7 +582,8 @@ test("an agent that ran at another effort is named in finish's say, and the spec
   assert.ok(count >= 4, "the spec sent out fewer agents than its route does");
 
   assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", body], env).status, 0);
-  const finish = ship("finish", plan, ["--spec", "01-a"], env);
+  // A one-spec plan lands on the base, so the person's approval comes with it.
+  const finish = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], env);
   assert.equal(finish.status, 0, finish.stderr);
   assert.equal(finish.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(finish.json.ask ?? "")}`);
   assert.equal(state().state, "merged");
@@ -614,7 +615,7 @@ test("the landing check's fetch waits on the primary checkout's mutex rather tha
   // `withPrimaryGitLock` resolves the repository the way `repoOf` does, so this
   // is the same lock path the driver and `merge.mjs` take.
   const held = await acquireLock(path.join(fs.realpathSync(repo), ".tagteam", "locks"), "primary-git.lock");
-  const blocked = ship("finish", plan, ["--spec", "01-a"], { ...env, TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1500" });
+  const blocked = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], { ...env, TAGTEAM_LOCK_WAIT_TIMEOUT_MS: "1500" });
   held.release();
   assert.notEqual(blocked.status, 0, "finish fetched the primary checkout while another ship held its mutex");
   assert.match(blocked.stderr, /timed out waiting .*for lock git in/);
@@ -622,7 +623,7 @@ test("the landing check's fetch waits on the primary checkout's mutex rather tha
   assert.notEqual(a.state().state, "merged");
 
   // Nothing is spent by the wait: with the mutex free, the same finish merges.
-  const merged = ship("finish", plan, ["--spec", "01-a"], env);
+  const merged = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], env);
   assert.equal(merged.status, 0, merged.stderr);
   assert.equal(merged.json.ask, undefined, `01-a stopped for a person: ${JSON.stringify(merged.json.ask ?? "")}`);
   assert.equal(a.state().state, "merged");

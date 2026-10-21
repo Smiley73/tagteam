@@ -68,7 +68,7 @@ export function stage() {
   fs.writeFileSync(path.join(repo, ".gitignore"), ".tagteam/ships/\n.tagteam/worktrees/\n.tagteam/locks/\n");
   const plan = path.join(repo, ".tagteam", "plans", "demo");
   fs.writeFileSync(path.join(plan, "specs", "01-a.md"),
-    "---\nid: 01-a\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nadd works.\n");
+    "---\nid: 01-a\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\nadd works.\n");
   fs.writeFileSync(path.join(plan, "approved.json"), JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug: "demo", specs: ["01-a"] }));
   git(repo, "add", "-A");
   git(repo, "commit", "-m", "init");
@@ -344,17 +344,18 @@ export const resultOf = (dispatch) => /^Command file: (.*)\.cmd\.sh$/m.exec(disp
 // depends on the first unless `specs` is 1, committed and pushed so the primary
 // checkout stays clean for every snapshot after it. The merging `gh` is on the
 // PATH every call here is made with, so every call the ship makes to it is in
-// its log.
-export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge = true, branchPrefix = null } = {}) {
+// its log. `autoMerge` is written only when given: the key does nothing, and a
+// test that stages it is proving that a leftover one reaches nothing.
+export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge, branchPrefix = null } = {}) {
   const staged = stage();
   const { repo, plan } = staged;
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  Object.assign(config, { planBranch, ciWaitSec, autoMerge }, branchPrefix ? { branchPrefix } : {});
+  Object.assign(config, { planBranch, ciWaitSec }, autoMerge === undefined ? {} : { autoMerge }, branchPrefix ? { branchPrefix } : {});
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   if (specs >= 2) {
     fs.writeFileSync(path.join(plan, "specs", "02-b.md"),
-      "---\nid: 02-b\ndepends_on: [01-a]\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nb works.\n");
+      "---\nid: 02-b\ndepends_on: [01-a]\nreviewers: []\n---\n\n## Outcome\nb works.\n");
     fs.writeFileSync(path.join(plan, "approved.json"), JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug: "demo", specs: ["01-a", "02-b"] }));
   }
   git(repo, "add", "-A");
@@ -405,6 +406,16 @@ export function shipThrough(staged, id, file, contents) {
   return { ...driven, published, finished };
 }
 
+// A person's approval given at `finish`: what a spec that merges straight into
+// the base waits for once nothing else stops it. `--approve` records it against
+// the current candidate and merges in the same call.
+export function approveFinish(plan, id, env = {}, by = "owner@example.com") {
+  const approved = ship("finish", plan, ["--spec", id, "--approve", by], env);
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.match(approved.json.say.join("\n"), new RegExp(`Approved by ${by.replace(/\./g, "\\.")}`));
+  return approved;
+}
+
 export const A_CHANGE = "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n";
 export const B_CHANGE = "export const twice = (n) => n * 2;\n";
 
@@ -440,8 +451,8 @@ export const checkRoundIn = (shipDir, n) => path.join(shipDir, "whole-plan", Str
 // The plan route with both specs merged into plan/demo, and `verify` as the
 // repository's verify commands. Every spec cycle and fix unit runs them by
 // `when`; the whole-plan check runs them all.
-export function stageMerged({ ciRepairs = 1, verify = null, a = { "app.js": A_CHANGE }, b = { "b.js": B_CHANGE }, env: extra = {}, prepare = null } = {}) {
-  const staged = stagePlan();
+export function stageMerged({ ciRepairs = 1, verify = null, a = { "app.js": A_CHANGE }, b = { "b.js": B_CHANGE }, env: extra = {}, prepare = null, autoMerge } = {}) {
+  const staged = stagePlan({ autoMerge });
   const { plan, configPath, env, shipDir } = staged;
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.limits = { ...config.limits, ciRepairs };
