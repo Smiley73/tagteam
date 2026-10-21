@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { root, git, ship, write, outputOf, arriveAll, findings, major, resultOf, onOrigin, ghCalls,
   pullsOf, trainOf, setTrainRoute, commitByHand, A_CHANGE, B_CHANGE, MAIN_ADD, BOTH_ADD, UNRELATED,
   commitToMain, recordOf, conflictedLine, resolvedReport, unitDirIn, checkRoundIn, stageMerged,
-  reviewWholePlan, shipUnit, mergeBaseIn } from "./ship-stage.mjs";
+  reviewWholePlan, shipUnit, mergeBaseIn, stagePlan, shipThrough } from "./ship-stage.mjs";
 
 const MERGE_SCRIPT = path.join(root, "scripts", "merge.mjs");
 const landingRecordOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "plan-landing", "record.json"), "utf8"));
@@ -605,4 +605,129 @@ test("re-entry: after Leave open the same dialog comes back without verify runni
   assert.deepEqual([shipped.status, shipped.planLanding.state], ["complete", "merged"]);
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(scratch, { recursive: true, force: true });
+});
+
+// --- the start wait: checks on the plan's pull request that take a while to appear ---
+
+const PR_WORKFLOW = "on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
+const checksAsked = (env) => ghCalls(env).filter((argv) => argv[0] === "pr" && argv[1] === "checks").length;
+// The landing waits `ciWaitSec` for checks, with `ciStartWaitSec` as given. The
+// specs before it waited for none, so every `gh pr checks` call is the landing's.
+const startWait = ({ configPath }, ciStartWaitSec, ciWaitSec = 30) => {
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, ciWaitSec, ciStartWaitSec }, null, 2));
+};
+
+// `stageClean`'s plan, except that 01-a also commits the repository's first
+// workflow that runs on pull requests: it is on plan/demo at the tip, and on
+// neither the base nor the primary checkout — so a detector reading either of
+// those finds none. A workflow change waits for a person, who approves it.
+function stageWorkflowClean() {
+  const staged = stagePlan();
+  const { plan, env, repo, origin } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const first = shipThrough(staged, "01-a", { "app.js": A_CHANGE, ".github/workflows/ci.yml": PR_WORKFLOW });
+  assert.equal(first.finished.status, 0, first.finished.stderr);
+  assert.deepEqual(first.finished.json.approvals, ["workflow-change"], first.finished.stdout);
+  const approved = ship("finish", plan, ["--spec", "01-a", "--approve", "p@example.com"], env);
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.equal(first.state().state, "merged");
+  const second = shipThrough(staged, "02-b", { "b.js": B_CHANGE });
+  assert.equal(second.finished.status, 0, second.finished.stderr);
+  assert.equal(second.state().state, "merged");
+  const collected = reviewWholePlan(staged, ship("plan-check", plan, [], env));
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.match(collected.json.next, /plan-land --plan /, "a clean check is not followed by the plan's landing");
+  const tip = onOrigin(origin, "plan/demo");
+  assert.equal(git(origin, "cat-file", "-t", `${tip}:.github/workflows/ci.yml`), "blob", "the workflow is not at the plan's tip");
+  assert.equal(spawnSync("git", ["-C", origin, "cat-file", "-e", "main:.github/workflows/ci.yml"]).status, 128, "the base has a workflow");
+  assert.ok(!fs.existsSync(path.join(repo, ".github")), "the primary checkout has a workflow");
+  return { ...staged, tip };
+}
+
+test("checks on the plan's pull request that appear only after an empty first answer are waited for, when the workflow is on the plan's tip alone", () => {
+  const staged = stageWorkflowClean();
+  const { dir, shipDir, tip } = staged;
+  startWait(staged, 2);
+  const env = { ...staged.env, GH_STUB_CHECKS_BY_CALL: JSON.stringify([[], JSON.parse(GREEN_CHECK)]) };
+  const dialog = toDialog(staged, [], env);
+  assert.match(dialog.json.say.join("\n"),
+    new RegExp(`Waiting up to 2s for checks to start on #\\d+ \\(ciStartWaitSec\\): at ${tip.slice(0, 12)}, \\.github/workflows/ci\\.yml can run on a pull request\\.`));
+  assert.equal(landingRecordOf(shipDir).ci.status, "passed", "the empty first answer was taken as the result");
+  assert.equal(checksAsked(env), 2);
+  assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  assert.match(dialog.json.ask, new RegExp(`the checks on pull request #\\d+ passed at ${tip.slice(0, 12)}`));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("checks on the plan's pull request that never start: their own line with the recorded limit, no whole-plan fix, Merge offered, and merged on approval", () => {
+  const staged = stageWorkflowClean();
+  const { dir, plan, shipDir, origin, env, tip } = staged;
+  startWait(staged, 1);
+  const dialog = toDialog(staged);
+  assert.match(dialog.json.say.join("\n"), /Waiting up to 1s for checks to start/);
+  assert.match(dialog.json.say.join("\n"), /^ci: not-started — .*1s.*ciStartWaitSec/m);
+  const record = landingRecordOf(shipDir);
+  assert.equal(record.ci.status, "not-started");
+  assert.equal(record.ci.startWaitSec, 1);
+  // The number the line gives is the one the wait recorded, and its reason names.
+  assert.match(record.ci.reason, /within 1s of waiting/);
+  assert.match(dialog.json.ask,
+    new RegExp(`CI on pull request #\\d+ never started within ${record.ci.startWaitSec} second at ${tip.slice(0, 12)}, the start wait ciStartWaitSec gave it`));
+  assert.doesNotMatch(dialog.json.ask, /did not run/, "the timeout was shown as checks that did not run");
+  assert.doesNotMatch(dialog.json.ask, /checks on pull request #\d+ passed/);
+  assert.equal(dialog.json.planLanding.results.ci.status, "not-started");
+  assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  assert.ok(!fs.existsSync(unitDirIn(shipDir, "plan-fix-1")), "a timeout made a whole-plan fix unit");
+  assert.doesNotMatch(dialog.json.next, /begin --plan /);
+
+  const main = onOrigin(origin, "main");
+  const merged = ship("plan-land", plan, ["--approve", "p@example.com"], env);
+  assert.equal(merged.status, 0, merged.stderr);
+  assert.match(merged.json.say.join("\n"), /Merge confirmed by p@example\.com/);
+  assert.equal(landingRecordOf(shipDir).merged?.by, "ship", merged.stdout);
+  assert.equal(planPullOf(env).method, "merge");
+  assert.deepEqual(git(origin, "rev-parse", `${onOrigin(origin, "main")}^@`).split("\n"), [main, tip]);
+  assert.ok(!fs.existsSync(unitDirIn(shipDir, "plan-fix-1")));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("checks on the plan's pull request that never started are waited for again, and a red check then takes the whole-plan fix path", () => {
+  const staged = stageWorkflowClean();
+  const { dir, plan, shipDir, env } = staged;
+  startWait(staged, 1);
+  const first = toDialog(staged);
+  assert.equal(landingRecordOf(shipDir).ci.status, "not-started", first.stdout);
+  const asked = checksAsked(env);
+
+  const red = ship("plan-land", plan, [], { ...env, GH_STUB_CHECKS: RED_CHECK });
+  assert.equal(red.status, 0, red.stderr);
+  assert.doesNotMatch(red.json.say.join("\n"), /were already waited for/, "a timeout was reused");
+  assert.ok(checksAsked(env) > asked, "the checks were not asked for again");
+  assert.equal(landingRecordOf(shipDir).ci.status, "failed");
+  assert.match(red.json.next, /--spec plan-fix-1$/, "a red check was not fixed through the whole-plan fix path");
+  assert.match(fs.readFileSync(path.join(unitDirIn(shipDir, "plan-fix-1"), "spec.md"), "utf8"), /A check on the plan's pull request #\d+ failed .*: test/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("no start wait for the plan's pull request without a workflow at its tip, with ciStartWaitSec 0, or with ciWaitSec 0", () => {
+  const cases = [
+    { name: "no workflow", stage: () => stageClean(), start: 2, wait: 30, asked: 1, ci: ["not-run", "no checks were registered"] },
+    { name: "ciStartWaitSec 0", stage: stageWorkflowClean, start: 0, wait: 30, asked: 1, ci: ["not-run", "no checks were registered"] },
+    { name: "ciWaitSec 0", stage: stageWorkflowClean, start: 2, wait: 0, asked: 0, ci: ["not-run", "CI waiting is disabled (ciWaitSec is 0)"] }
+  ];
+  for (const { name, stage, start, wait, asked, ci } of cases) {
+    const staged = stage();
+    const { dir, shipDir, env } = staged;
+    startWait(staged, start, wait);
+    const dialog = toDialog(staged);
+    // The call count, and not only the status: a hidden wait would still end
+    // in not-run.
+    assert.equal(checksAsked(env), asked, `${name}: gh pr checks was asked ${checksAsked(env)} times`);
+    assert.doesNotMatch(dialog.json.say.join("\n"), /for checks to start/, `${name}: a start wait was announced`);
+    const record = landingRecordOf(shipDir);
+    assert.deepEqual([record.ci.status, record.ci.reason], ci, `${name}: not today's result`);
+    assert.equal(dialog.json.planLanding.results.ci.status, "not-run", name);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

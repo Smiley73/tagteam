@@ -186,7 +186,8 @@ function landingOf(state) {
 // `stopped` and `merged`, and each result is `passed`, `failed` or `not-run` for
 // the tip the train last recorded — a result about any other tip is `not-run`
 // here, never a pass, and so is a version condition last read against a base
-// that has moved since. Nothing here calls git: the version condition is the one
+// that has moved since. The checks on the pull request alone may also be
+// `not-started`: no check appeared within the start wait at this tip. Nothing here calls git: the version condition is the one
 // the landing step last read, with the tip and base it read it against.
 //
 // The plan-level directories — `plan-landing/`, `whole-plan/`, `resolve/` —

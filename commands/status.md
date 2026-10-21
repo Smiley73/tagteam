@@ -160,6 +160,16 @@ base, and the version lines — each one of three values:
   ran was about an earlier commit of the plan's branch. Say "not run", never
   "passed": checks that never ran prove nothing.
 
+The checks on the plan's pull request — `results.ci`, and no other result — can
+also be:
+
+- `"not-started"` — the checks were waited for at this commit, and no check
+  appeared on the pull request within the start wait (`ciStartWaitSec`). Say "CI
+  on the plan's pull request never started at this commit", never "passed" and
+  never "failed": nothing was proven either way, it does not keep Merge from
+  being offered, and running `/tagteam:ship` on the plan waits for the checks
+  again.
+
 ## Which plugin is running
 
 Claude Code runs an installed *copy* of this plugin, not the working tree it was

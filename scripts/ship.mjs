@@ -4097,18 +4097,37 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
 // request is the answer, and is not waited for twice. A `not-run` is not final:
 // the checks had not registered yet, or were still running, so they are waited
 // for again, or a check that went red after the wait would never withhold Merge.
+// A `not-started` is not final either: no check had appeared within the start
+// wait, and CI that starts after it would stay hidden behind a reused timeout.
 // Checks waited for on a pull request since closed are not this one's.
+//
+// The start wait is `publish`'s, decided the same way and about `tip` itself —
+// the plan's branch may carry the repository's first workflow, which neither the
+// base nor any checkout does. The limit it ran with is recorded beside the
+// result, so the question names it even after the configuration was edited.
 function waitPlanChecks(ctx, record, tip, say) {
   const recorded = ciFor(record, tip);
   if (recorded && (recorded.status === "passed" || recorded.status === "failed")) {
     say.push(`The checks on pull request #${record.pr.number} at ${short(tip)} were already waited for: ${recorded.status} — ${recorded.reason}.`);
     return recorded;
   }
+  const start = ciStartLimit(ctx, tip);
+  if (start.seconds > 0) {
+    say.push(`Waiting up to ${start.seconds}s for checks to start on #${record.pr.number} (ciStartWaitSec): at ${short(tip)}, ${start.files.join(", ")} can run on a pull request.`);
+  }
   const out = path.join(landingRoot(ctx.shipDir), `ci-${short(tip)}.json`);
-  const ran = node("ci-wait.mjs", ["--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec), "--out", out], { allow: [1] });
+  const ran = node("ci-wait.mjs", [
+    "--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec),
+    ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
+    "--out", out
+  ], { allow: [1] });
   const outcome = readJson(out);
   const failed = (outcome.checks ?? []).filter((check) => /fail|timed|action/i.test(check.bucket ?? check.state ?? "")).map((check) => check.name);
-  record.ci = { tip, pr: record.pr.number, status: outcome.status, reason: outcome.reason, result: out, failed, at: new Date().toISOString() };
+  record.ci = {
+    tip, pr: record.pr.number, status: outcome.status, reason: outcome.reason, result: out, failed,
+    ...(Number.isFinite(outcome.startWaitSec) ? { startWaitSec: outcome.startWaitSec } : {}),
+    at: new Date().toISOString()
+  };
   saveLanding(ctx, record);
   say.push(...ran.stdout.trim().split("\n").filter(Boolean));
   return record.ci;
@@ -4515,6 +4534,18 @@ function whyFor(ctx, record, tip) {
   return "";
 }
 
+// The checks on the plan's pull request that never started: the limit is the one
+// the wait recorded, never the configuration, which a person may have edited
+// since; a record without one gives the poller's own reason, which names it too.
+// Not passed, and not a failure either — nothing was there to fail.
+function notStartedLine(pr, at, ci) {
+  const seconds = ci.startWaitSec;
+  return Number.isFinite(seconds)
+    ? `CI on ${pr} never started within ${seconds} second${seconds === 1 ? "" : "s"} at ${at}, the start wait ciStartWaitSec gave it `
+      + "— never started, which is not passed, and the next run waits for it again"
+    : `CI on ${pr} never started at ${at} (${ci.reason}) — never started, which is not passed, and the next run waits for it again`;
+}
+
 // One sentence per result, each naming the commit it is about.
 function resultLines(route, record, results) {
   const at = short(results.tip);
@@ -4530,7 +4561,8 @@ function resultLines(route, record, results) {
     ? `the checks on ${pr} were not waited for at ${at} — not run, which is not passed`
     : ci.status === "passed" ? `the checks on ${pr} passed at ${at}`
       : ci.status === "failed" ? `a check on ${pr} failed at ${at}`
-        : `the checks on ${pr} did not run at ${at} (${ci.reason}) — not run, which is not passed`);
+        : ci.status === "not-started" ? notStartedLine(pr, at, ci)
+          : `the checks on ${pr} did not run at ${at} (${ci.reason}) — not run, which is not passed`);
   lines.push(landing.status === "not-run"
     ? `the landing check of ${at} against ${route.base} as it stands, at ${short(results.baseOid)}, has not run — not run`
     : `the landing check of ${at} against ${route.base} at ${short(landing.baseOid)} ${landing.status === "passed" ? "passed" : `came back ${landing.outcome}`}`);
