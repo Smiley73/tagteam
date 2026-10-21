@@ -3866,10 +3866,10 @@ async function planCollect(options) {
 //   7  the dialog: what lands, every result with the tip it is for, and Merge
 //      only when every one is for this tip and none fails
 //
-// Nothing here reads `autoMerge` or asks `evaluate`: `autoMerge: true` makes a
-// spec's verdict ready, and `finish` merges a spec on ready. The plan's merge has
-// one authority, a person's Merge for the tip in front of them, and `merge.mjs`
-// re-reads that and every result itself before it merges anything.
+// Nothing here asks `evaluate`: a spec's verdict, ready or approved, authorises
+// that spec's merge and never the plan's. The plan's merge has one authority, a
+// person's Merge for the tip in front of them, and `merge.mjs` re-reads that and
+// every result itself before it merges anything.
 
 const short = (oid) => String(oid ?? "").slice(0, 12);
 const TITLE = /^[A-Za-z0-9 ._:-]{1,70}$/;
@@ -4523,10 +4523,10 @@ function stoppedCheckNote(ctx, check) {
 
 /**
  * The dialog: what lands, every result with the commit it is for, and the
- * three answers. Merge is offered only when nothing withholds it, whatever
- * `autoMerge` says. With `--approve` and nothing withholding, the person's Merge
- * is recorded for this tip and the plan merges; with anything withholding,
- * nothing is recorded — no approval clears a blocker.
+ * three answers. Merge is offered only when nothing withholds it, and no spec's
+ * verdict stands in for it. With `--approve` and nothing withholding, the
+ * person's Merge is recorded for this tip and the plan merges; with anything
+ * withholding, nothing is recorded — no approval clears a blocker.
  */
 async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []) {
   const route = routeOf(ctx);
@@ -4776,11 +4776,11 @@ const REASONS = {
   "continuous-integration-failed": "a check on the pull request failed",
   "continuous-integration-not-recorded": "this repository waits for checks and none were recorded",
   "continuous-integration-inconclusive": "the checks proved nothing either way",
-  "user-visible": "this changes something people will see, so it waits for you by design",
+  "straight-to-base": "this merges straight into the base branch, and everything that lands there waits for your approval; "
+    + "that is the normal wait for it, not a sign that anything is wrong",
   "workflow-change": "it changes the CI workflows, which every later gate depends on",
   "work-not-accounted-for": "the agent that wrote this never confirmed it finished what it was given",
-  "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one",
-  "auto-merge-disabled": "auto-merge is off in this repository's configuration"
+  "no-executable-evidence": "nothing in this change has a test that runs it, so nothing was proved by running one"
 };
 
 // What moves a blocker: the step that records it, run again against this commit,

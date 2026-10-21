@@ -446,7 +446,11 @@ test("a landing record is bound to the candidate it was about, and a bind clears
 // A repository with a real origin, a state file whose gates are satisfied, and a
 // `gh` that answers. `merge.mjs`'s refusals happen before the first `gh` call;
 // its acceptance does not, which is what the stub is for.
-function stageMerge({ landing, candidateOid, baseMoves = true } = {}) {
+//
+// The state merges straight into `main`, so it carries a person's approval of
+// this candidate: without one the verdict waits, and that is a different refusal
+// from the landing check these fixtures are about.
+function stageMerge({ landing, candidateOid, baseMoves = true, approved = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-merge-"));
   const origin = path.join(dir, "origin.git");
   const repo = path.join(dir, "repo");
@@ -476,7 +480,10 @@ function stageMerge({ landing, candidateOid, baseMoves = true } = {}) {
     spec: "01-a", slug: "demo", branch: BRANCH, base: "main", planUserVisible: false, reviewers: [], briefs: {},
     state: "publishing", baseOid: reviewedBase, candidateOid: candidate, changedPaths: ["app.js"],
     pr: { number: 7, url: "https://example.invalid/7", headOid: candidate },
-    gates: { review: gate("clean"), verify: gate("passed"), ci: null, report: gate("complete"), human: null },
+    gates: {
+      review: gate("clean"), verify: gate("passed"), ci: null, report: gate("complete"),
+      human: approved ? { approved: true, candidateOid: candidate } : null
+    },
     fixRoundsUsed: 0, ciRepairsUsed: 0, unaccountedCandidates: [], landing: landing ?? null, history: []
   };
   const statePath = path.join(dir, "state.json");
@@ -534,5 +541,17 @@ test("merge.mjs still merges into the reviewed base with no landing record anywh
   const merged = staged.run();
   assert.equal(merged.status, 0, merged.stderr);
   assert.equal(JSON.parse(merged.stdout).merged, true);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("merge.mjs refuses a state that merges straight into the base with no person's approval of it", () => {
+  // Even with `autoMerge: true` in the configuration and every check clean: the
+  // verdict is re-evaluated here, so an orchestrator that skips `finish` meets the
+  // same wait.
+  const staged = stageMerge({ baseMoves: false, approved: false });
+  const refused = staged.run();
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /not satisfied \(straight-to-base\)/);
+  assert.match(refused.stderr, /nothing was merged/);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });

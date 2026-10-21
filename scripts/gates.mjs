@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { planBranchOf } from "./lib/plan-route.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
 
@@ -655,12 +656,18 @@ export function evaluate(state, config) {
     else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
-  // (a) User-visible. This is the plan's judgement, made per spec and approved by
-  // a person, and raised by the spec writer if writing the spec revealed a
-  // surface the plan missed. There is deliberately no diff-derived signal: a
-  // reliable one needs per-project path conventions, and an unreliable one
-  // reading as authoritative is worse than none.
-  if (state.planUserVisible) approvals.push("user-visible");
+  // (a) Where this lands. Nothing reaches the base without a person, and a plan
+  // branch is the one target where the plan's own pull request is that person's
+  // look. So anything not confirmed as merging into this plan's own plan branch
+  // waits. The proof is the base recorded when the spec began against the slug
+  // it began under — never the route or the setting, which this function does
+  // not read. It fails closed: a missing or empty base or slug, another plan's
+  // branch, and a configured base that is itself named like a plan branch all
+  // count as straight to the base.
+  const onPlanBranch = typeof state.slug === "string" && state.slug.length > 0
+    && state.base === planBranchOf(state.slug)
+    && !(typeof config?.base === "string" && config.base.length > 0 && state.base === config.base);
+  if (!onPlanBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
@@ -684,7 +691,6 @@ export function evaluate(state, config) {
   if (verify?.status === "not-applicable" && (!ci || ci.status === "not-run")) {
     approvals.push("no-executable-evidence");
   }
-  if (config?.autoMerge === false) approvals.push("auto-merge-disabled");
 
   const uniqueApprovals = [...new Set(approvals)];
   const uniqueBlockers = [...new Set(blockers)];
