@@ -4,14 +4,35 @@
 //
 // They live outside any `*.test.mjs` for the reason `stage.mjs` gives:
 // importing a suite to borrow a helper runs that suite's tests a second time.
-// They are split out of `ship-driver.test.mjs` so the plan's route and landing
-// can be suites of their own — node runs the files of `npm test` side by side
-// but the tests of one file in turn, and the driver's file is already the
-// longest of them.
+// They are split out of the driver's suite so that its themes, the plan's route
+// and its landing can each be suites of their own, `ship-driver-*.test.mjs` —
+// node runs the files of `npm test` side by side but the tests of one file in
+// turn, so the longest file sets how long the whole run takes.
+//
+// A plan-level fixture takes seconds to build, and most of a plan-level test is
+// that build. `shareBuilds` builds one once per file, the first time a test asks
+// for it, and gives every test that asks a byte copy of its own, with every path
+// in the copy and in the returned object pointing at the copy. Nobody gets the
+// template itself, which is removed when the file's process exits.
+//
+// - When a builder copies: called with the shared options — none, or options
+//   that build the same thing — it copies; called with anything else it builds
+//   fresh. Only the outermost builder a test calls shares, so no copy is ever
+//   made of a copy, and a test's own steps after setup stay in its body.
+// - The switch: TAGTEAM_TEST_FRESH_FIXTURES=1 makes every shared builder build
+//   fresh, so a run with it says whether a copy behaves as a fresh build. Nothing
+//   needs it for a normal run.
+// - The exceptions: a test calls its builder in a way that builds fresh, and
+//   says why in a comment, when it writes outside its fixture's directory (a
+//   copy would share what is out there), when its options differ from the shared
+//   build, or when a setting it changes after setup has an effect nobody has
+//   checked. A test that edits the configuration as one of its own steps, once
+//   it has its copy, does what a fresh build would, and shares.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { spawnSync } from "node:child_process";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
 import { EFFORT_LADDER } from "../scripts/lib/effort-ladder.mjs";
@@ -507,4 +528,136 @@ export function mergeBaseIn({ dir, origin, shipDir }) {
   setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, pendingOid: oid } }));
   git(clone, "push", "-q", "origin", "HEAD:refs/heads/plan/demo");
   return oid;
+}
+
+// --- shared fixtures ------------------------------------------------------------
+
+// Set to "1", every shared builder builds fresh instead of handing out a copy.
+const FRESH = process.env.TAGTEAM_TEST_FRESH_FIXTURES === "1";
+const templateDirs = [];
+
+// Every file and symlink under `dir`, `.git` included, and every work tree in it:
+// the parent of each `.git` outside another `.git`.
+function walk(dir, found = { files: [], links: [], trees: [] }, inGit = false) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const at = path.join(dir, entry.name);
+    if (entry.name === ".git" && !inGit) found.trees.push(dir);
+    if (entry.isSymbolicLink()) found.links.push(at);
+    else if (entry.isDirectory()) walk(at, found, inGit || entry.name === ".git");
+    else if (entry.isFile()) found.files.push(at);
+  }
+  return found;
+}
+
+// `from` replaced by `to`, which is as long, everywhere in the file.
+function repointFile(file, from, to) {
+  const bytes = fs.readFileSync(file);
+  let at = bytes.indexOf(from);
+  if (at === -1) return;
+  for (; at !== -1; at = bytes.indexOf(from, at + from.length)) to.copy(bytes, at);
+  const { mode } = fs.statSync(file);
+  if (!(mode & 0o200)) fs.chmodSync(file, mode | 0o200);
+  fs.writeFileSync(file, bytes);
+  if (!(mode & 0o200)) fs.chmodSync(file, mode);
+}
+
+const statusOf = (dir, trees) => Object.fromEntries(trees.map((tree) =>
+  [path.relative(dir, tree), git(tree, "status", "--porcelain")]));
+
+// `value` with every string, and every key, holding `from` repointed to `to`,
+// as a new object throughout. A function is never passed through: each one is
+// listed by where it sits, for `rebind` to rebuild against the copy.
+function repointValue(value, from, to, where, functions) {
+  if (typeof value === "string") return value.replaceAll(from, to);
+  if (value === null || ["number", "boolean", "undefined"].includes(typeof value)) return value;
+  if (typeof value === "function") {
+    functions.push(where);
+    return null;
+  }
+  if (Array.isArray(value)) return value.map((item, index) => repointValue(item, from, to, [...where, index], functions));
+  if (Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) =>
+      [key.replaceAll(from, to), repointValue(item, from, to, [...where, key], functions)]));
+  }
+  throw new Error(`the shared fixture holds a ${value.constructor?.name ?? typeof value} at ${where.join(".") || "its top"}, which a copy cannot repoint`);
+}
+
+function templateOf(staged, dir) {
+  if (!templateDirs.length) process.on("exit", () => {
+    for (const template of templateDirs) fs.rmSync(template, { recursive: true, force: true });
+  });
+  templateDirs.push(dir);
+  const name = path.basename(dir);
+  // The ship looks sessions up in `~/.claude/projects/<repository path,
+  // mangled>`, a name that keeps the template's. Building one makes nothing
+  // there; if a build ever did, its copies would have no entry of their own, so
+  // the build is refused rather than copied.
+  const projects = path.join(process.env.HOME || os.homedir(), ".claude", "projects");
+  const sessions = fs.existsSync(projects) ? fs.readdirSync(projects).filter((entry) => entry.includes(name)) : [];
+  if (sessions.length) throw new Error(`building ${dir} made ${sessions.join(", ")} under ${projects}, which a copy would not have`);
+  return { staged, dir, status: statusOf(dir, walk(dir).trees) };
+}
+
+// A byte copy of the template in a directory of its own, with every path in it
+// and in the returned object pointing at the copy.
+function copyOf({ staged, dir, status }, rebind) {
+  const into = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ship-"));
+  const [name, copy] = [path.basename(dir), path.basename(into)];
+  // The same prefix in the same directory: the two names are as long as each
+  // other, so replacing one by the other repoints both the path as given and its
+  // realpath, and moves no byte of any file.
+  assert.equal(copy.length, name.length, `${into} is not named like ${dir}`);
+  fs.cpSync(dir, into, { recursive: true, verbatimSymlinks: true });
+  const [from, to] = [Buffer.from(name), Buffer.from(copy)];
+  const { files, links, trees } = walk(into);
+  for (const file of files) repointFile(file, from, to);
+  for (const link of links) {
+    const target = fs.readlinkSync(link);
+    if (!target.includes(name)) continue;
+    fs.unlinkSync(link);
+    fs.symlinkSync(target.replaceAll(name, copy), link);
+  }
+  for (const file of files) {
+    if (fs.readFileSync(file).includes(from)) throw new Error(`the copy ${into} still names the template ${name} in ${path.relative(into, file)}`);
+  }
+  for (const link of links) {
+    if (fs.readlinkSync(link).includes(name)) throw new Error(`the copy ${into} still names the template ${name} in the link ${path.relative(into, link)}`);
+  }
+  // A copied file is a new inode with a new ctime, and git plumbing that reads
+  // the index without refreshing it would take every one for a change.
+  for (const tree of trees) spawnSync("git", ["-C", tree, "update-index", "-q", "--refresh"]);
+  assert.deepEqual(statusOf(into, trees), status, `the copy ${into} does not stand as the template ${dir} does`);
+  const functions = [];
+  const result = repointValue(staged, name, copy, [], functions);
+  const held = functions.map((where) => where.join("."));
+  for (const named of Object.keys(rebind)) {
+    if (!held.includes(named)) throw new Error(`rebind names ${named}, which the shared fixture does not hold as a function`);
+  }
+  for (const where of functions) {
+    const rebuild = rebind[where.join(".")];
+    if (!rebuild) throw new Error(`the shared fixture holds a function at ${where.join(".")} that nothing rebuilds for its copy`);
+    where.slice(0, -1).reduce((at, key) => at[key], result)[where.at(-1)] = rebuild(result);
+  }
+  return result;
+}
+
+/**
+ * `build`, built once per file and handed out as a copy to every call whose
+ * options are one of the shapes in an `alike` group — each group one template,
+ * built from its first shape the first time any of its shapes is asked for —
+ * and built fresh for any other call. `dirOf` says where the fixture's
+ * directory is; `rebind` rebuilds each function the fixture holds, by where it
+ * sits ("a.state"), for the copy it is given.
+ */
+export function shareBuilds(build, { alike = [[{}]], dirOf = (staged) => staged.dir, rebind = {} } = {}) {
+  const templates = new Map();
+  return (options = {}) => {
+    const group = alike.findIndex((shapes) => shapes.some((shape) => isDeepStrictEqual(shape, options)));
+    if (FRESH || group === -1) return build(options);
+    if (!templates.has(group)) {
+      const staged = build(alike[group][0]);
+      templates.set(group, templateOf(staged, dirOf(staged)));
+    }
+    return copyOf(templates.get(group), rebind);
+  };
 }
