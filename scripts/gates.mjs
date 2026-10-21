@@ -672,10 +672,16 @@ export function evaluate(state, config) {
   // configured base is the one that decides, because the setting can change
   // under a spec already running; the current one is checked as well, and can
   // only ever add a wait.
+  //
+  // A state with no `configuredBase` key at all was written before the key
+  // existed, by a spec already under way when this rule landed. It is judged by
+  // the slug, the base and the current setting alone, so that it merges as it
+  // would have. A key that is present but not a branch name still fails closed.
   const isBranchName = (value) => typeof value === "string" && value.length > 0;
+  const recordsConfiguredBase = Object.hasOwn(state, "configuredBase");
   const onPlanBranch = isBranchName(state.slug)
     && state.base === planBranchOf(state.slug)
-    && isBranchName(state.configuredBase) && state.base !== state.configuredBase
+    && (!recordsConfiguredBase || (isBranchName(state.configuredBase) && state.base !== state.configuredBase))
     && !(isBranchName(config?.base) && state.base === config.base);
   if (!onPlanBranch) approvals.push("straight-to-base");
 

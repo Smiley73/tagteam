@@ -121,7 +121,7 @@ test("a clean candidate that is not confirmed as on its plan branch waits for a 
     ["no slug recorded", reviewed({ slug: undefined })],
     ["an empty slug", reviewed({ slug: "" })],
     ["a slug that is not a string", reviewed({ slug: 7, base: "plan/7" })],
-    ["no configured base recorded", reviewed({ configuredBase: undefined })],
+    ["a configured base recorded as undefined", reviewed({ configuredBase: undefined })],
     ["a configured base recorded as null", reviewed({ configuredBase: null })],
     ["an empty configured base recorded", reviewed({ configuredBase: "" })],
     ["a configured base recorded that is not a string", reviewed({ configuredBase: ["main"] })]
@@ -163,6 +163,21 @@ test("a spec that began straight to a base named like a plan branch stays there 
   // The same slug and base begun on a plan route, with `main` configured, is the
   // plan branch.
   assert.equal(evaluate({ ...state, configuredBase: "main" }, { base: "main" }).ready, true);
+});
+
+test("a state written before the configured base was recorded is judged by its slug, base and the setting", () => {
+  // A spec already under way when the configured base began to be recorded has
+  // no such key at all, and a resumed begin does not add one. It merges into its
+  // plan branch as it would have, and the current setting still stops it.
+  const { configuredBase, ...legacy } = reviewed();
+  assert.equal(configuredBase, "main", "control: the fixture records one to remove");
+  assert.equal(Object.hasOwn(legacy, "configuredBase"), false);
+  const verdict = evaluate(legacy, { ...CONFIG, base: "main" });
+  assert.deepEqual(verdict.approvals, []);
+  assert.equal(verdict.ready, true);
+  assert.equal(verdict.needsHuman, false);
+  assert.deepEqual(evaluate(legacy, { ...CONFIG, base: "plan/s" }).approvals, ["straight-to-base"]);
+  assert.deepEqual(evaluate({ ...legacy, base: "plan/other" }, CONFIG).approvals, ["straight-to-base"]);
 });
 
 test("a person's approval of this candidate clears straight-to-base, and of an earlier one does not", () => {
