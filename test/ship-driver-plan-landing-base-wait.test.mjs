@@ -15,11 +15,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, ship, onOrigin, ghCalls, trainOf, A_CHANGE, B_CHANGE, UNRELATED, commitToMain,
-  unitDirIn, reviewWholePlan, mergeBaseIn, stagePlan, shipThrough } from "./ship-stage.mjs";
+  unitDirIn, reviewWholePlan, mergeBaseIn, stagePlan, shipThrough, shareBuilds } from "./ship-stage.mjs";
 import { landingRecordOf, planPullOf, stageClean, toDialog, shipCommitOnPlan, RED_CHECK,
   GREEN_CHECK } from "./ship-plan-landing-shared.mjs";
 
 test("the version condition: no lines holds, a plan whose lines are configured is offered Merge only once the ship made its one increase, and the lines are the route's", () => {
+  // Fresh: its prepare commits a version, which the shared build does not.
   const staged = stageClean({
     prepare: ({ repo }, config) => {
       commitToMain(repo, { "package.json": "{\n  \"version\": \"1.0.0\"\n}\n" }, "the version");
@@ -116,6 +117,7 @@ function stagePusher() {
 }
 
 test("a base that moves between the check and the merge, with the version lines untouched, is checked again and merged within the bound; one that keeps moving merges nothing and the dialog comes back", () => {
+  // Fresh: the pusher's script and counter are outside the fixture's directory.
   const staged = stagePusher();
   const { dir, repo, plan, shipDir, origin, env, counter, scratch } = staged;
   assert.equal(toDialog(staged).json.planLanding.merge, true);
@@ -169,8 +171,9 @@ const startWait = ({ configPath }, ciStartWaitSec, ciWaitSec = 30) => {
 // `stageClean`'s plan, except that 01-a also commits the repository's first
 // workflow that runs on pull requests: it is on plan/demo at the tip, and on
 // neither the base nor the primary checkout — so a detector reading either of
-// those finds none. A workflow change waits for a person, who approves it.
-function stageWorkflowClean() {
+// those finds none. A workflow change waits for a person, who approves it. A
+// copy of one built once in this file, as `shareBuilds` says.
+function buildWorkflowClean() {
   const staged = stagePlan();
   const { plan, env, repo, origin } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
@@ -192,6 +195,7 @@ function stageWorkflowClean() {
   assert.ok(!fs.existsSync(path.join(repo, ".github")), "the primary checkout has a workflow");
   return { ...staged, tip };
 }
+const stageWorkflowClean = shareBuilds(buildWorkflowClean);
 
 test("checks on the plan's pull request that appear only after an empty first answer are waited for, when the workflow is on the plan's tip alone", () => {
   const staged = stageWorkflowClean();

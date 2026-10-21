@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { git, ship, write, outputOf, arriveAll, findings, major, resultOf, onOrigin, pullsOf,
   trainOf, setTrainRoute, A_CHANGE, commitToMain, stagePlan, reviewWholePlan,
-  shipThrough } from "./ship-stage.mjs";
+  shipThrough, shareBuilds } from "./ship-stage.mjs";
 import { PLAN_BODY, landingRecordOf, manifests, ENTRIES, linesAt, increasesOn, stageVersioned,
   walkToDialog, approve, sayOf } from "./ship-plan-version-shared.mjs";
 
@@ -59,6 +59,7 @@ test("a plan route recorded before it kept its kind of increase and its lines ta
   const forget = ({ shipDir }, keys) => setTrainRoute(shipDir, (train) => ({
     ...train, route: Object.fromEntries(Object.entries(train.route).filter(([key]) => !keys.includes(key)))
   }));
+  // Fresh: its plan declares the increase, which the shared build's does not.
   const staged = stageVersioned({ declare: "Version increase: minor" });
   const { dir, plan, shipDir, env } = staged;
   assert.equal(ship("end", plan, [], env).status, 0);
@@ -274,8 +275,9 @@ const OTHER_SPEC = (id, deps) => `---\nid: ${id}\ndepends_on: [${deps}]\nuser_vi
 
 // Two plans in one repository, both on the plan route with the same version
 // lines: `demo` (B) with both specs merged into its branch, and `other` (A),
-// committed beside it and not started.
-function stageTwoPlans() {
+// committed beside it and not started. A copy of one built once in this file, as
+// `shareBuilds` says; the two share the one directory.
+function buildTwoPlans() {
   const staged = stageVersioned({
     prepare: ({ repo }) => {
       fs.mkdirSync(path.join(repo, ".tagteam", "plans", "other", "specs"), { recursive: true });
@@ -289,6 +291,7 @@ function stageTwoPlans() {
   const other = { ...staged, plan: path.join(staged.repo, ".tagteam", "plans", "other"), shipDir: path.join(staged.repo, ".tagteam", "ships", "other") };
   return { b: staged, a: other };
 }
+const stageTwoPlans = shareBuilds(buildTwoPlans, { dirOf: ({ b }) => b.dir });
 
 // Plan A from its start to its question, with an increase of its own.
 function otherToDialog(a) {
@@ -393,6 +396,7 @@ test("a refusal on the version lines at the merge goes back into the landing loo
   const counter = path.join(scratch, "count");
   const script = path.join(scratch, "push.mjs");
   fs.writeFileSync(counter, "0");
+  // Fresh: the pusher's script and counter are outside the fixture's directory.
   const staged = stageVersioned({
     verify: [{ command: `node ${JSON.stringify(script)}`, when: { globs: [], keywords: [] }, timeoutSec: 60 }],
     prepare: ({ dir, origin }) => {
