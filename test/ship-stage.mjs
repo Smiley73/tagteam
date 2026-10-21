@@ -4,10 +4,10 @@
 //
 // They live outside any `*.test.mjs` for the reason `stage.mjs` gives:
 // importing a suite to borrow a helper runs that suite's tests a second time.
-// They are split out of `ship-driver.test.mjs` so the plan's route and landing
-// can be suites of their own — node runs the files of `npm test` side by side
-// but the tests of one file in turn, and the driver's file is already the
-// longest of them.
+// They are split out of the driver's suite so that its themes, the plan's route
+// and its landing can each be suites of their own, `ship-driver-*.test.mjs` —
+// node runs the files of `npm test` side by side but the tests of one file in
+// turn, so the longest file sets how long the whole run takes.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
