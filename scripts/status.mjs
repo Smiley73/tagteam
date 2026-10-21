@@ -48,10 +48,10 @@ function exists(file) {
 }
 
 // A configured limit, or null when there is none to read. **Never a default.**
-// No limit has a fallback anywhere in this plugin: a version-6 configuration is
-// refused by every command that enforces one, so a number invented here would
-// promise a round nothing will grant. Unknown is the honest answer, and the
-// command file says so rather than guessing.
+// No `limits.*` key has a fallback anywhere in this plugin: a version-6
+// configuration is refused by every command that enforces one, so a number
+// invented here would promise a round nothing will grant. Unknown is the honest
+// answer, and the command file says so rather than guessing.
 const limitOf = (limits, key) =>
   (Number.isInteger(limits?.[key]) && limits[key] >= 1 ? limits[key] : null);
 

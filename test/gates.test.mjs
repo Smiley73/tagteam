@@ -295,6 +295,39 @@ test("a repository that waits for CI must have CI evidence recorded", () => {
   assert.equal(evaluate(state, { autoMerge: true, ciWaitSec: 0 }).ready, true);
 });
 
+test("checks that never started ask a person once, as their own reason, and block nothing", () => {
+  const withCi = { autoMerge: true, ciWaitSec: 1800 };
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: "main", userVisible: false, reviewers: [] });
+  state = bindCandidate(state, A, BASE, []);
+  state = recordGate(state, "review", A, { status: "clean" });
+  state = recordGate(state, "verify", A, { status: "passed" });
+  state = recordGate(state, "report", A, { status: "complete", kind: "implement" });
+  const notStarted = recordGate(state, "ci", A, { status: "not-started", reason: "no checks within 120s", checks: [], startWaitSec: 120 });
+
+  // Inconclusive is asserted absent: the new id alone would pass a stop that
+  // gives the person both reasons for one cause.
+  const verdict = evaluate(notStarted, withCi);
+  assert.deepEqual(verdict.approvals, ["continuous-integration-not-started"]);
+  assert.ok(!verdict.approvals.includes("continuous-integration-inconclusive"));
+  assert.deepEqual(verdict.blockers, []);
+  assert.equal(verdict.ready, false);
+
+  const approved = recordGate(notStarted, "human", A, { approved: true, approvedBy: "p@example.com" });
+  assert.equal(evaluate(approved, withCi).ready, true, "a person's approval carries it");
+
+  // Nothing ran, so the tests that verify did not run were not run by CI either.
+  const untested = recordGate(notStarted, "verify", A, { status: "not-applicable" });
+  const both = evaluate(untested, withCi);
+  assert.ok(both.approvals.includes("no-executable-evidence"));
+  assert.ok(both.approvals.includes("continuous-integration-not-started"));
+  assert.ok(!both.approvals.includes("continuous-integration-inconclusive"));
+
+  // With CI switched off the gate is not read at all.
+  const off = evaluate(notStarted, { autoMerge: true, ciWaitSec: 0 });
+  assert.deepEqual(off.approvals, []);
+  assert.equal(off.ready, true);
+});
+
 test("init reports an existing state instead of resetting a spec mid-flight", async () => {
   const { spawnSync } = await import("node:child_process");
   const os = await import("node:os");

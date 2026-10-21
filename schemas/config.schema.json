@@ -79,7 +79,13 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 21600,
-      "description": "How long to wait for GitHub checks. Still pending at the deadline counts as not-run, which waits for a person. Zero skips CI entirely."
+      "description": "How long to wait for GitHub checks, counted from when a check first appears on the pull request. Still pending at the deadline counts as not-run, which waits for a person. Zero skips CI entirely."
+    },
+    "ciStartWaitSec": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3600,
+      "description": "How long to wait for a first check to appear on a pull request whose commit has a workflow that runs on pull requests, before stopping for a person. The one key that may be missing: a missing key means 120. Zero turns the start wait off."
     },
     "autoMerge": {
       "type": "boolean",

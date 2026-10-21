@@ -125,13 +125,20 @@ export function validateJson(schema, value) {
 // `planBranch`, whether a plan of two or more specs collects its specs on a
 // branch of its own, and `versionFiles`, the lines that carry the repository's
 // version — both required, and both written explicitly when unused (`false`,
-// `[]`), because no key in this project has a fallback in a script: the file is
-// the whole configuration, so a missing key is a hard error rather than a
+// `[]`), because no key in this project but one has a fallback in a script: the
+// file is the whole configuration, so a missing key is a hard error rather than a
 // silently-assumed value — which is also why `escalation` and `plan` are written
 // as an explicit `null` when unused rather than omitted. An older configuration
 // is therefore incomplete, so it is reported stale and `/tagteam:configure`
 // writes the current one; from version 9 it carries every value forward and adds
 // the two keys.
+//
+// The one exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120
+// when it is missing. It was added to version 10 as an optional key so that the
+// version-10 files already written stay current: requiring it would have meant a
+// version bump, and every existing file reported stale for one number. The rule
+// is unchanged for every other key, and `/tagteam:configure` still writes this
+// one.
 export const CONFIG_VERSION = 10;
 
 // Staleness is not an error, so it never joins the error list: it gets its own

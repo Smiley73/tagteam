@@ -174,8 +174,10 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. No key has a fallback in a
-script, so an older configuration is incomplete. Configure carries a version-9
+tell the person to run `/tagteam:configure` and stop. No key but one has a
+fallback in a script, so an older configuration is incomplete. The one is
+`ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the
+version-10 files written before it existed stay current. Configure carries a version-9
 file forward: every value it holds is offered back, and version 10's two keys,
 `planBranch` and `versionFiles`, are asked about — off and empty change nothing
 about how a plan ships. Anything older is a different shape and is replaced.
@@ -190,7 +192,8 @@ about how a plan ships. Anything older is a different shape and is replaced.
 | `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused |
 | `reviewers.default` | Lenses applied to every spec unless it drops one. Every lens is one more reader over every round of every spec |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
-| `ciWaitSec` | How long to wait for checks; 0 skips CI |
+| `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
+| `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |
 | `autoMerge` | False makes every pull request wait |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
@@ -618,7 +621,7 @@ that would land as something else, and a failure on the new base are all stops
 for a person, and no approval reaches the last of them.
 
 A pull request stops and waits when: the spec is marked user-visible;
-verification failed, or CI failed or proved nothing; a finding is still open
+verification failed, or CI failed, proved nothing or never started; a finding is still open
 after the re-check; **a selected reviewer produced no usable evidence**;
 `.github/workflows/**` changed; or the agent that wrote the code never confirmed
 it finished what it was given.
@@ -759,8 +762,8 @@ fixer. None of them is a reason to answer one way rather than the other.
 
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts. A
-key in their own configuration is one of these: `ciWaitSec`, `limits.fixRounds`,
-`effort.reviewer`, `escalation` and `plan` are settings they set and will later
+key in their own configuration is one of these: `ciWaitSec`, `ciStartWaitSec`,
+`limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
 edit in `.tagteam/config.json`. A lens name is one too. So say what the setting
 or the lens does *and* name it wherever they might go looking for it afterwards.
 

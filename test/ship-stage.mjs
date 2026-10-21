@@ -226,8 +226,18 @@ if (argv[1] === "create") {
     }
   }
   // No workflow runs for this pull request: nothing registered — unless
-  // GH_STUB_CHECKS names the rows to answer with.
-  process.stdout.write((process.env.GH_STUB_CHECKS ?? "[]") + "\\n");
+  // GH_STUB_CHECKS names the rows to answer with. GH_STUB_CHECKS_BY_CALL is a
+  // JSON array of answers, one per call in turn and the last one repeated, so a
+  // test can have checks appear only after an empty first answer.
+  if (process.env.GH_STUB_CHECKS_BY_CALL) {
+    const answers = JSON.parse(process.env.GH_STUB_CHECKS_BY_CALL);
+    const counter = statePath + ".checks-calls";
+    const call = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+    fs.writeFileSync(counter, String(call + 1));
+    process.stdout.write(JSON.stringify(answers[Math.min(call, answers.length - 1)]) + "\\n");
+  } else {
+    process.stdout.write((process.env.GH_STUB_CHECKS ?? "[]") + "\\n");
+  }
 } else die("gh stub: unsupported command " + argv.join(" "));
 `;
 
@@ -255,7 +265,7 @@ export function driveToPublishable({ plan, shipDir }, id, file, contents, env = 
   assert.equal(begin.json.dispatch?.[0]?.agent, "tagteam:implementer", `begin did not start ${id}: ${begin.stdout}`);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   const files = typeof file === "string" ? { [file]: contents } : file;
-  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(worktree, name), text);
+  for (const [name, text] of Object.entries(files)) write(path.join(worktree, name), text);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: `wrote ${Object.keys(files).join(", ")}`, unfinished: [] });
   arriveAll(begin);
   ship("snapshot", plan, ["--spec", id], env);
