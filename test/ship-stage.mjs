@@ -323,13 +323,14 @@ export const resultOf = (dispatch) => /^Command file: (.*)\.cmd\.sh$/m.exec(disp
 // depends on the first unless `specs` is 1, committed and pushed so the primary
 // checkout stays clean for every snapshot after it. The merging `gh` is on the
 // PATH every call here is made with, so every call the ship makes to it is in
-// its log.
-export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge = true, branchPrefix = null } = {}) {
+// its log. `autoMerge` is written only when given: the key does nothing, and a
+// test that stages it is proving that a leftover one reaches nothing.
+export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge, branchPrefix = null } = {}) {
   const staged = stage();
   const { repo, plan } = staged;
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  Object.assign(config, { planBranch, ciWaitSec, autoMerge }, branchPrefix ? { branchPrefix } : {});
+  Object.assign(config, { planBranch, ciWaitSec }, autoMerge === undefined ? {} : { autoMerge }, branchPrefix ? { branchPrefix } : {});
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   if (specs >= 2) {
     fs.writeFileSync(path.join(plan, "specs", "02-b.md"),
@@ -429,8 +430,8 @@ export const checkRoundIn = (shipDir, n) => path.join(shipDir, "whole-plan", Str
 // The plan route with both specs merged into plan/demo, and `verify` as the
 // repository's verify commands. Every spec cycle and fix unit runs them by
 // `when`; the whole-plan check runs them all.
-export function stageMerged({ ciRepairs = 1, verify = null, a = { "app.js": A_CHANGE }, b = { "b.js": B_CHANGE }, env: extra = {}, prepare = null } = {}) {
-  const staged = stagePlan();
+export function stageMerged({ ciRepairs = 1, verify = null, a = { "app.js": A_CHANGE }, b = { "b.js": B_CHANGE }, env: extra = {}, prepare = null, autoMerge } = {}) {
+  const staged = stagePlan({ autoMerge });
   const { plan, configPath, env, shipDir } = staged;
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.limits = { ...config.limits, ciRepairs };

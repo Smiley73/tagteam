@@ -135,7 +135,7 @@ names, internal ids. See *Asking* in the skill.
    briefs plus anything this repository calibrates in `.tagteam/lenses/`, which
    are equally selectable and, on a reconfigure, are usually the ones this
    project cares most about.
-7. `autoMerge`, and `ciWaitSec` and `ciStartWaitSec` only if the repository has
+7. `ciWaitSec` and `ciStartWaitSec`, asked only if the repository has
    workflows. Ask the start wait alongside the CI wait, as behaviour: "how long
    should a new pull request wait for its checks to start before this stops to
    ask you?" — `ciStartWaitSec`, proposed at 120 seconds, 0 to not wait. No
@@ -187,13 +187,14 @@ names, internal ids. See *Asking* in the skill.
     decides what the tool spends and how often it hands work back.
 11. `planBranch` — whether a plan of two or more specs ships as one: its specs
     collect on a branch of its own, each still its own reviewed pull request
-    into that branch, the whole plan is checked as one change after its last
-    spec, and it lands on the base through one final pull request that a person
-    confirms every time, whatever `autoMerge` says. Off, every spec merges into
-    the base as soon as it is ready, as now. Say that a plan of one spec goes
-    straight to the base either way, that a plan already started keeps the route
-    it started with, and that the repository has to allow merge commits and run
-    its checks on pull requests into the plan's branch. Offer off first.
+    into that branch, merged there without asking a person once it is clean;
+    the whole plan is checked as one change after its last spec, and it lands
+    on the base through one final pull request that a person confirms every
+    time. Off, every spec goes straight to the base and waits there for a
+    person's approval. Say that a plan of one spec goes straight to the base
+    either way, that a plan already started keeps the route it started with,
+    and that the repository has to allow merge commits and run its checks on
+    pull requests into the plan's branch. Offer off first.
 
     When it is on, the version files ride in the next call, as a follow-up only
     that answer needs: show what *Infer first* found for `versionFiles` and ask
@@ -251,11 +252,13 @@ anything, so those files stay in history until someone runs `git rm --cached` on
 them, and this command will not do that on its own.
 
 Then show the file and say what it means: which commands prove a candidate, which
-lenses read every spec, which jobs think how hard, whether merges happen
-without asking, and whether a plan ships as one — and if it does, which lines
-carry its one version increase. The validator prints a `note:` line giving the worst-case cost
-the limits commit this repository to; show that line as it came out rather than
-restating the arithmetic. It prints a second `note:` when this repository
+lenses read every spec, which jobs think how hard, whether a plan ships as one —
+and if it does, which lines carry its one version increase — and what merges
+without asking. With `planBranch` on, a clean spec merges into the plan's branch
+without asking anyone; with it off, every spec waits for a person. Either way,
+nothing reaches the base without a person. The validator prints a `note:` line
+giving the worst-case cost the limits commit this repository to; show that line
+as it came out rather than restating the arithmetic. It prints a second `note:` when this repository
 calibrates lenses of its own, and `warning:` lines for each one that replaces a
 brief the plugin ships, for a brief in `.tagteam/lenses/` that the roster does
 not name, for one named after `codex` or `adversary`, which have prompts of their
@@ -267,7 +270,8 @@ those the same way, as the validator wrote them.
 `limits` and `effort` included — a repository that raised or lowered one is
 offered its own number back. Defaulting to what is already there is the whole
 protection: a reconfigure that was about lenses must not reset a limit someone
-chose deliberately.
+chose deliberately. The one value not offered back is `autoMerge`, which nothing
+reads any more; see *The key that no longer does anything* below.
 
 `escalation` and `plan` carry forward on the same terms: a key that is `null`
 today is re-offered as off, and a configured one is offered its own models and
@@ -311,7 +315,9 @@ Say two things afterwards, because neither is visible from the file:
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; there is no fallback for any key but `ciStartWaitSec`, so an
-omitted key is an invalid file rather than an unused feature.
+omitted key is an invalid file rather than an unused feature. `autoMerge` is
+the one key the file may omit without either, because nothing reads it — and
+this command always omits it.
 
 Always write `ciStartWaitSec`: the answer when question 7 asked it, 120 when it
 did not. It is the one key that may be missing — the ship reads a missing one as
@@ -332,8 +338,29 @@ more specs collects its specs' pull requests on a branch of its own before
 anything reaches the base, offered off; and `versionFiles`, the lines that carry
 this repository's version, asked about only when that is on. Off and empty,
 nothing about how a plan ships changes. Answering every question as before, and
-leaving the setting off, writes the old file with those two keys added and
-nothing else different.
+leaving the setting off, writes the old file with those two keys and
+`ciStartWaitSec` added, `autoMerge` left out, and nothing else different.
 
 A configuration older than version 9 is not upgraded — each of those versions is
 a different shape, not an extension. Say that the old file is being replaced.
+
+### The key that no longer does anything
+
+Never write `autoMerge`. It used to decide whether a pull request waited for a
+person, and it no longer does anything in either value: a spec that merges
+straight into the base always waits for a person, and `planBranch` is the
+setting that lets specs merge without waiting, into the plan's branch. The
+schema still accepts it, so a file that has it stays valid and current, and the
+validator prints a `note:` saying so.
+
+That note never appears during this command: the validator runs on the file
+just written, which leaves the key out. So read the configuration being
+reconfigured or carried forward from version 9 before the interview, and when it
+has `autoMerge`, say all of it yourself — what the key used to do, that it no
+longer does anything whatever its value, that `planBranch` is how specs merge
+without waiting, and that the file this writes leaves it out. Do not ask about
+it, and do not offer its value back. To an owner who had it `false`: nothing
+reaches the base without a person either way, though with `planBranch` on, specs
+now merge into the plan's branch without asking. To one who had it `true` with
+`planBranch` off: every spec will now wait for a person, and turning
+`planBranch` on is what lets specs merge without waiting again.

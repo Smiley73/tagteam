@@ -44,7 +44,6 @@
   ],
   "ciWaitSec": 1800,
   "ciStartWaitSec": 120,
-  "autoMerge": true,
   "worktree": {
     "setup": ["npm ci"],
     "copyUntracked": [],

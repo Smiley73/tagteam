@@ -150,6 +150,31 @@ test("on a plan route a spec whose state was frozen user-visible merges at finis
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a leftover autoMerge: false is told at start that it does nothing, and a clean spec still merges into the plan branch unasked", () => {
+  // The value an owner who wanted every pull request to wait would have left
+  // behind. It is information at start, never a stop, and it reaches nothing.
+  const staged = stagePlan({ autoMerge: false });
+  const { dir, plan, shipDir, origin, env, configPath } = staged;
+  assert.equal(JSON.parse(fs.readFileSync(configPath, "utf8")).autoMerge, false, "the test proves nothing without the key");
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(started.json.ask, undefined, JSON.stringify(started.json.ask ?? ""));
+  const said = started.json.say.filter((line) => /\bautoMerge\b/.test(line));
+  assert.equal(said.length, 1, `start did not pass the autoMerge note on: ${JSON.stringify(started.json.say)}`);
+  assert.match(said[0], /^note: autoMerge no longer does anything/);
+  assert.match(said[0], /\bplanBranch\b/);
+  assert.equal(trainOf(shipDir).route.kind, "plan");
+
+  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
+  assert.equal(a.finished.status, 0, a.finished.stderr);
+  assert.equal(a.finished.json.ask, undefined, JSON.stringify(a.finished.json.ask ?? ""));
+  assert.equal(a.state().base, "plan/demo");
+  assert.equal(a.state().state, "merged");
+  assert.equal(a.state().gates.human, null, "it merged on a person's approval, not on its own");
+  assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a spec begun before its plan route was recorded takes it from the train's route at finish, and merges", () => {
   // What a spec already under way when the verdict began to read the plan route
   // carries: a state frozen user-visible, and no plan route at all. `finish`
