@@ -39,7 +39,8 @@ const PLAN_BASE = "plan/s";
 
 function reviewed(overrides = {}) {
   let state = initState({
-    spec: "01-x", slug: "s", branch: "tagteam/s/01-x", base: PLAN_BASE, userVisible: false, reviewers: ["correctness"]
+    spec: "01-x", slug: "s", branch: "tagteam/s/01-x", base: PLAN_BASE, configuredBase: "main", userVisible: false,
+    reviewers: ["correctness"]
   });
   state = { ...state, ...overrides };
   state = bindCandidate(state, A, BASE, overrides.changedPaths ?? []);
@@ -119,7 +120,11 @@ test("a clean candidate that is not confirmed as on its plan branch waits for a 
     ["another plan's branch", reviewed({ base: "plan/other" })],
     ["no slug recorded", reviewed({ slug: undefined })],
     ["an empty slug", reviewed({ slug: "" })],
-    ["a slug that is not a string", reviewed({ slug: 7, base: "plan/7" })]
+    ["a slug that is not a string", reviewed({ slug: 7, base: "plan/7" })],
+    ["no configured base recorded", reviewed({ configuredBase: undefined })],
+    ["a configured base recorded as null", reviewed({ configuredBase: null })],
+    ["an empty configured base recorded", reviewed({ configuredBase: "" })],
+    ["a configured base recorded that is not a string", reviewed({ configuredBase: ["main"] })]
   ];
   for (const [what, state] of cases) {
     const verdict = evaluate(state, CONFIG);
@@ -141,6 +146,23 @@ test("a configured base named like a plan branch is still the base", () => {
   // A configuration with no base has nothing to compare, and does not stop it.
   assert.equal(evaluate(state, {}).ready, true);
   assert.equal(evaluate(state, undefined).ready, true);
+});
+
+test("a spec that began straight to a base named like a plan branch stays there when the setting changes", () => {
+  // Begun on the base route with `plan/release` as the configured base, so the
+  // recorded base is `plan/release` — exactly what a plan-branch spec of the
+  // slug `release` records. Moving the setting to `main` afterwards changes
+  // nothing about where this pull request merges, and no later plan pull
+  // request will put it in front of a person.
+  const state = reviewed({ slug: "release", base: "plan/release", configuredBase: "plan/release" });
+  for (const config of [{ base: "plan/release" }, { base: "main" }, {}, undefined]) {
+    const verdict = evaluate(state, config);
+    assert.deepEqual(verdict.approvals, ["straight-to-base"], JSON.stringify(config));
+    assert.equal(verdict.ready, false, JSON.stringify(config));
+  }
+  // The same slug and base begun on a plan route, with `main` configured, is the
+  // plan branch.
+  assert.equal(evaluate({ ...state, configuredBase: "main" }, { base: "main" }).ready, true);
 });
 
 test("a person's approval of this candidate clears straight-to-base, and of an earlier one does not", () => {
@@ -242,7 +264,7 @@ test("a change to CI is a change to what every other gate is worth", () => {
 });
 
 test("nothing executable having run is not the same as having passed", () => {
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, configuredBase: "main", userVisible: false, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "not-applicable" });
@@ -416,7 +438,7 @@ test("both review outcomes converge on verifying before publishing", () => {
 
 test("a repository that waits for CI must have CI evidence recorded", () => {
   const withCi = { ...CONFIG, ciWaitSec: 1800 };
-  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, userVisible: false, reviewers: [] });
+  let state = initState({ spec: "01-x", slug: "s", branch: "b", base: PLAN_BASE, configuredBase: "main", userVisible: false, reviewers: [] });
   state = bindCandidate(state, A, BASE, []);
   state = recordGate(state, "review", A, { status: "clean" });
   state = recordGate(state, "verify", A, { status: "passed" });
@@ -451,6 +473,29 @@ test("init reports an existing state instead of resetting a spec mid-flight", as
   assert.match(again.stdout, /"existing":true/);
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).state, "awaiting-approval");
   assert.equal(JSON.parse(fsm.readFileSync(file, "utf8")).pr.number, 9);
+});
+
+test("init freezes the configured base it is given, and records none when it is given none", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const fsm = await import("node:fs");
+  const dir = fsm.mkdtempSync(path.join(os.tmpdir(), "tagteam-init-"));
+  const script = path.join(path.resolve(import.meta.dirname, ".."), "scripts", "gates.mjs");
+  const init = (file, ...extra) => spawnSync("node", [
+    script, "init", file, "01-x", "s", "b", "plan/s", "false", "correctness", "--repo", root, ...extra
+  ], { encoding: "utf8" });
+
+  const given = path.join(dir, "given.json");
+  assert.equal(init(given, "--configured-base", "main").status, 0);
+  assert.equal(JSON.parse(fsm.readFileSync(given, "utf8")).configuredBase, "main");
+
+  // Without it the state can never be taken for one merging into its plan
+  // branch, whatever the setting says later.
+  const none = path.join(dir, "none.json");
+  assert.equal(init(none).status, 0);
+  const state = JSON.parse(fsm.readFileSync(none, "utf8"));
+  assert.equal(state.configuredBase, null);
+  assert.deepEqual(evaluate(state, CONFIG).approvals.includes("straight-to-base"), true);
 });
 
 test("init resolves each lens's brief and freezes it into the state file", async () => {

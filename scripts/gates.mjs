@@ -149,12 +149,17 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-export function initState({ spec, slug, branch, base, userVisible, reviewers, briefs = {} }) {
+export function initState({ spec, slug, branch, base, configuredBase = null, userVisible, reviewers, briefs = {} }) {
   return {
     spec,
     slug,
     branch,
     base,
+    // The repository's base branch as configured when this spec began, frozen
+    // beside `base` for the verdict. A spec shipped straight to a base that is
+    // itself named `plan/<slug>` records exactly the base a plan-branch spec
+    // would; this is what still tells the two apart after the setting changes.
+    configuredBase,
     planUserVisible: Boolean(userVisible),
     reviewers,
     // The brief that calibrates each lens, absolute, resolved once here and
@@ -660,13 +665,18 @@ export function evaluate(state, config) {
   // branch is the one target where the plan's own pull request is that person's
   // look. So anything not confirmed as merging into this plan's own plan branch
   // waits. The proof is the base recorded when the spec began against the slug
-  // it began under — never the route or the setting, which this function does
-  // not read. It fails closed: a missing or empty base or slug, another plan's
-  // branch, and a configured base that is itself named like a plan branch all
-  // count as straight to the base.
-  const onPlanBranch = typeof state.slug === "string" && state.slug.length > 0
+  // it began under, and against the configured base recorded beside it — never
+  // the route. It fails closed: a missing or empty base, slug or recorded
+  // configured base, another plan's branch, and a configured base that is itself
+  // named like a plan branch all count as straight to the base. The recorded
+  // configured base is the one that decides, because the setting can change
+  // under a spec already running; the current one is checked as well, and can
+  // only ever add a wait.
+  const isBranchName = (value) => typeof value === "string" && value.length > 0;
+  const onPlanBranch = isBranchName(state.slug)
     && state.base === planBranchOf(state.slug)
-    && !(typeof config?.base === "string" && config.base.length > 0 && state.base === config.base);
+    && isBranchName(state.configuredBase) && state.base !== state.configuredBase
+    && !(isBranchName(config?.base) && state.base === config.base);
   if (!onPlanBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.
@@ -716,7 +726,7 @@ function writeJson(file, value) {
 }
 
 const USAGE = `usage:
-  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--force]
+  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--configured-base <branch>] [--force]
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs grant    <state.json> <rounds-root> <config.json>
@@ -952,11 +962,17 @@ async function main() {
     }
     const reviewers = (values[6] ?? "").split(",").filter(Boolean);
     const briefs = resolveBriefs(reviewers);
+    // Optional, and nothing is filled in when it is absent: a state without it
+    // is never taken for one merging into its plan branch, so every spec it
+    // carries waits for a person rather than for a guess at the setting.
+    const configuredBaseIndex = values.indexOf("--configured-base");
+    const configuredBase = configuredBaseIndex >= 0 ? values[configuredBaseIndex + 1] || null : null;
     next = initState({
       spec: values[1],
       slug: values[2],
       branch: values[3],
       base: values[4],
+      configuredBase,
       userVisible: values[5] === "true",
       reviewers,
       briefs

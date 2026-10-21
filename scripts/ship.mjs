@@ -2060,7 +2060,8 @@ async function begin(options) {
   ctx.baseOid = baseOid;
 
   const init = lastJson(node("gates.mjs", [
-    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo
+    "init", statePath(ctx, id), id, ctx.slug, branch, lands, String(spec.userVisible), spec.reviewers.join(","), "--repo", ctx.repo,
+    "--configured-base", ctx.config.base
   ]).stdout);
   let state = readState(ctx, id);
 
