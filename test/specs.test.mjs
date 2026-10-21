@@ -17,11 +17,15 @@ function planWith(specs) {
   return dir;
 }
 
-const spec = (id, { depends = [], visible = false, reviewers = [] } = {}) =>
-  `---\nid: ${id}\ndepends_on: [${depends.join(", ")}]\nuser_visible: ${visible}\nreviewers: [${reviewers.join(", ")}]\n---\n\n## Outcome\nSomething.\n`;
+// `retired` writes the retired `user_visible` key, which only a spec written
+// before it was retired still carries. Left out, the key is not written at all.
+const spec = (id, { depends = [], reviewers = [], retired } = {}) =>
+  `---\nid: ${id}\ndepends_on: [${depends.join(", ")}]\n${retired === undefined ? "" : `user_visible: ${retired}\n`}`
+  + `reviewers: [${reviewers.join(", ")}]\n---\n\n## Outcome\nSomething.\n`;
 
 test("front matter parses scalars, booleans, and inline lists", () => {
-  const { front, body } = parseFrontMatter(spec("01-a", { depends: ["00-z"], visible: true, reviewers: ["security"] }), "01-a.md");
+  // An older spec's front matter, the one place a boolean still turns up.
+  const { front, body } = parseFrontMatter(spec("01-a", { depends: ["00-z"], retired: true, reviewers: ["security"] }), "01-a.md");
   assert.equal(front.id, "01-a");
   assert.deepEqual(front.depends_on, ["00-z"]);
   assert.equal(front.user_visible, true);
@@ -71,11 +75,34 @@ test("front matter id must match the file name", () => {
   assert.throws(() => readSpecs(dir, CONFIG, SCHEMA), /but the file is named/);
 });
 
-test("resolved lenses and user-visibility ride along with the order", () => {
-  const dir = planWith({ "01-a.md": spec("01-a", { visible: true, reviewers: ["experience"] }) });
+test("resolved lenses ride along with the order", () => {
+  const dir = planWith({ "01-a.md": spec("01-a", { reviewers: ["experience"] }) });
   const [entry] = readSpecs(dir, CONFIG, SCHEMA);
-  assert.equal(entry.userVisible, true);
   assert.deepEqual(entry.reviewers, ["code-quality", "correctness", "experience"]);
+});
+
+test("a spec without the retired user_visible key validates, and nothing about visibility comes back", () => {
+  const [entry] = readSpecs(planWith({ "01-a.md": spec("01-a") }), CONFIG, SCHEMA);
+  assert.deepEqual(Object.keys(entry).sort(), ["dependsOn", "id", "path", "reviewers", "signOffs"]);
+});
+
+test("an older spec that still carries user_visible reads exactly as one without it", () => {
+  // Stands for specs written before the key was retired. Comparing the whole
+  // returned spec, not just "it validates", is what shows the old value rides
+  // along nowhere.
+  const read = (body) => {
+    const [entry] = readSpecs(planWith({ "01-a.md": body }), CONFIG, SCHEMA);
+    return { ...entry, path: path.basename(entry.path) };
+  };
+  const without = read(spec("01-a", { reviewers: ["experience"] }));
+  for (const retired of [true, false]) {
+    assert.deepEqual(read(spec("01-a", { reviewers: ["experience"], retired })), without, `user_visible: ${retired}`);
+  }
+});
+
+test("the spec schema stays closed: a front-matter key it does not declare is refused", () => {
+  const body = spec("01-a").replace("reviewers: []", "reviewers: []\nwaits_for_owner: true");
+  assert.throws(() => readSpecs(planWith({ "01-a.md": body }), CONFIG, SCHEMA), /waits_for_owner: is not allowed/);
 });
 
 test("each spec's sign-offs ride along, and None or no section at all is none", () => {

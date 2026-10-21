@@ -90,12 +90,15 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 //   reads a missing one as 120.
 // - `autoMerge` in the configuration, which nothing reads any more and which
 //   stays declared so the version-10 files that carry it stay valid and current.
+// - `user_visible` in a spec's front matter, retired and ignored, and declared
+//   only so that specs written while it was required still validate.
 //
 // `test/config-shape.test.mjs` holds the configuration to having exactly these
 // optional root keys.
 const DELIBERATELY_OPTIONAL = [
   { schema: "config.schema.json", property: "ciStartWaitSec" },
-  { schema: "config.schema.json", property: "autoMerge" }
+  { schema: "config.schema.json", property: "autoMerge" },
+  { schema: "spec.schema.json", property: "user_visible" }
 ];
 
 // What a schema's walk reports once its deliberate exceptions are taken out.
@@ -135,4 +138,23 @@ test("the strict-mode exceptions cover their own properties and nothing else", (
     const elsewhere = { type: "object", additionalProperties: false, required: [], properties: { [property]: { type: "boolean" } } };
     assert.deepEqual(unexcused("findings.schema.json", elsewhere), [`/ omits ${property} from required`]);
   }
+});
+
+test("the spec schema's exception covers user_visible and no other property", () => {
+  // The schema with its one exception passes. Every other property it declares,
+  // taken off `required`, still fails; so does a second optional property added
+  // beside it, and `user_visible` optional in any other schema.
+  const spec = JSON.parse(fs.readFileSync(path.join(root, "schemas", "spec.schema.json"), "utf8"));
+  assert.deepEqual(unexcused("spec.schema.json", spec), []);
+  assert.equal(spec.additionalProperties, false, "the spec schema stopped refusing undeclared keys");
+  const others = Object.keys(spec.properties).filter((key) => key !== "user_visible");
+  assert.deepEqual(others.sort(), [...spec.required].sort(), "every other spec property is required");
+  for (const key of others) {
+    const loosened = { ...spec, required: spec.required.filter((entry) => entry !== key) };
+    assert.deepEqual(unexcused("spec.schema.json", loosened), [`/ omits ${key} from required`], `${key} went optional unnoticed`);
+  }
+  const second = { ...spec, properties: { ...spec.properties, waits_for_owner: { type: "boolean" } } };
+  assert.deepEqual(unexcused("spec.schema.json", second), ["/ omits waits_for_owner from required"]);
+  const elsewhere = { type: "object", additionalProperties: false, required: [], properties: { user_visible: { type: "boolean" } } };
+  assert.deepEqual(unexcused("config.schema.json", elsewhere), ["/ omits user_visible from required"]);
 });

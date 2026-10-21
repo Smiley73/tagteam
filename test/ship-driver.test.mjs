@@ -2505,7 +2505,7 @@ function addPlan(repo, slug, id, outcome) {
   const plan = path.join(repo, ".tagteam", "plans", slug);
   fs.mkdirSync(path.join(plan, "specs"), { recursive: true });
   fs.writeFileSync(path.join(plan, "specs", `${id}.md`),
-    `---\nid: ${id}\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
+    `---\nid: ${id}\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\n${outcome}\n`);
   fs.writeFileSync(path.join(plan, "approved.json"),
     JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug, specs: [id] }));
   return { slug, plan, shipDir: path.join(repo, ".tagteam", "ships", slug) };

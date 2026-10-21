@@ -350,7 +350,7 @@ node "$P/scripts/deliverables.mjs" "$D/plan.md"
 ```
 
 That returns one object per deliverable — id, what it delivers, dependencies,
-user-visibility, and the row verbatim. It is how you dispatch without reading
+and the row verbatim. It is how you dispatch without reading
 `plan.md`. It refuses while any set is still out. It refuses a plan over the
 12 KB ceiling, naming the size: re-dispatch the drafter to cut it to the target,
 as `--kind draft --purpose cut` prints it, labelled `Cut the plan`, as a `draft`
@@ -382,11 +382,10 @@ its own; its arrival runs the validation again.
 
 Show: the deliverables in dependency order, the lenses `specs.mjs` resolved for
 each one, the note that Codex and the adversary run on every spec regardless,
-which specs will stop for them because they are user-visible, and **the review
-findings the drafter rejected, with its reasons** — `plan.mjs check` printed
-them, and this is where the person sees what was declined on their behalf. Say
-that the lens selection lives in each spec's front matter and is editable there,
-the way `goal.md` was.
+and **the review findings the drafter rejected, with its reasons** —
+`plan.mjs check` printed them, and this is where the person sees what was
+declined on their behalf. Say that the lens selection lives in each spec's front
+matter and is editable there, the way `goal.md` was.
 
 A lens this repository calibrates itself has its brief at
 `$R/.tagteam/lenses/<lens>.md`, and that file is the only place its description

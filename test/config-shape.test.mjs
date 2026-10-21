@@ -361,28 +361,58 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
   assert.ok(missing.some((error) => error.includes("effort.recheck")), `expected effort.recheck to be required, got: ${missing.join("; ")}`);
 });
 
-test("the deliverables table comes out as data, without reading the plan", async () => {
-  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+// A plan whose Deliverables table has the given header and rows, each row a list
+// of cells.
+function planWithTable(header, rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-"));
   const plan = path.join(dir, "plan.md");
+  const line = (cells) => `| ${cells.join(" | ")} |`;
   fs.writeFileSync(plan, [
     "# Account recovery", "",
     "Prose the orchestrator never reads.", "",
     "## Deliverables", "",
-    "| # | spec | delivers | depends on | user-visible |",
-    "|---|------|----------|------------|--------------|",
-    "| 1 | 01-token-schema | the token table | — | no |",
-    "| 2 | 02-recovery-api | the endpoint | 01-token-schema | no |",
-    "| 3 | 03-recovery-ui | the entry point | 02-recovery-api | yes |", "",
+    line(header), line(header.map(() => "---")),
+    ...rows.map(line), "",
     "## Order", "", "Because the API needs the schema.", ""
   ].join("\n"));
+  return plan;
+}
 
-  const deliverables = readDeliverables(plan);
-  assert.equal(deliverables.length, 3);
-  assert.deepEqual(deliverables.map((entry) => entry.id), ["01-token-schema", "02-recovery-api", "03-recovery-ui"]);
-  assert.deepEqual(deliverables[1].dependsOn, ["01-token-schema"]);
-  assert.equal(deliverables[0].userVisible, false);
-  assert.equal(deliverables[2].userVisible, true);
+const RECOVERY = [
+  ["1", "01-token-schema", "the token table", "—"],
+  ["2", "02-recovery-api", "the endpoint", "01-token-schema"],
+  ["3", "03-recovery-ui", "the entry point", "02-recovery-api"]
+];
+
+test("the deliverables table comes out as data, without reading the plan", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const deliverables = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on"], RECOVERY));
+  assert.deepEqual(deliverables, [
+    { id: "01-token-schema", delivers: "the token table", dependsOn: [], row: "#: 1 · spec: 01-token-schema · delivers: the token table · depends on: —" },
+    { id: "02-recovery-api", delivers: "the endpoint", dependsOn: ["01-token-schema"], row: "#: 2 · spec: 02-recovery-api · delivers: the endpoint · depends on: 01-token-schema" },
+    { id: "03-recovery-ui", delivers: "the entry point", dependsOn: ["02-recovery-api"], row: "#: 3 · spec: 03-recovery-ui · delivers: the entry point · depends on: 02-recovery-api" }
+  ]);
+});
+
+test("an older plan's user-visible column is read without complaint and carried nowhere", async () => {
+  // Stands for a plan drafted while the user-visible mark existed: the column is
+  // there, with a yes and a no. What comes out is exactly what the same table
+  // without the column gives — no field for it, and no trace in the row.
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const without = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on"], RECOVERY));
+  for (const header of ["user-visible", "User visible", "visible"]) {
+    const marked = RECOVERY.map((cells, index) => [...cells, index === 2 ? "yes" : "no"]);
+    const old = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on", header], marked));
+    assert.deepEqual(old, without, header);
+  }
+});
+
+test("a column whose header merely contains ui is an ordinary column and stays in the row", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const rows = RECOVERY.map((cells) => [...cells, "yes"]);
+  const deliverables = readDeliverables(planWithTable(["#", "spec", "delivers", "depends on", "build guidance"], rows));
+  assert.equal(deliverables[0].row, "#: 1 · spec: 01-token-schema · delivers: the token table · depends on: — · build guidance: yes");
+  assert.deepEqual(Object.keys(deliverables[0]).sort(), ["delivers", "dependsOn", "id", "row"]);
 });
 
 test("a deliverables table that cannot be dispatched from is refused", async () => {

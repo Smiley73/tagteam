@@ -149,13 +149,12 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-export function initState({ spec, slug, branch, base, userVisible, reviewers, briefs = {} }) {
+export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) {
   return {
     spec,
     slug,
     branch,
     base,
-    planUserVisible: Boolean(userVisible),
     reviewers,
     // The brief that calibrates each lens, absolute, resolved once here and
     // frozen for the whole spec — the same treatment `reviewers` gets, and for
@@ -748,7 +747,7 @@ function writeJson(file, value) {
 }
 
 const USAGE = `usage:
-  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <user-visible:true|false> <lens,lens,...> --repo <repo> [--force]
+  gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <lens,lens,...> --repo <repo> [--force]
   gates.mjs plan-route <state.json> [<plan-branch>]
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
@@ -987,14 +986,13 @@ async function main() {
       })}\n`);
       return;
     }
-    const reviewers = (values[6] ?? "").split(",").filter(Boolean);
+    const reviewers = (values[5] ?? "").split(",").filter(Boolean);
     const briefs = resolveBriefs(reviewers);
     next = initState({
       spec: values[1],
       slug: values[2],
       branch: values[3],
       base: values[4],
-      userVisible: values[5] === "true",
       reviewers,
       briefs
     });

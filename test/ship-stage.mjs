@@ -47,7 +47,7 @@ export function stage() {
   fs.writeFileSync(path.join(repo, ".gitignore"), ".tagteam/ships/\n.tagteam/worktrees/\n.tagteam/locks/\n");
   const plan = path.join(repo, ".tagteam", "plans", "demo");
   fs.writeFileSync(path.join(plan, "specs", "01-a.md"),
-    "---\nid: 01-a\ndepends_on: []\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nadd works.\n");
+    "---\nid: 01-a\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\nadd works.\n");
   fs.writeFileSync(path.join(plan, "approved.json"), JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug: "demo", specs: ["01-a"] }));
   git(repo, "add", "-A");
   git(repo, "commit", "-m", "init");
@@ -334,7 +334,7 @@ export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMer
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   if (specs >= 2) {
     fs.writeFileSync(path.join(plan, "specs", "02-b.md"),
-      "---\nid: 02-b\ndepends_on: [01-a]\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\nb works.\n");
+      "---\nid: 02-b\ndepends_on: [01-a]\nreviewers: []\n---\n\n## Outcome\nb works.\n");
     fs.writeFileSync(path.join(plan, "approved.json"), JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", slug: "demo", specs: ["01-a", "02-b"] }));
   }
   git(repo, "add", "-A");

@@ -695,7 +695,7 @@ test("unchanged elsewhere: with the setting off, and on a one-spec plan, a spec 
 
 // --- two plans ------------------------------------------------------------------------
 
-const OTHER_SPEC = (id, deps) => `---\nid: ${id}\ndepends_on: [${deps}]\nuser_visible: false\nreviewers: []\n---\n\n## Outcome\n${id} of another plan.\n`;
+const OTHER_SPEC = (id, deps) => `---\nid: ${id}\ndepends_on: [${deps}]\nreviewers: []\n---\n\n## Outcome\n${id} of another plan.\n`;
 
 // Two plans in one repository, both on the plan route with the same version
 // lines: `demo` (B) with both specs merged into its branch, and `other` (A),

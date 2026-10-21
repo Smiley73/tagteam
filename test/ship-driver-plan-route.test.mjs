@@ -130,24 +130,63 @@ test("a clean spec that merges straight into the base stops at finish for that r
 });
 
 test("on a plan route a spec whose state was frozen user-visible merges at finish without stopping", () => {
+  // Stands for a state frozen mid-train before the mark was retired: nothing
+  // writes `planUserVisible` any more, so it is put there by hand, where an
+  // older plugin left it.
   const staged = stagePlan();
-  const { dir, repo, plan, shipDir, origin, env } = staged;
-  const file = path.join(plan, "specs", "01-a.md");
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("user_visible: false", "user_visible: true"));
-  git(repo, "add", "-A");
-  git(repo, "commit", "-m", "01-a is user-visible");
-  git(repo, "push", "origin", "main");
+  const { dir, plan, shipDir, origin, env } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
-  const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
-  assert.equal(a.finished.status, 0, a.finished.stderr);
-  assert.equal(a.state().planUserVisible, true, "the mark was not frozen into the state, so this proves nothing");
+  const a = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const file = path.join(shipDir, "01-a", "state.json");
+  fs.writeFileSync(file, `${JSON.stringify({ ...a.state(), planUserVisible: true }, null, 2)}\n`);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  const finished = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(a.state().planUserVisible, true, "the old mark is gone from the state, so this proves nothing");
   assert.equal(a.state().base, "plan/demo");
   assert.equal(a.state().planRouteBranch, "plan/demo");
-  assert.equal(a.finished.json.ask, undefined, JSON.stringify(a.finished.json.ask ?? ""));
+  assert.equal(finished.json.ask, undefined, JSON.stringify(finished.json.ask ?? ""));
   assert.equal(a.state().state, "merged");
   assert.equal(a.state().gates.human, null, "it merged on a person's approval, not on its own");
   assert.equal(trainOf(shipDir).route.tipOid, onOrigin(origin, "plan/demo"));
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an older plan whose spec still carries user_visible: true starts and begins exactly as one without it", () => {
+  // Stands for a plan approved while the mark existed. Everything `start` says
+  // and `begin` dispatches and writes is compared whole, once what differs
+  // between any two staged repositories — their directory, commits, set ids and
+  // clock — is taken out, so the old value cannot ride along anywhere.
+  const run = (retired) => {
+    const staged = stagePlan();
+    const { dir, repo, plan, shipDir, env } = staged;
+    if (retired) {
+      const file = path.join(plan, "specs", "01-a.md");
+      fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("depends_on: []\n", "depends_on: []\nuser_visible: true\n"));
+      git(repo, "add", "-A");
+      git(repo, "commit", "-m", "01-a as an older plan wrote it");
+      git(repo, "push", "origin", "main");
+    }
+    const started = ship("start", plan, [], env);
+    assert.equal(started.status, 0, started.stderr);
+    const begun = ship("begin", plan, ["--spec", "01-a"], env);
+    assert.equal(begun.status, 0, begun.stderr);
+    const state = fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8");
+    const same = (text) => text.split(fs.realpathSync(dir)).join("<dir>").split(dir).join("<dir>")
+      .replace(/\b[0-9a-f]{40}\b|\b[0-9a-f]{12}\b/g, "<oid>")
+      .replace(/\d{8}T\d{6}Z-[0-9a-f]+/g, "<set>")
+      .replace(/\d{4}-\d\d-\d\dT[0-9:.]+Z/g, "<at>");
+    const seen = { specs: started.json.specs, start: same(JSON.stringify(started.json)), begin: same(JSON.stringify(begun.json)), state: same(state) };
+    fs.rmSync(dir, { recursive: true, force: true });
+    return seen;
+  };
+  const fresh = run(false);
+  const old = run(true);
+  for (const spec of old.specs) assert.equal(Object.hasOwn(spec, "userVisible"), false, spec.id);
+  assert.doesNotMatch(old.state, /planUserVisible/);
+  assert.equal(old.start, fresh.start);
+  assert.equal(old.begin, fresh.begin);
+  assert.equal(old.state, fresh.state);
 });
 
 test("a leftover autoMerge: false is told at start that it does nothing, and a clean spec still merges into the plan branch unasked", () => {
@@ -1371,13 +1410,18 @@ test("a gating finding becomes a fix unit into plan/<slug> whose document lists 
   assert.deepEqual(checkRecordOf(shipDir, 1).units, ["plan-fix-1"]);
   const document = fs.readFileSync(path.join(unitDirIn(shipDir, "plan-fix-1"), "spec.md"), "utf8");
   assert.match(document, /^id: plan-fix-1$/m);
-  assert.match(document, /^user_visible: false$/m);
+  assert.doesNotMatch(document, /user_visible/);
   assert.match(document, /^depends_on: \[\]$/m);
   assert.match(document, /b\.js:1: wrong — twice shadows the add that 01-a exported/, "the document does not list the finding");
   assert.match(document, /## Out of scope\n\nNothing else changes/);
   assert.ok(!fs.existsSync(path.join(plan, "specs", "plan-fix-1.md")), "the fix unit was written into the plan's specs");
 
+  // Shipped as an older plugin generated it, with the retired `user_visible`
+  // line in its front matter: the unit is read past it and ships the same.
+  const documentPath = path.join(unitDirIn(shipDir, "plan-fix-1"), "spec.md");
+  fs.writeFileSync(documentPath, document.replace("depends_on: []\n", "depends_on: []\nuser_visible: false\n"));
   const finished = shipUnit(staged, "plan-fix-1", { "b.js": "export const twice = (n) => n + n;\n" });
+  assert.match(fs.readFileSync(documentPath, "utf8"), /^user_visible: false$/m, "the older document was rewritten, so this proves nothing");
   assert.equal(finished.json.ask, undefined, JSON.stringify(finished.json.ask ?? ""));
   assert.match(finished.json.next, /plan-check --plan .* --why fix-unit$/);
   const unit = unitStateOf(shipDir, "plan-fix-1");
