@@ -638,6 +638,11 @@ it. That push is the driver's step and nothing wider: it goes to this plan's
 branch only, and nothing in this file runs git. If one is refused, say so, and
 say what was refused; do not try another way to make the push.
 
+When the person's git signs commits, the driver signs those two commits with
+their own signing setup. If signing fails, the step stops, naming the commit
+and quoting git's error: relay it, and stop. Never work around it: no unsigned
+retry, and no change to the person's git configuration.
+
 **The question.** When the step gets there it returns `ask`: what lands — the
 specs and fixes by name and pull request, from the records — and every result
 named with the commit it is about: the whole-plan check, the pull request's

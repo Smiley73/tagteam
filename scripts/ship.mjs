@@ -1334,6 +1334,48 @@ function settleWorktree(ctx) {
 // The version lines this train's route recorded; none for a route that has none.
 const routeEntries = (ctx) => versionFilesOf(routeOf(ctx)) ?? [];
 
+// Whether git signs the commits made in the ship's worktree: `commit.gpgsign`
+// as git reads it there, so worktree configuration and `GIT_CONFIG_*` count as
+// they would for `git commit`. Unset is off. A value git refuses as a boolean is
+// a stop, since `git commit` refuses it too. Read for every commit made and never
+// kept in the train: a person fixes their signing between runs.
+function signsCommits(ctx) {
+  const read = git(ctx.worktree, ["config", "--type=bool", "--get", "commit.gpgsign"], { allowFailure: true });
+  if (read.status === 0) return read.stdout.trim() === "true";
+  if (read.status === 1 && read.stderr.trim() === "") return false;
+  throw new Stop(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
+    + `nothing was committed or pushed: ${(read.stderr || read.stdout || "").trim()}. git commit refuses that setting as well; `
+    + "correct it, then run this again.");
+}
+
+/**
+ * One commit of the ship's own, made in the worktree by `args`: `commit-tree`,
+ * which never reads `commit.gpgsign` and so is given `-S` when git signs — with
+ * no key named, git's own key and format sign it — or porcelain `commit`, which
+ * reads the setting itself. With signing off it is exactly the call it always
+ * was, failure message included. With signing on, a commit that fails is a stop
+ * naming it by `subject` and quoting git's own error, never the arguments: the
+ * signer is the likely cause, and what git says shows the real one. `settle`
+ * first hands the worktree back as the next run of `again` needs it, and the
+ * stop is thrown before anything records the commit as made.
+ */
+function shipCommit(ctx, args, { subject, again, held, settle = () => {}, kept = "" }) {
+  let signs;
+  try { signs = signsCommits(ctx); } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!signs) return git(ctx.worktree, args);
+  const call = args[0] === "commit-tree" ? ["commit-tree", "-S", ...args.slice(1)] : args;
+  const made = git(ctx.worktree, call, { allowFailure: true });
+  if (made.status === 0) return made;
+  settle();
+  throw new Stop(`git could not make the commit "${subject}". This repository's git configuration signs commits, so the signer is `
+    + `the likely cause; git said: ${(made.stderr || made.stdout || "").trim() || `exit status ${made.status}`}. Nothing was `
+    + `committed, recorded or pushed, and ${held}.${kept} Get git signing again: unlock the key, or start the agent that holds `
+    + `it, and check the key gpg.format points git at. Then run ${again}, which goes on from here.`);
+}
+
 /**
  * The one place every merge of the base into the plan branch starts: the
  * worktree detached at the plan tip, `merge --no-ff --no-commit <baseOid>`, and
@@ -1377,9 +1419,11 @@ function resetLine(ctx, reset) {
  * made, its tree is checked to be exactly git's own merge with the configured
  * version lines set to the base's values — the remerge view of the commit,
  * touching nothing but those lines — and anything more is a stop, never a
- * commit. Returns the merge commit, with the worktree on it.
+ * commit. Signed when git signs; a signing stop leaves no merge in progress,
+ * and `again` makes it once more. Returns the merge commit, with the worktree on
+ * it.
  */
-function commitScriptedMerge(ctx, { tip, baseOid }, outcome) {
+function commitScriptedMerge(ctx, { tip, baseOid }, outcome, again) {
   const route = routeOf(ctx);
   git(ctx.worktree, ["add", "-u"]);
   node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
@@ -1391,7 +1435,10 @@ function commitScriptedMerge(ctx, { tip, baseOid }, outcome) {
       + `resolver, as git's own merge with the version lines set to ${route.base}'s values, and it is not only that: ${problem}. `
       + `Nothing was committed or pushed, and ${outcome}.`);
   }
-  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", `Merge ${route.base} into ${route.branch}`]).stdout.trim();
+  const subject = `Merge ${route.base} into ${route.branch}`;
+  const oid = shipCommit(ctx, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", subject], {
+    subject, again, held: outcome, settle: () => settleWorktree(ctx)
+  }).stdout.trim();
   git(ctx.worktree, ["merge", "--quit"]);
   git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
   return oid;
@@ -1592,8 +1639,11 @@ async function takeAttempt(ctx, record, say = []) {
     // base's side: there is nothing for a resolver, and no resolution for a
     // panel to read. The merge is the script's, checked to be git's own merge
     // with those lines set; verify and the whole-plan check of the tip it makes
-    // stand in for the panel, since a version line has one right answer.
-    attempt.mergeOid = commitScriptedMerge(ctx, { tip: record.planTip, baseOid: record.baseOid }, record.held);
+    // stand in for the panel, since a version line has one right answer. A
+    // signing stop leaves the attempt at merging, so the round's entry takes this
+    // same attempt again rather than spending another.
+    attempt.mergeOid = commitScriptedMerge(ctx, { tip: record.planTip, baseOid: record.baseOid }, record.held,
+      nextCommand(ctx, record.spec ? "begin" : "plan-land", record.spec ?? null));
     attempt.scripted = true;
     attempt.phase = "pushing";
     saveRecord(ctx, record);
@@ -3316,7 +3366,15 @@ async function resolveCommit(options) {
       saveRecord(ctx, record);
       git(ctx.worktree, ["add", "-A"]);
       node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
-      git(ctx.worktree, ["commit", "-m", `Merge ${record.base} into ${record.branch}`]);
+      // The merge in progress is the resolver's resolution, not yet reviewed: a
+      // signing stop aborts and discards nothing, spends no attempt, and leaves
+      // the phase at committing, so running this step again commits that same
+      // resolution.
+      const subject = `Merge ${record.base} into ${record.branch}`;
+      shipCommit(ctx, ["commit", "-m", subject], {
+        subject, again: roundStep(ctx, record, "resolve-commit"), held: record.held,
+        kept: " The resolver's resolution is still in the worktree, with the merge in progress, as it was handed back."
+      });
     }
     attempt.mergeOid = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
     attempt.phase = "committed";
@@ -4301,7 +4359,7 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
   // the plan here ran every verify command in this worktree, and anything they
   // wrote and left untracked is nobody's change — `-A` would commit it into a
   // merge that adds no code of its own, and push it.
-  const oid = commitScriptedMerge(ctx, { tip, baseOid }, outcome);
+  const oid = commitScriptedMerge(ctx, { tip, baseOid }, outcome, nextCommand(ctx, "plan-land", null));
   record.mergeIn = { tip: oid, from: tip, baseOid, why, at: new Date().toISOString() };
   saveLanding(ctx, record);
   // Immediately before the push, as for a resolved merge: a plain push goes
@@ -4394,7 +4452,10 @@ const landsAsOf = (ctx, tip) => {
 
 // The version commit: each configured line set to `value` in the worktree at
 // the tip, by its own bytes, through the add → guard-staged chain, and made with
-// `commit-tree`, so the commit is named by the call that made it.
+// `commit-tree`, so the commit is named by the call that made it. Signed when
+// git signs; a signing stop switches back to the tip, discarding the edits —
+// they are remade from the base's value on the next pass — so that the next run
+// does not meet them as uncommitted work.
 function makeVersionCommit(ctx, tip, entries, value) {
   const route = routeOf(ctx);
   settleWorktree(ctx);
@@ -4413,7 +4474,11 @@ function makeVersionCommit(ctx, tip, entries, value) {
   git(ctx.worktree, ["add", "--", ...files]);
   node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
   const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
-  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-m", `Version ${value}\n\nThe one version increase of ${route.branch}, made by the ship.`]).stdout.trim();
+  const subject = `Version ${value}`;
+  const oid = shipCommit(ctx, ["commit-tree", tree, "-p", tip, "-m", `${subject}\n\nThe one version increase of ${route.branch}, made by the ship.`], {
+    subject, again: nextCommand(ctx, "plan-land", null), held: "the plan was not landed",
+    settle: () => git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip])
+  }).stdout.trim();
   git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
   return oid;
 }

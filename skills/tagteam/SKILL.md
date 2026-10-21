@@ -402,7 +402,7 @@ four:
 
 ```bash
 git -C "$R" merge-tree --write-tree <newBaseOid> <candidateOid>
-git -C "$R" commit-tree <mergedTree> -p <newBaseOid> -p <candidateOid> -m "<message>"
+git -C "$R" commit-tree --no-gpg-sign <mergedTree> -p <newBaseOid> -p <candidateOid> -m "<message>"
 git -C "$W" checkout --detach <mergedCommit>
 git -C "$W" switch --discard-changes "<branch>"
 ```
@@ -499,7 +499,8 @@ git -C "$W" checkout --detach <planTip>                       # the tip the land
 git -C "$W" merge --no-ff --no-commit <baseOid>               # the merge of the base after a failed or differing landing
 git -C "$W" diff --name-only --diff-filter=U -z               # read-only: it is clean, as the landing check found
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
-git -C "$W" commit-tree <tree> -p <planTip> -p <baseOid> -m "<message>"   # that merge, the plan tip first
+git -C "$W" config --type=bool --get commit.gpgsign          # read-only, before each commit of the ship's own: whether git signs
+git -C "$W" commit-tree -S <tree> -p <planTip> -p <baseOid> -m "<message>"   # that merge, the plan tip first; -S only when git signs
 git -C "$W" merge --quit                                      # the merge is committed; nothing is left in progress
 git -C "$W" switch --discard-changes --detach <mergeCommit>   # the worktree on it, as it is
 git -C "$R" push origin <mergeCommit>:refs/heads/plan/<slug>  # the push above: recorded before, confirmed after
@@ -527,7 +528,7 @@ git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: wh
 git -C "$R" merge-base --is-ancestor <baseOid> <planTip>      # read-only: whether the plan already holds the base
 git -C "$W" checkout --detach <planTip>                       # the tip the version commit goes on
 git -C "$W" add -- <files> && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
-git -C "$W" commit-tree <tree> -p <planTip> -m "Version <x.y.z>"   # the version commit: the version lines' own bytes and nothing else
+git -C "$W" commit-tree -S <tree> -p <planTip> -m "Version <x.y.z>"   # the version commit: the version lines' own bytes and nothing else; -S only when git signs
 git -C "$W" switch --discard-changes --detach <versionCommit> # the worktree on it, as it is
 git -C "$R" push origin <versionCommit>:refs/heads/plan/<slug>  # recorded before with the increase it makes, confirmed after
 git -C "$R" diff-tree -r --no-renames --name-status -z <parent> <versionCommit>  # read-only: the move is the version lines alone
@@ -572,13 +573,26 @@ The plan's pull request merges with a merge commit, never a squash, pinned to
 the tip that was checked, and the plan branch is deleted afterwards rather than
 inside the merge command.
 
+The merge of the base and the version commit are signed when git signs
+commits: `commit-tree` does not read `commit.gpgsign`, so the ship reads it in
+its worktree before each of them and passes `-S` exactly when git says true,
+naming no key, so git's own key and format sign them. A signing failure on one
+of them, or on the resolver's merge that the commit chain makes, is a stop that
+names the commit by its subject, quotes git's error and says which command to
+run again once signing works. Nothing is pushed or recorded before it, and no
+resolve attempt is spent. A merge the ship makes itself is aborted and the
+version edits are discarded, since the next run makes both again; the
+resolver's merge is left in progress exactly as it was handed back. Running the
+named command again goes on from there.
+
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —
 the reason a `.env.test` copied into a worktree does not end up in history.
 
 The landing check's four are read this way: the first two write objects and move
 no ref, no index and no working tree — the merge commit they build is a throwaway
-that exists to be verified and is never pushed — and the last two are the ship's
+that exists to be verified, is never pushed and is never signed, whatever git's
+configuration says — and the last two are the ship's
 one worktree lent to the check and given back. The discard is what the verify
 commands wrote while the worktree sat on that throwaway commit, proved clean
 before the check began, and nothing else.
