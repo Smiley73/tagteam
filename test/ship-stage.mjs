@@ -566,6 +566,35 @@ export function signWith(staged, { on = true, works = true } = {}) {
   return () => fs.readdirSync(payloads).map((name) => fs.readFileSync(path.join(payloads, name), "utf8"));
 }
 
+// `staged.env` with git's configuration cut off from the machine's: a global file
+// of the test's own, holding `global`, and no system file. The developer's own
+// `commit.gpgsign`, `gpg.format` or `gpg.ssh.defaultKeyCommand` would otherwise
+// decide whether a signature check passes, differently on every machine.
+export function isolatedGit(staged, global = "") {
+  const file = path.join(staged.dir, "gitconfig-global");
+  fs.writeFileSync(file, global);
+  return { ...staged.env, GIT_CONFIG_GLOBAL: file, GIT_CONFIG_NOSYSTEM: "1" };
+}
+
+// Signing keys in `repo`'s own configuration, each set to its value or, when the
+// value is null, unset.
+export function setSigning(repo, keys) {
+  for (const [key, value] of Object.entries(keys)) {
+    if (value === null) spawnSync("git", ["-C", repo, "config", "--unset-all", key]);
+    else git(repo, "config", key, value);
+  }
+}
+
+// A stand-in for every program git runs to sign or to find a key: it records
+// that it ran, and fails. Returns its path and whether it has run so far.
+export function trippedSigner(staged) {
+  const program = path.join(staged.dir, "signer", "tripped.sh");
+  const ran = `${program}.ran`;
+  fs.mkdirSync(path.dirname(program), { recursive: true });
+  fs.writeFileSync(program, `#!/bin/sh\necho "$@" >> ${JSON.stringify(ran)}\nexit 1\n`, { mode: 0o755 });
+  return { program, ran: () => fs.existsSync(ran) };
+}
+
 // Whether the commit `oid` in `repo` carries a signature.
 export const isSigned = (repo, oid) => /^gpgsig /m.test(git(repo, "cat-file", "commit", oid));
 
