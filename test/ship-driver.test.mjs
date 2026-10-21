@@ -929,7 +929,9 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   // The implementer rewrites the area and reports as the first one did. A run
   // interrupted here resumes through begin, which lands on the same snapshot.
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
-  write(outputOf(implementer), { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [] });
+  // A redesign implementer is a builder, so its claim about manual testing is
+  // applied like the first implementer's.
+  write(outputOf(implementer), { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [], reachability: { claim: "reachable-now", reason: "sub is exported" } });
   arriveAll(redesign);
   const resumed = run("begin");
   assert.match(resumed.json.say.join("\n"), /interrupted while fixing/);
@@ -942,6 +944,7 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   assert.deepEqual(record, { requested: ["app.js"], files: ["app.js"], brief: briefPath, fromRound: 3 });
   assert.match(snapshot.json.say.join("\n"), /a redesign of app\.js: findings on those files start a fresh count/);
   assert.match(snapshot.json.say.join("\n"), /implement report: complete/);
+  assert.deepEqual([state().builderClaim?.claim, state().builderClaim?.round], ["reachable-now", 4], "a redesign's claim was not applied");
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")));
 
   assert.match(run("verify").json.next, /recheck/, "the route is unchanged: round 3 is collected and unsettled");
@@ -5290,4 +5293,45 @@ test("a claim with no reason is ignored and said to be, and a whole-plan fix's c
     assert.equal(unitStateOf(shipDir, "plan-fix-1").state, "merged");
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a fixer that writes an implementer's report cannot take a marked spec off the manual-testing stop", () => {
+  const staged = stage();
+  const { dir, plan, shipDir } = staged;
+  markStopping(staged, "01-a");
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).status, 0);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const first = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.json.dispatch[0].agent, "tagteam:fixer");
+
+  // The fixer repairs, then writes where the implementer writes, with a claim
+  // that would drop the stop — and no fix report at all.
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  write(path.join(shipDir, "01-a", "implement-report.json"),
+    { status: "complete", summary: "fixed sub", unfinished: [], ...claim("not-reachable-yet", UNREACHABLE) });
+  arriveAll(fix);
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.equal(snapshot.json.round, 2);
+  assert.match(snapshot.json.say.join("\n"), /implement report: complete/, "the report was not recorded as an implementer's");
+  assert.match(snapshot.json.say.join("\n"), /claims nothing here is reachable yet; that is ignored\. Round 2 of 01-a was not built by an implementer/);
+  assert.equal(state().builderClaim, undefined, "a fixer's claim was applied");
+  assert.equal(state().planUserVisible, true);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

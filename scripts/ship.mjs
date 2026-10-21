@@ -2464,7 +2464,8 @@ async function snapshot(options) {
     throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
-  const claimed = builderClaimLines(ctx, id, spec, round, path.join(dir, "report.json"));
+  const claimed = builderClaimLines(ctx, id, spec, round, path.join(dir, "report.json"),
+    builtByBuilder(ctx, id, { state, pending, outOfBand, round, dir }));
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
 
   say.push(allocation.granted
@@ -2484,19 +2485,48 @@ async function snapshot(options) {
 }
 
 /**
+ * Whether the round a snapshot just recorded was made by a builder — the first
+ * implementer or a redesign implementer — the only dispatches whose claim about
+ * manual testing may move the plan's marking. Read off what the run dispatched
+ * and what the round holds, never off which report file the agent chose to
+ * write: a fixer or a CI repair that wrote `implement-report.json` would
+ * otherwise be recorded as an implementer and take away the stop that keeps an
+ * opt-in feature from merging unattended.
+ *
+ * A fresh commit is a builder's when no fixer is pending and the spec is still
+ * in its implementation (which an out-of-band commit by definition is not), or
+ * when the pending dispatch is a redesign. A re-entered round is a builder's
+ * when it holds the redesign record, or is the spec's first round — the
+ * implementation, which no later commit can re-enter, since every fix, repair
+ * and out-of-band commit is a new candidate and gets a round of its own.
+ */
+function builtByBuilder(ctx, id, { state, pending, outOfBand, round, dir }) {
+  if (outOfBand) return false;
+  if (pending) return pending.from === "redesign";
+  if (state.state === "implementing") return true;
+  if (exists(path.join(dir, ROUND_REDESIGN))) return true;
+  return listRounds(roundsRoot(ctx, id))[0]?.round === round;
+}
+
+/**
  * The builder's claim about manual testing in the report this round just
  * recorded, applied to the spec's state by `gates.mjs claim`, and what the
  * person is told about it. Nothing is said for a report that makes no claim,
  * which is most of them; everything else is said, applied or not, with the
  * builder's reason quoted as its words.
  *
- * Every round's report comes through here — a fix or a repair round's too —
- * and only an implement report can carry a claim, so a fixer's round says
- * nothing and leaves an earlier claim where it was. A whole-plan fix unit is
- * dispatched as an implementer but is not a plan spec: it is never held for
- * manual testing, and its claim is said to be ignored and never applied.
+ * Every round's report comes through here — a fix or a repair round's too.
+ * Only an implement report can carry a claim, but which kind a report is
+ * recorded as is decided by the file name the agent wrote, so that is not what
+ * decides whether a claim is applied: `builder` is, and it is worked out from
+ * the dispatch and the round (see `builtByBuilder`). A claim in a round no
+ * builder made — a fixer's, a CI repair's, a commit made outside any dispatch —
+ * is said to be ignored and never applied, so it leaves an earlier claim where
+ * it was. A whole-plan fix unit is dispatched as an implementer but is not a
+ * plan spec: it is never held for manual testing, and its claim is said to be
+ * ignored and never applied either.
  */
-function builderClaimLines(ctx, id, spec, round, reportFile) {
+function builderClaimLines(ctx, id, spec, round, reportFile, builder) {
   const wrapper = readJson(reportFile, null);
   const reachability = wrapper?.kind === "implement" ? wrapper.report?.reachability : null;
   if (!reachability || reachability.claim === "none") return [];
@@ -2504,6 +2534,11 @@ function builderClaimLines(ctx, id, spec, round, reportFile) {
   if (spec.fixUnit || isFixUnitId(id)) {
     return [`The report claims ${words}; that is ignored. ${id} is a whole-plan fix, which never stops for manual testing — `
       + "what it changes reaches the base only through the plan's own pull request, which always asks a person."];
+  }
+  if (!builder) {
+    return [`The report claims ${words}; that is ignored. Round ${round} of ${id} was not built by an implementer, and only `
+      + "the first implementation or a redesign may correct the plan's manual-testing marking — never a fixer, a CI repair, "
+      + "or a commit made outside a dispatch. The marking, and any earlier builder's claim, stands."];
   }
   const { outcome, correction } = lastJson(node("gates.mjs", ["claim", statePath(ctx, id), String(round), reportFile]).stdout);
   if (outcome.status === "blank") {

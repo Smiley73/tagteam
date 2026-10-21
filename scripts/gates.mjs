@@ -171,9 +171,12 @@ export function correctionOf(state) {
  * `repeated` marks a claim already stored from this very round, which a resumed
  * snapshot re-reads off the held wrapper.
  *
- * Only an implement report carries a claim. Fixers and repairs write fix
- * reports, so their rounds are `none` here by construction. A whole-plan fix
- * unit is not a plan spec, and the caller does not apply its claim at all.
+ * Only an implement report carries a claim. Which kind a wrapper is depends on
+ * the file name the agent wrote, so nothing here can tell a builder's round from
+ * a fixer's or a repair's: the caller applies a claim only from a round a
+ * builder made — the first implementation or a redesign — and never calls this
+ * for any other. A whole-plan fix unit is not a plan spec, and the caller does
+ * not apply its claim at all.
  */
 export function applyBuilderClaim(state, round, wrapper) {
   if (!Number.isSafeInteger(round) || round < 1) throw new Error(`a claim is applied from a round, got: ${round}`);
