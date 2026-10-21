@@ -4,15 +4,17 @@
 //
 // They live outside any `*.test.mjs` for the reason `stage.mjs` gives:
 // importing a suite to borrow a helper runs that suite's tests a second time.
-// They are split out of `ship-driver.test.mjs` so the plan's landing can be a
-// suite of its own — node runs the files of `npm test` side by side but the
-// tests of one file in turn, and the driver's file is already the longest of
-// them.
+// They are split out of `ship-driver.test.mjs` so the plan's route and landing
+// can be suites of their own — node runs the files of `npm test` side by side
+// but the tests of one file in turn, and the driver's file is already the
+// longest of them.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { projectDirectoryFor } from "../scripts/usage.mjs";
+import { EFFORT_LADDER } from "../scripts/lib/effort-ladder.mjs";
 
 export const root = path.resolve(import.meta.dirname, "..");
 const SHIP = path.join(root, "scripts", "ship.mjs");
@@ -98,6 +100,32 @@ export function arriveAll(result, env = {}) {
 
 export const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
 export const major = (file) => ({ severity: "major", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
+
+// The effort an entry is printed with. There is one agent per role, so the
+// effort travels on the call alone: a name carrying one would be an agent that
+// does not exist. The runner carries its own pair, which no configuration reaches.
+export function assertEffort(entry, effort, why) {
+  assert.equal(entry.effort, effort, `${entry.description}: ${why}`);
+  if (entry.agent === "tagteam:codex-runner") {
+    assert.deepEqual([entry.model, entry.effort], ["haiku", "low"], `${entry.description}: the runner runs at its own pair`);
+    return;
+  }
+  assert.ok(!EFFORT_LADDER.some((level) => entry.agent.endsWith(`-${level}`)),
+    `${entry.description}: ${entry.agent} names an effort; the effort is passed on the call`);
+}
+
+// Sessions are staged the way `usage.mjs` identifies them: a HOME of the
+// test's own, a transcript in this repository's project directory, and the
+// session variables naming it — or naming nothing.
+export function sessionsFor(staged) {
+  const home = path.join(staged.dir, "home");
+  const projectDir = projectDirectoryFor(staged.repo, home);
+  fs.mkdirSync(projectDir, { recursive: true });
+  return {
+    as: (session) => ({ HOME: home, TAGTEAM_SESSION_ID: session ?? "", CLAUDE_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" }),
+    transcript: (session) => fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "")
+  };
+}
 
 // `finish` rings a desktop notification through osascript on macOS. A stub first
 // on PATH keeps the suite from posting one on every run; elsewhere it is inert.
