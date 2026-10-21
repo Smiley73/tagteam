@@ -321,7 +321,10 @@ gates allow, so a plan half-shipped is half on `main`. Turn on `planBranch` in
   check against the base as it is now, and what the plan lands as, and you
   answer Merge, Leave open, or Stop. Merge is offered only when nothing shown
   fails. Leaving it open ends the run, and `/tagteam:ship` on the plan brings the
-  same question back.
+  same question back. That pull request's checks get the same `ciStartWaitSec`
+  to appear as a spec's, when the plan's branch has workflows that run on pull
+  requests; if none appears, the question says CI never started, and the next
+  run waits for them again.
 
 The repository has to allow merge commits into the base, and its checks have to
 run on pull requests into the plan's branch; the ship says so plainly when

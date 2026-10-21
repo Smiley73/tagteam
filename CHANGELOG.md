@@ -7,6 +7,7 @@
 - Wait only when the commit being published has a workflow that runs on pull requests. A repository without one gets no extra wait.
 - When no check appears in time, stop for a person with a reason of its own, saying CI never started within the time waited and naming `ciStartWaitSec`. It spends no CI repair, and approving it merges as approving checks that proved nothing does.
 - `/tagteam:configure` offers the setting alongside the CI wait, in repositories that have workflows.
+- The plan's own pull request gets the same wait, when the plan's branch has a workflow that runs on pull requests. If no check appears in time, the landing question says CI never started within the time waited, naming `ciStartWaitSec`; it spends no whole-plan fix, does not keep Merge from being offered, and the next run waits for the checks again.
 
 ## 0.10.6
 

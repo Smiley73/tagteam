@@ -432,6 +432,31 @@ test("a plan on its own branch is not complete before its pull request merges, a
   assert.deepEqual([shipped.status, shipped.planLanding.state], ["in progress", "unreadable"]);
 });
 
+// Checks on the plan's pull request that never started within the start wait are
+// their own value for the tip they were waited for at, and only for it.
+test("checks on the plan's pull request that never started are reported as not-started for the current tip, and not-run for an older one", () => {
+  const repo = repository();
+  const tip = "a".repeat(40);
+  const base = "b".repeat(40);
+  const root = path.join(repo, ".tagteam", "ships", "s");
+  ship(repo, "01-a", { state: "merged" });
+  ship(repo, "02-b", { state: "merged" });
+  write(path.join(root, "train.json"), { slug: "s", route: { kind: "plan", branch: "plan/s", base: "main", tipOid: tip, pendingOid: null } });
+  write(path.join(root, "whole-plan", "1", "record.json"), { n: 1, tip, status: "clean", verify: { tip, status: "passed" }, review: { status: "clean", tip }, units: [] });
+  write(path.join(root, "plan-landing", "record.json"), {
+    pr: { number: 9, url: "https://example.invalid/9", head: tip, base: "main" },
+    ci: { tip, pr: 9, status: "not-started", startWaitSec: 120, reason: "no checks were reported within 120s of waiting for them to start (ciStartWaitSec), so nothing was proven either way" },
+    landing: { tip, baseOid: base, status: "passed" },
+    version: { tip, baseOid: base, holds: true, kind: "patch", lines: [] }
+  });
+  let [shipped] = inventory(repo).ships;
+  assert.deepEqual(shipped.planLanding.results, { wholePlan: "passed", ci: "not-started", landing: "passed", version: "passed" });
+
+  write(path.join(root, "train.json"), { slug: "s", route: { kind: "plan", branch: "plan/s", base: "main", tipOid: "c".repeat(40), pendingOid: null } });
+  [shipped] = inventory(repo).ships;
+  assert.equal(shipped.planLanding.results.ci, "not-run", "a timeout at an older tip was reported for the new one");
+});
+
 test("a ship on the base has no plan landing, and every spec merged is complete as it always was", () => {
   const repo = repository();
   ship(repo, "01-a", { state: "merged" });
