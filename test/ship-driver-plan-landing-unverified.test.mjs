@@ -240,6 +240,35 @@ test("with no signature rule, plan-land reads the base's rules once and nothing 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a rule gone, or its read failing, on a later run at the same tip: what the earlier run read is cleared, and end says nothing of it", () => {
+  const cases = [
+    ["the rule removed", (staged, commits) => answer(staged, { rule: false, verified: Object.fromEntries(commits.map(({ oid }) => [oid, false])) })],
+    ["the rules unreadable", (staged) => {
+      const answers = JSON.parse(fs.readFileSync(staged.env.GH_STUB_API, "utf8"));
+      delete answers[RULES];
+      fs.writeFileSync(staged.env.GH_STUB_API, JSON.stringify(answers));
+    }]
+  ];
+  for (const [what, later] of cases) {
+    const staged = signingPlan();
+    const { dir, plan, shipDir, env, commits } = staged;
+    answer(staged, { repository: { allow_merge_commit: true, allow_squash_merge: false }, verified: Object.fromEntries(commits.map(({ oid }) => [oid, false])) });
+    assert.deepEqual(Object.keys(toDialog(staged, [], env).json.answers).sort(), ["leaveOpen", "stop"], what);
+    assert.equal(landingRecordOf(shipDir).signatures.unverified.length, 2, what);
+
+    later(staged, commits);
+    const again = ship("plan-land", plan, [], env);
+    assert.equal(again.status, 0, `${what}: ${again.stderr}`);
+    assert.deepEqual(Object.keys(again.json.answers).sort(), ["leaveOpen", "merge", "stop"], `${what}: ${again.stdout}`);
+    assert.equal(landingRecordOf(shipDir).signatures ?? null, null, `${what}: the earlier run's read is still recorded`);
+
+    const ended = ship("end", plan, [], env);
+    assert.equal(ended.status, 0, `${what}: ${ended.stderr}`);
+    assert.doesNotMatch(said(ended), /GitHub does not show|squash was (not )?allowed when last read/, what);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("with the rule and a verification read that fails: one line says it was not checked, Merge stays offered, and Squash is not", () => {
   const staged = signingPlan();
   const { dir, plan, shipDir, env, commits: [first] } = staged;

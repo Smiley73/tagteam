@@ -4854,7 +4854,8 @@ function squashAllowed(ctx, base) {
  * request would bring onto it — `baseOid..tip` — GitHub does not show as
  * verified, and, when there are any, whether a squash is allowed for the base.
  * Null when the base requires no signature, or its rules could not be read:
- * then nothing more is read, and the question is as it always was.
+ * then nothing more is read, the question is as it always was, and what an
+ * earlier run recorded is cleared.
  *
  * Each commit is read on its own: the pull request's commit list and the compare
  * endpoint stop at 250, and where a stopped whole-plan check shows the question
@@ -4868,7 +4869,15 @@ function squashAllowed(ctx, base) {
 function signatureFacts(ctx, record, tip, baseOid) {
   const route = routeOf(ctx);
   const rule = baseSignatureRule(ctx, route.base);
-  if (!rule.required) return null;
+  if (!rule.required) {
+    // What an earlier run read under a rule this one did not find is not left
+    // for `end` or a later run to speak from.
+    if (record.signatures) {
+      record.signatures = null;
+      saveLanding(ctx, record);
+    }
+    return null;
+  }
   const kept = record.signatures?.tip === tip && record.signatures?.baseOid === baseOid && !record.signatures.unchecked
     && Array.isArray(record.signatures.unverified) ? record.signatures : null;
   let unverified = kept?.unverified ?? [];
