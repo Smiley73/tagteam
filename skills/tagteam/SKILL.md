@@ -418,6 +418,10 @@ git -C "$R" push origin <oid>:refs/heads/plan/<slug>                    # a comm
 gh api repos/{owner}/{repo}                                             # read-only: whether merge commits are allowed
 gh api repos/{owner}/{repo}/rules/branches/<base>                       # read-only: rulesets on the base
 gh api repos/{owner}/{repo}/branches/<base>/protection                  # read-only: classic protection, admins only
+git -C "$R" config --type=bool --get commit.gpgsign                     # read-only: whether git here signs, as git parses the boolean
+git -C "$R" config --get gpg.format                                     # read-only: with ssh, a key has to be named
+git -C "$R" config --get user.signingkey                                # read-only: the key, for ssh
+git -C "$R" config --get gpg.ssh.defaultKeyCommand                      # read-only: or the command that finds one, for ssh
 gh pr create --base plan/<slug> --head "<branch>" --title "<title>" --body-file <file>
 gh pr view <number> --json state,mergedAt,mergeCommit,headRefOid,baseRefName  # read-only: the merge commit a squash made
 ```
@@ -427,6 +431,17 @@ ship records putting on the plan branch is its own, whatever kind of commit it
 is; anything else at the tip on origin stops `begin` before it branches and
 `finish` before the landing check. The `gh api` reads run on every `start` of
 such a train; a source that cannot be read is said and not taken as clean.
+
+The rulesets and protection reads also say whether the base requires signed
+commits. When one does, `start` reads the `git config` keys above, and stops
+before anything is created if git here does not sign: `commit.gpgsign` is not
+true, or `gpg.format` is ssh and neither `user.signingkey` nor
+`gpg.ssh.defaultKeyCommand` is set. These are configuration reads only: nothing
+is signed and no signer or key command is run, so a key that is locked is the
+commit's own stop, not this one. The same check runs at the top of `plan-land`,
+the other way round — the `git config` reads first, and the rulesets and
+protection reads only when git here does not sign. There a read that fails is
+not said, and stops nothing, unlike at `start`.
 
 Before a spec of such a train begins — never on a spec already in flight — the
 base is dry-run against the plan branch, and only a real conflict opens a

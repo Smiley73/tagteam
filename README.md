@@ -348,7 +348,10 @@ The repository has to allow merge commits into the base, and its checks have to
 run on pull requests into the plan's branch; the ship says so plainly when
 either is not the case, and changing it is a repository setting for you. When
 your git signs commits, the commits the ship makes on the plan's branch itself
-are signed with your own git signing setup.
+are signed with your own git signing setup. A base that requires signed commits
+needs signing turned on in git on the machine that ships: when it is off, the
+ship stops when it starts, and again before it lands the plan, with nothing
+created or pushed, and says how to turn it on.
 
 **The version.** List the lines that carry your version in `versionFiles` —
 configure proposes them — and a plan of two or more specs carries exactly one

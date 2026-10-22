@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, stage, ship, driveToPublishable, stagePlan, onOrigin, ghCalls, pullsOf, trainOf,
-  setTrainRoute, commitByHand, shipThrough, A_CHANGE, B_CHANGE, approveFinish } from "./ship-stage.mjs";
+  setTrainRoute, commitByHand, shipThrough, A_CHANGE, B_CHANGE, approveFinish, isolatedGit, setSigning, trippedSigner } from "./ship-stage.mjs";
 import { WAITS } from "./ship-plan-route-shared.mjs";
 
 // --- the plan route --------------------------------------------------------------
@@ -502,6 +502,177 @@ test("a repository that forbids merge commits stops start before any branch exis
   assert.match(said, /Whether this repository allows merge commits into main was not checked/);
   assert.match(said, /Whether the branch protection on main allows merge commits into main was not checked: only an admin can read it/);
   assert.equal(onOrigin(origin, "plan/demo"), onOrigin(origin, "main"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- a base that requires signed commits -------------------------------------------
+//
+// Every case reads git's configuration through `isolatedGit` alone: the staged
+// repository pins commit.gpgsign off, and what a case needs beyond that it sets
+// there. A developer's global gpg.format or gpg.ssh.defaultKeyCommand never
+// reaches the check.
+
+const SIGNED_BY_RULESET = { "repos/{owner}/{repo}/rules/branches/main": { body: [{ type: "required_signatures" }] } };
+const SIGNED_BY_PROTECTION = { "repos/{owner}/{repo}/branches/main/protection": { body: { required_signatures: { enabled: true } } } };
+const sayOf = (result) => result.json?.say ?? [];
+
+test("a base that requires signed commits stops start before anything exists when git here does not sign, from a ruleset or from branch protection alone", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin } = staged;
+  const env = isolatedGit(staged);
+  for (const [answers, source] of [[SIGNED_BY_RULESET, /a ruleset on main requires signed commits/],
+    [SIGNED_BY_PROTECTION, /the branch protection on main requires signed commits/]]) {
+    fs.writeFileSync(env.GH_STUB_API, JSON.stringify(answers));
+    const refused = ship("start", plan, [], env);
+    assert.equal(refused.status, 1, refused.stdout);
+    assert.match(refused.stderr, /plan\/demo cannot take the commits the ship makes on it here/);
+    assert.match(refused.stderr, source);
+    assert.match(refused.stderr, /git here does not sign commits: commit\.gpgsign is not true/, "what is missing is not said");
+    assert.match(refused.stderr, /git config --global commit\.gpgsign true/, "how to turn signing on is not said");
+    assert.match(refused.stderr, /run start again, which picks the plan up\. Nothing was created\./);
+    assert.match(refused.stderr, /turn planBranch off/);
+    assert.equal(planRefs(origin), "", "a branch was created for a plan whose commits the base would refuse");
+    assert.ok(!fs.existsSync(path.join(shipDir, "train.json")), "a route was recorded");
+  }
+
+  // A base that also forbids merge commits says both in the one stop.
+  fs.writeFileSync(env.GH_STUB_API, JSON.stringify({
+    "repos/{owner}/{repo}/rules/branches/main": { body: [{ type: "required_signatures" }, { type: "required_linear_history" }] }
+  }));
+  const both = ship("start", plan, [], env);
+  assert.equal(both.status, 1, both.stdout);
+  assert.match(both.stderr, /plan\/demo could never land on main: a ruleset on main requires linear history/);
+  assert.match(both.stderr, /It also cannot take the commits the ship makes on it here: a ruleset on main requires signed commits/);
+  assert.match(both.stderr, /Change that setting on GitHub, and turn signing on in git here/);
+  assert.equal(planRefs(origin), "");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the signature stop fires on a route already under way, and leaves the plan branch and the route as they were", () => {
+  const staged = stagePlan();
+  const { dir, plan, shipDir, origin } = staged;
+  const env = isolatedGit(staged);
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const route = trainOf(shipDir).route;
+  const tip = onOrigin(origin, "plan/demo");
+
+  fs.writeFileSync(env.GH_STUB_API, JSON.stringify(SIGNED_BY_RULESET));
+  const refused = ship("start", plan, ["--reclaim"], env);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /a ruleset on main requires signed commits, and git here does not sign commits/);
+  assert.match(refused.stderr, /Nothing was created, and the specs already merged into the plan branch stay there\./);
+  assert.doesNotMatch(refused.stderr, /turn planBranch off/, "a route under way was offered a setting that no longer applies to it");
+  assert.equal(onOrigin(origin, "plan/demo"), tip);
+  assert.deepEqual(trainOf(shipDir).route, route);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("signing is judged as git judges it, from its configuration alone: an SSH format with no key stops, and no signer is ever started", () => {
+  const staged = stagePlan();
+  const { dir, repo, plan, origin } = staged;
+  const env = isolatedGit(staged);
+  const signer = trippedSigner(staged);
+  fs.writeFileSync(env.GH_STUB_API, JSON.stringify(SIGNED_BY_RULESET));
+  setSigning(repo, { "commit.gpgsign": "true", "gpg.format": "ssh", "gpg.program": signer.program, "gpg.ssh.program": signer.program });
+
+  const keyless = ship("start", plan, [], env);
+  assert.equal(keyless.status, 1, keyless.stdout);
+  assert.match(keyless.stderr, /set to sign with an SSH key \(gpg\.format ssh\) but has no key to sign with: neither user\.signingkey nor gpg\.ssh\.defaultKeyCommand is set/);
+  assert.match(keyless.stderr, /git config --global user\.signingkey/);
+  assert.doesNotMatch(keyless.stderr, /commit\.gpgsign is not true/, "the switch was named as missing, not the key");
+  assert.equal(planRefs(origin), "");
+
+  // Each of these is on as git reads it, and start goes on.
+  const passing = [
+    ["ssh, with only gpg.ssh.defaultKeyCommand", { "gpg.ssh.defaultKeyCommand": signer.program }],
+    ["openpgp, with no user.signingkey", { "gpg.format": "openpgp", "gpg.ssh.defaultKeyCommand": null }],
+    ["commit.gpgsign spelled yes", { "commit.gpgsign": "yes" }]
+  ];
+  for (const [index, [what, keys]] of passing.entries()) {
+    setSigning(repo, keys);
+    const started = ship("start", plan, index === 0 ? [] : ["--reclaim"], env);
+    assert.equal(started.status, 0, `${what}: ${started.stderr}`);
+  }
+  assert.ok(onOrigin(origin, "plan/demo"));
+  assert.ok(!signer.ran(), "the check started a signer or a key command");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("signing is judged by the configuration the ship's commits are made under: the worktree's own when it exists, and never the primary checkout's alone", () => {
+  const staged = stagePlan();
+  const { dir, repo, plan, origin, shipDir } = staged;
+  const env = isolatedGit(staged);
+  const signer = trippedSigner(staged);
+  fs.writeFileSync(env.GH_STUB_API, JSON.stringify(SIGNED_BY_RULESET));
+  setSigning(repo, { "extensions.worktreeConfig": "true", "gpg.format": "openpgp", "gpg.program": signer.program });
+  const stopsUnsigned = (result) => {
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /a ruleset on main requires signed commits, and git here does not sign commits: commit\.gpgsign is not true/);
+  };
+
+  // No worktree yet: signing on for the primary checkout alone is not signing
+  // for the worktree git is about to add.
+  git(repo, "config", "--worktree", "commit.gpgsign", "true");
+  stopsUnsigned(ship("start", plan, [], env));
+  assert.equal(planRefs(origin), "");
+
+  // Signing on for every checkout: start goes on and adds the worktree.
+  spawnSync("git", ["-C", repo, "config", "--worktree", "--unset-all", "commit.gpgsign"]);
+  setSigning(repo, { "commit.gpgsign": "true" });
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const worktree = trainOf(shipDir).worktree;
+  const tip = onOrigin(origin, "plan/demo");
+
+  // Signing off in the ship's worktree alone, where its commits are made, stops
+  // the route under way though the primary checkout still signs.
+  git(worktree, "config", "--worktree", "commit.gpgsign", "false");
+  assert.equal(git(repo, "config", "--type=bool", "--get", "commit.gpgsign"), "true");
+  stopsUnsigned(ship("start", plan, ["--reclaim"], env));
+  assert.equal(onOrigin(origin, "plan/demo"), tip);
+  assert.ok(!signer.ran());
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("start says nothing new with a signature rule and signing on, with signing off and no rule, or with the protection unreadable", () => {
+  // A new route: with the rule and signing on, start says what it says with neither.
+  const runs = [[SIGNED_BY_RULESET, "true"], [{}, "true"]].map(([answers, gpgsign]) => {
+    const staged = stagePlan();
+    const env = isolatedGit(staged);
+    const signer = trippedSigner(staged);
+    setSigning(staged.repo, { "commit.gpgsign": gpgsign, "gpg.format": "openpgp", "gpg.program": signer.program });
+    fs.writeFileSync(env.GH_STUB_API, JSON.stringify(answers));
+    const started = ship("start", staged.plan, [], env);
+    assert.equal(started.status, 0, started.stderr);
+    assert.ok(!signer.ran());
+    fs.rmSync(staged.dir, { recursive: true, force: true });
+    return sayOf(started).map((line) => line.replaceAll(staged.dir, "<dir>").replace(/\b[0-9a-f]{12,40}\b/g, "<oid>"));
+  });
+  assert.deepEqual(runs[0], runs[1]);
+
+  // A route under way, run again in one repository against the same baseline.
+  const staged = stagePlan();
+  const { dir, repo, plan } = staged;
+  const env = isolatedGit(staged);
+  const signer = trippedSigner(staged);
+  const signing = (on) => setSigning(repo, { "commit.gpgsign": on ? "true" : "false", "gpg.format": "openpgp", "gpg.program": signer.program });
+  const again = (answers) => {
+    fs.writeFileSync(env.GH_STUB_API, JSON.stringify(answers));
+    const started = ship("start", plan, ["--reclaim"], env);
+    assert.equal(started.status, 0, started.stderr);
+    return sayOf(started);
+  };
+  signing(true);
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const baseline = again({});
+  assert.deepEqual(again(SIGNED_BY_RULESET), baseline, "a rule with signing on said something new");
+  signing(false);
+  assert.deepEqual(again({}), baseline, "signing off with no rule said something new");
+  const said = again({ "repos/{owner}/{repo}/branches/main/protection": { error: "gh: Must have admin rights to Repository. (HTTP 403)" } });
+  assert.deepEqual(said.filter((line) => !baseline.includes(line)),
+    ["Whether the branch protection on main allows merge commits into main was not checked: only an admin can read it, and it could not be "
+      + "read here (gh: Must have admin rights to Repository. (HTTP 403))."]);
+  assert.deepEqual(said.filter((line) => baseline.includes(line)), baseline);
+  assert.ok(!signer.ran());
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

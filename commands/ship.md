@@ -148,6 +148,12 @@ difference is not a failure, and it is never a reason to refuse a ship or to
 offer to reinstall. Its `say` carries the validator's `note:` and `warning:`
 lines about lens briefs and cost; show them as written.
 
+On a plan branch it also stops, before anything is created, when the base
+requires signed commits — by a ruleset or by branch protection — and git on this
+machine does not sign: signing is not switched on, or it signs with an SSH key
+and names none. The stop says which, and how to turn signing on; relay it and
+stop. Running `start` again once signing is on picks the plan up.
+
 If it returns `ask`, the lock is held — and the lock is per plan, so what is
 holding it is another run of **this** plan, not a ship of something else. Two
 plans ship from one checkout at the same time and neither refuses the other. Ask
@@ -642,6 +648,13 @@ When the person's git signs commits, the driver signs those two commits with
 their own signing setup. If signing fails, the step stops, naming the commit
 and quoting git's error: relay it, and stop. Never work around it: no unsigned
 retry, and no change to the person's git configuration.
+
+`plan-land` can also stop before it does anything on the plan's branch: the
+base requires signed commits, and git on this machine does not sign. Nothing was
+committed or pushed. Relay the stop as it is and stop; it says how to turn
+signing on, and `plan-land` continues from there once the person has. Do not
+work around it either — not by changing their git configuration, and not by
+landing the plan some other way.
 
 **The question.** When the step gets there it returns `ask`: what lands — the
 specs and fixes by name and pull request, from the records — and every result

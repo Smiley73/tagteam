@@ -1172,27 +1172,63 @@ function planRefRefusals(ctx, order, route, fresh) {
     + (fresh ? " Turning planBranch off ships this plan one spec at a time to the base instead." : "") + " Then run start again.");
 }
 
+// One read-only `gh api` call: the document it printed, or the first line of
+// why there is none.
+function ghRead(ctx, endpoint) {
+  const result = gh(ctx.repo, ["api", endpoint], { allowFailure: true });
+  const error = (result.stderr || result.stdout || "").trim().split("\n")[0];
+  if (result.status !== 0) return { error: error || `gh api exited ${result.status}` };
+  try { return { body: JSON.parse(result.stdout) }; } catch { return { error: "gh api printed no document" }; }
+}
+
+// The two places GitHub keeps rules for a branch: the rulesets that apply to it,
+// and classic branch protection, which only an admin can read. Read once, and
+// both the merge-commit check and the signature rule answer from these reads.
+const readBaseRules = (ctx, base) => ({
+  rules: ghRead(ctx, `repos/{owner}/{repo}/rules/branches/${base}`),
+  protection: ghRead(ctx, `repos/{owner}/{repo}/branches/${base}/protection`)
+});
+const notProtected = (read) => /Branch not protected/i.test(read.error ?? "");
+
+// Whether `base` requires signed commits, from reads already made: `sources`
+// names each place that requires them. A source that could not be read is not a
+// requirement; `unknown` says that one was not read, and nothing more.
+function signatureRuleIn(base, { rules, protection }) {
+  const sources = [];
+  if (!rules.error && Array.isArray(rules.body) && rules.body.some((rule) => rule?.type === "required_signatures")) {
+    sources.push(`a ruleset on ${base}`);
+  }
+  if (!protection.error && protection.body?.required_signatures?.enabled === true) sources.push(`the branch protection on ${base}`);
+  const unknown = Boolean(rules.error) || !Array.isArray(rules.body) || (Boolean(protection.error) && !notProtected(protection));
+  return { required: sources.length > 0, sources, unknown };
+}
+
+/**
+ * Does `base` require signed commits, and from which source: one call, which
+ * reads the rulesets and the branch protection and nothing else. A read that
+ * fails leaves the requirement unknown and is said nowhere: the caller decides
+ * nothing from it. `start` answers the same question from the reads its
+ * merge-commit check already makes, through `signatureRuleIn`.
+ */
+const baseSignatureRule = (ctx, base) => signatureRuleIn(base, readBaseRules(ctx, base));
+
 // The repository's answer on whether a merge commit may land on `base`, from
 // every place GitHub keeps one: the repository setting, the rulesets on the
 // branch, and classic branch protection, which only an admin can read. A source
 // that forbids it is a reason; one that could not be read is a line saying it
-// was not checked, which is neither a stop nor a clean answer.
-function mergeCommitRefusals(ctx, base, say) {
-  const read = (endpoint) => {
-    const result = gh(ctx.repo, ["api", endpoint], { allowFailure: true });
-    const error = (result.stderr || result.stdout || "").trim().split("\n")[0];
-    if (result.status !== 0) return { error: error || `gh api exited ${result.status}` };
-    try { return { body: JSON.parse(result.stdout) }; } catch { return { error: "gh api printed no document" }; }
-  };
+// was not checked, which is neither a stop nor a clean answer. The rulesets and
+// the protection, read once, also say whether `base` requires signed commits.
+function baseRulesAtStart(ctx, base, say) {
   const reasons = [];
   const unchecked = (what, why) => say.push(`Whether ${what} allows merge commits into ${base} was not checked: ${why}.`);
 
-  const repository = read("repos/{owner}/{repo}");
+  const repository = ghRead(ctx, "repos/{owner}/{repo}");
   if (repository.error) unchecked("this repository", `its settings could not be read (${repository.error})`);
   else if (typeof repository.body?.allow_merge_commit !== "boolean") unchecked("this repository", "its settings do not say");
   else if (repository.body.allow_merge_commit === false) reasons.push("the repository does not allow merge commits (Settings → General → Pull Requests)");
 
-  const rules = read(`repos/{owner}/{repo}/rules/branches/${base}`);
+  const reads = readBaseRules(ctx, base);
+  const { rules, protection } = reads;
   if (rules.error || !Array.isArray(rules.body)) unchecked(`the rulesets on ${base}`, `they could not be read (${rules.error ?? "not a list"})`);
   else {
     if (rules.body.some((rule) => rule?.type === "required_linear_history")) reasons.push(`a ruleset on ${base} requires linear history`);
@@ -1203,32 +1239,66 @@ function mergeCommitRefusals(ctx, base, say) {
     }
   }
 
-  const protection = read(`repos/{owner}/{repo}/branches/${base}/protection`);
   if (protection.error) {
-    if (!/Branch not protected/i.test(protection.error)) {
+    if (!notProtected(protection)) {
       unchecked(`the branch protection on ${base}`, `only an admin can read it, and it could not be read here (${protection.error})`);
     }
   } else if (protection.body?.required_linear_history?.enabled === true) {
     reasons.push(`the branch protection on ${base} requires linear history`);
   }
-  return reasons;
+  return { reasons, signatures: signatureRuleIn(base, reads) };
 }
+
+// What a base that requires signed commits is told about this machine's git, by
+// what `signingGap` found missing, and what to change.
+const SIGNING_GAPS = {
+  switch: {
+    missing: "git here does not sign commits: commit.gpgsign is not true",
+    fix: "turn signing on in git here (git config --global commit.gpgsign true, with user.signingkey naming your key and, "
+      + "for an SSH key, gpg.format ssh)"
+  },
+  key: {
+    missing: "git here is set to sign with an SSH key (gpg.format ssh) but has no key to sign with: neither user.signingkey nor "
+      + "gpg.ssh.defaultKeyCommand is set",
+    fix: "give git the key it signs with (git config --global user.signingkey with your SSH public key, or gpg.ssh.defaultKeyCommand)"
+  }
+};
+const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+const requiresSignatures = (rule) => `${listOf(rule.sources)} require${rule.sources.length > 1 ? "" : "s"} signed commits`;
 
 // Everything that stops a plan-route train at `start`, before anything is
 // created: a branch name Git refuses, a repository that will never take the
-// plan's final merge commit, and — for a route not yet recorded — a branch of
-// the same name already on origin. Run on every start of a plan-route train,
-// because a repository's settings can change in the middle of a plan.
+// plan's final merge commit, a base that requires signed commits while git here
+// does not sign, and — for a route not yet recorded — a branch of the same name
+// already on origin. Run on every start of a plan-route train, because a
+// repository's settings, and a machine's git, can change in the middle of a
+// plan. Both of the base's refusals are said in one stop, so a base with both
+// does not take two runs to learn.
 async function planRouteRefusals(ctx, order, route, fresh, say, { reads = false } = {}) {
   planRefRefusals(ctx, order, route, fresh);
   if (reads) await versionListRefusals(ctx, route);
-  const reasons = mergeCommitRefusals(ctx, route.base, say);
-  if (reasons.length > 0) {
-    throw new Stop(`${route.branch} could never land on ${route.base}: ${reasons.join("; ")}. A plan branch reaches ${route.base} `
-      + `through one merge commit at the end, so this repository has to allow merge commits for pull requests into ${route.base}. `
-      + "Change that setting on GitHub"
-      + (fresh ? ", or turn planBranch off in .tagteam/config.json to ship this plan one spec at a time," : "")
-      + ` and run start again. Nothing was created${fresh ? "" : ", and the specs already merged into the plan branch stay there"}.`);
+  const { reasons, signatures } = baseRulesAtStart(ctx, route.base, say);
+  const gap = signatures.required ? signingGap(ctx) : null;
+  if (reasons.length > 0 || gap) {
+    const why = [];
+    const fixes = [];
+    if (reasons.length > 0) {
+      why.push(`${route.branch} could never land on ${route.base}: ${reasons.join("; ")}. A plan branch reaches ${route.base} `
+        + `through one merge commit at the end, so this repository has to allow merge commits for pull requests into ${route.base}.`);
+      fixes.push("Change that setting on GitHub");
+    }
+    if (gap) {
+      why.push(`${reasons.length > 0 ? "It also cannot take" : `${route.branch} cannot take`} the commits the ship makes on it here: `
+        + `${requiresSignatures(signatures)}, and ${SIGNING_GAPS[gap].missing}. A merge of ${route.base} into ${route.branch}, and `
+        + `the plan's version commit when versionFiles is set, are made on this machine, and ${route.base} takes no commit that `
+        + "is not signed.");
+      fixes.push(SIGNING_GAPS[gap].fix);
+    }
+    throw new Stop(`${why.join(" ")} ${capitalized(fixes.join(", and "))}`
+      + (fresh ? ", or turn planBranch off in .tagteam/config.json to ship this plan one spec at a time,"
+        + (gap ? " each spec landing as a squash GitHub makes and signs," : "") : "")
+      + ` and run start again${gap ? ", which picks the plan up" : ""}. Nothing was created`
+      + `${fresh ? "" : ", and the specs already merged into the plan branch stay there"}.`);
   }
   if (fresh) {
     const origin = await originTipOf(ctx, route.branch);
@@ -1340,12 +1410,76 @@ const routeEntries = (ctx) => versionFilesOf(routeOf(ctx)) ?? [];
 // a stop, since `git commit` refuses it too. Read for every commit made and never
 // kept in the train: a person fixes their signing between runs.
 function signsCommits(ctx) {
-  const read = git(ctx.worktree, ["config", "--type=bool", "--get", "commit.gpgsign"], { allowFailure: true });
-  if (read.status === 0) return read.stdout.trim() === "true";
-  if (read.status === 1 && read.stderr.trim() === "") return false;
+  const read = gpgsignIn(ctx.worktree);
+  if (!read.error) return read.on;
   throw new Stop(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
-    + `nothing was committed or pushed: ${(read.stderr || read.stdout || "").trim()}. git commit refuses that setting as well; `
-    + "correct it, then run this again.");
+    + `nothing was committed or pushed: ${read.error}. git commit refuses that setting as well; correct it, then run this again.`);
+}
+
+// `key` as git reads it in `dir` — its last value, null when unset — or git's
+// error for a value it refuses. With `shared`, what is set for `dir`'s own
+// checkout alone (git's worktree scope, `extensions.worktreeConfig`) is left
+// out: the configuration a worktree git has yet to add will read.
+function configIn(dir, key, { bool = false, shared = false } = {}) {
+  const read = git(dir, ["config", ...(bool ? ["--type=bool"] : []), ...(shared ? ["--show-scope", "--get-all"] : ["--get"]), key],
+    { allowFailure: true });
+  if (read.status === 1 && read.stderr.trim() === "") return { value: null };
+  if (read.status !== 0) return { error: (read.stderr || read.stdout || "").trim() };
+  if (!shared) return { value: read.stdout.trim() };
+  const values = read.stdout.split("\n").filter(Boolean).map((line) => line.split("\t"))
+    .filter(([scope]) => scope !== "worktree").map(([, ...value]) => value.join("\t").trim());
+  return { value: values.at(-1) ?? null };
+}
+
+// `commit.gpgsign` as git parses a boolean in `dir` — `yes`, `on` and `1` are
+// true — with unset as off, or git's error for a value it refuses. The one read
+// of the setting, behind both the ship's commits and the signature check.
+function gpgsignIn(dir, { shared = false } = {}) {
+  const read = configIn(dir, "commit.gpgsign", { bool: true, shared });
+  return read.error ? { error: read.error } : { on: read.value === "true" };
+}
+
+// A key of git's configuration as read in `dir`, or null when it is unset or empty.
+const gitConfigValue = (dir, key, { shared = false } = {}) => configIn(dir, key, { shared }).value || null;
+
+/**
+ * What keeps git here from signing the commits the ship makes, by git's own
+ * rules and from its configuration alone: "switch" when `commit.gpgsign` is not
+ * true, "key" when it signs with an SSH key and nothing names one. Null when git
+ * would sign — with openpgp or x509 it picks a key from the committer's identity
+ * when `user.signingkey` is unset — and when the setting is one git refuses,
+ * which the commit's own read stops on. Read where the ship's commits are made:
+ * in its worktree when that exists, exactly as `shipCommit` reads it there, so
+ * the worktree's own configuration and the `includeIf` conditions that hold for
+ * it decide both alike. Before the worktree exists, read in the primary
+ * checkout without what is set for that checkout alone, which the worktree git
+ * adds for the ship will not have. Nothing is signed and no signer is started: a
+ * key that is locked or does not work is the commit's stop.
+ */
+function signingGap(ctx) {
+  const dir = exists(ctx.worktree) ? ctx.worktree : ctx.repo;
+  const shared = dir !== ctx.worktree;
+  const value = (key) => gitConfigValue(dir, key, { shared });
+  const gpgsign = gpgsignIn(dir, { shared });
+  if (gpgsign.error) return null;
+  if (!gpgsign.on) return "switch";
+  if (value("gpg.format") !== "ssh") return null;
+  return value("user.signingkey") || value("gpg.ssh.defaultKeyCommand") ? null : "key";
+}
+
+// A plan landing about to commit on a base that requires signed commits, with
+// git here not signing: stopped before anything is committed or pushed. Signing
+// is read first, so a machine that signs makes no call to GitHub for it; a read
+// of the base's rules that fails says nothing and does not stop.
+function landingSignatureRefusal(ctx, route) {
+  const gap = signingGap(ctx);
+  if (!gap) return;
+  const rule = baseSignatureRule(ctx, route.base);
+  if (!rule.required) return;
+  throw new Stop(`${requiresSignatures(rule)}, and ${SIGNING_GAPS[gap].missing}. Landing the plan can make commits here — a merge `
+    + `of ${route.base} into ${route.branch}, or the plan's version commit — and ${route.base} takes no commit that is not signed, so `
+    + `nothing was committed or pushed. ${capitalized(SIGNING_GAPS[gap].fix)}, then run ${nextCommand(ctx, "plan-land", null)}, `
+    + "which continues from here.");
 }
 
 /**
@@ -4842,6 +4976,12 @@ async function landingStep(ctx, record, options, say) {
       + `merges, and /tagteam:ship ${ctx.plan} picks the plan up again.`);
     return { say, planLanding: landingSummary(ctx, record), next: nextCommand(ctx, "end", null) };
   }
+  // Past the answers that commit nothing — merged, and a person's Stop — and
+  // before anything below can resume a round, merge the base in or make the
+  // version commit: a base that requires signed commits, with git here not
+  // signing, stops with the plan branch, and what this record says of it, as
+  // they were.
+  landingSignatureRefusal(ctx, route);
   if (record.stopped) {
     record.stopped = null;
     saveLanding(ctx, record);
