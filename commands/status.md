@@ -153,7 +153,10 @@ what it means:
   would land".
 - `"stopped"` — "a person stopped the plan's pull request; it stays open, and
   running `/tagteam:ship` on the plan picks it up again".
-- `"merged"` — "the plan landed on the base as one merge commit". When
+- `"merged"` — "the plan landed on the base", said with how from `mergedAs`:
+  `"merge"` as one merge commit, `"squash"` as one squash commit GitHub made,
+  which the person chose because GitHub did not show some of the plan's commits
+  as verified; `null` means nobody recorded how — do not say either. When
   `mergedBy` is `"hand"` it was merged on GitHub by a person, and when
   `mergedAtCheckedTip` is false what merged was not the commit the ship checked —
   say both.

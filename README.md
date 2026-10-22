@@ -353,6 +353,19 @@ needs signing turned on in git on the machine that ships: when it is off, the
 ship stops when it starts, and again before it lands the plan, with nothing
 created or pushed, and says how to turn it on.
 
+On such a base, the plan's branch can still hold commits GitHub does not show as
+verified — pushed before signing was set up, or from another machine — and
+GitHub refuses a merge commit for a branch that holds them. The question then
+names each of them and does not offer Merge. When they are all that stands in
+the way and the repository allows squash merges into the base, it offers
+**Squash** instead: the plan lands as one squash commit of the checked commit,
+which GitHub signs. What you give up is the history — each spec's own commit no
+longer stays separate on the base. Squash is only ever your answer; the ship
+never picks it for you. When a squash is not allowed either, the question says
+what you can do: allow squash merges for the base, remove the signature
+requirement, or re-sign those commits and merge the pull request on GitHub
+yourself.
+
 **The version.** List the lines that carry your version in `versionFiles` —
 configure proposes them — and a plan of two or more specs carries exactly one
 increase of them: a patch, unless the plan document says `Version increase:
