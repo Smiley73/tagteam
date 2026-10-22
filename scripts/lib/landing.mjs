@@ -346,8 +346,11 @@ export function checkLanding({
   const merged = dryRunMerge(repo, newBaseOid, candidateOid);
   if (!merged.clean) return { ...base, status: "conflict", conflicts: merged.conflicts };
   const mergedTree = merged.tree;
+  // Never signed, whatever git's configuration says: the throwaway is made as
+  // tagteam@localhost, which no signing key belongs to, and it is never pushed.
+  // The refusal is the call's own rather than `commit-tree`'s default.
   const mergedCommit = git(repo, [
-    "commit-tree", mergedTree, "-p", newBaseOid, "-p", candidateOid,
+    "commit-tree", "--no-gpg-sign", mergedTree, "-p", newBaseOid, "-p", candidateOid,
     "-m", `tagteam landing check: ${candidateOid} onto ${newBaseOid}`
   ], { env: COMMITTER }).stdout.trim();
 

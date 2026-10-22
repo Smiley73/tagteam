@@ -148,6 +148,12 @@ difference is not a failure, and it is never a reason to refuse a ship or to
 offer to reinstall. Its `say` carries the validator's `note:` and `warning:`
 lines about lens briefs and cost; show them as written.
 
+On a plan branch it also stops, before anything is created, when the base
+requires signed commits — by a ruleset or by branch protection — and git on this
+machine does not sign: signing is not switched on, or it signs with an SSH key
+and names none. The stop says which, and how to turn signing on; relay it and
+stop. Running `start` again once signing is on picks the plan up.
+
 If it returns `ask`, the lock is held — and the lock is per plan, so what is
 holding it is another run of **this** plan, not a ship of something else. Two
 plans ship from one checkout at the same time and neither refuses the other. Ask
@@ -422,8 +428,9 @@ reviewed — is a stop: say what it said.
 
 It does not reach the plan's own pull request. On a plan branch the plan lands on
 the base through one pull request at the end, and no spec's verdict has anything
-to do with it: the person's **Merge**, answered in *Landing the plan* below, is
-the only authority for that merge, every time.
+to do with it: the person's **Merge** — or their **Squash**, where the question
+offers one — answered in *Landing the plan* below, is the only authority for
+that merge, every time.
 
 A base branch that moved is not one of those refusals. `finish` checks the
 reviewed change against the base as it now stands and merges the reviewed commit
@@ -638,6 +645,18 @@ it. That push is the driver's step and nothing wider: it goes to this plan's
 branch only, and nothing in this file runs git. If one is refused, say so, and
 say what was refused; do not try another way to make the push.
 
+When the person's git signs commits, the driver signs those two commits with
+their own signing setup. If signing fails, the step stops, naming the commit
+and quoting git's error: relay it, and stop. Never work around it: no unsigned
+retry, and no change to the person's git configuration.
+
+`plan-land` can also stop before it does anything on the plan's branch: the
+base requires signed commits, and git on this machine does not sign. Nothing was
+committed or pushed. Relay the stop as it is and stop; it says how to turn
+signing on, and `plan-land` continues from there once the person has. Do not
+work around it either — not by changing their git configuration, and not by
+landing the plan some other way.
+
 **The question.** When the step gets there it returns `ask`: what lands — the
 specs and fixes by name and pull request, from the records — and every result
 named with the commit it is about: the whole-plan check, the pull request's
@@ -660,6 +679,26 @@ the answers it offers — `answers` carries each command:
   setting stands in for it. When it is not offered, say
   why, from what `ask` says; never offer an approval in its place. A Merge given
   anyway records nothing, and says so: **no approval clears a blocker**.
+- **Squash** — only when `answers` carries `squash`. Run `plan-land` with
+  `--approve <their email>` and `--squash`:
+
+  ```bash
+  node "$P/scripts/ship.mjs" plan-land --plan "$D" --approve <their email> --squash
+  ```
+
+  It lands the plan's pull request as one squash commit of exactly the commit
+  that was checked, which GitHub makes and signs, after the same re-check of the
+  base, version check and retry as Merge, and then deletes the plan's branch.
+  It is offered only on a base that requires signed commits, when GitHub does
+  not show some of the plan's commits as verified — `ask` names them — and that
+  is the one thing keeping Merge from being offered, and the repository and
+  its rulesets allow a squash. Say what the person gives up: each spec's own
+  commit does not stay separate on the base's history. It is the person's
+  answer alone, given as Merge is. Never put it in Merge's place yourself, never
+  run it on an approval given for Merge, and never suggest it when `answers`
+  does not carry it; a Squash given anyway records nothing, and says so. When
+  Merge is withheld for unverified commits and Squash is not offered, `ask`
+  says what the person can do — relay that as it is.
 - **Leave open** — run `end`. The pull request stays open, and `/tagteam:ship`
   on the plan again brings back the same question.
 - **Stop** — run `plan-land` with `--stop`, then `end`:
@@ -675,10 +714,10 @@ If the person is not there to answer, the run ends with the pull request open:
 the step has already sent a notification, and `/tagteam:ship` on the plan again
 asks the same question.
 
-A Merge that cannot go through — the base moved again and the re-check did not
-pass, or the version lines no longer hold against the base as it now is — merges
-nothing, withdraws the Merge, and `next` is `plan-land`: run it, and ask the
-question it returns. A plan pull request someone merged by hand on GitHub is
+A Merge or Squash that cannot go through — the base moved again and the
+re-check did not pass, or the version lines no longer hold against the base as it
+now is — merges nothing, withdraws the answer, and `next` is `plan-land`: run
+it, and ask the question it returns. A plan pull request someone merged by hand on GitHub is
 recorded as merged — `say` says whether what merged was the commit that was
 checked — its branch is deleted, and the train ends.
 
@@ -710,7 +749,8 @@ When a later run of this plan took the lock over, `end` releases nothing and say
 so, and the worktree stays where it is, because that run is working in it.
 Summarise: what merged, what waits, what stopped and why. On a plan branch, say
 where the plan's own pull request is — `say` and `planLanding` give its number
-and whether it is open, stopped by the person or merged — and, while it is not
+and whether it is open, stopped by the person or merged, and, once merged, as a
+merge commit or a squash commit when the ship knows — and, while it is not
 merged, that nothing of the plan has reached the base.
 
 ## When Codex could not say how it ran

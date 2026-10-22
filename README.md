@@ -346,7 +346,25 @@ the wait for your approval moves to the plan's own pull request:
 
 The repository has to allow merge commits into the base, and its checks have to
 run on pull requests into the plan's branch; the ship says so plainly when
-either is not the case, and changing it is a repository setting for you.
+either is not the case, and changing it is a repository setting for you. When
+your git signs commits, the commits the ship makes on the plan's branch itself
+are signed with your own git signing setup. A base that requires signed commits
+needs signing turned on in git on the machine that ships: when it is off, the
+ship stops when it starts, and again before it lands the plan, with nothing
+created or pushed, and says how to turn it on.
+
+On such a base, the plan's branch can still hold commits GitHub does not show as
+verified — pushed before signing was set up, or from another machine — and
+GitHub refuses a merge commit for a branch that holds them. The question then
+names each of them and does not offer Merge. When they are all that stands in
+the way and the repository allows squash merges into the base, it offers
+**Squash** instead: the plan lands as one squash commit of the checked commit,
+which GitHub signs. What you give up is the history — each spec's own commit no
+longer stays separate on the base. Squash is only ever your answer; the ship
+never picks it for you. When a squash is not allowed either, the question says
+what you can do: allow squash merges for the base, remove the signature
+requirement, or re-sign those commits and merge the pull request on GitHub
+yourself.
 
 **The version.** List the lines that carry your version in `versionFiles` —
 configure proposes them — and a plan of two or more specs carries exactly one

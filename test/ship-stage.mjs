@@ -56,6 +56,10 @@ export function stage() {
   spawnSync("git", ["init", "-b", "main", repo]);
   git(repo, "config", "user.email", "t@example.com");
   git(repo, "config", "user.name", "t");
+  // Pinned off, so that no test reaches a developer's signer or depends on how
+  // their git signs; the ship's worktree shares this configuration. A test that
+  // needs signing sets it, and a stand-in signer, on its own copy.
+  git(repo, "config", "commit.gpgsign", "false");
   fs.writeFileSync(path.join(repo, "app.js"), "export const add = (a, b) => a + b;\n");
   fs.mkdirSync(path.join(repo, ".tagteam", "plans", "demo", "specs"), { recursive: true });
   const config = JSON.parse(fs.readFileSync(path.join(root, "examples", "config.json"), "utf8"));
@@ -390,7 +394,7 @@ export function commitByHand({ dir, origin }, branch, { push = true, from = bran
   git(clone, "checkout", "-q", "-B", branch, `origin/${from}`);
   fs.writeFileSync(path.join(clone, `hand-${handCount}.txt`), `by hand ${handCount}\n`);
   git(clone, "add", "-A");
-  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "commit", "-q", "-m", `by hand ${handCount}`);
+  git(clone, "-c", "user.email=h@example.com", "-c", "user.name=h", "-c", "commit.gpgsign=false", "commit", "-q", "-m", `by hand ${handCount}`);
   const oid = git(clone, "rev-parse", "HEAD");
   const pushIt = () => git(clone, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
   if (push) pushIt();
@@ -523,12 +527,83 @@ export function mergeBaseIn({ dir, origin, shipDir }) {
   const clone = path.join(dir, `merge-in-${mergeIns}`);
   git(dir, "clone", "-q", origin, clone);
   git(clone, "checkout", "-q", "-B", "plan/demo", "origin/plan/demo");
-  git(clone, "-c", "user.email=s@example.com", "-c", "user.name=s", "merge", "--no-ff", "-q", "-m", "Merge main into plan/demo", "origin/main");
+  git(clone, "-c", "user.email=s@example.com", "-c", "user.name=s", "-c", "commit.gpgsign=false", "merge", "--no-ff", "-q", "-m", "Merge main into plan/demo", "origin/main");
   const oid = git(clone, "rev-parse", "HEAD");
   setTrainRoute(shipDir, (train) => ({ ...train, route: { ...train.route, pendingOid: oid } }));
   git(clone, "push", "-q", "origin", "HEAD:refs/heads/plan/demo");
   return oid;
 }
+
+// --- signing ----------------------------------------------------------------------
+
+// A stand-in for gpg, which git runs as `gpg.program` with `gpg.format` openpgp,
+// so that no test depends on a real key, `ssh-keygen` or an agent. Each keeps
+// every payload it is handed, in a file of its own beside it; a working one
+// answers with a signature git takes, and a broken one fails as a locked key does.
+const WORKING_SIGNER = `#!/bin/sh
+cat > "$(mktemp "$0.payloads/payload.XXXXXX")"
+printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 STANDIN\\n' >&2
+printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nstand-in\\n-----END PGP SIGNATURE-----\\n'
+`;
+const BROKEN_SIGNER = `#!/bin/sh
+cat > "$(mktemp "$0.payloads/payload.XXXXXX")"
+echo "stand-in signer: no key is unlocked" >&2
+exit 2
+`;
+
+// `staged`'s repository — whose configuration the ship's worktree shares — set
+// to sign (`on`) or pinned not to, with a working or a broken stand-in signer
+// configured either way. Set on a test's own copy, after the shared build.
+// Returns a reader of the payloads this signer has been handed so far.
+export function signWith(staged, { on = true, works = true } = {}) {
+  const program = path.join(staged.dir, "signer", works ? "working.sh" : "broken.sh");
+  fs.mkdirSync(`${program}.payloads`, { recursive: true });
+  fs.writeFileSync(program, works ? WORKING_SIGNER : BROKEN_SIGNER, { mode: 0o755 });
+  git(staged.repo, "config", "commit.gpgsign", String(on));
+  git(staged.repo, "config", "gpg.format", "openpgp");
+  git(staged.repo, "config", "gpg.program", program);
+  const payloads = `${program}.payloads`;
+  return () => fs.readdirSync(payloads).map((name) => fs.readFileSync(path.join(payloads, name), "utf8"));
+}
+
+// `staged.env` with git's configuration cut off from the machine's: a global file
+// of the test's own, holding `global`, and no system file. The developer's own
+// `commit.gpgsign`, `gpg.format` or `gpg.ssh.defaultKeyCommand` would otherwise
+// decide whether a signature check passes, differently on every machine.
+export function isolatedGit(staged, global = "") {
+  const file = path.join(staged.dir, "gitconfig-global");
+  fs.writeFileSync(file, global);
+  return { ...staged.env, GIT_CONFIG_GLOBAL: file, GIT_CONFIG_NOSYSTEM: "1" };
+}
+
+// Signing keys in `repo`'s own configuration, each set to its value or, when the
+// value is null, unset.
+export function setSigning(repo, keys) {
+  for (const [key, value] of Object.entries(keys)) {
+    if (value === null) spawnSync("git", ["-C", repo, "config", "--unset-all", key]);
+    else git(repo, "config", key, value);
+  }
+}
+
+// A stand-in for every program git runs to sign or to find a key: it records
+// that it ran, and fails. Returns its path and whether it has run so far.
+export function trippedSigner(staged) {
+  const program = path.join(staged.dir, "signer", "tripped.sh");
+  const ran = `${program}.ran`;
+  fs.mkdirSync(path.dirname(program), { recursive: true });
+  fs.writeFileSync(program, `#!/bin/sh\necho "$@" >> ${JSON.stringify(ran)}\nexit 1\n`, { mode: 0o755 });
+  return { program, ran: () => fs.existsSync(ran) };
+}
+
+// Whether the commit `oid` in `repo` carries a signature.
+export const isSigned = (repo, oid) => /^gpgsig /m.test(git(repo, "cat-file", "commit", oid));
+
+// Whether a signer was handed `oid` itself: the commit as `repo` holds it with
+// its signature taken out is one of `payloads`.
+export const wasHanded = (payloads, repo, oid) => {
+  const unsigned = git(repo, "cat-file", "commit", oid).replace(/^gpgsig .*\n(?: .*\n)*/m, "");
+  return payloads.some((payload) => payload.trim() === unsigned.trim());
+};
 
 // --- shared fixtures ------------------------------------------------------------
 

@@ -22,7 +22,8 @@
 // merges is the reviewed commit and only ever the reviewed commit.
 //
 // A spec merges as a squash. A plan on its own branch merges once more at the
-// end, as a merge commit, and only on a person's word — see `mergePlan`.
+// end, as a merge commit — or as one squash commit when that was the person's
+// answer — and only on a person's word — see `mergePlan`.
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -167,12 +168,15 @@ const readJsonFile = (file, what) => {
 
 /**
  * Merges a plan's pull request — `plan/<slug>` into the base its train
- * recorded — with a merge commit pinned to the plan branch's recorded tip.
+ * recorded — pinned to the plan branch's recorded tip: with a merge commit, or
+ * with one squash commit when the person's answer was Squash.
  *
  * Nothing of `evaluate`'s ready-or-approval logic reaches this: a spec's
  * verdict, ready or approved, authorises that spec's merge and never the
- * plan's. The one authority is a person's Merge, and it is read here off the
- * record, bound to the tip, never taken from the caller.
+ * plan's. The one authority is a person's Merge or Squash, and it is read here
+ * off the record, bound to the tip, never taken from the caller — the method
+ * with it: a confirmation that names none is a Merge, as every one did before
+ * a Squash could be given.
  * Then, for that exact tip, every other thing the dialog showed is re-read and
  * refused on: a clean whole-plan result, no merge of the base still under way,
  * the checks waited for on this pull request at this tip and none failed, the
@@ -206,6 +210,10 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
       throw refuse(record.confirmation
         ? `the person's Merge was given at ${short(record.confirmation.tip)}, and ${route.branch} has moved to ${short(tip)} since; only a Merge given for this tip lands it`
         : `no person has confirmed merging ${route.branch} at ${short(tip)}, and nothing else authorises the plan's merge — a spec's verdict authorises that spec's merge, never the plan's`);
+    }
+    const method = record.confirmation.method ?? "merge";
+    if (method !== "merge" && method !== "squash") {
+      throw refuse(`the person's answer for ${short(tip)} records the method ${JSON.stringify(method)}, which is neither a Merge nor a Squash`);
     }
     const pr = record.pr;
     if (!pr?.number) throw refuse("the landing record names no plan pull request");
@@ -266,14 +274,18 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
     if (live.baseRefName !== route.base) throw refuse(`PR #${pr.number} targets ${live.baseRefName}, not ${route.base}, the base this train recorded`);
     if (live.headRefOid !== tip) throw refuse(`PR #${pr.number} now heads at ${short(live.headRefOid)}, not the confirmed tip ${short(tip)}`);
 
-    // A real merge commit, never a squash: each spec's own commit stays on the
-    // base's history, and the commit that merges is the tip that was checked.
-    // The branch is deleted afterwards by the driver, never by the merge.
-    const argv = ["pr", "merge", String(pr.number), "--merge", "--match-head-commit", tip, "--delete-branch=false"];
-    if (dryRun) return { ok: true, dryRun: true, argv, tip, baseOid, pr: pr.number };
+    // A real merge commit, so each spec's own commit stays on the base's history,
+    // unless the person answered Squash: the dialog offers that only when the base
+    // requires signed commits, GitHub shows some of the plan's commits as
+    // unverified, and nothing else withholds Merge — a merge commit would be
+    // refused, and the one squash commit GitHub makes is signed by GitHub. Either
+    // way the commit that merges is the tip that was checked. The branch is
+    // deleted afterwards by the driver, never by the merge.
+    const argv = ["pr", "merge", String(pr.number), method === "squash" ? "--squash" : "--merge", "--match-head-commit", tip, "--delete-branch=false"];
+    if (dryRun) return { ok: true, dryRun: true, argv, method, tip, baseOid, pr: pr.number };
     const merged = spawnSync("gh", argv, { cwd: repo, encoding: "utf8", shell: false });
     if (merged.status !== 0) throw refuse(`gh pr merge refused PR #${pr.number}: ${(merged.stderr || merged.stdout || "").trim()}`);
-    return { ok: true, merged: true, pr: pr.number, tip, baseOid, branch: route.branch, base: route.base };
+    return { ok: true, merged: true, method, pr: pr.number, tip, baseOid, branch: route.branch, base: route.base };
   });
 }
 

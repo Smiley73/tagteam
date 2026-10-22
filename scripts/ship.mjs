@@ -56,7 +56,8 @@ import {
   verdict, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
 import {
-  checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, planBodyPath, readPlanLanding, resultsFor, savePlanLanding, withholding
+  checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, mergeMethodOf, planBodyPath, readPlanLanding, resultsFor, savePlanLanding,
+  withholding
 } from "./lib/plan-landing.mjs";
 import {
   baseVersionAt, changedLinesAt, declaredIncrease, describeEntry, nextVersion, readLinesAt, resetValuesAt, scriptedMergeProblem,
@@ -1172,27 +1173,72 @@ function planRefRefusals(ctx, order, route, fresh) {
     + (fresh ? " Turning planBranch off ships this plan one spec at a time to the base instead." : "") + " Then run start again.");
 }
 
+// One read-only `gh api` call: the document it printed, or the first line of
+// why there is none.
+function ghRead(ctx, endpoint) {
+  const result = gh(ctx.repo, ["api", endpoint], { allowFailure: true });
+  const error = (result.stderr || result.stdout || "").trim().split("\n")[0];
+  if (result.status !== 0) return { error: error || `gh api exited ${result.status}` };
+  try { return { body: JSON.parse(result.stdout) }; } catch { return { error: "gh api printed no document" }; }
+}
+
+// The two places GitHub keeps rules for a branch: the rulesets that apply to it,
+// and classic branch protection, which only an admin can read. Read once, and
+// both the merge-commit check and the signature rule answer from these reads.
+const readBaseRules = (ctx, base) => ({
+  rules: ghRead(ctx, `repos/{owner}/{repo}/rules/branches/${base}`),
+  protection: ghRead(ctx, `repos/{owner}/{repo}/branches/${base}/protection`)
+});
+const notProtected = (read) => /Branch not protected/i.test(read.error ?? "");
+
+// Whether `base` requires signed commits, from reads already made: `sources`
+// names each place that requires them. A source that could not be read is not a
+// requirement; `unknown` says that one was not read, and nothing more.
+function signatureRuleIn(base, { rules, protection }) {
+  const sources = [];
+  if (!rules.error && Array.isArray(rules.body) && rules.body.some((rule) => rule?.type === "required_signatures")) {
+    sources.push(`a ruleset on ${base}`);
+  }
+  if (!protection.error && protection.body?.required_signatures?.enabled === true) sources.push(`the branch protection on ${base}`);
+  const unknown = Boolean(rules.error) || !Array.isArray(rules.body) || (Boolean(protection.error) && !notProtected(protection));
+  return { required: sources.length > 0, sources, unknown };
+}
+
+// The base's rules as this run read them: read the first time a step asks, and
+// handed to every later question in the same run, so the signing check at the
+// top of the plan's landing and the landing question never read them twice.
+function baseRulesOnce(ctx, base) {
+  ctx.baseRules ??= new Map();
+  if (!ctx.baseRules.has(base)) ctx.baseRules.set(base, readBaseRules(ctx, base));
+  return ctx.baseRules.get(base);
+}
+
+/**
+ * Does `base` require signed commits, and from which source: the rulesets and
+ * the branch protection, read once in a run and nothing else. A read that fails
+ * leaves the requirement unknown and is said nowhere: the caller decides nothing
+ * from it. `start` answers the same question from the reads its merge-commit
+ * check already makes, through `signatureRuleIn`.
+ */
+const baseSignatureRule = (ctx, base) => signatureRuleIn(base, baseRulesOnce(ctx, base));
+
 // The repository's answer on whether a merge commit may land on `base`, from
 // every place GitHub keeps one: the repository setting, the rulesets on the
 // branch, and classic branch protection, which only an admin can read. A source
 // that forbids it is a reason; one that could not be read is a line saying it
-// was not checked, which is neither a stop nor a clean answer.
-function mergeCommitRefusals(ctx, base, say) {
-  const read = (endpoint) => {
-    const result = gh(ctx.repo, ["api", endpoint], { allowFailure: true });
-    const error = (result.stderr || result.stdout || "").trim().split("\n")[0];
-    if (result.status !== 0) return { error: error || `gh api exited ${result.status}` };
-    try { return { body: JSON.parse(result.stdout) }; } catch { return { error: "gh api printed no document" }; }
-  };
+// was not checked, which is neither a stop nor a clean answer. The rulesets and
+// the protection, read once, also say whether `base` requires signed commits.
+function baseRulesAtStart(ctx, base, say) {
   const reasons = [];
   const unchecked = (what, why) => say.push(`Whether ${what} allows merge commits into ${base} was not checked: ${why}.`);
 
-  const repository = read("repos/{owner}/{repo}");
+  const repository = ghRead(ctx, "repos/{owner}/{repo}");
   if (repository.error) unchecked("this repository", `its settings could not be read (${repository.error})`);
   else if (typeof repository.body?.allow_merge_commit !== "boolean") unchecked("this repository", "its settings do not say");
   else if (repository.body.allow_merge_commit === false) reasons.push("the repository does not allow merge commits (Settings → General → Pull Requests)");
 
-  const rules = read(`repos/{owner}/{repo}/rules/branches/${base}`);
+  const reads = readBaseRules(ctx, base);
+  const { rules, protection } = reads;
   if (rules.error || !Array.isArray(rules.body)) unchecked(`the rulesets on ${base}`, `they could not be read (${rules.error ?? "not a list"})`);
   else {
     if (rules.body.some((rule) => rule?.type === "required_linear_history")) reasons.push(`a ruleset on ${base} requires linear history`);
@@ -1203,32 +1249,66 @@ function mergeCommitRefusals(ctx, base, say) {
     }
   }
 
-  const protection = read(`repos/{owner}/{repo}/branches/${base}/protection`);
   if (protection.error) {
-    if (!/Branch not protected/i.test(protection.error)) {
+    if (!notProtected(protection)) {
       unchecked(`the branch protection on ${base}`, `only an admin can read it, and it could not be read here (${protection.error})`);
     }
   } else if (protection.body?.required_linear_history?.enabled === true) {
     reasons.push(`the branch protection on ${base} requires linear history`);
   }
-  return reasons;
+  return { reasons, signatures: signatureRuleIn(base, reads) };
 }
+
+// What a base that requires signed commits is told about this machine's git, by
+// what `signingGap` found missing, and what to change.
+const SIGNING_GAPS = {
+  switch: {
+    missing: "git here does not sign commits: commit.gpgsign is not true",
+    fix: "turn signing on in git here (git config --global commit.gpgsign true, with user.signingkey naming your key and, "
+      + "for an SSH key, gpg.format ssh)"
+  },
+  key: {
+    missing: "git here is set to sign with an SSH key (gpg.format ssh) but has no key to sign with: neither user.signingkey nor "
+      + "gpg.ssh.defaultKeyCommand is set",
+    fix: "give git the key it signs with (git config --global user.signingkey with your SSH public key, or gpg.ssh.defaultKeyCommand)"
+  }
+};
+const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+const requiresSignatures = (rule) => `${listOf(rule.sources)} require${rule.sources.length > 1 ? "" : "s"} signed commits`;
 
 // Everything that stops a plan-route train at `start`, before anything is
 // created: a branch name Git refuses, a repository that will never take the
-// plan's final merge commit, and — for a route not yet recorded — a branch of
-// the same name already on origin. Run on every start of a plan-route train,
-// because a repository's settings can change in the middle of a plan.
+// plan's final merge commit, a base that requires signed commits while git here
+// does not sign, and — for a route not yet recorded — a branch of the same name
+// already on origin. Run on every start of a plan-route train, because a
+// repository's settings, and a machine's git, can change in the middle of a
+// plan. Both of the base's refusals are said in one stop, so a base with both
+// does not take two runs to learn.
 async function planRouteRefusals(ctx, order, route, fresh, say, { reads = false } = {}) {
   planRefRefusals(ctx, order, route, fresh);
   if (reads) await versionListRefusals(ctx, route);
-  const reasons = mergeCommitRefusals(ctx, route.base, say);
-  if (reasons.length > 0) {
-    throw new Stop(`${route.branch} could never land on ${route.base}: ${reasons.join("; ")}. A plan branch reaches ${route.base} `
-      + `through one merge commit at the end, so this repository has to allow merge commits for pull requests into ${route.base}. `
-      + "Change that setting on GitHub"
-      + (fresh ? ", or turn planBranch off in .tagteam/config.json to ship this plan one spec at a time," : "")
-      + ` and run start again. Nothing was created${fresh ? "" : ", and the specs already merged into the plan branch stay there"}.`);
+  const { reasons, signatures } = baseRulesAtStart(ctx, route.base, say);
+  const gap = signatures.required ? signingGap(ctx) : null;
+  if (reasons.length > 0 || gap) {
+    const why = [];
+    const fixes = [];
+    if (reasons.length > 0) {
+      why.push(`${route.branch} could never land on ${route.base}: ${reasons.join("; ")}. A plan branch reaches ${route.base} `
+        + `through one merge commit at the end, so this repository has to allow merge commits for pull requests into ${route.base}.`);
+      fixes.push("Change that setting on GitHub");
+    }
+    if (gap) {
+      why.push(`${reasons.length > 0 ? "It also cannot take" : `${route.branch} cannot take`} the commits the ship makes on it here: `
+        + `${requiresSignatures(signatures)}, and ${SIGNING_GAPS[gap].missing}. A merge of ${route.base} into ${route.branch}, and `
+        + `the plan's version commit when versionFiles is set, are made on this machine, and ${route.base} takes no commit that `
+        + "is not signed.");
+      fixes.push(SIGNING_GAPS[gap].fix);
+    }
+    throw new Stop(`${why.join(" ")} ${capitalized(fixes.join(", and "))}`
+      + (fresh ? ", or turn planBranch off in .tagteam/config.json to ship this plan one spec at a time,"
+        + (gap ? " each spec landing as a squash GitHub makes and signs," : "") : "")
+      + ` and run start again${gap ? ", which picks the plan up" : ""}. Nothing was created`
+      + `${fresh ? "" : ", and the specs already merged into the plan branch stay there"}.`);
   }
   if (fresh) {
     const origin = await originTipOf(ctx, route.branch);
@@ -1334,6 +1414,113 @@ function settleWorktree(ctx) {
 // The version lines this train's route recorded; none for a route that has none.
 const routeEntries = (ctx) => versionFilesOf(routeOf(ctx)) ?? [];
 
+// Whether git signs the commits made in the ship's worktree: `commit.gpgsign`
+// as git reads it there, so worktree configuration and `GIT_CONFIG_*` count as
+// they would for `git commit`. Unset is off. A value git refuses as a boolean is
+// a stop, since `git commit` refuses it too. Read for every commit made and never
+// kept in the train: a person fixes their signing between runs.
+function signsCommits(ctx) {
+  const read = gpgsignIn(ctx.worktree);
+  if (!read.error) return read.on;
+  throw new Stop(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
+    + `nothing was committed or pushed: ${read.error}. git commit refuses that setting as well; correct it, then run this again.`);
+}
+
+// `key` as git reads it in `dir` — its last value, null when unset — or git's
+// error for a value it refuses. With `shared`, what is set for `dir`'s own
+// checkout alone (git's worktree scope, `extensions.worktreeConfig`) is left
+// out: the configuration a worktree git has yet to add will read.
+function configIn(dir, key, { bool = false, shared = false } = {}) {
+  const read = git(dir, ["config", ...(bool ? ["--type=bool"] : []), ...(shared ? ["--show-scope", "--get-all"] : ["--get"]), key],
+    { allowFailure: true });
+  if (read.status === 1 && read.stderr.trim() === "") return { value: null };
+  if (read.status !== 0) return { error: (read.stderr || read.stdout || "").trim() };
+  if (!shared) return { value: read.stdout.trim() };
+  const values = read.stdout.split("\n").filter(Boolean).map((line) => line.split("\t"))
+    .filter(([scope]) => scope !== "worktree").map(([, ...value]) => value.join("\t").trim());
+  return { value: values.at(-1) ?? null };
+}
+
+// `commit.gpgsign` as git parses a boolean in `dir` — `yes`, `on` and `1` are
+// true — with unset as off, or git's error for a value it refuses. The one read
+// of the setting, behind both the ship's commits and the signature check.
+function gpgsignIn(dir, { shared = false } = {}) {
+  const read = configIn(dir, "commit.gpgsign", { bool: true, shared });
+  return read.error ? { error: read.error } : { on: read.value === "true" };
+}
+
+// A key of git's configuration as read in `dir`, or null when it is unset or empty.
+const gitConfigValue = (dir, key, { shared = false } = {}) => configIn(dir, key, { shared }).value || null;
+
+/**
+ * What keeps git here from signing the commits the ship makes, by git's own
+ * rules and from its configuration alone: "switch" when `commit.gpgsign` is not
+ * true, "key" when it signs with an SSH key and nothing names one. Null when git
+ * would sign — with openpgp or x509 it picks a key from the committer's identity
+ * when `user.signingkey` is unset — and when the setting is one git refuses,
+ * which the commit's own read stops on. Read where the ship's commits are made:
+ * in its worktree when that exists, exactly as `shipCommit` reads it there, so
+ * the worktree's own configuration and the `includeIf` conditions that hold for
+ * it decide both alike. Before the worktree exists, read in the primary
+ * checkout without what is set for that checkout alone, which the worktree git
+ * adds for the ship will not have. Nothing is signed and no signer is started: a
+ * key that is locked or does not work is the commit's stop.
+ */
+function signingGap(ctx) {
+  const dir = exists(ctx.worktree) ? ctx.worktree : ctx.repo;
+  const shared = dir !== ctx.worktree;
+  const value = (key) => gitConfigValue(dir, key, { shared });
+  const gpgsign = gpgsignIn(dir, { shared });
+  if (gpgsign.error) return null;
+  if (!gpgsign.on) return "switch";
+  if (value("gpg.format") !== "ssh") return null;
+  return value("user.signingkey") || value("gpg.ssh.defaultKeyCommand") ? null : "key";
+}
+
+// A plan landing about to commit on a base that requires signed commits, with
+// git here not signing: stopped before anything is committed or pushed. Signing
+// is read first, so a machine that signs makes no call to GitHub for it here; a
+// read of the base's rules that fails says nothing and does not stop. What it
+// read is the landing question's too, through `baseRulesOnce`.
+function landingSignatureRefusal(ctx, route) {
+  const gap = signingGap(ctx);
+  if (!gap) return;
+  const rule = baseSignatureRule(ctx, route.base);
+  if (!rule.required) return;
+  throw new Stop(`${requiresSignatures(rule)}, and ${SIGNING_GAPS[gap].missing}. Landing the plan can make commits here — a merge `
+    + `of ${route.base} into ${route.branch}, or the plan's version commit — and ${route.base} takes no commit that is not signed, so `
+    + `nothing was committed or pushed. ${capitalized(SIGNING_GAPS[gap].fix)}, then run ${nextCommand(ctx, "plan-land", null)}, `
+    + "which continues from here.");
+}
+
+/**
+ * One commit of the ship's own, made in the worktree by `args`: `commit-tree`,
+ * which never reads `commit.gpgsign` and so is given `-S` when git signs — with
+ * no key named, git's own key and format sign it — or porcelain `commit`, which
+ * reads the setting itself. With signing off it is exactly the call it always
+ * was, failure message included. With signing on, a commit that fails is a stop
+ * naming it by `subject` and quoting git's own error, never the arguments: the
+ * signer is the likely cause, and what git says shows the real one. `settle`
+ * first hands the worktree back as the next run of `again` needs it, and the
+ * stop is thrown before anything records the commit as made.
+ */
+function shipCommit(ctx, args, { subject, again, held, settle = () => {}, kept = "" }) {
+  let signs;
+  try { signs = signsCommits(ctx); } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!signs) return git(ctx.worktree, args);
+  const call = args[0] === "commit-tree" ? ["commit-tree", "-S", ...args.slice(1)] : args;
+  const made = git(ctx.worktree, call, { allowFailure: true });
+  if (made.status === 0) return made;
+  settle();
+  throw new Stop(`git could not make the commit "${subject}". This repository's git configuration signs commits, so the signer is `
+    + `the likely cause; git said: ${(made.stderr || made.stdout || "").trim() || `exit status ${made.status}`}. Nothing was `
+    + `committed, recorded or pushed, and ${held}.${kept} Get git signing again: unlock the key, or start the agent that holds `
+    + `it, and check the key gpg.format points git at. Then run ${again}, which goes on from here.`);
+}
+
 /**
  * The one place every merge of the base into the plan branch starts: the
  * worktree detached at the plan tip, `merge --no-ff --no-commit <baseOid>`, and
@@ -1377,9 +1564,11 @@ function resetLine(ctx, reset) {
  * made, its tree is checked to be exactly git's own merge with the configured
  * version lines set to the base's values — the remerge view of the commit,
  * touching nothing but those lines — and anything more is a stop, never a
- * commit. Returns the merge commit, with the worktree on it.
+ * commit. Signed when git signs; a signing stop leaves no merge in progress,
+ * and `again` makes it once more. Returns the merge commit, with the worktree on
+ * it.
  */
-function commitScriptedMerge(ctx, { tip, baseOid }, outcome) {
+function commitScriptedMerge(ctx, { tip, baseOid }, outcome, again) {
   const route = routeOf(ctx);
   git(ctx.worktree, ["add", "-u"]);
   node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
@@ -1391,7 +1580,10 @@ function commitScriptedMerge(ctx, { tip, baseOid }, outcome) {
       + `resolver, as git's own merge with the version lines set to ${route.base}'s values, and it is not only that: ${problem}. `
       + `Nothing was committed or pushed, and ${outcome}.`);
   }
-  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", `Merge ${route.base} into ${route.branch}`]).stdout.trim();
+  const subject = `Merge ${route.base} into ${route.branch}`;
+  const oid = shipCommit(ctx, ["commit-tree", tree, "-p", tip, "-p", baseOid, "-m", subject], {
+    subject, again, held: outcome, settle: () => settleWorktree(ctx)
+  }).stdout.trim();
   git(ctx.worktree, ["merge", "--quit"]);
   git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
   return oid;
@@ -1592,8 +1784,11 @@ async function takeAttempt(ctx, record, say = []) {
     // base's side: there is nothing for a resolver, and no resolution for a
     // panel to read. The merge is the script's, checked to be git's own merge
     // with those lines set; verify and the whole-plan check of the tip it makes
-    // stand in for the panel, since a version line has one right answer.
-    attempt.mergeOid = commitScriptedMerge(ctx, { tip: record.planTip, baseOid: record.baseOid }, record.held);
+    // stand in for the panel, since a version line has one right answer. A
+    // signing stop leaves the attempt at merging, so the round's entry takes this
+    // same attempt again rather than spending another.
+    attempt.mergeOid = commitScriptedMerge(ctx, { tip: record.planTip, baseOid: record.baseOid }, record.held,
+      nextCommand(ctx, record.spec ? "begin" : "plan-land", record.spec ?? null));
     attempt.scripted = true;
     attempt.phase = "pushing";
     saveRecord(ctx, record);
@@ -3316,7 +3511,15 @@ async function resolveCommit(options) {
       saveRecord(ctx, record);
       git(ctx.worktree, ["add", "-A"]);
       node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
-      git(ctx.worktree, ["commit", "-m", `Merge ${record.base} into ${record.branch}`]);
+      // The merge in progress is the resolver's resolution, not yet reviewed: a
+      // signing stop aborts and discards nothing, spends no attempt, and leaves
+      // the phase at committing, so running this step again commits that same
+      // resolution.
+      const subject = `Merge ${record.base} into ${record.branch}`;
+      shipCommit(ctx, ["commit", "-m", subject], {
+        subject, again: roundStep(ctx, record, "resolve-commit"), held: record.held,
+        kept: " The resolver's resolution is still in the worktree, with the merge in progress, as it was handed back."
+      });
     }
     attempt.mergeOid = git(ctx.worktree, ["rev-parse", "HEAD"]).stdout.trim();
     attempt.phase = "committed";
@@ -3920,12 +4123,14 @@ async function planCollect(options) {
 //   6  any tip move, by any of those, starts again from 1: every result is
 //      bound to a tip, and none of them speaks for another
 //   7  the dialog: what lands, every result with the tip it is for, and Merge
-//      only when every one is for this tip and none fails
+//      only when every one is for this tip and none fails — or, on a base that
+//      requires signed commits with plan commits GitHub shows unverified and
+//      nothing else in the way, Squash where a squash is allowed
 //
 // Nothing here asks `evaluate`: a spec's verdict, ready or approved, authorises
 // that spec's merge and never the plan's. The plan's merge has one authority, a
-// person's Merge for the tip in front of them, and `merge.mjs` re-reads that and
-// every result itself before it merges anything.
+// person's Merge or Squash for the tip in front of them, and `merge.mjs` re-reads
+// that and every result itself before it merges anything.
 
 const short = (oid) => String(oid ?? "").slice(0, 12);
 const TITLE = /^[A-Za-z0-9 ._:-]{1,70}$/;
@@ -4301,7 +4506,7 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
   // the plan here ran every verify command in this worktree, and anything they
   // wrote and left untracked is nobody's change — `-A` would commit it into a
   // merge that adds no code of its own, and push it.
-  const oid = commitScriptedMerge(ctx, { tip, baseOid }, outcome);
+  const oid = commitScriptedMerge(ctx, { tip, baseOid }, outcome, nextCommand(ctx, "plan-land", null));
   record.mergeIn = { tip: oid, from: tip, baseOid, why, at: new Date().toISOString() };
   saveLanding(ctx, record);
   // Immediately before the push, as for a resolved merge: a plain push goes
@@ -4394,7 +4599,10 @@ const landsAsOf = (ctx, tip) => {
 
 // The version commit: each configured line set to `value` in the worktree at
 // the tip, by its own bytes, through the add → guard-staged chain, and made with
-// `commit-tree`, so the commit is named by the call that made it.
+// `commit-tree`, so the commit is named by the call that made it. Signed when
+// git signs; a signing stop switches back to the tip, discarding the edits —
+// they are remade from the base's value on the next pass — so that the next run
+// does not meet them as uncommitted work.
 function makeVersionCommit(ctx, tip, entries, value) {
   const route = routeOf(ctx);
   settleWorktree(ctx);
@@ -4413,7 +4621,11 @@ function makeVersionCommit(ctx, tip, entries, value) {
   git(ctx.worktree, ["add", "--", ...files]);
   node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
   const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
-  const oid = git(ctx.worktree, ["commit-tree", tree, "-p", tip, "-m", `Version ${value}\n\nThe one version increase of ${route.branch}, made by the ship.`]).stdout.trim();
+  const subject = `Version ${value}`;
+  const oid = shipCommit(ctx, ["commit-tree", tree, "-p", tip, "-m", `${subject}\n\nThe one version increase of ${route.branch}, made by the ship.`], {
+    subject, again: nextCommand(ctx, "plan-land", null), held: "the plan was not landed",
+    settle: () => git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip])
+  }).stdout.trim();
   git(ctx.worktree, ["switch", "--discard-changes", "--detach", oid]);
   return oid;
 }
@@ -4609,12 +4821,144 @@ function stoppedCheckNote(ctx, check) {
   return `The whole-plan check of ${at} stopped ${check.status}: ${why}. Its record is ${where}; only a new tip is checked again.`;
 }
 
+// --- the plan's commits, on a base that requires signed commits -----------------
+
+// Whether GitHub would take a squash merge into `base`: the repository allows
+// squash merges, and no ruleset on the base leaves `squash` out of the methods
+// it allows. The rulesets are the ones this run already read; the repository's
+// settings are read here. `{ allowed }`, with `why` when it is not — and with
+// `unknown` when that could not be told, which is never taken as allowed.
+function squashAllowed(ctx, base) {
+  const repository = ghRead(ctx, "repos/{owner}/{repo}");
+  const { rules } = baseRulesOnce(ctx, base);
+  const reasons = [];
+  const unknown = [];
+  if (repository.error) unknown.push(`this repository's settings could not be read (${repository.error})`);
+  else if (typeof repository.body?.allow_squash_merge !== "boolean") unknown.push("this repository's settings do not say whether it allows squash merges");
+  else if (repository.body.allow_squash_merge === false) reasons.push("this repository does not allow squash merges (Settings → General → Pull Requests)");
+  if (rules.error || !Array.isArray(rules.body)) unknown.push(`the rulesets on ${base} could not be read (${rules.error ?? "not a list"})`);
+  else {
+    const methods = rules.body.filter((rule) => rule?.type === "pull_request" && Array.isArray(rule.parameters?.allowed_merge_methods))
+      .map((rule) => rule.parameters.allowed_merge_methods);
+    for (const allowed of methods.filter((list) => !list.includes("squash"))) {
+      reasons.push(`a ruleset on ${base} allows only ${listOf(allowed.map(String))} for pull requests`);
+    }
+  }
+  if (reasons.length > 0) return { allowed: false, unknown: false, why: reasons.join("; and ") };
+  if (unknown.length > 0) return { allowed: false, unknown: true, why: unknown.join("; and ") };
+  return { allowed: true, unknown: false, why: null };
+}
+
+/**
+ * On a base that requires signed commits, which of the commits the plan's pull
+ * request would bring onto it — `baseOid..tip` — GitHub does not show as
+ * verified, and, when there are any, whether a squash is allowed for the base.
+ * Null when the base requires no signature, or its rules could not be read:
+ * then nothing more is read, the question is as it always was, and what an
+ * earlier run recorded is cleared.
+ *
+ * Each commit is read on its own: the pull request's commit list and the compare
+ * endpoint stop at 250, and where a stopped whole-plan check shows the question
+ * early the pull request may not be open yet. A read that fails, or an answer
+ * that does not say, makes the whole read `unchecked` — never "verified", and
+ * never a reason to withhold Merge either. What was read is recorded for the tip
+ * and the base; a run on the same pair takes the commits' verification from the
+ * record, since a commit's signature does not change without its OID changing,
+ * and reads the squash settings again, which a person changes between runs.
+ */
+function signatureFacts(ctx, record, tip, baseOid) {
+  const route = routeOf(ctx);
+  const rule = baseSignatureRule(ctx, route.base);
+  if (!rule.required) {
+    // What an earlier run read under a rule this one did not find is not left
+    // for `end` or a later run to speak from.
+    if (record.signatures) {
+      record.signatures = null;
+      saveLanding(ctx, record);
+    }
+    return null;
+  }
+  const kept = record.signatures?.tip === tip && record.signatures?.baseOid === baseOid && !record.signatures.unchecked
+    && Array.isArray(record.signatures.unverified) ? record.signatures : null;
+  let unverified = kept?.unverified ?? [];
+  let unchecked = null;
+  if (!kept) {
+    const commits = git(ctx.repo, ["log", "--reverse", "--format=%H %s", `${baseOid}..${tip}`]).stdout.split("\n").filter(Boolean)
+      .map((line) => ({ oid: line.slice(0, line.indexOf(" ")), subject: line.slice(line.indexOf(" ") + 1) }));
+    for (const commit of commits) {
+      const read = ghRead(ctx, `repos/{owner}/{repo}/commits/${commit.oid}`);
+      const verified = read.body?.commit?.verification?.verified;
+      if (read.error || typeof verified !== "boolean") {
+        unchecked = `GitHub's record of ${short(commit.oid)} ${read.error ? `could not be read (${read.error})` : "does not say whether it is verified"}`;
+        unverified = [];
+        break;
+      }
+      if (!verified) unverified.push(commit);
+    }
+  }
+  const squash = unverified.length > 0 ? squashAllowed(ctx, route.base) : null;
+  record.signatures = { tip, baseOid, sources: rule.sources, unverified, unchecked, squash, at: new Date().toISOString() };
+  saveLanding(ctx, record);
+  return record.signatures;
+}
+
+// The plan's commits GitHub does not show as verified, by short OID and subject.
+const unverifiedList = (unverified) => listOf(unverified.map((commit) => `${short(commit.oid)} ${q(commit.subject)}`));
+
+// The one sentence that withholds Merge for them.
+const unverifiedReason = (route, signatures) => {
+  const many = signatures.unverified.length > 1;
+  return `GitHub does not show ${many ? `these ${signatures.unverified.length} commits` : "this commit"} of ${route.branch} as verified: `
+    + `${unverifiedList(signatures.unverified)}, and ${requiresSignatures(signatures)}, so GitHub refuses a merge commit for a branch `
+    + `that holds ${many ? "them" : "it"}`;
+};
+
+// What clears the unverified commits when Squash is not offered for them. A
+// branch re-signed by hand is one the ship did not record, and every later run
+// stops on it, so the sentence never says the ship carries on from one.
+function unverifiedClears(ctx, route, signatures) {
+  const squash = signatures.squash;
+  if (squash.allowed) {
+    return `Once nothing else withholds Merge, the question offers Squash for them instead — ${route.base} allows squash merges, and the `
+      + "one squash commit GitHub makes is signed by GitHub — and a person alone gives it.";
+  }
+  return `${squash.unknown ? `Whether a squash is allowed for ${route.base} could not be told — ${squash.why} — so Squash is not offered`
+    : `A squash is not allowed for ${route.base}: ${squash.why}`}. What clears the unverified commits is one of: allowing squash merges `
+    + `for ${route.base}, after which the next run offers Squash; removing the signature requirement (${listOf(signatures.sources)}); or `
+    + `re-signing those commits and merging the pull request on GitHub yourself — the ship does not carry on from a rewritten `
+    + `${route.branch}, and /tagteam:ship ${ctx.plan} then records the merge as made by hand, at a tip it did not check.`;
+}
+
+// Why a Squash given now is not recorded: the question did not offer it.
+function squashRefusal(route, tip, signatures, others) {
+  const why = [
+    !signatures ? `${route.base} does not require signed commits, as far as its rules could be read`
+      : signatures.unchecked ? `whether the plan's commits are verified on GitHub was not checked (${signatures.unchecked})`
+        : signatures.unverified.length === 0 ? `GitHub shows every commit ${route.branch} at ${short(tip)} brings onto ${route.base} as verified`
+          : null,
+    ...others,
+    signatures?.squash && !signatures.squash.allowed
+      ? (signatures.squash.unknown ? `whether a squash is allowed for ${route.base} could not be told (${signatures.squash.why})`
+        : `a squash is not allowed for ${route.base}: ${signatures.squash.why}`)
+      : null
+  ].filter(Boolean);
+  return `the question does not offer Squash: ${why.join("; ")}. Squash is offered only when commits GitHub does not show as verified `
+    + "are all that withholds Merge and a squash is allowed. No approval clears a blocker.";
+}
+
 /**
  * The dialog: what lands, every result with the commit it is for, and the
- * three answers. Merge is offered only when nothing withholds it, and no spec's
+ * answers. Merge is offered only when nothing withholds it, and no spec's
  * verdict stands in for it. With `--approve` and nothing withholding, the
  * person's Merge is recorded for this tip and the plan merges; with anything
  * withholding, nothing is recorded — no approval clears a blocker.
+ *
+ * On a base that requires signed commits, commits of the plan GitHub does not
+ * show as verified withhold Merge too: GitHub refuses a merge commit for them.
+ * When they are all that withholds it and a squash is allowed, the question
+ * offers Squash — `--approve` with `--squash`, a person's answer of its own,
+ * never what an approval alone gives — which lands the plan as one squash
+ * commit GitHub signs.
  */
 async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []) {
   const route = routeOf(ctx);
@@ -4627,64 +4971,102 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
   record.version = { tip, baseOid, holds: version.holds, kind: version.kind, lines: version.lines, at: new Date().toISOString() };
   saveLanding(ctx, record);
   const results = resultsFor(ctx.shipDir, record, { tip, baseOid, version });
-  const withheld = withholding(ctx.shipDir, record, results);
+  const others = withholding(ctx.shipDir, record, results);
+  const signatures = signatureFacts(ctx, record, tip, baseOid);
+  const unverified = signatures?.unverified ?? [];
+  const withheld = unverified.length > 0 ? [...others, unverifiedReason(route, signatures)] : others;
+  const squashOffered = unverified.length > 0 && others.length === 0 && signatures.squash?.allowed === true;
   const lands = landsList(ctx);
-  if (options.approve && withheld.length === 0) return confirmAndMerge(ctx, record, tip, options.approve, say);
-  if (options.approve) say.push(`Not recording ${options.approve}'s Merge: ${withheld.join("; ")}. No approval clears a blocker.`);
+  if (options.approve) {
+    if (!options.squash && withheld.length === 0) return confirmAndMerge(ctx, record, tip, options.approve, "merge", say);
+    if (options.squash && squashOffered) return confirmAndMerge(ctx, record, tip, options.approve, "squash", say);
+    say.push(options.squash
+      ? `Not recording ${options.approve}'s Squash: ${squashRefusal(route, tip, signatures, others)}`
+      : `Not recording ${options.approve}'s Merge: ${withheld.join("; ")}. No approval clears a blocker.`);
+  }
   say.push(...notes);
   const lines = resultLines(route, record, results);
   const pr = record.pr?.number ? `The plan's pull request #${record.pr.number} (${record.pr.url})` : "The plan's pull request, not opened yet,";
   const offered = withheld.length === 0;
   const merge = nextCommand(ctx, "plan-land", null, " --approve \"<their email>\"");
+  const squash = nextCommand(ctx, "plan-land", null, " --approve \"<their email>\" --squash");
   const stop = nextCommand(ctx, "plan-land", null, " --stop");
   const leave = nextCommand(ctx, "end", null);
   // What moves a blocker: a whole-plan check that stopped on a spent budget is
   // moved by raising limits.ciRepairs — the note above says how — and anything
-  // else by the plan or the base changing.
+  // else by the plan or the base changing. Unverified commits are not moved by
+  // either, and say what clears them themselves.
   const spent = results.wholePlan.status === "failed" && results.wholePlan.reason === "spent";
   const moves = `${spent ? "limits.ciRepairs raised, as said above, or " : ""}the plan or the base changing`;
   const landsAs = version.holds && version.lines.length > 0 ? `${version.lines[0].base} → ${version.lines[0].tip}` : null;
+  // What the plan's pull request would do, true for what is offered: a merge
+  // commit, or — with commits GitHub shows unverified — only a squash, or nothing.
+  const how = unverified.length === 0
+    ? `${pr} would merge ${route.branch} at ${short(tip)} with one merge commit, which keeps each spec's own commit on ${route.base}'s history.`
+    : signatures.squash.allowed
+      ? `${pr} can land ${route.branch} at ${short(tip)} only as one squash commit, which GitHub makes and signs: each spec's own commit `
+        + `does not stay separate on ${route.base}'s history, where the whole plan becomes that one commit.`
+      : `${pr} cannot land ${route.branch} at ${short(tip)} as it stands: ${route.base} takes no merge commit of it, and a squash `
+        + `${signatures.squash.unknown ? "could not be told to be allowed" : "is not allowed"}.`;
+  const blocked = [`Merge is not offered: ${withheld.join("; ")}.`];
+  if (unverified.length === 0) blocked.push(`No approval clears these; what moves them is ${moves}.`);
+  else if (squashOffered) blocked.push("No approval clears that; Squash, the person's own answer, lands the plan as one squash commit GitHub signs instead.");
+  else {
+    blocked.push(`No approval clears these.${others.length > 0 ? ` What moves all but the unverified commits is ${moves}.` : ""}`,
+      unverifiedClears(ctx, route, signatures));
+  }
   const text = [
-    `What lands on ${route.base}: ${landsText(lands)}. ${pr} would merge ${route.branch} at ${short(tip)} with one merge commit, `
-      + `which keeps each spec's own commit on ${route.base}'s history. The plan as a whole is ${path.join(ctx.plan, "plan.md")}.`
+    `What lands on ${route.base}: ${landsText(lands)}. ${how} The plan as a whole is ${path.join(ctx.plan, "plan.md")}.`
       + (landsAs ? ` It lands as version ${landsAs}.` : ""),
     `Checked against ${short(tip)}: ${lines.join("; ")}.`,
+    ...(signatures?.unchecked
+      ? [`Whether the commits ${route.branch} at ${short(tip)} brings onto ${route.base} are verified on GitHub was not checked: `
+        + `${signatures.unchecked}. ${capitalized(requiresSignatures(signatures))}, so GitHub may still refuse a merge commit.`]
+      : []),
     offered
       ? `Offer: Merge (run ${merge}) — merges it now, at exactly ${short(tip)}, after checking the base once more, and then deletes `
         + `${route.branch}; Leave open (run ${leave}) — the pull request stays open, and /tagteam:ship ${ctx.plan} brings this `
         + `question back; or Stop (run ${stop}) — the same, recorded as stopped by them.`
-      : `Merge is not offered: ${withheld.join("; ")}. No approval clears these; what moves them is ${moves}. `
-        + `Offer: Leave open (run ${leave}) — the pull request stays as it is, and /tagteam:ship ${ctx.plan} looks again; or Stop `
-        + `(run ${stop}) — the same, recorded as stopped by them.`
+      : squashOffered
+        ? `${blocked.join(" ")} Offer: Squash (run ${squash}) — lands it now as one squash commit of exactly ${short(tip)}, which `
+          + `GitHub signs, after checking the base once more, and then deletes ${route.branch}; Leave open (run ${leave}) — the pull `
+          + `request stays open, and /tagteam:ship ${ctx.plan} brings this question back; or Stop (run ${stop}) — the same, recorded `
+          + "as stopped by them."
+        : `${blocked.join(" ")} Offer: Leave open (run ${leave}) — the pull request stays as it is, and /tagteam:ship ${ctx.plan} `
+          + `looks again; or Stop (run ${stop}) — the same, recorded as stopped by them.`
   ].join(" ");
-  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} needs you`, offered ? "the plan is ready to land" : "the plan cannot land yet"], { stdio: "ignore" });
+  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} needs you`, offered || squashOffered ? "the plan is ready to land" : "the plan cannot land yet"], { stdio: "ignore" });
   return {
     say, ask: text,
-    answers: { ...(offered ? { merge } : {}), leaveOpen: leave, stop },
+    answers: { ...(offered ? { merge } : {}), ...(squashOffered ? { squash } : {}), leaveOpen: leave, stop },
     planLanding: {
-      ...landingSummary(ctx, record), lands, baseOid, results, merge: offered, withheld, ...(landsAs ? { landsAs } : {})
+      ...landingSummary(ctx, record), lands, baseOid, results, merge: offered, withheld, ...(landsAs ? { landsAs } : {}),
+      ...(signatures
+        ? { squash: squashOffered, unverified: unverified.map(({ oid, subject }) => ({ oid, subject })), ...(signatures.unchecked ? { signaturesUnchecked: signatures.unchecked } : {}) }
+        : {})
     },
     next: leave
   };
 }
 
 /**
- * A person's Merge, for `tip`: recorded, and then the merge through `merge.mjs`
- * inside the landing retry — which re-checks a base that moved between the check
- * and the merge, within its bound, and stops on anything else. The confirmation
- * is bound to the tip; when the loop ends without a merge it is withdrawn, so the
- * dialog that comes back asks again.
+ * A person's Merge or Squash, for `tip`: recorded with its method, and then the
+ * merge through `merge.mjs` inside the landing retry — which re-checks a base
+ * that moved between the check and the merge, within its bound, and stops on
+ * anything else. The confirmation is bound to the tip; when the loop ends
+ * without a merge it is withdrawn, so the dialog that comes back asks again.
  */
-async function confirmAndMerge(ctx, record, tip, by, say) {
+async function confirmAndMerge(ctx, record, tip, by, method, say) {
   const route = routeOf(ctx);
-  record.confirmation = { tip, by, at: new Date().toISOString() };
+  const answer = method === "squash" ? "Squash" : "Merge";
+  record.confirmation = { tip, by, method, at: new Date().toISOString() };
   saveLanding(ctx, record);
-  say.push(`Merge confirmed by ${by} for ${route.branch} at ${short(tip)}.`);
+  say.push(`${answer} confirmed by ${by} for ${route.branch} at ${short(tip)}${method === "squash" ? ", to land as one squash commit" : ""}.`);
   const check = checkFor(ctx.shipDir, tip);
   const landed = await mergeWithLanding({
     check: async () => {
       const at = await planTipCheck(ctx, "nothing was merged");
-      if (at !== tip) return { stop: `${route.branch} moved to ${short(at)} after the Merge was given for ${short(tip)}, so nothing was merged.` };
+      if (at !== tip) return { stop: `${route.branch} moved to ${short(at)} after the ${answer} was given for ${short(tip)}, so nothing was merged.` };
       const landing = await planLandingCheck(ctx, record, tip, check, say);
       return landing.status === "passed" ? null : { stop: `The landing check came back ${landing.status} against the base as it now stands, so nothing was merged.` };
     },
@@ -4707,17 +5089,21 @@ async function confirmAndMerge(ctx, record, tip, by, say) {
   if (!landed.merged) {
     record.confirmation = null;
     saveLanding(ctx, record);
-    say.push(landed.stop, "The Merge given for this tip is withdrawn; what would land is shown again.");
+    say.push(landed.stop, `The ${answer} given for this tip is withdrawn; what would land is shown again.`);
     return { say, next: nextCommand(ctx, "plan-land", null) };
   }
-  record.merged = { by: "ship", pr: record.pr.number, head: tip, baseOid: landed.merged.baseOid ?? null, confirmedBy: by, checkedTip: true, at: new Date().toISOString() };
+  record.merged = {
+    by: "ship", pr: record.pr.number, head: tip, baseOid: landed.merged.baseOid ?? null, method, confirmedBy: by, checkedTip: true,
+    at: new Date().toISOString()
+  };
   saveLanding(ctx, record);
-  return finishLanded(ctx, record, say, `Merged the plan's pull request #${record.pr.number} into ${route.base} at ${short(tip)}, as one merge commit.`);
+  return finishLanded(ctx, record, say, `Merged the plan's pull request #${record.pr.number} into ${route.base} at ${short(tip)}, `
+    + `${method === "squash" ? "as one squash commit, which GitHub made and signed" : "as one merge commit"}.`);
 }
 
-// After the plan's merge, by the ship or by hand: its merge commit if GitHub
-// says, then the plan branch deleted — a failed delete is said, never a stop —
-// and the train ends.
+// After the plan's merge, by the ship or by hand: the commit it made on the base
+// if GitHub says, then the plan branch deleted — a failed delete is said, never
+// a stop — and the train ends.
 function finishLanded(ctx, record, say, line) {
   const route = routeOf(ctx);
   say.push(line);
@@ -4739,12 +5125,16 @@ function finishLanded(ctx, record, say, line) {
 
 // A plan pull request GitHub says is merged that this ship did not record
 // merging: a person merged it, or this ship did and died before saying so.
-// Recorded with whether its head was the tip the ship checked.
+// Recorded with whether its head was the tip the ship checked, and — only when
+// it was the ship's, on the answer confirmed for that head — how it merged: how
+// a person merged one on GitHub is not known here, and is not claimed.
 function mergedByHand(ctx, record, view, say) {
   const route = routeOf(ctx);
   const checkedTip = view.headRefOid === route.tipOid;
+  const by = record.confirmation?.tip === view.headRefOid ? "ship" : "hand";
   record.merged = {
-    by: record.confirmation?.tip === view.headRefOid ? "ship" : "hand", pr: view.number ?? record.pr.number, head: view.headRefOid,
+    by, pr: view.number ?? record.pr.number, head: view.headRefOid,
+    ...(by === "ship" ? { method: record.confirmation.method ?? "merge" } : {}),
     mergeCommit: view.mergeCommit?.oid ?? null, checkedTip, at: new Date().toISOString()
   };
   saveLanding(ctx, record);
@@ -4777,6 +5167,12 @@ async function landingStep(ctx, record, options, say) {
       + `merges, and /tagteam:ship ${ctx.plan} picks the plan up again.`);
     return { say, planLanding: landingSummary(ctx, record), next: nextCommand(ctx, "end", null) };
   }
+  // Past the answers that commit nothing — merged, and a person's Stop — and
+  // before anything below can resume a round, merge the base in or make the
+  // version commit: a base that requires signed commits, with git here not
+  // signing, stops with the plan branch, and what this record says of it, as
+  // they were.
+  landingSignatureRefusal(ctx, route);
   if (record.stopped) {
     record.stopped = null;
     saveLanding(ctx, record);
@@ -4842,14 +5238,19 @@ async function planLand(options) {
     throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no plan pull request to open or land; nothing was done`);
   }
   if (options.approve && options.stop) throw new Stop("--approve and --stop are two answers to one question; give one", 2);
+  if (options.squash && !options.approve) {
+    throw new Stop("--squash is the person's Squash, and is given with --approve <their email>, as Merge is; nothing was done", 2);
+  }
   const say = [];
   const payload = await landingStep(ctx, readLanding(ctx), options, say);
-  // A Merge given where the step never reached the question for this tip is
-  // not recorded either, and says so: a merge-in, a fix or a check was due first.
+  // A Merge or a Squash given where the step never reached the question for
+  // this tip is not recorded either, and says so: a merge-in, a fix or a check
+  // was due first.
+  const answer = options.squash ? "Squash" : "Merge";
   if (options.approve && !readPlanLanding(ctx.shipDir).confirmation && !readPlanLanding(ctx.shipDir).merged
-    && !(payload.say ?? []).some((line) => line.startsWith(`Not recording ${options.approve}'s Merge`))
-    && !(payload.say ?? []).some((line) => line.startsWith("Merge confirmed by"))) {
-    (payload.say ?? (payload.say = [])).unshift(`Not recording ${options.approve}'s Merge: the plan is not at its question for this tip `
+    && !(payload.say ?? []).some((line) => line.startsWith(`Not recording ${options.approve}'s ${answer}`))
+    && !(payload.say ?? []).some((line) => line.startsWith(`${answer} confirmed by`))) {
+    (payload.say ?? (payload.say = [])).unshift(`Not recording ${options.approve}'s ${answer}: the plan is not at its question for this tip `
       + "yet — what is due first is below. No approval clears a blocker.");
   }
   emit(payload);
@@ -5303,7 +5704,11 @@ async function end(options) {
   const landing = isPlanRoute(route) ? readPlanLanding(ctx.shipDir) : {};
   const planLanding = isPlanRoute(route) && landingBegun(ctx.shipDir) && !landing.unreadable ? landingSummary(ctx, landing) : null;
   if (isPlanRoute(route) && landing.merged) {
-    say.push(`This plan landed on ${route.base} through its pull request #${landing.merged.pr}, one merge commit of ${route.branch} at `
+    // How it merged only when the ship knows: a merge made by hand on GitHub is
+    // not claimed to be either.
+    const method = mergeMethodOf(landing.merged);
+    const as = method === "squash" ? "as one squash commit of" : method === "merge" ? "one merge commit of" : "merging";
+    say.push(`This plan landed on ${route.base} through its pull request #${landing.merged.pr}, ${as} ${route.branch} at `
       + `${short(landing.merged.head)}${landing.merged.by === "hand" ? ", merged on GitHub by a person" : ""}`
       + `${landing.merged.checkedTip === false ? " — not the tip this ship checked" : ""}.`
       + (landing.branchDeleted === false ? ` ${route.branch} is still on origin.` : ""));
@@ -5313,6 +5718,15 @@ async function end(options) {
     else if (landing.pr?.number) {
       say.push(`The plan's pull request #${landing.pr.number} into ${route.base} is open${landing.stopped ? ", stopped by the person" : ""}; `
         + `nothing of it merges until a person says Merge, and /tagteam:ship ${ctx.plan} brings back what would land.`);
+    }
+    // What the last question read of the plan's commits at this tip, as recorded.
+    const signed = landing.unreadable ? null : landing.signatures;
+    if (signed?.tip && signed.tip === route.tipOid && Array.isArray(signed.unverified) && signed.unverified.length > 0) {
+      say.push(`GitHub does not show ${unverifiedList(signed.unverified)} on ${route.branch} as verified, and `
+        + `${requiresSignatures(signed)}, so the plan's pull request does not land with a merge commit; `
+        + (signed.squash?.allowed
+          ? "a squash was allowed when last read, and Squash lands it as one squash commit only when a person gives it."
+          : "a squash was not allowed when last read, so nothing the ship offers lands it yet."));
     }
   }
   // A resolve round that did not pass is named, so that a train ended on one is
@@ -5394,10 +5808,11 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       decided result for the same tip. --why is last-spec, fix-unit, merge-in,
                                       resolve, version or tip-moved, and says what the result answers
   plan-collect                        judge that reviewer; clean, a fix unit to ship, or a stop for a person
-  plan-land [--title <t>] [--approve <email> | --stop] [--run-gone | --run-live]
+  plan-land [--title <t>] [--approve <email> [--squash] | --stop] [--run-gone | --run-live]
                                       on a plan branch whose tip is clean: open the plan's pull request, wait for its
                                       checks, check it against the base, and ask what lands; --approve is the person's
-                                      Merge, the only thing that merges a plan, and --stop records that they stopped it
+                                      Merge, the only thing that merges a plan, and with --squash their Squash, taken
+                                      only where the question offers it; --stop records that they stopped it
   end                                 release the lock and remove the worktree
 `;
 
@@ -5411,6 +5826,7 @@ function parseArgs(argv) {
     if (key === "--run-gone") { options.runGone = true; continue; }
     if (key === "--run-live") { options.runLive = true; continue; }
     if (key === "--stop") { options.stop = true; continue; }
+    if (key === "--squash") { options.squash = true; continue; }
     const value = rest[++index];
     if (value === undefined) throw new Stop(`${key} requires a value\n${USAGE}`, 2);
     options[key.slice(2)] = value;

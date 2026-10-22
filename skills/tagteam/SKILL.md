@@ -402,7 +402,7 @@ four:
 
 ```bash
 git -C "$R" merge-tree --write-tree <newBaseOid> <candidateOid>
-git -C "$R" commit-tree <mergedTree> -p <newBaseOid> -p <candidateOid> -m "<message>"
+git -C "$R" commit-tree --no-gpg-sign <mergedTree> -p <newBaseOid> -p <candidateOid> -m "<message>"
 git -C "$W" checkout --detach <mergedCommit>
 git -C "$W" switch --discard-changes "<branch>"
 ```
@@ -415,9 +415,13 @@ above:
 ```bash
 git -C "$R" rev-parse --verify --quiet refs/remotes/origin/plan/<slug>  # read-only, after the fetch: where the plan branch is
 git -C "$R" push origin <oid>:refs/heads/plan/<slug>                    # a commit the ship made: recorded before, confirmed after
-gh api repos/{owner}/{repo}                                             # read-only: whether merge commits are allowed
+gh api repos/{owner}/{repo}                                             # read-only: whether merge commits — or, at the plan's question, squash merges — are allowed
 gh api repos/{owner}/{repo}/rules/branches/<base>                       # read-only: rulesets on the base
 gh api repos/{owner}/{repo}/branches/<base>/protection                  # read-only: classic protection, admins only
+git -C "$R" config --type=bool --get commit.gpgsign                     # read-only: whether git here signs, as git parses the boolean
+git -C "$R" config --get gpg.format                                     # read-only: with ssh, a key has to be named
+git -C "$R" config --get user.signingkey                                # read-only: the key, for ssh
+git -C "$R" config --get gpg.ssh.defaultKeyCommand                      # read-only: or the command that finds one, for ssh
 gh pr create --base plan/<slug> --head "<branch>" --title "<title>" --body-file <file>
 gh pr view <number> --json state,mergedAt,mergeCommit,headRefOid,baseRefName  # read-only: the merge commit a squash made
 ```
@@ -427,6 +431,18 @@ ship records putting on the plan branch is its own, whatever kind of commit it
 is; anything else at the tip on origin stops `begin` before it branches and
 `finish` before the landing check. The `gh api` reads run on every `start` of
 such a train; a source that cannot be read is said and not taken as clean.
+
+The rulesets and protection reads also say whether the base requires signed
+commits. When one does, `start` reads the `git config` keys above, and stops
+before anything is created if git here does not sign: `commit.gpgsign` is not
+true, or `gpg.format` is ssh and neither `user.signingkey` nor
+`gpg.ssh.defaultKeyCommand` is set. These are configuration reads only: nothing
+is signed and no signer or key command is run, so a key that is locked is the
+commit's own stop, not this one. The same check runs at the top of `plan-land`,
+the other way round — the `git config` reads first, and the rulesets and
+protection reads only when git here does not sign. There a read that fails is
+not said, and stops nothing, unlike at `start`. The plan's landing question
+answers from the same reads, made once in a run whichever asks first.
 
 Before a spec of such a train begins — never on a spec already in flight — the
 base is dry-run against the plan branch, and only a real conflict opens a
@@ -499,11 +515,13 @@ git -C "$W" checkout --detach <planTip>                       # the tip the land
 git -C "$W" merge --no-ff --no-commit <baseOid>               # the merge of the base after a failed or differing landing
 git -C "$W" diff --name-only --diff-filter=U -z               # read-only: it is clean, as the landing check found
 git -C "$W" add -A && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
-git -C "$W" commit-tree <tree> -p <planTip> -p <baseOid> -m "<message>"   # that merge, the plan tip first
+git -C "$W" config --type=bool --get commit.gpgsign          # read-only, before each commit of the ship's own: whether git signs
+git -C "$W" commit-tree -S <tree> -p <planTip> -p <baseOid> -m "<message>"   # that merge, the plan tip first; -S only when git signs
 git -C "$W" merge --quit                                      # the merge is committed; nothing is left in progress
 git -C "$W" switch --discard-changes --detach <mergeCommit>   # the worktree on it, as it is
 git -C "$R" push origin <mergeCommit>:refs/heads/plan/<slug>  # the push above: recorded before, confirmed after
 gh pr merge <number> --merge --match-head-commit <planTip> --delete-branch=false   # merge.mjs, on a person's Merge only
+gh pr merge <number> --squash --match-head-commit <planTip> --delete-branch=false  # merge.mjs, on a person's Squash only
 git -C "$R" push origin --delete plan/<slug>                  # once the plan's pull request has merged
 ```
 
@@ -527,7 +545,7 @@ git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: wh
 git -C "$R" merge-base --is-ancestor <baseOid> <planTip>      # read-only: whether the plan already holds the base
 git -C "$W" checkout --detach <planTip>                       # the tip the version commit goes on
 git -C "$W" add -- <files> && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
-git -C "$W" commit-tree <tree> -p <planTip> -m "Version <x.y.z>"   # the version commit: the version lines' own bytes and nothing else
+git -C "$W" commit-tree -S <tree> -p <planTip> -m "Version <x.y.z>"   # the version commit: the version lines' own bytes and nothing else; -S only when git signs
 git -C "$W" switch --discard-changes --detach <versionCommit> # the worktree on it, as it is
 git -C "$R" push origin <versionCommit>:refs/heads/plan/<slug>  # recorded before with the increase it makes, confirmed after
 git -C "$R" diff-tree -r --no-renames --name-status -z <parent> <versionCommit>  # read-only: the move is the version lines alone
@@ -568,9 +586,40 @@ git's own merge with those lines set and nothing more. A tip whose one change
 over a tip with a clean whole-plan check is the ship's version commit keeps that
 check's review, and still gets verify and the landing check.
 
-The plan's pull request merges with a merge commit, never a squash, pinned to
-the tip that was checked, and the plan branch is deleted afterwards rather than
-inside the merge command.
+The plan's pull request merges with a merge commit, pinned to the tip that was
+checked, and the plan branch is deleted afterwards rather than inside the merge
+command. The one exception is a base that requires signed commits. There, when
+the landing question is reached, the commits the plan's pull request would bring
+are read one by one, with these forms:
+
+```bash
+git -C "$R" log --reverse --format="%H %s" <baseOid>..<planTip>   # read-only: the commits the plan's pull request brings onto the base
+gh api repos/{owner}/{repo}/commits/<oid>                         # read-only: whether GitHub shows that commit as verified
+```
+
+GitHub refuses a merge commit for a branch holding a commit it does not show as
+verified, so the question names each such commit and does not offer Merge. When
+those commits are all that withholds Merge, and a squash is allowed — the
+repository's `allow_squash_merge`, read with the form above, and no ruleset on
+the base leaving `squash` out of its `allowed_merge_methods` — it offers Squash
+instead: one squash commit of the tip, which GitHub signs, and each spec's own
+commit no longer separate on the base. Only the person picks it, as their own
+answer, and `merge.mjs` makes the squash only when their recorded confirmation
+says Squash. A commit list that cannot be read in full is said as not checked,
+and leaves Merge offered and Squash not. A base with no signature rule reads
+none of this.
+
+The merge of the base and the version commit are signed when git signs
+commits: `commit-tree` does not read `commit.gpgsign`, so the ship reads it in
+its worktree before each of them and passes `-S` exactly when git says true,
+naming no key, so git's own key and format sign them. A signing failure on one
+of them, or on the resolver's merge that the commit chain makes, is a stop that
+names the commit by its subject, quotes git's error and says which command to
+run again once signing works. Nothing is pushed or recorded before it, and no
+resolve attempt is spent. A merge the ship makes itself is aborted and the
+version edits are discarded, since the next run makes both again; the
+resolver's merge is left in progress exactly as it was handed back. Running the
+named command again goes on from there.
 
 The three-command commit runs as one chain, always. `guard-staged.mjs` refuses
 the commit when any file copied by `worktree.copyUntracked` has been staged —
@@ -578,7 +627,8 @@ the reason a `.env.test` copied into a worktree does not end up in history.
 
 The landing check's four are read this way: the first two write objects and move
 no ref, no index and no working tree — the merge commit they build is a throwaway
-that exists to be verified and is never pushed — and the last two are the ship's
+that exists to be verified, is never pushed and is never signed, whatever git's
+configuration says — and the last two are the ship's
 one worktree lent to the check and given back. The discard is what the verify
 commands wrote while the worktree sat on that throwaway commit, proved clean
 before the check began, and nothing else.
@@ -687,7 +737,7 @@ a new commit appears — and every fix round makes one.
 | `collect-findings.mjs` | Read every findings file, check evidence, print a one-line-per-finding summary |
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
-| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit |
+| `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge or Squash for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit, or as one squash commit when the person's recorded answer is Squash |
 | `ci-wait.mjs` | Poll checks, return one classified line |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |

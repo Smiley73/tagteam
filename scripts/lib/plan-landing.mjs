@@ -21,9 +21,14 @@
 //   landing       the landing check of one tip against one base commit
 //   version       the version condition last read, for one tip and one base
 //   mergeIn       the last merge of the base into the plan branch the ship made
-//   confirmation  a person's Merge, for one tip
+//   signatures    on a base that requires signed commits, which of the plan's
+//                 commits GitHub does not show as verified, for one tip and one
+//                 base, and whether a squash was allowed when last read
+//   confirmation  a person's Merge or Squash, for one tip; `method` says which,
+//                 and a confirmation without one is a Merge
 //   stopped       a person's Stop, until the step runs again
-//   merged        the plan pull request merged: by the ship or by hand
+//   merged        the plan pull request merged: by the ship or by hand, and with
+//                 `method` when the ship knows how
 //
 // What is here reads and writes the record and judges it; the git and `gh`
 // around it are the driver's and `merge.mjs`'s.
@@ -48,6 +53,14 @@ export function readPlanLanding(shipDir) {
   }
   try { return JSON.parse(text); } catch (error) { return { unreadable: error.message }; }
 }
+
+/**
+ * How the plan's pull request merged: "merge" for one merge commit, "squash" for
+ * one squash commit, or null when nobody recorded it — a merge made by hand on
+ * GitHub. A merge the ship made before it recorded a method was a merge commit,
+ * since that was then the only one it made.
+ */
+export const mergeMethodOf = (merged) => (merged ? merged.method ?? (merged.by === "ship" ? "merge" : null) : null);
 
 /** Whether the landing step has ever run for this plan. */
 export const landingBegun = (shipDir) => fs.existsSync(landingRecordPath(shipDir));

@@ -104,7 +104,7 @@ function stagePusher() {
         "if (left > 0) {",
         `  const clone = ${JSON.stringify(path.join(dir, "pusher"))};`,
         `  if (!fs.existsSync(clone)) execFileSync('git', ['clone', '-q', ${JSON.stringify(origin)}, clone]);`,
-        "  const g = (...args) => execFileSync('git', ['-C', clone, '-c', 'user.email=m@example.com', '-c', 'user.name=m', ...args]);",
+        "  const g = (...args) => execFileSync('git', ['-C', clone, '-c', 'user.email=m@example.com', '-c', 'user.name=m', '-c', 'commit.gpgsign=false', ...args]);",
         "  g('fetch', '-q', 'origin'); g('checkout', '-q', '-B', 'main', 'origin/main');",
         "  fs.writeFileSync(clone + '/moved-' + left + '.txt', 'moved ' + left + '\\n');",
         "  g('add', '-A'); g('commit', '-q', '-m', 'moved ' + left); g('push', '-q', 'origin', 'HEAD:refs/heads/main');",
