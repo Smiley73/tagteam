@@ -598,6 +598,41 @@ test("signing is judged as git judges it, from its configuration alone: an SSH f
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("signing is judged by the configuration the ship's commits are made under: the worktree's own when it exists, and never the primary checkout's alone", () => {
+  const staged = stagePlan();
+  const { dir, repo, plan, origin, shipDir } = staged;
+  const env = isolatedGit(staged);
+  const signer = trippedSigner(staged);
+  fs.writeFileSync(env.GH_STUB_API, JSON.stringify(SIGNED_BY_RULESET));
+  setSigning(repo, { "extensions.worktreeConfig": "true", "gpg.format": "openpgp", "gpg.program": signer.program });
+  const stopsUnsigned = (result) => {
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /a ruleset on main requires signed commits, and git here does not sign commits: commit\.gpgsign is not true/);
+  };
+
+  // No worktree yet: signing on for the primary checkout alone is not signing
+  // for the worktree git is about to add.
+  git(repo, "config", "--worktree", "commit.gpgsign", "true");
+  stopsUnsigned(ship("start", plan, [], env));
+  assert.equal(planRefs(origin), "");
+
+  // Signing on for every checkout: start goes on and adds the worktree.
+  spawnSync("git", ["-C", repo, "config", "--worktree", "--unset-all", "commit.gpgsign"]);
+  setSigning(repo, { "commit.gpgsign": "true" });
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const worktree = trainOf(shipDir).worktree;
+  const tip = onOrigin(origin, "plan/demo");
+
+  // Signing off in the ship's worktree alone, where its commits are made, stops
+  // the route under way though the primary checkout still signs.
+  git(worktree, "config", "--worktree", "commit.gpgsign", "false");
+  assert.equal(git(repo, "config", "--type=bool", "--get", "commit.gpgsign"), "true");
+  stopsUnsigned(ship("start", plan, ["--reclaim"], env));
+  assert.equal(onOrigin(origin, "plan/demo"), tip);
+  assert.ok(!signer.ran());
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("start says nothing new with a signature rule and signing on, with signing off and no rule, or with the protection unreadable", () => {
   // A new route: with the rule and signing on, start says what it says with neither.
   const runs = [[SIGNED_BY_RULESET, "true"], [{}, "true"]].map(([answers, gpgsign]) => {

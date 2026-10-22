@@ -1416,21 +1416,31 @@ function signsCommits(ctx) {
     + `nothing was committed or pushed: ${read.error}. git commit refuses that setting as well; correct it, then run this again.`);
 }
 
+// `key` as git reads it in `dir` — its last value, null when unset — or git's
+// error for a value it refuses. With `shared`, what is set for `dir`'s own
+// checkout alone (git's worktree scope, `extensions.worktreeConfig`) is left
+// out: the configuration a worktree git has yet to add will read.
+function configIn(dir, key, { bool = false, shared = false } = {}) {
+  const read = git(dir, ["config", ...(bool ? ["--type=bool"] : []), ...(shared ? ["--show-scope", "--get-all"] : ["--get"]), key],
+    { allowFailure: true });
+  if (read.status === 1 && read.stderr.trim() === "") return { value: null };
+  if (read.status !== 0) return { error: (read.stderr || read.stdout || "").trim() };
+  if (!shared) return { value: read.stdout.trim() };
+  const values = read.stdout.split("\n").filter(Boolean).map((line) => line.split("\t"))
+    .filter(([scope]) => scope !== "worktree").map(([, ...value]) => value.join("\t").trim());
+  return { value: values.at(-1) ?? null };
+}
+
 // `commit.gpgsign` as git parses a boolean in `dir` — `yes`, `on` and `1` are
 // true — with unset as off, or git's error for a value it refuses. The one read
 // of the setting, behind both the ship's commits and the signature check.
-function gpgsignIn(dir) {
-  const read = git(dir, ["config", "--type=bool", "--get", "commit.gpgsign"], { allowFailure: true });
-  if (read.status === 0) return { on: read.stdout.trim() === "true" };
-  if (read.status === 1 && read.stderr.trim() === "") return { on: false };
-  return { error: (read.stderr || read.stdout || "").trim() };
+function gpgsignIn(dir, { shared = false } = {}) {
+  const read = configIn(dir, "commit.gpgsign", { bool: true, shared });
+  return read.error ? { error: read.error } : { on: read.value === "true" };
 }
 
 // A key of git's configuration as read in `dir`, or null when it is unset or empty.
-const gitConfigValue = (dir, key) => {
-  const read = git(dir, ["config", "--get", key], { allowFailure: true });
-  return read.status === 0 && read.stdout.trim() !== "" ? read.stdout.trim() : null;
-};
+const gitConfigValue = (dir, key, { shared = false } = {}) => configIn(dir, key, { shared }).value || null;
 
 /**
  * What keeps git here from signing the commits the ship makes, by git's own
@@ -1438,16 +1448,23 @@ const gitConfigValue = (dir, key) => {
  * true, "key" when it signs with an SSH key and nothing names one. Null when git
  * would sign — with openpgp or x509 it picks a key from the committer's identity
  * when `user.signingkey` is unset — and when the setting is one git refuses,
- * which the commit's own read stops on. Read in the primary checkout, whose
- * configuration the ship's worktree shares. Nothing is signed and no signer is
- * started: a key that is locked or does not work is the commit's stop.
+ * which the commit's own read stops on. Read where the ship's commits are made:
+ * in its worktree when that exists, exactly as `shipCommit` reads it there, so
+ * the worktree's own configuration and the `includeIf` conditions that hold for
+ * it decide both alike. Before the worktree exists, read in the primary
+ * checkout without what is set for that checkout alone, which the worktree git
+ * adds for the ship will not have. Nothing is signed and no signer is started: a
+ * key that is locked or does not work is the commit's stop.
  */
 function signingGap(ctx) {
-  const gpgsign = gpgsignIn(ctx.repo);
+  const dir = exists(ctx.worktree) ? ctx.worktree : ctx.repo;
+  const shared = dir !== ctx.worktree;
+  const value = (key) => gitConfigValue(dir, key, { shared });
+  const gpgsign = gpgsignIn(dir, { shared });
   if (gpgsign.error) return null;
   if (!gpgsign.on) return "switch";
-  if (gitConfigValue(ctx.repo, "gpg.format") !== "ssh") return null;
-  return gitConfigValue(ctx.repo, "user.signingkey") || gitConfigValue(ctx.repo, "gpg.ssh.defaultKeyCommand") ? null : "key";
+  if (value("gpg.format") !== "ssh") return null;
+  return value("user.signingkey") || value("gpg.ssh.defaultKeyCommand") ? null : "key";
 }
 
 // A plan landing about to commit on a base that requires signed commits, with
