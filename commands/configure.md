@@ -128,10 +128,12 @@ names, internal ids. See *Asking* in the skill.
    turn it on, ask them for the `lead` and `codex` models and the `planner`,
    `adversary` and `codex` efforts, the settings the plan cycle actually
    dispatches at; carry the rest over from questions 2 and 3 without asking.
-6. `reviewers.default`. Recommend `correctness` and `code-quality`, and explain
-   that Codex and the adversary run on every spec regardless, so a typical spec
-   gets four readers, and that every lens is one more reader over every round of
-   every spec. Show the full roster and let them pick from it — the shipped
+6. `reviewers.default`. Recommend `correctness`, `code-quality` and `economy`,
+   and explain that Codex and the adversary run on every spec regardless, so a
+   typical spec gets five readers, that every lens is one more reader over every
+   round of every spec, and that `economy` is the one reader asking what the
+   change could do without — the only lens whose findings make a diff smaller.
+   Show the full roster and let them pick from it — the shipped
    briefs plus anything this repository calibrates in `.tagteam/lenses/`, which
    are equally selectable and, on a reconfigure, are usually the ones this
    project cares most about.

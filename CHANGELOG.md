@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0
+
+- Add an `economy` lens, shipped with the plugin and in the example roster: a reviewer that asks what a change could do without. It files deletions — a comment that restates or defends the code, a helper cut out for one caller, a type with one producer and one consumer, an export only a test reaches, a test that fails for the same reason as another, and what the change made unnecessary and left standing — and it is the one lens whose findings make a diff smaller. It files `major` when the removable part is a fifth or more of the change, or the diff is more than half again the size its spec expected.
+- Have the implementer end with a deletion pass over its own diff, before it reports, removing every line the spec and the tests do not need; and have it match a neighbourhood's comment density only where the comments say why.
+- Have a spec's Outcome end with the size it expects, which the implementer reads as a budget and reports an overrun against, and have its Tests section name the three to five behaviours that must be pinned rather than every assertion a writer can think of. A spec's Changes also say what the change makes unnecessary, so it is deleted rather than left beside its replacement.
+- Let a reviewer file something present that nothing needs as a finding, with what goes and what stays true without it, from a lens whose brief asks for surplus; for every other lens a long diff is still not a finding.
+- `/tagteam:configure` recommends `economy` alongside `correctness` and `code-quality` for the default set.
+
 ## 0.11.0
 
 - Merge a spec into its plan's branch once its checks are clean, whether or not it changes something a person will notice. A spec on a plan branch no longer stops for that; the plan's own pull request is where you judge the combined change.

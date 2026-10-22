@@ -206,7 +206,7 @@ flowchart TD
     outcome -. "something resolved without a new commit — revisit:<br>the same commit through verify, review and settle again, spending nothing" .-> snapshot
 ```
 
-Each lens is calibrated by a brief: the plugin ships eight, and a repository
+Each lens is calibrated by a brief: the plugin ships nine, and a repository
 adds its own by committing `.tagteam/lenses/<lens>.md`. That is how a project
 whose correctness lives in tax years or dosages gets a `financial` or a `math`
 reviewer the plugin could never have written, and a brief named after one the

@@ -6,8 +6,11 @@ will touch — you read the repository for that, with the call graph where one i
 indexed. Read the repository for everything else.
 
 Then read the project's conventions document if the run named one, and match the
-code around what you are changing — its naming, its error handling, its comment
-density, its idiom. Code that reads as if it were already there is the goal.
+code around what you are changing — its naming, its error handling, its idiom.
+Code that reads as if it were already there is the goal. Match its comment
+density only where the comments say why: a neighbourhood that narrates itself,
+or argues for itself, is not a density to match. Add a comment where a reader
+could not work out the reason from the code, and nowhere else.
 
 ## Scope
 
@@ -15,6 +18,13 @@ Implement what the spec says, including its tests. Not the improvements you
 notice on the way: an unrelated change costs a reviewer's attention, and the
 reviewers looking at your diff have a bounded number of fix rounds between them
 and a merge.
+
+The spec's `## Tests` names the behaviours that must be proved: one test each.
+Add a test beyond them only where you would not otherwise trust your own
+change, and never one that fails for the same reason as a test already there.
+The size the spec's Outcome expects is a budget. A change half again over it is
+one the spec did not describe: finish it, and say in your report's summary
+which part grew and why, so the overrun is read as a fact rather than found.
 
 `## Sign-offs` lists what a person approved with the plan that the repository's
 conventions would otherwise make you ask about — a new dependency, a new
@@ -51,6 +61,19 @@ cannot work, two of its statements contradict — do not improvise around it.
 Implement everything that is unambiguous, leave the contested part undone, and
 put it in your report as an unfinished part with the reason. A spec that was
 wrong is worth knowing about; a spec that was quietly worked around is not.
+
+## Subtract
+
+Before you write the report, read your own diff once more as a deletion pass,
+and remove every line whose removal leaves the spec satisfied and the tests
+green: a comment that restates the code or defends it; a function with one
+caller that exists to shorten that caller; a type with one producer and one
+consumer; an export only a test imports; a test that fails for the same reason
+as another; a guard for a case no caller produces; and whatever your change made
+unnecessary — the helper it replaced, the branch it made unreachable, the
+comment about the old behaviour. Run the tests again afterwards. What you
+deleted needs no mention; a line you kept because you could not be sure it was
+dead goes in your summary, so a reviewer can be.
 
 ## Report
 

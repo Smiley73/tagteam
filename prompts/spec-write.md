@@ -34,6 +34,10 @@ not apply (a docs-only spec has nothing for `code-quality` to say). Leave it
 `[]` when the defaults are right, which is most of the time.
 
 **Outcome** — what must be true when this is done, observable from outside.
+End it with one line on the size you expect — files touched, lines of source,
+lines of tests, roughly. The implementer reads it as a budget and a reviewer
+reading for surplus as a yardstick, so a rough number taken from the plan's
+shape is worth more than none; where you genuinely cannot say, write that.
 **Context** — what the implementer cannot read out of the repository: the
 decision behind an approach, the constraint that is not written down, the
 gotcha in the module being touched. Point at files by path.
@@ -43,8 +47,16 @@ a file only when the implementer could not find it from the repository — a
 module that does not exist yet, a helper hidden somewhere unexpected. A list of
 every file with a line on what changes in it is the implementer's job done badly
 in advance, and it becomes the thing reviewers then grade compliance against.
-**Tests** — what behaviour must be proved and what a passing test would fail to
-catch. Not the test code, not the test names.
+Say what the change makes unnecessary — the helper it replaces, the branch it
+makes unreachable — so that it is deleted rather than left beside its
+replacement.
+**Tests** — the behaviours, usually three to five, whose silent failure would
+mean the spec did not deliver, one line each with the input that would expose
+it. Not the test code, not the test names, not every branch and boundary, and
+not a second test to guard the first: each line here becomes at least one
+test, and a list of every assertion you can think of becomes a suite that
+every later change pays for. What the list leaves out is the implementer's
+judgment.
 **Done when** — the observable criteria, and which verify commands must pass.
 **Sign-offs** — what this spec needs that the repository's conventions say to
 ask a person about first: typically a new or upgraded dependency, a new
@@ -76,7 +88,7 @@ how the framework works.
 
 Do include anything the repository cannot tell it: why this approach rather than
 the obvious one, which existing helper to reuse instead of writing a new one,
-what a passing test would fail to catch.
+which behaviour a test must pin because nothing else would catch it breaking.
 
 Before writing Changes and Tests, ask of each item "what already serves this
 purpose?" and cut what the repository, plan, or Done when checks already cover,

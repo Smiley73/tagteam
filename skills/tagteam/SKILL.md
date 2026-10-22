@@ -224,7 +224,7 @@ ships. Anything older is a different shape and is replaced.
 ### Lens briefs
 
 A rostered lens is a reviewer that can be dispatched, and one file calibrates it.
-The plugin ships eight under `prompts/lenses/`; a repository writes its own
+The plugin ships nine under `prompts/lenses/`; a repository writes its own
 under `.tagteam/lenses/`, which is how a roster names a lens the plugin has no
 brief for — `financial`, `math`, whatever this codebase's correctness actually
 turns on. A brief is a markdown file whose first line is a `# Lens: …` heading;

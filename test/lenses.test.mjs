@@ -102,7 +102,7 @@ test("a file that is there and unusable is refused by name, not reported as abse
 });
 
 test("the heading rule matches the shipped briefs, which head themselves readably", () => {
-  // Two of the eight do not name their own file — `# Lens: user experience`
+  // Two of the nine do not name their own file — `# Lens: user experience`
   // calibrates `experience`, and `# Lens: code quality` calibrates
   // `code-quality` — so the rule is the prefix, not the lens name. Pinned here
   // because tightening it to an exact name match would refuse both briefs, and
