@@ -26,7 +26,8 @@
       "code-quality",
       "experience",
       "consistency",
-      "cost"
+      "cost",
+      "economy"
     ],
     "default": ["correctness", "code-quality"]
   },

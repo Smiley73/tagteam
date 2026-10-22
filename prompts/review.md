@@ -33,6 +33,12 @@ that failure into `detail`: the value, the path through the code, the observable
 result. If you cannot name how it fails, you have a preference rather than a
 defect — file it at `nit` or not at all.
 
+The other kind of finding is something **present that nothing needs**: a
+line, a block, a file whose removal leaves the behaviour the spec names and
+its tests unchanged. Write into `detail` what goes and what stays true without
+it. Only a lens whose brief asks for surplus files these; for every other
+lens, a diff that is merely long is not a finding.
+
 The spec's `## Sign-offs` names what a person approved with the plan — a new
 dependency, a new top-level directory, and the like. That the change does what
 it lists is not a finding; how it does it still is. A change of that kind that
@@ -51,7 +57,8 @@ Severity:
   feature that does not work.
 - `major` — must not merge without a person deciding. A real defect on a path
   that is reachable but narrow; a missing test for behaviour the spec's
-  `## Done when` names.
+  `## Done when` names; a change far past the size its spec expected, from the
+  lens that reads for surplus, with the parts that account for it named.
 - `minor` / `nit` — recorded, never gating, never fixed automatically. A missing
   test for anything the spec did not make a condition of being done is minor.
 
