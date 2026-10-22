@@ -261,6 +261,35 @@ test("merge.mjs refuses the plan without a Merge for its tip, over a check that 
   }
 });
 
+test("--dry-run builds --squash from a confirmation whose method is squash, --merge from one with no method, and refuses a method it does not know", () => {
+  const cases = [
+    ["no method", (confirmation) => confirmation, "--merge"],
+    ["squash", (confirmation) => ({ ...confirmation, method: "squash" }), "--squash"],
+    ["merge", (confirmation) => ({ ...confirmation, method: "merge" }), "--merge"]
+  ];
+  for (const [what, change, flag] of cases) {
+    const staged = stage(["p1"]);
+    staged.setRecord("p1", (record) => ({ ...record, confirmation: change(record.confirmation) }));
+    const dry = spawnSync(process.execPath, [MERGE, "--plan-ship", staged.ships.p1.shipDir, "--repo", staged.repo, "--config", staged.configPath, "--dry-run"],
+      { encoding: "utf8", env: { ...process.env, PATH: `${path.join(staged.dir, "bin")}${path.delimiter}${process.env.PATH}`,
+        GH_STUB_ORIGIN: staged.origin, GH_STUB_STATE: path.join(staged.dir, "pulls.json"), GH_STUB_LOG: path.join(staged.dir, "gh.jsonl") } });
+    assert.equal(dry.status, 0, `${what}: ${dry.stderr}`);
+    const { argv, method } = JSON.parse(dry.stdout);
+    assert.deepEqual(argv, ["pr", "merge", "1", flag, "--match-head-commit", staged.ships.p1.tip, "--delete-branch=false"], what);
+    assert.equal(method, flag.slice(2), what);
+    assert.equal(staged.merges().length, 0, `${what}: a dry run merged`);
+    assert.equal(staged.main(), staged.base, what);
+    fs.rmSync(staged.dir, { recursive: true, force: true });
+  }
+  const staged = stage(["p1"]);
+  staged.setRecord("p1", (record) => ({ ...record, confirmation: { ...record.confirmation, method: "rebase" } }));
+  const refused = staged.run("p1");
+  assert.notEqual(refused.status, 0, refused.stdout);
+  assert.match(refused.stderr, /records the method "rebase", which is neither a Merge nor a Squash; nothing was merged/);
+  assert.equal(staged.merges().length, 0);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
 test("with no version lines recorded on the route the condition holds, and a plan confirmed for its tip merges", () => {
   const staged = stage(["p1"]);
   staged.setRoute("p1", (route) => ({ ...route, versionFiles: [] }));

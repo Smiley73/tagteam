@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isMain } from "./lib/is-main.mjs";
 import { repairScope } from "./gates.mjs";
-import { readPlanLanding, resultsFor } from "./lib/plan-landing.mjs";
+import { mergeMethodOf, readPlanLanding, resultsFor } from "./lib/plan-landing.mjs";
 
 function directories(root) {
   try {
@@ -208,7 +208,11 @@ function planLandingOf(root) {
       results: results
         ? { wholePlan: results.wholePlan.status, ci: results.ci.status, landing: results.landing.status, version: results.version.status }
         : { wholePlan: "not-run", ci: "not-run", landing: "not-run", version: "not-run" },
-      ...(record.merged ? { mergedBy: record.merged.by ?? null, mergedAtCheckedTip: record.merged.checkedTip ?? null } : {})
+      // `mergedAs` is "merge", "squash", or null for a merge made by hand,
+      // whose method nobody recorded.
+      ...(record.merged
+        ? { mergedBy: record.merged.by ?? null, mergedAtCheckedTip: record.merged.checkedTip ?? null, mergedAs: mergeMethodOf(record.merged) }
+        : {})
     };
   } catch {
     return null;
