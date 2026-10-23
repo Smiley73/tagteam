@@ -476,12 +476,21 @@ test("every reporting dispatch the driver prints names the path its agent must w
 });
 
 // The two answers to the Recurring question are a person's, like `revisit`:
-// `next` never prints them. A redesign is budgeted like a fix and dispatched
-// after the edge, and its question carries none of the run's vocabulary.
+// `next` never prints `accept` or `revisit`, and prints `redesign` only where
+// `churnAsk` says `autoRedesign` answered the question. A redesign is budgeted
+// like a fix and dispatched after the edge, and its question carries none of
+// the run's vocabulary.
 test("redesign and accept are person-only doors, budgeted before dispatch, and the ask names no severity", () => {
-  for (const door of ["redesign", "accept", "revisit"]) {
-    assert.doesNotMatch(shipDriver, new RegExp(`nextCommand\\(ctx, "${door}"`), `next prints ${door}, which only a person decides`);
+  const nexts = [...shipDriver.matchAll(/nextCommand\(ctx,[^)]*\)/g)].map(([call]) => call);
+  for (const door of ["accept", "revisit"]) {
+    assert.ok(!nexts.some((call) => call.includes(`"${door}"`)), `next prints ${door}, which only a person decides`);
   }
+  for (const call of nexts.filter((call) => call.includes('"redesign"'))) {
+    assert.match(call, /^nextCommand\(ctx, churn\.auto \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
+  }
+  const churn = driverFunction("churnAsk");
+  assert.equal(churn.split("result.auto = true").length - 1, 1, "churnAsk answers redesign in one place");
+  assert.match(churn, /if \(ctx\.config\.autoRedesign && !used && signals\.length > 0\) \{\s*result\.auto = true;/, "the automatic answer is not behind the setting, an unused rewrite and the same file failing");
   const redesign = driverFunction("redesign");
   const edge = redesign.indexOf('transition(ctx, id, "fixing", { budgeted: true })');
   const dispatch = redesign.indexOf("redesignDispatch(");
