@@ -235,12 +235,14 @@ person can do is set the line back in the worktree, keeping the rest of the
 change, and run `snapshot` again, or stop the train. A dependency added to the
 same file is not a version change and does not stop.
 
-You do not choose the route; `next` does. Three steps `next` never prints,
-because only a person decides them: `revisit`, which looks at a spec that
-stopped for a person again — see *Looking again* below — and `redesign` and
-`accept`, the answers to the *Recurring* question that are not "fix it again"
-or "publish as it is" — see *After `collect` and `settle`* below. What is yours
-at each point:
+You do not choose the route; `next` does. Three steps are a person's to
+decide: `revisit`, which looks at a spec that stopped for a person again — see
+*Looking again* below — and `redesign` and `accept`, the answers to the
+*Recurring* question that are not "fix it again" or "publish as it is" — see
+*After `collect` and `settle`* below. `next` never prints `revisit` or
+`accept`. It prints `redesign` in one case only: with `autoRedesign` on, the
+first time in a cycle that the same file keeps failing and a fix round is left.
+What is yours at each point:
 
 - **After `begin`, `fix` and `repair`**: say the announcement in `say` — what is
   starting, which round of how many, and at what model and effort. Say it every
@@ -268,6 +270,14 @@ at each point:
   file once — so put it once; never merge it with anything or ask twice. The
   `ask` says all of what follows; do not paraphrase the commands away. It comes
   in three forms.
+
+  With `autoRedesign` on, the first time in a cycle that the same file keeps
+  failing with a fix round left, there is no `ask`: `next` is the `redesign`
+  command, and `say` says the question was answered `redesign` automatically
+  because the setting is on, and that a person is asked if the rewrite does not
+  settle it. Relay that line and the *Recurring:* lines, then run `next`. Every
+  other form below still comes as an `ask`. That includes the loose signal on
+  its own, the question at the cap, and any question after the cycle's rewrite.
 
   *A fix round is still left* — four answers. **Fix it once more** is `next`.
   **Redesign** is
@@ -337,13 +347,16 @@ at each point:
   and, when the spent round was the one past the limit, that it is gone. Relay it
   and run `next`.
 - **Never dispatch a fixer of your own, and never run `redesign` or `accept`
-  on your own judgement.** A commit that reaches `snapshot` without `fix` having
-  dispatched it is committed and counted as a fix round all the same —
+  on your own judgement.** Run `redesign` only when a person answers with it or
+  `next` prints it; never run `accept` without the person. A commit that
+  reaches `snapshot` without `fix` having dispatched it is committed and
+  counted as a fix round all the same —
   `snapshot` says so — but it was never announced, and it is not the way round
   a spent budget. There are two ways round one, and both are a person's: raising
   `limits.fixRounds`, or answering the question at the cap with `redesign`, which
   buys one round past it once per cycle. `redesign` and `accept` are answers to a
-  question, and only the person answers it.
+  question, and only the person answers it, except where the setting answers
+  `redesign` and `next` says so.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
   returned, or the line its finished notice carries. If it
   contains *how it routed could not be confirmed*, take *When Codex could not

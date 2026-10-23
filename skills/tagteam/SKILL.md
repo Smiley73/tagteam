@@ -174,12 +174,16 @@ touch, then any `--file` additions; a pull request finding or one with no file
 counts toward the signal but is not a file to rewrite, and when no file is left
 the question offers no `redesign` and at the cap nothing is asked. While a fix
 round is still available the question has two answers besides "fix it again"
-and "stop" that `next` never prints: `redesign`, which spends a fix round on a
+and "stop" that `next` does not print, but for the case below: `redesign`, which spends a fix round on a
 fresh implementer working from a brief of every finding the rounds record on
 those files and how each was answered, and `accept`, which spends nothing and
 publishes the change as it is with what is open disclosed — an open finding is a
 blocker no approval clears, so the spec then waits at `finish` to be merged by
-hand. With every fix round spent they ask before anything publishes, and the
+hand. With `autoRedesign` on, the first such question in a cycle with a fix
+round left and the same file failing is not asked: `next` is `redesign`, and
+`say` says it was answered automatically. The loose signal alone, the question
+at the cap and every later question are still a person's, and so is `accept`.
+With every fix round spent they ask before anything publishes, and the
 question has three answers: `redesign`, which takes one round past
 `limits.fixRounds` — `gates.mjs grant`, taken only when this question was put
 for this round, candidate and cycle; publishing as it is, which is `next`, since

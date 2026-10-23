@@ -669,8 +669,12 @@ function liveAt(ctx, id, state, round) {
 // rule: a cycle gets one rewrite, in budget or past the cap, and a rewrite needs
 // a file it could change — the loose signal's findings may name none.
 //
-// - A fix round left: the question, with a redesign among its answers only while
-//   the cycle's rewrite is unused and a file is left to rewrite.
+// - A fix round left, `autoRedesign` on, the cycle's rewrite unused and the same
+//   file failing: nothing is asked, and `auto` says the question is answered
+//   `redesign` — the caller prints that command as `next`. The loose signal alone
+//   never answers it: what it names is spread across the change.
+// - A fix round left otherwise: the question, with a redesign among its answers
+//   only while the cycle's rewrite is unused and a file is left to rewrite.
 // - Every fix round spent and the rewrite unused: the question at the cap, whose
 //   redesign answer is the one round past the limit. It is recorded — see
 //   `capAskPath` — and at `settle` (`honour`) a record from the same round's
@@ -694,6 +698,10 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   const used = redesignUsed(ctx, id, state);
   const rewritable = files.length > 0;
   if (spent < limit) {
+    if (ctx.config.autoRedesign && !used && signals.length > 0) {
+      result.auto = true;
+      return result;
+    }
     result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used, rewritable, loose });
     return result;
   }
@@ -718,6 +726,9 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   result.ask = redesignAsk(signals, { spent, limit, atCollect, atCap: true, loose });
   return result;
 }
+
+const AUTO_REDESIGN = "The Recurring question is answered redesign automatically, because autoRedesign is on in this repository's configuration: "
+  + "a fresh implementer rewrites the area on a fix round this cycle still has. If the rewrite does not settle it, a person is asked.";
 
 // A spec that stopped for a person stays exactly as it stopped until a person
 // says otherwise. Two doors lead out of waiting — `repair` for a red check and
@@ -3157,9 +3168,10 @@ async function collect(options) {
   const churn = churnAsk(ctx, id, state, round.round, { openForFixer, atCollect: true });
   say.push(...churn.signal);
   if (churn.note) say.push(churn.note);
+  if (churn.auto) say.push(AUTO_REDESIGN);
   emit({
     say, review: review.status, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}),
-    next: nextCommand(ctx, review.status === "open" ? "fix" : "recheck", id)
+    next: nextCommand(ctx, churn.auto ? "redesign" : review.status === "open" ? "fix" : "recheck", id)
   });
 }
 
@@ -3258,8 +3270,9 @@ async function fix(options) {
 }
 
 // A person's answer to the Recurring question: stop patching the last finding
-// and have a fresh implementer rewrite the area. `next` never prints this; the
-// ask names it. In budget it spends a fix round exactly as `fix` does. At the
+// and have a fresh implementer rewrite the area. The ask names it, and `next`
+// prints it only where `autoRedesign` answers the question — see `churnAsk`.
+// In budget it spends a fix round exactly as `fix` does. At the
 // cap it spends the one round past the limit, through the grant `gates.mjs
 // grant` records, and only when the question at the cap was put for this round,
 // candidate and cycle — see `capAskPath`. Either way it uses up the cycle's one
@@ -3662,10 +3675,12 @@ async function settle(options) {
       say.push(`Publishing as it is, as you decided at round ${churn.honoured.round} when every fix round was spent: what is open goes into the pull request under Risk, it will not merge unattended, and finish cannot approve past an open finding — merging it is yours to do on GitHub.`);
     } else if (churn.note) {
       say.push(churn.note);
+    } else if (churn.auto) {
+      say.push(AUTO_REDESIGN);
     } else {
       say.push("Something blocking or major is still open, so another fix round follows if the budget allows one.");
     }
-    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, "fix", id) });
+    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, churn.auto ? "redesign" : "fix", id) });
   }
   emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
 }
