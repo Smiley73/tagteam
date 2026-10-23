@@ -115,6 +115,13 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     asked-at-cap.json  the Recurring question was put at the cap: the round,
                  candidate, cycle and the ids the person was shown          ignored
     redesign-cycle.json  the cycle whose one rewrite has been chosen        ignored
+    fixers.json  every fixer handed findings: its brief, where its report is
+                 kept, and the re-check its table was judged at             ignored
+    fix-outcomes.json  the latest fixer tables, bound to the round and
+                 candidate they judged; publish hands their not-addressed
+                 rows over                                                  ignored
+    goal-conflict.json  a fixer answered that a repair would go against the
+                 goal: the findings and its notes; no fixer follows it      ignored
     redesign-briefs/  round-<n>-<stamp>.md, the brief a redesign implementer
                  read, kept outside every round                             ignored
     declined/    the reports of fixers and redesign implementers that changed

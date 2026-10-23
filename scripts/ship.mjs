@@ -41,6 +41,7 @@ import {
   restoreWorktree
 } from "./lib/landing.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
+import { carryEligible, recommendation } from "./lib/carry.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, writeRoundFile } from "./lib/round-store.mjs";
@@ -736,6 +737,8 @@ function fixerDispatch(ctx, spec, recordPath, job) {
     prompt: [
       `Job: fixer`,
       `Findings to fix (only these): ${recordPath}`,
+      `Spec this change implements (to read, not to work from): ${spec.path}`,
+      `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")}`
     ].join("\n")
@@ -1060,6 +1063,124 @@ function openAt(ctx, id, round) {
     if (carry) for (const finding of readJson(carry.file, { findings: [] }).findings ?? []) ids.add(finding.id);
   }
   return { settled, recordPath, record, ids };
+}
+
+// --- what each fixer was handed, and what came of it ------------------------
+
+// One entry per fixer that was handed findings, appended by the snapshot that
+// took its work: the brief it was handed and where its report was kept — the
+// round's `report.json` when it committed, under `declined/` when it changed
+// nothing. `fix-pending.json` is gone by then, so this is what the next
+// `settle` builds a table from, and `judgedBy` names the re-check that settle
+// judged so that a settle run again prints the same tables. Keyed by the
+// marker's `at`, so a snapshot run again does not append twice.
+const fixersPath = (ctx, id) => path.join(specDir(ctx, id), "fixers.json");
+
+// The tables the latest `settle` printed — or the one a goal-conflict snapshot
+// printed — bound to the round and candidate they judged. `publish` hands their
+// not-addressed rows over for the pull request's `## Risk`.
+const fixOutcomesPath = (ctx, id) => path.join(specDir(ctx, id), "fix-outcomes.json");
+
+// Written by `snapshot` when a fixer answered `goal-conflict`: the fix is a
+// person's to re-plan, not another round's. Nothing in the driver removes it.
+const goalConflictPath = (ctx, id) => path.join(specDir(ctx, id), "goal-conflict.json");
+
+function noteFixer(ctx, id, pending, report) {
+  const fixers = readJson(fixersPath(ctx, id), []);
+  if (fixers.some((entry) => entry.dispatched === pending.at)) return;
+  writeJson(fixersPath(ctx, id), [...fixers, { dispatched: pending.at, round: pending.round, brief: pending.record, report, judgedBy: null }]);
+}
+
+// A fix report from either place it is kept: a round's wrapper, or the report
+// itself, set aside.
+function fixerReport(file) {
+  const doc = file ? readJson(file, null) : null;
+  return doc && Object.hasOwn(doc, "kind") ? doc.report : doc;
+}
+
+const goalConflicts = (report) => (report?.outcomes ?? []).filter((entry) => entry.outcome === "goal-conflict");
+
+function writeGoalConflict(ctx, id, pending, report, kept) {
+  const conflict = {
+    round: pending.round, candidate: pending.candidate, report: kept,
+    conflicts: goalConflicts(report).map(({ id: finding, note }) => ({ id: finding, note })), at: new Date().toISOString()
+  };
+  writeJson(goalConflictPath(ctx, id), conflict);
+  return conflict;
+}
+
+function goalConflictLine(ctx, id, state, conflict) {
+  return `${id}'s fixer reported that the right repair for ${listOf(conflict.conflicts.map((entry) => entry.id))} would go against `
+    + `the plan's goal, because the spec conflicts with it. ${conflict.conflicts.map((entry) => `${entry.id}: ${entry.note.trim().replace(/\.$/, "")}.`).join(" ")} `
+    + `Recommendation: re-plan. No further fixer is sent, and the ${state.fixRoundsUsed ?? 0} of ${ctx.config.limits.fixRounds} `
+    + "fix rounds already spent are not given back.";
+}
+
+/**
+ * A fixer's table: one row per finding it was handed. `open` is the ids the
+ * settle left open, matched by id alone — ids survive the carry and text does
+ * not — or null when nothing has judged the fixer's work yet and every row is
+ * open.
+ */
+function tableOf(ctx, id, fixer, open) {
+  const report = fixerReport(fixer.report);
+  const said = new Map((report?.outcomes ?? []).map((entry) => [entry.id, entry]));
+  const goalConflict = goalConflicts(report).length > 0;
+  const specs = specsInOrder(ctx);
+  const facts = {
+    spec: specById(ctx, id), state: readState(ctx, id), config: ctx.config, specs,
+    merged: new Set(specs.filter((spec) => stateOf(ctx, spec.id) === "merged").map((spec) => spec.id))
+  };
+  const rows = (readJson(fixer.brief, { findings: [] }).findings ?? []).map((finding) => {
+    const addressed = open !== null && !open.has(finding.id);
+    const eligible = carryEligible(finding, facts);
+    return {
+      id: finding.id, severity: finding.severity, scope: finding.scope ?? null, file: finding.file ?? null, title: finding.title ?? "",
+      outcome: said.get(finding.id)?.outcome ?? null, note: said.get(finding.id)?.note ?? null, addressed,
+      recommendation: recommendation(finding, { addressed, goalConflict, eligible, carry: ctx.config.carry === true })
+    };
+  });
+  return { round: fixer.round, rows, summary: report?.summary ?? null };
+}
+
+const clip = (text, width) => {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat;
+};
+
+function tableLines({ round, rows, summary }) {
+  const header = ["id", "severity", "file", "title", "the fixer said", "re-check", "recommendation"];
+  const cells = rows.map((row) => [
+    row.id, row.severity, row.file ?? "—", clip(row.title, 40), row.outcome ? clip(`${row.outcome}: ${row.note}`, 60) : "no outcome reported",
+    row.addressed ? "addressed" : "not addressed", row.recommendation ?? "—"
+  ]);
+  const widths = header.map((name, column) => Math.max(name.length, ...cells.map((cell) => cell[column].length)));
+  const line = (cell) => `  ${cell.map((value, column) => value.padEnd(widths[column])).join("  ").trimEnd()}`;
+  const missed = rows.filter((row) => !row.addressed);
+  return [
+    `The fixer sent at round ${round} was handed ${rows.length} finding(s):`, line(header), ...cells.map(line),
+    missed.length > 0 ? `  Not addressed: ${missed.map((row) => `${row.id} (${row.recommendation})`).join(", ")}.` : "  Every one is addressed.",
+    ...(summary ? [`  The fixer: ${summary}`] : [])
+  ];
+}
+
+const saveTables = (ctx, id, { round, candidate }, tables) =>
+  writeJson(fixOutcomesPath(ctx, id), { round, candidate, tables, at: new Date().toISOString() });
+
+/**
+ * The tables `settle` owes: one per fixer sent since the previous settle, oldest
+ * first, judged against what this settle left open, and saved as the latest.
+ */
+function settleTables(ctx, id, plan, open) {
+  const key = `${plan.round}:${plan.candidate}:${plan.at}`;
+  const fixers = readJson(fixersPath(ctx, id), []);
+  const owed = fixers.filter((fixer) => fixer.judgedBy === null || fixer.judgedBy === key);
+  if (owed.length === 0) return [];
+  const ids = new Set(open.map((finding) => finding.id));
+  const tables = owed.map((fixer) => tableOf(ctx, id, fixer, ids));
+  writeJson(fixersPath(ctx, id), fixers.map((fixer) => (owed.includes(fixer) ? { ...fixer, judgedBy: key } : fixer)));
+  saveTables(ctx, id, plan, tables);
+  return tables.flatMap(tableLines);
 }
 
 // --- the route ---------------------------------------------------------------
@@ -2662,13 +2783,6 @@ function versionLineStop(ctx, id, state, step) {
   };
 }
 
-function fixReportLines(report) {
-  const lines = [];
-  for (const outcome of report.outcomes ?? []) lines.push(`  ${outcome.id}: ${outcome.outcome} — ${outcome.note}`);
-  if (report.summary) lines.push(`  ${report.summary}`);
-  return lines;
-}
-
 async function snapshot(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -2754,17 +2868,32 @@ async function snapshot(options) {
       fs.mkdirSync(path.join(specDir(ctx, id), "declined"), { recursive: true, mode: 0o700 });
       kept = path.join(specDir(ctx, id), "declined", `round-${pending.round}-${stamp}.json`);
       fs.renameSync(reportPath, kept);
-      say.push(`The fixer changed nothing. What it said about each finding (kept at ${kept}):`, ...fixReportLines(report));
+      say.push(`The fixer changed nothing (its report is kept at ${kept}).`);
     } else {
       say.push("The fixer changed nothing and wrote no report.");
     }
-    fs.unlinkSync(fixPendingPath(ctx, id));
     // A CI repair is handed a failing check and no findings, so there is nothing
     // for a lens to re-judge; the spec publishes and the check speaks.
     if (pending.from === "repair") {
+      if (report?.summary) say.push(`  ${report.summary}`);
+      fs.unlinkSync(fixPendingPath(ctx, id));
       transition(ctx, id, "verifying");
       return done({ say, next: nextCommand(ctx, "publish", id) });
     }
+    // A conflict between the spec and the goal is no lens's to re-judge and no
+    // further round's to fix: the spec goes on to publish and stops at finish,
+    // where its review — never recorded for this commit, or open — blocks it.
+    if (goalConflicts(report).length > 0) {
+      const conflict = writeGoalConflict(ctx, id, pending, report, kept);
+      fs.unlinkSync(fixPendingPath(ctx, id));
+      transition(ctx, id, "verifying");
+      const table = tableOf(ctx, id, { round: pending.round, brief: pending.record, report: kept }, null);
+      saveTables(ctx, id, pending, [table]);
+      say.push(...tableLines(table), goalConflictLine(ctx, id, state, conflict));
+      return done({ say, next: nextCommand(ctx, "publish", id) });
+    }
+    noteFixer(ctx, id, pending, kept);
+    fs.unlinkSync(fixPendingPath(ctx, id));
     // Whether the fixer came from the panel or from a settled re-check, the
     // findings it declined are re-judged by the lenses that raised them. This
     // is the one route by which a `wont-fix` can close a finding: the lens reads
@@ -2840,6 +2969,12 @@ async function snapshot(options) {
     throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
+  let conflict = null;
+  if (["panel", "settle"].includes(pending?.from)) {
+    noteFixer(ctx, id, pending, path.join(dir, "report.json"));
+    const report = fixerReport(path.join(dir, "report.json"));
+    if (goalConflicts(report).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
+  }
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
 
   say.push(allocation.granted
@@ -2855,6 +2990,7 @@ async function snapshot(options) {
     }
   }
   say.push(...recorded.stdout.trim().split("\n"));
+  if (conflict) say.push(`${goalConflictLine(ctx, id, state, conflict)} It changed the code all the same, so this commit is reviewed like any other.`);
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
@@ -3063,6 +3199,16 @@ async function fix(options) {
       record: recordPath, report: null, attempt: `pull-request-${stamp}`, at: new Date().toISOString()
     });
     return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent. Write the body now, then run next: the readers that raised these judge it."], next: nextCommand(ctx, "recheck", id) });
+  }
+  // A conflict between the spec and the goal is resolved by re-planning or a
+  // merge by hand, never by another round: on to publish the way a spent
+  // budget goes.
+  const conflict = readJson(goalConflictPath(ctx, id), null);
+  if (conflict) {
+    const say = [...prSay, goalConflictLine(ctx, id, state, conflict)];
+    if (!settled) return emit({ say, next: nextCommand(ctx, "recheck", id) });
+    transition(ctx, id, "verifying");
+    return emit({ say, next: nextCommand(ctx, "publish", id) });
   }
   // A fixer never takes the round past the cap. The edge would let one through
   // while this cycle holds an unspent grant — a redesign interrupted between
@@ -3483,6 +3629,7 @@ async function settle(options) {
   // or a panel in between.
   if (state.state !== "verifying") transition(ctx, id, "verifying");
   const open = settledReview.open ?? [];
+  say.push(...settleTables(ctx, id, plan, open));
   const openForFixer = open.some((finding) => !isPullRequestFinding(finding));
   const churn = churnAsk(ctx, id, state, plan.round, { openForFixer, atCollect: false, honour: true });
   const signal = churn.signal;
@@ -3578,8 +3725,13 @@ function publish(options) {
   node("gates.mjs", ["pr", statePath(ctx, id), String(view.number), view.url, view.headRefOid]);
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
-  if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
-  emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
+  // The latest tables' not-addressed rows, once each, while they judged this
+  // candidate.
+  const saved = readJson(fixOutcomesPath(ctx, id), null);
+  const missed = saved?.candidate === state.candidateOid ? saved.tables.flatMap((table) => table.rows).filter((row) => !row.addressed) : [];
+  const handed = missed.length > 0 ? { notAddressed: [...new Map(missed.map((row) => [row.id, row])).values()] } : {};
+  if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...handed, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
+  emit({ say, pr: view, ...handed, next: nextCommand(ctx, "finish", id) });
 }
 
 // `publish`'s wait for checks still running when `ciWaitSec` ran out, taken up
@@ -5627,10 +5779,19 @@ const sentence = (reason) => REASONS[reason] ?? reason;
 // blocker, it was taken: the approval was recorded, printed as "Approved by",
 // and `finish` asked again with the same reasons.
 // `words` replaces a reason's fixed sentence with one this stop worked out —
-// the start wait's, which carries the limit publish recorded.
-function stopAsk(id, { blockers, approvals }, accepted = null, words = {}) {
+// the start wait's, which carries the limit publish recorded. A goal conflict
+// a fixer reported changes the verdict for no approval, so none is offered.
+function stopAsk(id, { blockers, approvals }, accepted = null, words = {}, { goalConflict = false } = {}) {
   const sentence = (reason) => words[reason] ?? REASONS[reason] ?? reason;
   const text = [`${id} stops and waits.`];
+  if (goalConflict) {
+    if (blockers.length > 0) {
+      text.push(`Also blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by ${CLEARS[reason] ?? "revisit"}, or by a new commit)`).join("; ")}.`);
+    }
+    text.push("No approval merges it past the goal conflict, so none is offered. Offer: re-plan it, or merge it by hand on GitHub; "
+      + "leave it open and continue (run next), or stop the train (run end).");
+    return text.join(" ");
+  }
   if (accepted && blockers.length > 0) {
     text.push(`You accepted this at round ${accepted.round} with what was open disclosed, so it waits for you to merge it on GitHub — or to look at it again once a reader would withdraw what it found.`);
   }
@@ -5897,11 +6058,18 @@ async function finish(options) {
   endChecksWait(ctx, id, state, say);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
+  // A goal conflict a fixer reported is a person's to re-plan whatever the gates
+  // say: a fixer that changed the code all the same has its commit reviewed like
+  // any other, and that review can come back clean. It is not a gate, so no gate
+  // and no approval clears it; it stops the spec before the merge.
+  const conflict = readJson(goalConflictPath(ctx, id), null);
   if (options.approve) {
     // An approval given while a blocker is open would change nothing now and
     // would still be on disk, bound to this commit, when the blocker clears —
     // merging unattended what nobody looked at again. It is not recorded.
-    if (verdict.blockers.length > 0) {
+    if (conflict) {
+      say.push(`Not recording ${options.approve}'s approval: ${id}'s fixer reported a goal conflict, which is re-planned, never approved.`);
+    } else if (verdict.blockers.length > 0) {
       say.push(`Not recording ${options.approve}'s approval: ${verdict.blockers.map(sentence).join("; ")}. No approval clears a blocker.`);
     } else {
       const gate = path.join(specDir(ctx, id), "human.json");
@@ -5911,7 +6079,7 @@ async function finish(options) {
       verdict = evaluateGates();
     }
   }
-  if (verdict.ready) {
+  if (verdict.ready && !conflict) {
     const landed = await landAndMerge(ctx, id, state, say, planRoute);
     if (landed.merged) {
       // The squash GitHub just made becomes the plan branch's recorded tip before
@@ -5942,7 +6110,7 @@ async function finish(options) {
   state = readState(ctx, id);
   if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
   const reasons = [...verdict.blockers, ...verdict.approvals];
-  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ")], { stdio: "ignore" });
+  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ") || "a goal conflict"], { stdio: "ignore" });
   const round = currentRound(ctx, id, state);
   const open = round && exists(path.join(round.dir, "recheck.json"))
     ? node("recheck.mjs", ["--print", path.join(round.dir, "recheck.json")], { allow: [1] }).stdout.trim().split("\n")
@@ -5963,7 +6131,11 @@ async function finish(options) {
   const cause = checksCause(ctx, id, state, verdict);
   emit({
     say,
-    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state)), ...(cause ? [cause] : [])].join(" "),
+    ask: [
+      ...(conflict ? [goalConflictLine(ctx, id, state, conflict)] : []),
+      stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) }),
+      ...(cause ? [cause] : [])
+    ].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: followingCommand(ctx, id)
   });

@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { planBranchOf } from "./lib/plan-route.mjs";
+import { onPlanBranch } from "./lib/carry.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
 
@@ -680,25 +680,10 @@ export function evaluate(state, config) {
   // (a) Where this lands. Nothing reaches the base without a person, and a plan
   // branch is the one target where the plan's own pull request is that person's
   // look. So a candidate merges with nobody asked only when its state confirms
-  // that its pull request merges into this plan's own plan branch, and anything
-  // else waits.
-  //
-  // The confirmation is read off the state alone, and each part of it was frozen
-  // when the spec began: the base its pull request targets is exactly
-  // `planBranchOf(slug)`, and the plan route recorded beside it names that same
-  // branch. Neither is enough on its own. The base cannot say it, because a
-  // repository whose base branch is itself called `plan/<slug>` records that very
-  // base on a train that goes straight to it; and the configuration cannot say
-  // it, because it can change under a spec already running. So every part has
-  // to be there and agree — anything missing, empty or naming another branch,
-  // however the state came to be that way, counts as straight to the base. The
-  // configured base as it is now is compared as well, and can only add a wait.
-  const isBranchName = (value) => typeof value === "string" && value.length > 0;
-  const onPlanBranch = isBranchName(state.slug)
-    && state.base === planBranchOf(state.slug)
-    && state.planRouteBranch === state.base
-    && !(isBranchName(config?.base) && state.base === config.base);
-  if (!onPlanBranch) approvals.push("straight-to-base");
+  // that its pull request merges into this plan's own plan branch — see
+  // `onPlanBranch` — and anything else waits.
+  const planBranch = onPlanBranch(state, config);
+  if (!planBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
@@ -726,7 +711,7 @@ export function evaluate(state, config) {
   if (!report || report.status !== "complete" || unaccounted.length > 0) {
     const accounting = review?.accounting;
     const owed = [...(report?.status === "complete" ? [] : [state.candidateOid]), ...unaccounted];
-    const cleared = onPlanBranch
+    const cleared = planBranch
       && (report?.status === "complete" || report?.status === "unfinished")
       && review?.status === "clean"
       && verify?.status === "passed"

@@ -17,13 +17,13 @@
           "id": { "type": "string", "minLength": 1 },
           "outcome": {
             "type": "string",
-            "enum": ["fixed", "fixed-differently", "wont-fix", "failed"],
-            "description": "fixed means the defect is gone by the repair the finding proposed, or by any repair where it proposed none; fixed-differently means the finding was right and the defect is gone, but the repair departs from the one the finding proposed. wont-fix means the finding is wrong or the repair is a decision for a person; failed means the repair was attempted and did not work."
+            "enum": ["fixed", "fixed-differently", "wont-fix", "failed", "goal-conflict"],
+            "description": "fixed means the defect is gone by the repair the finding proposed, or by any repair where it proposed none; fixed-differently means the finding was right and the defect is gone, but the repair departs from the one the finding proposed. wont-fix means the finding is wrong or the repair is a decision for a person; failed means the repair was attempted and did not work. goal-conflict means the finding's correct repair would go against the goal, because the spec conflicts with the goal there; it stops the spec for a person."
           },
           "note": {
             "type": "string",
             "minLength": 1,
-            "description": "What changed, or why nothing did."
+            "description": "What changed, or why nothing did. For goal-conflict, where the spec and the goal disagree."
           }
         }
       }
@@ -35,7 +35,7 @@
     "status": {
       "type": "string",
       "enum": ["complete", "unfinished"],
-      "description": "complete only when you finished everything this dispatch handed you and `unfinished` is empty; unfinished otherwise. It is about the work you were given — a spec, a findings record, or a failing check — and never about anything you were not given: a fixer handed findings or a failing check answers for those and says nothing about a spec it never had. Claiming complete for work you did not finish is worse than saying unfinished, because the run stops for a person either way and only one of the two tells them the truth."
+      "description": "complete only when you finished everything this dispatch handed you and `unfinished` is empty; unfinished otherwise. It is about the work you were given — a spec, a findings record, or a failing check — and never about anything else: a fixer handed findings or a failing check answers for those, and not for the spec it was given to read. Claiming complete for work you did not finish is worse than saying unfinished, because the run stops for a person either way and only one of the two tells them the truth."
     },
     "summary": {
       "type": "string",
@@ -44,7 +44,7 @@
     },
     "unfinished": {
       "type": "array",
-      "description": "Every part of the work you were given and did not do, with the reason — including work you were told to do and could not: a file the spec names that does not exist, two statements that contradict, a repair that is a decision for a person. An empty array when nothing was left. A fixer reports here on the findings or the failing check it was handed, never on a spec it was not given.",
+      "description": "Every part of the work you were given and did not do, with the reason — including work you were told to do and could not: a file the spec names that does not exist, two statements that contradict, a repair that is a decision for a person. An empty array when nothing was left. A fixer reports here on the findings or the failing check it was handed, never on the spec as a whole.",
       "items": {
         "type": "object",
         "additionalProperties": false,

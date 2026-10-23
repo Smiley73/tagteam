@@ -255,6 +255,18 @@ disclosed without asking, and says so. A rewrite at the cap that still fails is
 published the same way, for a person to merge by hand. A CI repair starts a new
 cycle, and the new cycle gets a rewrite of its own.
 
+After every fixer you see a table of what it was handed: each finding's
+severity, file and title, what the fixer said it did, whether the re-check found
+it addressed, and a recommendation worked out by code rather than by a model —
+re-plan, needs a person, carry, or accept. Whatever is not addressed in a spec's
+last table is described under Risk in its pull request.
+
+The fixer reads the spec and the plan's goal as well as the findings, and can
+answer that the right repair would go against the goal because the spec
+conflicts with it. That stops the spec at once: no further fixer is sent, the
+table recommends re-planning, and the stop says how many fix rounds were spent,
+which are not given back.
+
 Each job thinks as hard as its work needs: the implementer, the fixer and the
 adversary at high effort by default, lens reviewers at medium, and re-checks —
 which only have to say whether one fix landed — at low. Every one of those is a
