@@ -116,6 +116,38 @@ test("an accept the carry rule refuses records nothing, finish stops on the open
   ]);
 });
 
+test("a spec merged by hand with findings open and no accept enters them in the ledger as merged-by-hand", () => {
+  const staged = stagePlan();
+  const { dir, shipDir, env } = staged;
+  // Both fix rounds are spent, so nobody is asked anything: the re-check leaves
+  // the carried finding open and the spec is published with it disclosed.
+  const { run, state } = driveToRecurrence(staged, { env, fixRounds: 2 });
+  const recheck = run("recheck");
+  const oid = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "adversary", candidate: oid, verdicts: [{ id: "2.adversary.1", resolved: false, evidence: "still there" }] });
+  arriveAll(recheck);
+  const settle = run("settle");
+  assert.notEqual(settle.json.accepted, true, settle.stdout);
+  assert.equal(state().accept, null);
+  assert.equal(run("fix").json.budget, "spent");
+  run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
+  assert.deepEqual(readLedger(shipDir).entries, []);
+
+  const merged = spawnSync(process.execPath, [path.join(dir, "gh-stub.mjs"), "pr", "merge", "1", "--squash", "--match-head-commit", state().candidateOid],
+    { encoding: "utf8", env: { ...process.env, ...env } });
+  assert.equal(merged.status, 0, merged.stderr);
+  const adopted = run("finish");
+  assert.match(adopted.json.say.join("\n"), /01-a was found merged into plan\/demo/);
+  assert.equal(state().state, "merged");
+  // No person accepted these, so the reason says the merge was a hand merge of
+  // what was still open.
+  const entries = readLedger(shipDir).entries;
+  assert.ok(entries.length > 0, "a hand merge with findings open wrote nothing");
+  assert.deepEqual([...new Set(entries.map((entry) => entry.reason))], ["merged-by-hand"]);
+  assert.ok(entries.every((entry) => entry.commit === state().candidateOid));
+});
+
 test("an accept still covering what is open is honoured when all that is left is about the pull request", () => {
   const staged = stagePlan();
   const { shipDir, env } = staged;
