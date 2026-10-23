@@ -268,7 +268,8 @@ appear, and stops for you if none do. A repository with no such workflows gets
 no extra wait. Checks still running when `ciWaitSec` runs out are waited on
 rather than given up on, and the run says how long they have been waited for;
 telling it to finish the spec is how you end the wait, and the spec then stops
-for you as for checks that proved nothing.
+for you as for checks that proved nothing — or, when a check had already
+failed, as for checks that failed.
 
 A single failure does not stop a spec on its own. A verify command that fails is
 run once more on the same commit, and so is the verify run against a base that

@@ -73,7 +73,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
-import { isFailed, runOf } from "./lib/ci-state.mjs";
+import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
   clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
   recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
@@ -2421,6 +2421,12 @@ async function begin(options) {
     emit({ say, ask: `${id} is recorded as failed. Say what it set out to deliver and what stopped it, and ask before doing anything with it. To retry from scratch: \`gates.mjs state ... pending\` by hand, then rerun begin.`, state: state.state });
     return;
   }
+  // A wait for checks is taken up again, not ended: ending it is a person's
+  // call, and finish is what ends it.
+  const waiting = state.state === "publishing" && state.pr?.number ? readJson(ciPath(ctx, id), null) : null;
+  if (waiting?.stillRunning && waiting.candidateOid === state.candidateOid) {
+    return emit({ say: [...say, `${id} was waiting for the checks on #${state.pr.number}; taking the wait up again.`], next: nextCommand(ctx, "checks", id) });
+  }
   if (["publishing", "awaiting-approval"].includes(state.state)) {
     return emit({ say: [...say, `${id} already has a pull request; evaluating it.`], next: nextCommand(ctx, "finish", id) });
   }
@@ -3614,7 +3620,9 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
   if (outcome.stillRunning) {
     writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
     say.push(`The checks on #${pr} are still running after ${secondsSince(since)}s of waiting in all, so nothing is recorded yet and the wait goes on. `
-      + "Ending it is a person's call: finish ends it, and records that the checks proved nothing either way.");
+      + (classifyChecks(outcome.checks).status === "failed"
+        ? "Ending it is a person's call: finish ends it, and records the check that has already failed as a failure."
+        : "Ending it is a person's call: finish ends it, and records that the checks proved nothing either way."));
     return { next: nextCommand(ctx, "checks", id) };
   }
   recordChecks(ctx, id, state, outcome, since, say);
@@ -5803,11 +5811,21 @@ function landAndMerge(ctx, id, state, say, planRoute) {
 // A wait for checks that `checks` had not finished, ended by a person running
 // finish: recorded as the checks proving nothing, with the time they were
 // waited for — the inconclusive result it always was, which a person approves.
+// Unless a check had already failed: a failure held back for the rest of its
+// run, or the attempt a rerun still running was asked to replace, is a failure,
+// and is recorded as one — a blocker no approval clears, which goes to repair.
 function endChecksWait(ctx, id, state, say) {
   const waiting = readJson(ciPath(ctx, id), null);
   if (!waiting?.stillRunning || waiting.candidateOid !== state.candidateOid) return;
   const { stillRunning, ...outcome } = waiting;
   const waited = secondsSince(waiting.waitBegan);
+  if (classifyChecks(outcome.checks).status === "failed") {
+    recordChecks(ctx, id, state, {
+      ...outcome, status: "failed", reason: `at least one check ran and failed; the wait for the rest was ended at finish after ${waited}s`
+    }, waiting.waitBegan, say, { ended: true });
+    say.push(`Ended the wait for the checks on #${state.pr.number} after ${waited}s; a check had already failed, so they are recorded as failed.`);
+    return;
+  }
   recordChecks(ctx, id, state, {
     ...outcome, reason: `checks were still running after ${waited}s of waiting, when the wait was ended at finish, so nothing was proven either way`
   }, waiting.waitBegan, say, { ended: true });

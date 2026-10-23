@@ -202,6 +202,34 @@ test("a failed check is rerun only once the rest of its workflow run has finishe
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a resumed ship takes a wait for checks up again, and finish ending a wait on a check that already failed records the failure", () => {
+  const staged = stageWith({ change: (config) => { config.ciWaitSec = 1; } });
+  const { dir, plan, env } = staged;
+  const { state } = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const lint = { name: "lint", state: "FAILURE", bucket: "fail", link: ACTIONS, completedAt: "2020-01-01T00:00:00Z" };
+  const going = { ...env, GH_STUB_CHECKS: JSON.stringify([lint, row("IN_PROGRESS", "pending", ACTIONS, "0001-01-01T00:00:00Z")]) };
+  const published = publishA(staged, going);
+  assert.equal(published.status, 0, published.stderr);
+  assert.match(published.json.next, /checks --plan .* --spec 01-a$/);
+  assert.match(published.json.say.join("\n"), /records the check that has already failed as a failure/);
+
+  assert.equal(ship("start", plan, [], going).status, 0);
+  const resumed = ship("begin", plan, ["--spec", "01-a"], going);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.json.next, /checks --plan .* --spec 01-a$/, "begin ended a wait no person ended");
+  assert.equal(state().gates.ci ?? null, null, "begin recorded the checks");
+
+  const ended = ship("finish", plan, ["--spec", "01-a"], going);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.equal(state().gates.ci.status, "failed");
+  assert.deepEqual(ended.json.blockers, ["continuous-integration-failed"]);
+  assert.ok(!ended.json.approvals.includes("continuous-integration-inconclusive"), ended.json.approvals.join(", "));
+  const approved = ship("finish", plan, ["--spec", "01-a", "--approve", "owner@example.com"], going);
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.notEqual(state().state, "merged", "an approval merged a failed check");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a rerun still running when a person ends the wait is disclosed when a later publish of the same commit sees it pass", () => {
   const staged = stageWith({ change: (config) => { config.ciWaitSec = 1; } });
   const { dir, plan, env, shipDir } = staged;

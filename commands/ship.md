@@ -365,7 +365,9 @@ at each point:
   It waits again and either moves on or names itself once more. Ending the wait
   is the person's call, never yours: when they say to stop waiting, run `finish`
   for the spec. It records that the checks proved nothing, with how long they
-  were waited for, and asks the person as for any checks that proved nothing.
+  were waited for, and asks the person as for any checks that proved nothing —
+  unless a check had already failed, which it records as a failure, as for any
+  check that failed.
 
 - **After `finish`**: see *Merge or stop* below.
 
