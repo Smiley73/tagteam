@@ -56,4 +56,5 @@ and nothing is fixed for them. If you cannot name how two specs fail together,
 it is not a finding at this level.
 
 Write your findings as `prompts/review.md` says, with `lens` set to the lens
-name you were given and `candidate` to the exact commit you were given.
+name you were given and `candidate` to the exact commit you were given. You
+are given no unfinished items to rule on, so write `rulings` as `[]`.

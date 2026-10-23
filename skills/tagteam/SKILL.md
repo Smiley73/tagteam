@@ -737,6 +737,18 @@ ends with its agent's report — `rounds/<n>/report.json` — and an absent repo
 and one that says `unfinished` are the same answer to the only question that gate
 asks: nobody has said this change is finished.
 
+On a plan branch the readers can answer it instead. Every reader of a round —
+each lens, Codex, the adversary's fresh pass and every re-check — is handed the
+items the round reports left undone, its own candidate's and those of every
+earlier candidate that went unaccounted for, and rules on each:
+`spec-requirement-missing`, `environmental` or `out-of-scope`. An item any
+reader rules missing becomes an ordinary gating finding for the fixer. The
+settled review records the accounting, and `evaluate` drops the approval only
+when every item was ruled environmental or out-of-scope by every reader given
+it, the review is clean, verify passed, and CI passed or is not waited for. A
+missing report, or an unfinished one that names nothing, has nothing to rule on
+and still waits; so does every spec that merges straight into `base`.
+
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
 a new commit appears — and every fix round makes one.
 

@@ -456,6 +456,40 @@ test("a report recorded against an older candidate accounts for nothing here", (
   assert.throws(() => recordGate(state, "report", A, { status: "complete" }), /current candidate/);
 });
 
+// --- the readers' rulings on what was left undone ---
+
+// A plan-branch candidate whose report is unfinished and whose settled review
+// records every reader ruling its one item acceptable.
+const ruled = (state = reviewed(), { candidates = [A], items = [{ id: "item:1.1", ruling: "environmental" }] } = {}) => {
+  let next = recordGate(state, "report", state.candidateOid, { status: "unfinished", kind: "implement" });
+  next = recordGate(next, "review", state.candidateOid, { status: "clean", accounting: { candidates, items, acceptable: true } });
+  return next;
+};
+
+test("on a plan branch, every item ruled acceptable with every gate passing clears the unfinished account", () => {
+  const verdict = evaluate(ruled(), CONFIG);
+  assert.deepEqual(verdict.approvals, []);
+  assert.equal(verdict.ready, true);
+  // Each of these keeps it.
+  const keeps = [
+    ["straight to the base", ruled(straight()), CONFIG],
+    ["verify failed", recordGate(ruled(), "verify", A, { status: "failed" }), CONFIG],
+    ["verify not applicable", recordGate(ruled(), "verify", A, { status: "not-applicable" }), CONFIG],
+    ["checks not run while the repository waits for them", recordGate(ruled(), "ci", A, { status: "not-run" }), { ...CONFIG, ciWaitSec: 60 }],
+    ["an earlier unaccounted candidate the accounting leaves out", ruled({ ...reviewed(), unaccountedCandidates: [B] }), CONFIG],
+    ["a candidate whose report is missing, so nothing covers it",
+      recordGate(ruled(), "report", A, { status: "missing", kind: null }), CONFIG],
+    ["an item left unruled", ruled(reviewed(), { items: [{ id: "item:1.1", ruling: "unruled" }] }), CONFIG],
+    ["an empty accounting", ruled(reviewed(), { items: [] }), CONFIG]
+  ];
+  for (const [what, state, config] of keeps) {
+    assert.ok(evaluate(state, config).approvals.includes("work-not-accounted-for"), what);
+  }
+  assert.ok(evaluate(ruled(straight()), CONFIG).approvals.includes("straight-to-base"));
+  // CI is not waited for at all: nothing to pass.
+  assert.equal(evaluate({ ...ruled(), gates: { ...ruled().gates, ci: null } }, CONFIG).ready, true);
+});
+
 // --- regressions from the Codex review of this rewrite ---
 
 test("a round that found something reaches publishing through fixing", () => {

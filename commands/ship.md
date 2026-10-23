@@ -407,6 +407,12 @@ Two things do carry over from the run, because they are about the software:
   question with `accept` — goes there the same way: it is still open, and the
   body is where it is disclosed. So does one the person chose to publish with at
   the cap, answering that question with "publish as it is".
+- **Work an agent left undone that every reader ruled environmental or
+  out-of-scope goes there too**, said as what was not done or not checked and
+  why that is no fault in the change — a check the agent could not run where it
+  ran, a part another spec owns. `settle`'s `say` gives each item with its
+  ruling, and on a plan branch these are what let the spec merge without a
+  person, so the body is the one place a reader learns of them.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
   to let it try again. When the area was rewritten at the cap and the rewrite
@@ -490,6 +496,15 @@ left undone, in its own words). Say all of it in plain English: what this spec s
 out to deliver, why it stopped, and one sentence per open finding on what goes
 wrong and for whom — see *Asking* in the skill. Then ask one question, with the
 answers `ask` offers.
+
+On a plan branch an agent's unfinished account does not stop the spec by
+itself. Every reader rules on each item it is handed, and when every one is
+ruled environmental or out-of-scope — with the review clean, verify passed and
+the checks passed or not waited for — `evaluate` drops that approval and the
+spec merges into the plan branch like any other. An item a reader rules missing
+is a finding the fixer gets. A round that wrote no report, an item left
+unruled, and anything merging straight into the base still stop, and
+`unaccounted` then shows each item's ruling where it has one.
 
 The two halves take different answers. A person's approval is what `evaluate`
 honours for `approvals` — merging straight into the base, a workflow change, a

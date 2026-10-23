@@ -49,6 +49,7 @@ import {
   versionStep, writeRecord
 } from "./lib/resolve.mjs";
 import { recordedIn } from "./record-round-report.mjs";
+import { itemId, itemsOfReport } from "./lib/rulings.mjs";
 import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
   BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
@@ -321,7 +322,29 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
 // for "Spec:", and the round directory holding the diff and taking the findings.
 // A spec's round, ordinarily; a resolve attempt's round on the plan route, whose
 // brief is the one `resolveBrief` writes.
-const specTarget = (ctx, spec, round) => ({ label: spec.id, specPath: spec.path, dir: roundDir(ctx, spec.id, round) });
+const specTarget = (ctx, spec, round, items) => ({ label: spec.id, specPath: spec.path, dir: roundDir(ctx, spec.id, round), items });
+
+// What every reader of a spec round is handed to rule on: the items its
+// candidate's own report left undone, and those of every earlier candidate that
+// went by unaccounted for, each found through the round its commit owns. Written
+// into the round once, with an empty list when nothing stands — its inputs are
+// the round reports, written once, and the unaccounted list, which moves only
+// when a new candidate is bound, so every later write in the round is the same.
+function writeItems(ctx, id, state, round) {
+  const rounds = listRounds(roundsRoot(ctx, id));
+  const candidates = [];
+  const items = [];
+  for (const candidate of new Set([state.candidateOid, ...(state.unaccountedCandidates ?? [])])) {
+    const owned = rounds.find((entry) => entry.candidate === candidate);
+    const listed = owned ? itemsOfReport(owned.round, readJson(path.join(owned.dir, ROUND_REPORT), null)) : [];
+    if (listed.length === 0) continue;
+    candidates.push(candidate);
+    items.push(...listed);
+  }
+  return itemsFile(roundDir(ctx, id, round), { candidate: state.candidateOid, candidates, items });
+}
+
+const itemsFile = (dir, list) => writeRoundFile(path.join(dir, "unfinished.json"), `${JSON.stringify(list, null, 2)}\n`);
 
 function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) {
   const { dir } = target;
@@ -334,6 +357,7 @@ function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) 
       `Lens brief (read this first, after prompts/review.md): ${brief}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       `Spec: ${target.specPath}`,
+      ...(target.items ? [`Unfinished items to rule on: ${target.items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${path.join(dir, "findings", `${lens}.json`)}`
@@ -350,7 +374,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { reuse = true } = {
     plugin: PLUGIN,
     template: "review.md",
     vars: { CANDIDATE: oid, LENSES: lenses.join(", ") },
-    fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff") },
+    fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff"), ITEMS: target.items },
     schema: "findings.schema.json",
     out: path.join(dir, "findings", "codex.json"),
     model: job.model,
@@ -363,7 +387,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { reuse = true } = {
   return runnerDispatch({ description: `Codex review of ${target.label}`, ...prepared });
 }
 
-function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null) {
+function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null, items = null) {
   const dir = roundDir(ctx, spec.id, round);
   return {
     ...agent("adversary", job),
@@ -373,6 +397,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
       `Brief: ${path.join(PLUGIN, "prompts", "code-adversary.md")} — you are judging a diff fresh, not re-checking`,
       `Spec: ${spec.path}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${out ?? path.join(dir, "findings", "adversary.json")}`
@@ -380,7 +405,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
   };
 }
 
-function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = [], outDir = null) {
+function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = [], outDir = null, items = null) {
   const dir = roundDir(ctx, spec.id, round);
   const base = lens === "adversary" ? "adversary" : "reviewer";
   return {
@@ -392,6 +417,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
       ...(brief ? [`Lens brief the findings were raised through: ${brief}`] : []),
       `Findings to judge, with their ids (judge every id in every file listed): ${inputs.join(" and ")}`,
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
       `Write your verdicts to: ${path.join(outDir ?? path.join(dir, "recheck"), `${lens}.json`)}`
@@ -400,14 +426,14 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
 }
 
 // `reuse` as in `codexReviewDispatch`: off for a re-send only.
-function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null, reuse = true } = {}) {
+function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null, reuse = true, items } = {}) {
   const dir = roundDir(ctx, spec.id, round);
   const diff = path.join(dir, "review.diff");
   // Two templates, one per question. After a fix Codex reads new code; after a
   // decline there is none, and it weighs the fixer's reasons instead.
   const request = declinedReport
-    ? { template: "recheck-declined.md", fences: { FINDINGS: input, DIFF: diff, DECLINED: declinedReport } }
-    : { template: "recheck.md", fences: { FINDINGS: input, DIFF: diff } };
+    ? { template: "recheck-declined.md", fences: { FINDINGS: input, DIFF: diff, DECLINED: declinedReport, ITEMS: items } }
+    : { template: "recheck.md", fences: { FINDINGS: input, DIFF: diff, ITEMS: items } };
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
     ...request,
@@ -1973,13 +1999,17 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
   const { jobs } = resolveJobs(ctx);
   const lensJob = jobs["review-lens"];
   const codexJob = jobs["review-codex"];
-  const target = { label: resolveLabel(record), specPath: resolveBriefPath(ctx, record.n), dir: attemptDirOf(ctx, record.n, attempt.k) };
+  const dir = attemptDirOf(ctx, record.n, attempt.k);
+  // Nothing stands against a resolve round, but Codex's template takes a list
+  // all the same; its Claude readers are given none and rule on none.
+  const items = itemsFile(dir, { candidate: attempt.mergeOid, candidates: [], items: [] });
+  const target = { label: resolveLabel(record), specPath: resolveBriefPath(ctx, record.n), dir };
   const agents = lenses.filter((lens) => lens !== "codex").map((lens) => ({
     dispatch: reviewerDispatch(ctx, target, attempt.mergeOid, lens, briefs[lens], lensJob), job: lensJob, name: reviewerName(lens)
   }));
   if (!resend || lenses.includes("codex")) {
     const reviewed = attempt.lenses ?? lenses;
-    agents.push({ dispatch: codexReviewDispatch(ctx, target, attempt.mergeOid, reviewed.filter((lens) => lens !== "codex"), codexJob, { reuse: !resend }), job: codexJob, name: "Codex" });
+    agents.push({ dispatch: codexReviewDispatch(ctx, { ...target, items }, attempt.mergeOid, reviewed.filter((lens) => lens !== "codex"), codexJob, { reuse: !resend }), job: codexJob, name: "Codex" });
   }
   const sent = await sendSet(ctx, record.spec, {
     kind: resend ? "resolve-resend" : "resolve-panel", round: attempt.k, agents, step: "resolve-collect", home: resolveDirOf(ctx, record.n)
@@ -2914,7 +2944,7 @@ async function panel(options) {
   const pr = pullRequestLines(ctx, id, state);
   const lensJob = resolved.jobs["review-lens"];
   const codexJob = resolved.jobs["review-codex"];
-  const target = specTarget(ctx, spec, round.round);
+  const target = specTarget(ctx, spec, round.round, writeItems(ctx, id, state, round.round));
   const agents = lenses.map((lens) => ({
     dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
     job: lensJob,
@@ -2945,9 +2975,10 @@ async function collect(options) {
   }
   requireSetIn(ctx, id, sentFor.set, "collect");
   const expect = [...state.reviewers, "codex"];
+  const items = writeItems(ctx, id, state, round.round);
   const result = node("collect-findings.mjs", [
     "--dir", path.join(round.dir, "findings"), "--candidate", state.candidateOid, "--expect", expect.join(","),
-    "--round", String(round.round), "--out", path.join(round.dir, "review.json")
+    "--round", String(round.round), "--out", path.join(round.dir, "review.json"), "--items", items
   ], { allow: [1] });
   const review = readJson(path.join(round.dir, "review.json"));
   const say = result.stdout.trim().split("\n");
@@ -2960,7 +2991,7 @@ async function collect(options) {
       const pr = pullRequestLines(ctx, id, state);
       const lensJob = resolved.jobs["review-lens"];
       const codexJob = resolved.jobs["review-codex"];
-      const target = specTarget(ctx, spec, round.round);
+      const target = specTarget(ctx, spec, round.round, items);
       const agents = missing.filter((lens) => lens !== "codex").map((lens) => ({
         dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
         job: lensJob,
@@ -3298,7 +3329,8 @@ async function recheck(options) {
       readers.push({ role: "recheck", lens, name: lens === "adversary" ? "the adversary's re-check" : `${reviewerName(lens)}'s re-check`, inputs: files });
     }
   }
-  const where = { round: round.round, dir: verdictsDir, given };
+  const items = writeItems(ctx, id, state, round.round);
+  const where = { round: round.round, dir: verdictsDir, given, items };
   const agents = readers.map((reader) => ({
     dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), job: recheckReaderJob(reader, resolved), name: reader.name
   }));
@@ -3311,7 +3343,7 @@ async function recheck(options) {
   writeJson(recheckPlanPath(ctx, id), {
     round: round.round, candidate: state.candidateOid, collectionRound: collected, carry: carry?.count > 0 ? carry.file : null,
     declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
-    lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, resend: null, at: new Date().toISOString()
+    lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, items, resend: null, at: new Date().toISOString()
   });
   const dispatch = agents.map((entry) => entry.dispatch);
   const say = [adversaryFile
@@ -3353,16 +3385,16 @@ function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { res
   const { lines, fresh } = declinedContext(where.given?.declined ?? null);
   const job = recheckReaderJob(reader, resolved);
   if (reader.role === "adversary") {
-    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output);
+    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output, where.items);
   }
   if (reader.role === "codex-recheck") {
     return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, job,
-      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend });
+      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend, items: where.items });
   }
   if (reader.lens === "adversary") {
-    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, job, [...pr.lines, ...lines], where.dir);
+    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, job, [...pr.lines, ...lines], where.dir, where.items);
   }
-  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], job, [...pr.lines, ...lines], where.dir);
+  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], job, [...pr.lines, ...lines], where.dir, where.items);
 }
 
 // The job a re-check reader runs as. The adversary is two of them in one
@@ -3416,6 +3448,9 @@ async function settle(options) {
   if (!Object.hasOwn(plan, "adversary") || plan.adversary) args.push("--adversary", plan.adversary ?? path.join(dir, "findings", "adversary.json"));
   if (plan.carry) args.push("--carry", plan.carry);
   if (plan.declined) args.push("--declined", plan.declined);
+  // A plan written before readers ruled names no items, and settles with no
+  // accounting, which clears nothing.
+  if (plan.items) args.push("--items", plan.items);
   const result = node("recheck.mjs", args, { allow: [1] });
   const settledReview = readJson(path.join(dir, "recheck.json"));
   const say = result.stdout.trim().split("\n");
@@ -3429,7 +3464,7 @@ async function settle(options) {
     const spec = specById(ctx, id);
     const resolved = roles(ctx, id);
     const pr = pullRequestLines(ctx, id, state);
-    const where = { round: plan.round, dir: plan.dir, given: plan.given };
+    const where = { round: plan.round, dir: plan.dir, given: plan.given, items: plan.items ?? writeItems(ctx, id, state, plan.round) };
     const agents = failed.map((reader) => ({
       dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true }), job: recheckReaderJob(reader, resolved), name: reader.name
     }));
@@ -5570,7 +5605,8 @@ const REASONS = {
 // steps run again only through `revisit`, which re-enters the round and spends
 // nothing — except a red check, whose door is `repair`. Named in the ask so the
 // person is told what would clear it instead of being offered an approval that
-// `evaluate` would not honour.
+// `evaluate` would not honour. The one approval here is cleared without a person
+// on a plan branch, and the ask says how.
 const CLEARS = {
   "review-not-recorded": "revisit — the review runs again against this commit",
   "review-open": "revisit once what it found is no longer there — the reader that raised it judges it again, and a fix round follows if one is left",
@@ -5578,7 +5614,9 @@ const CLEARS = {
   "verification-not-recorded": "revisit — the verify commands run again",
   "verification-failed": "revisit once what fails is put right",
   "continuous-integration-failed": "repair",
-  "continuous-integration-not-recorded": "revisit — publish records the checks again"
+  "continuous-integration-not-recorded": "revisit — publish records the checks again",
+  "work-not-accounted-for": "on a plan branch, once every reader rules each item left undone as something the agent could not do where it ran "
+    + "or something this change does not owe, and the review is clean, verify passed and the checks passed or were not waited for"
 };
 
 const sentence = (reason) => REASONS[reason] ?? reason;
@@ -5601,7 +5639,7 @@ function stopAsk(id, { blockers, approvals }, accepted = null, words = {}) {
     if (approvals.length > 0) text.push(`Also waiting on you: ${approvals.map(sentence).join("; ")}; approval would clear only this part, so it is not offered until nothing is blocked.`);
     text.push("Offer: leave it open and continue (run next), stop the train (run end), or — when they have put right what blocked it without a new commit — look at it again (run revisit, which spends no budget).");
   } else {
-    text.push(`Reasons: ${approvals.map(sentence).join("; ")}.`);
+    text.push(`Reasons: ${approvals.map((reason) => (CLEARS[reason] ? `${sentence(reason)} (cleared without you ${CLEARS[reason]})` : sentence(reason))).join("; ")}.`);
     text.push("Offer: approve and merge (rerun finish with --approve <email>), leave it open and continue (run next), or stop the train (run end).");
   }
   return text.join(" ");
@@ -5909,10 +5947,17 @@ async function finish(options) {
   const open = round && exists(path.join(round.dir, "recheck.json"))
     ? node("recheck.mjs", ["--print", path.join(round.dir, "recheck.json")], { allow: [1] }).stdout.trim().split("\n")
     : [];
+  // What the readers ruled on each item, where the settled review recorded it.
+  const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
+  const rulings = new Map((review?.accounting?.items ?? []).map((item) => [item.id, item.ruling]));
+  const undone = (number, part, index) => {
+    const ruling = rulings.get(itemId(number, index));
+    return `left undone: ${part.part} — ${part.reason}${ruling ? ` (ruled ${ruling})` : ""}`;
+  };
   const reports = listRounds(roundsRoot(ctx, id))
-    .map((entry) => readJson(path.join(entry.dir, "report.json"), null))
-    .filter((report) => report && report.status !== "complete")
-    .map((report) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part) => `left undone: ${part.part} — ${part.reason}`).join("; ")}`);
+    .map((entry) => ({ number: entry.round, report: readJson(path.join(entry.dir, "report.json"), null) }))
+    .filter(({ report }) => report && report.status !== "complete")
+    .map(({ number, report }) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part, index) => undone(number, part, index)).join("; ")}`);
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);

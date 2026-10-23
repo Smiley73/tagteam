@@ -24,9 +24,9 @@ catch.
 
 When you are re-checking rather than reviewing, read
 `${CLAUDE_PLUGIN_ROOT}/prompts/recheck.md` in place of `review.md`, and write a
-verdicts file matching `schemas/recheck.schema.json` — `lens`, `candidate`, and
-one `{"id", "resolved", "evidence"}` per finding, `resolved` a boolean — not a
-findings file. The brief still applies: the findings you are judging were raised
+verdicts file matching `schemas/recheck.schema.json` — `lens`, `candidate`,
+one `{"id", "resolved", "evidence"}` per finding, `resolved` a boolean, and the
+`rulings` the brief describes — not a findings file. The brief still applies: the findings you are judging were raised
 through it.
 
 You may write exactly one file: the findings path you are given. Never modify or
