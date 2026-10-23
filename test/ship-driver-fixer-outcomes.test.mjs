@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { ship, write, outputOf, arriveAll, findings, major, stagePlan, trainOf, A_CHANGE } from "./ship-stage.mjs";
+import { ship, write, outputOf, arriveAll, findings, major, stagePlan, trainOf, pullsOf, A_CHANGE } from "./ship-stage.mjs";
 
 const ID = "01-a";
 
@@ -163,4 +163,30 @@ test("on a plan branch, a fixer that answers goal-conflict and changes nothing s
   assert.ok(finished.json.blockers.includes("review-not-recorded"), JSON.stringify(finished.json));
   assert.equal(cycle.state().state, "awaiting-approval");
   assert.equal(cycle.state().fixRoundsUsed, 1);
+});
+
+test("on a plan branch, a fixer that answers goal-conflict and changes the code stops the spec at finish even once every gate is clean, and no approval merges it", () => {
+  const staged = stagePlan();
+  const { shipDir, env } = staged;
+  const cycle = begun(staged, { fixRounds: 2 });
+  panelRaises(cycle, shipDir, 1, [titled("sub adds")]);
+  fixWith(cycle, [{ id: "1.correctness.1", outcome: "goal-conflict", note: "the spec asks for adding; the goal says subtract" }]);
+  cycle.run("snapshot");
+  assert.ok(fs.existsSync(path.join(shipDir, ID, "goal-conflict.json")));
+  assert.match(cycle.run("verify").json.next, /recheck/);
+  assert.equal(recheckJudging(cycle, () => true).json.review, "clean");
+
+  cycle.run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
+  const finished = cycle.run("finish");
+  assert.deepEqual(finished.json.blockers, [], JSON.stringify(finished.json));
+  assert.match(finished.json.ask, /^01-a's fixer reported that the right repair for 1\.correctness\.1 would go against the plan's goal.*Recommendation: re-plan\./);
+  assert.doesNotMatch(finished.json.ask, /--approve/, "an approval is offered that cannot merge it");
+  assert.equal(cycle.state().state, "awaiting-approval");
+  assert.ok(!pullsOf(env).some((pull) => pull.merged), "the spec was merged into the plan branch past a goal conflict");
+
+  const approved = cycle.run("finish", ["--approve", "owner@example.com"]);
+  assert.doesNotMatch(approved.json.say.join("\n"), /Approved by/);
+  assert.equal(cycle.state().gates.human ?? null, null, "an approval was recorded past a goal conflict");
+  assert.equal(cycle.state().state, "awaiting-approval");
+  assert.ok(!pullsOf(env).some((pull) => pull.merged), "an approval merged the spec past a goal conflict");
 });

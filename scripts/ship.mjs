@@ -5779,10 +5779,19 @@ const sentence = (reason) => REASONS[reason] ?? reason;
 // blocker, it was taken: the approval was recorded, printed as "Approved by",
 // and `finish` asked again with the same reasons.
 // `words` replaces a reason's fixed sentence with one this stop worked out —
-// the start wait's, which carries the limit publish recorded.
-function stopAsk(id, { blockers, approvals }, accepted = null, words = {}) {
+// the start wait's, which carries the limit publish recorded. A goal conflict
+// a fixer reported changes the verdict for no approval, so none is offered.
+function stopAsk(id, { blockers, approvals }, accepted = null, words = {}, { goalConflict = false } = {}) {
   const sentence = (reason) => words[reason] ?? REASONS[reason] ?? reason;
   const text = [`${id} stops and waits.`];
+  if (goalConflict) {
+    if (blockers.length > 0) {
+      text.push(`Also blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by ${CLEARS[reason] ?? "revisit"}, or by a new commit)`).join("; ")}.`);
+    }
+    text.push("No approval merges it past the goal conflict, so none is offered. Offer: re-plan it, or merge it by hand on GitHub; "
+      + "leave it open and continue (run next), or stop the train (run end).");
+    return text.join(" ");
+  }
   if (accepted && blockers.length > 0) {
     text.push(`You accepted this at round ${accepted.round} with what was open disclosed, so it waits for you to merge it on GitHub — or to look at it again once a reader would withdraw what it found.`);
   }
@@ -6049,11 +6058,18 @@ async function finish(options) {
   endChecksWait(ctx, id, state, say);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
+  // A goal conflict a fixer reported is a person's to re-plan whatever the gates
+  // say: a fixer that changed the code all the same has its commit reviewed like
+  // any other, and that review can come back clean. It is not a gate, so no gate
+  // and no approval clears it; it stops the spec before the merge.
+  const conflict = readJson(goalConflictPath(ctx, id), null);
   if (options.approve) {
     // An approval given while a blocker is open would change nothing now and
     // would still be on disk, bound to this commit, when the blocker clears —
     // merging unattended what nobody looked at again. It is not recorded.
-    if (verdict.blockers.length > 0) {
+    if (conflict) {
+      say.push(`Not recording ${options.approve}'s approval: ${id}'s fixer reported a goal conflict, which is re-planned, never approved.`);
+    } else if (verdict.blockers.length > 0) {
       say.push(`Not recording ${options.approve}'s approval: ${verdict.blockers.map(sentence).join("; ")}. No approval clears a blocker.`);
     } else {
       const gate = path.join(specDir(ctx, id), "human.json");
@@ -6063,7 +6079,7 @@ async function finish(options) {
       verdict = evaluateGates();
     }
   }
-  if (verdict.ready) {
+  if (verdict.ready && !conflict) {
     const landed = await landAndMerge(ctx, id, state, say, planRoute);
     if (landed.merged) {
       // The squash GitHub just made becomes the plan branch's recorded tip before
@@ -6094,7 +6110,7 @@ async function finish(options) {
   state = readState(ctx, id);
   if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
   const reasons = [...verdict.blockers, ...verdict.approvals];
-  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ")], { stdio: "ignore" });
+  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ") || "a goal conflict"], { stdio: "ignore" });
   const round = currentRound(ctx, id, state);
   const open = round && exists(path.join(round.dir, "recheck.json"))
     ? node("recheck.mjs", ["--print", path.join(round.dir, "recheck.json")], { allow: [1] }).stdout.trim().split("\n")
@@ -6113,12 +6129,12 @@ async function finish(options) {
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
-  const conflict = readJson(goalConflictPath(ctx, id), null);
   emit({
     say,
     ask: [
       ...(conflict ? [goalConflictLine(ctx, id, state, conflict)] : []),
-      stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state)), ...(cause ? [cause] : [])
+      stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) }),
+      ...(cause ? [cause] : [])
     ].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: followingCommand(ctx, id)
