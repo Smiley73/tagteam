@@ -46,17 +46,22 @@ function awaitedByUnmerged(id, specs, merged) {
 }
 
 /**
- * Whether `finding`, open on `spec`, may be carried. Never off the plan branch,
- * never inside a fix unit, never `blocking`; and a `major` code finding only
- * when nothing unmerged waits on the spec, because a spec built on top of it
- * would build on the defect.
+ * Why `finding`, open on `spec`, may not be carried, said to a person; null
+ * when it may. Never off the plan branch, never inside a fix unit, never
+ * `blocking`; and a `major` code finding only when nothing unmerged waits on the
+ * spec, because a spec built on top of it would build on the defect.
  */
-export function carryEligible(finding, { spec, state, config, specs, merged }) {
-  if (!onPlanBranch(state, config) || spec.fixUnit) return false;
-  if (finding.severity === "blocking") return false;
-  if (finding.severity === "major" && !isPullRequestFinding(finding)) return !awaitedByUnmerged(spec.id, specs, merged);
-  return true;
+export function carryRefusal(finding, { spec, state, config, specs, merged }) {
+  if (!onPlanBranch(state, config)) return "it does not merge into a plan branch";
+  if (spec.fixUnit) return "a whole-plan fix never merges with a finding open";
+  if (finding.severity === "blocking") return "it is blocking, and nothing blocking merges unresolved";
+  if (finding.severity === "major" && !isPullRequestFinding(finding) && awaitedByUnmerged(spec.id, specs, merged)) {
+    return "it is a major finding in the code, and a spec not yet merged depends on this one";
+  }
+  return null;
 }
+
+export const carryEligible = (finding, facts) => carryRefusal(finding, facts) === null;
 
 /**
  * The advice for one row of a fixer's table: null for a finding the re-check

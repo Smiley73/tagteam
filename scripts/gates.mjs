@@ -44,7 +44,8 @@ const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
 // A person's accept of the findings this candidate's review left open, recorded
 // only when every one of them may be carried into the plan branch: `{candidateOid,
 // ids, at}`. A top-level key for the reason `landing` is one, and cleared by a
-// bind as it is. `evaluate` lifts `review-open` on it, and reads it nowhere else.
+// bind as it is. Weighed by `acceptLifts` alone, which `evaluate` asks to lift
+// `review-open`.
 const ACCEPT = "accept";
 
 // How much of this attempt's budget has been spent. Counters rather than a
@@ -663,6 +664,23 @@ export function recordGate(state, gate, candidateOid, value) {
 const currentGate = (state, gate) =>
   state.gates?.[gate]?.candidateOid === state.candidateOid ? state.gates[gate] : null;
 
+/**
+ * Whether a person's accept lifts `review-open` from this state's verdict: on
+ * the plan branch, and there alone, an accept of this candidate that covers
+ * everything its open review holds — never past a blocking finding, and never
+ * an incomplete review. Exported so that what the driver tells a person about
+ * an accept is this answer and not one of its own.
+ */
+export function acceptLifts(state, config) {
+  const review = currentGate(state, "review");
+  const open = Array.isArray(review?.open) ? review.open : [];
+  const accept = state[ACCEPT];
+  return onPlanBranch(state, config) && review?.status === "open" && open.length > 0
+    && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
+    && open.every((finding) => accept.ids.includes(finding.id))
+    && !open.some((finding) => finding.severity === "blocking");
+}
+
 export function evaluate(state, config) {
   const blockers = [];
   const approvals = [];
@@ -671,24 +689,14 @@ export function evaluate(state, config) {
   const ci = currentGate(state, "ci");
   const report = currentGate(state, "report");
   const human = currentGate(state, "human");
-  const planBranch = onPlanBranch(state, config);
 
   // (d) A lens that produced no evidence is not a lens that found nothing. An
   // absent, unparseable, or wrongly-bound findings file reads as an empty
   // finding set, and an empty finding set reads as clean, so this is checked
-  // before anything else is believed.
-  //
-  // On the plan branch, and there alone, a person's accept of this candidate
-  // that covers everything open lifts `review-open` — never past a blocking
-  // finding, and never an incomplete review.
-  const open = Array.isArray(review?.open) ? review.open : [];
-  const accept = state[ACCEPT];
-  const accepted = planBranch && review?.status === "open" && open.length > 0
-    && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
-    && open.every((finding) => accept.ids.includes(finding.id))
-    && !open.some((finding) => finding.severity === "blocking");
+  // before anything else is believed. A person's accept is weighed here and
+  // nowhere else in the verdict — see `acceptLifts`.
   if (!review) blockers.push("review-not-recorded");
-  else if (review.status !== "clean" && !accepted) blockers.push(`review-${review.status}`);
+  else if (review.status !== "clean" && !acceptLifts(state, config)) blockers.push(`review-${review.status}`);
 
   // (b) Verification and CI.
   if (!verify) blockers.push("verification-not-recorded");
@@ -712,6 +720,7 @@ export function evaluate(state, config) {
   // look. So a candidate merges with nobody asked only when its state confirms
   // that its pull request merges into this plan's own plan branch — see
   // `onPlanBranch` — and anything else waits.
+  const planBranch = onPlanBranch(state, config);
   if (!planBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.

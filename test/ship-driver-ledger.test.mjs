@@ -116,6 +116,34 @@ test("an accept the carry rule refuses records nothing, finish stops on the open
   ]);
 });
 
+test("an accept still covering what is open is honoured when all that is left is about the pull request", () => {
+  const staged = stagePlan();
+  const { shipDir, env } = staged;
+  const { run, state } = driveToRecurrence(staged, { env, on: ["app.js", "app.js", ["app.js", "pr-body.md"]] });
+  run("accept");
+  // A reader withdrew the round's code finding, so once the re-check resolves
+  // the carried one, what is open is the accepted pull request finding alone.
+  const file = path.join(shipDir, "01-a", "rounds", "3", "review.json");
+  const review = JSON.parse(fs.readFileSync(file, "utf8"));
+  const withdrawn = (list) => list.filter((finding) => finding.id !== "3.correctness.1");
+  fs.chmodSync(file, 0o600);
+  write(file, { ...review, counts: { ...review.counts, major: 1 }, open: withdrawn(review.open), findings: withdrawn(review.findings) });
+  const recheck = run("recheck");
+  const oid = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "adversary", candidate: oid, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "keeps the sign" }] });
+  arriveAll(recheck);
+  const settle = run("settle");
+  assert.deepEqual(state().gates.review.open.map((finding) => finding.id), ["3.correctness.2"]);
+  assert.match(settle.json.say.join("\n"), /It merges into plan\/demo at finish with nobody asked/, settle.stdout);
+  assert.equal(state().accept?.candidateOid, oid);
+
+  run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
+  const finished = run("finish");
+  assert.equal(state().state, "merged", finished.stdout);
+  assert.deepEqual(readLedger(shipDir).entries.map((entry) => [entry.id, entry.reason]), [["01-a:3.correctness.2", "accepted"]]);
+});
+
 test("a spec's own Risk line says the accept merges it, or else that it waits with the fixer table's advice for the finding", () => {
   const finding = { id: "2.adversary.1", severity: "major", scope: "code", file: "app.js", title: "sub loses the sign.", detail: "-1 - 1 gives 2" };
   const [accepted] = entriesOf("01-a", "a".repeat(40), [finding], new Set([finding.id]));
@@ -141,6 +169,11 @@ test("the plan's pull request lists every ledger entry and every retry disclosur
   enterMerge(shipDir, "01-a", { entries: entriesOf("01-a", "a".repeat(40), [finding], new Set([finding.id])), retries: [] });
   enterMerge(shipDir, "02-b", { entries: entriesOf("02-b", "b".repeat(40), [{ ...finding, id: "1.correctness.1", title: "twice of a string" }], new Set()), retries: [retry] });
   assert.deepEqual(readLedger(shipDir).entries.map((entry) => entry.id), ["01-a:2.adversary.1", "02-b:1.correctness.1"]);
+  // A run that died after the merge writes the same merge again on adoption:
+  // nothing is added, and the count it reports is the same.
+  const before = fs.readFileSync(path.join(shipDir, "ledger.json"), "utf8");
+  assert.equal(enterMerge(shipDir, "02-b", { entries: entriesOf("02-b", "b".repeat(40), [{ ...finding, id: "1.correctness.1", title: "twice of a string" }], new Set()), retries: [retry] }), 1);
+  assert.equal(fs.readFileSync(path.join(shipDir, "ledger.json"), "utf8"), before);
 
   toDialog(staged);
   const body = planPullOf(env).body;
