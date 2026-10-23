@@ -91,7 +91,7 @@ test("a fix unit's id can never be a spec's, and is one ref component", () => {
 test("a fix unit's document is in spec shape and lists every gating finding and the failing command with its log", () => {
   const text = unitDocument({
     id: "plan-fix-1", slug: "demo", branch: "plan/demo", tip: A, check: 2, recordPath: "/s/whole-plan/2/record.json",
-    findings: [{ severity: "major", file: "b.js", line: 3, title: "wrong", detail: "breaks\n  the add" }],
+    findings: [{ severity: "major", scope: "code", file: "b.js", line: 3, title: "wrong", detail: "breaks\n  the add" }],
     failedVerify: { command: "npm test", logPath: "/s/whole-plan/2/rounds/1/verify/1.log" },
     goalPath: "/p/goal.md", planPath: "/p/plan.md", diffPath: "/s/whole-plan/2/rounds/1/review.diff"
   });

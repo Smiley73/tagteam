@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { listRounds } from "./rounds.mjs";
-import { findingRound } from "../collect-findings.mjs";
+import { findingRound, isPullRequestFinding } from "../collect-findings.mjs";
 import { PLACEHOLDER_EVIDENCE } from "../recheck.mjs";
 
 // Briefs live beside `declined/` in the spec directory, outside every round. A
@@ -271,8 +271,8 @@ export function renderBrief({ spec, round, files, history, signals = [], loose =
 // files not already named, then the pull request, then "no file in particular".
 function arrivedOn(loose, named) {
   const places = loose.files.filter((file) => !named.has(file));
-  if (loose.findings.some((finding) => finding.file != null && !loose.files.includes(finding.file))) places.push("the pull request itself");
-  if (loose.findings.some((finding) => finding.file == null)) places.push("no file in particular");
+  if (loose.findings.some(isPullRequestFinding)) places.push("the pull request itself");
+  if (loose.findings.some((finding) => finding.file == null && !isPullRequestFinding(finding))) places.push("no file in particular");
   if (places.length < 2) return places.join("");
   return `${places.slice(0, -1).join(", ")} and ${places.at(-1)}`;
 }

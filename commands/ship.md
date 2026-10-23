@@ -174,8 +174,10 @@ when something blocking or major is open and a fix round is left, `recheck`
 A fixer that declines every finding and changes nothing makes no round and
 skips `verify`, but not `recheck`: the lenses that raised what it declined read
 its reasons and either withdraw the finding or keep it open.
-A finding about the pull request itself — one naming no file, or naming the
-pull request body — never reaches a fixer, which could only decline it. `fix`
+A finding about the pull request itself — one its reviewer scoped
+`pull-request`, or one naming the pull request body whatever its scope — never
+reaches a fixer, which could only decline it. A `code` finding that names no
+single file is a fixer's like any other. `fix`
 and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
 that it says what they ask for; the readers that raised them judge that body at
 the next re-check, before it is published, and `publish` sends it. When nothing
@@ -269,7 +271,7 @@ at each point:
   it was chosen with rounds left or at the cap and whether or not it changed
   anything, so redesign is not offered, and `redesign` run anyway is refused and
   spends nothing. The same three answers come when the findings that keep
-  arriving are all about the pull request or name no file: there is no file to
+  arriving are all scoped to the pull request or name no file: there is no file to
   rewrite, and the `ask` says so.
 
   *Every fix round is spent* — three answers, asked before anything publishes,

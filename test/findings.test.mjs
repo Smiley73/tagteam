@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { collect, findingId, parseRound, roundDirectoryFor } from "../scripts/collect-findings.mjs";
+import { collect, findingId, isPullRequestFinding, parseRound, roundDirectoryFor } from "../scripts/collect-findings.mjs";
 import { settle, resolveCarry, resolveDeclined, resolveReview, summaryLines } from "../scripts/recheck.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -21,6 +21,7 @@ const NEW_OID = "b".repeat(40);
 function finding(overrides = {}) {
   return {
     severity: "blocking",
+    scope: "code",
     file: "src/a.ts",
     line: 4,
     title: "loses the first write",
@@ -112,6 +113,23 @@ test("an unparseable or schema-invalid findings file is incomplete", () => {
   assert.match(result.missing[1].reason, /findings schema/);
 });
 
+test("a finding is for the pull request by its scope or a pull request file, and a code finding with no file is a fixer's", () => {
+  assert.equal(isPullRequestFinding(finding({ scope: "code", file: null })), false);
+  assert.equal(isPullRequestFinding(finding({ scope: "pull-request", file: "src/x.js" })), true);
+  assert.equal(isPullRequestFinding(finding({ scope: "code", file: "pr-body.md" })), true);
+  const { scope, ...legacy } = finding({ file: null });
+  assert.equal(isPullRequestFinding(legacy), true, "a record written before scope keeps the rule it was written under");
+});
+
+test("a findings file whose finding has no scope is a missing lens, not counted", () => {
+  const { scope, ...unscoped } = finding();
+  const target = dir({ "correctness.json": lensFile("correctness", [unscoped]) });
+  const result = collect({ dir: target, candidate: OID, expect: ["correctness"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  assert.equal(result.status, "incomplete");
+  assert.deepEqual(result.findings, []);
+  assert.match(result.missing[0].reason, /findings schema.*scope/);
+});
+
 test("only blocking and major are open; ids are assigned, not authored", () => {
   const target = dir({
     "correctness.json": lensFile("correctness", [
@@ -182,7 +200,7 @@ test("every finding resolved by its own reviewer clears the review", () => {
 // resolved verdict is the lens withdrawing what it raised.
 test("a fixer's decline puts the round's own findings to their lenses, and nothing else does", () => {
   const own = { status: "open", candidate: OID, counts: { major: 1 }, open: [
-    { id: "2.correctness.1", lens: "correctness", severity: "major", file: "src/a.ts", line: 1, title: "wrong", detail: "d" }
+    { id: "2.correctness.1", lens: "correctness", severity: "major", scope: "code", file: "src/a.ts", line: 1, title: "wrong", detail: "d" }
   ] };
   const withdrawn = () => dir({
     "correctness.json": verdictFile("correctness", [{ id: "2.correctness.1", resolved: true, evidence: "withdrawn: the guard is on the caller" }])
@@ -208,7 +226,7 @@ test("a verdict written as status: resolved is refused with the correction in th
   // and stays strict — but the reason now says which field was meant, so the
   // orchestrator can tell a wrong key from a broken file without opening it.
   const review = { status: "open", candidate: OID, counts: { major: 1 }, open: [
-    { id: "1.resilience.1", lens: "resilience", severity: "major", file: "src/a.ts", line: 1, title: "wrong", detail: "d" }
+    { id: "1.resilience.1", lens: "resilience", severity: "major", scope: "code", file: "src/a.ts", line: 1, title: "wrong", detail: "d" }
   ] };
   const result = settle({
     review, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, ...adversary([]),

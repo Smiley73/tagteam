@@ -822,7 +822,7 @@ function realPass() {
     candidate: source.candidate,
     summary: "looked",
     findings: [{
-      severity: "blocking", file: "a.txt", line: 1,
+      severity: "blocking", scope: "code", file: "a.txt", line: 1,
       title: "loses the first write", detail: "two concurrent callers", fix: null
     }]
   }), { mode: 0o600 });
