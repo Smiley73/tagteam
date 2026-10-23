@@ -2002,3 +2002,39 @@ test("an item ruled missing is raised once while a finding for it stands open, a
   assert.deepEqual(withdrawn.findings.map((entry) => entry.id), ["2.item:1.1"]);
   assert.deepEqual(withdrawn.open.map((entry) => [entry.id, entry.lens, entry.resolved]), [["2.item:1.1", "adversary", false]]);
 });
+
+test("after a decline, a lens's re-check ruling replaces its collection ruling on the same candidate", () => {
+  // The collection of this very candidate, where correctness ruled the item
+  // missing and so raised 1.item:1.1, and codex ruled it out of scope. The fixer
+  // declined, so the settlement's candidate is the collection's.
+  const items = { candidate: OID, candidates: [OID], items: [item(1, 1, "the migration")] };
+  const minted = carriedFinding("1.item:1.1", "correctness", { evidence: undefined, detail: "spec names it" });
+  const collection = {
+    status: "open", round: 1, candidate: OID, counts: { major: 1 }, open: [minted], findings: [minted], missing: [],
+    expected: ["correctness", "codex"], present: [{ lens: "correctness", summary: "s" }, { lens: "codex", summary: "s" }],
+    items: items.items,
+    rulings: [
+      { lens: "correctness", id: "item:1.1", ruling: "spec-requirement-missing", reason: "spec names it" },
+      { lens: "codex", id: "item:1.1", ruling: "out-of-scope", reason: "done" }
+    ]
+  };
+  const outOfScope = (reason) => ({ rulings: [{ id: "item:1.1", ruling: "out-of-scope", reason }] });
+  const fresh = dir({ "adversary.json": { ...lensFile("adversary", [], OID), ...outOfScope("not required") } });
+  const settleWith = (verdict) => settle({
+    review: collection, candidate: OID, schemaPath: RECHECK_SCHEMA, round: 1, items, declined: true,
+    dir: dir({ "correctness.json": { ...verdictFile("correctness", [verdict], OID), ...outOfScope("the spec does not require it") } }),
+    adversary: path.join(fresh, "adversary.json"), adversarySchemaPath: FINDINGS_SCHEMA
+  });
+
+  // Withdrawn, and every reader now rules the item out of scope: it closes like
+  // any other withdrawn finding.
+  const withdrawn = settleWith({ id: "1.item:1.1", resolved: true, evidence: "withdrawn: the migration is not required" });
+  assert.equal(withdrawn.status, "clean", JSON.stringify(withdrawn.open));
+  assert.deepEqual(withdrawn.open, []);
+  assert.deepEqual(withdrawn.accounting.items.map((entry) => [entry.id, entry.ruling]), [["item:1.1", "out-of-scope"]]);
+  assert.equal(withdrawn.accounting.acceptable, true);
+
+  // Not withdrawn: the finding stays open on the lens's own verdict.
+  const kept = settleWith({ id: "1.item:1.1", resolved: false, evidence: "the migration is still owed" });
+  assert.deepEqual(kept.open.map((entry) => [entry.id, entry.lens, entry.evidence]), [["1.item:1.1", "correctness", "the migration is still owed"]]);
+});

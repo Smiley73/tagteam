@@ -437,7 +437,7 @@ export function settle({
   // adversary's findings" is not a gate, and a missing file would pass silently.
   const fresh = [];
   const recorded = [];
-  let freshRulings = new Map();
+  let freshRulings = null;
   if (adversary !== null) {
     const findingsSchema = JSON.parse(fs.readFileSync(adversarySchemaPath, "utf8"));
     let parsed;
@@ -489,10 +489,20 @@ export function settle({
   // it reviewed this same candidate: after a clean panel the adversary may be
   // the only reader sent here. A collection of an earlier candidate ruled on
   // another candidate's items and counts for nothing.
+  //
+  // A lens that ruled here has ruled this candidate's items a second time, after
+  // its collection ruling, and only the later one counts. That is the decline
+  // path: the candidate is unchanged, so the collection is of this candidate, and
+  // the lens that ruled an item missing — and so owns its finding — is the lens
+  // asked whether to withdraw it. Kept beside its new ruling, the old
+  // `spec-requirement-missing` decided the item whatever the lens said now, and
+  // reopened the very finding it had just withdrawn, on every round.
   const readers = lenses.map((lens) => ({ reader: lens, bound: ruled.get(lens) ?? new Map() }));
-  if (adversary !== null) readers.push({ reader: "adversary", bound: freshRulings });
+  if (adversary !== null) readers.push({ reader: "adversary", bound: freshRulings ?? new Map() });
+  const ruledHere = new Set([...ruled.keys(), ...(freshRulings === null ? [] : ["adversary"])]);
   if (review.candidate === candidate) {
     for (const { lens } of review.present ?? []) {
+      if (ruledHere.has(lens)) continue;
       const own = (review.rulings ?? []).filter((entry) => entry.lens === lens);
       readers.push({ reader: lens, bound: bindRulings(own, itemIds) });
     }
