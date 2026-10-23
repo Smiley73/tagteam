@@ -1918,3 +1918,87 @@ test("an item a re-check reader leaves out is unruled, and a reader's file witho
   assert.deepEqual(bare.accounting.items.map((entry) => entry.ruling), ["unruled", "unruled"]);
   assert.equal(bare.accounting.acceptable, false);
 });
+
+test("an item a re-check reader rules missing is one major finding in what the round leaves open, under the same id on every settlement", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, verdicts, adv, review: reviewPath, out } = recheckRound(2);
+  fs.writeFileSync(path.join(verdicts, "correctness.json"), JSON.stringify(verdictFile("correctness", [
+    { id: "1.correctness.1", resolved: true, evidence: "fixed" },
+    { id: "1.correctness.2", resolved: true, evidence: "fixed" }
+  ])));
+  fs.writeFileSync(adv, JSON.stringify({
+    ...lensFile("adversary", [], NEW_OID),
+    rulings: [{ id: "item:2.1", ruling: "spec-requirement-missing", reason: "the spec names the migration and there is none" }]
+  }));
+  writeReview(reviewPath);
+  const items = path.join(roundDir, "unfinished.json");
+  fs.writeFileSync(items, JSON.stringify({ candidate: NEW_OID, candidates: [NEW_OID], items: [item(2, 1, "the migration")] }));
+  const run = () => {
+    const ran = spawnSync("node", [
+      path.join(root, "scripts", "recheck.mjs"),
+      "--review", reviewPath, "--dir", verdicts, "--adversary", adv,
+      "--candidate", NEW_OID, "--round", "2", "--out", out, "--items", items
+    ], { encoding: "utf8" });
+    assert.equal(ran.status, 1, `an item ruled missing is an open finding: ${ran.stderr}`);
+    return {
+      settled: JSON.parse(fs.readFileSync(out, "utf8")),
+      stillOpen: JSON.parse(fs.readFileSync(path.join(roundDir, "still-open.json"), "utf8"))
+    };
+  };
+
+  const { settled, stillOpen } = run();
+  assert.equal(settled.status, "open");
+  const raisedNow = settled.findings.filter((entry) => entry.id.includes("item:"));
+  assert.equal(raisedNow.length, 1);
+  assert.deepEqual(
+    { id: raisedNow[0].id, lens: raisedNow[0].lens, severity: raisedNow[0].severity, resolved: raisedNow[0].resolved },
+    { id: "2.item:2.1", lens: "adversary", severity: "major", resolved: false }
+  );
+  assert.deepEqual(settled.open.map((entry) => entry.id), ["2.item:2.1"]);
+  assert.deepEqual(stillOpen.findings.map((entry) => entry.id), ["2.item:2.1"]);
+
+  const again = run();
+  assert.deepEqual(again.settled.open.map((entry) => entry.id), ["2.item:2.1"], "a second settlement named the item differently");
+  assert.deepEqual(again.stillOpen.findings.map((entry) => entry.id), ["2.item:2.1"]);
+});
+
+test("an item ruled missing is raised once while a finding for it stands open, and again once that finding is resolved", () => {
+  const items = { candidate: NEW_OID, candidates: [NEW_OID], items: [item(1, 1, "the migration")] };
+  const missing = { rulings: [{ id: "item:1.1", ruling: "spec-requirement-missing", reason: "still no migration" }] };
+  const freshMissing = dir({ "adversary.json": { ...lensFile("adversary", [], NEW_OID), ...missing } });
+  const settleWith = (verdicts, overrides = {}) => settle({
+    review: { ...review, open: [] }, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, items,
+    carried: [carriedFinding("1.item:1.1", "correctness")], carriedRound: 1,
+    dir: dir({ "correctness.json": { ...verdictFile("correctness", verdicts), rulings: [] } }),
+    adversary: path.join(freshMissing, "adversary.json"), adversarySchemaPath: FINDINGS_SCHEMA,
+    ...overrides
+  });
+
+  // Still open: the carried finding stands for the item, and nothing is minted beside it.
+  const standing = settleWith([{ id: "1.item:1.1", resolved: false, evidence: "still no migration" }]);
+  assert.deepEqual(standing.open.map((entry) => entry.id), ["1.item:1.1"]);
+  assert.deepEqual(standing.findings.map((entry) => entry.id), ["1.item:1.1"]);
+  // The same when the collection raised it and nothing carried it.
+  const collected = settleWith([{ id: "1.item:1.1", resolved: false, evidence: "still no migration" }], {
+    review: { ...review, open: [carriedFinding("1.item:1.1", "correctness")] }, carried: [], carriedRound: null
+  });
+  assert.deepEqual(collected.findings.map((entry) => entry.id), ["1.item:1.1"]);
+
+  // Resolved by its owner while the adversary still rules the item missing: the
+  // item is raised at this round, and the review does not settle clean.
+  const closed = settleWith([{ id: "1.item:1.1", resolved: true, evidence: "the migration is there now" }]);
+  assert.equal(closed.status, "open");
+  assert.deepEqual(closed.open.map((entry) => [entry.id, entry.lens, entry.severity]), [["2.item:1.1", "adversary", "major"]]);
+
+  // A finding raised at this round, withdrawn by its lens after a decline while
+  // another reader still rules the item missing, is reopened, not listed twice.
+  const withdrawn = settle({
+    review: { ...review, open: [carriedFinding("2.item:1.1", "correctness")] },
+    candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, items, declined: true,
+    dir: dir({ "correctness.json": { ...verdictFile("correctness", [{ id: "2.item:1.1", resolved: true, evidence: "withdrawn" }]), rulings: [] } }),
+    adversary: path.join(freshMissing, "adversary.json"), adversarySchemaPath: FINDINGS_SCHEMA
+  });
+  assert.equal(withdrawn.status, "open");
+  assert.deepEqual(withdrawn.findings.map((entry) => entry.id), ["2.item:1.1"]);
+  assert.deepEqual(withdrawn.open.map((entry) => [entry.id, entry.lens, entry.resolved]), [["2.item:1.1", "adversary", false]]);
+});

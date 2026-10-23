@@ -498,13 +498,24 @@ export function settle({
     }
   }
   const combined = combineRulings(given, readers);
-  // An item already standing as a finding — the collection raised it, or an
+  // An item still standing as an open finding — the collection raised it, or an
   // earlier round did and it is carried — is settled as that finding, not
-  // raised a second time.
-  const asFinding = new Set([...byId.keys()].map((id) => id.slice(id.indexOf(".") + 1)));
+  // raised a second time. Only one this settlement left open counts: a finding
+  // for the item that was resolved here no longer stands for anything, and
+  // letting it suppress a reader's missing ruling would settle the review clean
+  // while the accounting still held the item missing.
+  const standing = new Set(settled.filter((finding) => !finding.resolved)
+    .map((finding) => finding.id.slice(finding.id.indexOf(".") + 1)));
   for (const item of combined) {
-    if (item.missing.length === 0 || asFinding.has(item.id)) continue;
-    fresh.push({ ...itemFinding(round, item, item.missing[0]), resolved: false, evidence: item.missing[0].reason });
+    if (item.missing.length === 0 || standing.has(item.id)) continue;
+    const raisedNow = { ...itemFinding(round, item, item.missing[0]), resolved: false, evidence: item.missing[0].reason };
+    // The resolved finding may carry this very id — this round's own, withdrawn
+    // by its lens after a decline while another reader still rules the item
+    // missing. It is reopened in place rather than listed twice, and it was
+    // already counted by the collection that raised it.
+    const closed = settled.findIndex((finding) => finding.id === raisedNow.id);
+    if (closed === -1) fresh.push(raisedNow);
+    else settled[closed] = raisedNow;
   }
   const accounting = items === null ? null : {
     candidates: items.candidates,
