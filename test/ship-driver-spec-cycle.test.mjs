@@ -877,8 +877,9 @@ test("a change that passes alone and fails on the base as it now stands stops, c
   assert.match(approved.json.ask, /fails this repository's verify commands/);
   assert.equal(approved.json.landing.status, "failed");
   assert.equal(state().state, "awaiting-approval");
-  // And the same stop was repeated rather than re-run: one attempt directory.
-  assert.deepEqual(fs.readdirSync(path.join(shipDir, "01-a", "rounds", "1", "landing")), [moved.slice(0, 12)]);
+  // And the same stop was repeated rather than re-run: the first check and the
+  // one go it got again on the same merge, and nothing after them.
+  assert.deepEqual(fs.readdirSync(path.join(shipDir, "01-a", "rounds", "1", "landing")), [moved.slice(0, 12), `${moved.slice(0, 12)}-2`]);
 
   const repair = ship("repair", plan, ["--spec", "01-a"]);
   assert.equal(repair.status, 0, repair.stderr);

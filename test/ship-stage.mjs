@@ -198,6 +198,13 @@ if (argv[0] === "api") {
   process.stdout.write(JSON.stringify(answer.body) + "\\n");
   process.exit(0);
 }
+// run rerun: recorded beside the state file, so that GH_STUB_CHECKS_AFTER_RERUN
+// answers the checks from then on — or refused, with GH_STUB_RERUN_FAILS.
+if (argv[0] === "run" && argv[1] === "rerun") {
+  if (process.env.GH_STUB_RERUN_FAILS) die("gh stub: run " + argv[2] + " cannot be rerun");
+  fs.appendFileSync(statePath + ".rerun", argv[2] + "\\n");
+  process.exit(0);
+}
 if (argv[0] !== "pr") die("gh stub: unsupported command " + argv.join(" "));
 const state = load();
 // By branch, the open pull request when there is one, as gh answers: a branch
@@ -216,6 +223,7 @@ if (argv[1] === "create") {
   save(state);
   process.stdout.write(pull.url + "\\n");
 } else if (argv[1] === "edit") {
+  if (process.env.GH_STUB_EDIT_FAILS) die("gh stub: HTTP 502: Bad Gateway");
   const pull = find(argv[2]);
   pull.title = flag(argv, "--title") ?? pull.title;
   const body = flag(argv, "--body-file");
@@ -282,7 +290,9 @@ if (argv[1] === "create") {
   // GH_STUB_CHECKS names the rows to answer with. GH_STUB_CHECKS_BY_CALL is a
   // JSON array of answers, one per call in turn and the last one repeated, so a
   // test can have checks appear only after an empty first answer.
-  if (process.env.GH_STUB_CHECKS_BY_CALL) {
+  if (process.env.GH_STUB_CHECKS_AFTER_RERUN && fs.existsSync(statePath + ".rerun")) {
+    process.stdout.write(process.env.GH_STUB_CHECKS_AFTER_RERUN + "\\n");
+  } else if (process.env.GH_STUB_CHECKS_BY_CALL) {
     const answers = JSON.parse(process.env.GH_STUB_CHECKS_BY_CALL);
     const counter = statePath + ".checks-calls";
     const call = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;

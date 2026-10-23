@@ -265,7 +265,18 @@ Right after a pull request opens GitHub shows no checks on it yet, so when the
 branch has workflows that run on pull requests, `publish` first waits up to
 `ciStartWaitSec` — two minutes unless you set it, 0 to not wait — for checks to
 appear, and stops for you if none do. A repository with no such workflows gets
-no extra wait.
+no extra wait. Checks still running when `ciWaitSec` runs out are waited on
+rather than given up on, and the run says how long they have been waited for;
+telling it to finish the spec is how you end the wait, and the spec then stops
+for you as for checks that proved nothing — or, when a check had already
+failed, as for checks that failed.
+
+A single failure does not stop a spec on its own. A verify command that fails is
+run once more on the same commit, and so is the verify run against a base that
+moved; failed GitHub Actions checks are rerun once before a repair is offered.
+What fails again stops or goes to repair as before. What passes the second time
+is said under Risk in the spec's pull request, and the spec does not merge until
+the pull request says it.
 
 Where a spec merges decides whether it waits for you. A spec that merges
 straight into the base — a plan of one spec, or any plan with `planBranch` off —

@@ -65,11 +65,58 @@ test("off by default: running then passing passes, and running to the deadline i
 
   const stalls = harness([running]);
   const result = await run(stalls, { waitSec: 60 });
-  assert.equal(result.status, "not-run");
+  assert.equal(result.status, "not-run", "a caller that reads the status sees what it always saw");
   assert.equal(result.reason, "checks were still running after 60s, so nothing was proven either way");
+  assert.equal(result.stillRunning, true);
   assert.deepEqual(result.checks, running);
   assert.equal(stalls.elapsed(), 60_000, "the running budget did not count from the call");
   assert.deepEqual(stalls.reads.map((read) => read.at), [0, 20_000, 40_000, 60_000]);
+});
+
+test("after a rerun, a failed row completed before the rerun moment is still running, and the rerun's own result is the answer", async () => {
+  const rerunAt = Date.parse("2026-05-01T12:00:00Z");
+  const stale = [{ ...failing[0], completedAt: "2026-05-01T11:59:00Z" }];
+  const fresh = [{ ...failing[0], completedAt: "2026-05-01T12:05:00Z" }];
+  const passes = harness([stale, stale, [{ ...passing[0], completedAt: "2026-05-01T12:04:00Z" }]]);
+  assert.equal((await run(passes, { waitSec: 600, rerunAt })).status, "passed");
+  assert.equal(passes.reads.length, 3);
+
+  const fails = harness([stale, fresh]);
+  assert.equal((await run(fails, { waitSec: 600, rerunAt })).status, "failed");
+  assert.equal(fails.reads.length, 2);
+
+  const stalls = harness([stale]);
+  const result = await run(stalls, { waitSec: 60, rerunAt });
+  assert.equal(result.stillRunning, true, "the stale failure was taken as the rerun's result");
+  assert.deepEqual(result.checks, stale, "the rows are reported as gh gave them");
+});
+
+test("settling runs, a failure waits for the rest of its Actions run before it is the answer, and nothing else is held back", async () => {
+  const job = (name, state, bucket, run) => ({ name, state, bucket, link: `https://github.com/o/r/actions/runs/${run}/job/1` });
+  const going = [job("lint", "FAILURE", "fail", 1), job("test", "IN_PROGRESS", "pending", 1)];
+  const done = [job("lint", "FAILURE", "fail", 1), job("test", "SUCCESS", "pass", 1)];
+
+  const settles = harness([going, going, done]);
+  const result = await run(settles, { waitSec: 600, settleRuns: true });
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.checks, done, "the failure was answered while its run was still going");
+  assert.equal(settles.reads.length, 3);
+
+  const stalls = harness([going]);
+  const stalled = await run(stalls, { waitSec: 60, settleRuns: true });
+  assert.equal(stalled.stillRunning, true, "a failure whose run never finished was the answer");
+
+  const unsettled = harness([going, done]);
+  assert.equal((await run(unsettled, { waitSec: 600 })).status, "failed");
+  assert.equal(unsettled.reads.length, 1, "without settling, the first failure is the answer");
+
+  const otherRun = harness([[job("lint", "FAILURE", "fail", 1), job("test", "IN_PROGRESS", "pending", 2)]]);
+  assert.equal((await run(otherRun, { waitSec: 600, settleRuns: true })).status, "failed");
+  assert.equal(otherRun.reads.length, 1, "a row of another run held the failure back");
+
+  const outside = harness([[...failing, job("test", "IN_PROGRESS", "pending", 1)]]);
+  assert.equal((await run(outside, { waitSec: 600, settleRuns: true })).status, "failed");
+  assert.equal(outside.reads.length, 1, "a failure that cannot be rerun was held back");
 });
 
 test("a wait of 0 is disabled whatever the start wait, without a read", async () => {
