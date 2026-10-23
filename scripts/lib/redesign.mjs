@@ -323,6 +323,8 @@ export function redesignAsk(signals, { spent, limit, atCollect = false, redesign
   if (loose) each.push(arrivingSentence(loose, new Set(signals.map((signal) => signal.file))));
   const heading = signals.length > 0 ? "The same place keeps failing." : "New findings keep arriving, round after round, on different files.";
   const opening = `${heading} ${each.join(" ")} ${spent} of ${limit} fix rounds ${spent === 1 ? "is" : "are"} spent`;
+  // What publishing as it is means off a plan branch, and at the cap, where
+  // `accept` is not an answer: the plan-branch accept is worded below.
   const disclosed = "with what is still open disclosed in the pull request — it will not merge unattended and finish "
     + "cannot approve past an open finding, so merging it is theirs to do on GitHub, or a revisit once a reader withdraws "
     + "what it found";
