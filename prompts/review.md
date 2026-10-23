@@ -78,6 +78,29 @@ low may never come back. A finding you inflate spends a round on the wrong thing
 and every major you file is a change the fixer will make and every other reviewer
 will re-read.
 
+## Unfinished items
+
+Your dispatch may name an unfinished items file: what the agents that wrote
+this change, or an earlier candidate of it, reported leaving undone. Each item
+carries an `id`, the round and kind of report it came from, and the agent's own
+`part` and `reason`. Rule on every one in `rulings`, against the candidate you
+are reviewing rather than the commit that wrote the report: one
+`{"id", "ruling", "reason"}` per item, the id copied unchanged and the reason
+one sentence.
+
+- `spec-requirement-missing` — the spec requires this, and this candidate
+  still lacks it.
+- `environmental` — the agent could not do or check this where it ran (a
+  sandbox, the full gate, the network), and nothing in the change is wrong
+  because of that.
+- `out-of-scope` — this candidate owes nothing more for it: the spec does not
+  ask for it, another spec owns it, or it has since been done.
+
+An item you rule `spec-requirement-missing` becomes a finding of its own, so do
+not also file one for it. An item you leave unruled keeps the spec waiting for
+a person. Given no items file, or one whose list is empty, write `rulings` as
+`[]` — never omit it.
+
 ## Discipline
 
 Verify before you assert. If you claim something is never called, look. If you

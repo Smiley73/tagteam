@@ -289,6 +289,15 @@ CI proved nothing or never started, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
 wrote it never confirmed it finished what it was given.
 
+On a plan branch that last stop can clear without you. Every reader of the
+change rules on each thing the agent said it left undone: something the spec
+still needs, something the agent could not do where it ran, or something this
+change does not owe. One the readers say the spec still needs goes back for a
+fix like any other finding. When all of them are the other two kinds, and the
+review, verify and checks are clean, the spec merges into the plan branch and
+its pull request names what was left under Risk. A round with no report at all
+still waits, and so does everything that merges straight into the base.
+
 The missing evidence matters more than it sounds: an absent or malformed findings
 file yields an empty finding set, and an empty finding set otherwise reads as a
 clean review.

@@ -1857,3 +1857,64 @@ test("a failed fresh adversary pass still seals the verdict the same round consu
     "the consumed re-check verdict was left writable because the other role failed"
   );
 });
+
+// --- the readers' rulings on what was left undone ---
+
+const item = (round, index, part) => ({ id: `item:${round}.${index}`, round, kind: "implement", part, reason: "the sandbox has no network" });
+
+test("an item one lens rules missing is one major code finding owned by that lens, and keeps its id on a second collection", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const ruling = (value, reason) => ({ rulings: [{ id: "item:1.1", ruling: value, reason }] });
+  const { dir: roundDir, findings, out } = round({
+    "correctness.json": { ...lensFile("correctness", []), ...ruling("spec-requirement-missing", "the spec names the migration") },
+    "security.json": { ...lensFile("security", []), ...ruling("environmental", "nothing could run it there") }
+  });
+  const items = path.join(roundDir, "unfinished.json");
+  fs.writeFileSync(items, JSON.stringify({ candidate: OID, candidates: [OID], items: [item(1, 1, "the migration")] }));
+  const run = () => {
+    const ran = spawnSync("node", [path.join(root, "scripts", "collect-findings.mjs"), "--dir", findings, "--candidate", OID,
+      "--expect", "security,correctness", "--round", "1", "--out", out, "--items", items], { encoding: "utf8" });
+    assert.equal(ran.status, 1, ran.stderr);
+    return JSON.parse(fs.readFileSync(out, "utf8"));
+  };
+  const first = run();
+  assert.equal(first.status, "open");
+  assert.equal(first.findings.length, 1);
+  const { id, lens, severity, scope, file, line, title, detail, fix } = first.findings[0];
+  assert.deepEqual({ id, lens, severity, scope, file, line, title, detail, fix }, {
+    id: "1.item:1.1", lens: "correctness", severity: "major", scope: "code", file: null, line: null,
+    title: "the migration", detail: "the spec names the migration", fix: null
+  });
+  assert.equal(isPullRequestFinding(first.findings[0]), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(roundDir, "to-fix.json"), "utf8")).findings.map((entry) => entry.id), ["1.item:1.1"]);
+  assert.deepEqual(run().findings.map((entry) => entry.id), ["1.item:1.1"]);
+});
+
+test("an item a re-check reader leaves out is unruled, and a reader's file without rulings is read as ruling nothing", () => {
+  const items = { candidate: NEW_OID, candidates: [NEW_OID], items: [item(2, 1, "the full gate"), item(2, 2, "the network test")] };
+  const resolvedBoth = [
+    { id: "1.correctness.1", resolved: true, evidence: "fixed" },
+    { id: "1.correctness.2", resolved: true, evidence: "fixed" }
+  ];
+  const environmental = (id) => ({ id, ruling: "environmental", reason: "the sandbox has no network" });
+  const fresh = dir({ "adversary.json": { ...lensFile("adversary", [], NEW_OID), rulings: [environmental("item:2.1"), environmental("item:2.2")] } });
+  const partly = settle({
+    review, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, items,
+    dir: dir({ "correctness.json": { ...verdictFile("correctness", resolvedBoth), rulings: [environmental("item:2.1")] } }),
+    adversary: path.join(fresh, "adversary.json"), adversarySchemaPath: FINDINGS_SCHEMA
+  });
+  assert.equal(partly.status, "clean");
+  assert.deepEqual(partly.accounting.items.map((entry) => [entry.id, entry.ruling]), [["item:2.1", "environmental"], ["item:2.2", "unruled"]]);
+  assert.equal(partly.accounting.acceptable, false);
+  assert.ok(summaryLines(partly).some((text) => /item:2\.2\s+unruled\s+the network test/.test(text)));
+
+  const bare = settle({
+    review, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, items,
+    dir: dir({ "correctness.json": verdictFile("correctness", resolvedBoth) }), ...adversary([])
+  });
+  assert.equal(bare.status, "clean", "a file without rulings is not a reader that produced no evidence");
+  assert.deepEqual(bare.missing, []);
+  assert.deepEqual(bare.filled, [{ lens: "correctness", field: "rulings" }, { lens: "adversary", field: "rulings" }]);
+  assert.deepEqual(bare.accounting.items.map((entry) => entry.ruling), ["unruled", "unruled"]);
+  assert.equal(bare.accounting.acceptable, false);
+});

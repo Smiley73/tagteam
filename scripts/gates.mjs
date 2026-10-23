@@ -714,8 +714,27 @@ export function evaluate(state, config) {
   // An approval and not a blocker, deliberately: a blocker is cleared by nothing,
   // and an implementer that correctly refuses to guess at a contradictory spec
   // would strand the branch. A person reads the account and decides.
-  if (!report || report.status !== "complete" || (state[UNACCOUNTED] ?? []).length > 0) {
-    approvals.push("work-not-accounted-for");
+  //
+  // On a plan branch the readers can decide instead, and only there. They rule
+  // on every item left undone, and the settled review records the accounting;
+  // it stands for a person only with the review clean, verify passed, CI passed
+  // or not waited for, and every item of the current candidate and of every
+  // earlier unaccounted one ruled environmental or out-of-scope by every reader
+  // that was given it. A missing report, or one that names nothing, has no item
+  // to rule on and is never covered, so it always waits.
+  const unaccounted = state[UNACCOUNTED] ?? [];
+  if (!report || report.status !== "complete" || unaccounted.length > 0) {
+    const accounting = review?.accounting;
+    const owed = [...(report?.status === "complete" ? [] : [state.candidateOid]), ...unaccounted];
+    const cleared = onPlanBranch
+      && (report?.status === "complete" || report?.status === "unfinished")
+      && review?.status === "clean"
+      && verify?.status === "passed"
+      && (ci?.status === "passed" || !(config?.ciWaitSec > 0))
+      && Array.isArray(accounting?.items) && accounting.items.length > 0
+      && accounting.items.every((item) => item.ruling === "environmental" || item.ruling === "out-of-scope")
+      && owed.every((candidate) => (accounting.candidates ?? []).includes(candidate));
+    if (!cleared) approvals.push("work-not-accounted-for");
   }
 
   // Nothing actually ran. Not a failure, and not evidence either.

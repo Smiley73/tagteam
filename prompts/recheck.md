@@ -31,6 +31,9 @@ The file has exactly this shape, and no other key anywhere in it:
   "candidate": "<the post-fix commit, exactly as given>",
   "verdicts": [
     { "id": "<copied from your input>", "resolved": true, "evidence": "<what settles it>" }
+  ],
+  "rulings": [
+    { "id": "<copied from the items file>", "ruling": "environmental", "reason": "<one sentence>" }
   ]
 }
 ```
@@ -44,8 +47,8 @@ you again.
 ## Rules
 
 **Read the code.** You cannot answer this from the fixer's report, and you are
-not given it. A finding is resolved when the new code no longer has the defect —
-which you establish by looking at the new code.
+not given its account of what it did. A finding is resolved when the new code no
+longer has the defect — which you establish by looking at the new code.
 
 **When the fixer declined instead.** Your dispatch may say the fixer changed
 nothing and point you at its report: it answered every finding `wont-fix` or
@@ -73,3 +76,26 @@ code you happen to notice — that is a different review, and this is not it.
 
 **Narrower scope, not less input.** You are looking only at your own findings.
 You are not looking at less of the diff.
+
+## Unfinished items
+
+Your dispatch may also name an unfinished items file: what the agents that
+wrote this change, or an earlier candidate of it, reported leaving undone —
+only each item's `part` and `reason`, its `id`, and the round and kind of
+report it came from, never the rest of a report. Rule on every one in
+`rulings`, against the code as it stands now rather than the commit that wrote
+the report: one `{"id", "ruling", "reason"}` per item, the id copied unchanged
+and the reason one sentence.
+
+- `spec-requirement-missing` — the spec requires this, and this candidate
+  still lacks it.
+- `environmental` — the agent could not do or check this where it ran (a
+  sandbox, the full gate, the network), and nothing in the change is wrong
+  because of that.
+- `out-of-scope` — this candidate owes nothing more for it: the spec does not
+  ask for it, another spec owns it, or it has since been done.
+
+An item you rule `spec-requirement-missing` becomes a finding of its own, so do
+not also raise it anywhere else. An item you leave unruled keeps the spec
+waiting for a person. Given no items file, or one whose list is empty, write
+`rulings` as `[]` — never omit it.
