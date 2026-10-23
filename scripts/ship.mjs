@@ -73,7 +73,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
-import { isFailed } from "./lib/ci-state.mjs";
+import { isFailed, runOf } from "./lib/ci-state.mjs";
 import {
   clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
   recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
@@ -544,62 +544,74 @@ function riskLines(ctx, id) {
 
 const NOTHING_KNOWN = /^nothing(?: else)?(?: is)? known\.?$/i;
 
+// Where `text`'s `## Risk` section begins and ends, or null when it has none.
+function riskSection(text) {
+  const heading = /^## Risk[ \t]*\r?$/m.exec(text);
+  if (!heading) return null;
+  const start = heading.index + heading[0].length;
+  const next = /^## /m.exec(text.slice(start));
+  return { start, end: next ? start + next.index : text.length, last: !next };
+}
+
+// Which of `lines` `text` does not say under its `## Risk` heading. A line said
+// anywhere else in the body is not a disclosure under Risk.
+function unsaid(text, lines) {
+  const section = riskSection(text);
+  const said = section ? text.slice(section.start, section.end) : "";
+  return lines.filter((line) => !said.includes(line));
+}
+
 // `text` with each of `lines` it does not hold yet under its `## Risk` heading:
 // in place of a section that says only that nothing is known, which a disclosure
 // contradicts; after whatever else the section says; or in a section of its own
 // at the end when there is none. A line already there is not added twice, so a
 // sent body composes to itself.
 function composeBody(text, lines) {
-  const missing = lines.filter((line) => !text.includes(line));
+  const missing = unsaid(text, lines);
   if (missing.length === 0) return text;
   const block = missing.join("\n");
-  const heading = /^## Risk[ \t]*\r?$/m.exec(text);
-  if (!heading) return `${text.trimEnd()}\n\n## Risk\n\n${block}\n`;
-  const start = heading.index + heading[0].length;
-  const next = /^## /m.exec(text.slice(start));
-  const end = next ? start + next.index : text.length;
+  const section = riskSection(text);
+  if (!section) return `${text.trimEnd()}\n\n## Risk\n\n${block}\n`;
+  const { start, end, last } = section;
   const said = text.slice(start, end).trim();
-  const section = said === "" || NOTHING_KNOWN.test(said) ? block : `${said}\n\n${block}`;
-  return `${text.slice(0, start)}\n\n${section}\n${next ? `\n${text.slice(end)}` : ""}`;
+  const body = said === "" || NOTHING_KNOWN.test(said) ? block : `${said}\n\n${block}`;
+  return `${text.slice(0, start)}\n\n${body}\n${last ? "" : `\n${text.slice(end)}`}`;
 }
 
 // The body as it is sent, written beside the orchestrator's file, which is left
-// as it was written; and, once GitHub has taken it, which driver lines it carried.
+// as it was written.
 const sentBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.sent.md");
-const sentLinesPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.sent.json");
 
 function composeSent(ctx, id, text) {
-  const lines = riskLines(ctx, id);
-  fs.writeFileSync(sentBodyPath(ctx, id), composeBody(text, lines), { mode: 0o600 });
-  return { file: sentBodyPath(ctx, id), lines };
+  fs.writeFileSync(sentBodyPath(ctx, id), composeBody(text, riskLines(ctx, id)), { mode: 0o600 });
+  return sentBodyPath(ctx, id);
 }
 
-const markSent = (ctx, id, pr, lines) => writeJson(sentLinesPath(ctx, id), { pr, lines, at: new Date().toISOString() });
-
 /**
- * A body-only re-send, for a disclosure recorded after the body went to GitHub:
- * the body last sent — or the live one, for a pull request this run never sent
- * one to — with the missing lines added, through `gh pr edit --body-file` and
+ * The live body on GitHub, checked for every line the driver owes it under
+ * `## Risk` — never what this run remembers sending, since a person can edit a
+ * line out on GitHub after it went — and, when one is missing, sent again: that
+ * live body with the missing lines added, through `gh pr edit --body-file` and
  * nothing else. Never a full `publish`, which would push and wait for checks
- * again. True when the pull request now carries every line, or there is none.
+ * again. True when the live body now says every line, or there is none to say.
  */
 function resendBody(ctx, id, state, say) {
   const number = state.pr?.number;
-  if (!number) return true;
-  const sent = readJson(sentLinesPath(ctx, id), null);
-  const carried = sent?.pr === number ? sent.lines ?? [] : [];
-  const missing = riskLines(ctx, id).filter((line) => !carried.includes(line));
+  const lines = riskLines(ctx, id);
+  if (!number || lines.length === 0) return true;
+  const live = pullRequestRecord(ctx, id, state);
+  if (live.body === null) {
+    say.push(`Pull request #${number}'s body could not be read (${live.error}), so nothing shows it says under Risk: ${lines.join(" ")}`);
+    return false;
+  }
+  const missing = unsaid(live.body, lines);
   if (missing.length === 0) return true;
-  const text = exists(sentBodyPath(ctx, id)) ? fs.readFileSync(sentBodyPath(ctx, id), "utf8") : pullRequestRecord(ctx, id, state).body;
-  const fail = (why) => {
+  const edited = gh(ctx.repo, ["pr", "edit", String(number), "--body-file", composeSent(ctx, id, live.body)], { allowFailure: true });
+  if (edited.status !== 0) {
+    const why = (edited.stderr || edited.stdout || "gh pr edit failed").trim().split("\n")[0];
     say.push(`Pull request #${number}'s body could not be sent again (${why}), so it does not yet say under Risk: ${missing.join(" ")}`);
     return false;
-  };
-  if (text === null) return fail("its body could not be read");
-  const sentNow = composeSent(ctx, id, text);
-  const edited = gh(ctx.repo, ["pr", "edit", String(number), "--body-file", sentNow.file], { allowFailure: true });
-  if (edited.status !== 0) return fail((edited.stderr || edited.stdout || "gh pr edit failed").trim().split("\n")[0]);
-  markSent(ctx, id, number, sentNow.lines);
+  }
   say.push(`Sent pull request #${number}'s body again, now saying under Risk: ${missing.join(" ")}`);
   return true;
 }
@@ -3512,20 +3524,17 @@ function publish(options) {
   const republish = Boolean(state.pr);
   const sent = composeSent(ctx, id, fs.readFileSync(options.body, "utf8"));
   git(ctx.worktree, ["push", ...(republish ? ["--force-with-lease"] : ["-u"]), "origin", state.branch]);
-  let taken = true;
   if (!republish) {
     // Where this spec's state says it lands, which `begin` set from the train's
     // route: the plan branch on a plan route, the configured base otherwise.
-    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", sent.file]);
+    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", sent]);
   } else {
-    const edited = gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", sent.file], { allowFailure: true });
-    taken = edited.status === 0;
-    if (!taken) say.push(`Pull request #${state.pr.number}'s title and body could not be updated (${(edited.stderr || edited.stdout || "").trim().split("\n")[0]}); it keeps the ones it had.`);
+    const edited = gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", sent], { allowFailure: true });
+    if (edited.status !== 0) say.push(`Pull request #${state.pr.number}'s title and body could not be updated (${(edited.stderr || edited.stdout || "").trim().split("\n")[0]}); it keeps the ones it had.`);
   }
   const view = JSON.parse(gh(ctx.repo, ["pr", "view", state.branch, "--json", "number,url,headRefOid"]).stdout);
   if (view.headRefOid !== state.candidateOid) throw new Stop(`the pull request heads at ${view.headRefOid}, not the reviewed candidate ${state.candidateOid}`);
   node("gates.mjs", ["pr", statePath(ctx, id), String(view.number), view.url, view.headRefOid]);
-  if (taken) markSent(ctx, id, view.number, sent.lines);
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
   if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
@@ -3565,8 +3574,9 @@ function rerunRequest(ctx, id, candidate) {
  * are still running at `ciWaitSec` — by `checks`, which takes up the wait that
  * began at `began`. The `ci` gate is recorded only on a decided result: still
  * running records nothing, and `next` is `checks` again. A failure is rerun
- * once, then waited for again without a start wait; what that gives is the
- * result, and a failure after it goes to `repair` as any failure does.
+ * once, when the rest of its workflow run has finished — GitHub refuses a rerun
+ * of a run still going — then waited for again without a start wait; what that
+ * gives is the result, and a failure after it goes to `repair` as any failure does.
  */
 function waitSpecChecks(ctx, id, state, say, began = null) {
   const pr = state.pr.number;
@@ -3579,6 +3589,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
       "--repo", ctx.repo, "--pr", String(pr), "--wait-sec", String(ctx.config.ciWaitSec),
       ...(startSeconds > 0 ? ["--start-wait-sec", String(startSeconds)] : []),
       ...(rerunAt ? ["--rerun-at", rerunAt] : []),
+      // Before a rerun is asked for, a failure waits for the rest of its run.
+      ...(request === null ? ["--settle-runs", "1"] : []),
       "--out", ciPath(ctx, id)
     ], { allow: [1] });
     const outcome = readJson(ciPath(ctx, id));
@@ -3620,14 +3632,14 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
  */
 function requestRerun(ctx, id, state, outcome, say) {
   const failed = (outcome.checks ?? []).filter(isFailed);
-  const others = failed.filter((row) => !/\/actions\/runs\/\d+/.test(row.link ?? ""));
+  const others = failed.filter((row) => runOf(row) === null);
   if (others.length > 0) {
     say.push(`Not rerun: ${others.map((row) => row.name).join(", ")} ${others.length > 1 ? "are not GitHub Actions checks" : "is not a GitHub Actions check"}, so running the failed checks again could not turn the result green.`);
     return null;
   }
   const dir = currentRound(ctx, id, state).dir;
   const file = path.join(retriesOf(dir), `ci-${short(state.candidateOid)}.rerun.json`);
-  const runs = [...new Set(failed.map((row) => /\/actions\/runs\/(\d+)/.exec(row.link)[1]))];
+  const runs = [...new Set(failed.map(runOf))];
   const request = { candidate: state.candidateOid, requestedAt: new Date().toISOString(), failed: failed.map((row) => row.name), runs, checks: outcome.checks };
   writeRoundFile(file, `${JSON.stringify(request, null, 2)}\n`);
   for (const run of runs) {
@@ -3644,11 +3656,14 @@ function requestRerun(ctx, id, state, outcome, say) {
 
 // A decided result for this commit's checks, recorded: `ci.json`, the retry
 // record once a rerun has an answer, a re-send of the body when the rerun turned
-// the failure into a pass, and the `ci` gate.
-function recordChecks(ctx, id, state, outcome, since, say) {
+// the failure into a pass, and the `ci` gate. A wait a person `ended` is not the
+// rerun's answer — the rerun may still be running — so it writes no retry
+// record, and a later wait on this commit that sees the rerun decided still
+// records it and says a pass under Risk.
+function recordChecks(ctx, id, state, outcome, since, say, { ended = false } = {}) {
   writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
   const request = rerunRequest(ctx, id, state.candidateOid);
-  if (request && !retryOf(ctx, id, "ci", state.candidateOid)) {
+  if (request && !ended && !retryOf(ctx, id, "ci", state.candidateOid)) {
     writeRetry(currentRound(ctx, id, state).dir, {
       kind: "ci", candidate: state.candidateOid, failed: request.failed, first: request.file, second: ciPath(ctx, id), result: outcome.status
     });
@@ -5795,7 +5810,7 @@ function endChecksWait(ctx, id, state, say) {
   const waited = secondsSince(waiting.waitBegan);
   recordChecks(ctx, id, state, {
     ...outcome, reason: `checks were still running after ${waited}s of waiting, when the wait was ended at finish, so nothing was proven either way`
-  }, waiting.waitBegan, say);
+  }, waiting.waitBegan, say, { ended: true });
   say.push(`Ended the wait for the checks on #${state.pr.number} after ${waited}s; they proved nothing either way.`);
 }
 

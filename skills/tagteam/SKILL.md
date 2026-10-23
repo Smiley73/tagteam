@@ -123,7 +123,6 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
                  under ## Risk — each failure that passed when run again on
                  the same commit                                            ignored
-    pr-body.sent.json  which of those lines GitHub has taken                ignored
 .tagteam/worktrees/                                                         ignored
 .tagteam/locks/  <plan>-<digest>.lock/, one per plan being shipped — the same
                  plan twice is refused, two plans are not; and
@@ -754,7 +753,7 @@ a new commit appears — and every fix round makes one.
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge or Squash for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit, or as one squash commit when the person's recorded answer is Squash |
-| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, and with `--rerun-at` a failed check completed before the rerun counts as running |
+| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, with `--rerun-at` a failed check completed before the rerun counts as running, and with `--settle-runs 1` a failure waits for the rest of its Actions run to finish |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |

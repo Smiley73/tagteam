@@ -91,6 +91,34 @@ test("after a rerun, a failed row completed before the rerun moment is still run
   assert.deepEqual(result.checks, stale, "the rows are reported as gh gave them");
 });
 
+test("settling runs, a failure waits for the rest of its Actions run before it is the answer, and nothing else is held back", async () => {
+  const job = (name, state, bucket, run) => ({ name, state, bucket, link: `https://github.com/o/r/actions/runs/${run}/job/1` });
+  const going = [job("lint", "FAILURE", "fail", 1), job("test", "IN_PROGRESS", "pending", 1)];
+  const done = [job("lint", "FAILURE", "fail", 1), job("test", "SUCCESS", "pass", 1)];
+
+  const settles = harness([going, going, done]);
+  const result = await run(settles, { waitSec: 600, settleRuns: true });
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.checks, done, "the failure was answered while its run was still going");
+  assert.equal(settles.reads.length, 3);
+
+  const stalls = harness([going]);
+  const stalled = await run(stalls, { waitSec: 60, settleRuns: true });
+  assert.equal(stalled.stillRunning, true, "a failure whose run never finished was the answer");
+
+  const unsettled = harness([going, done]);
+  assert.equal((await run(unsettled, { waitSec: 600 })).status, "failed");
+  assert.equal(unsettled.reads.length, 1, "without settling, the first failure is the answer");
+
+  const otherRun = harness([[job("lint", "FAILURE", "fail", 1), job("test", "IN_PROGRESS", "pending", 2)]]);
+  assert.equal((await run(otherRun, { waitSec: 600, settleRuns: true })).status, "failed");
+  assert.equal(otherRun.reads.length, 1, "a row of another run held the failure back");
+
+  const outside = harness([[...failing, job("test", "IN_PROGRESS", "pending", 1)]]);
+  assert.equal((await run(outside, { waitSec: 600, settleRuns: true })).status, "failed");
+  assert.equal(outside.reads.length, 1, "a failure that cannot be rerun was held back");
+});
+
 test("a wait of 0 is disabled whatever the start wait, without a read", async () => {
   const h = harness([[]]);
   const result = await run(h, { waitSec: 0, startWaitSec: 120 });

@@ -84,6 +84,27 @@ test("a verify command that fails once and passes when run again records passed,
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a disclosure a person edits out of the pull request on GitHub is sent again at finish before anything merges", () => {
+  const mark = (dir) => path.join(dir, "verify-ran");
+  const staged = stageWith({ change: (config, { dir }) => verifyWith(`if [ -f "${mark(dir)}" ]; then exit 0; fi; touch "${mark(dir)}"; exit 1`)(config) });
+  const { dir, plan, env } = staged;
+  const { state } = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(publishA(staged).status, 0);
+  const disclosure = /- The verify command `.*` failed, then passed when run again on the same commit \([0-9a-f]{12}\)\./;
+  assert.match(pullsOf(env)[0].body, disclosure);
+  const stub = JSON.parse(fs.readFileSync(env.GH_STUB_STATE, "utf8"));
+  stub.pulls[0].body = BODY;
+  fs.writeFileSync(env.GH_STUB_STATE, JSON.stringify(stub, null, 2));
+
+  const merged = approveFinish(plan, "01-a", env);
+  assert.match(merged.json.say.join("\n"), /Sent pull request #1's body again, now saying under Risk: - The verify command/);
+  assert.equal(state().state, "merged");
+  assert.match(pullsOf(env)[0].body, disclosure, "the pull request merged without the line a person edited out");
+  const calls = ghCalls(env).map((argv) => argv.slice(0, 2).join(" "));
+  assert.ok(calls.lastIndexOf("pr edit") < calls.indexOf("pr merge"), calls.join(", "));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a verify command that fails both times records failed, discloses nothing, and is not run a third time when verify runs again", () => {
   const count = (dir) => path.join(dir, "verify-count");
   const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${count(dir)}"; exit 1`)(config) });
@@ -158,6 +179,49 @@ test("a check that fails again after its rerun goes to repair, a later publish a
   assert.match(outside.json.next, /repair --plan /);
   assert.equal(reruns(other.env).length, 0);
   fs.rmSync(other.dir, { recursive: true, force: true });
+});
+
+test("a failed check is rerun only once the rest of its workflow run has finished", () => {
+  const staged = stageWith({ change: (config) => { config.ciWaitSec = 1; } });
+  const { dir, plan, env } = staged;
+  const { state } = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const lint = { name: "lint", state: "FAILURE", bucket: "fail", link: ACTIONS, completedAt: "2020-01-01T00:00:00Z" };
+  const going = JSON.stringify([lint, row("IN_PROGRESS", "pending", ACTIONS, "0001-01-01T00:00:00Z")]);
+  const done = JSON.stringify([lint, row("SUCCESS", "pass", ACTIONS, "2020-01-01T00:00:00Z")]);
+  const published = publishA(staged, { ...env, GH_STUB_CHECKS: going, GH_STUB_CHECKS_AFTER_RERUN: GREEN });
+  assert.equal(published.status, 0, published.stderr);
+  assert.equal(reruns(env).length, 0, "the rerun was asked for while its workflow run was still going");
+  assert.match(published.json.next, /checks --plan .* --spec 01-a$/);
+  assert.equal(state().gates.ci ?? null, null);
+
+  const settled = ship("checks", plan, ["--spec", "01-a"], { ...env, GH_STUB_CHECKS: done, GH_STUB_CHECKS_AFTER_RERUN: GREEN });
+  assert.equal(settled.status, 0, settled.stderr);
+  assert.deepEqual(reruns(env), [["run", "rerun", "123", "--failed"]]);
+  assert.equal(state().gates.ci.status, "passed");
+  assert.match(pullsOf(env)[0].body, /- The check `lint` failed on this pull request, then passed when rerun on the same commit/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a rerun still running when a person ends the wait is disclosed when a later publish of the same commit sees it pass", () => {
+  const staged = stageWith({ change: (config) => { config.ciWaitSec = 1; } });
+  const { dir, plan, env, shipDir } = staged;
+  const { state } = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const published = publishA(staged, { ...env, GH_STUB_CHECKS: STALE_RED, GH_STUB_CHECKS_AFTER_RERUN: RUNNING });
+  assert.equal(published.status, 0, published.stderr);
+  assert.equal(reruns(env).length, 1);
+  assert.match(published.json.next, /checks --plan /);
+  const ended = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.equal(state().gates.ci.status, "not-run");
+  assert.deepEqual(retriesIn(shipDir), [], "an ended wait was recorded as the rerun's result");
+
+  const again = publishA(staged, { ...env, GH_STUB_CHECKS: STALE_RED, GH_STUB_CHECKS_AFTER_RERUN: GREEN });
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(reruns(env).length, 1, "the same commit bought a second rerun");
+  assert.equal(state().gates.ci.status, "passed");
+  assert.match(pullsOf(env)[0].body, /- The check `test` failed on this pull request, then passed when rerun on the same commit \([0-9a-f]{12}\)\./,
+    "the rerun's pass was never disclosed");
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("checks still running when the wait runs out record nothing and are waited on by checks; finish during the wait ends it as inconclusive", () => {

@@ -16,6 +16,12 @@ function stateOf(row) {
 /** Whether one check row ran and failed. */
 export const isFailed = (row) => FAILED.has(stateOf(row));
 
+/** Whether one check row is still queued or running. */
+export const isRunning = (row) => RUNNING.has(stateOf(row));
+
+/** The GitHub Actions workflow run one check row belongs to, from its link, or null for a check outside Actions. */
+export const runOf = (row) => /\/actions\/runs\/(\d+)/.exec(row.link ?? "")?.[1] ?? null;
+
 export function classifyChecks(rows) {
   const checks = Array.isArray(rows) ? rows : [];
   const states = checks.map(stateOf);
