@@ -379,6 +379,14 @@ test("every brief at either end of a finding's `fix` field still says what it me
   }
 });
 
+test("every brief that writes findings says how to choose `scope`, and caps a finding only re-planning answers at minor", () => {
+  for (const file of ["prompts/review.md", "prompts/codex/review.md", "prompts/code-adversary.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.match(text, /Set `scope` on every finding.{0,80}`pull-request` when the remedy is a change to the pull request's text/, `${file} no longer says how to choose scope`);
+    assert.match(text, /only remedy is re-planning.{0,140}is `minor` at most/, `${file} no longer caps a re-plan-only finding`);
+  }
+});
+
 test("the ship command names both limits its loops are bounded by, and asserts no single round", () => {
   const ship = read("commands", "ship.md");
   assert.match(ship, /fixRounds/);

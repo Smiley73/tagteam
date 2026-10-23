@@ -51,16 +51,26 @@ never omitted; a findings file missing the key is rejected whole, and the run
 records your lens as having produced no usable evidence — which is incomplete,
 not clean, and is re-dispatched rather than merged.
 
+Set `scope` on every finding, the same way. `pull-request` when the remedy is a
+change to the pull request's text — what its description says or leaves out.
+`code` otherwise, including a code defect that names no single file, such as
+three modules that disagree: write `file` as `null` and it still goes to a fixer.
+
 Severity:
 
 - `blocking` — must not merge. Data loss, a security hole, a broken contract, a
   feature that does not work.
 - `major` — must not merge without a person deciding. A real defect on a path
   that is reachable but narrow; a missing test for behaviour the spec's
-  `## Done when` names; a change far past the size its spec expected, from the
-  lens that reads for surplus, with the parts that account for it named.
+  `## Done when` names; a change far past the size its spec expected because of
+  surplus a fixer can delete, from the lens that reads for surplus, with the
+  parts that account for it named.
 - `minor` / `nit` — recorded, never gating, never fixed automatically. A missing
   test for anything the spec did not make a condition of being done is minor.
+
+A finding whose only remedy is re-planning — this diff should have been two
+specs, or the work should have been planned differently — is `minor` at most. No
+fixer can answer it, and gating on it only stops the change for a person.
 
 Fix rounds are few, and how many this repository allows is its own configuration
 — you do not know it and must not assume more than one. A finding you rank too

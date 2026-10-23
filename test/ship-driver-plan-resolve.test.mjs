@@ -173,7 +173,7 @@ test("a resolution that drops the base's change shows in the review, a blocking 
   assert.match(fs.readFileSync(path.join(attemptDirIn(shipDir, 1), "review.diff"), "utf8"), /^-export const mul = \(a, b\) => a \* b;$/m,
     "the dropped side is not in the review diff");
 
-  const blocking = { severity: "blocking", file: "app.js", line: 2, title: "main's mul is gone", detail: "the resolution keeps only the plan's side", fix: null };
+  const blocking = { severity: "blocking", scope: "code", file: "app.js", line: 2, title: "main's mul is gone", detail: "the resolution keeps only the plan's side", fix: null };
   const retried = reviewResolution(staged, committed, { correctness: [blocking] });
   assert.equal(retried.status, 0, retried.stderr);
   assert.match(retried.json.say.join("\n"), /Resolve attempt 1 failed: the reviewers found something blocking or major/);

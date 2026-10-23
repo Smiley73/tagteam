@@ -28,9 +28,12 @@ still satisfy the spec and pass its tests, and say so. One finding per pattern,
 not per instance: eleven doc blocks that restate their function are one finding
 whose detail lists the lines. File `minor` for a line or a block. File `major`
 when what could go is a fifth or more of what the change adds, or the diff is
-more than half again the size the spec expected — name the parts that account
-for it. A change that far past its budget costs every later reader, and it is a
-change the fixer can shrink without a person deciding anything.
+more than half again the size the spec expected because of surplus a fixer can
+delete — name the parts that account for it. A change that far past its budget
+costs every later reader, and it is a change the fixer can shrink without a
+person deciding anything. A diff that is large because the spec asked for that
+much work is `minor` at most: only re-planning — splitting the spec — remedies
+it, and no fixer can.
 
 Not a finding: a comment that cites the rule the code follows — a tax limit, an
 RFC section, the bug it works around; a test for a boundary the spec named; a

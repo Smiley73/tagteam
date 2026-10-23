@@ -26,16 +26,21 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "file", "line", "title", "detail", "fix"],
+        "required": ["severity", "scope", "file", "line", "title", "detail", "fix"],
         "properties": {
           "severity": {
             "type": "string",
             "enum": ["blocking", "major", "minor", "nit"],
             "description": "blocking: must not merge. major: must not merge without a decision. minor and nit: recorded, never gating."
           },
+          "scope": {
+            "type": "string",
+            "enum": ["code", "pull-request"],
+            "description": "Who answers the finding. pull-request when the remedy is a change to the pull request's text. code otherwise, including a code defect that names no single file."
+          },
           "file": {
             "type": ["string", "null"],
-            "description": "Repository-relative path, or null when the finding is about the change as a whole."
+            "description": "Repository-relative path, or null when the finding names no single file."
           },
           "line": {
             "type": ["integer", "null"],

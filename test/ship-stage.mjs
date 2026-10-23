@@ -124,7 +124,7 @@ export function arriveAll(result, env = {}) {
 }
 
 export const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
-export const major = (file) => ({ severity: "major", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
+export const major = (file) => ({ severity: "major", scope: "code", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
 
 // The effort an entry is printed with. There is one agent per role, so the
 // effort travels on the call alone: a name carrying one would be an agent that

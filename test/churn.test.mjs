@@ -11,9 +11,10 @@ const OID = (n) => String(n).repeat(40).slice(0, 40);
 
 // A rounds root with one directory per round, each holding its marker and
 // whichever records the round produced. `raised` is what the round's own panel
-// or adversary opened, given as [file, severity, source] where source is which
-// record it sits in. `redesign` names the files the round's commit was a
-// redesign of, as the ship's snapshot records them.
+// or adversary opened, given as [file, severity, source, scope] where source is
+// which record it sits in and scope is the finding's, `code` unless given.
+// `redesign` names the files the round's commit was a redesign of, as the
+// ship's snapshot records them.
 function rootWith(rounds) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-churn-"));
   for (const [number, { scope = "repair:0", raised = [], carried = [], redesign = null }] of Object.entries(rounds)) {
@@ -22,9 +23,9 @@ function rootWith(rounds) {
     fs.writeFileSync(path.join(dir, "round.json"), JSON.stringify({ owner: OID(number), scope }));
     if (redesign) fs.writeFileSync(path.join(dir, "redesign.json"), JSON.stringify({ requested: redesign, files: redesign, brief: null, fromRound: Number(number) - 1 }));
     const byRecord = { "review.json": [], "recheck.json": [] };
-    raised.forEach(([file, severity, record = "review.json"], index) => {
+    raised.forEach(([file, severity, record = "review.json", findingScope = "code"], index) => {
       const lens = record === "recheck.json" ? "adversary" : "correctness";
-      byRecord[record].push({ id: `${number}.${lens}.${index + 1}`, lens, severity, file, line: 1, title: `t${number}-${index + 1}`, detail: "d" });
+      byRecord[record].push({ id: `${number}.${lens}.${index + 1}`, lens, severity, scope: findingScope, file, line: 1, title: `t${number}-${index + 1}`, detail: "d" });
     });
     // What a settled round carries forward is an earlier round's finding, and
     // must not read as this round raising it again.
@@ -104,7 +105,7 @@ test("two rounds is not a pattern, and neither is a file whose last finding was 
 });
 
 test("carried findings, minors, findings with no file, and other cycles do not count", () => {
-  const carried = { id: "1.correctness.1", lens: "correctness", severity: "major", file: "src/a.ts", line: 1, title: "t", detail: "d" };
+  const carried = { id: "1.correctness.1", lens: "correctness", severity: "major", scope: "code", file: "src/a.ts", line: 1, title: "t", detail: "d" };
   const root = rootWith({
     1: { raised: [["src/a.ts", "major"]] },
     2: { raised: [[null, "major"]], carried: [carried] },
@@ -176,7 +177,7 @@ test("three rounds on three different files are live and name all three, where t
 });
 
 test("only minors, or only carried findings, make a round raise nothing for the loose signal", () => {
-  const carried = { id: "1.correctness.1", lens: "correctness", severity: "major", file: "src/a.ts", line: 1, title: "t", detail: "d" };
+  const carried = { id: "1.correctness.1", lens: "correctness", severity: "major", scope: "code", file: "src/a.ts", line: 1, title: "t", detail: "d" };
   const minors = rootWith({ 1: { raised: [["src/a.ts", "major"]] }, 2: { raised: [["src/b.ts", "minor"]] }, 3: { raised: [["src/c.ts", "major"]] } });
   assert.equal(loose(minors, 3), null, "a round of minors breaks the run");
   const carrying = rootWith({ 1: { raised: [["src/a.ts", "major"]] }, 2: { carried: [carried] }, 3: { raised: [["src/c.ts", "major"]] } });
@@ -189,7 +190,7 @@ test("only minors, or only carried findings, make a round raise nothing for the 
 test("pull request and file-less findings make a round count, and are not among the files", () => {
   const root = rootWith({
     1: { raised: [["src/a.ts", "major"]] },
-    2: { raised: [["pr-body.md", "major"]] },
+    2: { raised: [["pr-body.md", "major", "review.json", "pull-request"]] },
     3: { raised: [[null, "blocking", "recheck.json"]] }
   });
   const signal = loose(root, 3);
@@ -197,11 +198,20 @@ test("pull request and file-less findings make a round count, and are not among 
   assert.deepEqual(signal.files, ["src/a.ts"]);
   assert.equal(signal.findings.length, 3);
   assert.match(looseLines(signal)[0], /across src\/a\.ts, the pull request, no file in particular:/);
-  const none = rootWith({ 1: { raised: [[null, "major"]] }, 2: { raised: [["pull-request.md", "major"]] }, 3: { raised: [[null, "major"]] } });
+  const none = rootWith({ 1: { raised: [[null, "major", "review.json", "pull-request"]] }, 2: { raised: [["pull-request.md", "major"]] }, 3: { raised: [[null, "major"]] } });
   const fileless = loose(none, 3);
   assert.deepEqual(fileless.files, [], "nothing a rewrite could change");
   assert.match(looseLines(fileless)[0], /a redesign is not on offer/);
   assert.deepEqual(churnSignal(none, { scope: "repair:0", round: 3 }).filter((signal) => signal.file === null), [], "the same-file signal still ignores file-less findings");
+});
+
+test("a run of code findings that name no file is no file in particular, not the pull request, and offers no redesign", () => {
+  const signal = loose(rootWith({ 1: { raised: [[null, "major"]] }, 2: { raised: [[null, "major"]] }, 3: { raised: [[null, "blocking", "recheck.json"]] } }), 3);
+  assert.deepEqual(signal.files, []);
+  const [line] = looseLines(signal);
+  assert.match(line, /across no file in particular:/);
+  assert.doesNotMatch(line, /the pull request/);
+  assert.match(line, /a redesign is not on offer/);
 });
 
 test("the loose signal counts its own cycle's rounds: a CI repair breaks the run, and a round with no scope counts", () => {

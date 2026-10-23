@@ -64,6 +64,13 @@ never omitted; a findings object missing the key does not validate, and the run
 records this pass as having produced no usable evidence — which is incomplete,
 not clean, and is re-dispatched rather than merged.
 
+Set `scope` on every finding, the same way. `pull-request` when the remedy is a
+change to the pull request's text — what its description says or leaves out.
+`code` otherwise, including a code defect that names no single file: write
+`file` as null and it still goes to a fixer. A finding whose only remedy is
+re-planning — this diff should have been two specs, or the work should have
+been planned differently — is `minor` at most, because no fixer can answer it.
+
 Verify before asserting. If you claim something is never called, look. If you
 claim a case is unhandled, find the handler and confirm it is missing. A
 confident wrong finding spends a fix round this change may not get again — how
