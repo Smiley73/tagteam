@@ -74,10 +74,14 @@ export const findingId = (round, lens, index) => `${round}.${lens}.${index + 1}`
  * of the same round, names the same finding again; and never a lens's own,
  * because an item id holds a `:` and a lens name cannot.
  */
+const itemFindingId = (round, itemId) => `${round}.${itemId}`;
 export const itemFinding = (round, item, { reader, reason }) => ({
   severity: "major", scope: "code", file: null, line: null, title: item.part, detail: reason, fix: null,
-  id: `${round}.${item.id}`, lens: reader
+  id: itemFindingId(round, item.id), lens: reader
 });
+
+/** Whether the finding `id` is the one `itemFinding` mints for `itemId`, at any round. */
+export const isItemFinding = (id, itemId) => id === itemFindingId(findingRound(id), itemId);
 
 /**
  * The round an id was minted at, or null for an id that carries none.

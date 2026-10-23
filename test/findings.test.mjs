@@ -2003,7 +2003,7 @@ test("an item ruled missing is raised once while a finding for it stands open, a
   assert.deepEqual(withdrawn.open.map((entry) => [entry.id, entry.lens, entry.resolved]), [["2.item:1.1", "adversary", false]]);
 });
 
-test("after a decline, a lens's re-check ruling replaces its collection ruling on the same candidate", () => {
+test("after a decline, an item finding its lens withdraws closes, and the lens's earlier missing ruling still keeps the item from clearing", () => {
   // The collection of this very candidate, where correctness ruled the item
   // missing and so raised 1.item:1.1, and codex ruled it out of scope. The fixer
   // declined, so the settlement's candidate is the collection's.
@@ -2026,15 +2026,37 @@ test("after a decline, a lens's re-check ruling replaces its collection ruling o
     adversary: path.join(fresh, "adversary.json"), adversarySchemaPath: FINDINGS_SCHEMA
   });
 
-  // Withdrawn, and every reader now rules the item out of scope: it closes like
-  // any other withdrawn finding.
   const withdrawn = settleWith({ id: "1.item:1.1", resolved: true, evidence: "withdrawn: the migration is not required" });
   assert.equal(withdrawn.status, "clean", JSON.stringify(withdrawn.open));
-  assert.deepEqual(withdrawn.open, []);
-  assert.deepEqual(withdrawn.accounting.items.map((entry) => [entry.id, entry.ruling]), [["item:1.1", "out-of-scope"]]);
-  assert.equal(withdrawn.accounting.acceptable, true);
+  assert.deepEqual(withdrawn.findings.map((entry) => [entry.id, entry.resolved]), [["1.item:1.1", true]]);
+  assert.deepEqual(withdrawn.accounting.items.map((entry) => [entry.id, entry.ruling]), [["item:1.1", "spec-requirement-missing"]]);
+  assert.equal(withdrawn.accounting.acceptable, false);
 
-  // Not withdrawn: the finding stays open on the lens's own verdict.
   const kept = settleWith({ id: "1.item:1.1", resolved: false, evidence: "the migration is still owed" });
   assert.deepEqual(kept.open.map((entry) => [entry.id, entry.lens, entry.evidence]), [["1.item:1.1", "correctness", "the migration is still owed"]]);
+});
+
+test("a collection of the same candidate counts its lenses' rulings beside the settlement's own", () => {
+  // A clean panel on this candidate, so the fresh adversary is the only reader
+  // the settlement sends, and it rules the item environmental.
+  const items = { candidate: OID, candidates: [OID], items: [item(1, 1, "the full gate")] };
+  const settleWith = (rulings) => settle({
+    review: {
+      status: "clean", round: 1, candidate: OID, counts: {}, open: [], findings: [], missing: [],
+      expected: ["correctness"], present: [{ lens: "correctness", summary: "s" }], items: items.items, rulings
+    },
+    candidate: OID, schemaPath: RECHECK_SCHEMA, round: 1, items, dir: dir({}), adversarySchemaPath: FINDINGS_SCHEMA,
+    adversary: path.join(dir({ "adversary.json": {
+      ...lensFile("adversary", [], OID), rulings: [{ id: "item:1.1", ruling: "environmental", reason: "no network" }]
+    } }), "adversary.json")
+  });
+
+  const silent = settleWith([{ lens: "correctness", id: "item:9.9", ruling: "out-of-scope", reason: "binds nothing" }]);
+  assert.equal(silent.status, "clean");
+  assert.deepEqual(silent.accounting.items.map((entry) => entry.ruling), ["unruled"]);
+  assert.equal(silent.accounting.acceptable, false);
+
+  const ruled = settleWith([{ lens: "correctness", id: "item:1.1", ruling: "out-of-scope", reason: "another spec owns it" }]);
+  assert.deepEqual(ruled.accounting.items.map((entry) => entry.ruling), ["environmental"]);
+  assert.equal(ruled.accounting.acceptable, true);
 });

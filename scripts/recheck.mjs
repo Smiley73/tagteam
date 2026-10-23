@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { findingId, findingRound, itemFinding, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
+import { findingId, findingRound, isItemFinding, itemFinding, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { ACCEPTABLE, bindRulings, combineRulings, fillRulings, readItems } from "./lib/rulings.mjs";
@@ -485,48 +485,42 @@ export function settle({
     }
   }
 
-  // The settlement's own readers, in expected order, then the collection's when
-  // it reviewed this same candidate: after a clean panel the adversary may be
-  // the only reader sent here. A collection of an earlier candidate ruled on
-  // another candidate's items and counts for nothing.
+  // A ruling of an item does two separate things, and they are answered by two
+  // separate records.
   //
-  // A lens that ruled here has ruled this candidate's items a second time, after
-  // its collection ruling, and only the later one counts. That is the decline
-  // path: the candidate is unchanged, so the collection is of this candidate, and
-  // the lens that ruled an item missing — and so owns its finding — is the lens
-  // asked whether to withdraw it. Kept beside its new ruling, the old
-  // `spec-requirement-missing` decided the item whatever the lens said now, and
-  // reopened the very finding it had just withdrawn, on every round.
-  const readers = lenses.map((lens) => ({ reader: lens, bound: ruled.get(lens) ?? new Map() }));
-  if (adversary !== null) readers.push({ reader: "adversary", bound: freshRulings ?? new Map() });
-  const ruledHere = new Set([...ruled.keys(), ...(freshRulings === null ? [] : ["adversary"])]);
-  if (review.candidate === candidate) {
-    for (const { lens } of review.present ?? []) {
-      if (ruledHere.has(lens)) continue;
-      const own = (review.rulings ?? []).filter((entry) => entry.lens === lens);
-      readers.push({ reader: lens, bound: bindRulings(own, itemIds) });
-    }
-  }
-  const combined = combineRulings(given, readers);
-  // An item still standing as an open finding — the collection raised it, or an
-  // earlier round did and it is carried — is settled as that finding, not
-  // raised a second time. Only one this settlement left open counts: a finding
-  // for the item that was resolved here no longer stands for anything, and
-  // letting it suppress a reader's missing ruling would settle the review clean
-  // while the accounting still held the item missing.
-  const standing = new Set(settled.filter((finding) => !finding.resolved)
-    .map((finding) => finding.id.slice(finding.id.indexOf(".") + 1)));
-  for (const item of combined) {
-    if (item.missing.length === 0 || standing.has(item.id)) continue;
+  // A `spec-requirement-missing` becomes a finding, once, in the pass that read
+  // it — the collection's in `collect`, this settlement's below — and from then
+  // on that finding's verdicts decide whether the item is still owed, exactly as
+  // for any other finding. So only this settlement's own readers raise one here.
+  // Counting the collection's again would reopen, on every round, a finding its
+  // owner has withdrawn after a decline, whatever every reader says now.
+  const own = lenses.map((lens) => ({ reader: lens, bound: ruled.get(lens) ?? new Map() }));
+  if (adversary !== null) own.push({ reader: "adversary", bound: freshRulings ?? new Map() });
+  for (const item of combineRulings(given, own)) {
+    if (item.missing.length === 0) continue;
+    // Settled as the finding that already stands for it, if one this settlement
+    // left open does; one resolved here stands for nothing any more.
+    if (settled.some((finding) => !finding.resolved && isItemFinding(finding.id, item.id))) continue;
     const raisedNow = { ...itemFinding(round, item, item.missing[0]), resolved: false, evidence: item.missing[0].reason };
-    // The resolved finding may carry this very id — this round's own, withdrawn
-    // by its lens after a decline while another reader still rules the item
-    // missing. It is reopened in place rather than listed twice, and it was
-    // already counted by the collection that raised it.
+    // The resolved one may carry this very id: this round's own, withdrawn after
+    // a decline while another reader here still rules the item missing. It is
+    // reopened in place rather than listed twice.
     const closed = settled.findIndex((finding) => finding.id === raisedNow.id);
     if (closed === -1) fresh.push(raisedNow);
     else settled[closed] = raisedNow;
   }
+  // The accounting is every ruling this candidate drew, and it is what alone
+  // clears the approval: the settlement's own readers, and the collection's when
+  // it reviewed this same candidate — after a clean panel the adversary may be
+  // the only reader sent here. A collection of an earlier candidate ruled on
+  // another candidate's items and counts for nothing. A lens that ruled at both
+  // is two rulings, so the more severe counts and a later `out-of-scope` never
+  // erases an earlier `spec-requirement-missing`: a finding withdrawn after a
+  // decline closes, and the item still waits for a person.
+  const collected = review.candidate !== candidate ? [] : (review.present ?? []).map(({ lens }) => ({
+    reader: lens, bound: bindRulings((review.rulings ?? []).filter((entry) => entry.lens === lens), itemIds)
+  }));
+  const combined = combineRulings(given, [...own, ...collected]);
   const accounting = items === null ? null : {
     candidates: items.candidates,
     items: combined.map(({ id, round: from, kind, part, ruling }) => ({ id, round: from, kind, part, ruling })),
