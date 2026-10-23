@@ -9,7 +9,7 @@
     "status": {
       "type": "string",
       "enum": ["complete", "unfinished"],
-      "description": "complete only when you finished everything this dispatch handed you and `unfinished` is empty; unfinished otherwise. It is about the work you were given — a spec, a findings record, or a failing check — and never about anything you were not given: a fixer handed findings or a failing check answers for those and says nothing about a spec it never had. Claiming complete for work you did not finish is worse than saying unfinished, because the run stops for a person either way and only one of the two tells them the truth."
+      "description": "complete only when you finished everything this dispatch handed you and `unfinished` is empty; unfinished otherwise. It is about the work you were given — a spec, a findings record, or a failing check — and never about anything else: a fixer handed findings or a failing check answers for those, and not for the spec it was given to read. Claiming complete for work you did not finish is worse than saying unfinished, because the run stops for a person either way and only one of the two tells them the truth."
     },
     "summary": {
       "type": "string",
@@ -18,7 +18,7 @@
     },
     "unfinished": {
       "type": "array",
-      "description": "Every part of the work you were given and did not do, with the reason — including work you were told to do and could not: a file the spec names that does not exist, two statements that contradict, a repair that is a decision for a person. An empty array when nothing was left. A fixer reports here on the findings or the failing check it was handed, never on a spec it was not given.",
+      "description": "Every part of the work you were given and did not do, with the reason — including work you were told to do and could not: a file the spec names that does not exist, two statements that contradict, a repair that is a decision for a person. An empty array when nothing was left. A fixer reports here on the findings or the failing check it was handed, never on the spec as a whole.",
       "items": {
         "type": "object",
         "additionalProperties": false,

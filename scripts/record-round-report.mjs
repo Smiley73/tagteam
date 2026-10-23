@@ -276,7 +276,7 @@ export function summaryLines(record, file) {
   // Every outcome the schema allows belongs here, or a report validates and its
   // outcome never reaches the line the run prints. Printed in the order a person
   // scans rather than alphabetically: the two repair outcomes read together.
-  const counted = ["fixed", "fixed-differently", "wont-fix", "failed"];
+  const counted = ["fixed", "fixed-differently", "wont-fix", "failed", "goal-conflict"];
   const tally = counted
     .map((outcome) => [outcome, outcomes.filter((entry) => entry.outcome === outcome).length])
     .filter(([, count]) => count > 0)

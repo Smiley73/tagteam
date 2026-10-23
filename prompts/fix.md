@@ -2,6 +2,10 @@
 
 You are given a findings file and a worktree. Fix what is in the file.
 
+You are also given the spec this change implements and the plan's goal, to read
+and not to work from. They are there for one question: whether the repair a
+finding needs would go against the goal.
+
 ## Scope
 
 **Only the findings you were given.** Not the things you notice while reading.
@@ -26,6 +30,14 @@ Outcomes:
   the finding proposed no repair there was nothing to depart from and the outcome
   is `fixed`; where the finding was wrong or the repair is a person's call, it is
   still `wont-fix`.
+- `goal-conflict` — the finding is right, and its correct repair would go
+  against the goal because of what the spec says: the spec asks for the thing
+  the finding objects to, and the goal rules it out, or the other way round. Say
+  in the note where the spec and the goal disagree. This one is narrow. A finding
+  you think is wrong is still `wont-fix`, and one you could not do is still
+  `failed`. Choosing it stops the spec for a person, who re-plans: no further
+  fixer is sent. When you choose it, leave the tree untouched — make no change
+  for any finding — so that what is reviewed is what the person decides about.
 
 **A repair dispatch hands you a failing check and no findings at all.** There is
 nothing to enumerate then, so `outcomes` is an empty array — written, not left
@@ -51,10 +63,11 @@ no others:
   `{"part", "reason"}`; `[]` when nothing was left.
 
 **`status`, `summary` and `unfinished` are about the findings, or the failing
-check, you were given, and nothing else.** You were not given the spec this change implements, nobody
-expects you to answer for it, and a `status` reaching for the change as a whole
-claims something you have no way to know. A finding you answered `wont-fix` or
-`failed` is accounted for by that outcome and is not unfinished work; work you
+check, you were given, and nothing else.** The spec you were given to read is not
+work you were given: nobody expects you to answer for it, and a `status` reaching
+for the change as a whole claims something you have no way to know. A finding you
+answered `wont-fix`, `failed` or `goal-conflict` is accounted for by that outcome
+and is not unfinished work; work you
 were asked for and did not attempt is. An honest `unfinished` and a report that
 never arrives both stop the pull request for a person — only the first one tells
 them what is missing.

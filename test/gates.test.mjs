@@ -14,6 +14,7 @@ import {
   budgetTaken, resolveRoles, grantFixRound
 } from "../scripts/gates.mjs";
 import { allocateRound, listRounds } from "../scripts/lib/rounds.mjs";
+import { onPlanBranch } from "../scripts/lib/carry.mjs";
 
 // `gates.mjs init` resolves each lens's brief, so it needs a repository to look
 // for `.tagteam/lenses/` in. These specs roster `correctness`, which the plugin
@@ -122,6 +123,7 @@ test("a clean candidate on its plan's own plan branch merges with nobody asked",
   assert.equal(verdict.needsHuman, false);
   assert.deepEqual(verdict.approvals, []);
   assert.deepEqual(verdict.blockers, []);
+  assert.equal(onPlanBranch(reviewed(), CONFIG), true, "the predicate the carry rule reads says the same");
 });
 
 test("a clean candidate that is not confirmed as on its plan branch waits for a person", () => {
@@ -147,6 +149,7 @@ test("a clean candidate that is not confirmed as on its plan branch waits for a 
     assert.deepEqual(verdict.blockers, [], what);
     assert.equal(verdict.ready, false, what);
     assert.equal(verdict.needsHuman, true, what);
+    assert.equal(onPlanBranch(state, CONFIG), false, what);
   }
 });
 

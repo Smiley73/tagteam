@@ -175,6 +175,29 @@ when something blocking or major is open and a fix round is left, `recheck`
 A fixer that declines every finding and changes nothing makes no round and
 skips `verify`, but not `recheck`: the lenses that raised what it declined read
 its reasons and either withdraw the finding or keep it open.
+
+After every fixer that was handed findings, `settle` prints a table of them: one
+row per finding, with its severity, its file, a short title, what the fixer said
+it did, whether the re-check found it addressed, and a recommendation the driver
+works out. An addressed row has none. One that is not gets `re-plan`, `needs a
+person`, `carry` or `accept`, and the rows not addressed are listed again under
+the table. A `settle` prints one table for each fixer sent since the one before
+it, oldest first, so a fixer whose commit went to the whole panel is tabled at
+the settle after that panel's fixer. Relay each table as printed. Its
+recommendations are advice for the person; you never run `accept` or anything
+else on their strength. A CI repair and a redesign are handed no findings and
+get no table.
+
+A fixer may answer that the right repair for a finding would go against the
+plan's goal, because the spec conflicts with it there. That answer stops the
+spec, and no further fixer is sent for it. When the fixer changed nothing,
+`snapshot` prints the table at once — every row not addressed, every
+recommendation `re-plan` — with how many fix rounds were spent, which are not
+given back, and `next` is `publish`. When it changed the code anyway, the commit
+is reviewed like any other, and from then on `fix` sends the spec on towards
+`publish` instead of to a fixer. Either way it stops at `finish`; see *Merge or
+stop*.
+
 A finding about the pull request itself — one its reviewer scoped
 `pull-request`, or one naming the pull request body whatever its scope — never
 reaches a fixer, which could only decline it. A `code` finding that names no
@@ -413,6 +436,12 @@ Two things do carry over from the run, because they are about the software:
   ran, a part another spec owns. `settle`'s `say` gives each item with its
   ruling, and on a plan branch these are what let the spec merge without a
   person, so the body is the one place a reader learns of them.
+- **Every row the last fixer table left not addressed goes there too**, on every
+  route — a plan branch, straight to the base, a whole-plan fix — said as what
+  goes wrong and for whom, with its recommendation in words: that it needs a
+  person, that the plan needs re-planning, or that it could be carried or
+  accepted as it is. `publish` lists those rows again in `notAddressed`; when
+  the body you sent leaves one out, add it and run the same `publish` again.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
   to let it try again. When the area was rewritten at the cap and the rewrite
@@ -537,6 +566,12 @@ when the person answered the question at the cap with "publish as it is", and
 when the cycle's rewrite — at the cap or before it — was tried and still left
 something open: the fix rounds are spent, what is open is disclosed, and the
 merge is theirs to make by hand.
+
+When a fixer answered that a repair would go against the goal, `ask` leads with
+that: which findings, where the spec and the goal disagree, the recommendation
+to re-plan, and how many fix rounds were spent — they are not given back. Say
+that the spec stopped because it and the goal disagree, not because a repair
+failed. More fix rounds do not settle it: the person re-plans, or merges by hand.
 
 When the person accepted it — they answered the *Recurring* question with
 `accept` — `ask` says so first: the spec stops here by their own decision, with
