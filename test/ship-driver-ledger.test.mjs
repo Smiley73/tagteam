@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { git, ship, write, outputOf, arriveAll, findings, stagePlan, pullsOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
 import { PLAN_BODY, landingRecordOf, planPullOf, stageClean, toDialog } from "./ship-plan-landing-shared.mjs";
-import { enterMerge, entriesOf, readLedger } from "../scripts/lib/ledger.mjs";
+import { enterMerge, entriesOf, pendingLine, readLedger } from "../scripts/lib/ledger.mjs";
 
 // The Recurring question at collect, answered accept, and the re-check that
 // follows: the adversary finds nothing new and the carried finding stays open.
@@ -84,7 +84,18 @@ test("an accept the carry rule refuses records nothing, finish stops on the open
   assert.match(settle.json.say.join("\n"), /merging it is yours to do on GitHub\. \d\.\w+\.1 keeps it from merging into plan\/demo on its own: it is a major finding in the code, and a spec not yet merged depends on this one\./);
   assert.equal(state().accept, null);
 
-  run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
+  // The fixer's table left 2.adversary.1 not addressed, needing a person. The
+  // driver's own Risk line stands in for that row, so it says so — and does not
+  // tell the reader the merge is arranged, since the spec waits for a person.
+  const published = run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
+  assert.equal(published.json.notAddressed, undefined, "a row the driver's Risk line says, recommendation included, was handed over to be said again");
+  const body = pullsOf(env)[0].body;
+  const waits = (finding, title) => new RegExp(`\\n- ${finding.replaceAll(".", "\\.")} \\(major\\): ${title} — a person accepted it open, but the spec does not merge on that alone: `
+    + "it needs a person\\. Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request\\.\\n");
+  assert.match(body, waits("2.adversary.1", "sub loses the sign of a negative result"), body);
+  assert.match(body, waits("3.correctness.1", "sub truncates large results"), body);
+  assert.doesNotMatch(body, /so it goes into the plan branch unresolved/, "the body says the merge is arranged for a spec that waits for a person");
+
   const finished = run("finish");
   assert.deepEqual(finished.json.blockers, ["review-open"]);
   assert.equal(state().state, "awaiting-approval");
@@ -103,6 +114,23 @@ test("an accept the carry rule refuses records nothing, finish stops on the open
     ["01-a:2.adversary.1", "accepted", state().candidateOid],
     ["01-a:3.correctness.1", "accepted", state().candidateOid]
   ]);
+});
+
+test("a spec's own Risk line says the accept merges it, or else that it waits with the fixer table's advice for the finding", () => {
+  const finding = { id: "2.adversary.1", severity: "major", scope: "code", file: "app.js", title: "sub loses the sign.", detail: "-1 - 1 gives 2" };
+  const [accepted] = entriesOf("01-a", "a".repeat(40), [finding], new Set([finding.id]));
+  const [nobody] = entriesOf("01-a", "a".repeat(40), [{ ...finding, scope: "pull-request", file: "pr-body.md" }], new Set());
+  assert.equal(pendingLine(accepted, { merges: true, recommendation: "accept" }),
+    "- 2.adversary.1 (major): sub loses the sign — a person accepted it open, so it goes into the plan branch unresolved and is listed in the plan's pull request.");
+  assert.equal(pendingLine(accepted, { merges: false, recommendation: "needs a person" }),
+    "- 2.adversary.1 (major): sub loses the sign — a person accepted it open, but the spec does not merge on that alone: it needs a person. "
+    + "Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request.");
+  assert.equal(pendingLine(nobody, { merges: false, recommendation: "re-plan" }),
+    "- 2.adversary.1 (major, about the pull request): sub loses the sign — still open: the plan needs re-planning. "
+    + "Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request.");
+  assert.equal(pendingLine(nobody, { merges: false, recommendation: "carry" }),
+    "- 2.adversary.1 (major, about the pull request): sub loses the sign — still open: it could be carried as it is. "
+    + "Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request.");
 });
 
 test("the plan's pull request lists every ledger entry and every retry disclosure under Risk, and retries are never entries", () => {

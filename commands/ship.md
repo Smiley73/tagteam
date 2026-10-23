@@ -445,7 +445,9 @@ Two things do carry over from the run, because they are about the software:
 - **A finding still open goes under `## Risk`**, said as what goes wrong and for
   whom, in the same plain English you use for a person. `settle`'s `say` gives
   you each one. On a plan branch the driver writes these lines itself, one per
-  finding, so do not write them a second time. A finding the person accepted — they answered the *Recurring*
+  finding — each saying whether the person's accept merges the spec, and
+  otherwise the fixer table's recommendation for it — so do not write them a
+  second time. A finding the person accepted — they answered the *Recurring*
   question with `accept` — goes there the same way: it is still open, and the
   body is where it is disclosed. So does one the person chose to publish with at
   the cap, answering that question with "publish as it is".
@@ -460,8 +462,8 @@ Two things do carry over from the run, because they are about the software:
   goes wrong and for whom, with its recommendation in words: that it needs a
   person, that the plan needs re-planning, or that it could be carried or
   accepted as it is. `publish` lists those rows again in `notAddressed` — less
-  any the driver's own lines already say; when the body you sent leaves one
-  out, add it and run the same `publish` again.
+  any the driver's own lines already say, recommendation included; when the
+  body you sent leaves one out, add it and run the same `publish` again.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
   to let it try again. When the area was rewritten at the cap and the rewrite

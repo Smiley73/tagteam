@@ -42,7 +42,7 @@ import {
 } from "./lib/landing.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
 import { carryEligible, onPlanBranch, recommendation } from "./lib/carry.mjs";
-import { enterMerge, entriesOf, entryLine, planLines, readLedger } from "./lib/ledger.mjs";
+import { enterMerge, entriesOf, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, writeRoundFile } from "./lib/round-store.mjs";
@@ -558,7 +558,30 @@ const firstFailed = (verify) => (verify?.commands ?? []).find((command) => comma
  */
 function riskLines(ctx, id) {
   const state = readState(ctx, id);
-  return [...ledgerEntries(ctx, id, state).map((entry) => entryLine(entry, { pending: true })), ...retryLines(ctx, id, state.base)];
+  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base)];
+}
+
+/**
+ * The line for each finding this spec would carry into the plan branch open if
+ * it merged now. It stands in for the fixer table's not-addressed row — `publish`
+ * hands a row over only where no line says its finding — so it says what the row
+ * says: that the accept recorded in gate state merges the spec on its own, or
+ * else that the spec waits for a person, with the row's recommendation, judged
+ * as `tableOf` judges it.
+ */
+function pendingLines(ctx, id, state) {
+  const entries = ledgerEntries(ctx, id, state);
+  if (entries.length === 0) return [];
+  const recorded = new Set(state.accept?.candidateOid === state.candidateOid ? state.accept.ids : []);
+  const merges = entries.every((entry) => recorded.has(entry.finding));
+  const facts = carryFacts(ctx, id);
+  const goalConflict = exists(goalConflictPath(ctx, id));
+  const open = new Map(reviewOpen(state).map((finding) => [finding.id, finding]));
+  return entries.map((entry) => {
+    const finding = open.get(entry.finding);
+    const advice = recommendation(finding, { addressed: false, goalConflict, eligible: carryEligible(finding, facts), carry: ctx.config.carry === true });
+    return pendingLine(entry, { merges, recommendation: advice });
+  });
 }
 
 function retryLines(ctx, id, base) {
@@ -578,18 +601,20 @@ function retryLines(ctx, id, base) {
 // Whether this spec merges into this train's plan branch.
 const intoPlanBranch = (ctx, state) => isPlanRoute(routeOf(ctx)) && state.base === routeOf(ctx).branch;
 
+// The findings this spec's review gate holds open at this candidate.
+const reviewOpen = (state) => (state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review.open ?? [] : []);
+
 // What this spec would put in the plan's ledger if it merged now: every finding
 // its review gate holds open at this candidate, `accepted` where a person's
 // accept of this candidate covers it. Nothing off the plan branch.
 function ledgerEntries(ctx, id, state) {
   if (!intoPlanBranch(ctx, state)) return [];
-  const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
   const file = readJson(acceptedPath(ctx, id), null);
   const accepted = new Set([
     ...(state.accept?.candidateOid === state.candidateOid ? state.accept.ids : []),
     ...(file?.candidate === state.candidateOid && Array.isArray(file.ids) ? file.ids : [])
   ]);
-  return entriesOf(id, state.candidateOid, review?.open ?? [], accepted);
+  return entriesOf(id, state.candidateOid, reviewOpen(state), accepted);
 }
 
 // A merge into the plan branch, written into the plan's ledger before the spec
@@ -3816,8 +3841,8 @@ function publish(options) {
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
   // The latest tables' not-addressed rows, once each, while they judged this
-  // candidate — less those the driver's own Risk lines already say, since a
-  // finding is said once in a body.
+  // candidate — less those the driver's own Risk lines already say, with the
+  // row's recommendation (`pendingLines`), since a finding is said once in a body.
   const saved = readJson(fixOutcomesPath(ctx, id), null);
   const said = new Set(ledgerEntries(ctx, id, readState(ctx, id)).map((entry) => entry.finding));
   const missed = saved?.candidate === state.candidateOid
@@ -6449,8 +6474,9 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       — or, when the question was put at the cap, the one round past limits.fixRounds that only this
                                       answer grants. One per cycle: refused once this cycle has had one
   accept  --spec <id>                 a person's other answer to it, for either signal, while a fix round is left, never printed by
-                                      next: publish as it is
-                                      with what is open disclosed; it then waits to be merged by hand. Refused at the cap, where
+                                      next: publish as it is with what is open disclosed. On a plan branch, when everything accepted
+                                      may be carried there, finish then merges it into the plan branch with each finding entered in
+                                      the plan's ledger; otherwise it waits to be merged by hand. Refused at the cap, where
                                       publishing as it is is next
   recheck --spec <id>                 dispatch the adversary and the re-checks
   settle  --spec <id>                 settle the round; decides fix or publish

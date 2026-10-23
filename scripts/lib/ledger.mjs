@@ -51,18 +51,43 @@ const REASONS = {
   "merged-by-hand": "it was open when the pull request was merged by hand"
 };
 
-/**
- * One line under `## Risk` for an entry: the finding's id and severity as the
- * fixer table gives them, its title, and why it was left open. `pending` is an
- * entry its spec would make if it merged now, worded for the spec's own body.
- */
-export function entryLine(entry, { pending = false } = {}) {
+// The fixer table's recommendation for a row it left not addressed, said as the
+// row is said under `## Risk`: in words, as advice to a person.
+const ADVICE = {
+  "needs a person": "it needs a person",
+  "re-plan": "the plan needs re-planning",
+  carry: "it could be carried as it is",
+  accept: "it could be accepted as it is"
+};
+
+// The finding as the fixer table gives it: its id, its severity and a short
+// title, so that a finding never appears in two formats.
+function describe(entry) {
   const about = entry.scope === "pull-request" ? ", about the pull request" : "";
   const title = String(entry.title).replace(/\s+/g, " ").trim().replace(/\.$/, "");
-  const why = !pending ? REASONS[entry.reason]
-    : entry.reason === "accepted" ? "a person accepted it open, so it goes into the plan branch unresolved and is listed in the plan's pull request"
-      : "still open; merged as it is, it goes into the plan branch unresolved and is listed in the plan's pull request";
-  return `- ${entry.finding} (${entry.severity}${about}): ${title} — ${why}.`;
+  return `${entry.finding} (${entry.severity}${about}): ${title}`;
+}
+
+/**
+ * One line under `## Risk` in the plan's pull request for an entry: the finding
+ * as the fixer table gives it, and why it was left open.
+ */
+export function entryLine(entry) {
+  return `- ${describe(entry)} — ${REASONS[entry.reason]}.`;
+}
+
+/**
+ * The line in a spec's own body for an entry it would make if it merged now. It
+ * stands in for the fixer table's not-addressed row, so it says what that row
+ * says: when the spec `merges` on a person's accept, that it does; otherwise
+ * that the spec waits for a person, with the row's `recommendation` as the
+ * advice — a reader of the pull request must not take the merge as arranged.
+ */
+export function pendingLine(entry, { merges, recommendation }) {
+  const carried = "it goes into the plan branch unresolved and is listed in the plan's pull request";
+  if (merges) return `- ${describe(entry)} — a person accepted it open, so ${carried}.`;
+  const status = entry.reason === "accepted" ? "a person accepted it open, but the spec does not merge on that alone" : "still open";
+  return `- ${describe(entry)} — ${status}: ${ADVICE[recommendation]}. Merged by hand as it is, ${carried}.`;
 }
 
 /**

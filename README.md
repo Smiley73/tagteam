@@ -236,11 +236,11 @@ run stops to ask, and when both do it asks once, naming each file once. While a
 fix round is still left there are four answers: fix it once more; redesign — a
 fresh implementer rewrites the files from a brief of everything raised on them
 this cycle, spending a fix round, and the rewrite starts a fresh count for each
-file it changes; accept — publish it as it is with what is open disclosed, to be
-merged by hand (except on a plan branch: when everything open may be carried
-there, the spec merges into the plan branch with nobody asked, and what is open
-is listed in the plan's pull request); or stop. A redesign covers the files both
-patterns name; when
+file it changes; accept — publish it as it is with what is open disclosed, which
+on a plan branch merges the spec into the plan branch with nobody asked when
+everything open may be carried there (what is open is then listed in the plan's
+pull request), and otherwise leaves it waiting to be merged by hand; or stop. A
+redesign covers the files both patterns name; when
 the findings are only about the pull request or name no file, there is nothing
 to rewrite, and redesign is not offered.
 
