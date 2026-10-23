@@ -7,9 +7,16 @@
 //
 // Two classification rules are easy to get wrong by eye and are therefore in
 // code (lib/ci-state.mjs): a cancelled check is never passing, and an all-skipped
-// run is not-run rather than passed. Still pending at the deadline is also
-// not-run — which does not fail the merge, but does mean nothing was proven, so
-// the gate asks a person.
+// run is not-run rather than passed. Still pending at the deadline keeps the
+// status not-run, so a caller that reads only the status — the plan pull
+// request's wait, which waits again for a not-run — sees what it always saw; the
+// result also carries `stillRunning: true`, which a spec's wait reads as "keep
+// waiting" rather than as a result.
+//
+// `--rerun-at` is the moment failed checks were asked to run again. Right after
+// that request `gh pr checks` can still list the failed row the rerun replaces,
+// so until the wait ends a failed row completed before that moment counts as
+// still running rather than as the rerun's result.
 //
 // The third non-result is not-started, and only the start wait gives it. Right
 // after a push `gh pr checks` has no rows yet, and on its own that classifies as
@@ -31,7 +38,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { classifyChecks } from "./lib/ci-state.mjs";
+import { classifyChecks, isFailed } from "./lib/ci-state.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
 const POLL_MS = 20_000;
@@ -50,6 +57,11 @@ function parseArgs(argv) {
   }
   options.waitSec = Number(options.waitSec);
   options.startWaitSec = Number(options.startWaitSec);
+  if (options.rerunAt !== undefined) {
+    const at = Date.parse(options.rerunAt);
+    if (!Number.isFinite(at)) throw new Error("--rerun-at must be a date");
+    options.rerunAt = at;
+  }
   if (!options.pr) throw new Error("--pr is required");
   if (!options.out) throw new Error("--out is required");
   if (!Number.isFinite(options.waitSec) || options.waitSec < 0) throw new Error("--wait-sec must be a non-negative number");
@@ -77,8 +89,13 @@ function readChecks(repo, pr, { timeoutMs } = {}) {
   }
 }
 
+// The rows as the wait judges them: a failed row that completed before
+// `rerunAt` is the run a rerun replaces, not its result.
+const pendingRerun = (rows, rerunAt) => (rerunAt === null || !Array.isArray(rows) ? rows : rows.map((row) =>
+  isFailed(row) && Date.parse(row.completedAt) < rerunAt ? { ...row, state: "PENDING", bucket: "pending" } : row));
+
 export async function waitForChecks({
-  repo, pr, waitSec, startWaitSec = 0, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay
+  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay
 }) {
   if (waitSec === 0) return { status: "not-run", reason: "CI waiting is disabled (ciWaitSec is 0)", checks: [] };
   const calledAt = now();
@@ -113,13 +130,14 @@ export async function waitForChecks({
     } else if (answered !== null) {
       checks = answered;
     }
-    const verdict = classifyChecks(checks);
+    const verdict = classifyChecks(pendingRerun(checks, rerunAt));
     if (verdict.status !== "running") return { ...verdict, checks };
     if (now() >= deadline) {
       return {
         status: "not-run",
         reason: `checks were still running after ${waitSec}s, so nothing was proven either way`,
-        checks
+        checks,
+        stillRunning: true
       };
     }
     await sleep(Math.min(poll, Math.max(0, deadline - now())));
@@ -133,7 +151,8 @@ async function main() {
       repo: path.resolve(options.repo),
       pr: options.pr,
       waitSec: options.waitSec,
-      startWaitSec: options.startWaitSec
+      startWaitSec: options.startWaitSec,
+      rerunAt: options.rerunAt ?? null
     });
     const out = path.resolve(options.out);
     fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });

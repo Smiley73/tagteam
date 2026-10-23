@@ -283,3 +283,16 @@ test("no start wait for the plan's pull request without a workflow at its tip, w
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("checks still running on the plan's pull request when the wait runs out are recorded as not-run, as they always were", () => {
+  // The spec path waits on for these; the plan's pull request reads only the status.
+  const staged = stageClean();
+  const { dir, shipDir } = staged;
+  startWait(staged, 0, 1);
+  const running = JSON.stringify([{ name: "test", state: "IN_PROGRESS", bucket: "pending", link: "https://example.invalid/run/3" }]);
+  const dialog = toDialog(staged, [], { ...staged.env, GH_STUB_CHECKS: running });
+  const record = landingRecordOf(shipDir);
+  assert.deepEqual([record.ci.status, record.ci.reason], ["not-run", "checks were still running after 1s, so nothing was proven either way"]);
+  assert.doesNotMatch(dialog.json.next ?? "", / checks --plan /, "the plan's landing was sent to a spec's wait");
+  fs.rmSync(dir, { recursive: true, force: true });
+});

@@ -94,6 +94,13 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  to-fix.json, open/, still-open.json, still-open/, report.json,
                  redesign.json (which files this round's commit was a redesign
                  of; kept on re-entry like the report),
+                 verify-retry.json and verify-retry/ (a failed verify run once
+                 more on the same commit, beside the first),
+                 retries/ (one record per failure run once more — a verify
+                 command, the landing check's verify, or checks rerun on the
+                 pull request: what failed, both attempts' evidence and the
+                 result — and the rerun request a check rerun begins with;
+                 kept on re-entry like the report),
                  landing/<new-base>/ (one directory per base this round's
                  commit was checked against: verify.json and verify/, plus
                  reviewed.diff and landing.diff when the two differed),
@@ -113,6 +120,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     declined/    the reports of fixers and redesign implementers that changed
                  nothing                                                    ignored
     pr-body.md  ci.json  usage.json                                          ignored
+    pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
+                 under ## Risk — each failure that passed when run again on
+                 the same commit                                            ignored
+    pr-body.sent.json  which of those lines GitHub has taken                ignored
 .tagteam/worktrees/                                                         ignored
 .tagteam/locks/  <plan>-<digest>.lock/, one per plan being shipped — the same
                  plan twice is refused, two plans are not; and
@@ -137,7 +148,8 @@ round that raised them — `2.correctness.1` — so nothing one round settled ca
 overwritten or cleared by another. A round is a record: once `round.json` names
 the commit that owns it, every file tagteam writes beneath it is written once,
 and re-snapshotting that same commit re-enters the round — empties it back to
-the marker, the round's report and its redesign record, and rebuilds it — while
+the marker, the round's report, its redesign record and its retry records, and
+rebuilds it — while
 a different commit is refused. Codex's own output is the exception, replaced in place when a Codex
 lens that produced nothing usable is re-dispatched.
 
@@ -733,7 +745,7 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
-| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
 | `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
@@ -742,7 +754,7 @@ a new commit appears — and every fix round makes one.
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge or Squash for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit, or as one squash commit when the person's recorded answer is Squash |
-| `ci-wait.mjs` | Poll checks, return one classified line |
+| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, and with `--rerun-at` a failed check completed before the rerun counts as running |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |

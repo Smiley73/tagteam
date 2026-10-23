@@ -65,11 +65,30 @@ test("off by default: running then passing passes, and running to the deadline i
 
   const stalls = harness([running]);
   const result = await run(stalls, { waitSec: 60 });
-  assert.equal(result.status, "not-run");
+  assert.equal(result.status, "not-run", "a caller that reads the status sees what it always saw");
   assert.equal(result.reason, "checks were still running after 60s, so nothing was proven either way");
+  assert.equal(result.stillRunning, true);
   assert.deepEqual(result.checks, running);
   assert.equal(stalls.elapsed(), 60_000, "the running budget did not count from the call");
   assert.deepEqual(stalls.reads.map((read) => read.at), [0, 20_000, 40_000, 60_000]);
+});
+
+test("after a rerun, a failed row completed before the rerun moment is still running, and the rerun's own result is the answer", async () => {
+  const rerunAt = Date.parse("2026-05-01T12:00:00Z");
+  const stale = [{ ...failing[0], completedAt: "2026-05-01T11:59:00Z" }];
+  const fresh = [{ ...failing[0], completedAt: "2026-05-01T12:05:00Z" }];
+  const passes = harness([stale, stale, [{ ...passing[0], completedAt: "2026-05-01T12:04:00Z" }]]);
+  assert.equal((await run(passes, { waitSec: 600, rerunAt })).status, "passed");
+  assert.equal(passes.reads.length, 3);
+
+  const fails = harness([stale, fresh]);
+  assert.equal((await run(fails, { waitSec: 600, rerunAt })).status, "failed");
+  assert.equal(fails.reads.length, 2);
+
+  const stalls = harness([stale]);
+  const result = await run(stalls, { waitSec: 60, rerunAt });
+  assert.equal(result.stillRunning, true, "the stale failure was taken as the rerun's result");
+  assert.deepEqual(result.checks, stale, "the rows are reported as gh gave them");
 });
 
 test("a wait of 0 is disabled whatever the start wait, without a read", async () => {

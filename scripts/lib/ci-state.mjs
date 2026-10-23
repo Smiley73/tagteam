@@ -13,6 +13,9 @@ function stateOf(row) {
   return String(row.state ?? row.bucket ?? "").toLocaleUpperCase().replaceAll(" ", "_");
 }
 
+/** Whether one check row ran and failed. */
+export const isFailed = (row) => FAILED.has(stateOf(row));
+
 export function classifyChecks(rows) {
   const checks = Array.isArray(rows) ? rows : [];
   const states = checks.map(stateOf);

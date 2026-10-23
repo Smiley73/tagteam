@@ -170,7 +170,8 @@ The driver walks each spec through: `begin` (branch, dispatch the implementer),
 `panel` (every lens plus Codex), `collect`, then `fix` and back to `snapshot`
 when something blocking or major is open and a fix round is left, `recheck`
 (the adversary's fresh pass and each reader's re-check of what it raised),
-`settle`, `publish`, `repair` when CI is red and a repair is left, and `finish`.
+`settle`, `publish`, `checks` while the pull request's checks are still running,
+`repair` when CI is red and a repair is left, and `finish`.
 A fixer that declines every finding and changes nothing makes no round and
 skips `verify`, but not `recheck`: the lenses that raised what it declined read
 its reasons and either withdraw the finding or keep it open.
@@ -344,6 +345,28 @@ at each point:
   says `Waiting up to …s for checks to start`, relay that line. A spec's repair
   and its revisit both come back through `publish`, and wait the same way.
 
+  A failure is not taken at its first word. A verify command that fails is run
+  once more on the same commit, and so is the verify the landing check runs at
+  `finish`; failed checks on the pull request that GitHub Actions ran are rerun
+  once before `repair` is offered. A failure that fails again goes on as any
+  failure does. A pass that came from running something again is written into
+  the pull request's `## Risk` by the driver itself, so there is nothing for you
+  to add about it.
+
+- **When `next` is `checks`**: the checks were still running when `ciWaitSec`
+  ran out. Nothing is recorded about them yet, and `say` gives how long they have
+  been waited for in all. Relay it and run `next` the way you ran `publish` — in
+  the background, acting on its completion notice:
+
+  ```bash
+  node "$P/scripts/ship.mjs" checks --plan "$D" --spec <id>
+  ```
+
+  It waits again and either moves on or names itself once more. Ending the wait
+  is the person's call, never yours: when they say to stop waiting, run `finish`
+  for the spec. It records that the checks proved nothing, with how long they
+  were waited for, and asks the person as for any checks that proved nothing.
+
 - **After `finish`**: see *Merge or stop* below.
 
 The driver's `snapshot` step commits through `git add -A`, `guard-staged.mjs`
@@ -389,6 +412,13 @@ Two things do carry over from the run, because they are about the software:
   and merging is the person's to do by hand.
 
 `## Risk` says "nothing known" when there is nothing, rather than being dropped.
+
+The body `publish` sends is yours plus lines the driver writes under `## Risk`
+itself — a failure that passed when it was run again on the same commit — and it
+sends the body again on its own when such a line comes after the pull request
+opened. Those lines replace a "nothing known". When you write the body again
+from the one on GitHub, keep them; the driver adds back any that are missing,
+and nothing merges while one is.
 
 When the pull request already exists — after a CI repair, or after a revisit —
 `publish` replaces its body with what you give it. After a revisit, start from

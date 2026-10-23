@@ -43,7 +43,7 @@ import {
 import { isPullRequestFinding } from "./collect-findings.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
-import { ROUND_REDESIGN, ROUND_REPORT, writeRoundFile } from "./lib/round-store.mjs";
+import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, writeRoundFile } from "./lib/round-store.mjs";
 import {
   RECORD, RESOLVE_DIR, attemptsLeft, hasMarkers, listResolveRounds, markerSizes, nextRoundNumber, parentsProblem, resolveBrief,
   versionStep, writeRecord
@@ -73,6 +73,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
+import { isFailed } from "./lib/ci-state.mjs";
 import {
   clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
   recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
@@ -458,7 +459,9 @@ const prBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.md");
 // because a finding about the pull request used to clear only after a full
 // publish-then-revisit lap: the body was rewritten, the next dispatch re-read
 // GitHub, and the reader found the old text still open. A reader judging the
-// draft judges text not yet on GitHub, and `publish` sends exactly that file.
+// draft judges text not yet on GitHub, and `publish` sends exactly that file
+// with the driver's Risk lines in it — so the draft is compared as it would be
+// sent, or once a disclosure exists it would differ from the live body forever.
 function pullRequestLines(ctx, id, state) {
   const record = pullRequestRecord(ctx, id, state);
   const lines = [];
@@ -470,7 +473,7 @@ function pullRequestLines(ctx, id, state) {
   }
   const draft = prBodyPath(ctx, id);
   if (exists(draft)) {
-    const text = fs.readFileSync(draft, "utf8");
+    const text = composeBody(fs.readFileSync(draft, "utf8"), riskLines(ctx, id));
     if (record.body === null || text.trim() !== record.body.trim()) {
       lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
       say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
@@ -486,6 +489,119 @@ function pullRequestFindingsLine(ctx, id, findings) {
   const named = findings.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
   return `${findings.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named}. `
     + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
+}
+
+// --- retries and what the pull request says about them ----------------------
+
+// A failure run once more on the same commit — a verify command, the landing
+// check's verify, failed checks on the pull request — leaves one record in its
+// round's `retries/`, written once and kept through re-entry: the kind, the
+// commit (and the base, for a landing check), what failed first, where both
+// attempts' evidence is, and what the second attempt gave. "Once" is read from
+// these records, so neither a revisit nor a later publish of the same commit
+// buys a second go.
+const retriesOf = (dir) => path.join(dir, ROUND_RETRIES);
+
+function writeRetry(dir, record) {
+  const name = `${record.kind}-${short(record.candidate)}${record.base ? `-${short(record.base)}` : ""}.json`;
+  writeRoundFile(path.join(retriesOf(dir), name), `${JSON.stringify({ ...record, at: new Date().toISOString() }, null, 2)}\n`);
+}
+
+// Every retry record of this spec, in round order. Across rounds, because one
+// commit can own more than one.
+function retryRecords(ctx, id) {
+  return listRounds(roundsRoot(ctx, id)).flatMap((round) => {
+    const dir = retriesOf(round.dir);
+    const names = exists(dir) ? fs.readdirSync(dir).filter((name) => name.endsWith(".json")).sort() : [];
+    return names.map((name) => readJson(path.join(dir, name), null)).filter((record) => record?.result);
+  });
+}
+
+const retryOf = (ctx, id, kind, candidate, base = null) =>
+  retryRecords(ctx, id).find((record) => record.kind === kind && record.candidate === candidate && (record.base ?? null) === base) ?? null;
+
+const firstFailed = (verify) => (verify?.commands ?? []).find((command) => command.status === "failed") ?? null;
+
+/**
+ * The lines the driver itself writes under `## Risk` in this spec's pull
+ * request: the one place that decides what they are. One per failure that
+ * passed when it was run again on the same commit.
+ */
+function riskLines(ctx, id) {
+  const base = readState(ctx, id).base;
+  return retryRecords(ctx, id).filter((record) => record.result === "passed").map((record) => {
+    if (record.kind === "ci") {
+      return `- ${record.failed.length > 1 ? "The checks" : "The check"} ${record.failed.map((name) => `\`${name}\``).join(", ")} `
+        + `failed on this pull request, then passed when rerun on the same commit (${short(record.candidate)}).`;
+    }
+    if (record.kind === "landing") {
+      return `- The verify command \`${record.failed}\` failed on this change merged onto ${base} as it stood at ${short(record.base)}, `
+        + `then passed when run again on the same merge (commit ${short(record.candidate)}).`;
+    }
+    return `- The verify command \`${record.failed}\` failed, then passed when run again on the same commit (${short(record.candidate)}).`;
+  });
+}
+
+const NOTHING_KNOWN = /^nothing(?: else)?(?: is)? known\.?$/i;
+
+// `text` with each of `lines` it does not hold yet under its `## Risk` heading:
+// in place of a section that says only that nothing is known, which a disclosure
+// contradicts; after whatever else the section says; or in a section of its own
+// at the end when there is none. A line already there is not added twice, so a
+// sent body composes to itself.
+function composeBody(text, lines) {
+  const missing = lines.filter((line) => !text.includes(line));
+  if (missing.length === 0) return text;
+  const block = missing.join("\n");
+  const heading = /^## Risk[ \t]*\r?$/m.exec(text);
+  if (!heading) return `${text.trimEnd()}\n\n## Risk\n\n${block}\n`;
+  const start = heading.index + heading[0].length;
+  const next = /^## /m.exec(text.slice(start));
+  const end = next ? start + next.index : text.length;
+  const said = text.slice(start, end).trim();
+  const section = said === "" || NOTHING_KNOWN.test(said) ? block : `${said}\n\n${block}`;
+  return `${text.slice(0, start)}\n\n${section}\n${next ? `\n${text.slice(end)}` : ""}`;
+}
+
+// The body as it is sent, written beside the orchestrator's file, which is left
+// as it was written; and, once GitHub has taken it, which driver lines it carried.
+const sentBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.sent.md");
+const sentLinesPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.sent.json");
+
+function composeSent(ctx, id, text) {
+  const lines = riskLines(ctx, id);
+  fs.writeFileSync(sentBodyPath(ctx, id), composeBody(text, lines), { mode: 0o600 });
+  return { file: sentBodyPath(ctx, id), lines };
+}
+
+const markSent = (ctx, id, pr, lines) => writeJson(sentLinesPath(ctx, id), { pr, lines, at: new Date().toISOString() });
+
+/**
+ * A body-only re-send, for a disclosure recorded after the body went to GitHub:
+ * the body last sent — or the live one, for a pull request this run never sent
+ * one to — with the missing lines added, through `gh pr edit --body-file` and
+ * nothing else. Never a full `publish`, which would push and wait for checks
+ * again. True when the pull request now carries every line, or there is none.
+ */
+function resendBody(ctx, id, state, say) {
+  const number = state.pr?.number;
+  if (!number) return true;
+  const sent = readJson(sentLinesPath(ctx, id), null);
+  const carried = sent?.pr === number ? sent.lines ?? [] : [];
+  const missing = riskLines(ctx, id).filter((line) => !carried.includes(line));
+  if (missing.length === 0) return true;
+  const text = exists(sentBodyPath(ctx, id)) ? fs.readFileSync(sentBodyPath(ctx, id), "utf8") : pullRequestRecord(ctx, id, state).body;
+  const fail = (why) => {
+    say.push(`Pull request #${number}'s body could not be sent again (${why}), so it does not yet say under Risk: ${missing.join(" ")}`);
+    return false;
+  };
+  if (text === null) return fail("its body could not be read");
+  const sentNow = composeSent(ctx, id, text);
+  const edited = gh(ctx.repo, ["pr", "edit", String(number), "--body-file", sentNow.file], { allowFailure: true });
+  if (edited.status !== 0) return fail((edited.stderr || edited.stdout || "gh pr edit failed").trim().split("\n")[0]);
+  markSent(ctx, id, number, sentNow.lines);
+  say.push(`Sent pull request #${number}'s body again, now saying under Risk: ${missing.join(" ")}`);
+  return true;
 }
 
 // What is live at `round` of this cycle: both signals `churn.mjs` reports, the
@@ -2701,14 +2817,40 @@ function verify(options) {
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}; run snapshot first`);
   const dir = round.dir;
-  const result = node("verify-run.mjs", [
+  const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`)
   ], { allow: [1] });
-  record(ctx, id, "verify", state.candidateOid, path.join(dir, "verify.json"));
-  const outcome = readJson(path.join(dir, "verify.json"));
+  run("verify");
+  const first = readJson(path.join(dir, "verify.json"));
+  // A failure is run once more on the same commit, beside the first so that its
+  // evidence stays, and the second result is the gate. Run again in this round
+  // the step finds the second result already there; after a re-entry the record
+  // says this commit has had its second run, and the first result stands.
+  const again = path.join(dir, "verify-retry.json");
+  const retried = retryOf(ctx, id, "verify", state.candidateOid);
+  const retry = first.status === "failed" && (exists(again) || !retried);
+  if (retry && !exists(again)) run("verify-retry");
+  const outcome = retry ? readJson(again) : first;
+  if (retry && !retried) {
+    writeRetry(dir, {
+      kind: "verify", candidate: state.candidateOid, failed: firstFailed(first)?.command ?? null,
+      first: path.join(dir, "verify.json"), second: again, result: outcome.status
+    });
+  }
+  record(ctx, id, "verify", state.candidateOid, retry ? again : path.join(dir, "verify.json"));
   const say = [`Verification: ${outcome.status}${outcome.status === "not-applicable" ? " — nothing matched, which is not a pass and waits for a person" : ""}.`];
-  for (const command of outcome.commands ?? []) say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+  const lines = (result, attempt = "") => (result.commands ?? []).map((command) => `  ${attempt}${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+  if (retry) {
+    say.push("The first run failed, and it was run once more on the same commit:", ...lines(first, "first run, "), ...lines(outcome, "second run, "));
+    if (outcome.status === "passed") {
+      say.push("It passed the second time; the pull request says so under Risk.");
+      resendBody(ctx, id, state, say);
+    }
+  } else {
+    if (first.status === "failed" && retried) say.push("Not run once more: this commit has already had its second run after a failure.");
+    say.push(...lines(outcome));
+  }
   // Which review this candidate gets. The first fix of a cycle skips the panel:
   // the round before it collected the panel's findings and nothing has settled
   // them yet, so the lenses that raised them re-judge them against this diff. A
@@ -3368,35 +3510,154 @@ function publish(options) {
   if (!exists(options.body)) throw new Stop(`the body file ${options.body} does not exist`);
   const say = [];
   const republish = Boolean(state.pr);
+  const sent = composeSent(ctx, id, fs.readFileSync(options.body, "utf8"));
   git(ctx.worktree, ["push", ...(republish ? ["--force-with-lease"] : ["-u"]), "origin", state.branch]);
+  let taken = true;
   if (!republish) {
     // Where this spec's state says it lands, which `begin` set from the train's
     // route: the plan branch on a plan route, the configured base otherwise.
-    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", path.resolve(options.body)]);
+    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", sent.file]);
   } else {
-    gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", path.resolve(options.body)], { allowFailure: true });
+    const edited = gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", sent.file], { allowFailure: true });
+    taken = edited.status === 0;
+    if (!taken) say.push(`Pull request #${state.pr.number}'s title and body could not be updated (${(edited.stderr || edited.stdout || "").trim().split("\n")[0]}); it keeps the ones it had.`);
   }
   const view = JSON.parse(gh(ctx.repo, ["pr", "view", state.branch, "--json", "number,url,headRefOid"]).stdout);
   if (view.headRefOid !== state.candidateOid) throw new Stop(`the pull request heads at ${view.headRefOid}, not the reviewed candidate ${state.candidateOid}`);
   node("gates.mjs", ["pr", statePath(ctx, id), String(view.number), view.url, view.headRefOid]);
+  if (taken) markSent(ctx, id, view.number, sent.lines);
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
-  if (ctx.config.ciWaitSec > 0) {
+  if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
+  emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
+}
+
+// `publish`'s wait for checks still running when `ciWaitSec` ran out, taken up
+// again. It waits on or moves on, and nothing else: ending the wait is a
+// person's call, made by running finish.
+function checks(options) {
+  const ctx = context(options);
+  const id = options.spec;
+  const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "checks");
+  const waiting = readJson(ciPath(ctx, id), null);
+  if (!state.pr?.number || !(waiting?.stillRunning && waiting.candidateOid === state.candidateOid)) {
+    throw new Stop(`${id} has no wait for checks to take up at ${short(state.candidateOid)}; publish is what waits for them`);
+  }
+  const say = [];
+  emit({ say, ...waitSpecChecks(ctx, id, state, say, waiting.waitBegan) });
+}
+
+const ciPath = (ctx, id) => path.join(specDir(ctx, id), "ci.json");
+const secondsSince = (at) => Math.max(0, Math.round((Date.now() - Date.parse(at)) / 1000));
+
+// The rerun of failed checks this commit already asked for, or null.
+function rerunRequest(ctx, id, candidate) {
+  for (const round of listRounds(roundsRoot(ctx, id))) {
+    const file = path.join(retriesOf(round.dir), `ci-${short(candidate)}.rerun.json`);
+    if (exists(file)) return { ...readJson(file), file };
+  }
+  return null;
+}
+
+/**
+ * The checks on a spec's pull request, waited for by `publish` and — while they
+ * are still running at `ciWaitSec` — by `checks`, which takes up the wait that
+ * began at `began`. The `ci` gate is recorded only on a decided result: still
+ * running records nothing, and `next` is `checks` again. A failure is rerun
+ * once, then waited for again without a start wait; what that gives is the
+ * result, and a failure after it goes to `repair` as any failure does.
+ */
+function waitSpecChecks(ctx, id, state, say, began = null) {
+  const pr = state.pr.number;
+  const since = began ?? new Date().toISOString();
+  let request = rerunRequest(ctx, id, state.candidateOid);
+  const wait = (startSeconds = 0) => {
+    // A rerun that was refused never ran, so no failed row is waiting on it.
+    const rerunAt = request && retryOf(ctx, id, "ci", state.candidateOid)?.result !== "refused" ? request.requestedAt : null;
+    const ran = node("ci-wait.mjs", [
+      "--repo", ctx.repo, "--pr", String(pr), "--wait-sec", String(ctx.config.ciWaitSec),
+      ...(startSeconds > 0 ? ["--start-wait-sec", String(startSeconds)] : []),
+      ...(rerunAt ? ["--rerun-at", rerunAt] : []),
+      "--out", ciPath(ctx, id)
+    ], { allow: [1] });
+    const outcome = readJson(ciPath(ctx, id));
+    if (!outcome.stillRunning) say.push(...ran.stdout.trim().split("\n").filter(Boolean));
+    return outcome;
+  };
+  let outcome;
+  if (began === null && request === null) {
     const start = ciStartLimit(ctx, state.candidateOid);
     if (start.seconds > 0) {
-      say.push(`Waiting up to ${start.seconds}s for checks to start on #${view.number} (ciStartWaitSec): at ${short(state.candidateOid)}, ${start.files.join(", ")} can run on a pull request.`);
+      say.push(`Waiting up to ${start.seconds}s for checks to start on #${pr} (ciStartWaitSec): at ${short(state.candidateOid)}, ${start.files.join(", ")} can run on a pull request.`);
     }
-    const ci = node("ci-wait.mjs", [
-      "--repo", ctx.repo, "--pr", String(view.number), "--wait-sec", String(ctx.config.ciWaitSec),
-      ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
-      "--out", path.join(specDir(ctx, id), "ci.json")
-    ], { allow: [1] });
-    record(ctx, id, "ci", state.candidateOid, path.join(specDir(ctx, id), "ci.json"));
-    say.push(...ci.stdout.trim().split("\n"));
-    const outcome = readJson(path.join(specDir(ctx, id), "ci.json"));
-    if (outcome.status === "failed") return emit({ say, pr: view, ci: outcome.status, next: nextCommand(ctx, "repair", id) });
+    outcome = wait(start.seconds);
+  } else {
+    outcome = wait();
   }
-  emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
+  if (outcome.status === "failed" && request === null) {
+    request = requestRerun(ctx, id, state, outcome, say);
+    if (request && !request.refused) outcome = wait();
+  }
+  if (outcome.stillRunning) {
+    writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
+    say.push(`The checks on #${pr} are still running after ${secondsSince(since)}s of waiting in all, so nothing is recorded yet and the wait goes on. `
+      + "Ending it is a person's call: finish ends it, and records that the checks proved nothing either way.");
+    return { next: nextCommand(ctx, "checks", id) };
+  }
+  recordChecks(ctx, id, state, outcome, since, say);
+  if (outcome.status === "failed") return { ci: outcome.status, next: nextCommand(ctx, "repair", id) };
+  return { next: nextCommand(ctx, "finish", id) };
+}
+
+/**
+ * One rerun of the failed checks on this commit, asked for at most once: the
+ * request is written before `gh run rerun` runs, so a run resumed between the
+ * two never asks again. Only a GitHub Actions row names a run that can be rerun;
+ * when a failed row does not, a rerun could not turn the result green and
+ * nothing is asked. A request GitHub refuses is recorded as refused, and the
+ * first failure stands.
+ */
+function requestRerun(ctx, id, state, outcome, say) {
+  const failed = (outcome.checks ?? []).filter(isFailed);
+  const others = failed.filter((row) => !/\/actions\/runs\/\d+/.test(row.link ?? ""));
+  if (others.length > 0) {
+    say.push(`Not rerun: ${others.map((row) => row.name).join(", ")} ${others.length > 1 ? "are not GitHub Actions checks" : "is not a GitHub Actions check"}, so running the failed checks again could not turn the result green.`);
+    return null;
+  }
+  const dir = currentRound(ctx, id, state).dir;
+  const file = path.join(retriesOf(dir), `ci-${short(state.candidateOid)}.rerun.json`);
+  const runs = [...new Set(failed.map((row) => /\/actions\/runs\/(\d+)/.exec(row.link)[1]))];
+  const request = { candidate: state.candidateOid, requestedAt: new Date().toISOString(), failed: failed.map((row) => row.name), runs, checks: outcome.checks };
+  writeRoundFile(file, `${JSON.stringify(request, null, 2)}\n`);
+  for (const run of runs) {
+    const asked = gh(ctx.repo, ["run", "rerun", run, "--failed"], { allowFailure: true });
+    if (asked.status === 0) continue;
+    const why = (asked.stderr || asked.stdout || "gh run rerun failed").trim().split("\n")[0];
+    writeRetry(dir, { kind: "ci", candidate: state.candidateOid, failed: request.failed, first: file, second: null, result: "refused", reason: why });
+    say.push(`The failed checks could not be rerun (${why}), so the first failure stands.`);
+    return { ...request, file, refused: true };
+  }
+  say.push(`${request.failed.join(", ")} failed; rerunning the failed jobs once on the same commit, and waiting for them.`);
+  return { ...request, file };
+}
+
+// A decided result for this commit's checks, recorded: `ci.json`, the retry
+// record once a rerun has an answer, a re-send of the body when the rerun turned
+// the failure into a pass, and the `ci` gate.
+function recordChecks(ctx, id, state, outcome, since, say) {
+  writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
+  const request = rerunRequest(ctx, id, state.candidateOid);
+  if (request && !retryOf(ctx, id, "ci", state.candidateOid)) {
+    writeRetry(currentRound(ctx, id, state).dir, {
+      kind: "ci", candidate: state.candidateOid, failed: request.failed, first: request.file, second: ciPath(ctx, id), result: outcome.status
+    });
+    if (outcome.status === "passed") {
+      say.push("The rerun passed; the pull request says so under Risk.");
+      resendBody(ctx, id, readState(ctx, id), say);
+    }
+  }
+  record(ctx, id, "ci", state.candidateOid, ciPath(ctx, id));
 }
 
 async function repair(options) {
@@ -5348,7 +5609,16 @@ function checksCause(ctx, id, state, verdict) {
   if (!isPlanRoute(route) || state.base !== route.branch) return null;
   const notStarted = verdict.approvals.includes("continuous-integration-not-started");
   if (!notStarted && !verdict.approvals.includes("continuous-integration-inconclusive")) return null;
-  const ci = readJson(path.join(specDir(ctx, id), "ci.json"), null);
+  // Only when no check appeared at all, on a commit holding a workflow a pull
+  // request would start: a check that was cancelled, skipped or still running
+  // did start, so no branch filter kept it away.
+  const ci = readJson(ciPath(ctx, id), null);
+  if (!Array.isArray(ci?.checks) || ci.checks.length > 0) return null;
+  try {
+    if (!hasPullRequestWorkflow(ctx.repo, state.candidateOid).found) return null;
+  } catch {
+    return null;
+  }
   return `The checks on this pull request ${notStarted ? "never started" : "proved nothing"}${ci?.reason ? ` (${ci.reason})` : ""}, and it targets ${route.branch}, `
     + `not ${route.base}: the likely cause is workflows that only run for pull requests into ${route.base} — an `
     + `\`on: pull_request: branches:\` filter. Letting them run for pull requests into ${route.branch} is a change to those `
@@ -5434,13 +5704,26 @@ async function landingCheck(ctx, id, state, say) {
       + `${state.candidateOid.slice(0, 12)} to verify the merged change against; nothing was merged`);
   }
   const borrowed = borrowWorktree(ctx, id, state);
-  const outcome = checkLanding({
+  const check = () => checkLanding({
     repo: ctx.repo, worktree: ctx.worktree, branch: borrowed,
     config: ctx.config, configPath: ctx.configPath,
     baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
     candidatePath: path.join(round.dir, "candidate.json"),
     landingDir: path.join(round.dir, "landing")
   });
+  let outcome = check();
+  // A verify that fails on the merge is run once more on the same merge, in an
+  // attempt directory of its own, and the second answer is the one recorded.
+  if (outcome.status === "failed" && !retryOf(ctx, id, "landing", state.candidateOid, baseOid)) {
+    const first = outcome;
+    outcome = check();
+    writeRetry(round.dir, {
+      kind: "landing", candidate: state.candidateOid, base: baseOid, failed: firstFailed(first.verify)?.command ?? null,
+      first: first.resultPath, second: outcome.resultPath ?? outcome.dir ?? null, result: outcome.status
+    });
+    say.push(`Merged onto ${state.base} at ${short(baseOid)}, a verify command failed, and it was run once more on the same merge: `
+      + `${outcome.status === "passed" ? "it passed, and the pull request says so under Risk" : "it failed again"}.`);
+  }
   const record = {
     status: outcome.status,
     baseOid: outcome.baseOid,
@@ -5482,7 +5765,14 @@ function landAndMerge(ctx, id, state, say, planRoute) {
         say.push(...(await reconcileMerged(ctx, { own: id })).say);
         await planTipCheck(ctx, "nothing was merged");
       }
-      return landingCheck(ctx, id, state, say);
+      const stopped = await landingCheck(ctx, id, state, say);
+      if (stopped) return stopped;
+      // Nothing merges while the body on GitHub lacks a line the driver owes it.
+      if (resendBody(ctx, id, readState(ctx, id), say)) return null;
+      return {
+        stop: `${id}'s pull request does not yet say under Risk what running a failure again on the same commit found, and its body `
+          + "could not be sent again, so nothing was merged. Run finish again once GitHub takes the edit."
+      };
     },
     merge: () => {
       const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath],
@@ -5493,6 +5783,20 @@ function landAndMerge(ctx, id, state, say, planRoute) {
       return {};
     }
   });
+}
+
+// A wait for checks that `checks` had not finished, ended by a person running
+// finish: recorded as the checks proving nothing, with the time they were
+// waited for — the inconclusive result it always was, which a person approves.
+function endChecksWait(ctx, id, state, say) {
+  const waiting = readJson(ciPath(ctx, id), null);
+  if (!waiting?.stillRunning || waiting.candidateOid !== state.candidateOid) return;
+  const { stillRunning, ...outcome } = waiting;
+  const waited = secondsSince(waiting.waitBegan);
+  recordChecks(ctx, id, state, {
+    ...outcome, reason: `checks were still running after ${waited}s of waiting, when the wait was ended at finish, so nothing was proven either way`
+  }, waiting.waitBegan, say);
+  say.push(`Ended the wait for the checks on #${state.pr.number} after ${waited}s; they proved nothing either way.`);
 }
 
 async function finish(options) {
@@ -5519,6 +5823,7 @@ async function finish(options) {
     }
   }
   freezePlanRoute(ctx, id);
+  endChecksWait(ctx, id, state, say);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
   if (options.approve) {
@@ -5771,7 +6076,7 @@ async function end(options) {
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
-  start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, repair, revisit, finish, end,
+  start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
   "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect,
   "plan-land": planLand
 };
@@ -5804,6 +6109,7 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   recheck --spec <id>                 dispatch the adversary and the re-checks
   settle  --spec <id>                 settle the round; decides fix or publish
   publish --spec <id> --title <t> --body <file>
+  checks  --spec <id>                 wait on for checks still running when publish's wait ran out; finish ends the wait
   repair  --spec <id>                 spend a CI repair and dispatch the fixer
   revisit --spec <id>                 from awaiting-approval: the reviewed commit through the cycle again, spending nothing
   finish  --spec <id> [--approve <email>]   merge when ready, otherwise stop for a person

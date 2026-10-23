@@ -676,7 +676,7 @@ test("start says nothing new with a signature rule and signing on, with signing 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a pull request into the plan branch whose checks never ran stops for a person and names the workflow cause", () => {
+test("a pull request into the plan branch whose checks never ran stops for a person, and names no workflow cause when the commit holds no workflow", () => {
   const staged = stagePlan({ ciWaitSec: 5 });
   const { dir, plan, env } = staged;
   assert.equal(ship("start", plan, [], env).status, 0);
@@ -685,7 +685,8 @@ test("a pull request into the plan branch whose checks never ran stops for a per
   assert.equal(a.state().gates.ci.status, "not-run", "checks that never ran were recorded as something else");
   assert.equal(a.state().state, "awaiting-approval");
   assert.match(a.finished.json.ask, /the checks proved nothing either way/);
-  assert.match(a.finished.json.ask, /it targets plan\/demo, not main: the likely cause is workflows that only run for pull requests into main/);
+  // No workflow at the candidate, so no branch filter can be what kept checks away.
+  assert.doesNotMatch(a.finished.json.ask, /likely cause/);
   assert.equal(pullsOf(env)[0].state, "OPEN");
   fs.rmSync(dir, { recursive: true, force: true });
 });
