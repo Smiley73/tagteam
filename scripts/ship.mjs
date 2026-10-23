@@ -3085,6 +3085,13 @@ async function recheck(options) {
   // new code to read; see `fixDeclinedPath`.
   const declinedMarker = readJson(fixDeclinedPath(ctx, id), null);
   const declined = declinedMarker && declinedMarker.candidate === state.candidateOid ? declinedMarker : null;
+  // A candidate `verify` sends to the whole panel is not re-checked in its place.
+  // Refused only while nothing has run on it.
+  const plannedHere = readJson(recheckPlanPath(ctx, id), null)?.candidate === state.candidateOid;
+  if (!declined && !plannedHere && collected < round.round && !exists(path.join(round.dir, "recheck.json"))
+    && reviewRouteFor(ctx, id, state, round.round) === "panel") {
+    throw new Stop(`${id} round ${round.round} follows a fix round that was already re-checked, so the whole panel reads it, not the re-check; run panel`);
+  }
   // No fixer ran at all: what was open is about the pull request, and the body
   // is what the readers judge. The adversary's fresh pass is skipped — the diff
   // it would read is the one it read when these findings were raised.
