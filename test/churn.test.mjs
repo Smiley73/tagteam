@@ -205,6 +205,20 @@ test("pull request and file-less findings make a round count, and are not among 
   assert.deepEqual(churnSignal(none, { scope: "repair:0", round: 3 }).filter((signal) => signal.file === null), [], "the same-file signal still ignores file-less findings");
 });
 
+test("pull request findings that name a source file never make it a same-file signal, so no redesign of it is offered", () => {
+  const root = rootWith({
+    1: { raised: [["src/x.js", "major", "review.json", "pull-request"], [null, "major"]] },
+    2: { raised: [["src/x.js", "major", "review.json", "pull-request"]] },
+    3: { raised: [["src/x.js", "blocking", "recheck.json", "pull-request"], [null, "major"]] }
+  });
+  assert.deepEqual(churnSignal(root, { scope: "repair:0", round: 3 }), [], "a body answers these, not a rewrite of src/x.js");
+  const signal = loose(root, 3);
+  assert.deepEqual(signal.rounds, [1, 2, 3], "the loose signal still counts them");
+  assert.deepEqual(signal.files, [], "and offers no file to rewrite either");
+  const body = rootWith({ 1: { raised: [["pr-body.md", "major"]] }, 2: { raised: [["pr-body.md", "major"]] }, 3: { raised: [["pr-body.md", "major"]] } });
+  assert.deepEqual(churnSignal(body, { scope: "repair:0", round: 3 }), [], "nor is a pull request file, whatever its scope says");
+});
+
 test("a run of code findings that name no file is no file in particular, not the pull request, and offers no redesign", () => {
   const signal = loose(rootWith({ 1: { raised: [[null, "major"]] }, 2: { raised: [[null, "major"]] }, 3: { raised: [[null, "blocking", "recheck.json"]] } }), 3);
   assert.deepEqual(signal.files, []);

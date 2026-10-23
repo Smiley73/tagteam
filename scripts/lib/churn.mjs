@@ -109,6 +109,10 @@ export function redesignedAt(dir) {
  * it does for the budget. Findings from before a redesign of the file are not
  * counted; `since` on a signal names that redesign round, or is null. Empty
  * when nothing recurs.
+ *
+ * A finding about the pull request is not counted against the file it names:
+ * a body answers it, not a rewrite, and a signal on that file would offer a
+ * redesign of code nothing asked to change. The loose signal still counts it.
  */
 export function churnSignal(roundsRoot, { scope = null, round, threshold = CHURN_ROUNDS } = {}) {
   if (!Number.isInteger(round) || round < 1) return [];
@@ -117,7 +121,7 @@ export function churnSignal(roundsRoot, { scope = null, round, threshold = CHURN
   const byFile = new Map();
   for (const entry of rounds) {
     for (const finding of raisedAt(entry.dir, entry.round)) {
-      if (discounted(resetAt, finding)) continue;
+      if (isPullRequestFinding(finding) || discounted(resetAt, finding)) continue;
       if (!byFile.has(finding.file)) byFile.set(finding.file, []);
       byFile.get(finding.file).push(finding);
     }
