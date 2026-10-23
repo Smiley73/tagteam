@@ -733,7 +733,7 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
       result.auto = true;
       return result;
     }
-    result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used, rewritable, loose });
+    result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used, rewritable, loose, planBranch: onPlanBranch(state, ctx.config) ? state.base : null });
     return result;
   }
   if (used || spent > limit || !rewritable) {
@@ -3449,7 +3449,10 @@ async function redesign(options) {
 // approves nothing: an open finding is a blocker no approval clears, so the spec
 // stops at `finish` exactly as it does when the budget runs out, and the pull
 // request is merged by hand on GitHub — `begin` adopts a hand merge — or
-// revisited once a reader withdraws the finding. Accept answers the Recurring
+// revisited once a reader withdraws the finding. On a plan branch, when every
+// finding accepted may be carried there, `acceptOnPlanBranch` records the accept
+// instead, and `finish` merges the spec into the plan branch with each open
+// finding entered in the plan's ledger. Accept answers the Recurring
 // question and nothing else: a spec that simply ran out of fix rounds publishes
 // on its own through the spent branch of `fix`.
 function accept(options) {
@@ -4861,10 +4864,15 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
     view = viewPlanPr(ctx, route.branch);
     say.push(`Opened the plan's pull request #${view.number} from ${route.branch} into ${route.base}: ${view.url}`);
   } else if (record.bodySent !== hash || record.title !== title) {
+    // A body not sent is not recorded as sent: the next run tries again, and
+    // nothing waits on checks or merges while GitHub holds a body that may lack
+    // what the ship says under Risk.
     const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", sent.file], { allowFailure: true });
-    say.push(edited.status === 0
-      ? `The plan's pull request #${view.number} now carries the body and title as written.`
-      : `The plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body it had.`);
+    if (edited.status !== 0) {
+      throw new Stop(`the plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body `
+        + "it had, which may lack what the ship says under Risk, so nothing else was done. Run this again to send it.");
+    }
+    say.push(`The plan's pull request #${view.number} now carries the body and title as written.`);
   }
   if (view.baseRefName !== route.base) throw new Stop(`the plan's pull request #${view.number} targets ${view.baseRefName}, not ${route.base}; nothing else was done`);
   if (view.headRefOid !== tip) {

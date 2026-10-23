@@ -198,7 +198,7 @@ flowchart TD
     recheck --> settle
     settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
     settle -->|"nothing open, or the fix rounds this repository allows are spent —<br>with the person's answer to publish as it is, or with this cycle's rewrite used"| publish
-    settle -. "the same file keeps failing, or new findings keep arriving on different files,<br>round after round — one question, and a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, or with no file to rewrite, redesign is not offered" .-> redesign
+    settle -. "the same file keeps failing, or new findings keep arriving on different files,<br>round after round — one question, and a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand — or, on a plan branch, into it), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, or with no file to rewrite, redesign is not offered" .-> redesign
     open -. "the same question, asked here too, and asked once per round — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
     redesign --> snapshot
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
@@ -237,7 +237,9 @@ fix round is still left there are four answers: fix it once more; redesign — a
 fresh implementer rewrites the files from a brief of everything raised on them
 this cycle, spending a fix round, and the rewrite starts a fresh count for each
 file it changes; accept — publish it as it is with what is open disclosed, to be
-merged by hand; or stop. A redesign covers the files both patterns name; when
+merged by hand, or on a plan branch merged into it with nobody asked when
+everything open may be carried there, and listed in the plan's pull request; or
+stop. A redesign covers the files both patterns name; when
 the findings are only about the pull request or name no file, there is nothing
 to rewrite, and redesign is not offered.
 

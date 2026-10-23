@@ -309,11 +309,14 @@ function arrivingSentence(loose, named) {
  *   publishing as it is being `next`, because that is where the run goes at the
  *   cap anyway. `accept` is not among them: it answers only while a round is left.
  *
+ * `planBranch`, the branch the spec merges into when that is a plan branch, says
+ * what `accept` does there: it may merge the spec into that branch unattended.
+ *
  * The cap form leaves out the in-budget form's "choosing it when the question
  * comes back after the next re-check": at the cap there is no fix round to get
  * there, and the question is not put twice for one round.
  */
-export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, rewritable = true, atCap = false, loose = null } = {}) {
+export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, rewritable = true, atCap = false, loose = null, planBranch = null } = {}) {
   const each = signals.map(({ file, rounds, findings }) =>
     `${file} has drawn a new finding serious enough to stop a merge in ${rounds.length} rounds of this cycle, each time `
     + `about: ${titlesOf(findings)}; every repair has opened the next case, so one more fix round there is likely to do the same.`);
@@ -336,7 +339,15 @@ export function redesignAsk(signals, { spent, limit, atCollect = false, redesign
     return `${opening}, which is every fix round this repository allows. Three ways on: ${rewrite}; ${publish}; ${stop}`;
   }
   const fixAgain = "fix it once more (run next; spends a fix round)";
-  const accept = `publish it as it is ${disclosed} (run accept; spends nothing)`;
+  // On a plan branch an accept may merge the spec into it: unless something open
+  // may not go into the plan branch unresolved, it does, with nobody asked.
+  const accept = planBranch
+    ? `publish it as it is with what is still open disclosed in the pull request — it then merges into ${planBranch} at finish `
+      + "with nobody asked, each finding still open entered in the plan's ledger and listed in the plan's pull request, which a "
+      + `person still confirms. That holds unless something open may not go into ${planBranch} unresolved: accept then names it, `
+      + "the spec will not merge unattended, and merging it is theirs to do on GitHub, or a revisit once a reader withdraws what "
+      + "it found (run accept; spends nothing)"
+    : `publish it as it is ${disclosed} (run accept; spends nothing)`;
   if (!redesign) {
     return `${opening}. This cycle's one rewrite has already been used, so a redesign is not one of the answers. `
       + `Three ways on: ${fixAgain}; ${accept}; ${stop}`;

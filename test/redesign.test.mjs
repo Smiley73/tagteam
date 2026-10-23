@@ -212,6 +212,21 @@ test("each form of the question lists exactly its answers: four in budget, three
   }
 });
 
+test("on a plan branch the accept answer says it merges into the plan branch unattended unless something open may not go there", () => {
+  const { rounds } = specWith();
+  const signals = churnSignal(rounds, { scope: "repair:0", round: 3 });
+  for (const form of [{}, { redesign: false }, { rewritable: false }]) {
+    const ask = redesignAsk(signals, { spent: 2, limit: 4, planBranch: "plan/demo", ...form });
+    assert.match(ask, /publish it as it is with what is still open disclosed in the pull request — it then merges into plan\/demo at finish with nobody asked, each finding still open entered in the plan's ledger and listed in the plan's pull request/);
+    assert.match(ask, /That holds unless something open may not go into plan\/demo unresolved: accept then names it, the spec will not merge unattended, and merging it is theirs to do on GitHub/);
+    assert.doesNotMatch(ask, /— it will not merge unattended and finish cannot approve past an open finding/, "the accept answer says it never merges unattended");
+    assert.deepEqual(answersIn(ask), answersIn(redesignAsk(signals, { spent: 2, limit: 4, ...form })));
+    assertPlain(ask, "on a plan branch");
+  }
+  const cap = redesignAsk(signals, { spent: 4, limit: 4, atCap: true, planBranch: "plan/demo" });
+  assert.equal(cap, redesignAsk(signals, { spent: 4, limit: 4, atCap: true }), "at the cap there is no accept to describe");
+});
+
 // --- both signals: one question, each file once ----------------------------
 
 test("redesignFiles puts the same-file signal's files first, then the loose signal's, then the person's", () => {

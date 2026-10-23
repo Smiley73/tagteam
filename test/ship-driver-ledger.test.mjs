@@ -9,7 +9,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, ship, write, outputOf, arriveAll, findings, stagePlan, pullsOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
-import { PLAN_BODY, planPullOf, stageClean, toDialog } from "./ship-plan-landing-shared.mjs";
+import { PLAN_BODY, landingRecordOf, planPullOf, stageClean, toDialog } from "./ship-plan-landing-shared.mjs";
 import { enterMerge, entriesOf, readLedger } from "../scripts/lib/ledger.mjs";
 
 // The Recurring question at collect, answered accept, and the re-check that
@@ -37,15 +37,28 @@ test("on a plan branch, an accept of major code findings on a spec nothing waits
   git(repo, "commit", "-m", "02-b stands alone");
   git(repo, "push", "origin", "main");
 
-  const { run, state, settle } = acceptAtCollect(staged);
+  const { run, state, settle, collect } = acceptAtCollect(staged);
+  assert.match(collect.json.ask, /it then merges into plan\/demo at finish with nobody asked/, "the question the person answered says an accept never merges unattended");
   assert.match(settle.json.say.join("\n"), /It merges into plan\/demo at finish with nobody asked/);
   assert.deepEqual([...state().accept.ids].sort(), ["2.adversary.1", "3.correctness.1"]);
+
+  // A verify failure on this candidate that passed when run again, recorded in
+  // its round the way the verify step records it.
+  const rounds = path.join(shipDir, "01-a", "rounds");
+  const latest = String(Math.max(...fs.readdirSync(rounds).filter((name) => /^\d+$/.test(name)).map(Number)));
+  const retried = state().candidateOid;
+  write(path.join(rounds, latest, "retries", `verify-${retried.slice(0, 12)}.json`), {
+    kind: "verify", candidate: retried, failed: "npm test",
+    first: path.join(rounds, latest, "verify.json"), second: path.join(rounds, latest, "verify-retry.json"), result: "passed"
+  });
 
   const published = run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
   assert.equal(published.json.notAddressed, undefined, "a finding the driver's Risk lines say was handed over to be said again");
   const body = pullsOf(env)[0].body;
   assert.match(body, /## Risk\n\n- 3\.correctness\.1 \(major\): sub truncates large results — a person accepted it open/);
   assert.match(body, /\n- 2\.adversary\.1 \(major\): sub loses the sign of a negative result — a person accepted it open/);
+  const retry = /^- The verify command `npm test` failed, then passed when run again on the same commit \([0-9a-f]{12}\)\.$/m.exec(body)?.[0];
+  assert.ok(retry, body);
 
   const finished = run("finish");
   assert.equal(state().state, "merged", finished.stdout);
@@ -56,6 +69,10 @@ test("on a plan branch, an accept of major code findings on a spec nothing waits
     ["01-a:2.adversary.1", "accepted", candidate, "major", "code", ["app.js"]],
     ["01-a:3.correctness.1", "accepted", candidate, "major", "code", ["app.js"]]
   ]);
+  // The retry the spec's body disclosed went into the ledger beside its entries,
+  // as the same line, and is not an entry.
+  assert.deepEqual(readLedger(shipDir).retries, [{ spec: "01-a", line: retry }]);
+  assert.ok(!readLedger(shipDir).entries.some((entry) => entry.title === retry || entry.detail === retry));
 });
 
 test("an accept the carry rule refuses records nothing, finish stops on the open finding, and a hand merge enters what was open", () => {
@@ -108,5 +125,26 @@ test("the plan's pull request lists every ledger entry and every retry disclosur
     "- 1.correctness.1 (major): twice of a string — it was open when the pull request was merged by hand.",
     retry, ""
   ].join("\n"));
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a plan pull request body that could not be sent again is a stop, is not recorded as sent, and is sent on the next run", () => {
+  const staged = stageClean();
+  const { shipDir, env } = staged;
+  toDialog(staged);
+  const sent = landingRecordOf(shipDir).bodySent;
+  assert.ok(sent);
+  const retry = "- The verify command `npm test` failed, then passed when run again on the same commit (abcdef123456).";
+  enterMerge(shipDir, "02-b", { entries: [], retries: [retry] });
+
+  const refused = ship("plan-land", staged.plan, [], { ...env, GH_STUB_EDIT_FAILS: "1" });
+  assert.notEqual(refused.status, 0, refused.stdout);
+  assert.match(refused.stderr, /could not be updated .*so nothing else was done/);
+  assert.equal(landingRecordOf(shipDir).bodySent, sent, "a body GitHub refused was recorded as sent");
+  assert.ok(!planPullOf(env).body.includes(retry));
+
+  toDialog(staged);
+  assert.notEqual(landingRecordOf(shipDir).bodySent, sent);
+  assert.ok(planPullOf(env).body.includes(retry), planPullOf(env).body);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
