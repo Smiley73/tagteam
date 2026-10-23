@@ -81,12 +81,19 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    pr-body.md (the body the orchestrator writes for the plan as
                    a whole), pr-body.sent.md (that body with the line saying
                    what the plan lands as, which the ship adds under
-                   ## Summary), ci-<tip>.json, checks/<tip>/ (the landing check's
+                   ## Summary, and the ledger under ## Risk), ci-<tip>.json, checks/<tip>/ (the landing check's
                    evidence, one directory per base) and snapshots/. Never a
                    state.json: it is not a spec                              ignored
+  ledger.json      on a plan branch, the plan's ledger: entries, one per finding
+                   a spec or fix unit still had open when it merged into the
+                   plan branch (spec, severity, scope, files, title, detail,
+                   why it was left open — accepted or merged-by-hand — and the
+                   merged commit), and retries, the failures that passed when
+                   run again, kept for the plan's body and never re-judged   ignored
   <spec-id>/
-    state.json     the state machine, the reviewed commit, the gates, and the
-                   landing check bound to the current candidate             ignored
+    state.json     the state machine, the reviewed commit, the gates, the
+                   landing check and a person's accept on the plan branch,
+                   each bound to the current candidate                       ignored
     landing.json   what the last landing check found, as it was recorded    ignored
     rounds/<n>/  round.json (the commit that owns this round), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
@@ -128,8 +135,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  nothing                                                    ignored
     pr-body.md  ci.json  usage.json                                          ignored
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
-                 under ## Risk — each failure that passed when run again on
-                 the same commit                                            ignored
+                 under ## Risk — on a plan branch each finding it would carry
+                 into the plan branch open, and each failure that passed when
+                 run again on the same commit                               ignored
 .tagteam/worktrees/                                                         ignored
 .tagteam/locks/  <plan>-<digest>.lock/, one per plan being shipped — the same
                  plan twice is refused, two plans are not; and

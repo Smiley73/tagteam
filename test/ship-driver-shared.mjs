@@ -19,18 +19,18 @@ import { root, git, ship, write, outputOf, arriveAll, findings, major } from "./
 // re-check resolves the panel's finding and whose adversary raises the next;
 // round 3 the second fix, which goes to the whole panel, and the panel raises
 // the third. The carried adversary finding from round 2 is still open at 3.
-export function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5, on = ["app.js", "app.js", "app.js"] } = {}) {
+export function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5, on = ["app.js", "app.js", "app.js"], env = {} } = {}) {
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.limits = { ...config.limits, fixRounds, ciRepairs: 1 };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  ship("start", plan);
-  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  ship("start", plan, [], env);
+  const begin = ship("begin", plan, ["--spec", "01-a"], env);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
   const app = (body) => fs.writeFileSync(path.join(worktree, "app.js"), body);
   const run = (sub, extra = []) => {
-    const result = ship(sub, plan, ["--spec", "01-a", ...extra]);
+    const result = ship(sub, plan, ["--spec", "01-a", ...extra], env);
     assert.equal(result.status, 0, `${sub}: ${result.stderr}`);
     return result;
   };

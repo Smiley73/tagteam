@@ -41,6 +41,12 @@ const LANDING = "landing";
 // for which one it was.
 const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
 
+// A person's accept of the findings this candidate's review left open, recorded
+// only when every one of them may be carried into the plan branch: `{candidateOid,
+// ids, at}`. A top-level key for the reason `landing` is one, and cleared by a
+// bind as it is. `evaluate` lifts `review-open` on it, and reads it nowhere else.
+const ACCEPT = "accept";
+
 // How much of this attempt's budget has been spent. Counters rather than a
 // derivation from disk alone, because they are the resume mechanism: a fixer
 // that was dispatched and produced no commit leaves no round directory, and a
@@ -179,6 +185,7 @@ export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) 
     [REPAIR_COUNTER]: 0,
     [UNACCOUNTED]: [],
     [LANDING]: null,
+    [ACCEPT]: null,
     [GRANT]: null,
     history: []
   };
@@ -545,6 +552,7 @@ export function bindCandidate(state, candidateOid, baseOid, changedPaths = null)
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
     [UNACCOUNTED]: outgoing !== null && outgoing !== candidateOid && !accounted ? [...carried, outgoing] : carried,
     [LANDING]: null,
+    [ACCEPT]: null,
     history: [...state.history, { candidateOid, baseOid, at: new Date().toISOString() }]
   };
 }
@@ -569,6 +577,17 @@ export function recordLanding(state, candidateOid, record) {
     throw new Error(`a landing check records the base it ran against, got: ${record?.baseOid}`);
   }
   return { ...state, [LANDING]: { ...record, candidateOid, at: record.at ?? new Date().toISOString() } };
+}
+
+/**
+ * Record a person's accept of `ids`, bound to the candidate it was given for,
+ * which is checked here as `recordLanding` checks its own.
+ */
+function recordAccept(state, candidateOid, ids) {
+  if (state.candidateOid !== candidateOid) {
+    throw new Error(`cannot record an accept for ${candidateOid}: the current candidate is ${state.candidateOid}`);
+  }
+  return { ...state, [ACCEPT]: { candidateOid, ids, at: new Date().toISOString() } };
 }
 
 // The pull request is recorded through here rather than by editing the state
@@ -652,13 +671,24 @@ export function evaluate(state, config) {
   const ci = currentGate(state, "ci");
   const report = currentGate(state, "report");
   const human = currentGate(state, "human");
+  const planBranch = onPlanBranch(state, config);
 
   // (d) A lens that produced no evidence is not a lens that found nothing. An
   // absent, unparseable, or wrongly-bound findings file reads as an empty
   // finding set, and an empty finding set reads as clean, so this is checked
   // before anything else is believed.
+  //
+  // On the plan branch, and there alone, a person's accept of this candidate
+  // that covers everything open lifts `review-open` — never past a blocking
+  // finding, and never an incomplete review.
+  const open = Array.isArray(review?.open) ? review.open : [];
+  const accept = state[ACCEPT];
+  const accepted = planBranch && review?.status === "open" && open.length > 0
+    && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
+    && open.every((finding) => accept.ids.includes(finding.id))
+    && !open.some((finding) => finding.severity === "blocking");
   if (!review) blockers.push("review-not-recorded");
-  else if (review.status !== "clean") blockers.push(`review-${review.status}`);
+  else if (review.status !== "clean" && !accepted) blockers.push(`review-${review.status}`);
 
   // (b) Verification and CI.
   if (!verify) blockers.push("verification-not-recorded");
@@ -682,7 +712,6 @@ export function evaluate(state, config) {
   // look. So a candidate merges with nobody asked only when its state confirms
   // that its pull request merges into this plan's own plan branch — see
   // `onPlanBranch` — and anything else waits.
-  const planBranch = onPlanBranch(state, config);
   if (!planBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.
@@ -759,6 +788,7 @@ const USAGE = `usage:
   gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs landing  <state.json> <candidateOid> <record.json>
+  gates.mjs accept   <state.json> <candidateOid> <id,id,...>
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
   gates.mjs roles    <state.json> <config.json>
@@ -787,6 +817,10 @@ const USAGE = `usage:
   approval is weighed against it and \`evaluate\` never reads it — and only a
   \`passed\` record lets \`merge.mjs\` accept a base other than the reviewed one.
   Binding a new candidate clears it.
+
+  \`accept\` records a person's accept of the open findings named, bound to the
+  candidate. On the plan branch \`evaluate\` lifts \`review-open\` when it covers
+  every open finding and none is blocking. Binding a new candidate clears it.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -1016,6 +1050,8 @@ async function main() {
     next = recordGate(readJson(values[0]), values[1], values[2], readJson(values[3]));
   } else if (action === "landing") {
     next = recordLanding(readJson(values[0]), values[1], readJson(values[2]));
+  } else if (action === "accept") {
+    next = recordAccept(readJson(values[0]), values[1], (values[2] ?? "").split(",").filter(Boolean));
   } else if (action === "pr") {
     next = recordPr(readJson(values[0]), { number: values[1], url: values[2], headOid: values[3] });
   } else {
