@@ -182,20 +182,22 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 10, validated by
+`.tagteam/config.json`, version 11, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
 tell the person to run `/tagteam:configure` and stop. No key but one has a
 fallback in a script, so an older configuration is incomplete. The one is
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the
-version-10 files written before it existed stay current. `autoMerge` is the one
-key the schema accepts without requiring and without a fallback, because nothing
-reads it: it stays declared so the version-10 files that carry it stay valid and
-current. Configure carries a version-9 file forward: every value it holds but
-`autoMerge` is offered back, and version 10's two keys, `planBranch` and
-`versionFiles`, are asked about — off and empty change nothing about how a plan
-ships. Anything older is a different shape and is replaced.
+version-10 files written before it existed stayed current. `autoMerge` is the
+one key the schema accepts without requiring and without a fallback, because
+nothing reads it: it stays declared so a file that carries it is not refused for
+it. Configure carries a version-9 or version-10 file forward: every value it
+holds but `autoMerge` is offered back, and the keys it lacks are asked about —
+version 10's `planBranch` and `versionFiles`, and version 11's `carry`,
+`autoRedesign`, `limits.carried` and `limits.followUps`, each offered at its
+safe value: off, empty, off, off, 5 and 2. At those values nothing about how a
+plan ships changes. Anything older is a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -213,10 +215,12 @@ ships. Anything older is a different shape and is replaced.
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
-| `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when a person answers the Recurring question at the cap with `redesign`), `ciRepairs` (repairs of a red pull request). Each at least 1 |
+| `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when the Recurring question at the cap is answered with `redesign`), `ciRepairs` (repairs of a red pull request), each at least 1; `carried` (the most findings a plan may carry before the ship stops and asks, at least 1 — turning carrying off is `carry`'s job) and `followUps` (how many fix units the whole-plan check may build from the carried findings, at least 0; with 0 every one still real goes into the plan's pull request body). Follow-up units are counted apart from the whole-plan fix units `ciRepairs` counts |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
 | `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms; its specs merge into `plan/<slug>` without waiting once every gate is satisfied. False: every spec merges straight into `base`, and each waits for a person's approval. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
+| `carry` | True: on a plan branch, a spec whose fix rounds ran out with only findings that may be carried — never a `blocking` one — merges into `plan/<slug>`, and each finding it carries is recorded in the plan's ledger and disclosed under that spec's `## Risk` and in the plan's pull request, which a person still confirms. Never on a spec that merges straight into `base`. False: such a spec stops for a person |
+| `autoRedesign` | True: the first Recurring question in a review cycle is answered with `redesign` without asking, spending a fix round — at the cap, the one round past `fixRounds`. Every later one is asked, and `accept` is always a person's answer. Applies on every route. False: every one is asked |
 | `versionFiles[]` | The lines that carry this repository's version, each `{file, pointer}` (a JSON Pointer, such as `/version` or `/plugins/0/version`) or `{file, pattern}` (a line pattern with one capture group). On a plan branch, each gets the plan's one increase — patch, or minor when `plan.md` says `Version increase: minor` — made by the ship after the whole-plan check, from the base's version then; a spec that changes one stops. Each must name exactly one `MAJOR.MINOR.PATCH` value on the base, and they must agree. Empty: no increase. A one-spec plan is outside this and keeps the repository's own habit, so it can collide |
 
 `examples/config.json` is a complete file.

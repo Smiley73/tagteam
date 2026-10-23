@@ -22,7 +22,7 @@ import { root, git, ship, write, outputOf, arriveAll, findings, major } from "./
 export function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5, on = ["app.js", "app.js", "app.js"] } = {}) {
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  config.limits = { fixRounds, ciRepairs: 1 };
+  config.limits = { ...config.limits, fixRounds, ciRepairs: 1 };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);

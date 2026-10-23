@@ -85,11 +85,11 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 // property at that schema's root — never a whole file, which would let any other
 // key there go optional unnoticed:
 //
-// - `ciStartWaitSec` in the configuration, which may be missing so that the
-//   version-10 files written before it existed stay current; `scripts/ship.mjs`
-//   reads a missing one as 120.
+// - `ciStartWaitSec` in the configuration, which was added to version 10
+//   without a bump so the version-10 files written before it existed stayed
+//   current; `scripts/ship.mjs` reads a missing one as 120.
 // - `autoMerge` in the configuration, which nothing reads any more and which
-//   stays declared so the version-10 files that carry it stay valid and current.
+//   stays declared so a file that carries it is not refused for it.
 // - `user_visible` in a spec's front matter, retired and ignored, and declared
 //   only so that specs written while it was required still validate.
 //

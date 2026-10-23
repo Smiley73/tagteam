@@ -300,6 +300,15 @@ test("the configure command asks about both of the settings a person can only ge
   for (const job of jobs) assert.ok(effortItem.includes(`\`${job}\``), `configure.md's effort question never names ${job}`);
 });
 
+// Version 11's settings are required so that nobody ships before seeing them,
+// which only holds if configure puts each one to the person by name.
+test("the configure command asks about every setting version 11 added", () => {
+  const items = thenAskItems(read("commands", "configure.md"));
+  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps"]) {
+    assert.ok(items.some((item) => item.includes(`\`${key}\``)), `no numbered question in configure.md asks about ${key}`);
+  }
+});
+
 // `autoMerge` does nothing, so no question may ask about it, and a configuration
 // that still carries it has to hear that from configure itself: the validator's
 // note never shows there, because configure validates the file it has just

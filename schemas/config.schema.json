@@ -1,15 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 10",
+  "title": "tagteam project configuration, version 11",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "worktree", "reviewExclude",
-    "maxConcurrentCodex", "limits", "escalation", "plan", "planBranch", "versionFiles"
+    "maxConcurrentCodex", "limits", "escalation", "plan", "planBranch", "versionFiles",
+    "carry", "autoRedesign"
   ],
   "properties": {
-    "version": { "const": 10, "type": "integer" },
+    "version": { "const": 11, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -89,7 +90,7 @@
     },
     "autoMerge": {
       "type": "boolean",
-      "description": "Accepted and has no effect: nothing reads it, in either value. A spec that merges straight into the base always waits for a person, and `planBranch` replaced this key as the setting that lets specs merge without waiting. It stays declared, and optional, so that the version-10 files that carry it stay valid and current."
+      "description": "Accepted and has no effect: nothing reads it, in either value. A spec that merges straight into the base always waits for a person, and `planBranch` replaced this key as the setting that lets specs merge without waiting. It stays declared, and optional, so that a file carrying it is not refused for a setting that does nothing."
     },
     "worktree": {
       "type": "object",
@@ -123,7 +124,7 @@
     "limits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["fixRounds", "ciRepairs"],
+      "required": ["fixRounds", "ciRepairs", "carried", "followUps"],
       "properties": {
         "fixRounds": {
           "type": "integer",
@@ -134,6 +135,16 @@
           "type": "integer",
           "minimum": 1,
           "description": "How many times a red pull request may be repaired. Each repair produces a new candidate that runs the whole review cycle again with a fresh fix budget."
+        },
+        "carried": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The most findings a plan may carry before the ship stops and asks a person. At least 1: turning carrying off is `carry`'s job, not a 0 here."
+        },
+        "followUps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many fix units the whole-plan check may build from the plan's carried findings. Zero builds none, and every carried finding still real goes into the plan pull request's body instead. These units are separate from the whole-plan fix units `ciRepairs` counts."
         }
       }
     },
@@ -177,6 +188,14 @@
     "planBranch": {
       "type": "boolean",
       "description": "When true, a plan of two or more specs collects its spec pull requests on a branch of its own, plan/<slug>, each merging into it without waiting once its checks are clean, and nothing from it reaches base until a person merges the plan's own pull request; false ships every spec straight to base, where each waits for a person's approval."
+    },
+    "carry": {
+      "type": "boolean",
+      "description": "When true, a spec on a plan branch whose fix rounds ran out with only findings eligible to carry merges into the plan branch, and those findings are recorded in the plan's ledger and disclosed under that spec's `## Risk` and in the plan's pull request. A blocking finding is never carried, and a spec shipped straight to base never carries. False stops the spec for a person, as before."
+    },
+    "autoRedesign": {
+      "type": "boolean",
+      "description": "When true, the first time in a review cycle that the same file keeps failing, the ship answers `redesign` without asking, which spends one more fix round. Any later time it asks a person, and `accept` is always a person's answer. False always asks."
     },
     "versionFiles": {
       "type": "array",

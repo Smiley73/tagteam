@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { approve } from "../scripts/goal-gate.mjs";
 import { inventory } from "../scripts/status.mjs";
+import { CONFIG_VERSION } from "../scripts/validate-json.mjs";
 
 const LIMITS = { fixRounds: 3, ciRepairs: 2 };
 
@@ -339,7 +340,7 @@ test("an unreadable specs path is an absence, not a throw", () => {
 
 test("status never throws — not on a missing .tagteam, not on a truncated state file", () => {
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-status-bare-"));
-  assert.deepEqual(inventory(empty), { plans: [], ships: [] });
+  assert.deepEqual(inventory(empty), { configuration: null, plans: [], ships: [] });
 
   const repo = repository();
   ship(repo, "01-a", { state: "reviewing", fixRoundsUsed: 0, ciRepairsUsed: 0 });
@@ -347,9 +348,23 @@ test("status never throws — not on a missing .tagteam, not on a truncated stat
   fs.mkdirSync(path.join(repo, ".tagteam", "ships", "s", "02-b"), { recursive: true });
   fs.writeFileSync(path.join(repo, ".tagteam", "ships", "s", "02-b", "state.json"), '{"spec": "02-b", "state": "revi');
   const result = inventory(repo);
-  assert.deepEqual(Object.keys(result), ["plans", "ships"]);
+  assert.deepEqual(Object.keys(result), ["configuration", "plans", "ships"]);
   assert.equal(result.ships[0].budgets.length, 1);
   assert.equal(budgetFor(result, "01-a").fixRoundsRemaining, 3);
+});
+
+test("an out-of-date configuration is reported stale, and the plans and ships still render", () => {
+  const repo = repository();
+  write(path.join(repo, ".tagteam", "config.json"), { version: 10, base: "main", limits: LIMITS });
+  plan(repo, "p");
+  ship(repo, "01-a", { state: "reviewing", fixRoundsUsed: 1, ciRepairsUsed: 0 });
+  const stale = inventory(repo);
+  assert.deepEqual(stale.configuration, { stale: true, version: 10 });
+  assert.equal(stale.plans[0].slug, "p");
+  assert.equal(budgetFor(stale, "01-a").fixRoundsRemaining, 2);
+
+  write(path.join(repo, ".tagteam", "config.json"), { version: CONFIG_VERSION, base: "main", limits: LIMITS });
+  assert.deepEqual(inventory(repo).configuration, { stale: false, version: CONFIG_VERSION });
 });
 
 // A counter that is not a whole number of rounds is not zero spent. `gates.mjs`

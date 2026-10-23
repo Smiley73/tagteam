@@ -46,7 +46,7 @@ export function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-// A repository with a bare "origin", a version-10 configuration, and an approved
+// A repository with a bare "origin", the example configuration, and an approved
 // plan holding one spec that wants two lenses.
 export function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ship-"));
@@ -67,7 +67,7 @@ export function stage() {
   config.ciWaitSec = 0;
   config.worktree.setup = [];
   config.verify = [{ command: "node -e \"process.exit(0)\"", when: { globs: [], keywords: [] }, timeoutSec: 60 }];
-  config.limits = { fixRounds: 2, ciRepairs: 1 };
+  config.limits = { ...config.limits, fixRounds: 2, ciRepairs: 1 };
   fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), JSON.stringify(config, null, 2));
   fs.writeFileSync(path.join(repo, ".gitignore"), ".tagteam/ships/\n.tagteam/worktrees/\n.tagteam/locks/\n");
   const plan = path.join(repo, ".tagteam", "plans", "demo");

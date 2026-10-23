@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 10. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 11. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -187,6 +187,15 @@ names, internal ids. See *Asking* in the skill.
 
     This is a question, not a default, because it is the only setting that
     decides what the tool spends and how often it hands work back.
+
+    Ask `autoRedesign` in the same call, priced with them. When the same file
+    keeps drawing new findings round after round, the run stops to ask whether
+    to rewrite that area from scratch, and a rewrite spends a fix round — at the
+    cap, the one round past `fixRounds`. On, the first time that question comes
+    up in a review cycle the run answers it with a rewrite itself and carries
+    on; any later time in that cycle it asks as before, and publishing with
+    what is still open is always a person's answer. It applies whether or not a plan has a branch of its own.
+    Offer off first: the run always asks.
 11. `planBranch` — whether a plan of two or more specs ships as one: its specs
     collect on a branch of its own, each still its own reviewed pull request
     into that branch, merged there without asking a person once it is clean;
@@ -208,6 +217,22 @@ names, internal ids. See *Asking* in the skill.
     one spec keeps this repository's own habit for its version and can collide.
     With the setting off, nothing is asked: write the list the file already
     has, or an empty one.
+
+    In the same call, ask about carrying, which only a plan branch uses. With
+    `carry` on, a spec whose fix rounds ran out with nothing open but findings
+    that may be carried — never a `blocking` one — merges into the plan's
+    branch instead of stopping, and every finding it carries is listed under
+    that spec's `## Risk` and in the plan's own pull request, which a person
+    still confirms; a spec going straight to the base never carries. Ask with
+    it how many findings a plan may carry before the ship stops and asks
+    (`limits.carried`, at least 1), and how many fix units the check of the
+    whole plan may build from them before it lands (`limits.followUps`, 0 to
+    put every one still real in the plan's pull request instead). Offer the
+    safe answers first: `carry` off, 5 and 2.
+
+    With `planBranch` off, none of the three is asked: write the values the file
+    already holds, or `carry` false, 5 and 2, and say in one sentence that
+    carrying settings exist and take effect only with `planBranch` on.
 
 Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
@@ -323,15 +348,20 @@ this command always omits it.
 
 Always write `ciStartWaitSec`: the answer when question 7 asked it, 120 when it
 did not. It is the one key that may be missing — the ship reads a missing one as
-120, so the version-10 files written before it existed stay current — but a file
-this command writes is complete. Under `--reconfigure`, and when a version-9
-file is carried forward, offer back the value the file holds, or 120 when it has
-none.
+120, so the version-10 files written before it existed stayed current — but a file
+this command writes is complete. Under `--reconfigure`, and when a version-9 or
+version-10 file is carried forward, offer back the value the file holds, or 120
+when it has none.
 
 Write `planBranch` and `versionFiles` as question 11 answered them, explicitly:
-there is no fallback for either. Under `--reconfigure` of a version-10 file both
-are offered back with the values the file already has, so a setting or a list
-someone wrote in by hand is not reset.
+there is no fallback for either. Under `--reconfigure` of a version-10 or
+version-11 file both are offered back with the values the file already has, so a
+setting or a list someone wrote in by hand is not reset.
+
+Write `carry`, `autoRedesign`, `limits.carried` and `limits.followUps`
+explicitly too, as questions 10 and 11 answered them or at the values the file
+holds when they were not asked. Under `--reconfigure` of a version-11 file all
+four are offered back with the values the file already has.
 
 A version-9 configuration is carried forward, not replaced. Run the interview as
 `--reconfigure` does, with every value the file holds offered back as the
@@ -339,9 +369,20 @@ default, and say what version 10 adds: `planBranch`, whether a plan of two or
 more specs collects its specs' pull requests on a branch of its own before
 anything reaches the base, offered off; and `versionFiles`, the lines that carry
 this repository's version, asked about only when that is on. Off and empty,
-nothing about how a plan ships changes. Answering every question as before, and
-leaving the setting off, writes the old file with those two keys and
+nothing about how a plan ships changes. Say what version 11 adds as well, as
+below. Answering every question as before, and leaving the setting off, writes
+the old file with those two keys, version 11's four at their safe values and
 `ciStartWaitSec` added, `autoMerge` left out, and nothing else different.
+
+A version-10 configuration is carried forward the same way: every value the
+file holds is offered back as the default, `autoMerge` is still never written,
+and say what version 11 adds — `autoRedesign`, whether the run answers its first
+"rewrite this area?" question in a review cycle itself, offered off; and, for a
+plan branch, `carry`, whether a spec out of fix rounds with only carriable
+findings merges into the plan's branch with them disclosed, offered off, with
+`limits.carried` at 5 and `limits.followUps` at 2. Answering every question as
+before writes the old file with those four keys at their safe values, and
+nothing else different.
 
 A configuration older than version 9 is not upgraded — each of those versions is
 a different shape, not an extension. Say that the old file is being replaced.
@@ -357,11 +398,11 @@ validator prints a `note:` saying so.
 
 That note never appears during this command: the validator runs on the file
 just written, which leaves the key out. So read the configuration being
-reconfigured or carried forward from version 9 before the interview, and when it
-has `autoMerge`, say all of it yourself — what the key used to do, that it no
-longer does anything whatever its value, that `planBranch` is how specs merge
-without waiting, and that the file this writes leaves it out. Do not ask about
-it, and do not offer its value back. To an owner who had it `false`: nothing
+reconfigured or carried forward from version 9 or 10 before the interview, and
+when it has `autoMerge`, say all of it yourself — what the key used to do, that
+it no longer does anything whatever its value, that `planBranch` is how specs
+merge without waiting, and that the file this writes leaves it out. Do not ask
+about it, and do not offer its value back. To an owner who had it `false`: nothing
 reaches the base without a person either way, though with `planBranch` on, specs
 now merge into the plan's branch without asking. To one who had it `true` with
 `planBranch` off: every spec will now wait for a person, and turning
