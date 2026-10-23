@@ -205,7 +205,7 @@ test("at the cap, new findings that touch only the pull request or no file publi
   const { repo, plan, shipDir } = staged;
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  config.limits = { fixRounds: 4, ciRepairs: 1 };
+  config.limits = { ...config.limits, fixRounds: 4, ciRepairs: 1 };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);

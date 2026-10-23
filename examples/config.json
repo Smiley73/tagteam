@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 11,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
@@ -59,10 +59,14 @@
   "maxConcurrentCodex": 3,
   "limits": {
     "fixRounds": 1,
-    "ciRepairs": 1
+    "ciRepairs": 1,
+    "carried": 5,
+    "followUps": 2
   },
   "escalation": null,
   "plan": null,
   "planBranch": false,
-  "versionFiles": []
+  "versionFiles": [],
+  "carry": false,
+  "autoRedesign": false
 }
