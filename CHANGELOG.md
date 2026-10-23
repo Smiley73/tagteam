@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1
+
+- Refuse a re-check on a candidate that the ship sends to the whole panel, such as a second fix round. It used to run, and so skipped the panel the ship had just said would read it.
+
 ## 0.12.0
 
 - Add an `economy` lens, shipped with the plugin and in the example roster: a reviewer that asks what a change could do without. It files deletions — a comment that restates or defends the code, a helper cut out for one caller, a type with one producer and one consumer, an export only a test reaches, a test that fails for the same reason as another, and what the change made unnecessary and left standing — and it is the one lens whose findings make a diff smaller. It files `major` when the removable part is a fifth or more of the change, or the diff is more than half again the size its spec expected.

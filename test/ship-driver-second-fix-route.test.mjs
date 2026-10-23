@@ -1,0 +1,54 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { stage, ship, write, outputOf, arriveAll, findings, major } from "./ship-stage.mjs";
+
+test("a second fix round goes to the whole panel, and the re-check refuses it until a panel has read it", () => {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "x", unfinished: [] });
+  arriveAll(begin);
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const first = state().candidateOid;
+  for (const d of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(d.prompt)[1];
+    write(outputOf(d), findings(lens, first, lens === "correctness" ? [major("app.js")] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
+  ship("collect", plan, ["--spec", "01-a"]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "m" }], notes: "", status: "complete", summary: "f", unfinished: [] });
+  arriveAll(fix);
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  const v2 = ship("verify", plan, ["--spec", "01-a"]);
+  assert.match(v2.json.next, /recheck/);
+  const rc = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  write(outputOf(rc.json.dispatch[0]), findings("adversary", second, [major("app.js")]));
+  write(outputOf(rc.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [{ id: "1.correctness.1", resolved: true, evidence: "ok" }] });
+  arriveAll(rc);
+  const st = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(st.json.review, "open");
+  const fix2 = ship("fix", plan, ["--spec", "01-a"]);
+  fs.appendFileSync(path.join(worktree, "app.js"), "// again\n");
+  write(outputOf(fix2.json.dispatch[0]), { outcomes: fix2.json.dispatch[0].prompt.match(/\d+\.adversary\.\d+/g)?.map((id) => ({ id, outcome: "fixed", note: "m" })) ?? [], notes: "", status: "complete", summary: "f", unfinished: [] });
+  arriveAll(fix2);
+  const sn = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(sn.json.round, 3);
+  const v3 = ship("verify", plan, ["--spec", "01-a"]);
+  assert.match(v3.json.say.at(-1), /whole panel/);
+  assert.match(v3.json.next, /ship\.mjs" panel /);
+  const rc3 = ship("recheck", plan, ["--spec", "01-a"]);
+  assert.notEqual(rc3.status, 0, "the re-check must not stand in for the panel");
+  assert.match(rc3.stderr + (rc3.json?.say ?? ""), /whole panel reads it/);
+  assert.equal(ship("panel", plan, ["--spec", "01-a"]).status, 0);
+});
