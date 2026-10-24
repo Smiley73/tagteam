@@ -44,6 +44,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   assert.equal(implementer.model, "sonnet", "the implementer runs the worker model");
   assertEffort(implementer, "high", "the implementer passes effort.implementer");
   assert.match(implementer.prompt, /^Job: implementer/);
+  assert.match(implementer.prompt, /^- node -e "process\.exit\(0\)" \(timeout 60s; runs when always\)$/m, "the implementer is told what verify will run");
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
 

@@ -300,6 +300,20 @@ const record = (ctx, id, gate, oid, file) => node("gates.mjs", ["record", stateP
 const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effort: job.effort });
 const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ? " (raised: escalation is in force)" : ""}`;
 
+// What the repository itself runs to call a candidate good, handed to the agents
+// that write code so they can run it before reporting rather than finding out at
+// the verify gate. The `when` is shown as configured: nothing here knows which
+// files the agent will end up touching, so the agent decides which apply.
+function verifyLine(ctx) {
+  const commands = ctx.config.verify ?? [];
+  if (commands.length === 0) return "Verify commands: none configured";
+  const when = ({ globs = [], keywords = [] }) => globs.length === 0 && keywords.length === 0
+    ? "always"
+    : [...globs.map((glob) => `a changed path matches ${glob}`), ...keywords.map((word) => `an added line contains "${word}"`)].join(", or ");
+  return "Verify commands (run the ones that apply to what you changed before you report):\n"
+    + commands.map((entry) => `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`).join("\n");
+}
+
 function implementerDispatch(ctx, spec, job) {
   return {
     ...agent("implementer", job),
@@ -309,6 +323,7 @@ function implementerDispatch(ctx, spec, job) {
       `Spec: ${spec.path}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      verifyLine(ctx),
       `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
     ].join("\n")
   };
@@ -331,6 +346,7 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
       `Spec: ${spec.path}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      verifyLine(ctx),
       `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
     ].join("\n")
   };
@@ -878,6 +894,7 @@ function fixerDispatch(ctx, spec, recordPath, job) {
       `Spec this change implements (to read, not to work from): ${spec.path}`,
       `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      verifyLine(ctx),
       `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")}`
     ].join("\n")
   };
@@ -920,6 +937,7 @@ function repairDispatch(ctx, spec, state, job) {
       `This is a CI repair: no findings, a failing check. Its record is ${path.join(specDir(ctx, spec.id), "ci.json")}.`,
       `Pull request #${state.pr?.number ?? "?"} on branch ${state.branch}: read the failed check's log with gh (for example \`gh pr checks ${state.pr?.number ?? ""}\` and \`gh run view --log-failed\`) before changing anything.`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      verifyLine(ctx),
       `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
     ].join("\n")
   };

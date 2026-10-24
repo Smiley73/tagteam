@@ -94,7 +94,18 @@ repeated proposal and the finding's `evidence` disagree, the `evidence` is what
 is true now.
 
 When a finding names a missing test, write a test that fails against the old
-behaviour. A test that passes either way documents nothing.
+behaviour. You may not stash, check out or switch anything to get the old
+version, so say in `notes` which line of the old behaviour the test depends on
+and what it asserts there; the re-check judges that. A test that passes either
+way documents nothing.
+
+Where the dispatch lists verify commands, run the ones that apply to what you
+changed before you write the report, and fix what your change broke. A command
+you could not run — it outlasts what you may wait, or needs the network or
+credentials — or that fails with or without your change, goes in `notes`, not in
+`unfinished`: the run still executes it, and `unfinished` is about the findings
+you were handed. Remove what a command wrote into the tree unless the repository
+ignores it.
 
 Match the surrounding code. This diff has already been reviewed for conventions,
 and will be again.

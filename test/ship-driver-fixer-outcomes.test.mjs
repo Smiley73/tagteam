@@ -141,6 +141,7 @@ test("on a plan branch, a fixer that answers goal-conflict and changes nothing s
     { id: "1.correctness.2", outcome: "wont-fix", note: "follows from the first" }
   ], { change: false });
   const [fixer] = fix.json.dispatch;
+  assert.match(fixer.prompt, /^- node -e "process\.exit\(0\)" \(timeout 60s; runs when always\)$/m, "the fixer is told what verify will run");
   assert.match(fixer.prompt, new RegExp(`^Spec this change implements \\(to read, not to work from\\): ${path.join(plan, "specs", "01-a.md")}$`, "m"));
   assert.match(fixer.prompt, new RegExp(`^The plan's goal \\(to read, not to work from\\): ${path.join(plan, "goal.md")}$`, "m"));
 

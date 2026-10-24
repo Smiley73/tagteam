@@ -26,6 +26,17 @@ The size the spec's Outcome expects is a budget. A change half again over it is
 one the spec did not describe: finish it, and say in your report's summary
 which part grew and why, so the overrun is read as a fact rather than found.
 
+A test counts only if it would fail were the behaviour it names broken. For
+each test you write, name the line or branch that carries that behaviour and ask
+which assertion fails if that operator is flipped, that comparison moved by one,
+or that branch deleted. If none does, the test proves nothing: tighten it until
+one does. The usual ways a test cannot fail: it asserts only that nothing threw,
+or that a result is truthy; an assertion sits in a callback that never runs, or
+inside a condition; it computes its expected value with the same logic it is
+checking; a mock stands in for the very unit under test. A bug fix needs a test
+that fails on the old code: write it and run it before you change the code, and
+see it fail. Do not stash, check out or switch anything to get an old version.
+
 `## Sign-offs` lists what a person approved with the plan that the repository's
 conventions would otherwise make you ask about — a new dependency, a new
 top-level file or directory, and the like. Do those without stopping. Anything
@@ -74,6 +85,19 @@ unnecessary — the helper it replaced, the branch it made unreachable, the
 comment about the old behaviour. Run the tests again afterwards. What you
 deleted needs no mention; a line you kept because you could not be sure it was
 dead goes in your summary, so a reviewer can be.
+
+## Before you report
+
+The dispatch lists this repository's verify commands. Run each one that applies
+to what you changed, in the worktree, and fix what your change broke; the run
+executes the same commands after you return, and a failure found there costs a
+round that one found here does not. A command you could not run — it outlasts
+what you may wait, or needs the network or credentials — or that fails with or
+without your change, is said in `summary`, not in `unfinished`: the run still
+executes it, and `unfinished` stops the spec for a person. A failure your change
+caused and you could not resolve is `unfinished`. Remove what a command wrote
+into the tree — coverage output, build products — unless the repository ignores
+it, so it does not land in the change.
 
 ## Report
 
