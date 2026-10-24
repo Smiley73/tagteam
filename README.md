@@ -77,6 +77,12 @@ Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**. The interview
 loads repository material that shipping does not need, and context is the thing
 that runs out.
 
+A run shows a progress board: under one line of how far the plan has got, a
+table of the current step's agents as `running` or `done`. It costs a little
+more output per step. `"progressBoard": false` in `.tagteam/config.json` turns
+it off, and a run then prints what it printed before the board existed; a
+configuration without the key has the board on.
+
 ### Planning
 
 ```mermaid

@@ -227,10 +227,11 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. No key but one has a
-fallback in a script, so an older configuration is incomplete. The one is
-`ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the
-version-10 files written before it existed stayed current. `autoMerge` is the
+tell the person to run `/tagteam:configure` and stop. Only two keys have a
+fallback in a script, so an older configuration is incomplete. They are
+`ciStartWaitSec` and `progressBoard`: either may be missing, a missing
+`ciStartWaitSec` reads as 120 and a missing `progressBoard` as on, so the files
+written before they existed stayed current. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
 it. Configure carries a version-9 or version-10 file forward: every value it
@@ -252,6 +253,7 @@ plan ships changes. Anything older is a different shape and is replaced.
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
 | `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |
+| `progressBoard` | On by default, and a missing key reads as on. On, ship and plan runs show a table of the current step's agents as `running` or `done` under one line of plan progress, at a little more output per step. Off, nothing extra is printed |
 | `autoMerge` | Accepted and ignored, in either value: nothing reads it, and the validator prints a `note:` saying so. `planBranch` replaced it as the setting that lets specs merge without waiting; a spec that merges straight into `base` always waits for a person. Configure no longer writes it |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
@@ -902,7 +904,7 @@ fixer. None of them is a reason to answer one way rather than the other.
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts. A
 key in their own configuration is one of these: `ciWaitSec`, `ciStartWaitSec`,
-`limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
+`progressBoard`, `limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
 edit in `.tagteam/config.json`. A lens name is one too. So say what the setting
 or the lens does *and* name it wherever they might go looking for it afterwards.
 

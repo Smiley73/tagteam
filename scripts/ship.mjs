@@ -3866,7 +3866,7 @@ async function settle(options) {
 }
 
 // How long checks get to appear when `ciStartWaitSec` is missing from the
-// configuration — the one key that may be, added to version 10 without a bump so
+// configuration — one of two keys that may be, added to version 10 without a bump so
 // that the version-10 files written before it existed stayed current. Nothing
 // else in the plugin reads the key.
 const CI_START_WAIT_SEC = 120;

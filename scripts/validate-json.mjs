@@ -125,7 +125,7 @@ export function validateJson(schema, value) {
 // `planBranch`, whether a plan of two or more specs collects its specs on a
 // branch of its own, and `versionFiles`, the lines that carry the repository's
 // version — both required, and both written explicitly when unused (`false`,
-// `[]`), because no key in this project but one has a fallback in a script: the
+// `[]`), because no key in this project but two has a fallback in a script: the
 // file is the whole configuration, so a missing key is a hard error rather than a
 // silently-assumed value — which is also why `escalation` and `plan` are written
 // as an explicit `null` when unused rather than omitted. Version 11 adds `carry`,
@@ -136,12 +136,12 @@ export function validateJson(schema, value) {
 // every value forward and adds the keys that version lacks, each new one at its
 // safe value unless the person answers otherwise.
 //
-// The one exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120
-// when it is missing. It was added to version 10 as an optional key so that the
-// version-10 files already written stayed current: requiring it would have meant
-// a version bump, and every existing file reported stale for one number. The rule
-// is unchanged for every other key, and `/tagteam:configure` still writes this
-// one.
+// The exceptions are `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120
+// when it is missing, and `progressBoard`, which a missing key reads as on. Each
+// was added as an optional key so that the version-10 and version-11 files
+// already written stayed current: requiring it would have meant a version bump,
+// and every existing file reported stale for one number. The rule is unchanged
+// for every other key, and `/tagteam:configure` still writes both.
 //
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its
