@@ -29,6 +29,12 @@
 // refused by name together with the labels still out, so the main agent can
 // correct itself in the same turn instead of a set blocking forever.
 //
+// **The board is decided by the sender.** Whether a set shows a progress board,
+// and its header line, are chosen when the set goes out and kept with it. An
+// arrival only combines that header with the recorded names and arrivals, so it
+// still reads this set's record and nothing else, and a record with no board gets
+// no board.
+//
 // A caller chooses the directory. It must not be a `rounds/<n>/` directory:
 // re-entering a round empties it, and the round store refuses rewrites there,
 // while a set's record is rewritten on every arrival.
@@ -136,6 +142,19 @@ function split(record) {
   return { arrived, missing };
 }
 
+/**
+ * The progress board of anything shaped like a record: the stored header, a blank
+ * line, and a table with one row per agent, `running` or `done` by its arrivals.
+ * Returns nothing when there is no board data; a missing `arrivals` is nobody in.
+ */
+export function renderBoard(record) {
+  if (!record?.board) return undefined;
+  const { arrived } = split({ agents: record.agents, arrivals: record.arrivals ?? [] });
+  const done = new Set(arrived.map((agent) => agent.label));
+  const rows = record.agents.map((agent) => `| ${agent.name.replaceAll("|", "\\|")} | ${done.has(agent.label) ? "done" : "running"} |`);
+  return [record.board.header, "", "| Agent | State |", "|---|---|", ...rows].join("\n");
+}
+
 // "a", "a and b", "a, b and c".
 function listOf(words) {
   if (words.length <= 1) return words.join("");
@@ -219,10 +238,11 @@ function requestOf(entry, id) {
  * `{ label, name?, output, request? }`, where `name` is how the person is told
  * about it and defaults to the label, and `request` is the agent, model and
  * effort it was sent at, stored as given and read by nothing in this module.
+ * `board`, when given, is `{ header }`, the one line the progress board opens with.
  * Set ids are written once: a re-send or a later attempt is a new set, so a late
  * notice from an old set can never land in a new one that reuses its labels.
  */
-export async function recordSet({ dir, id, agents, next, closing, repo, env = process.env, home } = {}) {
+export async function recordSet({ dir, id, agents, next, closing, board, repo, env = process.env, home } = {}) {
   recordPath(dir, id);
   if (!Array.isArray(agents) || agents.length === 0) refuse(`set ${id} names no agents; a set is what was sent out, so it has at least one`);
   const entries = agents.map((entry, index) => {
@@ -242,6 +262,9 @@ export async function recordSet({ dir, id, agents, next, closing, repo, env = pr
   if (!nonEmpty(next)) refuse(`set ${id} needs the command to run once it is in`);
   if (!nonEmpty(closing)) refuse(`set ${id} needs the phrase that closes its completion line`);
   if (!nonEmpty(repo)) refuse(`set ${id} needs the repository, to identify the session sending it out`);
+  if (board !== undefined && !(board && typeof board === "object" && nonEmpty(board.header) && !/[\r\n]/.test(board.header))) {
+    refuse(`set ${id} has a board that is not {header} with a non-empty one-line header`);
+  }
   const session = identifySession(repo, { env, home });
   return withSetLock(dir, id, (file) => {
     if (fs.existsSync(file)) {
@@ -254,6 +277,7 @@ export async function recordSet({ dir, id, agents, next, closing, repo, env = pr
       session,
       next,
       closing,
+      ...(board ? { board: { header: board.header } } : {}),
       agents: entries,
       arrivals: [],
       closed: null
@@ -268,7 +292,7 @@ export async function recordSet({ dir, id, agents, next, closing, repo, env = pr
 /**
  * Record one or more arrivals. Every label is checked before any is recorded,
  * so a refusal changes nothing. Returns `{ complete, say }`, with `next` once
- * the set is complete.
+ * the set is complete, and `board` when the set was recorded with one.
  */
 export async function arrive({ dir, id, labels } = {}) {
   if (!Array.isArray(labels) || labels.length === 0) refuse(`name at least one label arriving into set ${id}`, 2);
@@ -301,15 +325,16 @@ export async function arrive({ dir, id, labels } = {}) {
 
     const total = record.agents.length;
     const count = record.arrivals.length;
+    const board = renderBoard(record);
     if (count < total) {
       const byLabel = new Map(record.agents.map((agent) => [agent.label, agent]));
       const names = namesOf(labels.map((label) => byLabel.get(label)));
-      return { complete: false, say: `${sentence(names)} ${labels.length === 1 ? "is" : "are"} in (${count} of ${total})` };
+      return { complete: false, say: `${sentence(names)} ${labels.length === 1 ? "is" : "are"} in (${count} of ${total})`, ...(board ? { board } : {}) };
     }
     const say = total === 1
       ? `${sentence(record.agents[0].name)} is in. ${record.closing}`
       : `All ${total} are in. ${record.closing}`;
-    return { complete: true, say, next: record.next };
+    return { complete: true, say, next: record.next, ...(board ? { board } : {}) };
   });
 }
 
@@ -528,8 +553,8 @@ function readAgents(file) {
 
 const COMMANDS = {
   async arrive({ dir, set }, labels) {
-    const { say, next } = await arrive({ dir, id: set, labels });
-    return next ? { say, next } : { say };
+    const { say, next, board } = await arrive({ dir, id: set, labels });
+    return { say, ...(next ? { next } : {}), ...(board ? { board } : {}) };
   },
   status: ({ dir, set }) => status({ dir, id: set }),
   ready({ dir, set }) {

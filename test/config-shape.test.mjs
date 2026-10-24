@@ -50,8 +50,9 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "progressBoard"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
+  ["scripts/lib/plan-sets.mjs", ["progressBoard"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
 
@@ -1011,8 +1012,9 @@ test("the shipped example states today's behaviour", () => {
 test("the schema declares no default anywhere", () => {
   // The whole refuse-don't-migrate decision rests on this: a default makes a
   // missing key invisible, and the file stops being the whole configuration.
-  // `ciStartWaitSec`, the one key that may be missing, is no exception here:
-  // its 120 lives in `scripts/ship.mjs`, and the schema only describes it.
+  // `ciStartWaitSec` and `progressBoard`, the two keys that may be missing, are
+  // no exception here: a script supplies each one's fallback, and the schema
+  // only describes it.
   const defaults = [];
   // `reviewers.default` is a property *name*, not the keyword; only the map a
   // `properties` or `$defs` holds may legitimately contain one.
@@ -1300,7 +1302,7 @@ test("a version line names one file and exactly one locator: a JSON Pointer or a
   }
 });
 
-// --- the start wait: the one key that may be missing ---
+// --- the start wait and the progress board: the two keys that may be missing ---
 
 test("a current file without ciStartWaitSec is valid and current, not stale", async () => {
   // The key was added to version 10 without a version bump so that every
@@ -1329,14 +1331,37 @@ test("ciStartWaitSec is an integer from 0 to 3600", () => {
   }
 });
 
-test("ciStartWaitSec and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("a current file without progressBoard is valid and current, not stale", async () => {
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const { progressBoard, ...without } = example;
+  assert.equal(progressBoard, true, "examples/config.json states the board on, as configure always writes it");
+  assert.deepEqual(validateJson(schema, without), []);
+  const result = validateFile(versionRepo(), without);
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+});
+
+test("progressBoard is a boolean", () => {
+  const dir = versionRepo();
+  for (const good of [true, false]) {
+    const result = validateFile(dir, { ...example, progressBoard: good });
+    assert.equal(result.status, 0, `progressBoard: ${good} must validate: ${result.stderr}`);
+  }
+  for (const bad of ["on", 1, null]) {
+    const result = validateFile(dir, { ...example, progressBoard: bad });
+    assert.equal(result.status, 1, `progressBoard: ${JSON.stringify(bad)} must be invalid`);
+    assert.match(result.stderr, /progressBoard/, `progressBoard: ${JSON.stringify(bad)}: the refusal names the key`);
+  }
+});
+
+test("ciStartWaitSec, progressBoard and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
-  // 120 when it is missing, and `autoMerge`, which nothing reads at all. Another
-  // key quietly going optional would be a missing key read as something nobody
-  // wrote down.
+  // 120 when it is missing, `progressBoard`, which a missing key reads as on, and
+  // `autoMerge`, which nothing reads at all. Another key quietly going optional
+  // would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", ...ACCEPTED_AND_IGNORED].sort());
-  assert.equal(schema.properties.version.const, 11, "version 11 added only required keys; the optional set is the one version 10 had");
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "progressBoard", ...ACCEPTED_AND_IGNORED].sort());
+  assert.equal(schema.properties.version.const, 11, "the optional keys were added without a version bump");
 });
 
 // --- autoMerge: accepted, ignored, and said so ---

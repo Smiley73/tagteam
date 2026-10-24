@@ -71,7 +71,7 @@ import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 import { codexSpend, codexUsageLine, recordCodexUsage } from "./codex-usage.mjs";
-import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
+import { arriveCommand, closeSet, readSet, readiness, recordSet, renderBoard, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
@@ -221,15 +221,19 @@ function fixUnitSpec(ctx, id) {
 // an older check's unit with no document is one whose directory went after it
 // merged, and is not made again. Nor is a directory no check names.
 function fixUnitSpecs(ctx) {
+  const { newest, ids } = madeUnitIds(ctx);
+  return ids.map((id) => {
+    if (!exists(unitDocumentPath(ctx.shipDir, id))) ensureUnitDocument(ctx, newest, id);
+    return fixUnitSpec(ctx, id);
+  });
+}
+
+// The ids `fixUnitSpecs` makes specs of, without writing a missing document.
+function madeUnitIds(ctx) {
   const records = listChecks(ctx.shipDir).map((entry) => entry.record);
   const newest = records.at(-1);
   const named = new Set(newest && !newest.unreadable && Array.isArray(newest.units) ? newest.units : []);
-  return unitIds(ctx.shipDir, records).filter((id) => {
-    if (exists(unitDocumentPath(ctx.shipDir, id))) return true;
-    if (!named.has(id)) return false;
-    ensureUnitDocument(ctx, newest, id);
-    return true;
-  }).map((id) => fixUnitSpec(ctx, id));
+  return { newest, ids: unitIds(ctx.shipDir, records).filter((id) => exists(unitDocumentPath(ctx.shipDir, id)) || named.has(id)) };
 }
 
 // The specs and then the fix units: everything of this train that becomes a pull
@@ -983,7 +987,8 @@ function emit(payload) {
   // Every agent this driver sends out is waited on through a set; a dispatch
   // printed without one would be read from disk while it is still working.
   if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
-  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...instructionFor(payload) }, null, 2)}\n`);
+  const board = payload.set?.[BOARD];
+  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...(board ? { board } : {}), ...instructionFor(payload) }, null, 2)}\n`);
 }
 
 // --- dispatched sets ---------------------------------------------------------
@@ -1061,14 +1066,30 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
   // Each entry keeps the agent, model and effort exactly as printed — an
   // escalated fixer's raised pair, the runner's own — because `finish` compares
   // what ran against this and must never work the request out again later.
-  await recordSet({
+  const recorded = await recordSet({
     dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing,
+    ...(ctx.config.progressBoard === false ? {} : { board: { header: boardHeader(ctx, id, kind) } }),
     agents: agents.map(({ dispatch, name }) => ({
       label: dispatch.description, name, output: expectedOutput(dispatch),
       request: { agent: dispatch.agent ?? null, model: dispatch.model ?? null, effort: dispatch.effort ?? null }
     }))
   });
-  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description) };
+  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description), board: renderBoard(recorded) };
+}
+
+// The line a set's progress board opens with, built as the set goes out and
+// never updated: which unit is in progress out of how many, how many have
+// merged, and which have not started. A set of no unit (`id` null) names its
+// step where a unit would go. The count includes the fix units a whole-plan
+// check has made, which is why it can grow near the end.
+function boardHeader(ctx, id, kind) {
+  const units = [...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
+  const merged = units.filter((unit) => stateOf(ctx, unit) === "merged").length;
+  const queued = units.filter((unit) => unit !== id && [null, "pending"].includes(stateOf(ctx, unit)));
+  const where = id === null
+    ? `${kind.startsWith("whole-plan") ? "The whole-plan check" : "Resolving the merge that lands the plan"}, ${units.length} units`
+    : `${isFixUnitId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
+  return `${where} · ${merged} merged · ${queued.length ? `queued: ${queued.join(", ")}` : "nothing queued"}`;
 }
 
 /**
@@ -1085,7 +1106,10 @@ async function sendForSnapshot(ctx, id, { kind, round = null, dispatch, job }) {
 
 // What a payload carries about its set: the labels, and the arrival command with
 // the set already named, so only the label is left to append.
-const setPayload = ({ id, dir, labels }) => ({ id, labels, arrive: arriveCommand(dir, id) });
+// A freshly sent set's board rides on it under a key `JSON.stringify` skips, and
+// `emit` prints it beside the set.
+const BOARD = Symbol("board");
+const setPayload = ({ id, dir, labels, board }) => ({ id, labels, arrive: arriveCommand(dir, id), ...(board ? { [BOARD]: board } : {}) });
 
 /**
  * Refuse, changing nothing, unless `set` is in. A set released by a restart is
@@ -3884,7 +3908,7 @@ async function settle(options) {
 }
 
 // How long checks get to appear when `ciStartWaitSec` is missing from the
-// configuration — the one key that may be, added to version 10 without a bump so
+// configuration — one of two keys that may be, added to version 10 without a bump so
 // that the version-10 files written before it existed stayed current. Nothing
 // else in the plugin reads the key.
 const CI_START_WAIT_SEC = 120;

@@ -302,9 +302,11 @@ test("the configure command asks about both of the settings a person can only ge
 
 // Version 11's settings are required so that nobody ships before seeing them,
 // which only holds if configure puts each one to the person by name.
+// `progressBoard` is optional, and is asked all the same: configure always
+// writes it, and a dropped question would leave the person no way to learn it.
 test("the configure command asks about every setting version 11 added", () => {
   const items = thenAskItems(read("commands", "configure.md"));
-  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps"]) {
+  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps", "progressBoard"]) {
     assert.ok(items.some((item) => item.includes(`\`${key}\``)), `no numbered question in configure.md asks about ${key}`);
   }
 });

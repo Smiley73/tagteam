@@ -45,6 +45,7 @@
   ],
   "ciWaitSec": 1800,
   "ciStartWaitSec": 120,
+  "progressBoard": true,
   "worktree": {
     "setup": ["npm ci"],
     "copyUntracked": [],
