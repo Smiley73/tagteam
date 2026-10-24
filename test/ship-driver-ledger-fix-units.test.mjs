@@ -11,6 +11,7 @@ import { ship, write, outputOf, resultOf, arriveAll, findings, major, onOrigin, 
   stageMerged, reviewWholePlan, shipUnit } from "./ship-stage.mjs";
 import { enterMerge, entriesOf } from "../scripts/lib/ledger.mjs";
 import { fixUnitIds, followUpIds } from "../scripts/lib/whole-plan.mjs";
+import { PLAN_BODY, RED_CHECK, planPullOf } from "./ship-plan-landing-shared.mjs";
 
 const A_OID = "a".repeat(40);
 const B_OID = "b".repeat(40);
@@ -228,6 +229,46 @@ test("with carrying on, a follow-up whose fix rounds run out on a code finding d
   assert.equal(unitStateOf(shipDir, id).state, "awaiting-approval");
   assert.equal(unitStateOf(shipDir, id).accept ?? null, null, "a carry was recorded for a follow-up");
   assert.equal(onOrigin(origin, "plan/demo"), before, "the follow-up merged into the plan branch");
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a plan body written before a later check moved a ledger entry is asked for again, once, and the rewrite is what is sent", () => {
+  const staged = stageLedger({ followUps: 0, ciRepairs: 1 });
+  const { plan, shipDir, env } = staged;
+  assert.match(judge(staged, ship("plan-check", plan, [], env), everyone("resolved")).json.next, /plan-land --plan /);
+  const first = bodyFactsOf(staged);
+  assert.equal(first.ledger.entries.find((entry) => entry.id === FILELESS).outcome, "resolved");
+  write(first.path, PLAN_BODY);
+  assert.equal(ship("plan-land", plan, [], env).status, 0);
+  assert.ok(planPullOf(env), "the plan's pull request was not opened");
+
+  // Its CI fails, the whole-plan fix changes the tip, and the check after it
+  // finds the entries still real with no follow-up left to make.
+  const waitFor = (ciWaitSec) => {
+    const config = JSON.parse(fs.readFileSync(staged.configPath, "utf8"));
+    fs.writeFileSync(staged.configPath, JSON.stringify({ ...config, ciWaitSec }, null, 2));
+  };
+  waitFor(30);
+  const red = ship("plan-land", plan, [], { ...env, GH_STUB_CHECKS: RED_CHECK });
+  waitFor(0);
+  assert.match(red.json.next, /--spec plan-fix-1$/, red.stdout);
+  shipUnit(staged, "plan-fix-1", { "b.js": "export const twice = (n) => n + n;\n" });
+  assert.match(judge(staged, ship("plan-check", plan, [], env), everyone("still-real")).json.next, /plan-land --plan /);
+
+  const asked = ship("plan-land", plan, [], env);
+  assert.equal(asked.status, 0, asked.stderr);
+  assert.ok(asked.json.body, `a body written from the earlier verdicts was sent as it is: ${asked.stdout}`);
+  assert.equal(asked.json.body.ledger.entries.find((entry) => entry.id === FILELESS).outcome, "spent");
+  const said = asked.json.say.join("\n");
+  assert.match(said, new RegExp(`ledger entry ${FILELESS} went from resolved \\(resolved\\) to still-real \\(spent\\)`), said);
+  assert.match(said, /now the plan made every whole-plan fix limits\.ciRepairs allows \(plan-fix-1\)/, said);
+
+  const rewritten = PLAN_BODY.replace("nothing known", "Twice and add still disagree, and the follow-up budget is spent.");
+  write(asked.json.body.path, rewritten);
+  const sent = ship("plan-land", plan, [], env);
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.equal(sent.json.body, undefined, "the body was asked for twice for one change");
+  assert.match(planPullOf(env).body, /Twice and add still disagree/);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 

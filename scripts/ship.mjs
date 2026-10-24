@@ -5098,6 +5098,31 @@ function bodyFacts(ctx, file) {
   };
 }
 
+// What a plan body written from `facts` answers for that a later check can
+// move: the budgets spent at plan level, and every ledger entry's latest verdict
+// and where it ended up. The tip a resolved entry names is left out, since a
+// check that only confirms it again changes nothing the body says.
+const disclosedOf = (facts) => ({
+  spent: facts.spent,
+  entries: (facts.ledger?.entries ?? []).map((entry) => ({ id: entry.id, verdict: entry.verdict, outcome: entry.outcome }))
+});
+
+// What moved between the facts a body was written from and the ones now, in
+// words; nothing when the body still says what is so.
+function disclosureChanges(before, now) {
+  const was = new Map(before.entries.map((entry) => [entry.id, entry]));
+  const changes = now.entries.flatMap((entry) => {
+    const old = was.get(entry.id);
+    if (!old) return [`ledger entry ${entry.id} was added, ${entry.outcome}`];
+    return old.outcome !== entry.outcome || old.verdict !== entry.verdict
+      ? [`ledger entry ${entry.id} went from ${old.verdict ?? "no verdict"} (${old.outcome}) to ${entry.verdict ?? "no verdict"} (${entry.outcome})`]
+      : [];
+  });
+  changes.push(...now.spent.filter((line) => !before.spent.includes(line)).map((line) => `now ${line}`));
+  changes.push(...before.spent.filter((line) => !now.spent.includes(line)).map((line) => `no longer ${line}`));
+  return changes;
+}
+
 // The line the plan pull request's body carries about the version it lands as.
 const landsAsLine = (landsAs) => `This plan lands as version ${landsAs}.`;
 
@@ -5133,11 +5158,28 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
     throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -", 2);
   }
   const file = planBodyPath(ctx.shipDir);
+  const facts = bodyFacts(ctx, file);
   if (!exists(file)) {
     return {
       say: [...say, `The plan's pull request into ${route.base} opens next, and its body is needed first: write ${file} in the `
         + "Summary / What you can now do / Risk shape, for the plan as a whole, then run next."],
-      body: bodyFacts(ctx, file), next: nextCommand(ctx, "plan-land", null)
+      body: facts, next: nextCommand(ctx, "plan-land", null)
+    };
+  }
+  // A body written before a later check moved a ledger entry or spent a budget
+  // says what is no longer so, and the ship's own lines under Risk do not say
+  // where an entry ended up: it is asked for again, once for each such change.
+  // What it is asked from is recorded first, so the run after sends whatever
+  // the file then holds, rewritten or not.
+  const disclosed = disclosedOf(facts);
+  const changed = record.bodyFacts ? disclosureChanges(record.bodyFacts, disclosed) : [];
+  if (changed.length > 0) {
+    record.bodyFacts = disclosed;
+    saveLanding(ctx, record);
+    return {
+      say: [...say, `The plan's pull request body at ${file} was written before a later check changed what it answers for: `
+        + `${listOf(changed)}. Write it again from body, in the same Summary / What you can now do / Risk shape, then run next.`],
+      body: facts, next: nextCommand(ctx, "plan-land", null)
     };
   }
   const sent = sentBody(ctx, fs.readFileSync(file, "utf8"), tip);
@@ -5167,6 +5209,7 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
   }
   record.pr = { number: view.number, url: view.url, head: tip, base: route.base };
   record.bodySent = hash;
+  record.bodyFacts = disclosed;
   record.title = title;
   saveLanding(ctx, record);
   return null;

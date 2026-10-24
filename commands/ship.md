@@ -736,6 +736,10 @@ add under `## Risk` what it means for the person using the software — what
 still goes wrong, and when — and why it was not fixed. `## Risk` says "nothing known" when
 there is nothing. Then run `next`. A `--title "<title>"` of your own is taken the
 same way as for `publish`; without one, the plan document's heading is used.
+When a later check changes what the body answers for — where a ledger entry
+ended up, or a budget in `body.spent` — `plan-land` returns `body` again, and
+`say` names what changed: write the file again from it, the same way, and run
+`next`.
 
 **What it does on the way**, each step said in `say` — relay it plainly:
 
