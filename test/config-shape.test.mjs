@@ -50,7 +50,7 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "progressBoard"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
