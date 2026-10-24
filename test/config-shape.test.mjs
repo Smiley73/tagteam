@@ -52,6 +52,7 @@ const CONSUMED = [
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
   ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "progressBoard"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
+  ["scripts/lib/plan-sets.mjs", ["progressBoard"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
 

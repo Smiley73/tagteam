@@ -56,11 +56,14 @@ import {
   NOT_IN_YET,
   PlanSetError,
   REFUSED,
+  REVISE_LABEL,
   closeJudged,
+  listSets,
   recordPlanSet,
   repoFor,
   requireFamilyIn,
   resumePlanSets,
+  sentBoard,
   setsDir
 } from "./lib/plan-sets.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
@@ -109,7 +112,7 @@ const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effo
 
 // What the drafter is sent for under a `draft` set, and the label of each. A
 // cut is the same job whether step 4 or step 6 asks for it, so it has one label.
-export const DRAFTER_PURPOSES = { draft: "Draft the plan", cut: "Cut the plan", revise: "Revise the plan" };
+export const DRAFTER_PURPOSES = { draft: "Draft the plan", cut: "Cut the plan", revise: REVISE_LABEL };
 
 // The review's two Claude readers. Codex, the third, is prepared and printed by
 // `codex`, which a re-send of it runs again.
@@ -340,7 +343,7 @@ export function checkResponse({ findings, response, schemaPath = path.join(SCHEM
 const USAGE = `usage:
   plan.mjs roles    <config.json>
   plan.mjs dispatch <config.json> --kind <kind> [--purpose ${Object.keys(DRAFTER_PURPOSES).join("|")}]
-                    [--reader claude|adversary]... [--spec <id>]...
+                    [--reader claude|adversary]... [--spec <id>]... [--plan <plan-dir>]
   plan.mjs codex    --plugin <root> --dir <work/review> --goal <goal.md> --plan <plan.md> --cd <repo>
                     --model <codex model> --effort <codex effort> --max-concurrent <n>
   plan.mjs record   --plan <plan-dir> --kind <kind> --agent <label> <output> [--agent <label> <output>]...
@@ -355,8 +358,11 @@ const USAGE = `usage:
   label — for the kind of set they are recorded as: --purpose chooses what a
   draft is for, --reader which reader a review-resend re-sends, --spec each spec
   a spec-writers or spec-writers-resend step writes. It exits 1, printing
-  nothing, when an effort is missing or not on the ladder. \`codex\` writes the Codex plan review as a
-  command for the codex-runner agent and prints the dispatch. \`record\` records
+  nothing, when an effort is missing or not on the ladder. With --plan, and the
+  progress board on, it also prints \`board\`: the step's header over its agents,
+  all running. \`codex\` writes the Codex plan review as a
+  command for the codex-runner agent and prints the dispatch, with a \`board\`
+  when only Codex is re-sent. \`record\` records
   the set just dispatched — kind is one of ${KINDS.join(", ")} —
   and prints the command that records each arrival. \`resume\` applies the
   restart rule to a set still out; the flags answer the question it asks when no
@@ -413,7 +419,7 @@ function dispatchFlags(argv) {
   for (let index = 0; index < rest.length; index += 1) {
     const key = rest[index];
     const value = rest[++index];
-    if (!["--kind", "--purpose", "--reader", "--spec"].includes(key)) throw new Error(`dispatch does not take ${key}\n${USAGE}`);
+    if (!["--kind", "--purpose", "--reader", "--spec", "--plan"].includes(key)) throw new Error(`dispatch does not take ${key}\n${USAGE}`);
     if (value === undefined) throw new Error(`${key} requires a value\n${USAGE}`);
     if (key === "--reader") options.readers.push(value);
     else if (key === "--spec") options.specs.push(value);
@@ -436,6 +442,28 @@ function resumeFlags(argv) {
   if (!options.plan) throw new PlanSetError(`resume needs --plan\n${USAGE}`);
   if (options.runGone && options.runLive) throw new PlanSetError("--run-gone and --run-live are the two answers to one question; give one");
   return options;
+}
+
+// The readers a collection named missing, or none when there is no collection
+// to read. They are exactly the ones a re-send sends out again.
+function missingReaders(reviewDir) {
+  try {
+    return readJson(path.join(reviewDir, "findings.json")).missing.map((gap) => gap.reader);
+  } catch {
+    return [];
+  }
+}
+
+// Who is on the board of a step's dispatch, one entry per agent. A review is
+// always the three readers, Codex included although `dispatch` does not print it;
+// a re-send is the Claude readers it names, plus Codex when the collection also
+// names it.
+function boardSubjects(kind, planDir, { readers, specs }) {
+  if (kind === "review") return [...Object.keys(CLAUDE_READERS), "codex"];
+  if (kind === "review-resend") {
+    return [...readers, ...(missingReaders(path.join(path.resolve(planDir), "work", "review")).includes("codex") ? ["codex"] : [])];
+  }
+  return specs.length > 0 ? specs : [kind];
 }
 
 // The review directory is always `$D/work/review`, so the plan directory whose
@@ -487,8 +515,13 @@ async function main() {
       return;
     }
     if (action === "dispatch") {
-      const { config, kind, ...selection } = dispatchFlags(rest);
-      print({ kind, dispatch: planDispatch(readJson(config), kind, selection) });
+      const { config, kind, plan, ...selection } = dispatchFlags(rest);
+      const settings = readJson(config);
+      const calls = planDispatch(settings, kind, selection);
+      const board = plan && sentBoard({
+        config: settings, planDir: plan, kind, labels: calls.map((call) => call.description), subjects: boardSubjects(kind, plan, selection)
+      });
+      print({ kind, dispatch: calls, ...(board ? { board } : {}) });
       return;
     }
     if (action === "codex") {
@@ -509,10 +542,18 @@ async function main() {
         slots: path.dirname(dir),
         maxConcurrent: Number(options.maxConcurrent ?? 3)
       });
+      // Codex alone goes out again only after a collection named it as the one
+      // reader missing; no `dispatch` runs then, so this is where its board is.
+      let config = null;
+      try { config = readJson(path.join(path.resolve(options.cd), ".tagteam", "config.json")); } catch {}
+      const planDir = planDirOf(dir);
+      const alone = missingReaders(dir).join() === "codex" && listSets(planDir).some((set) => set.kind === "review");
+      const board = alone && sentBoard({ config, planDir, kind: "review-resend", labels: [CODEX_PLAN_REVIEW], subjects: ["codex"] });
       process.stdout.write(`${JSON.stringify({
         ok: true,
         dispatch: runnerDispatch({ description: CODEX_PLAN_REVIEW, commandFile: prepared.commandFile, statusFile: prepared.statusFile }),
-        statusFile: prepared.statusFile
+        statusFile: prepared.statusFile,
+        ...(board ? { board } : {})
       }, null, 2)}\n`);
       return;
     }
