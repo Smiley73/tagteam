@@ -55,8 +55,8 @@ import { itemId, itemsOfReport } from "./lib/rulings.mjs";
 import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
   BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
-  fixUnitIds, isCleanFor, isFixUnitId, listChecks, nextCheckNumber, nextUnitId, saveCheck, unitDir, unitDocument, unitDocumentPath,
-  verdict, ROUND as CHECK_ROUND
+  fixUnitIds, followUpIds, isCleanFor, isFixUnitId, isFollowUpId, ledgerOutcomes, listChecks, nextCheckNumber, nextUnitId, saveCheck,
+  unitDir, unitDocument, unitDocumentPath, unitIds, verdict, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
 import {
   checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, mergeMethodOf, planBodyPath, readPlanLanding, resultsFor, savePlanLanding,
@@ -212,9 +212,9 @@ function fixUnitSpec(ctx, id) {
   };
 }
 
-// Every fix unit the whole-plan check has made whose document is there, in the
-// order they were made.
-const fixUnitSpecs = (ctx) => fixUnitIds(ctx.shipDir).filter((id) => exists(unitDocumentPath(ctx.shipDir, id))).map((id) => fixUnitSpec(ctx, id));
+// Every fix unit the whole-plan check has made whose document is there, of
+// either family, in the order they were made.
+const fixUnitSpecs = (ctx) => unitIds(ctx.shipDir).filter((id) => exists(unitDocumentPath(ctx.shipDir, id))).map((id) => fixUnitSpec(ctx, id));
 
 // The specs and then the fix units: everything of this train that becomes a pull
 // request into its landing branch.
@@ -1302,7 +1302,7 @@ const clip = (text, width) => {
   return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat;
 };
 
-function tableLines({ round, rows, summary }) {
+function tableLines({ round, rows, summary, heading = `The fixer sent at round ${round}` }) {
   const header = ["id", "severity", "file", "title", "the fixer said", "re-check", "recommendation"];
   const cells = rows.map((row) => [
     row.id, row.severity, row.file ?? "—", clip(row.title, 40), row.outcome ? clip(`${row.outcome}: ${row.note}`, 60) : "no outcome reported",
@@ -1312,7 +1312,7 @@ function tableLines({ round, rows, summary }) {
   const line = (cell) => `  ${cell.map((value, column) => value.padEnd(widths[column])).join("  ").trimEnd()}`;
   const missed = rows.filter((row) => !row.addressed);
   return [
-    `The fixer sent at round ${round} was handed ${rows.length} finding(s):`, line(header), ...cells.map(line),
+    `${heading} was handed ${rows.length} finding(s):`, line(header), ...cells.map(line),
     missed.length > 0 ? `  Not addressed: ${missed.map((row) => `${row.id} (${row.recommendation})`).join(", ")}.` : "  Every one is addressed.",
     ...(summary ? [`  The fixer: ${summary}`] : [])
   ];
@@ -4426,12 +4426,129 @@ function wholePlanTarget(ctx, record) {
 async function sendWholePlanReviewer(ctx, record, { resend = false } = {}) {
   const job = resolveJobs(ctx).jobs["review-lens"];
   const dispatch = reviewerDispatch(ctx, wholePlanTarget(ctx, record), record.tip, WHOLE_PLAN_LENS,
-    path.join(PLUGIN, "prompts", WHOLE_PLAN_BRIEF), job);
+    path.join(PLUGIN, "prompts", WHOLE_PLAN_BRIEF), job, ledgerLines(ctx, record));
   const sent = await sendSet(ctx, null, {
     kind: resend ? "whole-plan-resend" : "whole-plan", agents: [{ dispatch, job, name: "the whole-plan reviewer" }],
     step: "plan-collect", home: checkHome(ctx, record.n)
   });
   return { dispatch, sent, job };
+}
+
+// The plan's ledger as this check re-judges it, written into its round once, so
+// that the verdicts, the table after a follow-up and the plan's body all read
+// the entries the reviewer was handed; and where the reviewer writes its
+// verdicts. An empty ledger hands the reviewer nothing.
+const ledgerSnapshotPath = (ctx, n) => path.join(checkRoundDir(ctx.shipDir, n), "ledger.json");
+const ledgerVerdictsPath = (ctx, n) => path.join(checkRoundDir(ctx.shipDir, n), "ledger-verdicts.json");
+
+function ledgerLines(ctx, record) {
+  const snapshot = ledgerSnapshotPath(ctx, record.n);
+  if (!exists(snapshot)) {
+    const { entries } = readLedger(ctx.shipDir);
+    if (entries.length === 0) return [];
+    writeRoundFile(snapshot, `${JSON.stringify({ entries }, null, 2)}\n`);
+  }
+  return [
+    `Ledger to re-judge (one verdict for every entry, as the brief's "Re-judging the ledger" says): ${snapshot}`,
+    `Write your ledger verdicts to: ${ledgerVerdictsPath(ctx, record.n)}`
+  ];
+}
+
+// The verdicts the reviewer wrote, or none and why: a document that is not
+// there, does not hold to its schema or is about another commit binds nothing.
+function readLedgerVerdicts(ctx, file, tip) {
+  if (!exists(file)) return { verdicts: [], problem: `${file} was not written` };
+  const checked = node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "ledger-verdicts.schema.json"), file], { allow: [1] });
+  if (checked.status !== 0) {
+    return { verdicts: [], problem: `${file} does not hold to ledger-verdicts.schema.json (${checked.stderr.trim().split("\n")[0]})` };
+  }
+  const document = readJson(file);
+  if (document.candidate !== tip) return { verdicts: [], problem: `${file} is about ${short(document.candidate)}, not ${short(tip)}` };
+  return { verdicts: document.verdicts, problem: null };
+}
+
+/**
+ * The ledger re-judged at this check, once its own `status` is decided — which
+ * this never changes: each entry's verdict and where it goes, and the
+ * follow-up units a clean check makes, named on the record before anything is
+ * emitted. A verdict document that is missing or does not hold leaves every
+ * entry not re-judged, and never sends the reviewer again.
+ */
+function judgeLedger(ctx, record, status, records) {
+  const snapshot = ledgerSnapshotPath(ctx, record.n);
+  if (!exists(snapshot)) return;
+  const file = ledgerVerdictsPath(ctx, record.n);
+  const { verdicts, problem } = readLedgerVerdicts(ctx, file, record.review.tip);
+  const decided = ledgerOutcomes({
+    entries: readJson(snapshot).entries, verdicts, status, made: followUpIds(ctx.shipDir, records), limit: ctx.config.limits.followUps
+  });
+  record.ledger = { snapshot, verdicts: file, problem, entries: decided.entries };
+  record.followUps = decided.units;
+  record.units = [...(record.units ?? []), ...decided.units.map((unit) => unit.id)];
+}
+
+// The ledger entries `maker`, the check that made it, handed the follow-up `id`.
+function followUpEntries(ctx, maker, id) {
+  const ids = maker.followUps.find((unit) => unit.id === id).entries;
+  return readJson(ledgerSnapshotPath(ctx, maker.n)).entries.filter((entry) => ids.includes(entry.id));
+}
+
+// The gating findings a check that was not clean on its own review hands its
+// whole-plan fix.
+const unitFindings = (ctx, record) => (record.review?.status === "open"
+  ? readJson(path.join(checkRoundDir(ctx.shipDir, record.n), "to-fix.json"), { findings: [] }).findings ?? []
+  : []);
+
+/**
+ * One table for each fix unit merged since a plan-collect last printed one,
+ * from 05's table: its rows are what the unit was handed. A follow-up's row is
+ * addressed when this check rules its entry resolved; a whole-plan fix's when
+ * this check is clean on its own, since finding ids are minted per check and
+ * cannot be matched across checks. A unit never carries, so no row says carry.
+ */
+function unitTables(ctx, records, record, status) {
+  const tabled = new Set(records.flatMap((entry) => entry.tabled ?? []));
+  const owed = records.filter((maker) => maker.n !== record.n)
+    .flatMap((maker) => (maker.units ?? []).map((id) => ({ id, maker })))
+    .filter(({ id }) => !tabled.has(id) && stateOf(ctx, id) === "merged");
+  record.tabled = owed.map(({ id }) => id);
+  const judged = new Map((record.ledger?.entries ?? []).map((entry) => [entry.id, entry.verdict]));
+  return owed.flatMap(({ id, maker }) => {
+    const followUp = isFollowUpId(id);
+    const rows = (followUp ? followUpEntries(ctx, maker, id) : unitFindings(ctx, maker)).map((finding) => {
+      const addressed = followUp ? judged.get(finding.id) === "resolved" : status === "clean";
+      return {
+        id: finding.id, severity: finding.severity, file: finding.file ?? finding.files?.[0] ?? null, title: finding.title ?? "",
+        outcome: null, note: null, addressed,
+        recommendation: recommendation(finding, { addressed, goalConflict: false, eligible: false, carry: ctx.config.carry === true })
+      };
+    });
+    return tableLines({ heading: `${followUp ? "The follow-up" : "The whole-plan fix"} ${id}`, rows, summary: null });
+  });
+}
+
+// Where an entry went at a check, in a few words, for the sentence that counts them.
+const OUTCOME_WORDS = {
+  resolved: "resolved",
+  "follow-up": "handed to a follow-up",
+  "pull-request": "still real and about the pull request",
+  "needs-person": "needing a person or a re-plan",
+  spent: "still real with every follow-up limits.followUps allows made",
+  "after-fix": "still real, judged again once the whole-plan fix merges",
+  "check-stopped": "still real, with the check stopped",
+  "not-re-judged": "not re-judged"
+};
+
+// How many ledger entries this check re-judged and where they went; nothing
+// for a check that had no ledger to re-judge.
+function ledgerLine(record) {
+  const entries = record.ledger?.entries ?? [];
+  if (entries.length === 0) return null;
+  const counts = Object.entries(OUTCOME_WORDS).map(([outcome, words]) => [entries.filter((entry) => entry.outcome === outcome).length, words])
+    .filter(([count]) => count > 0).map(([count, words]) => `${count} ${words}`);
+  const from = record.ledger.carried ? `, as check ${record.ledger.carried} re-judged them,` : "";
+  return `The ${entries.length} entr${entries.length === 1 ? "y" : "ies"} of the plan's ledger${from} came to: ${counts.join(", ")}`
+    + `${record.ledger.problem ? ` (${record.ledger.problem})` : ""}. Whatever is not fixed is listed in the plan's pull request; none of it changes the check's result.`;
 }
 
 /**
@@ -4470,7 +4587,14 @@ function ensureUnitDocument(ctx, record, id) {
   const file = unitDocumentPath(ctx.shipDir, id);
   if (exists(file)) return file;
   const round = checkRoundDir(ctx.shipDir, record.n);
-  const findings = record.review?.status === "open" ? readJson(path.join(round, "to-fix.json"), { findings: [] }).findings ?? [] : [];
+  const evidence = new Map((record.ledger?.entries ?? []).map((entry) => [entry.id, entry.evidence]));
+  const findings = isFollowUpId(id)
+    ? followUpEntries(ctx, record, id).map((entry) => ({
+      severity: entry.severity, file: entry.files[0] ?? null, line: null, title: entry.title,
+      detail: `${entry.detail} (Left open when ${entry.spec} merged at ${short(entry.commit)}, as ledger entry ${entry.id}; this check `
+        + `found it still real: ${evidence.get(entry.id)})`
+    }))
+    : unitFindings(ctx, record);
   const failedVerify = record.verify?.status === "failed"
     ? (record.verify.commands ?? []).find((command) => command.status === "failed") ?? { command: "a verify command", logPath: record.verify.result }
     : null;
@@ -4525,6 +4649,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   const where = checkRecordPath(ctx.shipDir, record.n);
   const wholePlan = wholePlanSummary(ctx, record);
   const limit = ctx.config.limits.ciRepairs;
+  const ledger = ledgerLine(record);
   if (reused) say.push(`Whole-plan check ${record.n} already decided ${at}; its result is reused, and nothing is dispatched.`);
   if (record.status === "clean") {
     const minor = Object.entries(record.review?.counts ?? {}).filter(([severity]) => severity === "minor" || severity === "nit")
@@ -4532,7 +4657,18 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
     say.push(`The whole-plan check of ${at} is clean: verify ${record.verify.status === "passed" ? "passed" : "had nothing to run, which is recorded as that and not as a pass"}, `
       + `and the reviewer found nothing blocking or major${minor > 0 ? ` (${minor} minor or nit finding(s) recorded in ${record.review.findings}, and nothing fixed for them)` : ""}. `
       + `Its record is ${where}.`);
-    return { say, wholePlan, next: afterCleanCheck(ctx) };
+    if (ledger) say.push(ledger);
+    const pending = (record.followUps ?? []).filter((unit) => stateOf(ctx, unit.id) !== "merged");
+    const made = followUpIds(ctx.shipDir);
+    for (const unit of pending) {
+      say.push(`${listOf(unit.entries)} ${unit.entries.length > 1 ? "are" : "is"} still real and about the code, so ${unit.id} fixes `
+        + `${unit.entries.length > 1 ? "them" : "it"} as one more pull request into ${record.branch} through the same cycle, review and gates `
+        + `as a spec — follow-up ${made.indexOf(unit.id) + 1} of the ${ctx.config.limits.followUps} limits.followUps allows. `
+        + `Its document is ${ensureUnitDocument(ctx, record, unit.id)}.`);
+    }
+    if (pending.length === 0) return { say, wholePlan, next: afterCleanCheck(ctx) };
+    say.push("Once every follow-up is merged, the check runs again on the new tip.");
+    return { say, wholePlan, next: nextCommand(ctx, "begin", pending[0].id) };
   }
   if (record.status === "open") {
     const id = record.units.at(-1);
@@ -4541,6 +4677,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
     say.push(`The whole-plan check of ${at} is not clean: ${foundLine(ctx, record)}. It is fixed as ${id}, one more pull request into `
       + `${record.branch} through the same cycle, review and gates as a spec — whole-plan fix ${made} of the ${limit} limits.ciRepairs allows. `
       + `Its document is ${document}, and the check's record ${where}. Once it is merged, the check runs again on the new tip.`);
+    if (ledger) say.push(ledger);
     return { say, wholePlan, next: nextCommand(ctx, "begin", id) };
   }
   const why = record.reason === "spent"
@@ -4554,6 +4691,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   const raise = record.reason === "spent" ? " Raising limits.ciRepairs in .tagteam/config.json and running this check again would let the ship make another fix." : "";
   say.push(`The whole-plan check of ${at} stopped: ${why}. Its record is ${where}. The work stays on ${record.branch}, nothing of it `
     + `reached ${record.base}, and the plan is recorded as not clean for this tip.${raise}`);
+  if (ledger) say.push(ledger);
   // Once the plan's landing has begun, a check that stopped is shown as the
   // landing dialog shows it — what would land, with Merge withheld — and the
   // person can ask for that; before it, there is nothing to show.
@@ -4705,6 +4843,7 @@ async function planCheck(options) {
       findings: clean?.review?.findings ?? null, toFix: clean?.review?.toFix ?? null, counts: clean?.review?.counts ?? null,
       carried: { check: record.carry.check, tip: record.carry.from }
     };
+    if (clean?.ledger) record.ledger = { ...clean.ledger, carried: clean.n };
     say.push(`${short(tip)} is the ship's version commit and nothing else, over ${short(record.carry.from)}, whose whole-plan check `
       + `${record.carry.check} is clean: that review is carried to this tip and no reviewer is sent, since a version line is the ship's `
       + "and has one right answer. Every verify command ran on this tip, and the landing check runs on it too.");
@@ -4753,15 +4892,19 @@ async function planCollect(options) {
   record.review = {
     ...record.review, status: review.status, findings: path.join(dir, "review.json"), toFix: path.join(dir, "to-fix.json"), counts: review.counts ?? null
   };
-  if (review.status === "incomplete") return emit(closeCheck(ctx, record, "incomplete", "review-incomplete", say));
-  if (verdict(record) === "clean") return emit(closeCheck(ctx, record, "clean", null, say));
-  // Not clean: a fix unit, while limits.ciRepairs allows one. Every unit this
-  // plan has made counts, whatever tip or trigger made it, and the count is
-  // what is on disk — never a counter beside it.
-  const units = fixUnitIds(ctx.shipDir, records);
-  if (units.length >= ctx.config.limits.ciRepairs) return emit(closeCheck(ctx, record, "failed", "spent", say));
-  record.units = [...(record.units ?? []), nextUnitId(units)];
-  emit(closeCheck(ctx, record, "open", null, say));
+  const decided = verdict(record);
+  let [status, reason] = decided === "incomplete" ? ["incomplete", "review-incomplete"] : decided === "clean" ? ["clean", null] : ["open", null];
+  if (status === "open") {
+    // Not clean: a fix unit, while limits.ciRepairs allows one. Every unit this
+    // plan has made counts, whatever tip or trigger made it, and the count is
+    // what is on disk — never a counter beside it.
+    const units = fixUnitIds(ctx.shipDir, records);
+    if (units.length >= ctx.config.limits.ciRepairs) [status, reason] = ["failed", "spent"];
+    else record.units = [...(record.units ?? []), nextUnitId(units)];
+  }
+  judgeLedger(ctx, record, status, records);
+  say.push(...unitTables(ctx, records, record, status));
+  emit(closeCheck(ctx, record, status, reason, say));
 }
 
 // --- the plan's landing ----------------------------------------------------------
@@ -4871,11 +5014,36 @@ function defaultTitle(ctx) {
   return clean(heading) || clean(`Land plan ${ctx.slug}`) || "Land plan";
 }
 
+// Every ledger entry as the plan's body discloses it: what it is, the latest
+// verdict any check gave it with that verdict's evidence, and where it ended up
+// at the latest check.
+function ledgerFacts(entries, records) {
+  const latest = records.at(-1) ?? null;
+  return entries.map((entry) => {
+    const judged = records.map((record) => record.ledger?.entries.find((item) => item.id === entry.id)).filter((item) => item?.verdict).at(-1);
+    const outcome = latest?.ledger?.entries.find((item) => item.id === entry.id)?.outcome ?? "not-re-judged";
+    const unit = records.flatMap((record) => record.followUps ?? []).filter((item) => item.entries.includes(entry.id)).at(-1)?.id ?? null;
+    const endedUp = {
+      resolved: `resolved at ${short(latest?.tip)}${unit ? `, after the follow-up ${unit}` : ""}`,
+      "pull-request": "still unresolved: it is about the pull request, so no fix unit can answer it",
+      "needs-person": "still unresolved: only a person or a re-plan settles it",
+      spent: "still unresolved: every follow-up limits.followUps allows was made",
+      "after-fix": "still unresolved: the latest check was not clean, so it is judged again once the whole-plan fix merges",
+      "check-stopped": "still unresolved: the latest check stopped, so no follow-up was made for it",
+      "not-re-judged": "still unresolved: the latest check gave it no usable verdict"
+    }[outcome];
+    return {
+      id: entry.id, spec: entry.spec, severity: entry.severity, scope: entry.scope, files: entry.files, title: entry.title,
+      verdict: judged?.verdict ?? null, evidence: judged?.evidence ?? null, outcome, endedUp
+    };
+  });
+}
+
 // What the orchestrator writes the plan's pull request body from: the shape,
 // what lands, and where each spec's own body is, whose `## Risk` is what carries
 // over — one disclosed when a fix budget ran out. What the ledger holds the ship
-// says itself. The budgets spent at plan level are said here, since no spec's
-// body has them.
+// says itself, and `ledger.entries` says where each entry ended up. The budgets
+// spent at plan level are said here, since no spec's body has them.
 function bodyFacts(ctx, file) {
   const limits = ctx.config.limits;
   const fixes = fixUnitIds(ctx.shipDir);
@@ -4886,18 +5054,31 @@ function bodyFacts(ctx, file) {
     if ((state.fixRoundsUsed ?? 0) >= limits.fixRounds) spent.push(`${unit.id} used every fix round limits.fixRounds allows`);
   }
   if (fixes.length >= limits.ciRepairs) spent.push(`the plan made every whole-plan fix limits.ciRepairs allows (${fixes.join(", ")})`);
+  const ledger = readLedger(ctx.shipDir);
+  const entries = ledgerFacts(ledger.entries, wholePlanChecks(ctx));
+  const followUps = followUpIds(ctx.shipDir);
+  const leftOver = entries.some((entry) => entry.outcome === "spent");
+  if (followUps.length >= limits.followUps && (followUps.length > 0 || leftOver)) {
+    spent.push(`the plan made every follow-up limits.followUps allows (${followUps.join(", ") || "none"})`
+      + `${leftOver ? ", and the ledger entries still real past it go unfixed into this pull request" : ""}`);
+  }
   // What the plan lands as is said in the body by the ship itself, under the
   // Summary heading, as the increase stands when the body is sent: a body
   // written before the base moved and the increase was made again would
   // otherwise name a number the plan no longer lands as.
   const landsAs = landsAsOf(ctx, routeOf(ctx).tipOid);
-  const carried = planLines(readLedger(ctx.shipDir)).length > 0;
+  const carried = planLines(ledger).length > 0;
   return {
     path: file, shape: ["## Summary", "## What you can now do", "## Risk"],
     goal: path.join(ctx.plan, "goal.md"), plan: path.join(ctx.plan, "plan.md"),
     lands: landsList(ctx), spent,
     ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {}),
-    ...(carried ? { riskLines: "the ship adds under ## Risk itself every finding a spec carried into the plan branch open, and every failure that passed when run again" } : {})
+    ...(carried ? {
+      ledger: {
+        riskLines: "the ship adds under ## Risk itself every finding a spec carried into the plan branch open, and every failure that passed when run again",
+        entries
+      }
+    } : {})
   };
 }
 

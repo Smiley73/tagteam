@@ -67,12 +67,21 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    (the tip, its merge base with the base and the base commit it
                    was taken against, why it ran, verify bound to the tip, the
                    review and the tip it read, the fix units it made, and one
-                   status: clean, open, failed or incomplete), sets/, and
-                   rounds/1/ laid out as a round — its review diff is the
-                   plan's combined change. Never a state.json               ignored
+                   status: clean, open, failed or incomplete — and, when the
+                   plan's ledger had entries, each one's verdict and where it
+                   went, and the follow-ups it made), sets/, and rounds/1/
+                   laid out as a round — its review diff is the plan's combined
+                   change; ledger.json there is the ledger as that check's
+                   reviewer was handed it, written once, and
+                   ledger-verdicts.json its verdict on every entry
+                   (`schemas/ledger-verdicts.schema.json`). Never a
+                   state.json                                               ignored
   whole-plan/units/plan-fix-<k>/  one fix a whole-plan check needed, shipped as
                    one more pull request into the plan branch: spec.md (its
                    generated document) and everything a <spec-id>/ holds     ignored
+  whole-plan/units/plan-followup-<k>/  the same, for ledger entries a clean
+                   whole-plan check judged still real in the code; counted
+                   against limits.followUps, apart from plan-fix-<k>        ignored
   plan-landing/    on a plan branch, the plan's own pull request into the base:
                    record.json (the pull request and the head it was seen at,
                    its checks, the landing check, the version lines and the

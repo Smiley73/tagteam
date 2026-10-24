@@ -377,7 +377,14 @@ the wait for your approval moves to the plan's own pull request:
   branch is never rebased.
 - After the last spec, the whole plan is checked as one change: every verify
   command, and one reviewer reading how the specs fit together. What it finds is
-  fixed as one more small pull request into the plan's branch.
+  fixed as one more small pull request into the plan's branch. The same reviewer
+  also looks again at every finding in the plan's ledger, the ones specs merged
+  with still open, and says of each whether it is fixed, still wrong in the
+  code, or needs you. When the check is otherwise clean, findings still wrong
+  in the code become follow-up pull requests into the plan's branch, findings
+  that touch the same files sharing one, up to `limits.followUps`. Everything
+  else is listed in the plan's own pull request with where it ended up. None of
+  this changes whether the check is clean or whether Merge is offered.
 - Then the plan reaches the base through one final pull request, merged with a
   merge commit at exactly the commit that was checked, so each spec keeps its own
   commit in the base's history. **A person confirms that merge every time**, and
