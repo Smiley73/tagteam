@@ -55,12 +55,17 @@ function driveToCollect({ plan, shipDir, env }, raised) {
 }
 
 // One major code finding, one fix round spent on it, and the re-check leaving it
-// open: `fix` then finds the budget spent and sends the spec on to publish.
-function driveToSpent(staged) {
+// open: `fix` then finds the budget spent and sends the spec on to publish. With
+// `workflow`, the fixer also adds a workflow, which waits for a person's approval.
+function driveToSpent(staged, { workflow = false } = {}) {
   const driven = driveToCollect(staged, [major("app.js")]);
   const { run, state, worktree } = driven;
   const fix = run("fix");
   fs.appendFileSync(path.join(worktree, "app.js"), "// still adds\n");
+  if (workflow) {
+    fs.mkdirSync(path.join(worktree, ".github", "workflows"), { recursive: true });
+    fs.writeFileSync(path.join(worktree, ".github", "workflows", "ci.yml"), "on: pull_request\n");
+  }
   write(outputOf(fix.json.dispatch[0]), { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "tried" }], notes: "", status: "complete", summary: "tried", unfinished: [] });
   arriveAll(fix, staged.env);
   run("snapshot");
@@ -150,6 +155,57 @@ test("a spec that would take the plan past limits.carried stops naming the cap, 
   const merged = run("finish");
   assert.equal(state().state, "merged", merged.stdout);
   assert.equal(readLedger(staged.shipDir).entries.filter((entry) => entry.reason === "carried").length, 6);
+});
+
+// limits.carried as given, committed where the ship reads it.
+function setCarried(staged, carried) {
+  const config = JSON.parse(fs.readFileSync(staged.configPath, "utf8"));
+  config.limits.carried = carried;
+  fs.writeFileSync(staged.configPath, JSON.stringify(config, null, 2));
+  git(staged.repo, "commit", "-am", `carry ${carried}`);
+  git(staged.repo, "push", "origin", "main");
+}
+
+test("a finish run again with this spec's own carried findings already in the ledger counts them once toward limits.carried", () => {
+  // At the cap with them counted once, past it with them counted twice.
+  const staged = stageCarry({ carried: 1 });
+  const { run, state } = driveToSpent(staged);
+  const open = state().gates.review.open;
+  enterMerge(staged.shipDir, "01-a", { entries: entriesOf("01-a", state().candidateOid, open, new Set(), new Set(open.map((f) => f.id))), retries: [] });
+
+  const finished = run("finish");
+  assert.equal(state().state, "merged", finished.stdout);
+  assert.match(finished.json.say.join("\n"), /Carried 1 open finding\(s\) into plan\/demo with it, as carrying allows: the plan has carried 1 of the 1 /);
+  assert.deepEqual(readLedger(staged.shipDir).entries.map((entry) => [entry.id, entry.reason]), [["01-a:1.correctness.1", "carried"]]);
+});
+
+test("a carry recorded by an earlier finish is weighed again against limits.carried before an approval merges it", () => {
+  const staged = stageCarry();
+  const other = { severity: "minor", scope: "code", file: "b.js", title: "terse", detail: "says little" };
+  const carried = [1, 2, 3, 4].map((n) => ({ ...other, id: `1.correctness.${n}` }));
+  enterMerge(staged.shipDir, "00-z", { entries: entriesOf("00-z", "d".repeat(40), carried, new Set(), new Set(carried.map((f) => f.id))), retries: [] });
+  const { run, state } = driveToSpent(staged, { workflow: true });
+
+  // Four carried and a limit of five: the carry is recorded, and the workflow waits for a person.
+  const waiting = run("finish");
+  assert.equal(state().state, "awaiting-approval", waiting.stdout);
+  assert.deepEqual(waiting.json.blockers, []);
+  assert.deepEqual(waiting.json.approvals, ["workflow-change"]);
+  assert.equal(state().accept.mode, "carry");
+
+  setCarried(staged, 4);
+  const held = run("finish", ["--approve", "owner@example.com"]);
+  assert.equal(state().state, "awaiting-approval", held.stdout);
+  assert.equal(pullsOf(staged.env)[0].state, "OPEN");
+  assert.deepEqual(held.json.blockers, ["review-open"]);
+  assert.match(held.json.say.join("\n"), /Not recording owner@example\.com's approval/);
+  assert.match(held.json.ask, /Carrying its 1 open finding\(s\) into plan\/demo would take the plan past limits\.carried, which is 4 — 4 finding\(s\) are carried so far — so the carry an earlier finish recorded for it does not merge it/);
+  assert.equal(readLedger(staged.shipDir).entries.filter((entry) => entry.spec === "01-a").length, 0);
+
+  setCarried(staged, 5);
+  const merged = run("finish", ["--approve", "owner@example.com"]);
+  assert.equal(state().state, "merged", merged.stdout);
+  assert.match(merged.json.say.join("\n"), /the plan has carried 5 of the 5 /);
 });
 
 test("with carrying off, a spent plan-branch spec stops on its open finding as it always did", () => {

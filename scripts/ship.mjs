@@ -623,23 +623,34 @@ function planStanding(ctx, id, state) {
  * not on the plan branch, a finding open may not be carried (05's rule) or
  * `evaluate` would not lift `review-open` on the record; otherwise the record
  * to write, how many findings the plan's ledger already holds carried by other
- * units, and whether this one would take that past `limits.carried`. Its own
- * earlier entries are not counted, since `finish` runs more than once, nor is
- * anything a person accepted: the cap bounds what merged with no one looking.
+ * units, and whether this one would take that past `limits.carried`. A carry
+ * already recorded that lifts `review-open` is weighed the same way, `recorded`,
+ * against the ledger and the limit as they stand now: either can have moved
+ * since it was written. Its own earlier entries are not counted, since `finish`
+ * runs more than once, nor is anything a person accepted: the cap bounds what
+ * merged with no one looking.
  */
 function carryStanding(ctx, id, state) {
   if (ctx.config.carry !== true) return null;
   const standing = planStanding(ctx, id, state);
-  if (!standing || standing.open.length === 0 || standing.merges) return null;
-  const facts = carryFacts(ctx, id);
-  if (standing.open.some((finding) => carryRefusal(finding, facts))) return null;
-  const record = {
-    candidateOid: state.candidateOid, ids: standing.open.map((finding) => finding.id), mode: "carry",
-    dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
-  };
-  if (!acceptLifts({ ...state, accept: record }, ctx.config)) return null;
+  if (!standing || standing.open.length === 0) return null;
+  const recorded = standing.merges && state.accept?.mode === "carry";
+  if (standing.merges && !recorded) return null;
+  let record = state.accept;
+  if (!recorded) {
+    const facts = carryFacts(ctx, id);
+    if (standing.open.some((finding) => carryRefusal(finding, facts))) return null;
+    record = {
+      candidateOid: state.candidateOid, ids: standing.open.map((finding) => finding.id), mode: "carry",
+      dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
+    };
+    if (!acceptLifts({ ...state, accept: record }, ctx.config)) return null;
+  }
   const others = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried" && entry.spec !== id).length;
-  return { record, base: state.base, others, limit: ctx.config.limits.carried, over: others + record.ids.length > ctx.config.limits.carried };
+  return {
+    record, recorded, base: state.base, others, limit: ctx.config.limits.carried,
+    over: others + record.ids.length > ctx.config.limits.carried
+  };
 }
 
 // What `fix` and `settle` say instead of "a person decides" when `finish` will
@@ -5980,13 +5991,16 @@ function stopAsk(id, { blockers, approvals }, accepted = null, words = {}, { goa
 
 // The stop when carrying this spec would take the plan past `limits.carried`:
 // the cap, and the ways on from it — or, when approvals are owed as well, the
-// cap ahead of the ordinary stop, `stopped`, which says what they are.
+// cap ahead of the ordinary stop, `stopped`, which says what they are. A carry
+// an earlier finish recorded stays on record, held back until the cap allows it,
+// so a merge by hand enters what is open as carried.
 function carriedPastCap(id, carry, stopped) {
   const cap = `Carrying its ${carry.record.ids.length} open finding(s) into ${carry.base} would take the plan past limits.carried, `
-    + `which is ${carry.limit} — ${carry.others} finding(s) are carried so far — so nothing was carried for it.`;
+    + `which is ${carry.limit} — ${carry.others} finding(s) are carried so far — so `
+    + `${carry.recorded ? "the carry an earlier finish recorded for it does not merge it" : "nothing was carried for it"}.`;
   if (stopped) return [cap, stopped];
   return [`${id} stops and waits.`, cap, "Offer: raise limits.carried in this repository's tagteam configuration and run finish again, merge it by hand on GitHub "
-    + "(what is open then enters the plan's ledger as merged by hand), leave it open and continue (run next), or stop the train (run end)."];
+    + `(what is open then enters the plan's ledger as ${carry.recorded ? "carried" : "merged by hand"}), leave it open and continue (run next), or stop the train (run end).`];
 }
 
 // The sentence for checks that never started, naming the limit the wait ran
@@ -6169,6 +6183,9 @@ function landAndMerge(ctx, id, state, say, planRoute) {
       if (planRoute) {
         say.push(...(await reconcileMerged(ctx, { own: id })).say);
         await planTipCheck(ctx, "nothing was merged");
+        // What was just taken in can have put carried findings in the ledger.
+        const carry = carryStanding(ctx, id, readState(ctx, id));
+        if (carry?.recorded && carry.over) return { stop: carriedPastCap(id, carry, null).join(" ") };
       }
       const stopped = await landingCheck(ctx, id, state, say);
       if (stopped) return stopped;
@@ -6249,14 +6266,18 @@ async function finish(options) {
   // Carried only when the open review is all that blocks the merge: a spec that
   // also fails verification or CI stops anyway, and the record would disclose
   // findings for a merge that is not going to happen. Before an approval is
-  // weighed, which cannot clear the blocker a carry lifts.
-  const carry = !conflict && verdict.blockers.length === 1 && verdict.blockers[0] === "review-open"
-    ? carryStanding(ctx, id, readState(ctx, id)) : null;
-  if (carry && !carry.over) {
+  // weighed, which cannot clear the blocker a carry lifts. A carry an earlier
+  // finish recorded is weighed again against the ledger and limits.carried as
+  // they stand now; past the cap it does not lift `review-open` here, so neither
+  // an approval nor the merge goes through on it.
+  const standing = conflict ? null : carryStanding(ctx, id, readState(ctx, id));
+  const carry = standing?.recorded || (verdict.blockers.length === 1 && verdict.blockers[0] === "review-open") ? standing : null;
+  if (carry && !carry.over && !carry.recorded) {
     node("gates.mjs", ["accept", statePath(ctx, id), carry.record.candidateOid, carry.record.ids.join(","),
       "--carry", carry.record.dependedOn ? "depended-on" : "independent"]);
     verdict = evaluateGates();
   }
+  if (carry?.over && carry.recorded) verdict = { ...verdict, ready: false, needsHuman: true, blockers: [...verdict.blockers, "review-open"] };
   if (options.approve) {
     // An approval given while a blocker is open would change nothing now and
     // would still be on disk, bound to this commit, when the blocker clears —
@@ -6287,8 +6308,9 @@ async function finish(options) {
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
       if (carry && !carry.over) {
-        const count = carry.record.ids.length;
-        say.push(`Carried ${count} open finding(s) into ${state.base} with it, as carrying allows: the plan has carried ${carry.others + count} `
+        // Read again, since what the landing check took in can have added to it.
+        const total = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried").length;
+        say.push(`Carried ${carry.record.ids.length} open finding(s) into ${state.base} with it, as carrying allows: the plan has carried ${total} `
           + `of the ${carry.limit} limits.carried allows.`);
       }
       say.push(...enteredLines(entered));
@@ -6335,7 +6357,7 @@ async function finish(options) {
     say,
     ask: [
       ...(conflict ? [goalConflictLine(ctx, id, state, conflict)] : []),
-      ...(carry?.over ? carriedPastCap(id, carry, verdict.approvals.length === 0 ? null : stopped) : [stopped]),
+      ...(carry?.over ? carriedPastCap(id, carry, verdict.approvals.length === 0 && verdict.blockers.length === 1 ? null : stopped) : [stopped]),
       ...(cause ? [cause] : [])
     ].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
