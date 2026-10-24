@@ -334,7 +334,7 @@ Each agent's label is its `description`, the name Claude Code repeats in the
 notice it posts when that agent finishes. The orchestrator records every arrival
 with `set.arrive` — once with every label when they come back together, or one
 quick call per finished notice when they do not — and relays the one line it
-prints. The step that judges the set refuses, changing nothing, until every
+prints, with the `board` exactly as printed when there is one. The step that judges the set refuses, changing nothing, until every
 label is in, so an agent still working is never read as one that failed or
 changed nothing. There is no watcher and nothing to poll for, and a wake-up that
 is not the last arrival runs that one call and nothing else.
