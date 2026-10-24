@@ -67,12 +67,21 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    (the tip, its merge base with the base and the base commit it
                    was taken against, why it ran, verify bound to the tip, the
                    review and the tip it read, the fix units it made, and one
-                   status: clean, open, failed or incomplete), sets/, and
-                   rounds/1/ laid out as a round — its review diff is the
-                   plan's combined change. Never a state.json               ignored
+                   status: clean, open, failed or incomplete — and, when the
+                   plan's ledger had entries, each one's verdict and where it
+                   went, and the follow-ups it made), sets/, and rounds/1/
+                   laid out as a round — its review diff is the plan's combined
+                   change; ledger.json there is the ledger as that check's
+                   reviewer was handed it, written once, and
+                   ledger-verdicts.json its verdict on every entry
+                   (`schemas/ledger-verdicts.schema.json`). Never a
+                   state.json                                               ignored
   whole-plan/units/plan-fix-<k>/  one fix a whole-plan check needed, shipped as
                    one more pull request into the plan branch: spec.md (its
                    generated document) and everything a <spec-id>/ holds     ignored
+  whole-plan/units/plan-followup-<k>/  the same, for ledger entries a clean
+                   whole-plan check judged still real in the code; counted
+                   against limits.followUps, apart from plan-fix-<k>        ignored
   plan-landing/    on a plan branch, the plan's own pull request into the base:
                    record.json (the pull request and the head it was seen at,
                    its checks, the landing check, the version lines and the
@@ -81,12 +90,19 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    pr-body.md (the body the orchestrator writes for the plan as
                    a whole), pr-body.sent.md (that body with the line saying
                    what the plan lands as, which the ship adds under
-                   ## Summary), ci-<tip>.json, checks/<tip>/ (the landing check's
+                   ## Summary, and the ledger under ## Risk), ci-<tip>.json, checks/<tip>/ (the landing check's
                    evidence, one directory per base) and snapshots/. Never a
                    state.json: it is not a spec                              ignored
+  ledger.json      on a plan branch, the plan's ledger: entries, one per finding
+                   a spec or fix unit still had open when it merged into the
+                   plan branch (spec, severity, scope, files, title, detail,
+                   why it was left open — accepted or merged-by-hand — and the
+                   merged commit), and retries, the failures that passed when
+                   run again, kept for the plan's body and never re-judged   ignored
   <spec-id>/
-    state.json     the state machine, the reviewed commit, the gates, and the
-                   landing check bound to the current candidate             ignored
+    state.json     the state machine, the reviewed commit, the gates, the
+                   landing check and a person's accept on the plan branch,
+                   each bound to the current candidate                       ignored
     landing.json   what the last landing check found, as it was recorded    ignored
     rounds/<n>/  round.json (the commit that owns this round), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
@@ -94,6 +110,13 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  to-fix.json, open/, still-open.json, still-open/, report.json,
                  redesign.json (which files this round's commit was a redesign
                  of; kept on re-entry like the report),
+                 verify-retry.json and verify-retry/ (a failed verify run once
+                 more on the same commit, beside the first),
+                 retries/ (one record per failure run once more — a verify
+                 command, the landing check's verify, or checks rerun on the
+                 pull request: what failed, both attempts' evidence and the
+                 result — and the rerun request a check rerun begins with;
+                 kept on re-entry like the report),
                  landing/<new-base>/ (one directory per base this round's
                  commit was checked against: verify.json and verify/, plus
                  reviewed.diff and landing.diff when the two differed),
@@ -108,11 +131,22 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     asked-at-cap.json  the Recurring question was put at the cap: the round,
                  candidate, cycle and the ids the person was shown          ignored
     redesign-cycle.json  the cycle whose one rewrite has been chosen        ignored
+    fixers.json  every fixer handed findings: its brief, where its report is
+                 kept, and the re-check its table was judged at             ignored
+    fix-outcomes.json  the latest fixer tables, bound to the round and
+                 candidate they judged; publish hands their not-addressed
+                 rows over                                                  ignored
+    goal-conflict.json  a fixer answered that a repair would go against the
+                 goal: the findings and its notes; no fixer follows it      ignored
     redesign-briefs/  round-<n>-<stamp>.md, the brief a redesign implementer
                  read, kept outside every round                             ignored
     declined/    the reports of fixers and redesign implementers that changed
                  nothing                                                    ignored
     pr-body.md  ci.json  usage.json                                          ignored
+    pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
+                 under ## Risk — on a plan branch each finding it would carry
+                 into the plan branch open, and each failure that passed when
+                 run again on the same commit                               ignored
 .tagteam/worktrees/                                                         ignored
 .tagteam/locks/  <plan>-<digest>.lock/, one per plan being shipped — the same
                  plan twice is refused, two plans are not; and
@@ -137,7 +171,8 @@ round that raised them — `2.correctness.1` — so nothing one round settled ca
 overwritten or cleared by another. A round is a record: once `round.json` names
 the commit that owns it, every file tagteam writes beneath it is written once,
 and re-snapshotting that same commit re-enters the round — empties it back to
-the marker, the round's report and its redesign record, and rebuilds it — while
+the marker, the round's report, its redesign record and its retry records, and
+rebuilds it — while
 a different commit is refused. Codex's own output is the exception, replaced in place when a Codex
 lens that produced nothing usable is re-dispatched.
 
@@ -156,12 +191,18 @@ touch, then any `--file` additions; a pull request finding or one with no file
 counts toward the signal but is not a file to rewrite, and when no file is left
 the question offers no `redesign` and at the cap nothing is asked. While a fix
 round is still available the question has two answers besides "fix it again"
-and "stop" that `next` never prints: `redesign`, which spends a fix round on a
+and "stop" that `next` does not print, but for the case below: `redesign`, which spends a fix round on a
 fresh implementer working from a brief of every finding the rounds record on
 those files and how each was answered, and `accept`, which spends nothing and
 publishes the change as it is with what is open disclosed — an open finding is a
 blocker no approval clears, so the spec then waits at `finish` to be merged by
-hand. With every fix round spent they ask before anything publishes, and the
+hand — except on a plan branch, where an accept of findings that may all be
+carried there lets `finish` merge it into the plan branch, each open finding
+entered in the plan's ledger. With `autoRedesign` on, the first such question in a cycle with a fix
+round left and the same file failing is not asked: `next` is `redesign`, and
+`say` says it was answered automatically. The loose signal alone, the question
+at the cap and every later question are still a person's, and so is `accept`.
+With every fix round spent they ask before anything publishes, and the
 question has three answers: `redesign`, which takes one round past
 `limits.fixRounds` — `gates.mjs grant`, taken only when this question was put
 for this round, candidate and cycle; publishing as it is, which is `next`, since
@@ -182,20 +223,22 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 10, validated by
+`.tagteam/config.json`, version 11, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
 tell the person to run `/tagteam:configure` and stop. No key but one has a
 fallback in a script, so an older configuration is incomplete. The one is
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the
-version-10 files written before it existed stay current. `autoMerge` is the one
-key the schema accepts without requiring and without a fallback, because nothing
-reads it: it stays declared so the version-10 files that carry it stay valid and
-current. Configure carries a version-9 file forward: every value it holds but
-`autoMerge` is offered back, and version 10's two keys, `planBranch` and
-`versionFiles`, are asked about — off and empty change nothing about how a plan
-ships. Anything older is a different shape and is replaced.
+version-10 files written before it existed stayed current. `autoMerge` is the
+one key the schema accepts without requiring and without a fallback, because
+nothing reads it: it stays declared so a file that carries it is not refused for
+it. Configure carries a version-9 or version-10 file forward: every value it
+holds but `autoMerge` is offered back, and the keys it lacks are asked about —
+version 10's `planBranch` and `versionFiles`, and version 11's `carry`,
+`autoRedesign`, `limits.carried` and `limits.followUps`, each offered at its
+safe value: off, empty, off, off, 5 and 2. At those values nothing about how a
+plan ships changes. Anything older is a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -213,10 +256,12 @@ ships. Anything older is a different shape and is replaced.
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
-| `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when a person answers the Recurring question at the cap with `redesign`), `ciRepairs` (repairs of a red pull request). Each at least 1 |
+| `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when the Recurring question at the cap is answered with `redesign`), `ciRepairs` (repairs of a red pull request), each at least 1; `carried` (the most findings a plan may carry before the ship stops and asks, at least 1 — turning carrying off is `carry`'s job) and `followUps` (how many fix units the whole-plan check may build from the carried findings, at least 0; with 0 every one still real goes into the plan's pull request body). Follow-up units are counted apart from the whole-plan fix units `ciRepairs` counts |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
 | `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms; its specs merge into `plan/<slug>` without waiting once every gate is satisfied. False: every spec merges straight into `base`, and each waits for a person's approval. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
+| `carry` | True: on a plan branch, a spec whose fix rounds ran out with only findings that may be carried — never a `blocking` one — merges into `plan/<slug>`, and each finding it carries is recorded in the plan's ledger and disclosed under that spec's `## Risk` and in the plan's pull request, which a person still confirms. Never on a spec that merges straight into `base`. False: such a spec stops for a person |
+| `autoRedesign` | True: the first Recurring question in a review cycle is answered with `redesign` without asking, spending a fix round — at the cap, the one round past `fixRounds`. Every later one is asked, and `accept` is always a person's answer. Applies on every route. False: every one is asked |
 | `versionFiles[]` | The lines that carry this repository's version, each `{file, pointer}` (a JSON Pointer, such as `/version` or `/plugins/0/version`) or `{file, pattern}` (a line pattern with one capture group). On a plan branch, each gets the plan's one increase — patch, or minor when `plan.md` says `Version increase: minor` — made by the ship after the whole-plan check, from the base's version then; a spec that changes one stops. Each must name exactly one `MAJOR.MINOR.PATCH` value on the base, and they must agree. Empty: no increase. A one-spec plan is outside this and keeps the repository's own habit, so it can collide |
 
 `examples/config.json` is a complete file.
@@ -694,7 +739,7 @@ for a person, and no approval reaches the last of them.
 
 A pull request stops and waits when: it merges straight into `base` rather than
 into its plan branch; verification failed, or CI failed, proved nothing or never
-started; a finding is still open after the re-check; **a selected reviewer
+started; a finding is still open after the re-check, unless it is carried (below); **a selected reviewer
 produced no usable evidence**; `.github/workflows/**` changed; or the agent that
 wrote the code never confirmed it finished what it was given.
 
@@ -722,6 +767,29 @@ ends with its agent's report — `rounds/<n>/report.json` — and an absent repo
 and one that says `unfinished` are the same answer to the only question that gate
 asks: nobody has said this change is finished.
 
+On a plan branch the readers can answer it instead. Every reader of a round —
+each lens, Codex, the adversary's fresh pass and every re-check — is handed the
+items the round reports left undone, its own candidate's and those of every
+earlier candidate that went unaccounted for, and rules on each:
+`spec-requirement-missing`, `environmental` or `out-of-scope`. An item any
+reader rules missing becomes an ordinary gating finding for the fixer. The
+settled review records the accounting, and `evaluate` drops the approval only
+when every item was ruled environmental or out-of-scope by every reader given
+it, the review is clean, verify passed, and CI passed or is not waited for. A
+missing report, or an unfinished one that names nothing, has nothing to rule on
+and still waits; so does every spec that merges straight into `base`.
+
+Carrying is opt-in: with `carry` on in `.tagteam/config.json`, a spec on a plan
+branch whose open review alone blocks it, and whose fix rounds for this cycle
+are spent or whose open findings are all about the pull request, has a carry
+recorded at `finish` — the same record a person's accept is, bound to the
+candidate and marked as a carry. `evaluate` lifts `review-open` on it only on the
+plan branch, with carrying on, outside a whole-plan fix, past no `blocking`
+finding and no `major` code finding on a spec an unmerged spec depends on, and
+with the rounds spent or nothing open a fixer could reach. Every finding carried
+goes into the plan's ledger. When carrying a spec would take the plan past
+`limits.carried`, nothing is carried and the ship stops and asks.
+
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
 a new commit appears — and every fix round makes one.
 
@@ -729,7 +797,7 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
-| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers that `next` never prints — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers — `next` never prints `accept` or `revisit`, and prints `redesign` only when `autoRedesign` answers the first same-file Recurring question of a cycle with a fix round left — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
 | `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
@@ -738,7 +806,7 @@ a new commit appears — and every fix round makes one.
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge or Squash for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit, or as one squash commit when the person's recorded answer is Squash |
-| `ci-wait.mjs` | Poll checks, return one classified line |
+| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, with `--rerun-at` a failed check completed before the rerun counts as running, and with `--settle-runs 1` a failure waits for the rest of its Actions run to finish |
 | `verify-run.mjs` | Run matching verify commands against a bound candidate |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |

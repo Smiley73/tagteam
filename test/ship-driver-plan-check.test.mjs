@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
-import { root, git, ship, major, stagePlan, onOrigin, pullsOf, trainOf, setTrainRoute, shipThrough,
+import { root, git, ship, write, outputOf, resultOf, arriveAll, findings, major, stagePlan, onOrigin, pullsOf, trainOf, setTrainRoute, shipThrough,
   A_CHANGE, B_CHANGE, UNRELATED, commitToMain, unitDirIn, unitStateOf, checkRoundIn,
   stageMerged as buildMerged, reviewWholePlan, shipUnit, mergeBaseIn, assertEffort, sessionsFor,
   shareBuilds, approveFinish } from "./ship-stage.mjs";
@@ -159,6 +159,31 @@ test("a gating finding becomes a fix unit into plan/<slug> whose document lists 
   const [shipped] = inventory(repo).ships;
   assert.deepEqual([shipped.started, shipped.merged, shipped.status], [2, 2, "in progress"], "a fix unit was counted as a spec, or the plan read as landed");
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a fix unit's fixer is given the unit's document as its spec and the plan's goal", () => {
+  const staged = stageMerged();
+  const { plan, shipDir, env } = staged;
+  reviewWholePlan(staged, ship("plan-check", plan, [], env), [major("b.js")]);
+  const id = "plan-fix-1";
+  const begin = ship("begin", plan, ["--spec", id], env);
+  fs.writeFileSync(path.join(trainOf(shipDir).worktree, "b.js"), "export const twice = (n) => n + n;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "fixed b.js", unfinished: [] });
+  arriveAll(begin);
+  ship("snapshot", plan, ["--spec", id], env);
+  ship("verify", plan, ["--spec", id], env);
+  const panel = ship("panel", plan, ["--spec", id], env);
+  const oid = unitStateOf(shipDir, id).candidateOid;
+  for (const dispatch of panel.json.dispatch) {
+    if (dispatch.agent === "tagteam:codex-runner") write(resultOf(dispatch), findings("codex", oid, [major("b.js")]));
+    else write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+  }
+  arriveAll(panel);
+  assert.equal(ship("collect", plan, ["--spec", id], env).json.review, "open");
+  const [fixer] = ship("fix", plan, ["--spec", id], env).json.dispatch;
+  // By their ends: the driver names the repository as git resolves it.
+  assert.match(fixer.prompt, /^Spec this change implements \(to read, not to work from\): .*\/whole-plan\/units\/plan-fix-1\/spec\.md$/m);
+  assert.match(fixer.prompt, /^The plan's goal \(to read, not to work from\): .*\/\.tagteam\/plans\/demo\/goal\.md$/m);
 });
 
 test("a merge-in tip is checked in full against the base merged in, never reuses the earlier clean result, and its verify failure is a fix unit naming the log", () => {

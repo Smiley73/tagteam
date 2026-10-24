@@ -121,22 +121,25 @@ export function validateJson(schema, value) {
   return errors;
 }
 
-// The configuration version the current plugin writes. Version 10 adds
+// The configuration version the current plugin writes. Version 10 added
 // `planBranch`, whether a plan of two or more specs collects its specs on a
 // branch of its own, and `versionFiles`, the lines that carry the repository's
 // version — both required, and both written explicitly when unused (`false`,
 // `[]`), because no key in this project but one has a fallback in a script: the
 // file is the whole configuration, so a missing key is a hard error rather than a
 // silently-assumed value — which is also why `escalation` and `plan` are written
-// as an explicit `null` when unused rather than omitted. An older configuration
-// is therefore incomplete, so it is reported stale and `/tagteam:configure`
-// writes the current one; from version 9 it carries every value forward and adds
-// the two keys.
+// as an explicit `null` when unused rather than omitted. Version 11 adds `carry`,
+// `autoRedesign`, `limits.carried` and `limits.followUps`, all four required for
+// the same reason: a ship must not start before a person has seen them. An older
+// configuration is therefore incomplete, so it is reported stale and
+// `/tagteam:configure` writes the current one; from version 9 or 10 it carries
+// every value forward and adds the keys that version lacks, each new one at its
+// safe value unless the person answers otherwise.
 //
 // The one exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120
 // when it is missing. It was added to version 10 as an optional key so that the
-// version-10 files already written stay current: requiring it would have meant a
-// version bump, and every existing file reported stale for one number. The rule
+// version-10 files already written stayed current: requiring it would have meant
+// a version bump, and every existing file reported stale for one number. The rule
 // is unchanged for every other key, and `/tagteam:configure` still writes this
 // one.
 //
@@ -146,11 +149,10 @@ export function validateJson(schema, value) {
 // request waited; a spec that merges straight into the base now always waits for
 // a person, and `planBranch` is what lets specs merge without waiting. It stays
 // declared because the root of the schema refuses keys it does not declare, so
-// deleting it would make every version-10 file that carries it invalid, and
-// bumping the version would report every one of them stale for a setting that
+// deleting it would make every file that carries it invalid for a setting that
 // does nothing. `autoMergeNotices` says so out loud instead, and
 // `/tagteam:configure` no longer writes it.
-export const CONFIG_VERSION = 10;
+export const CONFIG_VERSION = 11;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.

@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { listRounds } from "./rounds.mjs";
-import { findingRound } from "../collect-findings.mjs";
+import { findingRound, isPullRequestFinding } from "../collect-findings.mjs";
 import { PLACEHOLDER_EVIDENCE } from "../recheck.mjs";
 
 // Briefs live beside `declined/` in the spec directory, outside every round. A
@@ -271,8 +271,8 @@ export function renderBrief({ spec, round, files, history, signals = [], loose =
 // files not already named, then the pull request, then "no file in particular".
 function arrivedOn(loose, named) {
   const places = loose.files.filter((file) => !named.has(file));
-  if (loose.findings.some((finding) => finding.file != null && !loose.files.includes(finding.file))) places.push("the pull request itself");
-  if (loose.findings.some((finding) => finding.file == null)) places.push("no file in particular");
+  if (loose.findings.some(isPullRequestFinding)) places.push("the pull request itself");
+  if (loose.findings.some((finding) => finding.file == null && !isPullRequestFinding(finding))) places.push("no file in particular");
   if (places.length < 2) return places.join("");
   return `${places.slice(0, -1).join(", ")} and ${places.at(-1)}`;
 }
@@ -309,20 +309,28 @@ function arrivingSentence(loose, named) {
  *   publishing as it is being `next`, because that is where the run goes at the
  *   cap anyway. `accept` is not among them: it answers only while a round is left.
  *
+ * `planBranch`, the branch the spec merges into when that is a plan branch, says
+ * what `accept` does there: it may merge the spec into that branch unattended.
+ *
  * The cap form leaves out the in-budget form's "choosing it when the question
  * comes back after the next re-check": at the cap there is no fix round to get
  * there, and the question is not put twice for one round.
  */
-export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, rewritable = true, atCap = false, loose = null } = {}) {
+export function redesignAsk(signals, { spent, limit, atCollect = false, redesign = true, rewritable = true, atCap = false, loose = null, planBranch = null } = {}) {
   const each = signals.map(({ file, rounds, findings }) =>
     `${file} has drawn a new finding serious enough to stop a merge in ${rounds.length} rounds of this cycle, each time `
     + `about: ${titlesOf(findings)}; every repair has opened the next case, so one more fix round there is likely to do the same.`);
   if (loose) each.push(arrivingSentence(loose, new Set(signals.map((signal) => signal.file))));
   const heading = signals.length > 0 ? "The same place keeps failing." : "New findings keep arriving, round after round, on different files.";
   const opening = `${heading} ${each.join(" ")} ${spent} of ${limit} fix rounds ${spent === 1 ? "is" : "are"} spent`;
-  const disclosed = "with what is still open disclosed in the pull request — it will not merge unattended and finish "
-    + "cannot approve past an open finding, so merging it is theirs to do on GitHub, or a revisit once a reader withdraws "
-    + "what it found";
+  // Publishing as it is: what is open goes into the pull request under Risk.
+  const disclosed = "with what is still open disclosed in the pull request";
+  // What then becomes of a spec no accept carries into a plan branch — every
+  // answer off a plan branch, and publishing at the cap, which records no
+  // accept anywhere: it stops at finish, and a person merges it. The plan-branch
+  // accept, the one answer that may merge the spec unattended, never says this.
+  const byHand = "it will not merge unattended and finish cannot approve past an open finding, so merging it is theirs to do on "
+    + "GitHub, or a revisit once a reader withdraws what it found";
   const stop = "or stop the train (run end).";
   if (atCap) {
     const rewrite = "have a fresh implementer rewrite that area from a brief of everything raised on it so far instead of "
@@ -331,12 +339,20 @@ export function redesignAsk(signals, { spent, limit, atCollect = false, redesign
       + (atCollect ? " — the readers judge their earlier findings against the rewrite and the adversary reads it fresh)" : ")")
       + ". It is this cycle's only rewrite: if the rewrite still fails, the run publishes with what is open disclosed and "
       + "merging it is theirs to do by hand on GitHub";
-    const publish = `publish it as it is now ${disclosed} (run next; spends nothing`
+    const publish = `publish it as it is now ${disclosed} — ${byHand} (run next; spends nothing`
       + (atCollect ? ", and the re-check settles this round first: anything new it raises is put to them again)" : ")");
     return `${opening}, which is every fix round this repository allows. Three ways on: ${rewrite}; ${publish}; ${stop}`;
   }
   const fixAgain = "fix it once more (run next; spends a fix round)";
-  const accept = `publish it as it is ${disclosed} (run accept; spends nothing)`;
+  // On a plan branch an accept may merge the spec into it: unless something open
+  // may not go into the plan branch unresolved, it does, with nobody asked.
+  const accept = planBranch
+    ? `publish it as it is ${disclosed} — it then merges into ${planBranch} at finish `
+      + "with nobody asked, each finding still open entered in the plan's ledger and listed in the plan's pull request, which a "
+      + `person still confirms. That holds unless something open may not go into ${planBranch} unresolved: accept then names it, `
+      + "the spec will not merge unattended, and merging it is theirs to do on GitHub, or a revisit once a reader withdraws what "
+      + "it found (run accept; spends nothing)"
+    : `publish it as it is ${disclosed} — ${byHand} (run accept; spends nothing)`;
   if (!redesign) {
     return `${opening}. This cycle's one rewrite has already been used, so a redesign is not one of the answers. `
       + `Three ways on: ${fixAgain}; ${accept}; ${stop}`;

@@ -6,7 +6,7 @@ see theirs and are not confined to one of them.
 <!-- No lens brief is interpolated into this prompt, and none should be. Being
 unlensed is what this pass is for, so the briefs under prompts/lenses/ and the
 ones a repository writes under .tagteam/lenses/ are both deliberately absent
-here. The only substitutions are CANDIDATE, LENSES, SPEC and DIFF. -->
+here. The only substitutions are CANDIDATE, LENSES, SPEC, DIFF and ITEMS. -->
 
 
 Return only JSON matching the schema you were given. Set `lens` to "codex" and
@@ -37,6 +37,29 @@ The change:
 
 {{DIFF}}
 
+What the agents that wrote this change, or an earlier candidate of it,
+reported leaving undone — each item with an `id`, the round and kind of report
+it came from, and the agent's own `part` and `reason`:
+
+{{ITEMS}}
+
+Rule on every item in its `items` list in `rulings`, against the candidate you
+are reviewing rather than the commit that wrote the report: one
+`{"id", "ruling", "reason"}` per item, the id copied unchanged and the reason
+one sentence.
+
+- `spec-requirement-missing` — the spec requires this, and this candidate
+  still lacks it.
+- `environmental` — the agent could not do or check this where it ran (a
+  sandbox, the full gate, the network), and nothing in the change is wrong
+  because of that.
+- `out-of-scope` — this candidate owes nothing more for it: the spec does not
+  ask for it, another spec owns it, or it has since been done.
+
+An item you rule `spec-requirement-missing` becomes a finding of its own, so do
+not also file one for it. An item you leave unruled keeps the spec waiting for a
+person. When the list is empty, write `rulings` as `[]` — never omit it.
+
 Read the repository around what the diff touches. A diff read on its own hides
 everything about the code it is changing — the callers, the contract that used to
 hold, the helper that already did this.
@@ -63,6 +86,13 @@ is the expected shape. Write `fix` either way — null when you propose nothing,
 never omitted; a findings object missing the key does not validate, and the run
 records this pass as having produced no usable evidence — which is incomplete,
 not clean, and is re-dispatched rather than merged.
+
+Set `scope` on every finding, the same way. `pull-request` when the remedy is a
+change to the pull request's text — what its description says or leaves out.
+`code` otherwise, including a code defect that names no single file: write
+`file` as null and it still goes to a fixer. A finding whose only remedy is
+re-planning — this diff should have been two specs, or the work should have
+been planned differently — is `minor` at most, because no fixer can answer it.
 
 Verify before asserting. If you claim something is never called, look. If you
 claim a case is unhandled, find the handler and confirm it is missing. A

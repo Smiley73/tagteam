@@ -48,13 +48,19 @@ export const WHY = {
   "tip-moved": "the plan branch moved"
 };
 
-// A fix unit's id. Spec ids open with two digits (`spec.schema.json`), so this
-// never collides with one; it is one ref component, and no spec branch is a
-// prefix of `<prefix><slug>/plan-fix-<k>` or the other way round.
+// A fix unit's id, in one of two families: `plan-fix-<k>` for a unit built from
+// the check's own findings or a red plan check, counted against
+// `limits.ciRepairs`, and `plan-followup-<k>` for one built from the plan's
+// ledger, counted against `limits.followUps` — so each budget is read from disk
+// by id alone. Spec ids open with two digits (`spec.schema.json`), so neither
+// collides with one; each is one ref component, and no spec branch is a prefix
+// of `<prefix><slug>/plan-fix-<k>` or the other way round.
 const UNIT_ID = /^plan-fix-([1-9][0-9]*)$/;
-export const isFixUnitId = (id) => UNIT_ID.test(String(id ?? ""));
+const FOLLOW_UP_ID = /^plan-followup-([1-9][0-9]*)$/;
+export const isFollowUpId = (id) => FOLLOW_UP_ID.test(String(id ?? ""));
+export const isFixUnitId = (id) => UNIT_ID.test(String(id ?? "")) || isFollowUpId(id);
 export const unitIdOf = (k) => `plan-fix-${k}`;
-const unitNumber = (id) => Number(UNIT_ID.exec(id)?.[1] ?? 0);
+const numberIn = (family, id) => Number(family.exec(id)?.[1] ?? 0);
 
 export const wholePlanRoot = (shipDir) => path.join(shipDir, WHOLE_PLAN_DIR);
 export const checkDir = (shipDir, n) => path.join(wholePlanRoot(shipDir), String(n));
@@ -75,26 +81,100 @@ export function saveCheck(shipDir, record) {
 }
 
 /**
- * Every fix unit this plan has made, by id, in the order they were made: each
+ * Every `plan-fix` unit this plan has made, by id, in the order they were made: each
  * directory under `units/`, and each id any check record names. The union, so
  * that removing either one refunds nothing — the budget is counted from what is
  * on disk, never from a counter that can drift from it.
  */
-export function fixUnitIds(shipDir, records = listChecks(shipDir).map((entry) => entry.record)) {
+export const fixUnitIds = (shipDir, records) => idsOf(UNIT_ID, shipDir, records);
+
+/** Every follow-up unit, counted the same way as `fixUnitIds` and apart from it. */
+export const followUpIds = (shipDir, records) => idsOf(FOLLOW_UP_ID, shipDir, records);
+
+function idsOf(family, shipDir, records = listChecks(shipDir).map((entry) => entry.record)) {
   const ids = new Set();
   try {
     for (const entry of fs.readdirSync(unitsRoot(shipDir), { withFileTypes: true })) {
-      if (entry.isDirectory() && isFixUnitId(entry.name)) ids.add(entry.name);
+      if (entry.isDirectory() && family.test(entry.name)) ids.add(entry.name);
     }
   } catch {}
   for (const record of records) {
-    for (const id of Array.isArray(record?.units) ? record.units : []) if (isFixUnitId(id)) ids.add(id);
+    for (const id of Array.isArray(record?.units) ? record.units : []) if (family.test(id)) ids.add(id);
   }
-  return [...ids].sort((left, right) => unitNumber(left) - unitNumber(right));
+  return [...ids].sort((left, right) => numberIn(family, left) - numberIn(family, right));
 }
 
+const nextIn = (family, ids) => ids.reduce((top, id) => Math.max(top, numberIn(family, id)), 0) + 1;
+
 /** The id the next fix unit takes: past every one already counted. */
-export const nextUnitId = (ids) => unitIdOf(ids.reduce((top, id) => Math.max(top, unitNumber(id)), 0) + 1);
+export const nextUnitId = (ids) => unitIdOf(nextIn(UNIT_ID, ids));
+export const nextFollowUpId = (ids) => `plan-followup-${nextIn(FOLLOW_UP_ID, ids)}`;
+
+/**
+ * Every fix unit of both families, in the order they were made: as the check
+ * records name them, oldest check first, then any whose directory alone is left.
+ */
+export function unitIds(shipDir, records = listChecks(shipDir).map((entry) => entry.record)) {
+  const named = records.flatMap((record) => (Array.isArray(record?.units) ? record.units : []).filter(isFixUnitId));
+  return [...new Set([...named, ...fixUnitIds(shipDir, records), ...followUpIds(shipDir, records)])];
+}
+
+const SEVERITIES = ["blocking", "major", "minor", "nit"];
+const rank = (entry) => SEVERITIES.indexOf(entry.severity);
+const bySeverityThenId = (left, right) => rank(left) - rank(right) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+
+/**
+ * Ledger entries in the groups follow-up units are made from: entries sharing
+ * any file join one group, transitively, and an entry naming no file is a group
+ * of its own. Each group, and the groups, by severity and then entry id.
+ */
+export function followUpGroups(entries) {
+  let groups = [];
+  for (const entry of entries) {
+    const joined = groups.filter((group) => group.some((other) => other.files.some((file) => entry.files.includes(file))));
+    groups = [...groups.filter((group) => !joined.includes(group)), [entry, ...joined.flat()]];
+  }
+  return groups.map((group) => group.sort(bySeverityThenId)).sort((left, right) => bySeverityThenId(left[0], right[0]));
+}
+
+/**
+ * Where each ledger entry goes from one check, given the check's own `status`
+ * — decided before this is asked, and never changed by it — and the verdicts
+ * its reviewer wrote. A verdict binds by exact id, and an entry with none, or
+ * with more than one, is not re-judged. Only a clean check makes follow-up
+ * units, for its `still-real` code entries, one per group while `limit` allows
+ * past the follow-ups already `made`. Returns each entry's disposition and the
+ * units to make, each with the ids of the entries it is handed.
+ */
+export function ledgerOutcomes({ entries, verdicts, status, made, limit }) {
+  const said = new Map();
+  for (const entry of verdicts) said.set(entry.id, said.has(entry.id) ? null : entry);
+  const judged = (entry) => said.get(entry.id) ?? null;
+  const fixable = status === "clean" ? entries.filter((entry) => judged(entry)?.verdict === "still-real" && entry.scope === "code") : [];
+  const units = [];
+  const ids = [...made];
+  for (const group of followUpGroups(fixable)) {
+    if (ids.length >= limit) break;
+    const id = nextFollowUpId(ids);
+    ids.push(id);
+    units.push({ id, entries: group.map((entry) => entry.id) });
+  }
+  const handed = new Set(units.flatMap((unit) => unit.entries));
+  const outcome = (entry) => {
+    const verdict = judged(entry)?.verdict;
+    if (!verdict) return "not-re-judged";
+    if (verdict !== "still-real") return verdict;
+    if (entry.scope !== "code") return "pull-request";
+    if (status === "clean") return handed.has(entry.id) ? "follow-up" : "spent";
+    return status === "open" ? "after-fix" : "check-stopped";
+  };
+  return {
+    entries: entries.map((entry) => ({
+      id: entry.id, verdict: judged(entry)?.verdict ?? null, evidence: judged(entry)?.evidence ?? null, outcome: outcome(entry)
+    })),
+    units
+  };
+}
 
 const verifyClean = (verify) => verify?.status === "passed" || verify?.status === "not-applicable";
 

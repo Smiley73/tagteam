@@ -170,16 +170,50 @@ The driver walks each spec through: `begin` (branch, dispatch the implementer),
 `panel` (every lens plus Codex), `collect`, then `fix` and back to `snapshot`
 when something blocking or major is open and a fix round is left, `recheck`
 (the adversary's fresh pass and each reader's re-check of what it raised),
-`settle`, `publish`, `repair` when CI is red and a repair is left, and `finish`.
+`settle`, `publish`, `checks` while the pull request's checks are still running,
+`repair` when CI is red and a repair is left, and `finish`.
 A fixer that declines every finding and changes nothing makes no round and
 skips `verify`, but not `recheck`: the lenses that raised what it declined read
 its reasons and either withdraw the finding or keep it open.
-A finding about the pull request itself — one naming no file, or naming the
-pull request body — never reaches a fixer, which could only decline it. `fix`
+
+After every fixer that was handed findings, `settle` prints a table of them: one
+row per finding, with its severity, its file, a short title, what the fixer said
+it did, whether the re-check found it addressed, and a recommendation the driver
+works out. An addressed row has none. One that is not gets `re-plan`, `needs a
+person`, `carry` or `accept`, and the rows not addressed are listed again under
+the table. A `settle` prints one table for each fixer sent since the one before
+it, oldest first, so a fixer whose commit went to the whole panel is tabled at
+the settle after that panel's fixer. Relay each table as printed. Its
+recommendations are advice for the person; you never run `accept` or anything
+else on their strength. A CI repair and a redesign are handed no findings and
+get no table.
+
+A fixer may answer that the right repair for a finding would go against the
+plan's goal, because the spec conflicts with it there. That answer stops the
+spec, and no further fixer is sent for it. When the fixer changed nothing,
+`snapshot` prints the table at once — every row not addressed, every
+recommendation `re-plan` — with how many fix rounds were spent, which are not
+given back, and `next` is `publish`. When it changed the code anyway, the commit
+is reviewed like any other, and from then on `fix` sends the spec on towards
+`publish` instead of to a fixer. Either way it stops at `finish`; see *Merge or
+stop*.
+
+A finding about the pull request itself — one its reviewer scoped
+`pull-request`, or one naming the pull request body whatever its scope — never
+reaches a fixer, which could only decline it. A `code` finding that names no
+single file is a fixer's like any other. `fix`
 and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
 that it says what they ask for; the readers that raised them judge that body at
 the next re-check, before it is published, and `publish` sends it. When nothing
 else is open, no fix round is spent on them.
+
+With `carry` on in `.tagteam/config.json` — it is off unless the owner turns it
+on — a spec on a plan branch does not wait for a person merely because findings
+are still open, once its fix rounds for this cycle are spent, or once the
+readers have judged the body and everything still open is about the pull
+request. When everything open may be carried, the `say` of `fix` or `settle`
+says it will be carried at `finish` instead of saying a person decides; relay
+it and run `next`. See *Merge or stop*.
 
 On a plan branch, `begin` on a spec that has not started first asks whether the
 base still merges cleanly into this plan's branch. When it does, nothing happens
@@ -209,12 +243,14 @@ person can do is set the line back in the worktree, keeping the rest of the
 change, and run `snapshot` again, or stop the train. A dependency added to the
 same file is not a version change and does not stop.
 
-You do not choose the route; `next` does. Three steps `next` never prints,
-because only a person decides them: `revisit`, which looks at a spec that
-stopped for a person again — see *Looking again* below — and `redesign` and
-`accept`, the answers to the *Recurring* question that are not "fix it again"
-or "publish as it is" — see *After `collect` and `settle`* below. What is yours
-at each point:
+You do not choose the route; `next` does. Three steps are a person's to
+decide: `revisit`, which looks at a spec that stopped for a person again — see
+*Looking again* below — and `redesign` and `accept`, the answers to the
+*Recurring* question that are not "fix it again" or "publish as it is" — see
+*After `collect` and `settle`* below. `next` never prints `revisit` or
+`accept`. It prints `redesign` in one case only: with `autoRedesign` on, the
+first time in a cycle that the same file keeps failing and a fix round is left.
+What is yours at each point:
 
 - **After `begin`, `fix` and `repair`**: say the announcement in `say` — what is
   starting, which round of how many, and at what model and effort. Say it every
@@ -243,6 +279,14 @@ at each point:
   `ask` says all of what follows; do not paraphrase the commands away. It comes
   in three forms.
 
+  With `autoRedesign` on, the first time in a cycle that the same file keeps
+  failing with a fix round left, there is no `ask`: `next` is the `redesign`
+  command, and `say` says the question was answered `redesign` automatically
+  because the setting is on, and that a person is asked if the rewrite does not
+  settle it. Relay that line and the *Recurring:* lines, then run `next`. Every
+  other form below still comes as an `ask`. That includes the loose signal on
+  its own, the question at the cap, and any question after the cycle's rewrite.
+
   *A fix round is still left* — four answers. **Fix it once more** is `next`.
   **Redesign** is
 
@@ -261,15 +305,20 @@ at each point:
 
   which spends nothing and publishes the change as it is, with what is open
   disclosed — it will not merge unattended, `finish` cannot approve past an open
-  finding, and merging it is the person's to do on GitHub. **Stop the train**
-  is `end`.
+  finding, and merging it is the person's to do on GitHub. On a plan branch,
+  when nothing accepted is blocking and no major finding in the code sits on a
+  spec that an unmerged spec depends on, the accept instead lets `finish` merge
+  it into the plan branch, with each open finding entered in the plan's ledger
+  and listed in the plan's pull request; the `say` of `accept` or `settle` says
+  which it is, and names the finding that kept it from merging when it does not.
+  **Stop the train** is `end`.
 
   *A fix round is left, and this cycle has had its rewrite* — three answers:
   fix it once more (`next`), accept, and stop. A cycle gets one rewrite, whether
   it was chosen with rounds left or at the cap and whether or not it changed
   anything, so redesign is not offered, and `redesign` run anyway is refused and
   spends nothing. The same three answers come when the findings that keep
-  arriving are all about the pull request or name no file: there is no file to
+  arriving are all scoped to the pull request or name no file: there is no file to
   rewrite, and the `ask` says so.
 
   *Every fix round is spent* — three answers, asked before anything publishes,
@@ -311,13 +360,16 @@ at each point:
   and, when the spent round was the one past the limit, that it is gone. Relay it
   and run `next`.
 - **Never dispatch a fixer of your own, and never run `redesign` or `accept`
-  on your own judgement.** A commit that reaches `snapshot` without `fix` having
-  dispatched it is committed and counted as a fix round all the same —
+  on your own judgement.** Run `redesign` only when a person answers with it or
+  `next` prints it; never run `accept` without the person. A commit that
+  reaches `snapshot` without `fix` having dispatched it is committed and
+  counted as a fix round all the same —
   `snapshot` says so — but it was never announced, and it is not the way round
   a spent budget. There are two ways round one, and both are a person's: raising
   `limits.fixRounds`, or answering the question at the cap with `redesign`, which
   buys one round past it once per cycle. `redesign` and `accept` are answers to a
-  question, and only the person answers it.
+  question, and only the person answers it, except where the setting answers
+  `redesign` and `next` says so.
 - **After any dispatch of `tagteam:codex-runner`**: read the one line it
   returned, or the line its finished notice carries. If it
   contains *how it routed could not be confirmed*, take *When Codex could not
@@ -341,6 +393,30 @@ at each point:
   Nothing in between: its own completion notice is what wakes you. When it
   says `Waiting up to …s for checks to start`, relay that line. A spec's repair
   and its revisit both come back through `publish`, and wait the same way.
+
+  A failure is not taken at its first word. A verify command that fails is run
+  once more on the same commit, and so is the verify the landing check runs at
+  `finish`; failed checks on the pull request that GitHub Actions ran are rerun
+  once before `repair` is offered. A failure that fails again goes on as any
+  failure does. A pass that came from running something again is written into
+  the pull request's `## Risk` by the driver itself, so there is nothing for you
+  to add about it.
+
+- **When `next` is `checks`**: the checks were still running when `ciWaitSec`
+  ran out. Nothing is recorded about them yet, and `say` gives how long they have
+  been waited for in all. Relay it and run `next` the way you ran `publish` — in
+  the background, acting on its completion notice:
+
+  ```bash
+  node "$P/scripts/ship.mjs" checks --plan "$D" --spec <id>
+  ```
+
+  It waits again and either moves on or names itself once more. Ending the wait
+  is the person's call, never yours: when they say to stop waiting, run `finish`
+  for the spec. It records that the checks proved nothing, with how long they
+  were waited for, and asks the person as for any checks that proved nothing —
+  unless a check had already failed, which it records as a failure, as for any
+  check that failed.
 
 - **After `finish`**: see *Merge or stop* below.
 
@@ -376,10 +452,26 @@ Two things do carry over from the run, because they are about the software:
 
 - **A finding still open goes under `## Risk`**, said as what goes wrong and for
   whom, in the same plain English you use for a person. `settle`'s `say` gives
-  you each one. A finding the person accepted — they answered the *Recurring*
+  you each one. On a plan branch the driver writes these lines itself, one per
+  finding — each saying whether the person's accept or a carry merges the spec, and
+  otherwise the fixer table's recommendation for it — so do not write them a
+  second time. A finding the person accepted — they answered the *Recurring*
   question with `accept` — goes there the same way: it is still open, and the
   body is where it is disclosed. So does one the person chose to publish with at
   the cap, answering that question with "publish as it is".
+- **Work an agent left undone that every reader ruled environmental or
+  out-of-scope goes there too**, said as what was not done or not checked and
+  why that is no fault in the change — a check the agent could not run where it
+  ran, a part another spec owns. `settle`'s `say` gives each item with its
+  ruling, and on a plan branch these are what let the spec merge without a
+  person, so the body is the one place a reader learns of them.
+- **Every row the last fixer table left not addressed goes there too**, on every
+  route — a plan branch, straight to the base, a whole-plan fix — said as what
+  goes wrong and for whom, with its recommendation in words: that it needs a
+  person, that the plan needs re-planning, or that it could be carried or
+  accepted as it is. `publish` lists those rows again in `notAddressed` — less
+  any the driver's own lines already say, recommendation included; when the
+  body you sent leaves one out, add it and run the same `publish` again.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
   to let it try again. When the area was rewritten at the cap and the rewrite
@@ -387,6 +479,14 @@ Two things do carry over from the run, because they are about the software:
   and merging is the person's to do by hand.
 
 `## Risk` says "nothing known" when there is nothing, rather than being dropped.
+
+The body `publish` sends is yours plus lines the driver writes under `## Risk`
+itself — on a plan branch each finding still open, which merging carries into
+the plan branch, and a failure that passed when it was run again on the same
+commit — and it sends the body again on its own when such a line comes after
+the pull request opened. Never repeat a line the driver writes. Those lines replace a "nothing known". When you write the body again
+from the one on GitHub, keep them; the driver adds back any that are missing,
+and nothing merges while one is.
 
 When the pull request already exists — after a CI repair, or after a revisit —
 `publish` replaces its body with what you give it. After a revisit, start from
@@ -408,7 +508,8 @@ own configuration and invoked this command, and a `ready` verdict is the
 condition they attached. Stopping to ask anyway is not the safe choice, it is a
 broken train: the owner walks away from an unattended run and comes back to a
 queue of pull requests each waiting for a keystroke. When a person should
-decide, the gates say so — that is what they are for.
+decide, the gates say so — that is what they are for. A spec carried into the
+plan branch with findings open, below, merges on that same `ready` verdict.
 
 **Onto the base, only a person's approval or Merge authorizes a merge** — one
 they gave for that change, in this session. A spec that merges straight into the
@@ -457,6 +558,15 @@ out to deliver, why it stopped, and one sentence per open finding on what goes
 wrong and for whom — see *Asking* in the skill. Then ask one question, with the
 answers `ask` offers.
 
+On a plan branch an agent's unfinished account does not stop the spec by
+itself. Every reader rules on each item it is handed, and when every one is
+ruled environmental or out-of-scope — with the review clean, verify passed and
+the checks passed or not waited for — `evaluate` drops that approval and the
+spec merges into the plan branch like any other. An item a reader rules missing
+is a finding the fixer gets. A round that wrote no report, an item left
+unruled, and anything merging straight into the base still stop, and
+`unaccounted` then shows each item's ruling where it has one.
+
 The two halves take different answers. A person's approval is what `evaluate`
 honours for `approvals` — merging straight into the base, a workflow change, a
 round nobody accounted for, nothing executable having run, inconclusive checks,
@@ -489,13 +599,37 @@ when the cycle's rewrite — at the cap or before it — was tried and still lef
 something open: the fix rounds are spent, what is open is disclosed, and the
 merge is theirs to make by hand.
 
+When a fixer answered that a repair would go against the goal, `ask` leads with
+that: which findings, where the spec and the goal disagree, the recommendation
+to re-plan, and how many fix rounds were spent — they are not given back. Say
+that the spec stopped because it and the goal disagree, not because a repair
+failed. More fix rounds do not settle it: the person re-plans, or merges by hand.
+
 When the person accepted it — they answered the *Recurring* question with
-`accept` — `ask` says so first: the spec stops here by their own decision, with
+`accept` — on a plan branch where the accept let it merge, `finish` merges it
+into the plan branch like any ready spec, and its `say` carries one line saying
+how many open findings went into the plan's ledger with it: relay it.
+Otherwise `ask` says so first: the spec stops here by their own decision, with
 the open finding disclosed in the pull request, and it waits to be merged by
 hand on GitHub. Do not offer approval and do not treat the stop as a failure;
 say what is open, in behaviour terms, and that a `revisit` is the door back
 should a reader later withdraw it. `begin` records a merge made by hand and
 moves on.
+
+With `carry` on, a spec on a plan branch whose open review is the only thing
+blocking it is carried: when its fix rounds for this cycle are spent, or when
+everything open is about the pull request, `finish` records the carry, merges
+it into the plan branch like any ready spec, and enters each open finding in
+the plan's ledger and under Risk in the spec's pull request and the plan's. Its
+`say` carries one line saying how many it carried and how many of
+`limits.carried` the plan has used: relay it. Carrying is never used for a
+`blocking` finding, a whole-plan fix, a `major` finding in the code of a spec
+that an unmerged spec depends on, or anything that merges straight into the
+base; those stop as above. When carrying the spec would take the plan past
+`limits.carried`, nothing is carried and `ask` names the cap and how many are
+carried so far. The answers are raising `limits.carried` and running `finish`
+again, merging it by hand on GitHub — what is open then enters the ledger as
+merged by hand — leaving it open, or stopping the train.
 
 ## Looking again
 
@@ -555,6 +689,16 @@ what verify found, and at what model and effort the reviewer runs.
   change is empty — returns `ask`. Say what `say` says — what failed, and where
   the record is — then ask it. The work stays on the plan's branch.
 
+When the plan's ledger has entries, the reviewer's prompt also names the ledger
+and where to write a verdict on each entry. Nothing else changes for you: the
+same one dispatch, the same arrival. The verdicts never change which of the
+three ways the check ends. A check that is clean on its own may also make
+*follow-up* units, one per group of entries still wrong in the code, up to
+`limits.followUps`; `say` names each one and the budget, and `next` is `begin`
+for the first. A follow-up ships exactly as a fix unit does, under
+`$S/whole-plan/units/<id>/`, and never carries. The `plan-collect` after any fix
+unit or follow-up merges prints its table, as after a fixer: relay it as it is.
+
 A spec or a fix unit waiting for a person holds the check back: its `next` is
 `end`, as it always was, and the check runs once it is merged. Running
 `plan-check` again on a tip whose check is decided dispatches nothing and prints
@@ -581,11 +725,21 @@ the same shape as a spec's — *The pull request body* above — but for the pla
 a whole: what is different for the person using the software once the whole plan
 is in. `body.plan` is the plan's deliverables; read it for the summary. Under
 `## Risk` carry over what each spec's own body disclosed — `body.lands` names
-each one's `pr-body.md` — above all a finding a person accepted open, or one
-disclosed when a fix budget ran out; and say each budget in `body.spent` that ran
-out, with the setting a person would raise. `## Risk` says "nothing known" when
+each one's `pr-body.md` — above all one disclosed when a fix budget ran out; and
+say each budget in `body.spent` that ran out, with the setting a person would
+raise. The plan's ledger — every finding a spec carried into the plan branch
+open, grouped by spec, and every failure that passed when it was run again —
+the ship adds under `## Risk` itself, as `body.ledger.riskLines` says when there
+is any: do not write those lines a second time. `body.ledger.entries` says where
+each entry ended up: for every one whose `endedUp` says it is still unresolved,
+add under `## Risk` what it means for the person using the software — what
+still goes wrong, and when — and why it was not fixed. `## Risk` says "nothing known" when
 there is nothing. Then run `next`. A `--title "<title>"` of your own is taken the
 same way as for `publish`; without one, the plan document's heading is used.
+When a later check changes what the body answers for — where a ledger entry
+ended up, or a budget in `body.spent` — `plan-land` returns `body` again, and
+`say` names what changed: write the file again from it, the same way, and run
+`next`.
 
 **What it does on the way**, each step said in `say` — relay it plainly:
 

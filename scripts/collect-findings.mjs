@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { bindRulings, combineRulings, fillRulings, readItems } from "./lib/rulings.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 const GATING = new Set(["blocking", "major"]);
@@ -64,6 +65,25 @@ function parseArgs(argv) {
 export const findingId = (round, lens, index) => `${round}.${lens}.${index + 1}`;
 
 /**
+ * An item some reader at `round` ruled `spec-requirement-missing`, as the
+ * ordinary gating finding it becomes: owned by the first of those readers, so
+ * that reader re-checks it like any other finding it raised.
+ *
+ * Its id is qualified by that round, so `findingRound` reads it the way it reads
+ * any other; determined by the round and the item, so a re-run, or a settlement
+ * of the same round, names the same finding again; and never a lens's own,
+ * because an item id holds a `:` and a lens name cannot.
+ */
+const itemFindingId = (round, itemId) => `${round}.${itemId}`;
+export const itemFinding = (round, item, { reader, reason }) => ({
+  severity: "major", scope: "code", file: null, line: null, title: item.part, detail: reason, fix: null,
+  id: itemFindingId(round, item.id), lens: reader
+});
+
+/** Whether the finding `id` is the one `itemFinding` mints for `itemId`, at any round. */
+export const isItemFinding = (id, itemId) => id === itemFindingId(findingRound(id), itemId);
+
+/**
  * The round an id was minted at, or null for an id that carries none.
  *
  * The inverse of `findingId`, and here rather than beside its one caller for the
@@ -83,10 +103,10 @@ export const findingRound = (id) => {
 export const PULL_REQUEST_FILES = new Set(["pull-request.md", "pr-body.md"]);
 
 /**
- * Whether a finding is about the pull request rather than about the code: it
- * names one of the pull request files, or it names no file at all — the shape
- * `findings.schema.json` reserves for a finding about the change as a whole,
- * which is where a reader puts "the pull request does not say".
+ * Whether a finding is about the pull request rather than about the code: the
+ * reviewer gave it `scope: "pull-request"`, or it names one of the pull request
+ * files whatever its scope says. A `code` finding that names no single file is
+ * for a fixer.
  *
  * A fixer works beneath the worktree and cannot reach either file, and a finding
  * it cannot reach is one it can only decline. Handing it one spent a fix round
@@ -96,8 +116,14 @@ export const PULL_REQUEST_FILES = new Set(["pull-request.md", "pr-body.md"]);
  * raised it, and `ship.mjs` routes it there instead. Exported so the driver and
  * the re-check agree on the rule.
  */
-export const isPullRequestFinding = (finding) =>
-  finding?.file == null || PULL_REQUEST_FILES.has(path.basename(String(finding.file)));
+export const isPullRequestFinding = (finding) => {
+  if (PULL_REQUEST_FILES.has(path.basename(String(finding?.file)))) return true;
+  // Only derived records written before findings carried a `scope` reach this:
+  // a reviewer's own output without one fails the schema. They are routed by
+  // the rule they were written under, where no file meant the pull request.
+  if (finding?.scope === undefined) return finding?.file == null;
+  return finding.scope === "pull-request";
+};
 
 /**
  * `--round` as an integer: a bare decimal of at least 1. `<n>` is substituted by
@@ -129,21 +155,30 @@ export function roundDirectoryFor(dir, round, option = "--dir") {
   return roundDir;
 }
 
-export function collect({ dir, candidate, expect, schemaPath, round }) {
+export function collect({ dir, candidate, expect, schemaPath, round, items = null }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   const present = [];
   const missing = [];
   const findings = [];
+  const filled = [];
+  const given = items?.items ?? [];
+  const ids = new Set(given.map((item) => item.id));
+  const readers = [];
 
   for (const lens of expect) {
     const file = path.join(path.resolve(dir), `${lens}.json`);
     let parsed;
+    let wasFilled;
     try {
-      parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      ({ parsed, filled: wasFilled } = fillRulings(JSON.parse(fs.readFileSync(file, "utf8"))));
     } catch (error) {
       missing.push({ lens, file, reason: fs.existsSync(file) ? `unreadable (${error.message})` : "no file was written" });
       continue;
     }
+    // A file written before findings carried a `scope` fails here, and is
+    // re-dispatched once as any missing lens is. One an earlier collect of this
+    // round already sealed cannot be rewritten, so that round is carried forward
+    // incomplete, which stops for a person.
     const errors = validateJson(schema, parsed);
     if (errors.length > 0) {
       missing.push({ lens, file, reason: `does not match the findings schema: ${errors.slice(0, 3).join("; ")}` });
@@ -161,9 +196,17 @@ export function collect({ dir, candidate, expect, schemaPath, round }) {
       continue;
     }
     present.push({ lens, summary: parsed.summary });
+    if (wasFilled) filled.push({ lens, field: "rulings" });
+    readers.push({ reader: lens, bound: bindRulings(parsed.rulings, ids) });
     parsed.findings.forEach((finding, index) => {
       findings.push({ ...finding, id: findingId(round, lens, index), lens, file: finding.file, source: file });
     });
+  }
+
+  // A lens that ruled an item missing is not also asked to file a finding for
+  // it: the item becomes one here, once, whatever the other lenses said.
+  for (const item of combineRulings(given, readers)) {
+    if (item.missing.length > 0) findings.push(itemFinding(round, item, item.missing[0]));
   }
 
   findings.sort((left, right) =>
@@ -176,7 +219,16 @@ export function collect({ dir, candidate, expect, schemaPath, round }) {
     findings.filter((finding) => finding.severity === severity).length
   ]));
   const status = missing.length > 0 ? "incomplete" : open.length > 0 ? "open" : "clean";
-  return { status, round, candidate, expected: expect, present, missing, counts, open, findings };
+  return {
+    status, round, candidate, expected: expect, present, missing, counts, open, findings,
+    ...(filled.length > 0 ? { filled } : {}),
+    // What each lens ruled on each item it was given, for the settlement of this
+    // same candidate to count beside its own readers.
+    ...(items ? {
+      items: given,
+      rulings: readers.flatMap(({ reader, bound }) => [...bound].map(([id, said]) => ({ lens: reader, id, ...said })))
+    } : {})
+  };
 }
 
 function summaryLines(result) {
@@ -189,6 +241,7 @@ function summaryLines(result) {
   for (const gap of result.missing) {
     lines.push(`  MISSING  ${gap.lens}: ${gap.reason}`);
   }
+  for (const { lens } of result.filled ?? []) lines.push(`  ${lens} wrote no rulings; read as ruling on nothing`);
   for (const finding of result.findings) {
     const where = finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ""}` : "(whole change)";
     lines.push(`  ${finding.id.padEnd(22)} ${finding.severity.padEnd(8)} ${where}  ${finding.title}`);
@@ -232,6 +285,9 @@ export function writeOpenViews(dir, { candidate, open, list, perLens }) {
   const perLensDir = path.join(target, perLens);
   fs.mkdirSync(perLensDir, { recursive: true, mode: 0o700 });
   const withEvidence = (entry, finding) => (finding.evidence ? { ...entry, evidence: finding.evidence } : entry);
+  // Absent rather than null on a finding recorded before `scope` existed, so
+  // `isPullRequestFinding` still routes it by the rule it was written under.
+  const withScope = (finding) => (finding.scope === undefined ? {} : { scope: finding.scope });
   const written = [];
   for (const lens of [...new Set(open.map((finding) => finding.lens))]) {
     const file = path.join(perLensDir, `${lens}.json`);
@@ -244,6 +300,7 @@ export function writeOpenViews(dir, { candidate, open, list, perLens }) {
           {
             id: finding.id,
             severity: finding.severity,
+            ...withScope(finding),
             file: finding.file,
             line: finding.line,
             title: finding.title,
@@ -267,6 +324,7 @@ export function writeOpenViews(dir, { candidate, open, list, perLens }) {
         id: finding.id,
         lens: finding.lens,
         severity: finding.severity,
+        ...withScope(finding),
         file: finding.file,
         line: finding.line,
         title: finding.title,
@@ -365,7 +423,8 @@ async function main() {
     roundDirectoryFor(options.dir, round);
     const schemaPath = options.schema
       ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "findings.schema.json");
-    const result = collect({ ...options, round, schemaPath });
+    const items = options.items ? readItems(path.resolve(options.items), options.candidate) : null;
+    const result = collect({ ...options, round, schemaPath, items });
     const { perLens, list } = writeDerived(options.dir, options.out, result);
     sealConsumedFindings(options.dir, result);
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);

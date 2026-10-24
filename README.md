@@ -198,7 +198,7 @@ flowchart TD
     recheck --> settle
     settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
     settle -->|"nothing open, or the fix rounds this repository allows are spent —<br>with the person's answer to publish as it is, or with this cycle's rewrite used"| publish
-    settle -. "the same file keeps failing, or new findings keep arriving on different files,<br>round after round — one question, and a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, or with no file to rewrite, redesign is not offered" .-> redesign
+    settle -. "the same file keeps failing, or new findings keep arriving on different files,<br>round after round — one question, and a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand — or, on a plan branch, into it), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, or with no file to rewrite, redesign is not offered" .-> redesign
     open -. "the same question, asked here too, and asked once per round — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
     redesign --> snapshot
     publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
@@ -236,8 +236,11 @@ run stops to ask, and when both do it asks once, naming each file once. While a
 fix round is still left there are four answers: fix it once more; redesign — a
 fresh implementer rewrites the files from a brief of everything raised on them
 this cycle, spending a fix round, and the rewrite starts a fresh count for each
-file it changes; accept — publish it as it is with what is open disclosed, to be
-merged by hand; or stop. A redesign covers the files both patterns name; when
+file it changes; accept — publish it as it is with what is open disclosed, which
+on a plan branch merges the spec into the plan branch with nobody asked when
+everything open may be carried there (what is open is then listed in the plan's
+pull request), and otherwise leaves it waiting to be merged by hand; or stop. A
+redesign covers the files both patterns name; when
 the findings are only about the pull request or name no file, there is nothing
 to rewrite, and redesign is not offered.
 
@@ -255,6 +258,18 @@ disclosed without asking, and says so. A rewrite at the cap that still fails is
 published the same way, for a person to merge by hand. A CI repair starts a new
 cycle, and the new cycle gets a rewrite of its own.
 
+After every fixer you see a table of what it was handed: each finding's
+severity, file and title, what the fixer said it did, whether the re-check found
+it addressed, and a recommendation worked out by code rather than by a model —
+re-plan, needs a person, carry, or accept. Whatever is not addressed in a spec's
+last table is described under Risk in its pull request.
+
+The fixer reads the spec and the plan's goal as well as the findings, and can
+answer that the right repair would go against the goal because the spec
+conflicts with it. That stops the spec at once: no further fixer is sent, the
+table recommends re-planning, and the stop says how many fix rounds were spent,
+which are not given back.
+
 Each job thinks as hard as its work needs: the implementer, the fixer and the
 adversary at high effort by default, lens reviewers at medium, and re-checks —
 which only have to say whether one fix landed — at low. Every one of those is a
@@ -265,7 +280,18 @@ Right after a pull request opens GitHub shows no checks on it yet, so when the
 branch has workflows that run on pull requests, `publish` first waits up to
 `ciStartWaitSec` — two minutes unless you set it, 0 to not wait — for checks to
 appear, and stops for you if none do. A repository with no such workflows gets
-no extra wait.
+no extra wait. Checks still running when `ciWaitSec` runs out are waited on
+rather than given up on, and the run says how long they have been waited for;
+telling it to finish the spec is how you end the wait, and the spec then stops
+for you as for checks that proved nothing — or, when a check had already
+failed, as for checks that failed.
+
+A single failure does not stop a spec on its own. A verify command that fails is
+run once more on the same commit, and so is the verify run against a base that
+moved; failed GitHub Actions checks are rerun once before a repair is offered.
+What fails again stops or goes to repair as before. What passes the second time
+is said under Risk in the spec's pull request, and the spec does not merge until
+the pull request says it.
 
 Where a spec merges decides whether it waits for you. A spec that merges
 straight into the base — a plan of one spec, or any plan with `planBranch` off —
@@ -277,6 +303,26 @@ change. On either route, a pull request also stops when verification failed or
 CI proved nothing or never started, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
 wrote it never confirmed it finished what it was given.
+
+On a plan branch that last stop can clear without you. Every reader of the
+change rules on each thing the agent said it left undone: something the spec
+still needs, something the agent could not do where it ran, or something this
+change does not owe. One the readers say the spec still needs goes back for a
+fix like any other finding. When all of them are the other two kinds, and the
+review, verify and checks are clean, the spec merges into the plan branch and
+its pull request names what was left under Risk. A round with no report at all
+still waits, and so does everything that merges straight into the base.
+
+An open finding can stop being a stop on a plan branch too, if you turn
+carrying on (`carry` in `.tagteam/config.json`; it is off by default). Then a
+spec whose fix rounds have run out, or whose only open findings are about the
+pull request itself, merges into the plan branch anyway: each open finding goes
+into the plan's ledger and under Risk in the spec's pull request and in the
+plan's, where you judge it. Carrying is never used for a blocking finding, for
+a whole-plan fix, for a major finding in the code of a spec that another spec
+still to merge depends on, or for anything that goes straight to the base. When
+carrying one more spec would take the plan past `limits.carried`, the run stops
+and asks you instead.
 
 The missing evidence matters more than it sounds: an absent or malformed findings
 file yields an empty finding set, and an empty finding set otherwise reads as a
@@ -331,7 +377,14 @@ the wait for your approval moves to the plan's own pull request:
   branch is never rebased.
 - After the last spec, the whole plan is checked as one change: every verify
   command, and one reviewer reading how the specs fit together. What it finds is
-  fixed as one more small pull request into the plan's branch.
+  fixed as one more small pull request into the plan's branch. The same reviewer
+  also looks again at every finding in the plan's ledger, the ones specs merged
+  with still open, and says of each whether it is fixed, still wrong in the
+  code, or needs you. When the check is otherwise clean, findings still wrong
+  in the code become follow-up pull requests into the plan's branch, findings
+  that touch the same files sharing one, up to `limits.followUps`. Everything
+  else is listed in the plan's own pull request with where it ended up. None of
+  this changes whether the check is clean or whether Merge is offered.
 - Then the plan reaches the base through one final pull request, merged with a
   merge commit at exactly the commit that was checked, so each spec keeps its own
   commit in the base's history. **A person confirms that merge every time**, and
@@ -496,8 +549,9 @@ The diagrams in this file are Mermaid source. GitHub renders them, and changing
 one is a text edit here, with no image files to regenerate.
 
 A repository that calibrates its own lenses needs plugin 0.8.2 or newer
-**everywhere it is run**, one configured at version 9 needs 0.9.0 or newer, and
-one configured at version 10 needs 0.10.6 or newer.
+**everywhere it is run**, one configured at version 9 needs 0.9.0 or newer, one
+configured at version 10 needs 0.10.6 or newer, and one configured at version 11
+needs 0.13.0 or newer.
 Commit a brief and the roster entry that names it in the same commit, and
 refresh the plugin below.
 

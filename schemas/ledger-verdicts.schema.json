@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The whole-plan reviewer's verdict on every entry of the plan's ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate", "verdicts"],
+  "properties": {
+    "candidate": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$",
+      "description": "The plan's tip these verdicts were formed against: the commit the whole-plan check was given."
+    },
+    "verdicts": {
+      "type": "array",
+      "description": "Exactly one entry per ledger entry handed over. An entry with no verdict, or with more than one, is not re-judged.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "evidence"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The ledger entry's id, copied unchanged from the ledger."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["resolved", "still-real", "needs-person"],
+            "description": "resolved: the tip no longer has the problem. still-real: the problem is present, and a change in this plan's code can fix it. needs-person: the problem is present, but only a person or a re-plan settles it."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What in the tip settles it: the file and what it now does, or what is still wrong and why no code change answers it."
+          }
+        }
+      }
+    }
+  }
+}

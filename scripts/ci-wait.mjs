@@ -7,9 +7,23 @@
 //
 // Two classification rules are easy to get wrong by eye and are therefore in
 // code (lib/ci-state.mjs): a cancelled check is never passing, and an all-skipped
-// run is not-run rather than passed. Still pending at the deadline is also
-// not-run — which does not fail the merge, but does mean nothing was proven, so
-// the gate asks a person.
+// run is not-run rather than passed. Still pending at the deadline keeps the
+// status not-run, so a caller that reads only the status — the plan pull
+// request's wait, which waits again for a not-run — sees what it always saw; the
+// result also carries `stillRunning: true`, which a spec's wait reads as "keep
+// waiting" rather than as a result.
+//
+// `--rerun-at` is the moment failed checks were asked to run again. Right after
+// that request `gh pr checks` can still list the failed row the rerun replaces,
+// so until the wait ends a failed row completed before that moment counts as
+// still running rather than as the rerun's result.
+//
+// `--settle-runs 1` is for a wait whose failure is about to be rerun. GitHub
+// reruns the failed jobs of a workflow run only once the whole run has
+// completed, and a fast job can fail while a slow one in the same run is still
+// going; asked then, the rerun is refused. So a failure is not the answer while
+// a row of the same Actions run as a failed row is still running. A failed row
+// outside Actions cannot be rerun at all, and then nothing is held back.
 //
 // The third non-result is not-started, and only the start wait gives it. Right
 // after a push `gh pr checks` has no rows yet, and on its own that classifies as
@@ -31,7 +45,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { classifyChecks } from "./lib/ci-state.mjs";
+import { classifyChecks, isFailed, isRunning, runOf } from "./lib/ci-state.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
 const POLL_MS = 20_000;
@@ -50,6 +64,13 @@ function parseArgs(argv) {
   }
   options.waitSec = Number(options.waitSec);
   options.startWaitSec = Number(options.startWaitSec);
+  if (![undefined, "0", "1"].includes(options.settleRuns)) throw new Error("--settle-runs must be 0 or 1");
+  options.settleRuns = options.settleRuns === "1";
+  if (options.rerunAt !== undefined) {
+    const at = Date.parse(options.rerunAt);
+    if (!Number.isFinite(at)) throw new Error("--rerun-at must be a date");
+    options.rerunAt = at;
+  }
   if (!options.pr) throw new Error("--pr is required");
   if (!options.out) throw new Error("--out is required");
   if (!Number.isFinite(options.waitSec) || options.waitSec < 0) throw new Error("--wait-sec must be a non-negative number");
@@ -77,8 +98,22 @@ function readChecks(repo, pr, { timeoutMs } = {}) {
   }
 }
 
+// The rows as the wait judges them: a failed row that completed before
+// `rerunAt` is the run a rerun replaces, not its result.
+const pendingRerun = (rows, rerunAt) => (rerunAt === null || !Array.isArray(rows) ? rows : rows.map((row) =>
+  isFailed(row) && Date.parse(row.completedAt) < rerunAt ? { ...row, state: "PENDING", bucket: "pending" } : row));
+
+// Whether a failed row's Actions run still has a row running, so that a rerun of
+// its failed jobs asked for now would be refused. Never when a failed row is
+// outside Actions, since then there is nothing to rerun.
+function unsettledRun(rows) {
+  const runs = rows.filter(isFailed).map(runOf);
+  if (runs.includes(null)) return false;
+  return rows.some((row) => isRunning(row) && runs.includes(runOf(row)));
+}
+
 export async function waitForChecks({
-  repo, pr, waitSec, startWaitSec = 0, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay
+  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay
 }) {
   if (waitSec === 0) return { status: "not-run", reason: "CI waiting is disabled (ciWaitSec is 0)", checks: [] };
   const calledAt = now();
@@ -113,13 +148,16 @@ export async function waitForChecks({
     } else if (answered !== null) {
       checks = answered;
     }
-    const verdict = classifyChecks(checks);
-    if (verdict.status !== "running") return { ...verdict, checks };
+    const judged = pendingRerun(checks, rerunAt);
+    const verdict = classifyChecks(judged);
+    const settling = settleRuns && verdict.status === "failed" && unsettledRun(judged);
+    if (verdict.status !== "running" && !settling) return { ...verdict, checks };
     if (now() >= deadline) {
       return {
         status: "not-run",
         reason: `checks were still running after ${waitSec}s, so nothing was proven either way`,
-        checks
+        checks,
+        stillRunning: true
       };
     }
     await sleep(Math.min(poll, Math.max(0, deadline - now())));
@@ -133,7 +171,9 @@ async function main() {
       repo: path.resolve(options.repo),
       pr: options.pr,
       waitSec: options.waitSec,
-      startWaitSec: options.startWaitSec
+      startWaitSec: options.startWaitSec,
+      rerunAt: options.rerunAt ?? null,
+      settleRuns: options.settleRuns
     });
     const out = path.resolve(options.out);
     fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });

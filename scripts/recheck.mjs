@@ -14,7 +14,9 @@
 // The fixer's own report is deliberately not consulted. It is bookkeeping: it
 // says what was attempted, and the reviewer says what is true. The one thing a
 // report decides here is scope: `--declined` says the fixer changed nothing, and
-// then the findings raised at this very round are put to their lenses too.
+// then the findings raised at this very round are put to their lenses too. What
+// a report left undone reaches the readers only as `--items`, each a part and a
+// reason to rule on, and what they rule is recorded as this round's accounting.
 //
 // A round can also inherit. `--carry` is an earlier round's `still-open.json`,
 // settled by id exactly like the findings this round's own review raised, and
@@ -24,9 +26,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { findingId, findingRound, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
+import { findingId, findingRound, isItemFinding, itemFinding, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { ACCEPTABLE, bindRulings, combineRulings, fillRulings, readItems } from "./lib/rulings.mjs";
 
 const SEVERITY_ORDER = ["blocking", "major", "minor", "nit"];
 // The one name this deriver writes a settled review under. An `--out` inside the
@@ -288,7 +291,7 @@ function clearDerived(roundDir, out, candidate) {
 
 export function settle({
   review, dir, candidate, schemaPath, round, reviewRound = round, carried = [], carriedRound = null,
-  adversary = null, adversarySchemaPath = null, declined = false
+  adversary = null, adversarySchemaPath = null, declined = false, items = null
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   // Everything the adversary contributes is re-derived from its own file on
@@ -363,11 +366,23 @@ export function settle({
       reason: gap.reason.endsWith(CARRIED) ? gap.reason : `${gap.reason}${CARRIED}`
     }));
 
+  // Every reader this settlement dispatched was given the same unfinished items,
+  // and one whose file is unusable ruled on none of them.
+  const given = items?.items ?? [];
+  const itemIds = new Set(given.map((item) => item.id));
+  const ruled = new Map();
+  const filled = [];
+  const readRulings = (reader, parsed) => {
+    const read = fillRulings(parsed);
+    if (read.filled) filled.push({ lens: reader, field: "rulings" });
+    return read.parsed;
+  };
+
   for (const lens of lenses) {
     const file = path.join(path.resolve(dir), `${lens}.json`);
     let parsed;
     try {
-      parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      parsed = readRulings(lens, JSON.parse(fs.readFileSync(file, "utf8")));
     } catch (error) {
       unusable.push({ lens, file, reason: fs.existsSync(file) ? `unreadable (${error.message})` : "no file was written" });
       continue;
@@ -392,6 +407,7 @@ export function settle({
     for (const verdict of parsed.verdicts) {
       if (ownIds.has(verdict.id)) verdicts.set(verdict.id, verdict);
     }
+    ruled.set(lens, bindRulings(parsed.rulings, itemIds));
   }
 
   // A finding that got no verdict keeps whatever a reviewer last said about it.
@@ -421,11 +437,12 @@ export function settle({
   // adversary's findings" is not a gate, and a missing file would pass silently.
   const fresh = [];
   const recorded = [];
+  let freshRulings = null;
   if (adversary !== null) {
     const findingsSchema = JSON.parse(fs.readFileSync(adversarySchemaPath, "utf8"));
     let parsed;
     try {
-      parsed = JSON.parse(fs.readFileSync(path.resolve(adversary), "utf8"));
+      parsed = readRulings("adversary", JSON.parse(fs.readFileSync(path.resolve(adversary), "utf8")));
     } catch (error) {
       unusable.push({
         lens: "adversary",
@@ -446,6 +463,7 @@ export function settle({
         // adversary would count as having run.
         unusable.push({ lens: "adversary", file: adversary, reason: `holds a review by "${parsed.lens}", not by the adversary` });
       } else {
+        freshRulings = bindRulings(parsed.rulings, itemIds);
         // Severity decides what gates, and it decides nothing else. The
         // non-gating findings used to be filtered away here and never written
         // anywhere, so an adversary that raised a minor and a nit reported
@@ -466,6 +484,48 @@ export function settle({
       }
     }
   }
+
+  // A ruling of an item does two separate things, and they are answered by two
+  // separate records.
+  //
+  // A `spec-requirement-missing` becomes a finding, once, in the pass that read
+  // it — the collection's in `collect`, this settlement's below — and from then
+  // on that finding's verdicts decide whether the item is still owed, exactly as
+  // for any other finding. So only this settlement's own readers raise one here.
+  // Counting the collection's again would reopen, on every round, a finding its
+  // owner has withdrawn after a decline, whatever every reader says now.
+  const own = lenses.map((lens) => ({ reader: lens, bound: ruled.get(lens) ?? new Map() }));
+  if (adversary !== null) own.push({ reader: "adversary", bound: freshRulings ?? new Map() });
+  for (const item of combineRulings(given, own)) {
+    if (item.missing.length === 0) continue;
+    // Settled as the finding that already stands for it, if one this settlement
+    // left open does; one resolved here stands for nothing any more.
+    if (settled.some((finding) => !finding.resolved && isItemFinding(finding.id, item.id))) continue;
+    const raisedNow = { ...itemFinding(round, item, item.missing[0]), resolved: false, evidence: item.missing[0].reason };
+    // The resolved one may carry this very id: this round's own, withdrawn after
+    // a decline while another reader here still rules the item missing. It is
+    // reopened in place rather than listed twice.
+    const closed = settled.findIndex((finding) => finding.id === raisedNow.id);
+    if (closed === -1) fresh.push(raisedNow);
+    else settled[closed] = raisedNow;
+  }
+  // The accounting is every ruling this candidate drew, and it is what alone
+  // clears the approval: the settlement's own readers, and the collection's when
+  // it reviewed this same candidate — after a clean panel the adversary may be
+  // the only reader sent here. A collection of an earlier candidate ruled on
+  // another candidate's items and counts for nothing. A lens that ruled at both
+  // is two rulings, so the more severe counts and a later `out-of-scope` never
+  // erases an earlier `spec-requirement-missing`: a finding withdrawn after a
+  // decline closes, and the item still waits for a person.
+  const collected = review.candidate !== candidate ? [] : (review.present ?? []).map(({ lens }) => ({
+    reader: lens, bound: bindRulings((review.rulings ?? []).filter((entry) => entry.lens === lens), itemIds)
+  }));
+  const combined = combineRulings(given, [...own, ...collected]);
+  const accounting = items === null ? null : {
+    candidates: items.candidates,
+    items: combined.map(({ id, round: from, kind, part, ruling }) => ({ id, round: from, kind, part, ruling })),
+    acceptable: combined.length > 0 && combined.every((item) => ACCEPTABLE.has(item.ruling))
+  };
 
   const open = [...settled.filter((finding) => !finding.resolved), ...fresh];
   const status = unusable.length > 0 ? "incomplete" : open.length > 0 ? "open" : "clean";
@@ -520,7 +580,11 @@ export function settle({
     reviewCounts,
     counts,
     open,
-    findings: [...settled, ...fresh, ...recorded]
+    findings: [...settled, ...fresh, ...recorded],
+    ...(filled.length > 0 ? { filled } : {}),
+    // Recorded with the review gate, so the `evaluate` that `merge.mjs` re-runs
+    // reads the same accounting `finish` did.
+    ...(accounting ? { accounting } : {})
   };
 }
 
@@ -560,6 +624,12 @@ export function summaryLines(result) {
   for (const gap of result.missing) {
     const where = role(gap.file);
     lines.push(`  MISSING  ${gap.lens}${where ? ` (${where})` : ""}: ${oneLine(gap.reason)}`);
+  }
+  for (const { lens } of result.filled ?? []) lines.push(`  ${lens} wrote no rulings; read as ruling on nothing`);
+  // One line per unfinished item, with what the readers made of it together:
+  // what a person reads to know whether the work left undone still waits for them.
+  for (const item of result.accounting?.items ?? []) {
+    lines.push(`  ${item.id.padEnd(22)} ${item.ruling.padEnd(24)} ${oneLine(item.part)}`);
   }
   for (const finding of result.findings) {
     // `recorded` is neither of the other two: not open, and not resolved by
@@ -632,7 +702,8 @@ async function main() {
       carriedRound: carry === null ? null : Number(path.basename(path.dirname(carry))),
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json"),
-      declined
+      declined,
+      items: options.items ? readItems(path.resolve(options.items), options.candidate) : null
     });
     // Everything below is this run's own derivation, so the previous one is
     // cleared first — see `clearDerived`. Nothing is removed until the round's

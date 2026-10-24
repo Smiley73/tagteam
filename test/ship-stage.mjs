@@ -46,7 +46,7 @@ export function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-// A repository with a bare "origin", a version-10 configuration, and an approved
+// A repository with a bare "origin", the example configuration, and an approved
 // plan holding one spec that wants two lenses.
 export function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ship-"));
@@ -67,7 +67,7 @@ export function stage() {
   config.ciWaitSec = 0;
   config.worktree.setup = [];
   config.verify = [{ command: "node -e \"process.exit(0)\"", when: { globs: [], keywords: [] }, timeoutSec: 60 }];
-  config.limits = { fixRounds: 2, ciRepairs: 1 };
+  config.limits = { ...config.limits, fixRounds: 2, ciRepairs: 1 };
   fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), JSON.stringify(config, null, 2));
   fs.writeFileSync(path.join(repo, ".gitignore"), ".tagteam/ships/\n.tagteam/worktrees/\n.tagteam/locks/\n");
   const plan = path.join(repo, ".tagteam", "plans", "demo");
@@ -124,7 +124,7 @@ export function arriveAll(result, env = {}) {
 }
 
 export const findings = (lens, candidate, findingsList = []) => ({ lens, candidate, summary: `${lens} looked`, findings: findingsList });
-export const major = (file) => ({ severity: "major", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
+export const major = (file) => ({ severity: "major", scope: "code", file, line: 1, title: "wrong", detail: "returns the wrong sum for negatives", fix: null });
 
 // The effort an entry is printed with. There is one agent per role, so the
 // effort travels on the call alone: a name carrying one would be an agent that
@@ -198,6 +198,13 @@ if (argv[0] === "api") {
   process.stdout.write(JSON.stringify(answer.body) + "\\n");
   process.exit(0);
 }
+// run rerun: recorded beside the state file, so that GH_STUB_CHECKS_AFTER_RERUN
+// answers the checks from then on — or refused, with GH_STUB_RERUN_FAILS.
+if (argv[0] === "run" && argv[1] === "rerun") {
+  if (process.env.GH_STUB_RERUN_FAILS) die("gh stub: run " + argv[2] + " cannot be rerun");
+  fs.appendFileSync(statePath + ".rerun", argv[2] + "\\n");
+  process.exit(0);
+}
 if (argv[0] !== "pr") die("gh stub: unsupported command " + argv.join(" "));
 const state = load();
 // By branch, the open pull request when there is one, as gh answers: a branch
@@ -216,6 +223,7 @@ if (argv[1] === "create") {
   save(state);
   process.stdout.write(pull.url + "\\n");
 } else if (argv[1] === "edit") {
+  if (process.env.GH_STUB_EDIT_FAILS) die("gh stub: HTTP 502: Bad Gateway");
   const pull = find(argv[2]);
   pull.title = flag(argv, "--title") ?? pull.title;
   const body = flag(argv, "--body-file");
@@ -282,7 +290,9 @@ if (argv[1] === "create") {
   // GH_STUB_CHECKS names the rows to answer with. GH_STUB_CHECKS_BY_CALL is a
   // JSON array of answers, one per call in turn and the last one repeated, so a
   // test can have checks appear only after an empty first answer.
-  if (process.env.GH_STUB_CHECKS_BY_CALL) {
+  if (process.env.GH_STUB_CHECKS_AFTER_RERUN && fs.existsSync(statePath + ".rerun")) {
+    process.stdout.write(process.env.GH_STUB_CHECKS_AFTER_RERUN + "\\n");
+  } else if (process.env.GH_STUB_CHECKS_BY_CALL) {
     const answers = JSON.parse(process.env.GH_STUB_CHECKS_BY_CALL);
     const counter = statePath + ".checks-calls";
     const call = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;

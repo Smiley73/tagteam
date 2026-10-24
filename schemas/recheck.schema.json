@@ -3,7 +3,7 @@
   "title": "One reviewer's verdict on whether its own findings were resolved",
   "type": "object",
   "additionalProperties": false,
-  "required": ["lens", "candidate", "verdicts"],
+  "required": ["lens", "candidate", "verdicts", "rulings"],
   "properties": {
     "lens": { "type": "string", "minLength": 1 },
     "candidate": {
@@ -28,6 +28,32 @@
             "type": "string",
             "minLength": 1,
             "description": "What in the new diff settles it — the file and what it now does. For an unresolved finding, what is still wrong."
+          }
+        }
+      }
+    },
+    "rulings": {
+      "type": "array",
+      "description": "One entry per unfinished item this reader was given, ruled against the candidate under review. Empty when it was given none. An item with no entry is unruled, and an unruled item keeps the spec waiting for a person.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "ruling", "reason"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The item's id, copied unchanged from the items file."
+          },
+          "ruling": {
+            "type": "string",
+            "enum": ["environmental", "out-of-scope", "spec-requirement-missing"],
+            "description": "spec-requirement-missing: the spec requires this and this candidate still lacks it. environmental: the agent could not do or check this where it ran, and nothing in the change is wrong because of that. out-of-scope: this candidate owes nothing more for it: the spec does not ask for it, another spec owns it, or it has since been done."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One sentence on why."
           }
         }
       }

@@ -24,14 +24,15 @@ const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.sch
 // This repository's own configuration, as `/tagteam:configure` would leave it.
 // The file is untracked, and every ship of this repository copies it from the
 // primary checkout into its worktree, so while the plan that introduces version
-// 10 is itself being shipped the copy is still at version 9: bumping it there
-// would break the run reviewing the change. A version-9 file is read the way
-// configure carries one forward — every value kept, the two version-10 keys
-// written off — and anything else is held to the schema exactly as it is.
+// 11 is itself being shipped the copy is still at version 10: bumping it there
+// would break the run reviewing the change. A version-10 file is read the way
+// configure carries one forward — every value kept, the four version-11 keys
+// written at their safe values — and anything else is held to the schema
+// exactly as it is.
 function ownConfiguration() {
   const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
-  if (own.version !== 9) return own;
-  return { ...own, version: 10, planBranch: false, versionFiles: [] };
+  if (own.version !== 10) return own;
+  return { ...own, version: 11, carry: false, autoRedesign: false, limits: { ...own.limits, carried: 5, followUps: 2 } };
 }
 
 // Every dotted key a script dereferences off the config object, and where.
@@ -257,7 +258,7 @@ test("a current-version configuration carrying the old role-keyed effort map is 
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 10,
+    version: 11,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { lead: "high", worker: "high", codex: "high" }
   };
@@ -348,8 +349,8 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
     `expected effort.codex: "ultra" to be refused, got: ${codexErrors.join("; ")}`
   );
   const { CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(CONFIG_VERSION, 10, "a Codex effort word joining the ladder is not a new configuration shape");
-  assert.equal(schema.properties?.version?.const, 10);
+  assert.equal(CONFIG_VERSION, 11, "a Codex effort word joining the ladder is not a new configuration shape");
+  assert.equal(schema.properties?.version?.const, 11);
 
   const recheckMax = { ...example, effort: { ...example.effort, recheck: "max" } };
   const recheckErrors = validateJson(schema, recheckMax).filter((error) => error.includes("effort.recheck"));
@@ -817,7 +818,7 @@ test("validating expensive limits prints a warning line per limit and still exit
   fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
   fs.writeFileSync(configPath, JSON.stringify({
     ...example,
-    limits: { fixRounds: 9, ciRepairs: 9 }
+    limits: { ...example.limits, fixRounds: 9, ciRepairs: 9 }
   }));
   const result = spawnSync("node", [
     path.join(root, "scripts", "validate-json.mjs"), "--repo", dir,
@@ -971,7 +972,7 @@ test("validating a pointless escalation prints both warnings and still exits 0",
   fs.writeFileSync(path.join(dir, example.conventionsPath), "conventions\n");
   const config = {
     ...example,
-    limits: { fixRounds: 2, ciRepairs: 2 },
+    limits: { ...example.limits, fixRounds: 2, ciRepairs: 2 },
     escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } }
   };
   assert.deepEqual(validateJson(schema, config), []);
@@ -1004,7 +1005,7 @@ test("the shipped example states today's behaviour", () => {
   // held to it: nobody copies this repository's own settings, and `limits` is a
   // question `/tagteam:configure` asks, so pinning the answer here would mean tagteam
   // could not configure itself the way it offers to configure everyone else.
-  assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1 }, "examples/config.json");
+  assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1, carried: 5, followUps: 2 }, "examples/config.json");
 });
 
 test("the schema declares no default anywhere", () => {
@@ -1180,7 +1181,17 @@ test("a version-8 configuration reports stale rather than invalid", () => {
   assert.match(result.stdout, /run \/tagteam:configure/);
 });
 
-// --- version 10: the plan-branch setting and the version lines ---
+// --- versions 10 and 11: the plan-branch setting, the version lines, and the
+// carrying and redesign settings ---
+
+const VERSION_11_KEYS = ["carry", "autoRedesign", "limits.carried", "limits.followUps"];
+
+// A version-10 file: the example without the four keys version 11 added.
+function versionTen() {
+  const { carry, autoRedesign, ...ten } = example;
+  const { carried, followUps, ...limits } = example.limits;
+  return { ...ten, version: 10, limits };
+}
 
 const validateFile = (dir, document) => {
   const file = path.join(dir, "config.json");
@@ -1204,36 +1215,57 @@ function versionRepo() {
   return dir;
 }
 
-test("a version-9 configuration is refused as older, with the run-configure exit", () => {
-  // The whole of what version 9 lacks is the two new keys; it is old, not broken.
-  const { planBranch, versionFiles, ...nine } = example;
-  const result = validateFile(versionRepo(), { ...nine, version: 9 });
-  assert.equal(result.status, 3, `expected exit 3, got ${result.status}: ${result.stderr}`);
-  assert.match(result.stdout, /run \/tagteam:configure/);
+test("a version-9 or version-10 configuration is refused as older, with the run-configure exit", () => {
+  // Each lacks only the keys later versions added; it is old, not broken.
+  const ten = versionTen();
+  const { planBranch, versionFiles, ...nine } = ten;
+  for (const document of [{ ...nine, version: 9 }, ten]) {
+    const result = validateFile(versionRepo(), document);
+    assert.equal(result.status, 3, `version ${document.version}: expected exit 3, got ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /run \/tagteam:configure/);
+  }
+  // Bumping the number by hand does not make it current: the keys are still missing.
+  const bumped = validateFile(versionRepo(), { ...ten, version: 11 });
+  assert.equal(bumped.status, 1, `a hand-bumped version-10 file must be invalid: ${bumped.stdout}${bumped.stderr}`);
+  for (const key of VERSION_11_KEYS) {
+    assert.match(bumped.stderr, new RegExp(`\\$\\.${key.replace(".", "\\.")}: is required`));
+  }
 });
 
-test("the example validates at version 10 with the setting off and no version lines", async () => {
+test("the example validates at version 11 with every setting at its safe value", async () => {
   const { validateJson, CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(example.version, 10);
-  assert.equal(CONFIG_VERSION, 10);
+  assert.equal(example.version, 11);
+  assert.equal(CONFIG_VERSION, 11);
   assert.equal(example.planBranch, false, "examples/config.json must ship the setting off");
   assert.deepEqual(example.versionFiles, [], "examples/config.json must ship no version lines");
+  // The defaults an upgrade promises: carrying off and redesign asked. The 5 and
+  // 2 under `limits` are pinned with the rest of that block in "the shipped
+  // example states today's behaviour".
+  assert.equal(example.carry, false);
+  assert.equal(example.autoRedesign, false);
   assert.deepEqual(validateJson(schema, example), []);
   assert.equal(validateFile(versionRepo(), example).status, 0);
 });
 
-test("planBranch and versionFiles are required keys, and planBranch is a boolean", () => {
+test("the version-10 and version-11 keys are required and typed", () => {
   const dir = versionRepo();
-  for (const key of ["planBranch", "versionFiles"]) {
-    const { [key]: removed, ...without } = example;
+  for (const key of ["planBranch", "versionFiles", ...VERSION_11_KEYS]) {
+    const [parent, child] = key.includes(".") ? key.split(".") : [null, key];
+    const { [child]: removed, ...rest } = parent ? example[parent] : example;
+    const without = parent ? { ...example, [parent]: rest } : rest;
     const result = validateFile(dir, without);
-    assert.equal(result.status, 1, `a version-10 file without ${key} must be invalid: ${result.stderr}`);
-    assert.match(result.stderr, new RegExp(`\\$\\.${key}: is required`));
+    assert.equal(result.status, 1, `a version-11 file without ${key} must be invalid: ${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`\\$\\.${key.replace(".", "\\.")}: is required`));
   }
-  for (const wrong of ["true", 1, null]) {
-    const result = validateFile(dir, { ...example, planBranch: wrong });
-    assert.equal(result.status, 1, `planBranch: ${JSON.stringify(wrong)} must be invalid`);
-    assert.match(result.stderr, /planBranch/);
+  const wrongs = [
+    ...["true", 1, null].flatMap((wrong) => ["planBranch", "carry", "autoRedesign"].map((key) => [key, { ...example, [key]: wrong }])),
+    ["limits.carried", { ...example, limits: { ...example.limits, carried: 0 } }],
+    ["limits.followUps", { ...example, limits: { ...example.limits, followUps: -1 } }]
+  ];
+  for (const [key, document] of wrongs) {
+    const result = validateFile(dir, document);
+    assert.equal(result.status, 1, `${key}: ${JSON.stringify(resolve(document, key))} must be invalid`);
+    assert.match(result.stderr, new RegExp(key.replace(".", "\\.")));
   }
 });
 
@@ -1270,10 +1302,11 @@ test("a version line names one file and exactly one locator: a JSON Pointer or a
 
 // --- the start wait: the one key that may be missing ---
 
-test("a version-10 file without ciStartWaitSec is valid and current, not stale", async () => {
-  // The key was added without a version bump so that every version-10 file
-  // already written stays current; reporting one stale would send its owner to
-  // /tagteam:configure for a number the ship reads as 120.
+test("a current file without ciStartWaitSec is valid and current, not stale", async () => {
+  // The key was added to version 10 without a version bump so that every
+  // version-10 file already written stayed current; reporting one stale would
+  // have sent its owner to /tagteam:configure for a number the ship reads as 120.
+  // Version 11 left it optional.
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const { ciStartWaitSec, ...without } = example;
   assert.equal(ciStartWaitSec, 120, "examples/config.json states the start wait it documents");
@@ -1303,7 +1336,7 @@ test("ciStartWaitSec and the accepted-and-ignored keys are the only root propert
   // wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
   assert.deepEqual(optional.sort(), ["ciStartWaitSec", ...ACCEPTED_AND_IGNORED].sort());
-  assert.equal(schema.properties.version.const, 10, "the optional keys came without a version bump");
+  assert.equal(schema.properties.version.const, 11, "version 11 added only required keys; the optional set is the one version 10 had");
 });
 
 // --- autoMerge: accepted, ignored, and said so ---
@@ -1313,7 +1346,7 @@ test("ciStartWaitSec and the accepted-and-ignored keys are the only root propert
 const notesOf = (text) => text.split("\n").filter((line) => line.startsWith("note:"));
 const autoMergeNote = (text) => notesOf(text).filter((line) => /\bautoMerge\b/.test(line));
 
-test("a version-10 file validates the same with autoMerge true, false or absent, and only the note differs", () => {
+test("a current file validates the same with autoMerge true, false or absent, and only the note differs", () => {
   const dir = versionRepo();
   assert.equal(Object.hasOwn(example, "autoMerge"), false, "the example is a configuration without the key");
   const runs = [true, false, undefined].map((value) => {
@@ -1347,10 +1380,10 @@ test("a version-10 file validates the same with autoMerge true, false or absent,
   assert.equal(without(runs[1][1].stderr), runs[2][1].stderr);
 });
 
-test("a version-9 file is stale whether or not it carries autoMerge", () => {
+test("a version-10 file is stale whether or not it carries autoMerge", () => {
   const dir = versionRepo();
-  const { planBranch, versionFiles, ...nine } = example;
-  for (const document of [{ ...nine, version: 9 }, { ...nine, version: 9, autoMerge: true }, { ...nine, version: 9, autoMerge: false }]) {
+  const ten = versionTen();
+  for (const document of [ten, { ...ten, autoMerge: true }, { ...ten, autoMerge: false }]) {
     const result = validateFile(dir, document);
     assert.equal(result.status, 3, `${JSON.stringify(document.autoMerge)}: expected exit 3, got ${result.status}: ${result.stderr}`);
     assert.match(result.stdout, /run \/tagteam:configure/);

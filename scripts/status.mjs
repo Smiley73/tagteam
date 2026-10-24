@@ -12,6 +12,7 @@ import path from "node:path";
 import { isMain } from "./lib/is-main.mjs";
 import { repairScope } from "./gates.mjs";
 import { mergeMethodOf, readPlanLanding, resultsFor } from "./lib/plan-landing.mjs";
+import { configStaleness } from "./validate-json.mjs";
 
 function directories(root) {
   try {
@@ -220,8 +221,9 @@ function planLandingOf(root) {
 }
 
 /**
- * Everything `/tagteam:status` renders: the plans, the ships, and how much
- * iteration budget each thing still in flight has left before it stops.
+ * Everything `/tagteam:status` renders: whether the configuration is out of
+ * date, the plans, the ships, and how much iteration budget each thing still in
+ * flight has left before it stops.
  */
 export function inventory(repoRoot) {
   const repo = path.resolve(repoRoot ?? ".");
@@ -322,7 +324,11 @@ export function inventory(repoRoot) {
     };
   });
 
-  return { plans, ships };
+  // Reported, never refused: a stale file stops `/tagteam:plan` and
+  // `/tagteam:ship` through the validator, and status still has to render.
+  // Null when there is no configuration to read.
+  const configuration = config === null ? null : configStaleness(config);
+  return { configuration, plans, ships };
 }
 
 if (isMain(import.meta.url)) {

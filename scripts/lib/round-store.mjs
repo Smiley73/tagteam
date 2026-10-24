@@ -12,7 +12,8 @@
 // that same owner **re-enters** the round: everything the previous attempt at
 // reviewing that commit produced is cleared and rebuilt, and the records that
 // belong to the commit rather than to the attempt — the marker, the round's
-// report and its redesign record — are kept. A different owner is refused and nothing is removed.
+// report, its redesign record and its retry records — are kept. A different
+// owner is refused and nothing is removed.
 // Re-entry is the only thing that empties a round, which is what keeps the
 // documented resume path — restart at the commit-and-snapshot step against
 // whatever is committed in the worktree — working without a fresh round number.
@@ -65,6 +66,14 @@ export const ROUND_REPORT = "report.json";
 // at this round. It is about the commit, not about the attempt to review it, so
 // `clearRound` keeps it — see there — and a re-entry is not a second redesign.
 export const ROUND_REDESIGN = "redesign.json";
+
+// The directory of the round's retry records: one file per failure the ship ran
+// again on the same commit — a verify command, the landing check's verify, or
+// failed checks on the pull request — saying what failed and what the second
+// attempt gave. A flaky pass is disclosed in the pull request from these, so
+// they outlive re-entry: cleared, a pass already disclosed would drop out of the
+// next body, and a revisit would buy the same commit a second retry.
+export const ROUND_RETRIES = "retries";
 
 // The reader of this message is usually an autonomous agent that acts on what a
 // tool prints, so the recovery has to carry its price with it. Re-entry is the
@@ -194,7 +203,7 @@ function discardMarkerTemporaries(dir, entries) {
 }
 
 // Re-entry clears what the *attempt* produced and keeps what belongs to the
-// *owner*, and the round has exactly three of the second kind. The marker is
+// *owner*, and the round has four of the second kind. The marker is
 // one: it names the commit, and `enterRound` refuses a different one, so
 // re-entry never changes whose round this is. The report is another, and for
 // the same reason — it is the account of the work in that one commit, so a
@@ -203,7 +212,8 @@ function discardMarkerTemporaries(dir, entries) {
 // third: it says which files that commit was a redesign of, the churn signal
 // reads it to restart their count, and re-entering the round is not a second
 // redesign — cleared, the reset would vanish on the first revisit and every
-// finding the rewrite replaced would count against it again.
+// finding the rewrite replaced would count against it again. The retry records
+// are the fourth; `ROUND_RETRIES` says why.
 //
 // Clearing the report is not a smaller loss than clearing the marker would be. It is the
 // only durable copy: the gate's copy is rebuilt all-null by the next
@@ -216,7 +226,7 @@ function discardMarkerTemporaries(dir, entries) {
 // report and refuses it by name, with the first still on disk to compare it to.
 function clearRound(roundDir) {
   for (const entry of fs.readdirSync(roundDir)) {
-    if (entry === ROUND_MARKER || entry === ROUND_REPORT || entry === ROUND_REDESIGN) continue;
+    if (entry === ROUND_MARKER || entry === ROUND_REPORT || entry === ROUND_REDESIGN || entry === ROUND_RETRIES) continue;
     fs.rmSync(path.join(roundDir, entry), { recursive: true, force: true });
   }
 }
@@ -234,8 +244,9 @@ function reenter(roundDir, marker) {
 /**
  * Claim `roundDir` for `owner` — an opaque non-empty string; the ship side
  * passes the candidate OID. A fresh directory is created and marked. The same
- * owner re-enters: the round is emptied back to its marker, its report and its
- * redesign record — the records that belong to the owning commit — and rebuilt.
+ * owner re-enters: the round is emptied back to its marker, its report, its
+ * redesign record and its retry records — the records that belong to the owning
+ * commit — and rebuilt.
  * A different owner throws, having removed nothing.
  */
 export function enterRound(roundDir, { owner } = {}) {

@@ -34,26 +34,29 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
-import { adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
+import { acceptLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
   restoreWorktree
 } from "./lib/landing.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
+import { awaitedByUnmerged, carryEligible, carryRefusal, onPlanBranch, recommendation } from "./lib/carry.mjs";
+import { enterMerge, entriesOf, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
-import { ROUND_REDESIGN, ROUND_REPORT, writeRoundFile } from "./lib/round-store.mjs";
+import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, writeRoundFile } from "./lib/round-store.mjs";
 import {
   RECORD, RESOLVE_DIR, attemptsLeft, hasMarkers, listResolveRounds, markerSizes, nextRoundNumber, parentsProblem, resolveBrief,
   versionStep, writeRecord
 } from "./lib/resolve.mjs";
 import { recordedIn } from "./record-round-report.mjs";
+import { itemId, itemsOfReport } from "./lib/rulings.mjs";
 import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
   BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
-  fixUnitIds, isCleanFor, isFixUnitId, listChecks, nextCheckNumber, nextUnitId, saveCheck, unitDir, unitDocument, unitDocumentPath,
-  verdict, ROUND as CHECK_ROUND
+  fixUnitIds, followUpIds, isCleanFor, isFixUnitId, isFollowUpId, ledgerOutcomes, listChecks, nextCheckNumber, nextUnitId, saveCheck,
+  unitDir, unitDocument, unitDocumentPath, unitIds, verdict, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
 import {
   checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, mergeMethodOf, planBodyPath, readPlanLanding, resultsFor, savePlanLanding,
@@ -73,6 +76,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
+import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
   clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
   recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
@@ -208,9 +212,25 @@ function fixUnitSpec(ctx, id) {
   };
 }
 
-// Every fix unit the whole-plan check has made whose document is there, in the
-// order they were made.
-const fixUnitSpecs = (ctx) => fixUnitIds(ctx.shipDir).filter((id) => exists(unitDocumentPath(ctx.shipDir, id))).map((id) => fixUnitSpec(ctx, id));
+// Every fix unit the whole-plan check has made, of either family, in the order
+// they were made. A check saves the units it decided before it writes their
+// documents, so a unit the newest check names whose document a run that died
+// between the two never wrote is written now, from that check: dropped instead,
+// the plan would be checked and landed past a unit that never ran. Only the
+// newest check can be that one — no check starts while a unit is unmerged — so
+// an older check's unit with no document is one whose directory went after it
+// merged, and is not made again. Nor is a directory no check names.
+function fixUnitSpecs(ctx) {
+  const records = listChecks(ctx.shipDir).map((entry) => entry.record);
+  const newest = records.at(-1);
+  const named = new Set(newest && !newest.unreadable && Array.isArray(newest.units) ? newest.units : []);
+  return unitIds(ctx.shipDir, records).filter((id) => {
+    if (exists(unitDocumentPath(ctx.shipDir, id))) return true;
+    if (!named.has(id)) return false;
+    ensureUnitDocument(ctx, newest, id);
+    return true;
+  }).map((id) => fixUnitSpec(ctx, id));
+}
 
 // The specs and then the fix units: everything of this train that becomes a pull
 // request into its landing branch.
@@ -320,7 +340,29 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
 // for "Spec:", and the round directory holding the diff and taking the findings.
 // A spec's round, ordinarily; a resolve attempt's round on the plan route, whose
 // brief is the one `resolveBrief` writes.
-const specTarget = (ctx, spec, round) => ({ label: spec.id, specPath: spec.path, dir: roundDir(ctx, spec.id, round) });
+const specTarget = (ctx, spec, round, items) => ({ label: spec.id, specPath: spec.path, dir: roundDir(ctx, spec.id, round), items });
+
+// What every reader of a spec round is handed to rule on: the items its
+// candidate's own report left undone, and those of every earlier candidate that
+// went by unaccounted for, each found through the round its commit owns. Written
+// into the round once, with an empty list when nothing stands — its inputs are
+// the round reports, written once, and the unaccounted list, which moves only
+// when a new candidate is bound, so every later write in the round is the same.
+function writeItems(ctx, id, state, round) {
+  const rounds = listRounds(roundsRoot(ctx, id));
+  const candidates = [];
+  const items = [];
+  for (const candidate of new Set([state.candidateOid, ...(state.unaccountedCandidates ?? [])])) {
+    const owned = rounds.find((entry) => entry.candidate === candidate);
+    const listed = owned ? itemsOfReport(owned.round, readJson(path.join(owned.dir, ROUND_REPORT), null)) : [];
+    if (listed.length === 0) continue;
+    candidates.push(candidate);
+    items.push(...listed);
+  }
+  return itemsFile(roundDir(ctx, id, round), { candidate: state.candidateOid, candidates, items });
+}
+
+const itemsFile = (dir, list) => writeRoundFile(path.join(dir, "unfinished.json"), `${JSON.stringify(list, null, 2)}\n`);
 
 function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) {
   const { dir } = target;
@@ -333,6 +375,7 @@ function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) 
       `Lens brief (read this first, after prompts/review.md): ${brief}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       `Spec: ${target.specPath}`,
+      ...(target.items ? [`Unfinished items to rule on: ${target.items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${path.join(dir, "findings", `${lens}.json`)}`
@@ -349,7 +392,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { reuse = true } = {
     plugin: PLUGIN,
     template: "review.md",
     vars: { CANDIDATE: oid, LENSES: lenses.join(", ") },
-    fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff") },
+    fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff"), ITEMS: target.items },
     schema: "findings.schema.json",
     out: path.join(dir, "findings", "codex.json"),
     model: job.model,
@@ -362,7 +405,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { reuse = true } = {
   return runnerDispatch({ description: `Codex review of ${target.label}`, ...prepared });
 }
 
-function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null) {
+function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null, items = null) {
   const dir = roundDir(ctx, spec.id, round);
   return {
     ...agent("adversary", job),
@@ -372,6 +415,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
       `Brief: ${path.join(PLUGIN, "prompts", "code-adversary.md")} — you are judging a diff fresh, not re-checking`,
       `Spec: ${spec.path}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${out ?? path.join(dir, "findings", "adversary.json")}`
@@ -379,7 +423,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
   };
 }
 
-function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = [], outDir = null) {
+function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = [], outDir = null, items = null) {
   const dir = roundDir(ctx, spec.id, round);
   const base = lens === "adversary" ? "adversary" : "reviewer";
   return {
@@ -391,6 +435,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
       ...(brief ? [`Lens brief the findings were raised through: ${brief}`] : []),
       `Findings to judge, with their ids (judge every id in every file listed): ${inputs.join(" and ")}`,
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
       `Write your verdicts to: ${path.join(outDir ?? path.join(dir, "recheck"), `${lens}.json`)}`
@@ -399,14 +444,14 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
 }
 
 // `reuse` as in `codexReviewDispatch`: off for a re-send only.
-function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null, reuse = true } = {}) {
+function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedReport = null, outDir = null, reuse = true, items } = {}) {
   const dir = roundDir(ctx, spec.id, round);
   const diff = path.join(dir, "review.diff");
   // Two templates, one per question. After a fix Codex reads new code; after a
   // decline there is none, and it weighs the fixer's reasons instead.
   const request = declinedReport
-    ? { template: "recheck-declined.md", fences: { FINDINGS: input, DIFF: diff, DECLINED: declinedReport } }
-    : { template: "recheck.md", fences: { FINDINGS: input, DIFF: diff } };
+    ? { template: "recheck-declined.md", fences: { FINDINGS: input, DIFF: diff, DECLINED: declinedReport, ITEMS: items } }
+    : { template: "recheck.md", fences: { FINDINGS: input, DIFF: diff, ITEMS: items } };
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
     ...request,
@@ -458,7 +503,9 @@ const prBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.md");
 // because a finding about the pull request used to clear only after a full
 // publish-then-revisit lap: the body was rewritten, the next dispatch re-read
 // GitHub, and the reader found the old text still open. A reader judging the
-// draft judges text not yet on GitHub, and `publish` sends exactly that file.
+// draft judges text not yet on GitHub, and `publish` sends exactly that file
+// with the driver's Risk lines in it — so the draft is compared as it would be
+// sent, or once a disclosure exists it would differ from the live body forever.
 function pullRequestLines(ctx, id, state) {
   const record = pullRequestRecord(ctx, id, state);
   const lines = [];
@@ -470,7 +517,7 @@ function pullRequestLines(ctx, id, state) {
   }
   const draft = prBodyPath(ctx, id);
   if (exists(draft)) {
-    const text = fs.readFileSync(draft, "utf8");
+    const text = composeBody(fs.readFileSync(draft, "utf8"), riskLines(ctx, id));
     if (record.body === null || text.trim() !== record.body.trim()) {
       lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
       say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
@@ -486,6 +533,241 @@ function pullRequestFindingsLine(ctx, id, findings) {
   const named = findings.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
   return `${findings.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named}. `
     + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
+}
+
+// --- retries and what the pull request says about them ----------------------
+
+// A failure run once more on the same commit — a verify command, the landing
+// check's verify, failed checks on the pull request — leaves one record in its
+// round's `retries/`, written once and kept through re-entry: the kind, the
+// commit (and the base, for a landing check), what failed first, where both
+// attempts' evidence is, and what the second attempt gave. "Once" is read from
+// these records, so neither a revisit nor a later publish of the same commit
+// buys a second go.
+const retriesOf = (dir) => path.join(dir, ROUND_RETRIES);
+
+function writeRetry(dir, record) {
+  const name = `${record.kind}-${short(record.candidate)}${record.base ? `-${short(record.base)}` : ""}.json`;
+  writeRoundFile(path.join(retriesOf(dir), name), `${JSON.stringify({ ...record, at: new Date().toISOString() }, null, 2)}\n`);
+}
+
+// Every retry record of this spec, in round order. Across rounds, because one
+// commit can own more than one.
+function retryRecords(ctx, id) {
+  return listRounds(roundsRoot(ctx, id)).flatMap((round) => {
+    const dir = retriesOf(round.dir);
+    const names = exists(dir) ? fs.readdirSync(dir).filter((name) => name.endsWith(".json")).sort() : [];
+    return names.map((name) => readJson(path.join(dir, name), null)).filter((record) => record?.result);
+  });
+}
+
+const retryOf = (ctx, id, kind, candidate, base = null) =>
+  retryRecords(ctx, id).find((record) => record.kind === kind && record.candidate === candidate && (record.base ?? null) === base) ?? null;
+
+const firstFailed = (verify) => (verify?.commands ?? []).find((command) => command.status === "failed") ?? null;
+
+/**
+ * The lines the driver itself writes under `## Risk` in this spec's pull
+ * request: the one place that decides what they are. One per finding the spec
+ * would carry into the plan branch open if it merged now, and one per failure
+ * that passed when it was run again on the same commit.
+ */
+function riskLines(ctx, id) {
+  const state = readState(ctx, id);
+  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base)];
+}
+
+/**
+ * The line for each finding this spec would carry into the plan branch open if
+ * it merged now. It stands in for the fixer table's not-addressed row — `publish`
+ * hands a row over only where no line says its finding — so it says what the row
+ * says: that the spec merges on the accept in its gate state, or else that it
+ * waits for a person, with the row's recommendation, judged as `tableOf` judges it.
+ */
+function pendingLines(ctx, id, state) {
+  const standing = planStanding(ctx, id, state);
+  if (!standing || standing.entries.length === 0) return [];
+  const facts = carryFacts(ctx, id);
+  const goalConflict = exists(goalConflictPath(ctx, id));
+  return standing.entries.map((entry, index) => {
+    const finding = standing.open[index];
+    const advice = recommendation(finding, { addressed: false, goalConflict, eligible: carryEligible(finding, facts), carry: ctx.config.carry === true });
+    return pendingLine(entry, { merges: standing.merges, recommendation: advice });
+  });
+}
+
+function retryLines(ctx, id, base) {
+  return retryRecords(ctx, id).filter((record) => record.result === "passed").map((record) => {
+    if (record.kind === "ci") {
+      return `- ${record.failed.length > 1 ? "The checks" : "The check"} ${record.failed.map((name) => `\`${name}\``).join(", ")} `
+        + `failed on this pull request, then passed when rerun on the same commit (${short(record.candidate)}).`;
+    }
+    if (record.kind === "landing") {
+      return `- The verify command \`${record.failed}\` failed on this change merged onto ${base} as it stood at ${short(record.base)}, `
+        + `then passed when run again on the same merge (commit ${short(record.candidate)}).`;
+    }
+    return `- The verify command \`${record.failed}\` failed, then passed when run again on the same commit (${short(record.candidate)}).`;
+  });
+}
+
+/**
+ * Where this spec's open findings stand on the plan branch at its candidate: the
+ * one answer its ledger entries, its Risk lines, `publish` and an accept are
+ * given. Null unless `onPlanBranch` holds, the question the gates ask. `open` is
+ * what its review gate holds open; `entries`, one for each, what it would put in
+ * the plan's ledger if it merged now — `accepted` where a person's accept of this
+ * candidate covers it, `carried` where the ship's carry does; `merges`, whether
+ * the record in its gate state lifts `review-open`, as `evaluate` decides it.
+ */
+function planStanding(ctx, id, state) {
+  if (!onPlanBranch(state, ctx.config)) return null;
+  const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
+  const open = review?.open ?? [];
+  const file = readJson(acceptedPath(ctx, id), null);
+  const recorded = state.accept?.candidateOid === state.candidateOid ? state.accept : null;
+  const accepted = new Set([
+    ...(recorded && recorded.mode !== "carry" ? recorded.ids : []),
+    ...(file?.candidate === state.candidateOid && Array.isArray(file.ids) ? file.ids : [])
+  ]);
+  const carried = new Set(recorded?.mode === "carry" ? recorded.ids : []);
+  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted, carried), merges: acceptLifts(state, ctx.config) };
+}
+
+/**
+ * Whether `finish` would carry this spec's open findings into the plan branch
+ * on the review gate as now recorded: null when carrying is off, the spec is
+ * not on the plan branch, a finding open may not be carried (05's rule) or
+ * `evaluate` would not lift `review-open` on the record; otherwise the record
+ * to write, how many findings the plan's ledger already holds carried by other
+ * units, and whether this one would take that past `limits.carried`. A carry
+ * already recorded that lifts `review-open` is weighed the same way, `recorded`,
+ * against the ledger and the limit as they stand now: either can have moved
+ * since it was written. Its own earlier entries are not counted, since `finish`
+ * runs more than once, nor is anything a person accepted: the cap bounds what
+ * merged with no one looking.
+ */
+function carryStanding(ctx, id, state) {
+  if (ctx.config.carry !== true) return null;
+  const standing = planStanding(ctx, id, state);
+  if (!standing || standing.open.length === 0) return null;
+  const recorded = standing.merges && state.accept?.mode === "carry";
+  if (standing.merges && !recorded) return null;
+  let record = state.accept;
+  if (!recorded) {
+    const facts = carryFacts(ctx, id);
+    if (standing.open.some((finding) => carryRefusal(finding, facts))) return null;
+    record = {
+      candidateOid: state.candidateOid, ids: standing.open.map((finding) => finding.id), mode: "carry",
+      dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
+    };
+    if (!acceptLifts({ ...state, accept: record }, ctx.config)) return null;
+  }
+  const others = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried" && entry.spec !== id).length;
+  return {
+    record, recorded, base: state.base, others, limit: ctx.config.limits.carried,
+    over: others + record.ids.length > ctx.config.limits.carried
+  };
+}
+
+// What `fix` and `settle` say instead of "a person decides" when `finish` will
+// carry what is open; null when it will not, and they say what they always did.
+function carriedAtFinish(ctx, id) {
+  const carry = carryStanding(ctx, id, readState(ctx, id));
+  if (!carry || carry.over) return null;
+  return `Carrying is on, so at finish the ${carry.record.ids.length} finding(s) open are carried into ${carry.base} with it, unless something `
+    + "other than its review stops it: each is entered in the plan's ledger and listed under Risk, and the plan's pull request lists them for a person.";
+}
+
+function pullRequestOnlyLine(ctx, id) {
+  const said = "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write";
+  const carried = carriedAtFinish(ctx, id);
+  return carried ? `${said}. ${carried}` : `${said}, and revisit puts it to the readers again.`;
+}
+
+const enteredLines = (count) =>
+  (count > 0 ? [`${count} finding(s) still open went into the plan's ledger with it, and the plan's pull request lists them under Risk.`] : []);
+
+// A merge into the plan branch, written into the plan's ledger before the spec
+// is recorded as merged, so a run that dies in between writes it on adoption.
+// Returns how many entries the ledger holds for this spec.
+function enterLedger(ctx, id, state) {
+  const standing = planStanding(ctx, id, state);
+  if (!standing) return 0;
+  return enterMerge(ctx.shipDir, id, { entries: standing.entries, retries: retryLines(ctx, id, state.base) });
+}
+
+const NOTHING_KNOWN = /^nothing(?: else)?(?: is)? known\.?$/i;
+
+// Where `text`'s `## Risk` section begins and ends, or null when it has none.
+function riskSection(text) {
+  const heading = /^## Risk[ \t]*\r?$/m.exec(text);
+  if (!heading) return null;
+  const start = heading.index + heading[0].length;
+  const next = /^## /m.exec(text.slice(start));
+  return { start, end: next ? start + next.index : text.length, last: !next };
+}
+
+// Which of `lines` `text` does not say under its `## Risk` heading. A line said
+// anywhere else in the body is not a disclosure under Risk.
+function unsaid(text, lines) {
+  const section = riskSection(text);
+  const said = section ? text.slice(section.start, section.end) : "";
+  return lines.filter((line) => !said.includes(line));
+}
+
+// `text` with each of `lines` it does not hold yet under its `## Risk` heading:
+// in place of a section that says only that nothing is known, which a disclosure
+// contradicts; after whatever else the section says; or in a section of its own
+// at the end when there is none. A line already there is not added twice, so a
+// sent body composes to itself.
+function composeBody(text, lines) {
+  const missing = unsaid(text, lines);
+  if (missing.length === 0) return text;
+  const block = missing.join("\n");
+  const section = riskSection(text);
+  if (!section) return `${text.trimEnd()}\n\n## Risk\n\n${block}\n`;
+  const { start, end, last } = section;
+  const said = text.slice(start, end).trim();
+  const body = said === "" || NOTHING_KNOWN.test(said) ? block : `${said}\n\n${block}`;
+  return `${text.slice(0, start)}\n\n${body}\n${last ? "" : `\n${text.slice(end)}`}`;
+}
+
+// The body as it is sent, written beside the orchestrator's file, which is left
+// as it was written.
+const sentBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.sent.md");
+
+function composeSent(ctx, id, text) {
+  fs.writeFileSync(sentBodyPath(ctx, id), composeBody(text, riskLines(ctx, id)), { mode: 0o600 });
+  return sentBodyPath(ctx, id);
+}
+
+/**
+ * The live body on GitHub, checked for every line the driver owes it under
+ * `## Risk` — never what this run remembers sending, since a person can edit a
+ * line out on GitHub after it went — and, when one is missing, sent again: that
+ * live body with the missing lines added, through `gh pr edit --body-file` and
+ * nothing else. Never a full `publish`, which would push and wait for checks
+ * again. True when the live body now says every line, or there is none to say.
+ */
+function resendBody(ctx, id, state, say) {
+  const number = state.pr?.number;
+  const lines = riskLines(ctx, id);
+  if (!number || lines.length === 0) return true;
+  const live = pullRequestRecord(ctx, id, state);
+  if (live.body === null) {
+    say.push(`Pull request #${number}'s body could not be read (${live.error}), so nothing shows it says under Risk: ${lines.join(" ")}`);
+    return false;
+  }
+  const missing = unsaid(live.body, lines);
+  if (missing.length === 0) return true;
+  const edited = gh(ctx.repo, ["pr", "edit", String(number), "--body-file", composeSent(ctx, id, live.body)], { allowFailure: true });
+  if (edited.status !== 0) {
+    const why = (edited.stderr || edited.stdout || "gh pr edit failed").trim().split("\n")[0];
+    say.push(`Pull request #${number}'s body could not be sent again (${why}), so it does not yet say under Risk: ${missing.join(" ")}`);
+    return false;
+  }
+  say.push(`Sent pull request #${number}'s body again, now saying under Risk: ${missing.join(" ")}`);
+  return true;
 }
 
 // What is live at `round` of this cycle: both signals `churn.mjs` reports, the
@@ -514,8 +796,12 @@ function liveAt(ctx, id, state, round) {
 // rule: a cycle gets one rewrite, in budget or past the cap, and a rewrite needs
 // a file it could change — the loose signal's findings may name none.
 //
-// - A fix round left: the question, with a redesign among its answers only while
-//   the cycle's rewrite is unused and a file is left to rewrite.
+// - A fix round left, `autoRedesign` on, the cycle's rewrite unused and the same
+//   file failing: nothing is asked, and `auto` says the question is answered
+//   `redesign` — the caller prints that command as `next`. The loose signal alone
+//   never answers it: what it names is spread across the change.
+// - A fix round left otherwise: the question, with a redesign among its answers
+//   only while the cycle's rewrite is unused and a file is left to rewrite.
 // - Every fix round spent and the rewrite unused: the question at the cap, whose
 //   redesign answer is the one round past the limit. It is recorded — see
 //   `capAskPath` — and at `settle` (`honour`) a record from the same round's
@@ -539,7 +825,11 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   const used = redesignUsed(ctx, id, state);
   const rewritable = files.length > 0;
   if (spent < limit) {
-    result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used, rewritable, loose });
+    if (ctx.config.autoRedesign && !used && signals.length > 0) {
+      result.auto = true;
+      return result;
+    }
+    result.ask = redesignAsk(signals, { spent, limit, atCollect, redesign: !used, rewritable, loose, planBranch: onPlanBranch(state, ctx.config) ? state.base : null });
     return result;
   }
   if (used || spent > limit || !rewritable) {
@@ -564,6 +854,9 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   return result;
 }
 
+const AUTO_REDESIGN = "The Recurring question is answered redesign automatically, because autoRedesign is on in this repository's configuration: "
+  + "a fresh implementer rewrites the area on a fix round this cycle still has. If the rewrite does not settle it, a person is asked.";
+
 // A spec that stopped for a person stays exactly as it stopped until a person
 // says otherwise. Two doors lead out of waiting — `repair` for a red check and
 // `revisit` for everything else — and a step refused here would either die on
@@ -582,6 +875,8 @@ function fixerDispatch(ctx, spec, recordPath, job) {
     prompt: [
       `Job: fixer`,
       `Findings to fix (only these): ${recordPath}`,
+      `Spec this change implements (to read, not to work from): ${spec.path}`,
+      `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")}`
     ].join("\n")
@@ -908,6 +1203,156 @@ function openAt(ctx, id, round) {
   return { settled, recordPath, record, ids };
 }
 
+// --- what each fixer was handed, and what came of it ------------------------
+
+// One entry per fixer that was handed findings, appended by the snapshot that
+// took its work: the brief it was handed and where its report was kept — the
+// round's `report.json` when it committed, under `declined/` when it changed
+// nothing. `fix-pending.json` is gone by then, so this is what the next
+// `settle` builds a table from, and `judgedBy` names the re-check that settle
+// judged so that a settle run again prints the same tables. Keyed by the
+// marker's `at`, so a snapshot run again does not append twice.
+const fixersPath = (ctx, id) => path.join(specDir(ctx, id), "fixers.json");
+
+// The tables the latest `settle` printed — or the one a goal-conflict snapshot
+// printed — bound to the round and candidate they judged. `publish` hands their
+// not-addressed rows over for the pull request's `## Risk`.
+const fixOutcomesPath = (ctx, id) => path.join(specDir(ctx, id), "fix-outcomes.json");
+
+// Written by `snapshot` when a fixer answered `goal-conflict`: the fix is a
+// person's to re-plan, not another round's. Nothing in the driver removes it.
+const goalConflictPath = (ctx, id) => path.join(specDir(ctx, id), "goal-conflict.json");
+
+function noteFixer(ctx, id, pending, report) {
+  const fixers = readJson(fixersPath(ctx, id), []);
+  if (fixers.some((entry) => entry.dispatched === pending.at)) return;
+  writeJson(fixersPath(ctx, id), [...fixers, { dispatched: pending.at, round: pending.round, brief: pending.record, report, judgedBy: null }]);
+}
+
+// A fix report from either place it is kept: a round's wrapper, or the report
+// itself, set aside.
+function fixerReport(file) {
+  const doc = file ? readJson(file, null) : null;
+  return doc && Object.hasOwn(doc, "kind") ? doc.report : doc;
+}
+
+const goalConflicts = (report) => (report?.outcomes ?? []).filter((entry) => entry.outcome === "goal-conflict");
+
+function writeGoalConflict(ctx, id, pending, report, kept) {
+  const conflict = {
+    round: pending.round, candidate: pending.candidate, report: kept,
+    conflicts: goalConflicts(report).map(({ id: finding, note }) => ({ id: finding, note })), at: new Date().toISOString()
+  };
+  writeJson(goalConflictPath(ctx, id), conflict);
+  return conflict;
+}
+
+function goalConflictLine(ctx, id, state, conflict) {
+  return `${id}'s fixer reported that the right repair for ${listOf(conflict.conflicts.map((entry) => entry.id))} would go against `
+    + `the plan's goal, because the spec conflicts with it. ${conflict.conflicts.map((entry) => `${entry.id}: ${entry.note.trim().replace(/\.$/, "")}.`).join(" ")} `
+    + `Recommendation: re-plan. No further fixer is sent, and the ${state.fixRoundsUsed ?? 0} of ${ctx.config.limits.fixRounds} `
+    + "fix rounds already spent are not given back.";
+}
+
+/**
+ * A fixer's table: one row per finding it was handed. `open` is the ids the
+ * settle left open, matched by id alone — ids survive the carry and text does
+ * not — or null when nothing has judged the fixer's work yet and every row is
+ * open.
+ */
+function tableOf(ctx, id, fixer, open) {
+  const report = fixerReport(fixer.report);
+  const said = new Map((report?.outcomes ?? []).map((entry) => [entry.id, entry]));
+  const goalConflict = goalConflicts(report).length > 0;
+  const facts = carryFacts(ctx, id);
+  const rows = (readJson(fixer.brief, { findings: [] }).findings ?? []).map((finding) => {
+    const addressed = open !== null && !open.has(finding.id);
+    const eligible = carryEligible(finding, facts);
+    return {
+      id: finding.id, severity: finding.severity, scope: finding.scope ?? null, file: finding.file ?? null, title: finding.title ?? "",
+      outcome: said.get(finding.id)?.outcome ?? null, note: said.get(finding.id)?.note ?? null, addressed,
+      recommendation: recommendation(finding, { addressed, goalConflict, eligible, carry: ctx.config.carry === true })
+    };
+  });
+  return { round: fixer.round, rows, summary: report?.summary ?? null };
+}
+
+// What carry eligibility is judged from for this spec: the plan's specs and
+// which of them have merged.
+function carryFacts(ctx, id) {
+  const specs = specsInOrder(ctx);
+  return {
+    spec: specById(ctx, id), state: readState(ctx, id), config: ctx.config, specs,
+    merged: new Set(specs.filter((spec) => stateOf(ctx, spec.id) === "merged").map((spec) => spec.id))
+  };
+}
+
+/**
+ * A person's accept of `ids`, on the plan branch, weighed against the review
+ * gate as it is now recorded: written into gate state only when every finding
+ * open there may be carried — whatever `carry` says — and `evaluate` would then
+ * lift `review-open`, so that what the person is told is what the verdict does.
+ * Null off the plan branch, where an accept is what it always was; otherwise
+ * whether it merges, and the sentence that says so or says what keeps it from it.
+ */
+function acceptOnPlanBranch(ctx, id, ids) {
+  const state = readState(ctx, id);
+  const standing = planStanding(ctx, id, state);
+  if (!standing) return null;
+  const facts = carryFacts(ctx, id);
+  const kept = standing.open.map((finding) => ({ finding, why: carryRefusal(finding, facts) })).find((entry) => entry.why);
+  if (kept) return { merges: false, line: `${kept.finding.id} keeps it from merging into ${state.base} on its own: ${kept.why}.` };
+  if (!acceptLifts({ ...state, accept: { candidateOid: state.candidateOid, ids } }, ctx.config)) {
+    return { merges: false, line: `Its review is ${standing.review.status}, and an accept lets only a complete review with findings open merge into ${state.base} on its own.` };
+  }
+  node("gates.mjs", ["accept", statePath(ctx, id), state.candidateOid, ids.join(",")]);
+  return {
+    merges: true,
+    line: `It merges into ${state.base} at finish with nobody asked, unless something other than its review stops it: each finding `
+      + "open is entered in the plan's ledger and listed under Risk in the plan's pull request, which a person still confirms."
+  };
+}
+
+const clip = (text, width) => {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat;
+};
+
+function tableLines({ round, rows, summary, heading = `The fixer sent at round ${round}` }) {
+  const header = ["id", "severity", "file", "title", "the fixer said", "re-check", "recommendation"];
+  const cells = rows.map((row) => [
+    row.id, row.severity, row.file ?? "—", clip(row.title, 40), row.outcome ? clip(`${row.outcome}: ${row.note}`, 60) : "no outcome reported",
+    row.addressed ? "addressed" : "not addressed", row.recommendation ?? "—"
+  ]);
+  const widths = header.map((name, column) => Math.max(name.length, ...cells.map((cell) => cell[column].length)));
+  const line = (cell) => `  ${cell.map((value, column) => value.padEnd(widths[column])).join("  ").trimEnd()}`;
+  const missed = rows.filter((row) => !row.addressed);
+  return [
+    `${heading} was handed ${rows.length} finding(s):`, line(header), ...cells.map(line),
+    missed.length > 0 ? `  Not addressed: ${missed.map((row) => `${row.id} (${row.recommendation})`).join(", ")}.` : "  Every one is addressed.",
+    ...(summary ? [`  The fixer: ${summary}`] : [])
+  ];
+}
+
+const saveTables = (ctx, id, { round, candidate }, tables) =>
+  writeJson(fixOutcomesPath(ctx, id), { round, candidate, tables, at: new Date().toISOString() });
+
+/**
+ * The tables `settle` owes: one per fixer sent since the previous settle, oldest
+ * first, judged against what this settle left open, and saved as the latest.
+ */
+function settleTables(ctx, id, plan, open) {
+  const key = `${plan.round}:${plan.candidate}:${plan.at}`;
+  const fixers = readJson(fixersPath(ctx, id), []);
+  const owed = fixers.filter((fixer) => fixer.judgedBy === null || fixer.judgedBy === key);
+  if (owed.length === 0) return [];
+  const ids = new Set(open.map((finding) => finding.id));
+  const tables = owed.map((fixer) => tableOf(ctx, id, fixer, ids));
+  writeJson(fixersPath(ctx, id), fixers.map((fixer) => (owed.includes(fixer) ? { ...fixer, judgedBy: key } : fixer)));
+  saveTables(ctx, id, plan, tables);
+  return tables.flatMap(tableLines);
+}
+
 // --- the route ---------------------------------------------------------------
 
 // Where this train's specs go, as `train.json` recorded it the first time the
@@ -1145,9 +1590,11 @@ async function reconcileMerged(ctx, { own = null, landed = false } = {}) {
       continue;
     }
     if (entry.id === own) continue;
+    const entered = enterLedger(ctx, entry.id, readState(ctx, entry.id));
     node("gates.mjs", ["adopt-merge", statePath(ctx, entry.id), "--repo", ctx.repo]);
     result.adopted.add(entry.id);
-    result.say.push(`${entry.id} was found merged into ${route.branch} at the reviewed commit; recorded, and the plan branch's record follows it.`);
+    result.say.push(`${entry.id} was found merged into ${route.branch} at the reviewed commit; recorded, and the plan branch's record follows it.`,
+      ...enteredLines(entered));
   }
   if (unplaced.length > 0) throw new Stop(unplacedStop(ctx, walk, unplaced));
   return result;
@@ -1845,13 +2292,17 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
   const { jobs } = resolveJobs(ctx);
   const lensJob = jobs["review-lens"];
   const codexJob = jobs["review-codex"];
-  const target = { label: resolveLabel(record), specPath: resolveBriefPath(ctx, record.n), dir: attemptDirOf(ctx, record.n, attempt.k) };
+  const dir = attemptDirOf(ctx, record.n, attempt.k);
+  // Nothing stands against a resolve round, but Codex's template takes a list
+  // all the same; its Claude readers are given none and rule on none.
+  const items = itemsFile(dir, { candidate: attempt.mergeOid, candidates: [], items: [] });
+  const target = { label: resolveLabel(record), specPath: resolveBriefPath(ctx, record.n), dir };
   const agents = lenses.filter((lens) => lens !== "codex").map((lens) => ({
     dispatch: reviewerDispatch(ctx, target, attempt.mergeOid, lens, briefs[lens], lensJob), job: lensJob, name: reviewerName(lens)
   }));
   if (!resend || lenses.includes("codex")) {
     const reviewed = attempt.lenses ?? lenses;
-    agents.push({ dispatch: codexReviewDispatch(ctx, target, attempt.mergeOid, reviewed.filter((lens) => lens !== "codex"), codexJob, { reuse: !resend }), job: codexJob, name: "Codex" });
+    agents.push({ dispatch: codexReviewDispatch(ctx, { ...target, items }, attempt.mergeOid, reviewed.filter((lens) => lens !== "codex"), codexJob, { reuse: !resend }), job: codexJob, name: "Codex" });
   }
   const sent = await sendSet(ctx, record.spec, {
     kind: resend ? "resolve-resend" : "resolve-panel", round: attempt.k, agents, step: "resolve-collect", home: resolveDirOf(ctx, record.n)
@@ -2293,6 +2744,12 @@ async function begin(options) {
     emit({ say, ask: `${id} is recorded as failed. Say what it set out to deliver and what stopped it, and ask before doing anything with it. To retry from scratch: \`gates.mjs state ... pending\` by hand, then rerun begin.`, state: state.state });
     return;
   }
+  // A wait for checks is taken up again, not ended: ending it is a person's
+  // call, and finish is what ends it.
+  const waiting = state.state === "publishing" && state.pr?.number ? readJson(ciPath(ctx, id), null) : null;
+  if (waiting?.stillRunning && waiting.candidateOid === state.candidateOid) {
+    return emit({ say: [...say, `${id} was waiting for the checks on #${state.pr.number}; taking the wait up again.`], next: nextCommand(ctx, "checks", id) });
+  }
   if (["publishing", "awaiting-approval"].includes(state.state)) {
     return emit({ say: [...say, `${id} already has a pull request; evaluating it.`], next: nextCommand(ctx, "finish", id) });
   }
@@ -2498,13 +2955,6 @@ function versionLineStop(ctx, id, state, step) {
   };
 }
 
-function fixReportLines(report) {
-  const lines = [];
-  for (const outcome of report.outcomes ?? []) lines.push(`  ${outcome.id}: ${outcome.outcome} — ${outcome.note}`);
-  if (report.summary) lines.push(`  ${report.summary}`);
-  return lines;
-}
-
 async function snapshot(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -2590,17 +3040,32 @@ async function snapshot(options) {
       fs.mkdirSync(path.join(specDir(ctx, id), "declined"), { recursive: true, mode: 0o700 });
       kept = path.join(specDir(ctx, id), "declined", `round-${pending.round}-${stamp}.json`);
       fs.renameSync(reportPath, kept);
-      say.push(`The fixer changed nothing. What it said about each finding (kept at ${kept}):`, ...fixReportLines(report));
+      say.push(`The fixer changed nothing (its report is kept at ${kept}).`);
     } else {
       say.push("The fixer changed nothing and wrote no report.");
     }
-    fs.unlinkSync(fixPendingPath(ctx, id));
     // A CI repair is handed a failing check and no findings, so there is nothing
     // for a lens to re-judge; the spec publishes and the check speaks.
     if (pending.from === "repair") {
+      if (report?.summary) say.push(`  ${report.summary}`);
+      fs.unlinkSync(fixPendingPath(ctx, id));
       transition(ctx, id, "verifying");
       return done({ say, next: nextCommand(ctx, "publish", id) });
     }
+    // A conflict between the spec and the goal is no lens's to re-judge and no
+    // further round's to fix: the spec goes on to publish and stops at finish,
+    // where its review — never recorded for this commit, or open — blocks it.
+    if (goalConflicts(report).length > 0) {
+      const conflict = writeGoalConflict(ctx, id, pending, report, kept);
+      fs.unlinkSync(fixPendingPath(ctx, id));
+      transition(ctx, id, "verifying");
+      const table = tableOf(ctx, id, { round: pending.round, brief: pending.record, report: kept }, null);
+      saveTables(ctx, id, pending, [table]);
+      say.push(...tableLines(table), goalConflictLine(ctx, id, state, conflict));
+      return done({ say, next: nextCommand(ctx, "publish", id) });
+    }
+    noteFixer(ctx, id, pending, kept);
+    fs.unlinkSync(fixPendingPath(ctx, id));
     // Whether the fixer came from the panel or from a settled re-check, the
     // findings it declined are re-judged by the lenses that raised them. This
     // is the one route by which a `wont-fix` can close a finding: the lens reads
@@ -2676,6 +3141,12 @@ async function snapshot(options) {
     throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
+  let conflict = null;
+  if (["panel", "settle"].includes(pending?.from)) {
+    noteFixer(ctx, id, pending, path.join(dir, "report.json"));
+    const report = fixerReport(path.join(dir, "report.json"));
+    if (goalConflicts(report).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
+  }
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
 
   say.push(allocation.granted
@@ -2691,6 +3162,7 @@ async function snapshot(options) {
     }
   }
   say.push(...recorded.stdout.trim().split("\n"));
+  if (conflict) say.push(`${goalConflictLine(ctx, id, state, conflict)} It changed the code all the same, so this commit is reviewed like any other.`);
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
@@ -2701,14 +3173,40 @@ function verify(options) {
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}; run snapshot first`);
   const dir = round.dir;
-  const result = node("verify-run.mjs", [
+  const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`)
   ], { allow: [1] });
-  record(ctx, id, "verify", state.candidateOid, path.join(dir, "verify.json"));
-  const outcome = readJson(path.join(dir, "verify.json"));
+  run("verify");
+  const first = readJson(path.join(dir, "verify.json"));
+  // A failure is run once more on the same commit, beside the first so that its
+  // evidence stays, and the second result is the gate. Run again in this round
+  // the step finds the second result already there; after a re-entry the record
+  // says this commit has had its second run, and the first result stands.
+  const again = path.join(dir, "verify-retry.json");
+  const retried = retryOf(ctx, id, "verify", state.candidateOid);
+  const retry = first.status === "failed" && (exists(again) || !retried);
+  if (retry && !exists(again)) run("verify-retry");
+  const outcome = retry ? readJson(again) : first;
+  if (retry && !retried) {
+    writeRetry(dir, {
+      kind: "verify", candidate: state.candidateOid, failed: firstFailed(first)?.command ?? null,
+      first: path.join(dir, "verify.json"), second: again, result: outcome.status
+    });
+  }
+  record(ctx, id, "verify", state.candidateOid, retry ? again : path.join(dir, "verify.json"));
   const say = [`Verification: ${outcome.status}${outcome.status === "not-applicable" ? " — nothing matched, which is not a pass and waits for a person" : ""}.`];
-  for (const command of outcome.commands ?? []) say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+  const lines = (result, attempt = "") => (result.commands ?? []).map((command) => `  ${attempt}${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+  if (retry) {
+    say.push("The first run failed, and it was run once more on the same commit:", ...lines(first, "first run, "), ...lines(outcome, "second run, "));
+    if (outcome.status === "passed") {
+      say.push("It passed the second time; the pull request says so under Risk.");
+      resendBody(ctx, id, state, say);
+    }
+  } else {
+    if (first.status === "failed" && retried) say.push("Not run once more: this commit has already had its second run after a failure.");
+    say.push(...lines(outcome));
+  }
   // Which review this candidate gets. The first fix of a cycle skips the panel:
   // the round before it collected the panel's findings and nothing has settled
   // them yet, so the lenses that raised them re-judge them against this diff. A
@@ -2754,7 +3252,7 @@ async function panel(options) {
   const pr = pullRequestLines(ctx, id, state);
   const lensJob = resolved.jobs["review-lens"];
   const codexJob = resolved.jobs["review-codex"];
-  const target = specTarget(ctx, spec, round.round);
+  const target = specTarget(ctx, spec, round.round, writeItems(ctx, id, state, round.round));
   const agents = lenses.map((lens) => ({
     dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
     job: lensJob,
@@ -2785,9 +3283,10 @@ async function collect(options) {
   }
   requireSetIn(ctx, id, sentFor.set, "collect");
   const expect = [...state.reviewers, "codex"];
+  const items = writeItems(ctx, id, state, round.round);
   const result = node("collect-findings.mjs", [
     "--dir", path.join(round.dir, "findings"), "--candidate", state.candidateOid, "--expect", expect.join(","),
-    "--round", String(round.round), "--out", path.join(round.dir, "review.json")
+    "--round", String(round.round), "--out", path.join(round.dir, "review.json"), "--items", items
   ], { allow: [1] });
   const review = readJson(path.join(round.dir, "review.json"));
   const say = result.stdout.trim().split("\n");
@@ -2800,7 +3299,7 @@ async function collect(options) {
       const pr = pullRequestLines(ctx, id, state);
       const lensJob = resolved.jobs["review-lens"];
       const codexJob = resolved.jobs["review-codex"];
-      const target = specTarget(ctx, spec, round.round);
+      const target = specTarget(ctx, spec, round.round, items);
       const agents = missing.filter((lens) => lens !== "codex").map((lens) => ({
         dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
         job: lensJob,
@@ -2830,9 +3329,10 @@ async function collect(options) {
   const churn = churnAsk(ctx, id, state, round.round, { openForFixer, atCollect: true });
   say.push(...churn.signal);
   if (churn.note) say.push(churn.note);
+  if (churn.auto) say.push(AUTO_REDESIGN);
   emit({
     say, review: review.status, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}),
-    next: nextCommand(ctx, review.status === "open" ? "fix" : "recheck", id)
+    next: nextCommand(ctx, churn.auto ? "redesign" : review.status === "open" ? "fix" : "recheck", id)
   });
 }
 
@@ -2857,9 +3357,10 @@ async function fix(options) {
   if (forFixer.length === 0 && aboutPr.length > 0) {
     if (settled) {
       // The readers have judged these once already, against the body as it was.
-      // The body is rewritten, published, and judged again on a revisit.
+      // The body is rewritten, published, and judged again on a revisit — or
+      // carried at finish.
       transition(ctx, id, "verifying");
-      return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again."], next: nextCommand(ctx, "publish", id) });
+      return emit({ say: [...prSay, pullRequestOnlyLine(ctx, id)], next: nextCommand(ctx, "publish", id) });
     }
     // Not yet judged by anyone but the panel that raised them. The re-check
     // asks the raising lenses to judge the body — the draft, once it is
@@ -2873,6 +3374,16 @@ async function fix(options) {
     });
     return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent. Write the body now, then run next: the readers that raised these judge it."], next: nextCommand(ctx, "recheck", id) });
   }
+  // A conflict between the spec and the goal is resolved by re-planning or a
+  // merge by hand, never by another round: on to publish the way a spent
+  // budget goes.
+  const conflict = readJson(goalConflictPath(ctx, id), null);
+  if (conflict) {
+    const say = [...prSay, goalConflictLine(ctx, id, state, conflict)];
+    if (!settled) return emit({ say, next: nextCommand(ctx, "recheck", id) });
+    transition(ctx, id, "verifying");
+    return emit({ say, next: nextCommand(ctx, "publish", id) });
+  }
   // A fixer never takes the round past the cap. The edge would let one through
   // while this cycle holds an unspent grant — a redesign interrupted between
   // taking it and taking the edge leaves exactly that — and that round is the
@@ -2883,10 +3394,12 @@ async function fix(options) {
     ? { refused: true, reason: `${id} has spent its limits.fixRounds budget: ${spentRounds} of ${ctx.config.limits.fixRounds} round(s) used, so nothing further will be attempted — raise limits.fixRounds in this repository's tagteam configuration and run the command again, or finish what is left by hand` }
     : transition(ctx, id, "fixing", { budgeted: true });
   if (edge.refused) {
-    const say = [`No fix round is left for this cycle (${edge.reason.split("\n")[0]}). The spec still publishes and a person decides.`];
+    const spent = `No fix round is left for this cycle (${edge.reason.split("\n")[0]}).`;
+    const say = [`${spent} The spec still publishes and a person decides.`];
     if (settled) {
       transition(ctx, id, "verifying");
-      return emit({ say, budget: "spent", next: nextCommand(ctx, "publish", id) });
+      const carried = carriedAtFinish(ctx, id);
+      return emit({ say: carried ? [`${spent} The spec still publishes. ${carried}`] : say, budget: "spent", next: nextCommand(ctx, "publish", id) });
     }
     // Before the settle, this branch is the answer "publish" to a question put
     // at the cap for this round; the settle reads that off the record.
@@ -2921,8 +3434,9 @@ async function fix(options) {
 }
 
 // A person's answer to the Recurring question: stop patching the last finding
-// and have a fresh implementer rewrite the area. `next` never prints this; the
-// ask names it. In budget it spends a fix round exactly as `fix` does. At the
+// and have a fresh implementer rewrite the area. The ask names it, and `next`
+// prints it only where `autoRedesign` answers the question — see `churnAsk`.
+// In budget it spends a fix round exactly as `fix` does. At the
 // cap it spends the one round past the limit, through the grant `gates.mjs
 // grant` records, and only when the question at the cap was put for this round,
 // candidate and cycle — see `capAskPath`. Either way it uses up the cycle's one
@@ -3036,7 +3550,10 @@ async function redesign(options) {
 // approves nothing: an open finding is a blocker no approval clears, so the spec
 // stops at `finish` exactly as it does when the budget runs out, and the pull
 // request is merged by hand on GitHub — `begin` adopts a hand merge — or
-// revisited once a reader withdraws the finding. Accept answers the Recurring
+// revisited once a reader withdraws the finding. On a plan branch, when every
+// finding accepted may be carried there, `acceptOnPlanBranch` records the accept
+// instead, and `finish` merges the spec into the plan branch with each open
+// finding entered in the plan's ledger. Accept answers the Recurring
 // question and nothing else: a spec that simply ran out of fix rounds publishes
 // on its own through the spent branch of `fix`.
 function accept(options) {
@@ -3058,11 +3575,17 @@ function accept(options) {
   const forFixer = (record.findings ?? []).filter((finding) => !isPullRequestFinding(finding));
   if (forFixer.length === 0) throw new Stop(`nothing open on ${id} is for a fixer, so there is nothing to accept; a round left with pull request findings alone publishes on its own`);
   writeJson(acceptedPath(ctx, id), { round: round.round, candidate: state.candidateOid, ids: [...ids], at: new Date().toISOString() });
-  const say = [`Accepted as it is at round ${round.round}: what is open is disclosed in the pull request under Risk. It will not merge unattended and finish cannot approve past an open finding, so merging it is yours to do on GitHub — or revisit once a reader withdraws what it found.`];
+  const disclosed = `Accepted as it is at round ${round.round}: what is open is disclosed in the pull request under Risk.`;
+  const byHand = `${disclosed} It will not merge unattended and finish cannot approve past an open finding, so merging it is yours to do on GitHub — or revisit once a reader withdraws what it found.`;
   if (settled) {
+    const onPlan = acceptOnPlanBranch(ctx, id, [...ids]);
     transition(ctx, id, "verifying");
+    const say = [onPlan?.merges ? `${disclosed} ${onPlan.line}` : [byHand, onPlan?.line].filter(Boolean).join(" ")];
     return emit({ say, accepted: [...ids], next: nextCommand(ctx, "publish", id) });
   }
+  // Whether it may merge into the plan branch is judged at settle, on what the
+  // re-check leaves open.
+  const say = [onPlanBranch(state, ctx.config) ? disclosed : byHand];
   say.push("The re-check settles this round first; anything a reader raises that you have not seen is asked about before it publishes.");
   emit({ say, accepted: [...ids], next: nextCommand(ctx, "recheck", id) });
 }
@@ -3138,7 +3661,8 @@ async function recheck(options) {
       readers.push({ role: "recheck", lens, name: lens === "adversary" ? "the adversary's re-check" : `${reviewerName(lens)}'s re-check`, inputs: files });
     }
   }
-  const where = { round: round.round, dir: verdictsDir, given };
+  const items = writeItems(ctx, id, state, round.round);
+  const where = { round: round.round, dir: verdictsDir, given, items };
   const agents = readers.map((reader) => ({
     dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), job: recheckReaderJob(reader, resolved), name: reader.name
   }));
@@ -3151,7 +3675,7 @@ async function recheck(options) {
   writeJson(recheckPlanPath(ctx, id), {
     round: round.round, candidate: state.candidateOid, collectionRound: collected, carry: carry?.count > 0 ? carry.file : null,
     declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
-    lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, resend: null, at: new Date().toISOString()
+    lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, items, resend: null, at: new Date().toISOString()
   });
   const dispatch = agents.map((entry) => entry.dispatch);
   const say = [adversaryFile
@@ -3193,16 +3717,16 @@ function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { res
   const { lines, fresh } = declinedContext(where.given?.declined ?? null);
   const job = recheckReaderJob(reader, resolved);
   if (reader.role === "adversary") {
-    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output);
+    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output, where.items);
   }
   if (reader.role === "codex-recheck") {
     return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, job,
-      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend });
+      { declinedReport: where.given?.declined?.report ?? null, outDir: where.dir, reuse: !resend, items: where.items });
   }
   if (reader.lens === "adversary") {
-    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, job, [...pr.lines, ...lines], where.dir);
+    return recheckDispatch(ctx, spec, where.round, state.candidateOid, "adversary", reader.inputs, null, job, [...pr.lines, ...lines], where.dir, where.items);
   }
-  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], job, [...pr.lines, ...lines], where.dir);
+  return recheckDispatch(ctx, spec, where.round, state.candidateOid, reader.lens, reader.inputs, resolved.briefs[reader.lens], job, [...pr.lines, ...lines], where.dir, where.items);
 }
 
 // The job a re-check reader runs as. The adversary is two of them in one
@@ -3256,6 +3780,9 @@ async function settle(options) {
   if (!Object.hasOwn(plan, "adversary") || plan.adversary) args.push("--adversary", plan.adversary ?? path.join(dir, "findings", "adversary.json"));
   if (plan.carry) args.push("--carry", plan.carry);
   if (plan.declined) args.push("--declined", plan.declined);
+  // A plan written before readers ruled names no items, and settles with no
+  // accounting, which clears nothing.
+  if (plan.items) args.push("--items", plan.items);
   const result = node("recheck.mjs", args, { allow: [1] });
   const settledReview = readJson(path.join(dir, "recheck.json"));
   const say = result.stdout.trim().split("\n");
@@ -3269,7 +3796,7 @@ async function settle(options) {
     const spec = specById(ctx, id);
     const resolved = roles(ctx, id);
     const pr = pullRequestLines(ctx, id, state);
-    const where = { round: plan.round, dir: plan.dir, given: plan.given };
+    const where = { round: plan.round, dir: plan.dir, given: plan.given, items: plan.items ?? writeItems(ctx, id, state, plan.round) };
     const agents = failed.map((reader) => ({
       dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true }), job: recheckReaderJob(reader, resolved), name: reader.name
     }));
@@ -3288,26 +3815,34 @@ async function settle(options) {
   // or a panel in between.
   if (state.state !== "verifying") transition(ctx, id, "verifying");
   const open = settledReview.open ?? [];
+  say.push(...settleTables(ctx, id, plan, open));
   const openForFixer = open.some((finding) => !isPullRequestFinding(finding));
   const churn = churnAsk(ctx, id, state, plan.round, { openForFixer, atCollect: false, honour: true });
   const signal = churn.signal;
   say.push(...signal);
   if (open.length > 0) {
+    // A person accepted this candidate as it is, and nothing is open that they
+    // did not see. Anything open they have not seen — a fresh adversary finding
+    // after an accept given at collect — is asked about; see `acceptedPath`.
+    // Weighed before anything below decides where the round goes, so that no
+    // way on passes an accept by.
+    const accepted = readJson(acceptedPath(ctx, id), null);
+    const acceptedIds = new Set(Array.isArray(accepted?.ids) ? accepted.ids : []);
+    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && open.every((finding) => acceptedIds.has(finding.id));
+    const onPlan = covered ? acceptOnPlanBranch(ctx, id, [...acceptedIds]) : null;
     // Everything still open is about the pull request: no fixer can reach it,
     // so no fix round is spent on it. The spec publishes with the body the
     // orchestrator writes, and a revisit puts that body to the readers.
     if (open.every(isPullRequestFinding)) {
-      say.push(pullRequestFindingsLine(ctx, id, open), "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again.");
+      say.push(pullRequestFindingsLine(ctx, id, open), pullRequestOnlyLine(ctx, id));
+      if (onPlan) say.push(onPlan.line);
       return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
     }
-    // A person accepted this candidate as it is, and nothing is open that they
-    // did not see: it publishes with what is open disclosed. Anything open they
-    // have not seen — a fresh adversary finding after an accept given at collect
-    // — is asked about; see `acceptedPath`.
-    const accepted = readJson(acceptedPath(ctx, id), null);
-    const acceptedIds = new Set(Array.isArray(accepted?.ids) ? accepted.ids : []);
-    if (accepted && accepted.candidate === state.candidateOid && accepted.round === plan.round && open.every((finding) => acceptedIds.has(finding.id))) {
-      say.push(`Publishing as it is, as you decided at round ${accepted.round}: what is open goes into the pull request under Risk, it will not merge unattended, and finish cannot approve past an open finding — merging it is yours to do on GitHub.`);
+    // It publishes with what is open disclosed.
+    if (covered) {
+      const decided = `Publishing as it is, as you decided at round ${accepted.round}: what is open goes into the pull request under Risk`;
+      say.push(onPlan?.merges ? `${decided}. ${onPlan.line}`
+        : [`${decided}, it will not merge unattended, and finish cannot approve past an open finding — merging it is yours to do on GitHub.`, onPlan?.line].filter(Boolean).join(" "));
       return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), accepted: true, next: nextCommand(ctx, "publish", id) });
     }
     fs.rmSync(acceptedPath(ctx, id), { force: true });
@@ -3320,17 +3855,20 @@ async function settle(options) {
       say.push(`Publishing as it is, as you decided at round ${churn.honoured.round} when every fix round was spent: what is open goes into the pull request under Risk, it will not merge unattended, and finish cannot approve past an open finding — merging it is yours to do on GitHub.`);
     } else if (churn.note) {
       say.push(churn.note);
+    } else if (churn.auto) {
+      say.push(AUTO_REDESIGN);
     } else {
       say.push("Something blocking or major is still open, so another fix round follows if the budget allows one.");
     }
-    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, "fix", id) });
+    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, churn.auto ? "redesign" : "fix", id) });
   }
   emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
 }
 
 // How long checks get to appear when `ciStartWaitSec` is missing from the
-// configuration — the one key that may be, so that the version-10 files written
-// before it existed stay current. Nothing else in the plugin reads the key.
+// configuration — the one key that may be, added to version 10 without a bump so
+// that the version-10 files written before it existed stayed current. Nothing
+// else in the plugin reads the key.
 const CI_START_WAIT_SEC = 120;
 
 /**
@@ -3367,35 +3905,167 @@ function publish(options) {
   if (!exists(options.body)) throw new Stop(`the body file ${options.body} does not exist`);
   const say = [];
   const republish = Boolean(state.pr);
+  const sent = composeSent(ctx, id, fs.readFileSync(options.body, "utf8"));
   git(ctx.worktree, ["push", ...(republish ? ["--force-with-lease"] : ["-u"]), "origin", state.branch]);
   if (!republish) {
     // Where this spec's state says it lands, which `begin` set from the train's
     // route: the plan branch on a plan route, the configured base otherwise.
-    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", path.resolve(options.body)]);
+    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", sent]);
   } else {
-    gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", path.resolve(options.body)], { allowFailure: true });
+    const edited = gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", sent], { allowFailure: true });
+    if (edited.status !== 0) say.push(`Pull request #${state.pr.number}'s title and body could not be updated (${(edited.stderr || edited.stdout || "").trim().split("\n")[0]}); it keeps the ones it had.`);
   }
   const view = JSON.parse(gh(ctx.repo, ["pr", "view", state.branch, "--json", "number,url,headRefOid"]).stdout);
   if (view.headRefOid !== state.candidateOid) throw new Stop(`the pull request heads at ${view.headRefOid}, not the reviewed candidate ${state.candidateOid}`);
   node("gates.mjs", ["pr", statePath(ctx, id), String(view.number), view.url, view.headRefOid]);
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
-  if (ctx.config.ciWaitSec > 0) {
+  // The latest tables' not-addressed rows, once each, while they judged this
+  // candidate — less those the driver's own Risk lines already say, with the
+  // row's recommendation (`pendingLines`), since a finding is said once in a body.
+  const saved = readJson(fixOutcomesPath(ctx, id), null);
+  const said = new Set((planStanding(ctx, id, readState(ctx, id))?.entries ?? []).map((entry) => entry.finding));
+  const missed = saved?.candidate === state.candidateOid
+    ? saved.tables.flatMap((table) => table.rows).filter((row) => !row.addressed && !said.has(row.id)) : [];
+  const handed = missed.length > 0 ? { notAddressed: [...new Map(missed.map((row) => [row.id, row])).values()] } : {};
+  if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...handed, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
+  emit({ say, pr: view, ...handed, next: nextCommand(ctx, "finish", id) });
+}
+
+// `publish`'s wait for checks still running when `ciWaitSec` ran out, taken up
+// again. It waits on or moves on, and nothing else: ending the wait is a
+// person's call, made by running finish.
+function checks(options) {
+  const ctx = context(options);
+  const id = options.spec;
+  const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "checks");
+  const waiting = readJson(ciPath(ctx, id), null);
+  if (!state.pr?.number || !(waiting?.stillRunning && waiting.candidateOid === state.candidateOid)) {
+    throw new Stop(`${id} has no wait for checks to take up at ${short(state.candidateOid)}; publish is what waits for them`);
+  }
+  const say = [];
+  emit({ say, ...waitSpecChecks(ctx, id, state, say, waiting.waitBegan) });
+}
+
+const ciPath = (ctx, id) => path.join(specDir(ctx, id), "ci.json");
+const secondsSince = (at) => Math.max(0, Math.round((Date.now() - Date.parse(at)) / 1000));
+
+// The rerun of failed checks this commit already asked for, or null.
+function rerunRequest(ctx, id, candidate) {
+  for (const round of listRounds(roundsRoot(ctx, id))) {
+    const file = path.join(retriesOf(round.dir), `ci-${short(candidate)}.rerun.json`);
+    if (exists(file)) return { ...readJson(file), file };
+  }
+  return null;
+}
+
+/**
+ * The checks on a spec's pull request, waited for by `publish` and — while they
+ * are still running at `ciWaitSec` — by `checks`, which takes up the wait that
+ * began at `began`. The `ci` gate is recorded only on a decided result: still
+ * running records nothing, and `next` is `checks` again. A failure is rerun
+ * once, when the rest of its workflow run has finished — GitHub refuses a rerun
+ * of a run still going — then waited for again without a start wait; what that
+ * gives is the result, and a failure after it goes to `repair` as any failure does.
+ */
+function waitSpecChecks(ctx, id, state, say, began = null) {
+  const pr = state.pr.number;
+  const since = began ?? new Date().toISOString();
+  let request = rerunRequest(ctx, id, state.candidateOid);
+  const wait = (startSeconds = 0) => {
+    // A rerun that was refused never ran, so no failed row is waiting on it.
+    const rerunAt = request && retryOf(ctx, id, "ci", state.candidateOid)?.result !== "refused" ? request.requestedAt : null;
+    const ran = node("ci-wait.mjs", [
+      "--repo", ctx.repo, "--pr", String(pr), "--wait-sec", String(ctx.config.ciWaitSec),
+      ...(startSeconds > 0 ? ["--start-wait-sec", String(startSeconds)] : []),
+      ...(rerunAt ? ["--rerun-at", rerunAt] : []),
+      // Before a rerun is asked for, a failure waits for the rest of its run.
+      ...(request === null ? ["--settle-runs", "1"] : []),
+      "--out", ciPath(ctx, id)
+    ], { allow: [1] });
+    const outcome = readJson(ciPath(ctx, id));
+    if (!outcome.stillRunning) say.push(...ran.stdout.trim().split("\n").filter(Boolean));
+    return outcome;
+  };
+  let outcome;
+  if (began === null && request === null) {
     const start = ciStartLimit(ctx, state.candidateOid);
     if (start.seconds > 0) {
-      say.push(`Waiting up to ${start.seconds}s for checks to start on #${view.number} (ciStartWaitSec): at ${short(state.candidateOid)}, ${start.files.join(", ")} can run on a pull request.`);
+      say.push(`Waiting up to ${start.seconds}s for checks to start on #${pr} (ciStartWaitSec): at ${short(state.candidateOid)}, ${start.files.join(", ")} can run on a pull request.`);
     }
-    const ci = node("ci-wait.mjs", [
-      "--repo", ctx.repo, "--pr", String(view.number), "--wait-sec", String(ctx.config.ciWaitSec),
-      ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
-      "--out", path.join(specDir(ctx, id), "ci.json")
-    ], { allow: [1] });
-    record(ctx, id, "ci", state.candidateOid, path.join(specDir(ctx, id), "ci.json"));
-    say.push(...ci.stdout.trim().split("\n"));
-    const outcome = readJson(path.join(specDir(ctx, id), "ci.json"));
-    if (outcome.status === "failed") return emit({ say, pr: view, ci: outcome.status, next: nextCommand(ctx, "repair", id) });
+    outcome = wait(start.seconds);
+  } else {
+    outcome = wait();
   }
-  emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
+  if (outcome.status === "failed" && request === null) {
+    request = requestRerun(ctx, id, state, outcome, say);
+    if (request && !request.refused) outcome = wait();
+  }
+  if (outcome.stillRunning) {
+    writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
+    say.push(`The checks on #${pr} are still running after ${secondsSince(since)}s of waiting in all, so nothing is recorded yet and the wait goes on. `
+      + (classifyChecks(outcome.checks).status === "failed"
+        ? "Ending it is a person's call: finish ends it, and records the check that has already failed as a failure."
+        : "Ending it is a person's call: finish ends it, and records that the checks proved nothing either way."));
+    return { next: nextCommand(ctx, "checks", id) };
+  }
+  recordChecks(ctx, id, state, outcome, since, say);
+  if (outcome.status === "failed") return { ci: outcome.status, next: nextCommand(ctx, "repair", id) };
+  return { next: nextCommand(ctx, "finish", id) };
+}
+
+/**
+ * One rerun of the failed checks on this commit, asked for at most once: the
+ * request is written before `gh run rerun` runs, so a run resumed between the
+ * two never asks again. Only a GitHub Actions row names a run that can be rerun;
+ * when a failed row does not, a rerun could not turn the result green and
+ * nothing is asked. A request GitHub refuses is recorded as refused, and the
+ * first failure stands.
+ */
+function requestRerun(ctx, id, state, outcome, say) {
+  const failed = (outcome.checks ?? []).filter(isFailed);
+  const others = failed.filter((row) => runOf(row) === null);
+  if (others.length > 0) {
+    say.push(`Not rerun: ${others.map((row) => row.name).join(", ")} ${others.length > 1 ? "are not GitHub Actions checks" : "is not a GitHub Actions check"}, so running the failed checks again could not turn the result green.`);
+    return null;
+  }
+  const dir = currentRound(ctx, id, state).dir;
+  const file = path.join(retriesOf(dir), `ci-${short(state.candidateOid)}.rerun.json`);
+  const runs = [...new Set(failed.map(runOf))];
+  const request = { candidate: state.candidateOid, requestedAt: new Date().toISOString(), failed: failed.map((row) => row.name), runs, checks: outcome.checks };
+  writeRoundFile(file, `${JSON.stringify(request, null, 2)}\n`);
+  for (const run of runs) {
+    const asked = gh(ctx.repo, ["run", "rerun", run, "--failed"], { allowFailure: true });
+    if (asked.status === 0) continue;
+    const why = (asked.stderr || asked.stdout || "gh run rerun failed").trim().split("\n")[0];
+    writeRetry(dir, { kind: "ci", candidate: state.candidateOid, failed: request.failed, first: file, second: null, result: "refused", reason: why });
+    say.push(`The failed checks could not be rerun (${why}), so the first failure stands.`);
+    return { ...request, file, refused: true };
+  }
+  say.push(`${request.failed.join(", ")} failed; rerunning the failed jobs once on the same commit, and waiting for them.`);
+  return { ...request, file };
+}
+
+// A decided result for this commit's checks, recorded: `ci.json`, the retry
+// record once a rerun has an answer, a re-send of the body when the rerun turned
+// the failure into a pass, and the `ci` gate. A wait a person `ended` is not the
+// rerun's answer — the rerun may still be running — so it writes no retry
+// record, and a later wait on this commit that sees the rerun decided still
+// records it and says a pass under Risk.
+function recordChecks(ctx, id, state, outcome, since, say, { ended = false } = {}) {
+  writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
+  const request = rerunRequest(ctx, id, state.candidateOid);
+  if (request && !ended && !retryOf(ctx, id, "ci", state.candidateOid)) {
+    writeRetry(currentRound(ctx, id, state).dir, {
+      kind: "ci", candidate: state.candidateOid, failed: request.failed, first: request.file, second: ciPath(ctx, id), result: outcome.status
+    });
+    if (outcome.status === "passed") {
+      say.push("The rerun passed; the pull request says so under Risk.");
+      resendBody(ctx, id, readState(ctx, id), say);
+    }
+  }
+  record(ctx, id, "ci", state.candidateOid, ciPath(ctx, id));
 }
 
 async function repair(options) {
@@ -3772,12 +4442,129 @@ function wholePlanTarget(ctx, record) {
 async function sendWholePlanReviewer(ctx, record, { resend = false } = {}) {
   const job = resolveJobs(ctx).jobs["review-lens"];
   const dispatch = reviewerDispatch(ctx, wholePlanTarget(ctx, record), record.tip, WHOLE_PLAN_LENS,
-    path.join(PLUGIN, "prompts", WHOLE_PLAN_BRIEF), job);
+    path.join(PLUGIN, "prompts", WHOLE_PLAN_BRIEF), job, ledgerLines(ctx, record));
   const sent = await sendSet(ctx, null, {
     kind: resend ? "whole-plan-resend" : "whole-plan", agents: [{ dispatch, job, name: "the whole-plan reviewer" }],
     step: "plan-collect", home: checkHome(ctx, record.n)
   });
   return { dispatch, sent, job };
+}
+
+// The plan's ledger as this check re-judges it, written into its round once, so
+// that the verdicts, the table after a follow-up and the plan's body all read
+// the entries the reviewer was handed; and where the reviewer writes its
+// verdicts. An empty ledger hands the reviewer nothing.
+const ledgerSnapshotPath = (ctx, n) => path.join(checkRoundDir(ctx.shipDir, n), "ledger.json");
+const ledgerVerdictsPath = (ctx, n) => path.join(checkRoundDir(ctx.shipDir, n), "ledger-verdicts.json");
+
+function ledgerLines(ctx, record) {
+  const snapshot = ledgerSnapshotPath(ctx, record.n);
+  if (!exists(snapshot)) {
+    const { entries } = readLedger(ctx.shipDir);
+    if (entries.length === 0) return [];
+    writeRoundFile(snapshot, `${JSON.stringify({ entries }, null, 2)}\n`);
+  }
+  return [
+    `Ledger to re-judge (one verdict for every entry, as the brief's "Re-judging the ledger" says): ${snapshot}`,
+    `Write your ledger verdicts to: ${ledgerVerdictsPath(ctx, record.n)}`
+  ];
+}
+
+// The verdicts the reviewer wrote, or none and why: a document that is not
+// there, does not hold to its schema or is about another commit binds nothing.
+function readLedgerVerdicts(ctx, file, tip) {
+  if (!exists(file)) return { verdicts: [], problem: `${file} was not written` };
+  const checked = node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "ledger-verdicts.schema.json"), file], { allow: [1] });
+  if (checked.status !== 0) {
+    return { verdicts: [], problem: `${file} does not hold to ledger-verdicts.schema.json (${checked.stderr.trim().split("\n")[0]})` };
+  }
+  const document = readJson(file);
+  if (document.candidate !== tip) return { verdicts: [], problem: `${file} is about ${short(document.candidate)}, not ${short(tip)}` };
+  return { verdicts: document.verdicts, problem: null };
+}
+
+/**
+ * The ledger re-judged at this check, once its own `status` is decided — which
+ * this never changes: each entry's verdict and where it goes, and the
+ * follow-up units a clean check makes, named on the record before anything is
+ * emitted. A verdict document that is missing or does not hold leaves every
+ * entry not re-judged, and never sends the reviewer again.
+ */
+function judgeLedger(ctx, record, status, records) {
+  const snapshot = ledgerSnapshotPath(ctx, record.n);
+  if (!exists(snapshot)) return;
+  const file = ledgerVerdictsPath(ctx, record.n);
+  const { verdicts, problem } = readLedgerVerdicts(ctx, file, record.review.tip);
+  const decided = ledgerOutcomes({
+    entries: readJson(snapshot).entries, verdicts, status, made: followUpIds(ctx.shipDir, records), limit: ctx.config.limits.followUps
+  });
+  record.ledger = { snapshot, verdicts: file, problem, entries: decided.entries };
+  record.followUps = decided.units;
+  record.units = [...(record.units ?? []), ...decided.units.map((unit) => unit.id)];
+}
+
+// The ledger entries `maker`, the check that made it, handed the follow-up `id`.
+function followUpEntries(ctx, maker, id) {
+  const ids = maker.followUps.find((unit) => unit.id === id).entries;
+  return readJson(ledgerSnapshotPath(ctx, maker.n)).entries.filter((entry) => ids.includes(entry.id));
+}
+
+// The gating findings a check that was not clean on its own review hands its
+// whole-plan fix.
+const unitFindings = (ctx, record) => (record.review?.status === "open"
+  ? readJson(path.join(checkRoundDir(ctx.shipDir, record.n), "to-fix.json"), { findings: [] }).findings ?? []
+  : []);
+
+/**
+ * One table for each fix unit merged since a plan-collect last printed one,
+ * from 05's table: its rows are what the unit was handed. A follow-up's row is
+ * addressed when this check rules its entry resolved; a whole-plan fix's when
+ * this check is clean on its own, since finding ids are minted per check and
+ * cannot be matched across checks. A unit never carries, so no row says carry.
+ */
+function unitTables(ctx, records, record, status) {
+  const tabled = new Set(records.flatMap((entry) => entry.tabled ?? []));
+  const owed = records.filter((maker) => maker.n !== record.n)
+    .flatMap((maker) => (maker.units ?? []).map((id) => ({ id, maker })))
+    .filter(({ id }) => !tabled.has(id) && stateOf(ctx, id) === "merged");
+  record.tabled = owed.map(({ id }) => id);
+  const judged = new Map((record.ledger?.entries ?? []).map((entry) => [entry.id, entry.verdict]));
+  return owed.flatMap(({ id, maker }) => {
+    const followUp = isFollowUpId(id);
+    const rows = (followUp ? followUpEntries(ctx, maker, id) : unitFindings(ctx, maker)).map((finding) => {
+      const addressed = followUp ? judged.get(finding.id) === "resolved" : status === "clean";
+      return {
+        id: finding.id, severity: finding.severity, file: finding.file ?? finding.files?.[0] ?? null, title: finding.title ?? "",
+        outcome: null, note: null, addressed,
+        recommendation: recommendation(finding, { addressed, goalConflict: false, eligible: false, carry: ctx.config.carry === true })
+      };
+    });
+    return tableLines({ heading: `${followUp ? "The follow-up" : "The whole-plan fix"} ${id}`, rows, summary: null });
+  });
+}
+
+// Where an entry went at a check, in a few words, for the sentence that counts them.
+const OUTCOME_WORDS = {
+  resolved: "resolved",
+  "follow-up": "handed to a follow-up",
+  "pull-request": "still real and about the pull request",
+  "needs-person": "needing a person or a re-plan",
+  spent: "still real with every follow-up limits.followUps allows made",
+  "after-fix": "still real, judged again once the whole-plan fix merges",
+  "check-stopped": "still real, with the check stopped",
+  "not-re-judged": "not re-judged"
+};
+
+// How many ledger entries this check re-judged and where they went; nothing
+// for a check that had no ledger to re-judge.
+function ledgerLine(record) {
+  const entries = record.ledger?.entries ?? [];
+  if (entries.length === 0) return null;
+  const counts = Object.entries(OUTCOME_WORDS).map(([outcome, words]) => [entries.filter((entry) => entry.outcome === outcome).length, words])
+    .filter(([count]) => count > 0).map(([count, words]) => `${count} ${words}`);
+  const from = record.ledger.carried ? `, as check ${record.ledger.carried} re-judged them,` : "";
+  return `The ${entries.length} entr${entries.length === 1 ? "y" : "ies"} of the plan's ledger${from} came to: ${counts.join(", ")}`
+    + `${record.ledger.problem ? ` (${record.ledger.problem})` : ""}. Whatever is not fixed is listed in the plan's pull request; none of it changes the check's result.`;
 }
 
 /**
@@ -3816,7 +4603,14 @@ function ensureUnitDocument(ctx, record, id) {
   const file = unitDocumentPath(ctx.shipDir, id);
   if (exists(file)) return file;
   const round = checkRoundDir(ctx.shipDir, record.n);
-  const findings = record.review?.status === "open" ? readJson(path.join(round, "to-fix.json"), { findings: [] }).findings ?? [] : [];
+  const evidence = new Map((record.ledger?.entries ?? []).map((entry) => [entry.id, entry.evidence]));
+  const findings = isFollowUpId(id)
+    ? followUpEntries(ctx, record, id).map((entry) => ({
+      severity: entry.severity, file: entry.files[0] ?? null, line: null, title: entry.title,
+      detail: `${entry.detail} (Left open when ${entry.spec} merged at ${short(entry.commit)}, as ledger entry ${entry.id}; this check `
+        + `found it still real: ${evidence.get(entry.id)})`
+    }))
+    : unitFindings(ctx, record);
   const failedVerify = record.verify?.status === "failed"
     ? (record.verify.commands ?? []).find((command) => command.status === "failed") ?? { command: "a verify command", logPath: record.verify.result }
     : null;
@@ -3871,6 +4665,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   const where = checkRecordPath(ctx.shipDir, record.n);
   const wholePlan = wholePlanSummary(ctx, record);
   const limit = ctx.config.limits.ciRepairs;
+  const ledger = ledgerLine(record);
   if (reused) say.push(`Whole-plan check ${record.n} already decided ${at}; its result is reused, and nothing is dispatched.`);
   if (record.status === "clean") {
     const minor = Object.entries(record.review?.counts ?? {}).filter(([severity]) => severity === "minor" || severity === "nit")
@@ -3878,7 +4673,18 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
     say.push(`The whole-plan check of ${at} is clean: verify ${record.verify.status === "passed" ? "passed" : "had nothing to run, which is recorded as that and not as a pass"}, `
       + `and the reviewer found nothing blocking or major${minor > 0 ? ` (${minor} minor or nit finding(s) recorded in ${record.review.findings}, and nothing fixed for them)` : ""}. `
       + `Its record is ${where}.`);
-    return { say, wholePlan, next: afterCleanCheck(ctx) };
+    if (ledger) say.push(ledger);
+    const pending = (record.followUps ?? []).filter((unit) => stateOf(ctx, unit.id) !== "merged");
+    const made = followUpIds(ctx.shipDir);
+    for (const unit of pending) {
+      say.push(`${listOf(unit.entries)} ${unit.entries.length > 1 ? "are" : "is"} still real and about the code, so ${unit.id} fixes `
+        + `${unit.entries.length > 1 ? "them" : "it"} as one more pull request into ${record.branch} through the same cycle, review and gates `
+        + `as a spec — follow-up ${made.indexOf(unit.id) + 1} of the ${ctx.config.limits.followUps} limits.followUps allows. `
+        + `Its document is ${ensureUnitDocument(ctx, record, unit.id)}.`);
+    }
+    if (pending.length === 0) return { say, wholePlan, next: afterCleanCheck(ctx) };
+    say.push("Once every follow-up is merged, the check runs again on the new tip.");
+    return { say, wholePlan, next: nextCommand(ctx, "begin", pending[0].id) };
   }
   if (record.status === "open") {
     const id = record.units.at(-1);
@@ -3887,6 +4693,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
     say.push(`The whole-plan check of ${at} is not clean: ${foundLine(ctx, record)}. It is fixed as ${id}, one more pull request into `
       + `${record.branch} through the same cycle, review and gates as a spec — whole-plan fix ${made} of the ${limit} limits.ciRepairs allows. `
       + `Its document is ${document}, and the check's record ${where}. Once it is merged, the check runs again on the new tip.`);
+    if (ledger) say.push(ledger);
     return { say, wholePlan, next: nextCommand(ctx, "begin", id) };
   }
   const why = record.reason === "spent"
@@ -3900,6 +4707,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   const raise = record.reason === "spent" ? " Raising limits.ciRepairs in .tagteam/config.json and running this check again would let the ship make another fix." : "";
   say.push(`The whole-plan check of ${at} stopped: ${why}. Its record is ${where}. The work stays on ${record.branch}, nothing of it `
     + `reached ${record.base}, and the plan is recorded as not clean for this tip.${raise}`);
+  if (ledger) say.push(ledger);
   // Once the plan's landing has begun, a check that stopped is shown as the
   // landing dialog shows it — what would land, with Merge withheld — and the
   // person can ask for that; before it, there is nothing to show.
@@ -4051,6 +4859,7 @@ async function planCheck(options) {
       findings: clean?.review?.findings ?? null, toFix: clean?.review?.toFix ?? null, counts: clean?.review?.counts ?? null,
       carried: { check: record.carry.check, tip: record.carry.from }
     };
+    if (clean?.ledger) record.ledger = { ...clean.ledger, carried: clean.n };
     say.push(`${short(tip)} is the ship's version commit and nothing else, over ${short(record.carry.from)}, whose whole-plan check `
       + `${record.carry.check} is clean: that review is carried to this tip and no reviewer is sent, since a version line is the ship's `
       + "and has one right answer. Every verify command ran on this tip, and the landing check runs on it too.");
@@ -4099,15 +4908,19 @@ async function planCollect(options) {
   record.review = {
     ...record.review, status: review.status, findings: path.join(dir, "review.json"), toFix: path.join(dir, "to-fix.json"), counts: review.counts ?? null
   };
-  if (review.status === "incomplete") return emit(closeCheck(ctx, record, "incomplete", "review-incomplete", say));
-  if (verdict(record) === "clean") return emit(closeCheck(ctx, record, "clean", null, say));
-  // Not clean: a fix unit, while limits.ciRepairs allows one. Every unit this
-  // plan has made counts, whatever tip or trigger made it, and the count is
-  // what is on disk — never a counter beside it.
-  const units = fixUnitIds(ctx.shipDir, records);
-  if (units.length >= ctx.config.limits.ciRepairs) return emit(closeCheck(ctx, record, "failed", "spent", say));
-  record.units = [...(record.units ?? []), nextUnitId(units)];
-  emit(closeCheck(ctx, record, "open", null, say));
+  const decided = verdict(record);
+  let [status, reason] = decided === "incomplete" ? ["incomplete", "review-incomplete"] : decided === "clean" ? ["clean", null] : ["open", null];
+  if (status === "open") {
+    // Not clean: a fix unit, while limits.ciRepairs allows one. Every unit this
+    // plan has made counts, whatever tip or trigger made it, and the count is
+    // what is on disk — never a counter beside it.
+    const units = fixUnitIds(ctx.shipDir, records);
+    if (units.length >= ctx.config.limits.ciRepairs) [status, reason] = ["failed", "spent"];
+    else record.units = [...(record.units ?? []), nextUnitId(units)];
+  }
+  judgeLedger(ctx, record, status, records);
+  say.push(...unitTables(ctx, records, record, status));
+  emit(closeCheck(ctx, record, status, reason, say));
 }
 
 // --- the plan's landing ----------------------------------------------------------
@@ -4196,25 +5009,15 @@ function landingSummary(ctx, record) {
 }
 
 // What lands, from the records and never from a walk of commits: every spec
-// and every whole-plan fix, merged into the plan branch, with its pull request
-// and whether a person accepted it with findings open.
+// and every whole-plan fix, merged into the plan branch, with its pull request.
 function landsList(ctx) {
-  return unitsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) === "merged").map((unit) => {
-    const state = readState(ctx, unit.id);
-    const accepted = readJson(acceptedPath(ctx, unit.id), null);
-    return {
-      id: unit.id, fixUnit: unit.fixUnit === true, pr: state.pr?.number ?? null,
-      accepted: accepted && accepted.candidate === state.candidateOid ? (accepted.ids ?? []).length : 0,
-      prBody: prBodyPath(ctx, unit.id)
-    };
-  });
+  return unitsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) === "merged").map((unit) => ({
+    id: unit.id, fixUnit: unit.fixUnit === true, pr: readState(ctx, unit.id).pr?.number ?? null, prBody: prBodyPath(ctx, unit.id)
+  }));
 }
 
 function landsText(lands) {
-  const one = (entry) => {
-    const notes = [entry.pr ? `#${entry.pr}` : null, entry.accepted > 0 ? `with ${entry.accepted} finding(s) a person accepted open` : null].filter(Boolean);
-    return `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.id}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
-  };
+  const one = (entry) => `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.id}${entry.pr ? ` (#${entry.pr})` : ""}`;
   return lands.length > 0 ? listOf(lands.map(one)) : "nothing";
 }
 
@@ -4227,10 +5030,36 @@ function defaultTitle(ctx) {
   return clean(heading) || clean(`Land plan ${ctx.slug}`) || "Land plan";
 }
 
+// Every ledger entry as the plan's body discloses it: what it is, the latest
+// verdict any check gave it with that verdict's evidence, and where it ended up
+// at the latest check.
+function ledgerFacts(entries, records) {
+  const latest = records.at(-1) ?? null;
+  return entries.map((entry) => {
+    const judged = records.map((record) => record.ledger?.entries.find((item) => item.id === entry.id)).filter((item) => item?.verdict).at(-1);
+    const outcome = latest?.ledger?.entries.find((item) => item.id === entry.id)?.outcome ?? "not-re-judged";
+    const unit = records.flatMap((record) => record.followUps ?? []).filter((item) => item.entries.includes(entry.id)).at(-1)?.id ?? null;
+    const endedUp = {
+      resolved: `resolved at ${short(latest?.tip)}${unit ? `, after the follow-up ${unit}` : ""}`,
+      "pull-request": "still unresolved: it is about the pull request, so no fix unit can answer it",
+      "needs-person": "still unresolved: only a person or a re-plan settles it",
+      spent: "still unresolved: every follow-up limits.followUps allows was made",
+      "after-fix": "still unresolved: the latest check was not clean, so it is judged again once the whole-plan fix merges",
+      "check-stopped": "still unresolved: the latest check stopped, so no follow-up was made for it",
+      "not-re-judged": "still unresolved: the latest check gave it no usable verdict"
+    }[outcome];
+    return {
+      id: entry.id, spec: entry.spec, severity: entry.severity, scope: entry.scope, files: entry.files, title: entry.title,
+      verdict: judged?.verdict ?? null, evidence: judged?.evidence ?? null, outcome, endedUp
+    };
+  });
+}
+
 // What the orchestrator writes the plan's pull request body from: the shape,
 // what lands, and where each spec's own body is, whose `## Risk` is what carries
-// over — a finding a person accepted, one disclosed when a fix budget ran out.
-// The budgets spent at plan level are said here, since no spec's body has them.
+// over — one disclosed when a fix budget ran out. What the ledger holds the ship
+// says itself, and `ledger.entries` says where each entry ended up. The budgets
+// spent at plan level are said here, since no spec's body has them.
 function bodyFacts(ctx, file) {
   const limits = ctx.config.limits;
   const fixes = fixUnitIds(ctx.shipDir);
@@ -4241,34 +5070,77 @@ function bodyFacts(ctx, file) {
     if ((state.fixRoundsUsed ?? 0) >= limits.fixRounds) spent.push(`${unit.id} used every fix round limits.fixRounds allows`);
   }
   if (fixes.length >= limits.ciRepairs) spent.push(`the plan made every whole-plan fix limits.ciRepairs allows (${fixes.join(", ")})`);
+  const ledger = readLedger(ctx.shipDir);
+  const entries = ledgerFacts(ledger.entries, wholePlanChecks(ctx));
+  const followUps = followUpIds(ctx.shipDir);
+  const leftOver = entries.some((entry) => entry.outcome === "spent");
+  if (followUps.length >= limits.followUps && (followUps.length > 0 || leftOver)) {
+    spent.push(`the plan made every follow-up limits.followUps allows (${followUps.join(", ") || "none"})`
+      + `${leftOver ? ", and the ledger entries still real past it go unfixed into this pull request" : ""}`);
+  }
   // What the plan lands as is said in the body by the ship itself, under the
   // Summary heading, as the increase stands when the body is sent: a body
   // written before the base moved and the increase was made again would
   // otherwise name a number the plan no longer lands as.
   const landsAs = landsAsOf(ctx, routeOf(ctx).tipOid);
+  const carried = planLines(ledger).length > 0;
   return {
     path: file, shape: ["## Summary", "## What you can now do", "## Risk"],
     goal: path.join(ctx.plan, "goal.md"), plan: path.join(ctx.plan, "plan.md"),
     lands: landsList(ctx), spent,
-    ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {})
+    ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {}),
+    ...(carried ? {
+      ledger: {
+        riskLines: "the ship adds under ## Risk itself every finding a spec carried into the plan branch open, and every failure that passed when run again",
+        entries
+      }
+    } : {})
   };
+}
+
+// What a plan body written from `facts` answers for that a later check can
+// move: the budgets spent at plan level, and every ledger entry's latest verdict
+// and where it ended up. The tip a resolved entry names is left out, since a
+// check that only confirms it again changes nothing the body says.
+const disclosedOf = (facts) => ({
+  spent: facts.spent,
+  entries: (facts.ledger?.entries ?? []).map((entry) => ({ id: entry.id, verdict: entry.verdict, outcome: entry.outcome }))
+});
+
+// What moved between the facts a body was written from and the ones now, in
+// words; nothing when the body still says what is so.
+function disclosureChanges(before, now) {
+  const was = new Map(before.entries.map((entry) => [entry.id, entry]));
+  const changes = now.entries.flatMap((entry) => {
+    const old = was.get(entry.id);
+    if (!old) return [`ledger entry ${entry.id} was added, ${entry.outcome}`];
+    return old.outcome !== entry.outcome || old.verdict !== entry.verdict
+      ? [`ledger entry ${entry.id} went from ${old.verdict ?? "no verdict"} (${old.outcome}) to ${entry.verdict ?? "no verdict"} (${entry.outcome})`]
+      : [];
+  });
+  changes.push(...now.spent.filter((line) => !before.spent.includes(line)).map((line) => `now ${line}`));
+  changes.push(...before.spent.filter((line) => !now.spent.includes(line)).map((line) => `no longer ${line}`));
+  return changes;
 }
 
 // The line the plan pull request's body carries about the version it lands as.
 const landsAsLine = (landsAs) => `This plan lands as version ${landsAs}.`;
 
-// The body as it is sent: the orchestrator's, with the version line under its
-// Summary heading — or above everything, when it has none — while the plan
-// carries an increase. Written beside the orchestrator's file, which is left as
-// it was written.
+// The body as it is sent: the orchestrator's, with the plan's ledger under its
+// Risk heading, and the version line under its Summary heading — or above
+// everything, when it has none — while the plan carries an increase. Written
+// beside the orchestrator's file, which is left as it was written.
 function sentBody(ctx, text, tip) {
   const landsAs = landsAsOf(ctx, tip);
-  if (!landsAs) return { text, file: planBodyPath(ctx.shipDir) };
-  const line = landsAsLine(landsAs);
-  const summary = /^## Summary[ \t]*\r?$/m.exec(text);
-  const composed = summary
-    ? `${text.slice(0, summary.index + summary[0].length)}\n\n${line}\n${text.slice(summary.index + summary[0].length).replace(/^\r?\n?/, "\n")}`
-    : `${line}\n\n${text}`;
+  let composed = composeBody(text, planLines(readLedger(ctx.shipDir)));
+  if (landsAs) {
+    const line = landsAsLine(landsAs);
+    const summary = /^## Summary[ \t]*\r?$/m.exec(composed);
+    composed = summary
+      ? `${composed.slice(0, summary.index + summary[0].length)}\n\n${line}\n${composed.slice(summary.index + summary[0].length).replace(/^\r?\n?/, "\n")}`
+      : `${line}\n\n${composed}`;
+  }
+  if (composed === text) return { text, file: planBodyPath(ctx.shipDir) };
   const file = path.join(landingRoot(ctx.shipDir), "pr-body.sent.md");
   fs.writeFileSync(file, composed, { mode: 0o600 });
   return { text: composed, file };
@@ -4286,11 +5158,28 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
     throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -", 2);
   }
   const file = planBodyPath(ctx.shipDir);
+  const facts = bodyFacts(ctx, file);
   if (!exists(file)) {
     return {
       say: [...say, `The plan's pull request into ${route.base} opens next, and its body is needed first: write ${file} in the `
         + "Summary / What you can now do / Risk shape, for the plan as a whole, then run next."],
-      body: bodyFacts(ctx, file), next: nextCommand(ctx, "plan-land", null)
+      body: facts, next: nextCommand(ctx, "plan-land", null)
+    };
+  }
+  // A body written before a later check moved a ledger entry or spent a budget
+  // says what is no longer so, and the ship's own lines under Risk do not say
+  // where an entry ended up: it is asked for again, once for each such change.
+  // What it is asked from is recorded first, so the run after sends whatever
+  // the file then holds, rewritten or not.
+  const disclosed = disclosedOf(facts);
+  const changed = record.bodyFacts ? disclosureChanges(record.bodyFacts, disclosed) : [];
+  if (changed.length > 0) {
+    record.bodyFacts = disclosed;
+    saveLanding(ctx, record);
+    return {
+      say: [...say, `The plan's pull request body at ${file} was written before a later check changed what it answers for: `
+        + `${listOf(changed)}. Write it again from body, in the same Summary / What you can now do / Risk shape, then run next.`],
+      body: facts, next: nextCommand(ctx, "plan-land", null)
     };
   }
   const sent = sentBody(ctx, fs.readFileSync(file, "utf8"), tip);
@@ -4303,10 +5192,15 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
     view = viewPlanPr(ctx, route.branch);
     say.push(`Opened the plan's pull request #${view.number} from ${route.branch} into ${route.base}: ${view.url}`);
   } else if (record.bodySent !== hash || record.title !== title) {
+    // A body not sent is not recorded as sent: the next run tries again, and
+    // nothing waits on checks or merges while GitHub holds a body that may lack
+    // what the ship says under Risk.
     const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", sent.file], { allowFailure: true });
-    say.push(edited.status === 0
-      ? `The plan's pull request #${view.number} now carries the body and title as written.`
-      : `The plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body it had.`);
+    if (edited.status !== 0) {
+      throw new Stop(`the plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body `
+        + "it had, which may lack what the ship says under Risk, so nothing else was done. Run this again to send it.");
+    }
+    say.push(`The plan's pull request #${view.number} now carries the body and title as written.`);
   }
   if (view.baseRefName !== route.base) throw new Stop(`the plan's pull request #${view.number} targets ${view.baseRefName}, not ${route.base}; nothing else was done`);
   if (view.headRefOid !== tip) {
@@ -4315,6 +5209,7 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
   }
   record.pr = { number: view.number, url: view.url, head: tip, base: route.base };
   record.bodySent = hash;
+  record.bodyFacts = disclosed;
   record.title = title;
   saveLanding(ctx, record);
   return null;
@@ -5285,7 +6180,8 @@ const REASONS = {
 // steps run again only through `revisit`, which re-enters the round and spends
 // nothing — except a red check, whose door is `repair`. Named in the ask so the
 // person is told what would clear it instead of being offered an approval that
-// `evaluate` would not honour.
+// `evaluate` would not honour. The one approval here is cleared without a person
+// on a plan branch, and the ask says how.
 const CLEARS = {
   "review-not-recorded": "revisit — the review runs again against this commit",
   "review-open": "revisit once what it found is no longer there — the reader that raised it judges it again, and a fix round follows if one is left",
@@ -5293,7 +6189,9 @@ const CLEARS = {
   "verification-not-recorded": "revisit — the verify commands run again",
   "verification-failed": "revisit once what fails is put right",
   "continuous-integration-failed": "repair",
-  "continuous-integration-not-recorded": "revisit — publish records the checks again"
+  "continuous-integration-not-recorded": "revisit — publish records the checks again",
+  "work-not-accounted-for": "on a plan branch, once every reader rules each item left undone as something the agent could not do where it ran "
+    + "or something this change does not owe, and the review is clean, verify passed and the checks passed or were not waited for"
 };
 
 const sentence = (reason) => REASONS[reason] ?? reason;
@@ -5304,10 +6202,19 @@ const sentence = (reason) => REASONS[reason] ?? reason;
 // blocker, it was taken: the approval was recorded, printed as "Approved by",
 // and `finish` asked again with the same reasons.
 // `words` replaces a reason's fixed sentence with one this stop worked out —
-// the start wait's, which carries the limit publish recorded.
-function stopAsk(id, { blockers, approvals }, accepted = null, words = {}) {
+// the start wait's, which carries the limit publish recorded. A goal conflict
+// a fixer reported changes the verdict for no approval, so none is offered.
+function stopAsk(id, { blockers, approvals }, accepted = null, words = {}, { goalConflict = false } = {}) {
   const sentence = (reason) => words[reason] ?? REASONS[reason] ?? reason;
   const text = [`${id} stops and waits.`];
+  if (goalConflict) {
+    if (blockers.length > 0) {
+      text.push(`Also blocked: ${blockers.map((reason) => `${sentence(reason)} (cleared by ${CLEARS[reason] ?? "revisit"}, or by a new commit)`).join("; ")}.`);
+    }
+    text.push("No approval merges it past the goal conflict, so none is offered. Offer: re-plan it, or merge it by hand on GitHub; "
+      + "leave it open and continue (run next), or stop the train (run end).");
+    return text.join(" ");
+  }
   if (accepted && blockers.length > 0) {
     text.push(`You accepted this at round ${accepted.round} with what was open disclosed, so it waits for you to merge it on GitHub — or to look at it again once a reader would withdraw what it found.`);
   }
@@ -5316,10 +6223,24 @@ function stopAsk(id, { blockers, approvals }, accepted = null, words = {}) {
     if (approvals.length > 0) text.push(`Also waiting on you: ${approvals.map(sentence).join("; ")}; approval would clear only this part, so it is not offered until nothing is blocked.`);
     text.push("Offer: leave it open and continue (run next), stop the train (run end), or — when they have put right what blocked it without a new commit — look at it again (run revisit, which spends no budget).");
   } else {
-    text.push(`Reasons: ${approvals.map(sentence).join("; ")}.`);
+    text.push(`Reasons: ${approvals.map((reason) => (CLEARS[reason] ? `${sentence(reason)} (cleared without you ${CLEARS[reason]})` : sentence(reason))).join("; ")}.`);
     text.push("Offer: approve and merge (rerun finish with --approve <email>), leave it open and continue (run next), or stop the train (run end).");
   }
   return text.join(" ");
+}
+
+// The stop when carrying this spec would take the plan past `limits.carried`:
+// the cap, and the ways on from it — or, when approvals are owed as well, the
+// cap ahead of the ordinary stop, `stopped`, which says what they are. A carry
+// an earlier finish recorded stays on record, held back until the cap allows it,
+// so a merge by hand enters what is open as carried.
+function carriedPastCap(id, carry, stopped) {
+  const cap = `Carrying its ${carry.record.ids.length} open finding(s) into ${carry.base} would take the plan past limits.carried, `
+    + `which is ${carry.limit} — ${carry.others} finding(s) are carried so far — so `
+    + `${carry.recorded ? "the carry an earlier finish recorded for it does not merge it" : "nothing was carried for it"}.`;
+  if (stopped) return [cap, stopped];
+  return [`${id} stops and waits.`, cap, "Offer: raise limits.carried in this repository's tagteam configuration and run finish again, merge it by hand on GitHub "
+    + `(what is open then enters the plan's ledger as ${carry.recorded ? "carried" : "merged by hand"}), leave it open and continue (run next), or stop the train (run end).`];
 }
 
 // The sentence for checks that never started, naming the limit the wait ran
@@ -5347,7 +6268,16 @@ function checksCause(ctx, id, state, verdict) {
   if (!isPlanRoute(route) || state.base !== route.branch) return null;
   const notStarted = verdict.approvals.includes("continuous-integration-not-started");
   if (!notStarted && !verdict.approvals.includes("continuous-integration-inconclusive")) return null;
-  const ci = readJson(path.join(specDir(ctx, id), "ci.json"), null);
+  // Only when no check appeared at all, on a commit holding a workflow a pull
+  // request would start: a check that was cancelled, skipped or still running
+  // did start, so no branch filter kept it away.
+  const ci = readJson(ciPath(ctx, id), null);
+  if (!Array.isArray(ci?.checks) || ci.checks.length > 0) return null;
+  try {
+    if (!hasPullRequestWorkflow(ctx.repo, state.candidateOid).found) return null;
+  } catch {
+    return null;
+  }
   return `The checks on this pull request ${notStarted ? "never started" : "proved nothing"}${ci?.reason ? ` (${ci.reason})` : ""}, and it targets ${route.branch}, `
     + `not ${route.base}: the likely cause is workflows that only run for pull requests into ${route.base} — an `
     + `\`on: pull_request: branches:\` filter. Letting them run for pull requests into ${route.branch} is a change to those `
@@ -5433,13 +6363,26 @@ async function landingCheck(ctx, id, state, say) {
       + `${state.candidateOid.slice(0, 12)} to verify the merged change against; nothing was merged`);
   }
   const borrowed = borrowWorktree(ctx, id, state);
-  const outcome = checkLanding({
+  const check = () => checkLanding({
     repo: ctx.repo, worktree: ctx.worktree, branch: borrowed,
     config: ctx.config, configPath: ctx.configPath,
     baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
     candidatePath: path.join(round.dir, "candidate.json"),
     landingDir: path.join(round.dir, "landing")
   });
+  let outcome = check();
+  // A verify that fails on the merge is run once more on the same merge, in an
+  // attempt directory of its own, and the second answer is the one recorded.
+  if (outcome.status === "failed" && !retryOf(ctx, id, "landing", state.candidateOid, baseOid)) {
+    const first = outcome;
+    outcome = check();
+    writeRetry(round.dir, {
+      kind: "landing", candidate: state.candidateOid, base: baseOid, failed: firstFailed(first.verify)?.command ?? null,
+      first: first.resultPath, second: outcome.resultPath ?? outcome.dir ?? null, result: outcome.status
+    });
+    say.push(`Merged onto ${state.base} at ${short(baseOid)}, a verify command failed, and it was run once more on the same merge: `
+      + `${outcome.status === "passed" ? "it passed, and the pull request says so under Risk" : "it failed again"}.`);
+  }
   const record = {
     status: outcome.status,
     baseOid: outcome.baseOid,
@@ -5480,8 +6423,18 @@ function landAndMerge(ctx, id, state, say, planRoute) {
       if (planRoute) {
         say.push(...(await reconcileMerged(ctx, { own: id })).say);
         await planTipCheck(ctx, "nothing was merged");
+        // What was just taken in can have put carried findings in the ledger.
+        const carry = carryStanding(ctx, id, readState(ctx, id));
+        if (carry?.recorded && carry.over) return { stop: carriedPastCap(id, carry, null).join(" ") };
       }
-      return landingCheck(ctx, id, state, say);
+      const stopped = await landingCheck(ctx, id, state, say);
+      if (stopped) return stopped;
+      // Nothing merges while the body on GitHub lacks a line the driver owes it.
+      if (resendBody(ctx, id, readState(ctx, id), say)) return null;
+      return {
+        stop: `${id}'s pull request does not yet say under Risk every line the ship writes there, and its body could not be sent `
+          + "again, so nothing was merged. Run finish again once GitHub takes the edit."
+      };
     },
     merge: () => {
       const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath],
@@ -5492,6 +6445,30 @@ function landAndMerge(ctx, id, state, say, planRoute) {
       return {};
     }
   });
+}
+
+// A wait for checks that `checks` had not finished, ended by a person running
+// finish: recorded as the checks proving nothing, with the time they were
+// waited for — the inconclusive result it always was, which a person approves.
+// Unless a check had already failed: a failure held back for the rest of its
+// run, or the attempt a rerun still running was asked to replace, is a failure,
+// and is recorded as one — a blocker no approval clears, which goes to repair.
+function endChecksWait(ctx, id, state, say) {
+  const waiting = readJson(ciPath(ctx, id), null);
+  if (!waiting?.stillRunning || waiting.candidateOid !== state.candidateOid) return;
+  const { stillRunning, ...outcome } = waiting;
+  const waited = secondsSince(waiting.waitBegan);
+  if (classifyChecks(outcome.checks).status === "failed") {
+    recordChecks(ctx, id, state, {
+      ...outcome, status: "failed", reason: `at least one check ran and failed; the wait for the rest was ended at finish after ${waited}s`
+    }, waiting.waitBegan, say, { ended: true });
+    say.push(`Ended the wait for the checks on #${state.pr.number} after ${waited}s; a check had already failed, so they are recorded as failed.`);
+    return;
+  }
+  recordChecks(ctx, id, state, {
+    ...outcome, reason: `checks were still running after ${waited}s of waiting, when the wait was ended at finish, so nothing was proven either way`
+  }, waiting.waitBegan, say, { ended: true });
+  say.push(`Ended the wait for the checks on #${state.pr.number} after ${waited}s; they proved nothing either way.`);
 }
 
 async function finish(options) {
@@ -5518,13 +6495,36 @@ async function finish(options) {
     }
   }
   freezePlanRoute(ctx, id);
+  endChecksWait(ctx, id, state, say);
   const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
   let verdict = evaluateGates();
+  // A goal conflict a fixer reported is a person's to re-plan whatever the gates
+  // say: a fixer that changed the code all the same has its commit reviewed like
+  // any other, and that review can come back clean. It is not a gate, so no gate
+  // and no approval clears it; it stops the spec before the merge.
+  const conflict = readJson(goalConflictPath(ctx, id), null);
+  // Carried only when the open review is all that blocks the merge: a spec that
+  // also fails verification or CI stops anyway, and the record would disclose
+  // findings for a merge that is not going to happen. Before an approval is
+  // weighed, which cannot clear the blocker a carry lifts. A carry an earlier
+  // finish recorded is weighed again against the ledger and limits.carried as
+  // they stand now; past the cap it does not lift `review-open` here, so neither
+  // an approval nor the merge goes through on it.
+  const standing = conflict ? null : carryStanding(ctx, id, readState(ctx, id));
+  const carry = standing?.recorded || (verdict.blockers.length === 1 && verdict.blockers[0] === "review-open") ? standing : null;
+  if (carry && !carry.over && !carry.recorded) {
+    node("gates.mjs", ["accept", statePath(ctx, id), carry.record.candidateOid, carry.record.ids.join(","),
+      "--carry", carry.record.dependedOn ? "depended-on" : "independent"]);
+    verdict = evaluateGates();
+  }
+  if (carry?.over && carry.recorded) verdict = { ...verdict, ready: false, needsHuman: true, blockers: [...verdict.blockers, "review-open"] };
   if (options.approve) {
     // An approval given while a blocker is open would change nothing now and
     // would still be on disk, bound to this commit, when the blocker clears —
     // merging unattended what nobody looked at again. It is not recorded.
-    if (verdict.blockers.length > 0) {
+    if (conflict) {
+      say.push(`Not recording ${options.approve}'s approval: ${id}'s fixer reported a goal conflict, which is re-planned, never approved.`);
+    } else if (verdict.blockers.length > 0) {
       say.push(`Not recording ${options.approve}'s approval: ${verdict.blockers.map(sentence).join("; ")}. No approval clears a blocker.`);
     } else {
       const gate = path.join(specDir(ctx, id), "human.json");
@@ -5534,7 +6534,7 @@ async function finish(options) {
       verdict = evaluateGates();
     }
   }
-  if (verdict.ready) {
+  if (verdict.ready && !conflict) {
     const landed = await landAndMerge(ctx, id, state, say, planRoute);
     if (landed.merged) {
       // The squash GitHub just made becomes the plan branch's recorded tip before
@@ -5543,9 +6543,17 @@ async function finish(options) {
       // It is placed the way every squash is: on the record, with nothing under
       // it the ship did not record, and beside any other spec merged meanwhile.
       if (planRoute) say.push(...(await reconcileMerged(ctx, { own: id, landed: true })).say);
+      const entered = enterLedger(ctx, id, readState(ctx, id));
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
+      if (carry && !carry.over) {
+        // Read again, since what the landing check took in can have added to it.
+        const total = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried").length;
+        say.push(`Carried ${carry.record.ids.length} open finding(s) into ${state.base} with it, as carrying allows: the plan has carried ${total} `
+          + `of the ${carry.limit} limits.carried allows.`);
+      }
+      say.push(...enteredLines(entered));
       say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
       return finishNext(ctx, id, say);
     }
@@ -5565,21 +6573,33 @@ async function finish(options) {
   state = readState(ctx, id);
   if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
   const reasons = [...verdict.blockers, ...verdict.approvals];
-  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ")], { stdio: "ignore" });
+  spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ") || "a goal conflict"], { stdio: "ignore" });
   const round = currentRound(ctx, id, state);
   const open = round && exists(path.join(round.dir, "recheck.json"))
     ? node("recheck.mjs", ["--print", path.join(round.dir, "recheck.json")], { allow: [1] }).stdout.trim().split("\n")
     : [];
+  // What the readers ruled on each item, where the settled review recorded it.
+  const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
+  const rulings = new Map((review?.accounting?.items ?? []).map((item) => [item.id, item.ruling]));
+  const undone = (number, part, index) => {
+    const ruling = rulings.get(itemId(number, index));
+    return `left undone: ${part.part} — ${part.reason}${ruling ? ` (ruled ${ruling})` : ""}`;
+  };
   const reports = listRounds(roundsRoot(ctx, id))
-    .map((entry) => readJson(path.join(entry.dir, "report.json"), null))
-    .filter((report) => report && report.status !== "complete")
-    .map((report) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part) => `left undone: ${part.part} — ${part.reason}`).join("; ")}`);
+    .map((entry) => ({ number: entry.round, report: readJson(path.join(entry.dir, "report.json"), null) }))
+    .filter(({ report }) => report && report.status !== "complete")
+    .map(({ number, report }) => report.status === "missing" ? `a round wrote no report: ${report.reason}` : `${report.kind} report is ${report.status}: ${report.report?.summary ?? ""} ${(report.report?.unfinished ?? []).map((part, index) => undone(number, part, index)).join("; ")}`);
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
+  const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) });
   emit({
     say,
-    ask: [stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state)), ...(cause ? [cause] : [])].join(" "),
+    ask: [
+      ...(conflict ? [goalConflictLine(ctx, id, state, conflict)] : []),
+      ...(carry?.over ? carriedPastCap(id, carry, verdict.approvals.length === 0 && verdict.blockers.length === 1 ? null : stopped) : [stopped]),
+      ...(cause ? [cause] : [])
+    ].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: followingCommand(ctx, id)
   });
@@ -5770,7 +6790,7 @@ async function end(options) {
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
-  start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, repair, revisit, finish, end,
+  start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
   "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect,
   "plan-land": planLand
 };
@@ -5797,12 +6817,14 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       — or, when the question was put at the cap, the one round past limits.fixRounds that only this
                                       answer grants. One per cycle: refused once this cycle has had one
   accept  --spec <id>                 a person's other answer to it, for either signal, while a fix round is left, never printed by
-                                      next: publish as it is
-                                      with what is open disclosed; it then waits to be merged by hand. Refused at the cap, where
+                                      next: publish as it is with what is open disclosed. On a plan branch, when everything accepted
+                                      may be carried there, finish then merges it into the plan branch with each finding entered in
+                                      the plan's ledger; otherwise it waits to be merged by hand. Refused at the cap, where
                                       publishing as it is is next
   recheck --spec <id>                 dispatch the adversary and the re-checks
   settle  --spec <id>                 settle the round; decides fix or publish
   publish --spec <id> --title <t> --body <file>
+  checks  --spec <id>                 wait on for checks still running when publish's wait ran out; finish ends the wait
   repair  --spec <id>                 spend a CI repair and dispatch the fixer
   revisit --spec <id>                 from awaiting-approval: the reviewed commit through the cycle again, spending nothing
   finish  --spec <id> [--approve <email>]   merge when ready, otherwise stop for a person

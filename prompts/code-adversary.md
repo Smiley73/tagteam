@@ -36,6 +36,29 @@ Where this usually hides:
 - **What this breaks elsewhere.** Callers, persisted data written by the old
   code, an assumption another module makes about this one.
 
+## Unfinished items
+
+Your dispatch may name an unfinished items file: what the agents that wrote
+this change, or an earlier candidate of it, reported leaving undone. Each item
+carries an `id`, the round and kind of report it came from, and the agent's own
+`part` and `reason`. Rule on every one in `rulings`, against the candidate you
+are reviewing rather than the commit that wrote the report: one
+`{"id", "ruling", "reason"}` per item, the id copied unchanged and the reason
+one sentence.
+
+- `spec-requirement-missing` — the spec requires this, and this candidate
+  still lacks it.
+- `environmental` — the agent could not do or check this where it ran (a
+  sandbox, the full gate, the network), and nothing in the change is wrong
+  because of that.
+- `out-of-scope` — this candidate owes nothing more for it: the spec does not
+  ask for it, another spec owns it, or it has since been done.
+
+An item you rule `spec-requirement-missing` becomes a finding of its own, so do
+not also file one for it. An item you leave unruled keeps the spec waiting for
+a person. Given no items file, or one whose list is empty, write `rulings` as
+`[]` — never omit it.
+
 ## Discipline
 
 The spec's `## Sign-offs` names what a person approved with the plan, such as a
@@ -52,6 +75,13 @@ fixer that will usually try whatever you wrote there, so a guess spends a round
 repairing the wrong thing. For anything else, name the defect and stop — a
 finding that proposes no repair is complete, and it is the expected shape. Write
 `fix` either way, null when you propose nothing, never omitted.
+
+Set `scope` on every finding, the same way. `pull-request` when the remedy is a
+change to the pull request's text — what its description says or leaves out.
+`code` otherwise, including a code defect that names no single file: write
+`file` as null and it still goes to a fixer. A finding whose only remedy is
+re-planning — this diff should have been two specs, or the work should have
+been planned differently — is `minor` at most, because no fixer can answer it.
 
 Severity is a claim you have to earn: `blocking` or `major` only with the
 failing input, state or reproduction in `detail`. A defect you reasoned about

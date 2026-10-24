@@ -296,6 +296,11 @@ test("the question at settle, answered accept: the spec publishes with the open 
   assert.doesNotMatch(finish.json.ask, /--approve/, "an open finding is a blocker no approval clears");
   assert.equal(state().state, "awaiting-approval");
   assert.ok(fs.existsSync(path.join(shipDir, "01-a", "accepted.json")), "finish keeps the marker");
+  assert.equal(state().accept, null, "an accept straight to the base was recorded for the verdict");
+  assert.ok(!fs.existsSync(path.join(shipDir, "ledger.json")));
+  const merge = spawnSync(process.execPath, [path.join(root, "scripts", "merge.mjs"), path.join(shipDir, "01-a", "state.json"),
+    "--repo", staged.repo, "--config", path.join(staged.repo, ".tagteam", "config.json")], { encoding: "utf8", env: { ...process.env, PATH: quietPath(dir) } });
+  assert.match(merge.stderr, /not satisfied \(review-open/);
 });
 
 test("an accept given at collect is honoured by settle only for what the person saw, and a revisit clears it", () => {

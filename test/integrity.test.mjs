@@ -300,6 +300,15 @@ test("the configure command asks about both of the settings a person can only ge
   for (const job of jobs) assert.ok(effortItem.includes(`\`${job}\``), `configure.md's effort question never names ${job}`);
 });
 
+// Version 11's settings are required so that nobody ships before seeing them,
+// which only holds if configure puts each one to the person by name.
+test("the configure command asks about every setting version 11 added", () => {
+  const items = thenAskItems(read("commands", "configure.md"));
+  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps"]) {
+    assert.ok(items.some((item) => item.includes(`\`${key}\``)), `no numbered question in configure.md asks about ${key}`);
+  }
+});
+
 // `autoMerge` does nothing, so no question may ask about it, and a configuration
 // that still carries it has to hear that from configure itself: the validator's
 // note never shows there, because configure validates the file it has just
@@ -367,6 +376,14 @@ test("every brief at either end of a finding's `fix` field still says what it me
   for (const { file, statement, pattern } of fixFieldProse) {
     const text = read(...file.split("/")).replace(/\s+/g, " ");
     assert.match(text, pattern, `${file} no longer says ${statement}`);
+  }
+});
+
+test("every brief that writes findings says how to choose `scope`, and caps a finding only re-planning answers at minor", () => {
+  for (const file of ["prompts/review.md", "prompts/codex/review.md", "prompts/code-adversary.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.match(text, /Set `scope` on every finding.{0,80}`pull-request` when the remedy is a change to the pull request's text/, `${file} no longer says how to choose scope`);
+    assert.match(text, /only remedy is re-planning.{0,140}is `minor` at most/, `${file} no longer caps a re-plan-only finding`);
   }
 });
 
@@ -459,12 +476,21 @@ test("every reporting dispatch the driver prints names the path its agent must w
 });
 
 // The two answers to the Recurring question are a person's, like `revisit`:
-// `next` never prints them. A redesign is budgeted like a fix and dispatched
-// after the edge, and its question carries none of the run's vocabulary.
+// `next` never prints `accept` or `revisit`, and prints `redesign` only where
+// `churnAsk` says `autoRedesign` answered the question. A redesign is budgeted
+// like a fix and dispatched after the edge, and its question carries none of
+// the run's vocabulary.
 test("redesign and accept are person-only doors, budgeted before dispatch, and the ask names no severity", () => {
-  for (const door of ["redesign", "accept", "revisit"]) {
-    assert.doesNotMatch(shipDriver, new RegExp(`nextCommand\\(ctx, "${door}"`), `next prints ${door}, which only a person decides`);
+  const nexts = [...shipDriver.matchAll(/nextCommand\(ctx,[^)]*\)/g)].map(([call]) => call);
+  for (const door of ["accept", "revisit"]) {
+    assert.ok(!nexts.some((call) => call.includes(`"${door}"`)), `next prints ${door}, which only a person decides`);
   }
+  for (const call of nexts.filter((call) => call.includes('"redesign"'))) {
+    assert.match(call, /^nextCommand\(ctx, churn\.auto \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
+  }
+  const churn = driverFunction("churnAsk");
+  assert.equal(churn.split("result.auto = true").length - 1, 1, "churnAsk answers redesign in one place");
+  assert.match(churn, /if \(ctx\.config\.autoRedesign && !used && signals\.length > 0\) \{\s*result\.auto = true;/, "the automatic answer is not behind the setting, an unused rewrite and the same file failing");
   const redesign = driverFunction("redesign");
   const edge = redesign.indexOf('transition(ctx, id, "fixing", { budgeted: true })');
   const dispatch = redesign.indexOf("redesignDispatch(");

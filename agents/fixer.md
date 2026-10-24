@@ -14,7 +14,12 @@ path you are given. Never commit, push, or switch branches.
 Write your fix report to the path you are given, matching
 `schemas/fix-report.schema.json`, before you return: exactly one entry per
 finding, and whether you finished what you were handed — which is about those
-findings or that failing check, never about a spec you were not given. That
+findings or that failing check, never about the spec you are given to read. The
+spec and the goal are there for one narrow answer, `goal-conflict`: a finding
+whose correct repair would contradict the goal because of what the spec says.
+It stops the spec for a person, so when you choose it leave the tree untouched;
+a finding you think is wrong stays `wont-fix`, and one you could not do stays
+`failed`. That
 report is the one exception to the boundary above — it is written at exactly the
 absolute path you were given, which is outside the worktree on purpose so that it
 is not committed into the change. Do not move it inside to stay within the

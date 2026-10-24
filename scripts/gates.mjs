@@ -13,7 +13,9 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { planBranchOf } from "./lib/plan-route.mjs";
+import { onPlanBranch } from "./lib/carry.mjs";
+import { isFixUnitId } from "./lib/whole-plan.mjs";
+import { isPullRequestFinding } from "./collect-findings.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
 
@@ -40,6 +42,15 @@ const LANDING = "landing";
 // merge, and `merge.mjs` re-reads the record rather than taking a caller's word
 // for which one it was.
 const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
+
+// A person's accept of the findings this candidate's review left open, recorded
+// only when every one of them may be carried into the plan branch: `{candidateOid,
+// ids, at}`. The ship's own carry is the same record with `mode: "carry"` and
+// `dependedOn`, whether a spec not yet merged depends on this one — which the
+// plan knows and this state does not. A top-level key for the reason `landing`
+// is one, and cleared by a bind as it is. Weighed by `acceptLifts` alone, which
+// `evaluate` asks to lift `review-open`.
+const ACCEPT = "accept";
 
 // How much of this attempt's budget has been spent. Counters rather than a
 // derivation from disk alone, because they are the resume mechanism: a fixer
@@ -179,6 +190,7 @@ export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) 
     [REPAIR_COUNTER]: 0,
     [UNACCOUNTED]: [],
     [LANDING]: null,
+    [ACCEPT]: null,
     [GRANT]: null,
     history: []
   };
@@ -545,6 +557,7 @@ export function bindCandidate(state, candidateOid, baseOid, changedPaths = null)
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
     [UNACCOUNTED]: outgoing !== null && outgoing !== candidateOid && !accounted ? [...carried, outgoing] : carried,
     [LANDING]: null,
+    [ACCEPT]: null,
     history: [...state.history, { candidateOid, baseOid, at: new Date().toISOString() }]
   };
 }
@@ -569,6 +582,19 @@ export function recordLanding(state, candidateOid, record) {
     throw new Error(`a landing check records the base it ran against, got: ${record?.baseOid}`);
   }
   return { ...state, [LANDING]: { ...record, candidateOid, at: record.at ?? new Date().toISOString() } };
+}
+
+/**
+ * Record a person's accept of `ids`, bound to the candidate it was given for,
+ * which is checked here as `recordLanding` checks its own — or, with `carry`,
+ * the ship's carry of them.
+ */
+function recordAccept(state, candidateOid, ids, carry = null) {
+  if (state.candidateOid !== candidateOid) {
+    throw new Error(`cannot record an accept for ${candidateOid}: the current candidate is ${state.candidateOid}`);
+  }
+  const mode = carry ? { mode: "carry", dependedOn: carry.dependedOn } : {};
+  return { ...state, [ACCEPT]: { candidateOid, ids, ...mode, at: new Date().toISOString() } };
 }
 
 // The pull request is recorded through here rather than by editing the state
@@ -644,6 +670,35 @@ export function recordGate(state, gate, candidateOid, value) {
 const currentGate = (state, gate) =>
   state.gates?.[gate]?.candidateOid === state.candidateOid ? state.gates[gate] : null;
 
+/**
+ * Whether a person's accept lifts `review-open` from this state's verdict: on
+ * the plan branch, and there alone, an accept of this candidate that covers
+ * everything its open review holds — never past a blocking finding, and never
+ * an incomplete review. Exported so that what the driver tells a person about
+ * an accept, or does about a carry, is this answer and not one of its own.
+ */
+export function acceptLifts(state, config) {
+  const review = currentGate(state, "review");
+  const open = Array.isArray(review?.open) ? review.open : [];
+  const accept = state[ACCEPT];
+  return onPlanBranch(state, config) && review?.status === "open" && open.length > 0
+    && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
+    && open.every((finding) => accept.ids.includes(finding.id))
+    && !open.some((finding) => finding.severity === "blocking")
+    && (accept.mode !== "carry" || carryHolds(state, config, accept, open));
+}
+
+// What a carry needs beyond an accept, since no person looked: carrying on, no
+// whole-plan fix, no major code finding on a spec something unmerged depends on
+// — read as depended on unless the record says otherwise — and either this
+// cycle's fix rounds spent or nothing open that a fixer could reach.
+function carryHolds(state, config, accept, open) {
+  const forFixer = open.filter((finding) => !isPullRequestFinding(finding));
+  return config?.carry === true && !isFixUnitId(state.spec)
+    && !(accept.dependedOn !== false && forFixer.some((finding) => finding.severity === "major"))
+    && (forFixer.length === 0 || counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds);
+}
+
 export function evaluate(state, config) {
   const blockers = [];
   const approvals = [];
@@ -656,9 +711,10 @@ export function evaluate(state, config) {
   // (d) A lens that produced no evidence is not a lens that found nothing. An
   // absent, unparseable, or wrongly-bound findings file reads as an empty
   // finding set, and an empty finding set reads as clean, so this is checked
-  // before anything else is believed.
+  // before anything else is believed. A person's accept, or the ship's carry, is
+  // weighed here and nowhere else in the verdict — see `acceptLifts`.
   if (!review) blockers.push("review-not-recorded");
-  else if (review.status !== "clean") blockers.push(`review-${review.status}`);
+  else if (review.status !== "clean" && !acceptLifts(state, config)) blockers.push(`review-${review.status}`);
 
   // (b) Verification and CI.
   if (!verify) blockers.push("verification-not-recorded");
@@ -680,25 +736,10 @@ export function evaluate(state, config) {
   // (a) Where this lands. Nothing reaches the base without a person, and a plan
   // branch is the one target where the plan's own pull request is that person's
   // look. So a candidate merges with nobody asked only when its state confirms
-  // that its pull request merges into this plan's own plan branch, and anything
-  // else waits.
-  //
-  // The confirmation is read off the state alone, and each part of it was frozen
-  // when the spec began: the base its pull request targets is exactly
-  // `planBranchOf(slug)`, and the plan route recorded beside it names that same
-  // branch. Neither is enough on its own. The base cannot say it, because a
-  // repository whose base branch is itself called `plan/<slug>` records that very
-  // base on a train that goes straight to it; and the configuration cannot say
-  // it, because it can change under a spec already running. So every part has
-  // to be there and agree — anything missing, empty or naming another branch,
-  // however the state came to be that way, counts as straight to the base. The
-  // configured base as it is now is compared as well, and can only add a wait.
-  const isBranchName = (value) => typeof value === "string" && value.length > 0;
-  const onPlanBranch = isBranchName(state.slug)
-    && state.base === planBranchOf(state.slug)
-    && state.planRouteBranch === state.base
-    && !(isBranchName(config?.base) && state.base === config.base);
-  if (!onPlanBranch) approvals.push("straight-to-base");
+  // that its pull request merges into this plan's own plan branch — see
+  // `onPlanBranch` — and anything else waits.
+  const planBranch = onPlanBranch(state, config);
+  if (!planBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth.
   if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
@@ -714,8 +755,27 @@ export function evaluate(state, config) {
   // An approval and not a blocker, deliberately: a blocker is cleared by nothing,
   // and an implementer that correctly refuses to guess at a contradictory spec
   // would strand the branch. A person reads the account and decides.
-  if (!report || report.status !== "complete" || (state[UNACCOUNTED] ?? []).length > 0) {
-    approvals.push("work-not-accounted-for");
+  //
+  // On a plan branch the readers can decide instead, and only there. They rule
+  // on every item left undone, and the settled review records the accounting;
+  // it stands for a person only with the review clean, verify passed, CI passed
+  // or not waited for, and every item of the current candidate and of every
+  // earlier unaccounted one ruled environmental or out-of-scope by every reader
+  // that was given it. A missing report, or one that names nothing, has no item
+  // to rule on and is never covered, so it always waits.
+  const unaccounted = state[UNACCOUNTED] ?? [];
+  if (!report || report.status !== "complete" || unaccounted.length > 0) {
+    const accounting = review?.accounting;
+    const owed = [...(report?.status === "complete" ? [] : [state.candidateOid]), ...unaccounted];
+    const cleared = planBranch
+      && (report?.status === "complete" || report?.status === "unfinished")
+      && review?.status === "clean"
+      && verify?.status === "passed"
+      && (ci?.status === "passed" || !(config?.ciWaitSec > 0))
+      && Array.isArray(accounting?.items) && accounting.items.length > 0
+      && accounting.items.every((item) => item.ruling === "environmental" || item.ruling === "out-of-scope")
+      && owed.every((candidate) => (accounting.candidates ?? []).includes(candidate));
+    if (!cleared) approvals.push("work-not-accounted-for");
   }
 
   // Nothing actually ran. Not a failure, and not evidence either.
@@ -755,6 +815,7 @@ const USAGE = `usage:
   gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs landing  <state.json> <candidateOid> <record.json>
+  gates.mjs accept   <state.json> <candidateOid> <id,id,...> [--carry <depended-on|independent>]
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
   gates.mjs roles    <state.json> <config.json>
@@ -783,6 +844,14 @@ const USAGE = `usage:
   approval is weighed against it and \`evaluate\` never reads it — and only a
   \`passed\` record lets \`merge.mjs\` accept a base other than the reviewed one.
   Binding a new candidate clears it.
+
+  \`accept\` records a person's accept of the open findings named, bound to the
+  candidate. On the plan branch \`evaluate\` lifts \`review-open\` when it covers
+  every open finding and none is blocking. Binding a new candidate clears it.
+  With \`--carry\` it records the ship's carry instead, which lifts it only with
+  \`carry\` on, outside a whole-plan fix, with this cycle's fix rounds spent or
+  nothing open for a fixer, and never past a major code finding on a spec that
+  is \`depended-on\` by one not yet merged.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -1012,6 +1081,13 @@ async function main() {
     next = recordGate(readJson(values[0]), values[1], values[2], readJson(values[3]));
   } else if (action === "landing") {
     next = recordLanding(readJson(values[0]), values[1], readJson(values[2]));
+  } else if (action === "accept") {
+    const carry = values.includes("--carry") ? values[values.indexOf("--carry") + 1] : null;
+    if (carry !== null && carry !== "depended-on" && carry !== "independent") {
+      throw new Error(`--carry is depended-on or independent, not ${JSON.stringify(carry ?? null)}`);
+    }
+    next = recordAccept(readJson(values[0]), values[1], (values[2] ?? "").split(",").filter(Boolean),
+      carry && { dependedOn: carry === "depended-on" });
   } else if (action === "pr") {
     next = recordPr(readJson(values[0]), { number: values[1], url: values[2], headOid: values[3] });
   } else {

@@ -14,6 +14,7 @@ import {
   budgetTaken, resolveRoles, grantFixRound
 } from "../scripts/gates.mjs";
 import { allocateRound, listRounds } from "../scripts/lib/rounds.mjs";
+import { onPlanBranch } from "../scripts/lib/carry.mjs";
 
 // `gates.mjs init` resolves each lens's brief, so it needs a repository to look
 // for `.tagteam/lenses/` in. These specs roster `correctness`, which the plugin
@@ -98,6 +99,44 @@ test("a review that is incomplete is not a review that is clean", () => {
   assert.ok(verdict.blockers.includes("review-incomplete"));
 });
 
+test("on the plan branch, a person's accept of everything open lifts review-open, and nothing short of that does", () => {
+  const major = { id: "3.correctness.1", severity: "major", scope: "code" };
+  const opened = (open, overrides) => recordGate(reviewed(overrides), "review", A, { status: "open", open });
+  const accepting = (state, ids, candidateOid = A) => ({ ...state, accept: { candidateOid, ids, at: "2026-01-01T00:00:00Z" } });
+  const lifted = evaluate(accepting(opened([major]), [major.id]), CONFIG);
+  assert.deepEqual([lifted.ready, lifted.blockers, lifted.approvals], [true, [], []]);
+  assert.equal(bindCandidate(accepting(opened([major]), [major.id]), B, BASE).accept, null, "a new candidate keeps the accept");
+  for (const [what, state] of [
+    ["straight to the base", accepting(opened([major], { base: "main", planRouteBranch: null }), [major.id])],
+    ["a blocking finding among them", accepting(opened([major, { id: "3.correctness.2", severity: "blocking", scope: "code" }]), [major.id, "3.correctness.2"])],
+    ["a fresh finding nobody accepted", accepting(opened([major, { id: "4.adversary.1", severity: "major", scope: "code" }]), [major.id])],
+    ["an accept of an earlier candidate", accepting(opened([major]), [major.id], B)]
+  ]) assert.ok(evaluate(state, CONFIG).blockers.includes("review-open"), what);
+  const incomplete = accepting(recordGate(reviewed(), "review", A, { status: "incomplete", open: [major] }), [major.id]);
+  assert.ok(evaluate(incomplete, CONFIG).blockers.includes("review-incomplete"));
+});
+
+test("the ship's carry lifts review-open only on the plan branch, with carrying on, past nothing blocking and outside a fix unit", () => {
+  const major = { id: "3.correctness.1", severity: "major", scope: "code", file: "app.js" };
+  const carrying = { ...CONFIG, carry: true, limits: { ...LIMITS, carried: 5 } };
+  const opened = (open, overrides) => recordGate(reviewed({ fixRoundsUsed: LIMITS.fixRounds, ...overrides }), "review", A, { status: "open", open });
+  const carried = (state, candidateOid = A) => ({
+    ...state, accept: { candidateOid, ids: state.gates.review.open.map((finding) => finding.id), mode: "carry", dependedOn: false, at: "2026-01-01T00:00:00Z" }
+  });
+  assert.deepEqual(evaluate(carried(opened([major])), carrying).blockers, []);
+  const straightOn = evaluate(carried(opened([major], { base: "main", planRouteBranch: null })), carrying);
+  assert.ok(straightOn.blockers.includes("review-open") && straightOn.approvals.includes("straight-to-base"), JSON.stringify(straightOn));
+  const baseIsConfigured = evaluate(carried(opened([major])), { ...carrying, base: PLAN_BASE });
+  assert.ok(baseIsConfigured.blockers.includes("review-open") && baseIsConfigured.approvals.includes("straight-to-base"));
+  for (const [what, state, config = carrying] of [
+    ["a blocking finding open", carried(opened([major, { id: "3.correctness.2", severity: "blocking", scope: "code", file: "app.js" }]))],
+    ["carrying off", carried(opened([major])), { ...carrying, carry: false }],
+    ["a whole-plan fix unit", carried(opened([major], { spec: "plan-fix-1" }))],
+    ["a record bound to an older candidate", carried(opened([major]), B)],
+    ["a major code finding on a spec depended on", { ...carried(opened([major])), accept: { ...carried(opened([major])).accept, dependedOn: true } }]
+  ]) assert.ok(evaluate(state, config).blockers.includes("review-open"), what);
+});
+
 // --- where the candidate lands ---
 //
 // Nothing reaches the base without a person. The verdict knows where a spec
@@ -122,6 +161,7 @@ test("a clean candidate on its plan's own plan branch merges with nobody asked",
   assert.equal(verdict.needsHuman, false);
   assert.deepEqual(verdict.approvals, []);
   assert.deepEqual(verdict.blockers, []);
+  assert.equal(onPlanBranch(reviewed(), CONFIG), true, "the predicate the carry rule reads says the same");
 });
 
 test("a clean candidate that is not confirmed as on its plan branch waits for a person", () => {
@@ -147,6 +187,7 @@ test("a clean candidate that is not confirmed as on its plan branch waits for a 
     assert.deepEqual(verdict.blockers, [], what);
     assert.equal(verdict.ready, false, what);
     assert.equal(verdict.needsHuman, true, what);
+    assert.equal(onPlanBranch(state, CONFIG), false, what);
   }
 });
 
@@ -454,6 +495,40 @@ test("a report recorded against an older candidate accounts for nothing here", (
   state = { ...state, gates: { ...state.gates, report: { status: "complete", kind: "implement", candidateOid: A } } };
   assert.ok(evaluate(state, CONFIG).approvals.includes("work-not-accounted-for"));
   assert.throws(() => recordGate(state, "report", A, { status: "complete" }), /current candidate/);
+});
+
+// --- the readers' rulings on what was left undone ---
+
+// A plan-branch candidate whose report is unfinished and whose settled review
+// records every reader ruling its one item acceptable.
+const ruled = (state = reviewed(), { candidates = [A], items = [{ id: "item:1.1", ruling: "environmental" }] } = {}) => {
+  let next = recordGate(state, "report", state.candidateOid, { status: "unfinished", kind: "implement" });
+  next = recordGate(next, "review", state.candidateOid, { status: "clean", accounting: { candidates, items, acceptable: true } });
+  return next;
+};
+
+test("on a plan branch, every item ruled acceptable with every gate passing clears the unfinished account", () => {
+  const verdict = evaluate(ruled(), CONFIG);
+  assert.deepEqual(verdict.approvals, []);
+  assert.equal(verdict.ready, true);
+  // Each of these keeps it.
+  const keeps = [
+    ["straight to the base", ruled(straight()), CONFIG],
+    ["verify failed", recordGate(ruled(), "verify", A, { status: "failed" }), CONFIG],
+    ["verify not applicable", recordGate(ruled(), "verify", A, { status: "not-applicable" }), CONFIG],
+    ["checks not run while the repository waits for them", recordGate(ruled(), "ci", A, { status: "not-run" }), { ...CONFIG, ciWaitSec: 60 }],
+    ["an earlier unaccounted candidate the accounting leaves out", ruled({ ...reviewed(), unaccountedCandidates: [B] }), CONFIG],
+    ["a candidate whose report is missing, so nothing covers it",
+      recordGate(ruled(), "report", A, { status: "missing", kind: null }), CONFIG],
+    ["an item left unruled", ruled(reviewed(), { items: [{ id: "item:1.1", ruling: "unruled" }] }), CONFIG],
+    ["an empty accounting", ruled(reviewed(), { items: [] }), CONFIG]
+  ];
+  for (const [what, state, config] of keeps) {
+    assert.ok(evaluate(state, config).approvals.includes("work-not-accounted-for"), what);
+  }
+  assert.ok(evaluate(ruled(straight()), CONFIG).approvals.includes("straight-to-base"));
+  // CI is not waited for at all: nothing to pass.
+  assert.equal(evaluate({ ...ruled(), gates: { ...ruled().gates, ci: null } }, CONFIG).ready, true);
 });
 
 // --- regressions from the Codex review of this rewrite ---

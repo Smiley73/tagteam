@@ -205,7 +205,7 @@ test("at the cap, new findings that touch only the pull request or no file publi
   const { repo, plan, shipDir } = staged;
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  config.limits = { fixRounds: 4, ciRepairs: 1 };
+  config.limits = { ...config.limits, fixRounds: 4, ciRepairs: 1 };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
@@ -217,7 +217,7 @@ test("at the cap, new findings that touch only the pull request or no file publi
     return result;
   };
   const app = (n) => fs.writeFileSync(path.join(worktree, "app.js"), `export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b - ${n};\n`);
-  const aboutTheChange = (title) => ({ severity: "major", file: null, line: null, title, detail: "a reader of the body cannot tell", fix: null });
+  const aboutTheChange = (title) => ({ severity: "major", scope: "pull-request", file: null, line: null, title, detail: "a reader of the body cannot tell", fix: null });
   const panelRaises = (round, list) => {
     const panel = run("panel");
     const oid = state().candidateOid;
@@ -239,7 +239,7 @@ test("at the cap, new findings that touch only the pull request or no file publi
     run("snapshot");
     return run("verify");
   };
-  // A panel round that raises only a finding about the change as a whole: `fix`
+  // A panel round that raises only a finding about the pull request: `fix`
   // spends nothing on it and sends it to the readers, and the settle carries it.
   const aboutOnly = (round, title) => {
     assert.equal(panelRaises(round, [aboutTheChange(title)]).json.ask, undefined, "nothing raised here is for a fixer");
@@ -262,7 +262,7 @@ test("at the cap, new findings that touch only the pull request or no file publi
   assert.equal(state().fixRoundsUsed, 4);
   const settle = aboutOnly(5, "the body does not say sub can go negative");
   assert.equal(settle.json.review, "open");
-  assert.match(settle.json.signal.at(-1), /^Recurring: 3 rounds of this cycle in a row \(3, 4, 5\) each raised a new blocking or major finding, across no file in particular:/);
+  assert.match(settle.json.signal.at(-1), /^Recurring: 3 rounds of this cycle in a row \(3, 4, 5\) each raised a new blocking or major finding, across the pull request:/);
   assert.match(settle.json.signal.at(-1), /a redesign is not on offer/);
   assert.equal(settle.json.ask, undefined, "no file is left to rewrite, so nothing is asked");
   assert.match(settle.json.say.join("\n"), /none of what keeps arriving is in a file a rewrite could change, so nothing is asked: the spec publishes with what is open disclosed/);

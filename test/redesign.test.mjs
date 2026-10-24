@@ -24,7 +24,7 @@ function specWith() {
   const spec = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-redesign-"));
   const rounds = path.join(spec, "rounds");
   const finding = (id, lens, severity, title, extra = {}) =>
-    ({ id, lens, severity, file: "src/handler.ts", line: 14, title, detail: `detail of ${title}`, fix: `fix ${title}`, ...extra });
+    ({ id, lens, severity, scope: "code", file: "src/handler.ts", line: 14, title, detail: `detail of ${title}`, fix: `fix ${title}`, ...extra });
   const one = finding("1.correctness.1", "correctness", "major", "resend is unbounded");
   const oneMinor = finding("1.code-quality.1", "code-quality", "minor", "naming drifts");
   const two = finding("2.adversary.1", "adversary", "major", "resend window resets on retry");
@@ -106,9 +106,9 @@ test("fileHistory reads a settled round's still-open as what is open, and a file
 test("fileHistory keeps a same-round verdict with real evidence and drops the settlement's placeholders", () => {
   const spec = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-redesign-"));
   const rounds = path.join(spec, "rounds");
-  const one = { id: "1.correctness.1", lens: "correctness", severity: "major", file: "a.ts", line: 1, title: "one", detail: "d", fix: null };
-  const two = { id: "1.correctness.2", lens: "correctness", severity: "major", file: "a.ts", line: 2, title: "two", detail: "d", fix: null };
-  const fresh = { id: "1.adversary.1", lens: "adversary", severity: "major", file: "a.ts", line: 3, title: "three", detail: "d", fix: null };
+  const one = { id: "1.correctness.1", lens: "correctness", severity: "major", scope: "code", file: "a.ts", line: 1, title: "one", detail: "d", fix: null };
+  const two = { id: "1.correctness.2", lens: "correctness", severity: "major", scope: "code", file: "a.ts", line: 2, title: "two", detail: "d", fix: null };
+  const fresh = { id: "1.adversary.1", lens: "adversary", severity: "major", scope: "code", file: "a.ts", line: 3, title: "three", detail: "d", fix: null };
   write(path.join(rounds, "1", "round.json"), { owner: OID(1), scope: "repair:0" });
   write(path.join(rounds, "1", "review.json"), { round: 1, candidate: OID(1), open: [one, two], findings: [one, two] });
   write(path.join(rounds, "1", "recheck.json"), {
@@ -212,6 +212,21 @@ test("each form of the question lists exactly its answers: four in budget, three
   }
 });
 
+test("on a plan branch the accept answer says it merges into the plan branch unattended unless something open may not go there", () => {
+  const { rounds } = specWith();
+  const signals = churnSignal(rounds, { scope: "repair:0", round: 3 });
+  for (const form of [{}, { redesign: false }, { rewritable: false }]) {
+    const ask = redesignAsk(signals, { spent: 2, limit: 4, planBranch: "plan/demo", ...form });
+    assert.match(ask, /publish it as it is with what is still open disclosed in the pull request — it then merges into plan\/demo at finish with nobody asked, each finding still open entered in the plan's ledger and listed in the plan's pull request/);
+    assert.match(ask, /That holds unless something open may not go into plan\/demo unresolved: accept then names it, the spec will not merge unattended, and merging it is theirs to do on GitHub/);
+    assert.doesNotMatch(ask, /— it will not merge unattended and finish cannot approve past an open finding/, "the accept answer says it never merges unattended");
+    assert.deepEqual(answersIn(ask), answersIn(redesignAsk(signals, { spent: 2, limit: 4, ...form })));
+    assertPlain(ask, "on a plan branch");
+  }
+  const cap = redesignAsk(signals, { spent: 4, limit: 4, atCap: true, planBranch: "plan/demo" });
+  assert.equal(cap, redesignAsk(signals, { spent: 4, limit: 4, atCap: true }), "at the cap there is no accept to describe");
+});
+
 // --- both signals: one question, each file once ----------------------------
 
 test("redesignFiles puts the same-file signal's files first, then the loose signal's, then the person's", () => {
@@ -250,7 +265,7 @@ test("with both signals live the question is one question, a sentence for each s
   assert.match(alone, /^New findings keep arriving, round after round, on different files\. In each of the last 3 rounds of this cycle a new finding serious enough to stop a merge came up, across src\/handler\.ts and src\/other\.ts; /);
   assert.deepEqual(answersIn(alone), ["next", "redesign", "accept", "end"]);
   assertPlain(alone, "loose alone");
-  const nowhere = redesignAsk([], { spent: 2, limit: 4, rewritable: false, loose: { rounds: [1, 2, 3], files: [], findings: [{ file: null }, { file: "pr-body.md" }] } });
+  const nowhere = redesignAsk([], { spent: 2, limit: 4, rewritable: false, loose: { rounds: [1, 2, 3], files: [], findings: [{ scope: "code", file: null }, { scope: "pull-request", file: "pr-body.md" }] } });
   assert.match(nowhere, /across no file in particular and the pull request itself|across the pull request itself and no file in particular/);
   assert.match(nowhere, /None of what keeps arriving is in a file a rewrite could change, so a redesign is not one of the answers\. Three ways on/);
   assert.deepEqual(answersIn(nowhere), ["next", "accept", "end"]);

@@ -56,4 +56,26 @@ and nothing is fixed for them. If you cannot name how two specs fail together,
 it is not a finding at this level.
 
 Write your findings as `prompts/review.md` says, with `lens` set to the lens
-name you were given and `candidate` to the exact commit you were given.
+name you were given and `candidate` to the exact commit you were given. You
+are given no unfinished items to rule on, so write `rulings` as `[]`.
+
+## Re-judging the ledger
+
+When you are given a ledger to re-judge, it lists findings that specs of this
+plan merged with still open. Judge each entry against the commit you were
+given, after reading the code it names:
+
+- `resolved` — the tip no longer has the problem.
+- `still-real` — the problem is present, and a change in this plan's code can
+  fix it.
+- `needs-person` — the problem is present, but only a person or a re-plan
+  settles it: its only remedy is a decision, or planning the work differently.
+
+Give every entry exactly one verdict, its `id` copied unchanged from the
+ledger, with `evidence` saying what in the tip settles it. Write them to the
+path you were given, matching `schemas/ledger-verdicts.schema.json`, with
+`candidate` set to the same commit as your findings.
+
+The verdicts are the only place a ledger entry is judged. Never file one as a
+finding, whatever you decide about it: a defect inside one spec is still not
+yours, as above. When you are given no ledger, write no verdicts.

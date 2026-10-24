@@ -483,7 +483,7 @@ test("a finding about the pull request never reaches the fixer, spends no fix ro
   const panel = ship("panel", plan, ["--spec", "01-a"]);
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
   const oid = state().candidateOid;
-  const aboutPr = { severity: "major", file: null, line: null, title: "the pull request does not say sub was added", detail: "a reader of the body cannot tell", fix: null };
+  const aboutPr = { severity: "major", scope: "pull-request", file: null, line: null, title: "the pull request does not say sub was added", detail: "a reader of the body cannot tell", fix: null };
   for (const dispatch of panel.json.dispatch.slice(0, 2)) {
     const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
     write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [aboutPr] : []));
@@ -535,7 +535,7 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
   const panel = ship("panel", plan, ["--spec", "01-a"]);
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
   const first = state().candidateOid;
-  const aboutPr = { severity: "major", file: ".tagteam/ships/demo/01-a/pull-request.md", line: null, title: "the body claims nothing changed", detail: "it did", fix: null };
+  const aboutPr = { severity: "major", scope: "pull-request", file: ".tagteam/ships/demo/01-a/pull-request.md", line: null, title: "the body claims nothing changed", detail: "it did", fix: null };
   for (const dispatch of panel.json.dispatch.slice(0, 2)) {
     const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
     write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [major("app.js"), aboutPr] : []));
@@ -575,6 +575,61 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
   assert.match(settle.json.say.join("\n"), /1 finding\(s\) are about the pull request itself[\s\S]*no fix round is spent/);
   assert.equal(state().state, "verifying");
   assert.equal(state().fixRoundsUsed, 1);
+});
+
+test("a code finding that names no file goes to the fixer, keeps its scope through a settle, and is handed to the fixer again", () => {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a + b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  const first = state().candidateOid;
+  const wholeChange = { ...major(null), line: null, title: "add and sub disagree about the sign" };
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, first, lens === "correctness" ? [wholeChange] : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", first));
+  arriveAll(panel);
+  assert.match(ship("collect", plan, ["--spec", "01-a"]).json.next, /fix/);
+
+  const briefOf = (fix) => JSON.parse(fs.readFileSync(/Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1], "utf8"));
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.equal(state().fixRoundsUsed, 1, "the fix round is spent on it");
+  assert.deepEqual(briefOf(fix).findings.map((entry) => entry.id), ["1.correctness.1"]);
+
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  write(outputOf(fix.json.dispatch[0]), {
+    outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: []
+  });
+  arriveAll(fix);
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const recheck = ship("recheck", plan, ["--spec", "01-a"]);
+  const second = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", second));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: second, verdicts: [
+    { id: "1.correctness.1", resolved: false, evidence: "they still disagree" }
+  ] });
+  arriveAll(recheck);
+  const settle = ship("settle", plan, ["--spec", "01-a"]);
+  assert.equal(settle.status, 0, settle.stderr);
+  assert.match(settle.json.next, /fix/);
+  const round2 = path.join(shipDir, "01-a", "rounds", "2");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(round2, "still-open.json"), "utf8")).findings[0].scope, "code");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(round2, "still-open", "correctness.json"), "utf8")).findings[0].scope, "code");
+
+  const again = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(state().fixRoundsUsed, 2);
+  assert.deepEqual(briefOf(again).findings.map((entry) => entry.id), ["1.correctness.1"], "the carried finding is the fixer's again");
 });
 
 test("start refuses without an approved plan, and a spent fix budget routes to the re-check rather than failing", () => {
@@ -695,7 +750,7 @@ test("a spec waiting on an open finding is revisited through the cycle again wit
   // One fix round, so the finding the fixer does not resolve leaves the spec waiting.
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  config.limits = { fixRounds: 1, ciRepairs: 1 };
+  config.limits = { ...config.limits, fixRounds: 1, ciRepairs: 1 };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
@@ -822,8 +877,9 @@ test("a change that passes alone and fails on the base as it now stands stops, c
   assert.match(approved.json.ask, /fails this repository's verify commands/);
   assert.equal(approved.json.landing.status, "failed");
   assert.equal(state().state, "awaiting-approval");
-  // And the same stop was repeated rather than re-run: one attempt directory.
-  assert.deepEqual(fs.readdirSync(path.join(shipDir, "01-a", "rounds", "1", "landing")), [moved.slice(0, 12)]);
+  // And the same stop was repeated rather than re-run: the first check and the
+  // one go it got again on the same merge, and nothing after them.
+  assert.deepEqual(fs.readdirSync(path.join(shipDir, "01-a", "rounds", "1", "landing")), [moved.slice(0, 12), `${moved.slice(0, 12)}-2`]);
 
   const repair = ship("repair", plan, ["--spec", "01-a"]);
   assert.equal(repair.status, 0, repair.stderr);

@@ -7,6 +7,15 @@ Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/status.mjs" "$(git rev-parse --show-top
 and render it as a short table: each plan with its stage and spec count, each
 ship with how many specs have merged out of how many, and anything waiting.
 
+**An out-of-date configuration comes first.** When `configuration.stale` is
+true, `.tagteam/config.json` was written for an older version of this plugin
+(`configuration.version` says which). Say so in one sentence above the table and
+tell the person to run `/tagteam:configure` before planning or shipping anything:
+both refuse to start on it, and configure offers back every value the file
+already holds. Then render everything else as usual. A `configuration` of `null`
+is no file at all, which the other commands say for themselves; say nothing
+about it here.
+
 For each spec waiting, give the pull request link and one line on why it stopped
 — read `state.json` for the reason rather than guessing, and say it as a reason
 rather than as the name of one: "waiting because it changes the CI workflows,

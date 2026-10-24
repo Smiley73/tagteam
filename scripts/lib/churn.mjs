@@ -61,7 +61,10 @@ function raisedAt(dir, round, { fileless = false } = {}) {
     }
     for (const finding of parsed?.open ?? []) {
       if (!GATING.has(finding?.severity) || findingRound(finding?.id) !== round || (!fileless && !finding?.file)) continue;
-      found.set(finding.id, { id: finding.id, round, lens: finding.lens ?? null, file: finding.file || null, title: finding.title ?? "" });
+      found.set(finding.id, {
+        id: finding.id, round, lens: finding.lens ?? null, ...(finding.scope === undefined ? {} : { scope: finding.scope }),
+        file: finding.file || null, title: finding.title ?? ""
+      });
     }
   }
   return [...found.values()];
@@ -106,6 +109,10 @@ export function redesignedAt(dir) {
  * it does for the budget. Findings from before a redesign of the file are not
  * counted; `since` on a signal names that redesign round, or is null. Empty
  * when nothing recurs.
+ *
+ * A finding about the pull request is not counted against the file it names:
+ * a body answers it, not a rewrite, and a signal on that file would offer a
+ * redesign of code nothing asked to change. The loose signal still counts it.
  */
 export function churnSignal(roundsRoot, { scope = null, round, threshold = CHURN_ROUNDS } = {}) {
   if (!Number.isInteger(round) || round < 1) return [];
@@ -114,7 +121,7 @@ export function churnSignal(roundsRoot, { scope = null, round, threshold = CHURN
   const byFile = new Map();
   for (const entry of rounds) {
     for (const finding of raisedAt(entry.dir, entry.round)) {
-      if (discounted(resetAt, finding)) continue;
+      if (isPullRequestFinding(finding) || discounted(resetAt, finding)) continue;
       if (!byFile.has(finding.file)) byFile.set(finding.file, []);
       byFile.get(finding.file).push(finding);
     }
@@ -169,7 +176,7 @@ export function looseSignal(roundsRoot, { scope = null, round, threshold = CHURN
   }
   if (run.length < threshold) return null;
   const findings = run.flatMap((entry) => entry.raised);
-  const files = [...new Set(findings.filter((finding) => !isPullRequestFinding(finding)).map((finding) => finding.file))];
+  const files = [...new Set(findings.filter((finding) => finding.file !== null && !isPullRequestFinding(finding)).map((finding) => finding.file))];
   return { rounds: run.map((entry) => entry.round), findings, files };
 }
 
@@ -181,8 +188,8 @@ export function looseLines(loose) {
   if (!loose) return [];
   const titles = loose.findings.map((finding) => String(finding.title ?? "").replace(/\s+/g, " ").trim()).filter(Boolean).join("; ");
   const places = [...loose.files];
-  if (loose.findings.some((finding) => finding.file !== null && isPullRequestFinding(finding))) places.push("the pull request");
-  if (loose.findings.some((finding) => finding.file === null)) places.push("no file in particular");
+  if (loose.findings.some(isPullRequestFinding)) places.push("the pull request");
+  if (loose.findings.some((finding) => finding.file === null && !isPullRequestFinding(finding))) places.push("no file in particular");
   const onward = loose.files.length > 0
     ? "Consider a redesign of these files instead — a fresh brief to an implementer, or a person's decision to ship with it disclosed."
     : "None of them is on a file a rewrite could change, so a redesign is not on offer; a person decides whether to fix again or ship with it disclosed.";

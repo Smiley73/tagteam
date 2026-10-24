@@ -3,7 +3,7 @@
   "title": "One reviewer's findings on one candidate",
   "type": "object",
   "additionalProperties": false,
-  "required": ["lens", "candidate", "summary", "findings"],
+  "required": ["lens", "candidate", "summary", "findings", "rulings"],
   "properties": {
     "lens": {
       "type": "string",
@@ -26,16 +26,21 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "file", "line", "title", "detail", "fix"],
+        "required": ["severity", "scope", "file", "line", "title", "detail", "fix"],
         "properties": {
           "severity": {
             "type": "string",
             "enum": ["blocking", "major", "minor", "nit"],
             "description": "blocking: must not merge. major: must not merge without a decision. minor and nit: recorded, never gating."
           },
+          "scope": {
+            "type": "string",
+            "enum": ["code", "pull-request"],
+            "description": "Who answers the finding. pull-request when the remedy is a change to the pull request's text. code otherwise, including a code defect that names no single file."
+          },
           "file": {
             "type": ["string", "null"],
-            "description": "Repository-relative path, or null when the finding is about the change as a whole."
+            "description": "Repository-relative path, or null when the finding names no single file."
           },
           "line": {
             "type": ["integer", "null"],
@@ -54,6 +59,32 @@
           "fix": {
             "type": ["string", "null"],
             "description": "What to change, when that is obvious. Null when the right repair is a judgement call."
+          }
+        }
+      }
+    },
+    "rulings": {
+      "type": "array",
+      "description": "One entry per unfinished item this reader was given, ruled against the candidate under review. Empty when it was given none. An item with no entry is unruled, and an unruled item keeps the spec waiting for a person.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "ruling", "reason"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The item's id, copied unchanged from the items file."
+          },
+          "ruling": {
+            "type": "string",
+            "enum": ["environmental", "out-of-scope", "spec-requirement-missing"],
+            "description": "spec-requirement-missing: the spec requires this and this candidate still lacks it. environmental: the agent could not do or check this where it ran, and nothing in the change is wrong because of that. out-of-scope: this candidate owes nothing more for it: the spec does not ask for it, another spec owns it, or it has since been done."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One sentence on why."
           }
         }
       }
