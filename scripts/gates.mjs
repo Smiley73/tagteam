@@ -14,6 +14,8 @@ import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mj
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { onPlanBranch } from "./lib/carry.mjs";
+import { isFixUnitId } from "./lib/whole-plan.mjs";
+import { isPullRequestFinding } from "./collect-findings.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
 
@@ -43,9 +45,11 @@ const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
 
 // A person's accept of the findings this candidate's review left open, recorded
 // only when every one of them may be carried into the plan branch: `{candidateOid,
-// ids, at}`. A top-level key for the reason `landing` is one, and cleared by a
-// bind as it is. Weighed by `acceptLifts` alone, which `evaluate` asks to lift
-// `review-open`.
+// ids, at}`. The ship's own carry is the same record with `mode: "carry"` and
+// `dependedOn`, whether a spec not yet merged depends on this one — which the
+// plan knows and this state does not. A top-level key for the reason `landing`
+// is one, and cleared by a bind as it is. Weighed by `acceptLifts` alone, which
+// `evaluate` asks to lift `review-open`.
 const ACCEPT = "accept";
 
 // How much of this attempt's budget has been spent. Counters rather than a
@@ -582,13 +586,15 @@ export function recordLanding(state, candidateOid, record) {
 
 /**
  * Record a person's accept of `ids`, bound to the candidate it was given for,
- * which is checked here as `recordLanding` checks its own.
+ * which is checked here as `recordLanding` checks its own — or, with `carry`,
+ * the ship's carry of them.
  */
-function recordAccept(state, candidateOid, ids) {
+function recordAccept(state, candidateOid, ids, carry = null) {
   if (state.candidateOid !== candidateOid) {
     throw new Error(`cannot record an accept for ${candidateOid}: the current candidate is ${state.candidateOid}`);
   }
-  return { ...state, [ACCEPT]: { candidateOid, ids, at: new Date().toISOString() } };
+  const mode = carry ? { mode: "carry", dependedOn: carry.dependedOn } : {};
+  return { ...state, [ACCEPT]: { candidateOid, ids, ...mode, at: new Date().toISOString() } };
 }
 
 // The pull request is recorded through here rather than by editing the state
@@ -669,7 +675,7 @@ const currentGate = (state, gate) =>
  * the plan branch, and there alone, an accept of this candidate that covers
  * everything its open review holds — never past a blocking finding, and never
  * an incomplete review. Exported so that what the driver tells a person about
- * an accept is this answer and not one of its own.
+ * an accept, or does about a carry, is this answer and not one of its own.
  */
 export function acceptLifts(state, config) {
   const review = currentGate(state, "review");
@@ -678,7 +684,19 @@ export function acceptLifts(state, config) {
   return onPlanBranch(state, config) && review?.status === "open" && open.length > 0
     && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
     && open.every((finding) => accept.ids.includes(finding.id))
-    && !open.some((finding) => finding.severity === "blocking");
+    && !open.some((finding) => finding.severity === "blocking")
+    && (accept.mode !== "carry" || carryHolds(state, config, accept, open));
+}
+
+// What a carry needs beyond an accept, since no person looked: carrying on, no
+// whole-plan fix, no major code finding on a spec something unmerged depends on
+// — read as depended on unless the record says otherwise — and either this
+// cycle's fix rounds spent or nothing open that a fixer could reach.
+function carryHolds(state, config, accept, open) {
+  const forFixer = open.filter((finding) => !isPullRequestFinding(finding));
+  return config?.carry === true && !isFixUnitId(state.spec)
+    && !(accept.dependedOn !== false && forFixer.some((finding) => finding.severity === "major"))
+    && (forFixer.length === 0 || counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds);
 }
 
 export function evaluate(state, config) {
@@ -693,8 +711,8 @@ export function evaluate(state, config) {
   // (d) A lens that produced no evidence is not a lens that found nothing. An
   // absent, unparseable, or wrongly-bound findings file reads as an empty
   // finding set, and an empty finding set reads as clean, so this is checked
-  // before anything else is believed. A person's accept is weighed here and
-  // nowhere else in the verdict — see `acceptLifts`.
+  // before anything else is believed. A person's accept, or the ship's carry, is
+  // weighed here and nowhere else in the verdict — see `acceptLifts`.
   if (!review) blockers.push("review-not-recorded");
   else if (review.status !== "clean" && !acceptLifts(state, config)) blockers.push(`review-${review.status}`);
 
@@ -797,7 +815,7 @@ const USAGE = `usage:
   gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs landing  <state.json> <candidateOid> <record.json>
-  gates.mjs accept   <state.json> <candidateOid> <id,id,...>
+  gates.mjs accept   <state.json> <candidateOid> <id,id,...> [--carry <depended-on|independent>]
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json>
   gates.mjs roles    <state.json> <config.json>
@@ -830,6 +848,10 @@ const USAGE = `usage:
   \`accept\` records a person's accept of the open findings named, bound to the
   candidate. On the plan branch \`evaluate\` lifts \`review-open\` when it covers
   every open finding and none is blocking. Binding a new candidate clears it.
+  With \`--carry\` it records the ship's carry instead, which lifts it only with
+  \`carry\` on, outside a whole-plan fix, with this cycle's fix rounds spent or
+  nothing open for a fixer, and never past a major code finding on a spec that
+  is \`depended-on\` by one not yet merged.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -1060,7 +1082,12 @@ async function main() {
   } else if (action === "landing") {
     next = recordLanding(readJson(values[0]), values[1], readJson(values[2]));
   } else if (action === "accept") {
-    next = recordAccept(readJson(values[0]), values[1], (values[2] ?? "").split(",").filter(Boolean));
+    const carry = values.includes("--carry") ? values[values.indexOf("--carry") + 1] : null;
+    if (carry !== null && carry !== "depended-on" && carry !== "independent") {
+      throw new Error(`--carry is depended-on or independent, not ${JSON.stringify(carry ?? null)}`);
+    }
+    next = recordAccept(readJson(values[0]), values[1], (values[2] ?? "").split(",").filter(Boolean),
+      carry && { dependedOn: carry === "depended-on" });
   } else if (action === "pr") {
     next = recordPr(readJson(values[0]), { number: values[1], url: values[2], headOid: values[3] });
   } else {

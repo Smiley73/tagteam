@@ -116,6 +116,27 @@ test("on the plan branch, a person's accept of everything open lifts review-open
   assert.ok(evaluate(incomplete, CONFIG).blockers.includes("review-incomplete"));
 });
 
+test("the ship's carry lifts review-open only on the plan branch, with carrying on, past nothing blocking and outside a fix unit", () => {
+  const major = { id: "3.correctness.1", severity: "major", scope: "code", file: "app.js" };
+  const carrying = { ...CONFIG, carry: true, limits: { ...LIMITS, carried: 5 } };
+  const opened = (open, overrides) => recordGate(reviewed({ fixRoundsUsed: LIMITS.fixRounds, ...overrides }), "review", A, { status: "open", open });
+  const carried = (state, candidateOid = A) => ({
+    ...state, accept: { candidateOid, ids: state.gates.review.open.map((finding) => finding.id), mode: "carry", dependedOn: false, at: "2026-01-01T00:00:00Z" }
+  });
+  assert.deepEqual(evaluate(carried(opened([major])), carrying).blockers, []);
+  const straightOn = evaluate(carried(opened([major], { base: "main", planRouteBranch: null })), carrying);
+  assert.ok(straightOn.blockers.includes("review-open") && straightOn.approvals.includes("straight-to-base"), JSON.stringify(straightOn));
+  const baseIsConfigured = evaluate(carried(opened([major])), { ...carrying, base: PLAN_BASE });
+  assert.ok(baseIsConfigured.blockers.includes("review-open") && baseIsConfigured.approvals.includes("straight-to-base"));
+  for (const [what, state, config = carrying] of [
+    ["a blocking finding open", carried(opened([major, { id: "3.correctness.2", severity: "blocking", scope: "code", file: "app.js" }]))],
+    ["carrying off", carried(opened([major])), { ...carrying, carry: false }],
+    ["a whole-plan fix unit", carried(opened([major], { spec: "plan-fix-1" }))],
+    ["a record bound to an older candidate", carried(opened([major]), B)],
+    ["a major code finding on a spec depended on", { ...carried(opened([major])), accept: { ...carried(opened([major])).accept, dependedOn: true } }]
+  ]) assert.ok(evaluate(state, config).blockers.includes("review-open"), what);
+});
+
 // --- where the candidate lands ---
 //
 // Nothing reaches the base without a person. The verdict knows where a spec

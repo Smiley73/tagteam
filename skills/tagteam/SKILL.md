@@ -730,7 +730,7 @@ for a person, and no approval reaches the last of them.
 
 A pull request stops and waits when: it merges straight into `base` rather than
 into its plan branch; verification failed, or CI failed, proved nothing or never
-started; a finding is still open after the re-check; **a selected reviewer
+started; a finding is still open after the re-check, unless it is carried (below); **a selected reviewer
 produced no usable evidence**; `.github/workflows/**` changed; or the agent that
 wrote the code never confirmed it finished what it was given.
 
@@ -769,6 +769,17 @@ when every item was ruled environmental or out-of-scope by every reader given
 it, the review is clean, verify passed, and CI passed or is not waited for. A
 missing report, or an unfinished one that names nothing, has nothing to rule on
 and still waits; so does every spec that merges straight into `base`.
+
+Carrying is opt-in: with `carry` on in `.tagteam/config.json`, a spec on a plan
+branch whose open review alone blocks it, and whose fix rounds for this cycle
+are spent or whose open findings are all about the pull request, has a carry
+recorded at `finish` — the same record a person's accept is, bound to the
+candidate and marked as a carry. `evaluate` lifts `review-open` on it only on the
+plan branch, with carrying on, outside a whole-plan fix, past no `blocking`
+finding and no `major` code finding on a spec an unmerged spec depends on, and
+with the rounds spent or nothing open a fixer could reach. Every finding carried
+goes into the plan's ledger. When carrying a spec would take the plan past
+`limits.carried`, nothing is carried and the ship stops and asks.
 
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
 a new commit appears — and every fix round makes one.

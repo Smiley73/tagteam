@@ -41,7 +41,7 @@ import {
   restoreWorktree
 } from "./lib/landing.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
-import { carryEligible, carryRefusal, onPlanBranch, recommendation } from "./lib/carry.mjs";
+import { awaitedByUnmerged, carryEligible, carryRefusal, onPlanBranch, recommendation } from "./lib/carry.mjs";
 import { enterMerge, entriesOf, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
@@ -600,19 +600,61 @@ function retryLines(ctx, id, base) {
  * given. Null unless `onPlanBranch` holds, the question the gates ask. `open` is
  * what its review gate holds open; `entries`, one for each, what it would put in
  * the plan's ledger if it merged now — `accepted` where a person's accept of this
- * candidate covers it; `merges`, whether the accept in its gate state lifts
- * `review-open`, as `evaluate` decides it.
+ * candidate covers it, `carried` where the ship's carry does; `merges`, whether
+ * the record in its gate state lifts `review-open`, as `evaluate` decides it.
  */
 function planStanding(ctx, id, state) {
   if (!onPlanBranch(state, ctx.config)) return null;
   const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
   const open = review?.open ?? [];
   const file = readJson(acceptedPath(ctx, id), null);
+  const recorded = state.accept?.candidateOid === state.candidateOid ? state.accept : null;
   const accepted = new Set([
-    ...(state.accept?.candidateOid === state.candidateOid ? state.accept.ids : []),
+    ...(recorded && recorded.mode !== "carry" ? recorded.ids : []),
     ...(file?.candidate === state.candidateOid && Array.isArray(file.ids) ? file.ids : [])
   ]);
-  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted), merges: acceptLifts(state, ctx.config) };
+  const carried = new Set(recorded?.mode === "carry" ? recorded.ids : []);
+  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted, carried), merges: acceptLifts(state, ctx.config) };
+}
+
+/**
+ * Whether `finish` would carry this spec's open findings into the plan branch
+ * on the review gate as now recorded: null when carrying is off, the spec is
+ * not on the plan branch, a finding open may not be carried (05's rule) or
+ * `evaluate` would not lift `review-open` on the record; otherwise the record
+ * to write, how many findings the plan's ledger already holds carried by other
+ * units, and whether this one would take that past `limits.carried`. Its own
+ * earlier entries are not counted, since `finish` runs more than once, nor is
+ * anything a person accepted: the cap bounds what merged with no one looking.
+ */
+function carryStanding(ctx, id, state) {
+  if (ctx.config.carry !== true) return null;
+  const standing = planStanding(ctx, id, state);
+  if (!standing || standing.open.length === 0 || standing.merges) return null;
+  const facts = carryFacts(ctx, id);
+  if (standing.open.some((finding) => carryRefusal(finding, facts))) return null;
+  const record = {
+    candidateOid: state.candidateOid, ids: standing.open.map((finding) => finding.id), mode: "carry",
+    dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
+  };
+  if (!acceptLifts({ ...state, accept: record }, ctx.config)) return null;
+  const others = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried" && entry.spec !== id).length;
+  return { record, base: state.base, others, limit: ctx.config.limits.carried, over: others + record.ids.length > ctx.config.limits.carried };
+}
+
+// What `fix` and `settle` say instead of "a person decides" when `finish` will
+// carry what is open; null when it will not, and they say what they always did.
+function carriedAtFinish(ctx, id) {
+  const carry = carryStanding(ctx, id, readState(ctx, id));
+  if (!carry || carry.over) return null;
+  return `Carrying is on, so at finish the ${carry.record.ids.length} finding(s) open are carried into ${carry.base} with it, unless something `
+    + "other than its review stops it: each is entered in the plan's ledger and listed under Risk, and the plan's pull request lists them for a person.";
+}
+
+function pullRequestOnlyLine(ctx, id) {
+  const said = "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write";
+  const carried = carriedAtFinish(ctx, id);
+  return carried ? `${said}. ${carried}` : `${said}, and revisit puts it to the readers again.`;
 }
 
 const enteredLines = (count) =>
@@ -3288,9 +3330,10 @@ async function fix(options) {
   if (forFixer.length === 0 && aboutPr.length > 0) {
     if (settled) {
       // The readers have judged these once already, against the body as it was.
-      // The body is rewritten, published, and judged again on a revisit.
+      // The body is rewritten, published, and judged again on a revisit — or
+      // carried at finish.
       transition(ctx, id, "verifying");
-      return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again."], next: nextCommand(ctx, "publish", id) });
+      return emit({ say: [...prSay, pullRequestOnlyLine(ctx, id)], next: nextCommand(ctx, "publish", id) });
     }
     // Not yet judged by anyone but the panel that raised them. The re-check
     // asks the raising lenses to judge the body — the draft, once it is
@@ -3324,10 +3367,12 @@ async function fix(options) {
     ? { refused: true, reason: `${id} has spent its limits.fixRounds budget: ${spentRounds} of ${ctx.config.limits.fixRounds} round(s) used, so nothing further will be attempted — raise limits.fixRounds in this repository's tagteam configuration and run the command again, or finish what is left by hand` }
     : transition(ctx, id, "fixing", { budgeted: true });
   if (edge.refused) {
-    const say = [`No fix round is left for this cycle (${edge.reason.split("\n")[0]}). The spec still publishes and a person decides.`];
+    const spent = `No fix round is left for this cycle (${edge.reason.split("\n")[0]}).`;
+    const say = [`${spent} The spec still publishes and a person decides.`];
     if (settled) {
       transition(ctx, id, "verifying");
-      return emit({ say, budget: "spent", next: nextCommand(ctx, "publish", id) });
+      const carried = carriedAtFinish(ctx, id);
+      return emit({ say: carried ? [`${spent} The spec still publishes. ${carried}`] : say, budget: "spent", next: nextCommand(ctx, "publish", id) });
     }
     // Before the settle, this branch is the answer "publish" to a question put
     // at the cap for this round; the settle reads that off the record.
@@ -3762,7 +3807,7 @@ async function settle(options) {
     // so no fix round is spent on it. The spec publishes with the body the
     // orchestrator writes, and a revisit puts that body to the readers.
     if (open.every(isPullRequestFinding)) {
-      say.push(pullRequestFindingsLine(ctx, id, open), "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write, and revisit puts it to the readers again.");
+      say.push(pullRequestFindingsLine(ctx, id, open), pullRequestOnlyLine(ctx, id));
       if (onPlan) say.push(onPlan.line);
       return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
     }
@@ -5933,6 +5978,17 @@ function stopAsk(id, { blockers, approvals }, accepted = null, words = {}, { goa
   return text.join(" ");
 }
 
+// The stop when carrying this spec would take the plan past `limits.carried`:
+// the cap, and the ways on from it — or, when approvals are owed as well, the
+// cap ahead of the ordinary stop, `stopped`, which says what they are.
+function carriedPastCap(id, carry, stopped) {
+  const cap = `Carrying its ${carry.record.ids.length} open finding(s) into ${carry.base} would take the plan past limits.carried, `
+    + `which is ${carry.limit} — ${carry.others} finding(s) are carried so far — so nothing was carried for it.`;
+  if (stopped) return [cap, stopped];
+  return [`${id} stops and waits.`, cap, "Offer: raise limits.carried in this repository's tagteam configuration and run finish again, merge it by hand on GitHub "
+    + "(what is open then enters the plan's ledger as merged by hand), leave it open and continue (run next), or stop the train (run end)."];
+}
+
 // The sentence for checks that never started, naming the limit the wait ran
 // with. Taken from the `ci` gate publish recorded for this commit and never from
 // the configuration, which a person may have edited since; null when the gate
@@ -6190,6 +6246,17 @@ async function finish(options) {
   // any other, and that review can come back clean. It is not a gate, so no gate
   // and no approval clears it; it stops the spec before the merge.
   const conflict = readJson(goalConflictPath(ctx, id), null);
+  // Carried only when the open review is all that blocks the merge: a spec that
+  // also fails verification or CI stops anyway, and the record would disclose
+  // findings for a merge that is not going to happen. Before an approval is
+  // weighed, which cannot clear the blocker a carry lifts.
+  const carry = !conflict && verdict.blockers.length === 1 && verdict.blockers[0] === "review-open"
+    ? carryStanding(ctx, id, readState(ctx, id)) : null;
+  if (carry && !carry.over) {
+    node("gates.mjs", ["accept", statePath(ctx, id), carry.record.candidateOid, carry.record.ids.join(","),
+      "--carry", carry.record.dependedOn ? "depended-on" : "independent"]);
+    verdict = evaluateGates();
+  }
   if (options.approve) {
     // An approval given while a blocker is open would change nothing now and
     // would still be on disk, bound to this commit, when the blocker clears —
@@ -6219,6 +6286,11 @@ async function finish(options) {
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
+      if (carry && !carry.over) {
+        const count = carry.record.ids.length;
+        say.push(`Carried ${count} open finding(s) into ${state.base} with it, as carrying allows: the plan has carried ${carry.others + count} `
+          + `of the ${carry.limit} limits.carried allows.`);
+      }
       say.push(...enteredLines(entered));
       say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
       return finishNext(ctx, id, say);
@@ -6258,11 +6330,12 @@ async function finish(options) {
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
+  const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) });
   emit({
     say,
     ask: [
       ...(conflict ? [goalConflictLine(ctx, id, state, conflict)] : []),
-      stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) }),
+      ...(carry?.over ? carriedPastCap(id, carry, verdict.approvals.length === 0 ? null : stopped) : [stopped]),
       ...(cause ? [cause] : [])
     ].join(" "),
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
