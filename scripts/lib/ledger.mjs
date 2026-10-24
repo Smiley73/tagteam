@@ -14,15 +14,15 @@ export function readLedger(shipDir) {
 
 /**
  * The entries `spec` makes by merging `commit` with `open` still open: each one
- * `accepted` when `accepted` holds its id, `merged-by-hand` otherwise. The id is
- * derived from the spec and the finding, so writing the same merge twice adds
- * nothing.
+ * `accepted` when `accepted` holds its id, `carried` when `carried` does,
+ * `merged-by-hand` otherwise. The id is derived from the spec and the finding,
+ * so writing the same merge twice adds nothing.
  */
-export function entriesOf(spec, commit, open, accepted) {
+export function entriesOf(spec, commit, open, accepted, carried = new Set()) {
   return open.map((finding) => ({
     id: `${spec}:${finding.id}`, spec, finding: finding.id, severity: finding.severity, scope: finding.scope ?? "code",
     files: finding.file ? [finding.file] : [], title: finding.title, detail: finding.detail,
-    reason: accepted.has(finding.id) ? "accepted" : "merged-by-hand", commit
+    reason: accepted.has(finding.id) ? "accepted" : carried.has(finding.id) ? "carried" : "merged-by-hand", commit
   }));
 }
 
@@ -48,6 +48,7 @@ export function enterMerge(shipDir, spec, { entries, retries }) {
 
 const REASONS = {
   accepted: "a person accepted it open",
+  carried: "the ship carried it open, as this repository's carrying setting allows",
   "merged-by-hand": "it was open when the pull request was merged by hand"
 };
 
@@ -79,13 +80,14 @@ export function entryLine(entry) {
 /**
  * The line in a spec's own body for an entry it would make if it merged now. It
  * stands in for the fixer table's not-addressed row, so it says what that row
- * says: when the spec `merges` on a person's accept, that it does; otherwise
- * that the spec waits for a person, with the row's `recommendation` as the
- * advice — a reader of the pull request must not take the merge as arranged.
+ * says: when the spec `merges` on a person's accept or the ship's carry, that it
+ * does; otherwise that the spec waits for a person, with the row's
+ * `recommendation` as the advice — a reader of the pull request must not take
+ * the merge as arranged.
  */
 export function pendingLine(entry, { merges, recommendation }) {
   const carried = "it goes into the plan branch unresolved and is listed in the plan's pull request";
-  if (merges) return `- ${describe(entry)} — a person accepted it open, so ${carried}.`;
+  if (merges) return `- ${describe(entry)} — ${REASONS[entry.reason]}, so ${carried}.`;
   const status = entry.reason === "accepted" ? "a person accepted it open, but the spec does not merge on that alone" : "still open";
   return `- ${describe(entry)} — ${status}: ${ADVICE[recommendation]}. Merged by hand as it is, ${carried}.`;
 }

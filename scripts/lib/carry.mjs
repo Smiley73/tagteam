@@ -30,7 +30,7 @@ export function onPlanBranch(state, config) {
  * Whether any spec not yet merged depends on `id`, directly or through other
  * specs, by their `dependsOn`. `merged` is the set of merged spec ids.
  */
-function awaitedByUnmerged(id, specs, merged) {
+export function awaitedByUnmerged(id, specs, merged) {
   const dependants = new Set();
   for (let grew = true; grew;) {
     grew = false;

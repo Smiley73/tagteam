@@ -313,6 +313,17 @@ review, verify and checks are clean, the spec merges into the plan branch and
 its pull request names what was left under Risk. A round with no report at all
 still waits, and so does everything that merges straight into the base.
 
+An open finding can stop being a stop on a plan branch too, if you turn
+carrying on (`carry` in `.tagteam/config.json`; it is off by default). Then a
+spec whose fix rounds have run out, or whose only open findings are about the
+pull request itself, merges into the plan branch anyway: each open finding goes
+into the plan's ledger and under Risk in the spec's pull request and in the
+plan's, where you judge it. Carrying is never used for a blocking finding, for
+a whole-plan fix, for a major finding in the code of a spec that another spec
+still to merge depends on, or for anything that goes straight to the base. When
+carrying one more spec would take the plan past `limits.carried`, the run stops
+and asks you instead.
+
 The missing evidence matters more than it sounds: an absent or malformed findings
 file yields an empty finding set, and an empty finding set otherwise reads as a
 clean review.

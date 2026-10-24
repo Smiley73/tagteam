@@ -207,6 +207,14 @@ that it says what they ask for; the readers that raised them judge that body at
 the next re-check, before it is published, and `publish` sends it. When nothing
 else is open, no fix round is spent on them.
 
+With `carry` on in `.tagteam/config.json` — it is off unless the owner turns it
+on — a spec on a plan branch does not wait for a person merely because findings
+are still open, once its fix rounds for this cycle are spent, or once the
+readers have judged the body and everything still open is about the pull
+request. When everything open may be carried, the `say` of `fix` or `settle`
+says it will be carried at `finish` instead of saying a person decides; relay
+it and run `next`. See *Merge or stop*.
+
 On a plan branch, `begin` on a spec that has not started first asks whether the
 base still merges cleanly into this plan's branch. When it does, nothing happens
 and the spec starts. When it does not, `begin` opens a **resolve round** instead
@@ -445,7 +453,7 @@ Two things do carry over from the run, because they are about the software:
 - **A finding still open goes under `## Risk`**, said as what goes wrong and for
   whom, in the same plain English you use for a person. `settle`'s `say` gives
   you each one. On a plan branch the driver writes these lines itself, one per
-  finding — each saying whether the person's accept merges the spec, and
+  finding — each saying whether the person's accept or a carry merges the spec, and
   otherwise the fixer table's recommendation for it — so do not write them a
   second time. A finding the person accepted — they answered the *Recurring*
   question with `accept` — goes there the same way: it is still open, and the
@@ -500,7 +508,8 @@ own configuration and invoked this command, and a `ready` verdict is the
 condition they attached. Stopping to ask anyway is not the safe choice, it is a
 broken train: the owner walks away from an unattended run and comes back to a
 queue of pull requests each waiting for a keystroke. When a person should
-decide, the gates say so — that is what they are for.
+decide, the gates say so — that is what they are for. A spec carried into the
+plan branch with findings open, below, merges on that same `ready` verdict.
 
 **Onto the base, only a person's approval or Merge authorizes a merge** — one
 they gave for that change, in this session. A spec that merges straight into the
@@ -606,6 +615,21 @@ hand on GitHub. Do not offer approval and do not treat the stop as a failure;
 say what is open, in behaviour terms, and that a `revisit` is the door back
 should a reader later withdraw it. `begin` records a merge made by hand and
 moves on.
+
+With `carry` on, a spec on a plan branch whose open review is the only thing
+blocking it is carried: when its fix rounds for this cycle are spent, or when
+everything open is about the pull request, `finish` records the carry, merges
+it into the plan branch like any ready spec, and enters each open finding in
+the plan's ledger and under Risk in the spec's pull request and the plan's. Its
+`say` carries one line saying how many it carried and how many of
+`limits.carried` the plan has used: relay it. Carrying is never used for a
+`blocking` finding, a whole-plan fix, a `major` finding in the code of a spec
+that an unmerged spec depends on, or anything that merges straight into the
+base; those stop as above. When carrying the spec would take the plan past
+`limits.carried`, nothing is carried and `ask` names the cap and how many are
+carried so far. The answers are raising `limits.carried` and running `finish`
+again, merging it by hand on GitHub — what is open then enters the ledger as
+merged by hand — leaving it open, or stopping the train.
 
 ## Looking again
 
