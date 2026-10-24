@@ -85,6 +85,20 @@ test("with progressBoard false nothing is stored and nothing printed: no board k
   assert.deepEqual(Object.keys(last.json), ["ok", "say", "next"]);
 });
 
+test("with progressBoard missing from the config the board is printed and stored, as with it on", () => {
+  const staged = stage();
+  const configPath = path.join(staged.repo, ".tagteam", "config.json");
+  assert.ok("progressBoard" in JSON.parse(fs.readFileSync(configPath, "utf8")), "the staged config carries the key before it is removed");
+  // JSON.stringify drops an undefined value, so this removes the key rather than setting it.
+  const { begin, panel } = toPanel(staged, { progressBoard: undefined });
+  assert.ok(!("progressBoard" in JSON.parse(fs.readFileSync(configPath, "utf8"))), "the key is gone from the config");
+  const header = "Spec 01-a, 1 of 1 · 0 merged · nothing queued";
+  assert.equal(begin.json.board, boardOf(header, ["Implement 01-a", "running"]));
+  assert.ok(typeof panel.json.board === "string" && panel.json.board.startsWith(header), "the panel printed a board");
+  const record = setRecordsOf(staged.shipDir, "01-a").find((entry) => entry.agents[0].name === "Implement 01-a");
+  assert.deepEqual(record.board, { header });
+});
+
 test("a panel's first arrival prints its board with that reader done and the others running", () => {
   const staged = stage();
   const { panel } = toPanel(staged);
