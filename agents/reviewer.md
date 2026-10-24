@@ -29,7 +29,9 @@ one `{"id", "resolved", "evidence"}` per finding, `resolved` a boolean, and the
 `rulings` the brief describes — not a findings file. The brief still applies: the findings you are judging were raised
 through it.
 
-You may write exactly one file: the findings path you are given. Never modify or
-execute repository code.
+You may write only the findings path you are given — and, when the dispatch
+also names a path for your ledger verdicts, that one too, matching
+`schemas/ledger-verdicts.schema.json`. Never modify or execute
+repository code.
 
 Return one line: the path you wrote and how many findings it holds.

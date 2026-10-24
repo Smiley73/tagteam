@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0
+
+- Run `/tagteam:configure` once after upgrading. The configuration moves to version 11, and until it is carried forward `/tagteam:plan` and `/tagteam:ship` stop before doing any work and `/tagteam:status` says the configuration is out of date. Configure offers back every value you had and asks about the four new settings below, each defaulting to its safe value.
+- Have every finding say who answers it: the code, or the pull request's text. A code problem that names no single file now goes to a fixer instead of stopping the spec, and a finding whose only remedy is that the work should have been planned differently is rated minor and no longer stops anything.
+- Run a failed verify command once more on the same commit, and rerun failed CI jobs once, before anything is fixed or repaired. Every failure that passed when run again is listed under Risk in the spec's pull request and the plan's; the body is sent again when one is found after it went out.
+- Keep waiting for checks that are still running when the CI wait ends, through a step you can resume or end, instead of stopping on them. The note about a workflow's branch filter now appears only when the evidence points to it.
+- Have reviewers rule on everything the agent said it left undone: something the spec still needs, something it could not do where it ran, or something this change does not owe. On a plan branch, a spec whose readers rule every item one of the last two, with review, verify and checks clean, no longer waits for you; anything the spec still needs goes back for a fix.
+- Print a table after every fixer: each finding it was handed, whether it is now addressed, and what to do about one that is not (accept, carry, needs a person, or re-plan). The rows still open go under Risk in the spec's pull request.
+- Stop a spec at once when its fixer reports that the right repair would go against the plan's goal, saying how many fix rounds were spent, instead of spending the rest of them.
+- Add `autoRedesign`, off by default: with it on, the first "the same file keeps failing" question in a cycle is answered with a rewrite without asking you. Accepting the findings as they are is always your answer.
+- Keep a ledger for each plan on a plan branch: every finding a spec still had open when it merged into the plan's branch, shown under Risk in that spec's pull request and in the plan's own. Accepting a spec's open findings on a plan branch now merges it into the plan's branch when they may be carried; anywhere else accepting works as before.
+- Add `carry`, off by default, and `limits.carried`, 5 by default. With carrying on, a spec on a plan branch whose fix rounds ran out, or whose only open findings are about its pull request, merges into the plan's branch with them in the ledger. Never for a blocking finding, a whole-plan fix, a major code finding on a spec another unmerged spec depends on, or anything that goes straight to the base. Past `limits.carried` the run stops and asks you.
+- Re-judge every ledger entry at the whole-plan check, against the plan's tip. When the check is otherwise clean, entries still wrong in the code become follow-up pull requests into the plan's branch, entries on the same files sharing one, up to `limits.followUps` (2 by default, 0 for none). A follow-up never carries. Everything else — fixed, about the pull request, needing a person, not re-judged, or left once the follow-ups are spent — is listed in the plan's pull request with where it ended up. The ledger never changes whether the check is clean or whether Merge is offered, and the plan still reaches the base only on your Merge or Squash.
+- Print the same kind of table after every whole-plan fix and follow-up merges, from what it was handed and the check that followed.
+
 ## 0.12.1
 
 - Refuse a re-check on a candidate that the ship sends to the whole panel, such as a second fix round. It used to run, and so skipped the panel the ship had just said would read it.

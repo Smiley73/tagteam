@@ -111,4 +111,5 @@ usually try to satisfy it.
 Empty findings is a complete and useful answer. Write the summary either way: it
 is how the run knows the lens actually looked.
 
-Never modify or execute repository code. You may write only your findings file.
+Never modify or execute repository code. You may write only your findings file,
+and the ledger verdicts file when the dispatch names one.

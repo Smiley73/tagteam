@@ -689,6 +689,16 @@ what verify found, and at what model and effort the reviewer runs.
   change is empty — returns `ask`. Say what `say` says — what failed, and where
   the record is — then ask it. The work stays on the plan's branch.
 
+When the plan's ledger has entries, the reviewer's prompt also names the ledger
+and where to write a verdict on each entry. Nothing else changes for you: the
+same one dispatch, the same arrival. The verdicts never change which of the
+three ways the check ends. A check that is clean on its own may also make
+*follow-up* units, one per group of entries still wrong in the code, up to
+`limits.followUps`; `say` names each one and the budget, and `next` is `begin`
+for the first. A follow-up ships exactly as a fix unit does, under
+`$S/whole-plan/units/<id>/`, and never carries. The `plan-collect` after any fix
+unit or follow-up merges prints its table, as after a fixer: relay it as it is.
+
 A spec or a fix unit waiting for a person holds the check back: its `next` is
 `end`, as it always was, and the check runs once it is merged. Running
 `plan-check` again on a tip whose check is decided dispatches nothing and prints
@@ -719,10 +729,17 @@ each one's `pr-body.md` — above all one disclosed when a fix budget ran out; a
 say each budget in `body.spent` that ran out, with the setting a person would
 raise. The plan's ledger — every finding a spec carried into the plan branch
 open, grouped by spec, and every failure that passed when it was run again —
-the ship adds under `## Risk` itself, as `body.riskLines` says when there is
-any: do not write those a second time. `## Risk` says "nothing known" when
+the ship adds under `## Risk` itself, as `body.ledger.riskLines` says when there
+is any: do not write those lines a second time. `body.ledger.entries` says where
+each entry ended up: for every one whose `endedUp` says it is still unresolved,
+add under `## Risk` what it means for the person using the software — what
+still goes wrong, and when — and why it was not fixed. `## Risk` says "nothing known" when
 there is nothing. Then run `next`. A `--title "<title>"` of your own is taken the
 same way as for `publish`; without one, the plan document's heading is used.
+When a later check changes what the body answers for — where a ledger entry
+ended up, or a budget in `body.spent` — `plan-land` returns `body` again, and
+`say` names what changed: write the file again from it, the same way, and run
+`next`.
 
 **What it does on the way**, each step said in `say` — relay it plainly:
 
