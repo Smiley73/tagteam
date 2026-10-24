@@ -99,6 +99,23 @@ test("a review that is incomplete is not a review that is clean", () => {
   assert.ok(verdict.blockers.includes("review-incomplete"));
 });
 
+test("on the plan branch, a person's accept of everything open lifts review-open, and nothing short of that does", () => {
+  const major = { id: "3.correctness.1", severity: "major", scope: "code" };
+  const opened = (open, overrides) => recordGate(reviewed(overrides), "review", A, { status: "open", open });
+  const accepting = (state, ids, candidateOid = A) => ({ ...state, accept: { candidateOid, ids, at: "2026-01-01T00:00:00Z" } });
+  const lifted = evaluate(accepting(opened([major]), [major.id]), CONFIG);
+  assert.deepEqual([lifted.ready, lifted.blockers, lifted.approvals], [true, [], []]);
+  assert.equal(bindCandidate(accepting(opened([major]), [major.id]), B, BASE).accept, null, "a new candidate keeps the accept");
+  for (const [what, state] of [
+    ["straight to the base", accepting(opened([major], { base: "main", planRouteBranch: null }), [major.id])],
+    ["a blocking finding among them", accepting(opened([major, { id: "3.correctness.2", severity: "blocking", scope: "code" }]), [major.id, "3.correctness.2"])],
+    ["a fresh finding nobody accepted", accepting(opened([major, { id: "4.adversary.1", severity: "major", scope: "code" }]), [major.id])],
+    ["an accept of an earlier candidate", accepting(opened([major]), [major.id], B)]
+  ]) assert.ok(evaluate(state, CONFIG).blockers.includes("review-open"), what);
+  const incomplete = accepting(recordGate(reviewed(), "review", A, { status: "incomplete", open: [major] }), [major.id]);
+  assert.ok(evaluate(incomplete, CONFIG).blockers.includes("review-incomplete"));
+});
+
 // --- where the candidate lands ---
 //
 // Nothing reaches the base without a person. The verdict knows where a spec

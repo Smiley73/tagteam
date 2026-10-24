@@ -81,12 +81,19 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    pr-body.md (the body the orchestrator writes for the plan as
                    a whole), pr-body.sent.md (that body with the line saying
                    what the plan lands as, which the ship adds under
-                   ## Summary), ci-<tip>.json, checks/<tip>/ (the landing check's
+                   ## Summary, and the ledger under ## Risk), ci-<tip>.json, checks/<tip>/ (the landing check's
                    evidence, one directory per base) and snapshots/. Never a
                    state.json: it is not a spec                              ignored
+  ledger.json      on a plan branch, the plan's ledger: entries, one per finding
+                   a spec or fix unit still had open when it merged into the
+                   plan branch (spec, severity, scope, files, title, detail,
+                   why it was left open — accepted or merged-by-hand — and the
+                   merged commit), and retries, the failures that passed when
+                   run again, kept for the plan's body and never re-judged   ignored
   <spec-id>/
-    state.json     the state machine, the reviewed commit, the gates, and the
-                   landing check bound to the current candidate             ignored
+    state.json     the state machine, the reviewed commit, the gates, the
+                   landing check and a person's accept on the plan branch,
+                   each bound to the current candidate                       ignored
     landing.json   what the last landing check found, as it was recorded    ignored
     rounds/<n>/  round.json (the commit that owns this round), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
@@ -128,8 +135,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  nothing                                                    ignored
     pr-body.md  ci.json  usage.json                                          ignored
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
-                 under ## Risk — each failure that passed when run again on
-                 the same commit                                            ignored
+                 under ## Risk — on a plan branch each finding it would carry
+                 into the plan branch open, and each failure that passed when
+                 run again on the same commit                               ignored
 .tagteam/worktrees/                                                         ignored
 .tagteam/locks/  <plan>-<digest>.lock/, one per plan being shipped — the same
                  plan twice is refused, two plans are not; and
@@ -179,7 +187,9 @@ fresh implementer working from a brief of every finding the rounds record on
 those files and how each was answered, and `accept`, which spends nothing and
 publishes the change as it is with what is open disclosed — an open finding is a
 blocker no approval clears, so the spec then waits at `finish` to be merged by
-hand. With `autoRedesign` on, the first such question in a cycle with a fix
+hand — except on a plan branch, where an accept of findings that may all be
+carried there lets `finish` merge it into the plan branch, each open finding
+entered in the plan's ledger. With `autoRedesign` on, the first such question in a cycle with a fix
 round left and the same file failing is not asked: `next` is `redesign`, and
 `say` says it was answered automatically. The loose signal alone, the question
 at the cap and every later question are still a person's, and so is `accept`.

@@ -297,8 +297,13 @@ What is yours at each point:
 
   which spends nothing and publishes the change as it is, with what is open
   disclosed — it will not merge unattended, `finish` cannot approve past an open
-  finding, and merging it is the person's to do on GitHub. **Stop the train**
-  is `end`.
+  finding, and merging it is the person's to do on GitHub. On a plan branch,
+  when nothing accepted is blocking and no major finding in the code sits on a
+  spec that an unmerged spec depends on, the accept instead lets `finish` merge
+  it into the plan branch, with each open finding entered in the plan's ledger
+  and listed in the plan's pull request; the `say` of `accept` or `settle` says
+  which it is, and names the finding that kept it from merging when it does not.
+  **Stop the train** is `end`.
 
   *A fix round is left, and this cycle has had its rewrite* — three answers:
   fix it once more (`next`), accept, and stop. A cycle gets one rewrite, whether
@@ -439,7 +444,10 @@ Two things do carry over from the run, because they are about the software:
 
 - **A finding still open goes under `## Risk`**, said as what goes wrong and for
   whom, in the same plain English you use for a person. `settle`'s `say` gives
-  you each one. A finding the person accepted — they answered the *Recurring*
+  you each one. On a plan branch the driver writes these lines itself, one per
+  finding — each saying whether the person's accept merges the spec, and
+  otherwise the fixer table's recommendation for it — so do not write them a
+  second time. A finding the person accepted — they answered the *Recurring*
   question with `accept` — goes there the same way: it is still open, and the
   body is where it is disclosed. So does one the person chose to publish with at
   the cap, answering that question with "publish as it is".
@@ -453,8 +461,9 @@ Two things do carry over from the run, because they are about the software:
   route — a plan branch, straight to the base, a whole-plan fix — said as what
   goes wrong and for whom, with its recommendation in words: that it needs a
   person, that the plan needs re-planning, or that it could be carried or
-  accepted as it is. `publish` lists those rows again in `notAddressed`; when
-  the body you sent leaves one out, add it and run the same `publish` again.
+  accepted as it is. `publish` lists those rows again in `notAddressed` — less
+  any the driver's own lines already say, recommendation included; when the
+  body you sent leaves one out, add it and run the same `publish` again.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
   to let it try again. When the area was rewritten at the cap and the rewrite
@@ -464,9 +473,10 @@ Two things do carry over from the run, because they are about the software:
 `## Risk` says "nothing known" when there is nothing, rather than being dropped.
 
 The body `publish` sends is yours plus lines the driver writes under `## Risk`
-itself — a failure that passed when it was run again on the same commit — and it
-sends the body again on its own when such a line comes after the pull request
-opened. Those lines replace a "nothing known". When you write the body again
+itself — on a plan branch each finding still open, which merging carries into
+the plan branch, and a failure that passed when it was run again on the same
+commit — and it sends the body again on its own when such a line comes after
+the pull request opened. Never repeat a line the driver writes. Those lines replace a "nothing known". When you write the body again
 from the one on GitHub, keep them; the driver adds back any that are missing,
 and nothing merges while one is.
 
@@ -587,7 +597,10 @@ that the spec stopped because it and the goal disagree, not because a repair
 failed. More fix rounds do not settle it: the person re-plans, or merges by hand.
 
 When the person accepted it — they answered the *Recurring* question with
-`accept` — `ask` says so first: the spec stops here by their own decision, with
+`accept` — on a plan branch where the accept let it merge, `finish` merges it
+into the plan branch like any ready spec, and its `say` carries one line saying
+how many open findings went into the plan's ledger with it: relay it.
+Otherwise `ask` says so first: the spec stops here by their own decision, with
 the open finding disclosed in the pull request, and it waits to be merged by
 hand on GitHub. Do not offer approval and do not treat the stop as a failure;
 say what is open, in behaviour terms, and that a `revisit` is the door back
@@ -678,9 +691,12 @@ the same shape as a spec's — *The pull request body* above — but for the pla
 a whole: what is different for the person using the software once the whole plan
 is in. `body.plan` is the plan's deliverables; read it for the summary. Under
 `## Risk` carry over what each spec's own body disclosed — `body.lands` names
-each one's `pr-body.md` — above all a finding a person accepted open, or one
-disclosed when a fix budget ran out; and say each budget in `body.spent` that ran
-out, with the setting a person would raise. `## Risk` says "nothing known" when
+each one's `pr-body.md` — above all one disclosed when a fix budget ran out; and
+say each budget in `body.spent` that ran out, with the setting a person would
+raise. The plan's ledger — every finding a spec carried into the plan branch
+open, grouped by spec, and every failure that passed when it was run again —
+the ship adds under `## Risk` itself, as `body.riskLines` says when there is
+any: do not write those a second time. `## Risk` says "nothing known" when
 there is nothing. Then run `next`. A `--title "<title>"` of your own is taken the
 same way as for `publish`; without one, the plan document's heading is used.
 
