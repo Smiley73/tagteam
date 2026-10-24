@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.1
+
+- Show a progress board during `/tagteam:ship` and `/tagteam:plan`: one line saying where the run is, over a table of the agents of the current step, each `running` or `done`, printed as the agents go out and again as each reports in. It is on by default.
+- Turn it off with `"progressBoard": false` in `.tagteam/config.json`, and nothing extra is printed.
+- Ask about it in `/tagteam:configure`, with a note that it costs a little more output per step.
+- Give existing configurations the board without re-running configure: a configuration that does not mention `progressBoard` has it on, and is not reported as out of date.
+
 ## 0.13.0
 
 - Run `/tagteam:configure` once after upgrading. The configuration moves to version 11, and until it is carried forward `/tagteam:plan` and `/tagteam:ship` stop before doing any work and `/tagteam:status` says the configuration is out of date. Configure offers back every value you had and asks about the four new settings below, each defaulting to its safe value.
