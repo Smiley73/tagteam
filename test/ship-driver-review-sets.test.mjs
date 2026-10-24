@@ -553,6 +553,7 @@ test("snapshot waits the same way for the first implementer, a redesign implemen
   assert.equal(repair.status, 0, repair.stderr);
   assert.deepEqual(repair.json.set.labels, ["Repair CI for 01-a"]);
   assertEffort(repair.json.dispatch[0], "high", "a CI repair passes effort.fixer");
+  assert.match(repair.json.dispatch[0].prompt, /^Verify commands \(/m, "a CI repair is told what verify will run");
   const waiting = ship("snapshot", red.plan, ["--spec", "01-a"]);
   assert.equal(waiting.status, NOT_IN_YET, waiting.stderr);
   assert.match(waiting.stderr, /still waiting on Repair CI for 01-a/);

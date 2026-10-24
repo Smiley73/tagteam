@@ -47,7 +47,10 @@ you again.
 ## Rules
 
 **Read the code.** You cannot answer this from the fixer's report, and you are
-not given its account of what it did. A finding is resolved when the new code no
+not given its account of what it did. If you are the adversary and a finding
+came from a break you made in a scratch copy, make the same break in a fresh
+copy of the post-fix worktree and run the test again: the finding is resolved
+only if it now fails. A finding is resolved when the new code no
 longer has the defect — which you establish by looking at the new code.
 
 **When the fixer declined instead.** Your dispatch may say the fixer changed

@@ -61,6 +61,7 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   assert.equal(implementer.model, "sonnet");
   assert.match(implementer.prompt, /^Job: implementer\n/);
   assert.match(implementer.prompt, /This is a redesign/);
+  assert.match(implementer.prompt, /^Verify commands \(/m, "a redesign implementer is told what verify will run");
   assert.match(implementer.prompt, /^Files to redesign: app\.js$/m);
   const briefPath = /^Redesign brief: (.*)$/m.exec(implementer.prompt)[1];
   assert.match(briefPath, /\/01-a\/redesign-briefs\/round-3-\d{8}T\d{6}Z\.md$/);

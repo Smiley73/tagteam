@@ -92,10 +92,12 @@ The dispatch lists this repository's verify commands. Run each one that applies
 to what you changed, in the worktree, and fix what your change broke; the run
 executes the same commands after you return, and a failure found there costs a
 round that one found here does not. A command you could not run — it outlasts
-what you may wait, or needs the network or credentials — or that fails with or
-without your change, is said in `summary`, not in `unfinished`: the run still
-executes it, and `unfinished` stops the spec for a person. A failure your change
-caused and you could not resolve is `unfinished`. Remove what a command wrote
+what you may wait, or needs the network or credentials — or that fails where
+you cannot tell whether your change caused it, is said in `summary`, not in
+`unfinished`: the run still executes it, and `unfinished` stops the spec for a
+person. You may not stash or check out to find out, so say it could not be told
+apart rather than that it predates your change. A failure your change caused and
+you could not resolve is `unfinished`. Remove what a command wrote
 into the tree — coverage output, build products — unless the repository ignores
 it, so it does not land in the change.
 

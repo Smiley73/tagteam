@@ -306,15 +306,16 @@ const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ?
 
 // What the repository itself runs to call a candidate good, handed to the agents
 // that write code so they can run it before reporting rather than finding out at
-// the verify gate. The `when` is shown as configured: nothing here knows which
-// files the agent will end up touching, so the agent decides which apply.
+// the verify gate. The `when` is shown as configured and is read against the
+// spec's whole change from its base, as the gate reads it: nothing here knows
+// which files the agent will end up touching, so the agent decides which apply.
 function verifyLine(ctx) {
   const commands = ctx.config.verify ?? [];
   if (commands.length === 0) return "Verify commands: none configured";
   const when = ({ globs = [], keywords = [] }) => globs.length === 0 && keywords.length === 0
     ? "always"
-    : [...globs.map((glob) => `a changed path matches ${glob}`), ...keywords.map((word) => `an added line contains "${word}"`)].join(", or ");
-  return "Verify commands (run the ones that apply to what you changed before you report):\n"
+    : [...globs.map((glob) => `a path this spec changes matches ${glob}`), ...keywords.map((word) => `a line this spec adds contains "${word}"`)].join(", or ");
+  return "Verify commands (run the ones that apply to everything this spec changes from its base, not only this round's edits, before you report):\n"
     + commands.map((entry) => `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`).join("\n");
 }
 
@@ -435,6 +436,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
       `Brief: ${path.join(PLUGIN, "prompts", "code-adversary.md")} — you are judging a diff fresh, not re-checking`,
       `Spec: ${spec.path}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      `The candidate's worktree (copy it to check a test, never edit it): ${ctx.worktree}`,
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
@@ -455,6 +457,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
       ...(brief ? [`Lens brief the findings were raised through: ${brief}`] : []),
       `Findings to judge, with their ids (judge every id in every file listed): ${inputs.join(" and ")}`,
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...(lens === "adversary" ? [`The post-fix worktree (copy it to repeat a check, never edit it): ${ctx.worktree}`] : []),
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
