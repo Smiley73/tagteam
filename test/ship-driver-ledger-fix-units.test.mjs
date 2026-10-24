@@ -106,6 +106,25 @@ test("a clean check makes one follow-up for the shared-file group within limits.
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
+test("a follow-up its check recorded but whose document a run that died never wrote is written again and shipped, not passed over", () => {
+  const staged = stageLedger({ followUps: 2 });
+  const { plan, shipDir, env } = staged;
+  judge(staged, ship("plan-check", plan, [], env), everyone("still-real"));
+  assert.deepEqual(checkRecordOf(shipDir, 1).units, ["plan-followup-1", "plan-followup-2"]);
+  // The run died after the record was saved and before the second document.
+  fs.rmSync(unitDirIn(shipDir, "plan-followup-2"), { recursive: true, force: true });
+
+  const finished = shipUnit(staged, "plan-followup-1", { "app.js": "export const add = (a, b) => a + b;\n// sub keeps the sign\nexport const sub = (a, b) => a - b;\n" });
+  assert.match(finished.json.next, /begin --plan .* --spec plan-followup-2$/, "the plan went on past a follow-up that never ran");
+  const document = fs.readFileSync(path.join(unitDirIn(shipDir, "plan-followup-2"), "spec.md"), "utf8");
+  assert.match(document, /^id: plan-followup-2$/m);
+  assert.match(document, /twice and add disagree/);
+  const check = ship("plan-check", plan, [], env);
+  assert.notEqual(check.status, 0, "the whole-plan check ran past an unmerged follow-up");
+  assert.match(check.stderr, /plan-followup-2 is not merged/);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
 test("the ledger never changes the check's result: unjudged entries leave a clean check clean, and a check that is not clean makes only its own fix", () => {
   const unjudged = stageLedger();
   const check = ship("plan-check", unjudged.plan, [], unjudged.env);

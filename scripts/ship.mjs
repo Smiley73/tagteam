@@ -212,9 +212,25 @@ function fixUnitSpec(ctx, id) {
   };
 }
 
-// Every fix unit the whole-plan check has made whose document is there, of
-// either family, in the order they were made.
-const fixUnitSpecs = (ctx) => unitIds(ctx.shipDir).filter((id) => exists(unitDocumentPath(ctx.shipDir, id))).map((id) => fixUnitSpec(ctx, id));
+// Every fix unit the whole-plan check has made, of either family, in the order
+// they were made. A check saves the units it decided before it writes their
+// documents, so a unit the newest check names whose document a run that died
+// between the two never wrote is written now, from that check: dropped instead,
+// the plan would be checked and landed past a unit that never ran. Only the
+// newest check can be that one — no check starts while a unit is unmerged — so
+// an older check's unit with no document is one whose directory went after it
+// merged, and is not made again. Nor is a directory no check names.
+function fixUnitSpecs(ctx) {
+  const records = listChecks(ctx.shipDir).map((entry) => entry.record);
+  const newest = records.at(-1);
+  const named = new Set(newest && !newest.unreadable && Array.isArray(newest.units) ? newest.units : []);
+  return unitIds(ctx.shipDir, records).filter((id) => {
+    if (exists(unitDocumentPath(ctx.shipDir, id))) return true;
+    if (!named.has(id)) return false;
+    ensureUnitDocument(ctx, newest, id);
+    return true;
+  }).map((id) => fixUnitSpec(ctx, id));
+}
 
 // The specs and then the fix units: everything of this train that becomes a pull
 // request into its landing branch.
