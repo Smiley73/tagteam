@@ -28,7 +28,14 @@ Where this usually hides:
   was told. Read `## Outcome` and ask whether the code actually produces it.
 - **The tests assert the implementation.** A test written alongside the code
   often encodes what the code does rather than what it should do. It will pass
-  through any refactor and catch nothing.
+  through any refactor and catch nothing. Where it is cheap, check it: copy
+  the worktree you are given without its `.git` (`rsync -a --exclude .git`) into
+  a directory made with `mktemp -d`, run the test there unbroken first, then
+  break the line a spec-named behaviour depends on and run it again. A test that
+  fails unbroken fails for the copy's own reason (some tests ask `git` something),
+  and says nothing about the break. A test that still passes broken is a finding,
+  with the break you made and the output as `detail`. Run no `git` command in the
+  copy, and never touch the candidate itself.
 - **The path nobody ran.** The error branch, the empty collection, the second
   concurrent caller, the value that is null in production and never in tests.
 - **The repair that moved the defect.** The fix round changed code under

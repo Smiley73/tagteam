@@ -44,6 +44,7 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   assert.equal(implementer.model, "sonnet", "the implementer runs the worker model");
   assertEffort(implementer, "high", "the implementer passes effort.implementer");
   assert.match(implementer.prompt, /^Job: implementer/);
+  assert.match(implementer.prompt, /^- node -e "process\.exit\(0\)" \(timeout 60s; runs when always\)$/m, "the implementer is told what verify will run");
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
   assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
 
@@ -94,6 +95,8 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   const recheck = ship("recheck", plan, ["--spec", "01-a"]);
   assert.deepEqual(recheck.json.dispatch.map((entry) => entry.agent), ["tagteam:adversary"], "nothing to re-check: the adversary alone");
   assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary passes effort.adversary");
+  assert.match(recheck.json.dispatch[0].prompt, /^The candidate's worktree \(copy it to check a test, never edit it\): \S+\.tagteam\/worktrees\/\S+$/m,
+    "the adversary is told which tree to copy");
   write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
 
   arriveAll(recheck);
@@ -888,6 +891,24 @@ test("a change that passes alone and fails on the base as it now stands stops, c
   assert.match(repair.json.dispatch[0].prompt, /fails this repository's verify commands once it is merged onto main/);
   assert.doesNotMatch(repair.json.dispatch[0].prompt, /a failing check/);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the verify list an implementer is given says when each command runs, and says so when there are none", () => {
+  const conditions = [
+    { command: "run-a", when: { globs: ["**/*.ts"], keywords: ["TODO"] }, timeoutSec: 30 },
+    { command: "run-b", when: { globs: [], keywords: [] }, timeoutSec: 40 }
+  ];
+  const promptFor = (verify) => {
+    const { repo, plan } = stage();
+    const configPath = path.join(repo, ".tagteam", "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(configPath, "utf8")), verify }, null, 2));
+    assert.equal(ship("start", plan).status, 0);
+    return ship("begin", plan, ["--spec", "01-a"]).json.dispatch[0].prompt;
+  };
+  const listed = promptFor(conditions);
+  assert.match(listed, /^- run-a \(timeout 30s; runs when a path this spec changes matches \*\*\/\*\.ts, or a line this spec adds contains "TODO"\)$/m);
+  assert.match(listed, /^- run-b \(timeout 40s; runs when always\)$/m);
+  assert.match(promptFor([]), /^Verify commands: none configured$/m);
 });
 
 test("a base that moved with something unrelated costs no round: finish merges the reviewed commit with the base re-verified under it", () => {

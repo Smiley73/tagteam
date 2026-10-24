@@ -9,6 +9,17 @@ that still passes when the relevant behaviour is deliberately broken; a mock
 so complete the test exercises only itself; an error path or boundary case
 with no test.
 
+You cannot run the tests, so judge "still passes when broken" by reading: for
+each test the spec names, find the line that carries the behaviour and ask what
+single change that line admits — a flipped operator, a comparison moved by one
+where it compares, a deleted branch — that no assertion would notice. File it
+only when the change you name leaves the spec-named behaviour unproved, and
+name the line and that change. A line with no boundary has no off-by-one to
+miss. Also look for a test that cannot fail: it asserts only that nothing
+threw, or that a result is truthy; an assertion inside a callback that never
+runs or a condition that is never true; an expected value computed with the
+logic under test.
+
 For runtime cost, look for: a query inside a loop, or a full scan where an index
 exists; work repeated per item that could be done once; something loaded
 entirely into memory that grows with the data; a synchronous call on a hot

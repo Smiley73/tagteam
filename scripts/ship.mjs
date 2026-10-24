@@ -304,6 +304,21 @@ const record = (ctx, id, gate, oid, file) => node("gates.mjs", ["record", stateP
 const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effort: job.effort });
 const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ? " (raised: escalation is in force)" : ""}`;
 
+// What the repository itself runs to call a candidate good, handed to the agents
+// that write code so they can run it before reporting rather than finding out at
+// the verify gate. The `when` is shown as configured and is read against the
+// spec's whole change from its base, as the gate reads it: nothing here knows
+// which files the agent will end up touching, so the agent decides which apply.
+function verifyLine(ctx) {
+  const commands = ctx.config.verify ?? [];
+  if (commands.length === 0) return "Verify commands: none configured";
+  const when = ({ globs = [], keywords = [] }) => globs.length === 0 && keywords.length === 0
+    ? "always"
+    : [...globs.map((glob) => `a path this spec changes matches ${glob}`), ...keywords.map((word) => `a line this spec adds contains "${word}"`)].join(", or ");
+  return "Verify commands (run the ones that apply to everything this spec changes from its base, not only this round's edits, before you report):\n"
+    + commands.map((entry) => `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`).join("\n");
+}
+
 function implementerDispatch(ctx, spec, job) {
   return {
     ...agent("implementer", job),
@@ -313,6 +328,7 @@ function implementerDispatch(ctx, spec, job) {
       `Spec: ${spec.path}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      verifyLine(ctx),
       `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
     ].join("\n")
   };
@@ -335,6 +351,7 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
       `Spec: ${spec.path}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      verifyLine(ctx),
       `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
     ].join("\n")
   };
@@ -419,6 +436,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
       `Brief: ${path.join(PLUGIN, "prompts", "code-adversary.md")} — you are judging a diff fresh, not re-checking`,
       `Spec: ${spec.path}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      `The candidate's worktree (copy it to check a test, never edit it): ${ctx.worktree}`,
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
@@ -439,6 +457,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
       ...(brief ? [`Lens brief the findings were raised through: ${brief}`] : []),
       `Findings to judge, with their ids (judge every id in every file listed): ${inputs.join(" and ")}`,
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      ...(lens === "adversary" ? [`The post-fix worktree (copy it to repeat a check, never edit it): ${ctx.worktree}`] : []),
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
@@ -882,6 +901,7 @@ function fixerDispatch(ctx, spec, recordPath, job) {
       `Spec this change implements (to read, not to work from): ${spec.path}`,
       `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      verifyLine(ctx),
       `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")}`
     ].join("\n")
   };
@@ -924,6 +944,7 @@ function repairDispatch(ctx, spec, state, job) {
       `This is a CI repair: no findings, a failing check. Its record is ${path.join(specDir(ctx, spec.id), "ci.json")}.`,
       `Pull request #${state.pr?.number ?? "?"} on branch ${state.branch}: read the failed check's log with gh (for example \`gh pr checks ${state.pr?.number ?? ""}\` and \`gh run view --log-failed\`) before changing anything.`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      verifyLine(ctx),
       `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
     ].join("\n")
   };
