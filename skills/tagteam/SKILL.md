@@ -745,6 +745,15 @@ started; a finding is still open after the re-check, unless it is carried (below
 produced no usable evidence**; `.github/workflows/**` changed; or the agent that
 wrote the code never confirmed it finished what it was given.
 
+A plan can approve named workflow files for named specs. A spec's front matter
+lists them under `workflows`, `plan.mjs approve` records them per spec in
+`approved.json` when the person approves the plan, and `gates.mjs evaluate` and
+`merge.mjs` both read them from there and from nowhere else. On a plan branch, a
+spec whose change touches only files approved for it — both sides of a rename and
+every deletion counted — does not stop on `workflow-change`; a spec going straight
+to the base, a file not named, a plan approved before this existed and a
+whole-plan fix still do.
+
 The first is read off the spec's state alone: a spec merges with nobody asked
 only when the base it recorded is exactly its plan's plan branch, and anything
 else — no recorded base included — counts as straight to `base` and waits for a

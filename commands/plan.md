@@ -406,12 +406,21 @@ top-level files or directories and the like that the repository's conventions
 say to ask about first, which the specs need. Say them plainly, per spec, in
 what they let the product do ("a PDF library, so statements can be exported"),
 and say that approving the plan approves them, so shipping will not stop to ask
-about them — a change to the CI workflows still stops before it merges. A spec
-with none needs no mention. A sign-off the person strikes under *Adjust* goes
+about them. A spec with none needs no mention. A sign-off the person strikes under *Adjust* goes
 back to that spec's writer as step 6 re-sends one (`spec-writers-resend`), told
 what was struck, to cut or redo the work that needed it rather than leave it
 for the implementer to trip over; its arrival runs the validation again, and
 you ask again.
+
+Then each spec's `workflows`, as `specs.mjs` returned them: one line per file,
+under its spec. Say in plain words what approving means: that spec may merge into
+the plan branch with exactly those files changed without stopping; any other
+workflow file it changes still stops it, and a spec that goes straight to the
+base still stops whatever was approved. The plan's own pull request is still
+theirs to merge. A spec with none needs no mention. A file the person strikes
+under *Adjust* goes back to that spec's writer the same way a struck sign-off
+does: it removes the file from front matter and cuts or redoes the work that
+needed it, validation runs again, and you ask again.
 
 Say nothing about how large anything is: the ceilings are enforced in code, and
 by the time a person is deciding whether to approve, a byte count is noise.
@@ -431,8 +440,11 @@ changes nothing about the question below.
 
 Run `node "$P/scripts/goal-gate.mjs" verify "$D"` one last time before asking.
 
-Then one question — Approve / Adjust / Stop. On approve, write `$D/approved.json`
-(`{"approvedAt", "slug", "specs": [...], "goalSha256", "planSha256"}`), commit
+Then one question — Approve / Adjust / Stop. On approve, run
+`node "$P/scripts/plan.mjs" approve --plan "$D" --config "$R/.tagteam/config.json"`,
+which writes `$D/approved.json` itself, hashes and each spec's approved workflow
+files included, and refuses if the specs no longer validate or the goal is not
+the one approved; never write that file by hand. Then commit
 `goal.md`, `plan.md`, `specs/`, `approved.json`, and tell them to run
 `/tagteam:ship <plan-dir>` **in a new session** — the interview loaded material
 shipping does not need.
