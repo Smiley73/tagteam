@@ -517,6 +517,14 @@ queue of pull requests each waiting for a keystroke. When a person should
 decide, the gates say so — that is what they are for. A spec carried into the
 plan branch with findings open, below, merges on that same `ready` verdict.
 
+A change to `.github/workflows/` is the one thing on that route that still waits,
+unless the plan's approval named every workflow file the spec changed, for that
+spec: the person approved those files when they approved the plan, so `finish`
+merges without asking and says which files it merged with. A file not named stops
+it as `workflow-change` and the stop names it. The approval is read from the
+plan's `approved.json` by `evaluate` and by `merge.mjs` alike, and never lifts the
+stop for a spec going straight to the base.
+
 **Onto the base, only a person's approval or Merge authorizes a merge** — one
 they gave for that change, in this session. A spec that merges straight into the
 base, on a one-spec plan or with `planBranch` off, always stops at `finish` with
@@ -574,9 +582,10 @@ unruled, and anything merging straight into the base still stop, and
 `unaccounted` then shows each item's ruling where it has one.
 
 The two halves take different answers. A person's approval is what `evaluate`
-honours for `approvals` — merging straight into the base, a workflow change, a
-round nobody accounted for, nothing executable having run, inconclusive checks,
-checks that never started within `ciStartWaitSec` — and for nothing in
+honours for `approvals` — merging straight into the base, a workflow change the
+plan's approval did not name for this spec, a round nobody accounted for,
+nothing executable having run, inconclusive checks, checks that never started
+within `ciStartWaitSec` — and for nothing in
 `blockers`: a reviewer that produced no usable
 evidence, a finding still open, a verification or check that failed or never
 ran. **No approval clears a blocker.** `finish --approve` given while one is

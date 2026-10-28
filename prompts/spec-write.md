@@ -15,6 +15,7 @@ Write exactly one file, at the path you are given.
 id: 03-recovery-ui
 depends_on: [02-recovery-api]
 reviewers: [experience]
+workflows: [.github/workflows/ci.yml]
 ---
 
 ## Outcome
@@ -32,6 +33,15 @@ a real dependency the plan missed. `reviewers` names only the lenses this spec n
 configured default set, or a lens prefixed with `-` to drop a default that does
 not apply (a docs-only spec has nothing for `code-quality` to say). Leave it
 `[]` when the defaults are right, which is most of the time.
+
+`workflows` declares every `.github/workflows/` file this spec's work will add,
+change, delete or rename, as exact repository paths — both sides of a rename,
+no wildcard, no directory, each once. Leave the key out when there are none,
+which is most of the time. Each declared path is shown to the person approving
+the plan and approved per file, for this spec alone: the spec then merges into
+the plan branch with exactly those files changed without stopping, and a
+workflow file it changes that is not listed still stops it. It is not a
+sign-off item; a workflow change listed under `## Sign-offs` approves nothing.
 
 **Outcome** — what must be true when this is done, observable from outside.
 End it with one line on the size you expect — files touched, lines of source,
@@ -61,7 +71,7 @@ judgment.
 **Sign-offs** — what this spec needs that the repository's conventions say to
 ask a person about first: typically a new or upgraded dependency, a new
 top-level file or directory, a schema-breaking migration, production
-configuration or CI. Find those rules in the conventions document the run
+configuration or CI (a workflow file goes in `workflows`, not here). Find those rules in the conventions document the run
 names, in any document it defers to for them, and in the instruction files you
 were given, then walk Changes against them. One list item each: what, and why
 this spec cannot be done without it. The person approving the plan approves

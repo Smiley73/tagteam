@@ -146,8 +146,10 @@ flowchart TD
    findings the drafter declined and why, and one question. Anything a spec
    needs that the repository's conventions say to ask about first — a new
    dependency, a new top-level directory — is listed there as that spec's
-   sign-off and approved with the plan, so shipping does not stop to ask (a change
-   to the CI workflows still does).
+   sign-off and approved with the plan, so shipping does not stop to ask. The
+   `.github/workflows/` files a spec will change are listed per spec, one per
+   line, and approved the same way: that spec may then change exactly those
+   files and merge into the plan branch without stopping.
 
 ### Shipping
 
@@ -308,7 +310,11 @@ satisfied, because the plan's own pull request is where you judge the combined
 change. On either route, a pull request also stops when verification failed or
 CI proved nothing or never started, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
-wrote it never confirmed it finished what it was given.
+wrote it never confirmed it finished what it was given. A workflow change does
+not stop a spec on a plan branch when the plan's approval named every workflow
+file it changed for that spec. A file the approval did not name still stops it,
+and the stop names that file; a spec going straight to the base stops whatever
+was approved.
 
 On a plan branch that last stop can clear without you. Every reader of the
 change rules on each thing the agent said it left undone: something the spec
@@ -335,8 +341,8 @@ file yields an empty finding set, and an empty finding set otherwise reads as a
 clean review.
 
 A person can approve past some of those stops and not others. Merging straight
-into the base, a workflow change, and an unconfirmed account are theirs to
-accept; a failed verification, an open finding, and a reviewer that produced no
+into the base, a workflow change the plan's approval did not name, and an
+unconfirmed account are theirs to accept; a failed verification, an open finding, and a reviewer that produced no
 usable evidence are cleared only by new evidence, and `finish` offers approval
 only when it would count.
 

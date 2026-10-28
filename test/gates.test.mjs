@@ -11,7 +11,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   initState, recordPlanRoute, transition, bindCandidate, recordGate, recordPr, evaluate, adoptMerge, reconcileBudgets, repairScope,
-  budgetTaken, resolveRoles, grantFixRound
+  budgetTaken, resolveRoles, grantFixRound, readApprovedWorkflows
 } from "../scripts/gates.mjs";
 import { allocateRound, listRounds } from "../scripts/lib/rounds.mjs";
 import { onPlanBranch } from "../scripts/lib/carry.mjs";
@@ -357,6 +357,86 @@ test("a change to CI is a change to what every other gate is worth", () => {
   const verdict = evaluate(reviewed({ changedPaths: [".github/workflows/test.yml"] }), CONFIG);
   assert.ok(verdict.approvals.includes("workflow-change"));
   assert.equal(verdict.ready, false);
+});
+
+// --- a workflow change a person approved when approving the plan ---
+//
+// The approval is an input to `evaluate`, read from `approved.json` by each
+// caller: `{ <spec id>: [files] }`. It lifts `workflow-change` for a spec that
+// merges into its plan branch and touched nothing it does not name.
+
+const CI = ".github/workflows/ci.yml";
+const OTHER = ".github/workflows/other.yml";
+const touching = (paths, build = reviewed) => ({ ...build({ changedPaths: paths }), workflowPaths: paths });
+
+test("a workflow change approved for this spec on a plan branch merges without asking", () => {
+  const verdict = evaluate(touching([CI]), CONFIG, { "01-x": [CI] });
+  assert.deepEqual(verdict.approvals, []);
+  assert.equal(verdict.ready, true);
+  assert.deepEqual(verdict.approvedWorkflows, [CI]);
+  assert.deepEqual(verdict.unapprovedWorkflows, []);
+});
+
+test("one workflow path the approval does not name stops it, and the stop names that path alone", () => {
+  const verdict = evaluate(touching([CI, OTHER]), CONFIG, { "01-x": [CI] });
+  assert.deepEqual(verdict.approvals, ["workflow-change"]);
+  assert.deepEqual(verdict.unapprovedWorkflows, [OTHER]);
+  assert.equal(verdict.ready, false);
+});
+
+test("an approval listed under another spec approves nothing for this one", () => {
+  const verdict = evaluate(touching([CI]), CONFIG, { "02-y": [CI] });
+  assert.deepEqual(verdict.approvals, ["workflow-change"]);
+  assert.deepEqual(verdict.unapprovedWorkflows, [CI]);
+});
+
+test("the same approved state going straight to the base still stops on both counts", () => {
+  const verdict = evaluate(touching([CI], straight), CONFIG, { "01-x": [CI] });
+  assert.deepEqual(verdict.approvals, ["straight-to-base", "workflow-change"]);
+  assert.equal(verdict.ready, false);
+});
+
+test("no approved list approves nothing", () => {
+  for (const approved of [undefined, null, [], "01-x", { "01-x": CI }, { "01-x": [7] }]) {
+    assert.deepEqual(evaluate(touching([CI]), CONFIG, approved).approvals, ["workflow-change"], JSON.stringify(approved));
+  }
+});
+
+test("a state bound before the workflow listing existed is judged from its changed paths and never approved", () => {
+  const legacy = reviewed({ changedPaths: [CI] });
+  assert.equal(Object.hasOwn(legacy, "workflowPaths"), false, "control: the fixture predates the listing");
+  const verdict = evaluate(legacy, CONFIG, { "01-x": [CI] });
+  assert.deepEqual(verdict.approvals, ["workflow-change"]);
+  assert.deepEqual(verdict.unapprovedWorkflows, [CI]);
+});
+
+test("a rename's source is judged though changed paths names only its destination", () => {
+  const renamed = { ...reviewed({ changedPaths: [CI] }), workflowPaths: [OTHER, CI] };
+  const verdict = evaluate(renamed, CONFIG, { "01-x": [CI] });
+  assert.deepEqual(verdict.unapprovedWorkflows, [OTHER]);
+  assert.deepEqual(verdict.approvals, ["workflow-change"]);
+});
+
+test("binding a candidate replaces the workflow listing, and one bound without it leaves none", () => {
+  const first = bindCandidate(touching([CI]), B, BASE, [CI], [CI, OTHER]);
+  assert.deepEqual(first.workflowPaths, [CI, OTHER]);
+  const second = bindCandidate(first, A, BASE, [CI]);
+  assert.equal(Object.hasOwn(second, "workflowPaths"), false);
+  assert.ok(evaluate(second, CONFIG, { "01-x": [CI, OTHER] }).approvals.includes("workflow-change"));
+});
+
+test("an approved.json that is missing, unreadable or without the key approves nothing", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-approved-"));
+  try {
+    const write = (text) => { fs.writeFileSync(path.join(dir, "approved.json"), text); return path.join(dir, "approved.json"); };
+    assert.equal(readApprovedWorkflows(path.join(dir, "absent.json")), null);
+    assert.equal(readApprovedWorkflows(write("{ not json")), null);
+    assert.equal(readApprovedWorkflows(write(JSON.stringify({ slug: "p", specs: ["01-x"] }))), null);
+    assert.equal(readApprovedWorkflows(write(JSON.stringify({ workflows: [CI] }))), null);
+    assert.deepEqual(readApprovedWorkflows(write(JSON.stringify({ workflows: { "01-x": [CI] } }))), { "01-x": [CI] });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("nothing executable having run is not the same as having passed", () => {

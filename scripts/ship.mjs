@@ -3180,7 +3180,7 @@ async function snapshot(options) {
     redesigned = { requested, files: requested.filter((file) => changed.has(file)), brief: pending.record ?? null, fromRound: pending.round };
     writeRoundFile(path.join(dir, ROUND_REDESIGN), `${JSON.stringify(redesigned, null, 2)}\n`);
   }
-  node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "changed-paths.json")]);
+  node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "candidate.json")]);
   const recorded = node("record-round-report.mjs", ["--dir", specDir(ctx, id), "--out", path.join(dir, "report.json")], { allow: [2] });
   if (recorded.status === 2) {
     throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
@@ -6462,7 +6462,7 @@ async function landingCheck(ctx, id, state, say) {
 // base, and the next check would otherwise re-verify the spec on top of it and
 // pass. Another spec of this plan merged meanwhile is taken in first, so that it
 // is not mistaken for one.
-function landAndMerge(ctx, id, state, say, planRoute) {
+function landAndMerge(ctx, id, state, say, planRoute, approvedPath) {
   return mergeWithLanding({
     check: async () => {
       if (planRoute) {
@@ -6482,7 +6482,7 @@ function landAndMerge(ctx, id, state, say, planRoute) {
       };
     },
     merge: () => {
-      const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath],
+      const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath, "--approved", approvedPath],
         { allow: [BASE_NOT_ACCEPTED] });
       if (result.status === 0) return { merged: lastJson(result.stdout) };
       say.push(`${state.base} moved again between the check and the merge, so the merge was refused: `
@@ -6541,7 +6541,10 @@ async function finish(options) {
   }
   freezePlanRoute(ctx, id);
   endChecksWait(ctx, id, state, say);
-  const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
+  // The workflow files a person approved at plan time are read from the plan's
+  // own `approved.json`, here and in `merge.mjs`, and from nowhere else.
+  const approvedPath = path.join(ctx.plan, "approved.json");
+  const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath, approvedPath]).stdout);
   let verdict = evaluateGates();
   // A goal conflict a fixer reported is a person's to re-plan whatever the gates
   // say: a fixer that changed the code all the same has its commit reviewed like
@@ -6580,7 +6583,7 @@ async function finish(options) {
     }
   }
   if (verdict.ready && !conflict) {
-    const landed = await landAndMerge(ctx, id, state, say, planRoute);
+    const landed = await landAndMerge(ctx, id, state, say, planRoute, approvedPath);
     if (landed.merged) {
       // The squash GitHub just made becomes the plan branch's recorded tip before
       // the spec is recorded as merged, so a run that dies in between finds the
@@ -6592,6 +6595,9 @@ async function finish(options) {
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
+      if (verdict.approvedWorkflows.length > 0 && verdict.unapprovedWorkflows.length === 0) {
+        say.push(`${id} changed ${verdict.approvedWorkflows.join(", ")}: the plan's approval named ${verdict.approvedWorkflows.length === 1 ? "that file" : "those files"} for this spec, so it merged into ${state.base} without stopping on ${verdict.approvedWorkflows.length === 1 ? "it" : "them"}.`);
+      }
       if (carry && !carry.over) {
         // Read again, since what the landing check took in can have added to it.
         const total = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried").length;
@@ -6637,7 +6643,11 @@ async function finish(options) {
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
-  const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) });
+  const words = verdict.unapprovedWorkflows.length === 0 ? notStartedWords(state) : {
+    ...notStartedWords(state),
+    "workflow-change": `${REASONS["workflow-change"]} (${verdict.unapprovedWorkflows.join(", ")} not named for ${id} in the plan's approval)`
+  };
+  const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, words, { goalConflict: Boolean(conflict) });
   emit({
     say,
     ask: [

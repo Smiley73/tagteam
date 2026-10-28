@@ -94,6 +94,8 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 //   stays declared so a file that carries it is not refused for it.
 // - `user_visible` in a spec's front matter, retired and ignored, and declared
 //   only so that specs written while it was required still validate.
+// - `workflows` in a spec's front matter, which most specs do not have and which
+//   specs written before it existed cannot.
 //
 // `test/config-shape.test.mjs` holds the configuration to having exactly these
 // optional root keys.
@@ -101,7 +103,8 @@ const DELIBERATELY_OPTIONAL = [
   { schema: "config.schema.json", property: "ciStartWaitSec" },
   { schema: "config.schema.json", property: "progressBoard" },
   { schema: "config.schema.json", property: "autoMerge" },
-  { schema: "spec.schema.json", property: "user_visible" }
+  { schema: "spec.schema.json", property: "user_visible" },
+  { schema: "spec.schema.json", property: "workflows" }
 ];
 
 // What a schema's walk reports once its deliberate exceptions are taken out.
@@ -143,14 +146,14 @@ test("the strict-mode exceptions cover their own properties and nothing else", (
   }
 });
 
-test("the spec schema's exception covers user_visible and no other property", () => {
-  // The schema with its one exception passes. Every other property it declares,
+test("the spec schema's exceptions cover user_visible and workflows and no other property", () => {
+  // The schema with its two exceptions passes. Every other property it declares,
   // taken off `required`, still fails; so does a second optional property added
   // beside it, and `user_visible` optional in any other schema.
   const spec = JSON.parse(fs.readFileSync(path.join(root, "schemas", "spec.schema.json"), "utf8"));
   assert.deepEqual(unexcused("spec.schema.json", spec), []);
   assert.equal(spec.additionalProperties, false, "the spec schema stopped refusing undeclared keys");
-  const others = Object.keys(spec.properties).filter((key) => key !== "user_visible");
+  const others = Object.keys(spec.properties).filter((key) => key !== "user_visible" && key !== "workflows");
   assert.deepEqual(others.sort(), [...spec.required].sort(), "every other spec property is required");
   for (const key of others) {
     const loosened = { ...spec, required: spec.required.filter((entry) => entry !== key) };

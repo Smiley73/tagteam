@@ -19,6 +19,11 @@
       "type": "boolean",
       "description": "Retired. Accepted only so that specs written before it was retired still validate; its value is ignored."
     },
+    "workflows": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Every .github/workflows/ file this spec's work will add, change, delete or rename, both sides of a rename included, as exact repository paths with no wildcard or directory. Approving the plan approves them for this spec alone. Omit when there are none."
+    },
     "reviewers": {
       "type": "array",
       "items": { "type": "string" },

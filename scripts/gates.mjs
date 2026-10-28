@@ -15,6 +15,8 @@ import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { onPlanBranch } from "./lib/carry.mjs";
 import { isFixUnitId } from "./lib/whole-plan.mjs";
+import { normalizeRepoPath } from "./lib/matcher.mjs";
+import { isWorkflowPath } from "./lib/workflows.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
@@ -542,18 +544,25 @@ export function reconcileBudgets(state, rounds) {
 // the fixer commits, and a bind falls between the two. It is not evidence about
 // a commit either — it is a record of what this cycle may spend, and it stops
 // counting by itself once the cycle's scope moves on.
-export function bindCandidate(state, candidateOid, baseOid, changedPaths = null) {
+//
+// So is the list of workflow paths the candidate touched, `workflowPaths`, for the
+// opposite reason: it is replaced by every bind, and a bind that is not handed one
+// leaves none. A list left over from an earlier candidate would speak for this one,
+// and a state without it is judged from `changedPaths` and never approved.
+export function bindCandidate(state, candidateOid, baseOid, changedPaths = null, workflowPaths = null) {
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) throw new Error(`candidate OID is required, got: ${candidateOid}`);
   if (!/^[0-9a-f]{40,64}$/.test(baseOid ?? "")) throw new Error(`base OID is required, got: ${baseOid}`);
   const outgoing = state.candidateOid ?? null;
   const reported = state.gates?.report;
   const accounted = reported?.candidateOid === outgoing && reported?.status === "complete";
   const carried = state[UNACCOUNTED] ?? [];
+  const { workflowPaths: _earlier, ...kept } = state;
   return {
-    ...state,
+    ...kept,
     candidateOid,
     baseOid,
     changedPaths: changedPaths ?? state.changedPaths,
+    ...(workflowPaths ? { workflowPaths } : {}),
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
     [UNACCOUNTED]: outgoing !== null && outgoing !== candidateOid && !accounted ? [...carried, outgoing] : carried,
     [LANDING]: null,
@@ -699,7 +708,34 @@ function carryHolds(state, config, accept, open) {
     && (forFixer.length === 0 || counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds);
 }
 
-export function evaluate(state, config) {
+// The workflow files a person approved `spec` to change, out of the map
+// `approved.json` records at plan approval. Nothing for a spec the map does not
+// name, and nothing for a map that is not one.
+function approvedWorkflowsFor(approved, spec) {
+  const listed = approved !== null && typeof approved === "object" ? approved[spec] : null;
+  return Array.isArray(listed) ? listed.filter((file) => typeof file === "string").map(normalizeRepoPath) : [];
+}
+
+/**
+ * The per-spec workflow approval out of a plan's `approved.json`, or null when the
+ * file cannot be read, is not JSON, or records none. The one place the approval
+ * is read from: it is written by `plan.mjs approve` at the moment a person
+ * approves, and nothing in a spec file or a candidate stands in for it.
+ */
+export function readApprovedWorkflows(file) {
+  try {
+    const workflows = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"))?.workflows;
+    return workflows !== null && typeof workflows === "object" && !Array.isArray(workflows) ? workflows : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `approvedWorkflows` is `approved.json`'s `workflows` map, spec id to the files
+ * that spec may change; a caller that passes none approves nothing.
+ */
+export function evaluate(state, config, approvedWorkflows = null) {
   const blockers = [];
   const approvals = [];
   const review = currentGate(state, "review");
@@ -741,10 +777,21 @@ export function evaluate(state, config) {
   const planBranch = onPlanBranch(state, config);
   if (!planBranch) approvals.push("straight-to-base");
 
-  // (e) A change to CI is a change to what every later gate is worth.
-  if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
-    approvals.push("workflow-change");
-  }
+  // (e) A change to CI is a change to what every later gate is worth. Judged from
+  // the rename-free listing the snapshot recorded, which names both sides of a
+  // rename; `changedPaths` names only its destination, so it is read as well, and
+  // it alone is all a state bound before the listing existed has. That state is
+  // never approved.
+  //
+  // A person's plan-time approval of named files for this spec lifts it on a plan
+  // branch, where the plan's own pull request is still theirs to merge, and only
+  // when every touched file is named.
+  const listed = Array.isArray(state.workflowPaths);
+  const touched = [...new Set([...(listed ? state.workflowPaths : []), ...(state.changedPaths ?? [])]
+    .map(normalizeRepoPath).filter(isWorkflowPath))];
+  const allowed = listed && planBranch ? approvedWorkflowsFor(approvedWorkflows, state.spec) : [];
+  const unapprovedWorkflows = touched.filter((file) => !allowed.includes(file));
+  if (unapprovedWorkflows.length > 0) approvals.push("workflow-change");
 
   // (f) The agent that wrote this code never said it finished what it was given.
   // An absent report and an `unfinished` one are the same answer to the only
@@ -791,6 +838,8 @@ export function evaluate(state, config) {
     candidateOid: state.candidateOid,
     blockers: uniqueBlockers,
     approvals: uniqueApprovals,
+    unapprovedWorkflows,
+    approvedWorkflows: touched.filter((file) => allowed.includes(file)),
     ready: uniqueBlockers.length === 0 && satisfied,
     needsHuman: uniqueBlockers.length > 0 || !satisfied
   };
@@ -812,12 +861,12 @@ const USAGE = `usage:
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs grant    <state.json> <rounds-root> <config.json>
-  gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json]
+  gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json|candidate.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs landing  <state.json> <candidateOid> <record.json>
   gates.mjs accept   <state.json> <candidateOid> <id,id,...> [--carry <depended-on|independent>]
   gates.mjs pr       <state.json> <number> <url> <headOid>
-  gates.mjs evaluate <state.json> <config.json>
+  gates.mjs evaluate <state.json> <config.json> [approved.json]
   gates.mjs roles    <state.json> <config.json>
   gates.mjs adopt-merge <state.json> --repo <repo>
 
@@ -852,6 +901,9 @@ const USAGE = `usage:
   \`carry\` on, outside a whole-plan fix, with this cycle's fix rounds spent or
   nothing open for a fixer, and never past a major code finding on a spec that
   is \`depended-on\` by one not yet merged.
+
+  \`evaluate\` reads the workflow files a person approved for this spec from
+  \`approved.json\`; given none, or one it cannot read, it approves none.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -895,7 +947,8 @@ export function readMergedPr(repo, number) {
 async function main() {
   const [action, ...values] = process.argv.slice(2);
   if (action === "evaluate") {
-    process.stdout.write(`${JSON.stringify(evaluate(readJson(values[0]), readJson(values[1])), null, 2)}\n`);
+    const approved = values[2] ? readApprovedWorkflows(values[2]) : null;
+    process.stdout.write(`${JSON.stringify(evaluate(readJson(values[0]), readJson(values[1]), approved), null, 2)}\n`);
     return;
   }
   if (action === "roles") {
@@ -1076,7 +1129,8 @@ async function main() {
     budget = budgetTaken(before, next, { limits });
   } else if (action === "bind") {
     const changed = values[3] ? readJson(values[3]) : null;
-    next = bindCandidate(readJson(values[0]), values[1], values[2], Array.isArray(changed) ? changed : changed?.changedPaths ?? null);
+    const workflows = Array.isArray(changed?.workflowPaths) ? changed.workflowPaths : null;
+    next = bindCandidate(readJson(values[0]), values[1], values[2], Array.isArray(changed) ? changed : changed?.changedPaths ?? null, workflows);
   } else if (action === "record") {
     next = recordGate(readJson(values[0]), values[1], values[2], readJson(values[3]));
   } else if (action === "landing") {

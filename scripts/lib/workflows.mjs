@@ -16,6 +16,7 @@
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileAt } from "./version-lines.mjs";
+import { normalizeRepoPath } from "./matcher.mjs";
 
 const QUALIFYING = new Set(["pull_request", "pull_request_target", "push"]);
 // What an event name looks like. Anything else in an event's place — a sentence,
@@ -24,6 +25,9 @@ const EVENT = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 // GitHub runs only files directly in this directory with these extensions.
 const DIRECTORY = ".github/workflows";
 const EXTENSION = /\.ya?ml$/i;
+
+/** Whether a repository path, once normalized, is under `.github/workflows/`. */
+export const isWorkflowPath = (file) => normalizeRepoPath(file).startsWith(`${DIRECTORY}/`);
 
 // A top-level-style key line: a quoted or plain key, a colon, and the rest.
 // Plain keys may not start with a YAML indicator, so `- x`, `? x`, `&a x`,

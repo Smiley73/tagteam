@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { parseNameStatus, snapshotCandidate } from "../scripts/snapshot-candidate.mjs";
+import { bindCandidate, evaluate, initState, recordPlanRoute } from "../scripts/gates.mjs";
 
 const z = (...records) => records.map((record) => `${record}\0`).join("");
 
@@ -84,5 +85,56 @@ test("a renamed and edited file keeps its old path's content in review.diff", ()
     assert.deepEqual(result.changedPaths, ["new.txt"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// `changedPaths` names only a rename's destination, so a workflow renamed onto
+// an approved name, or out of the directory, is invisible to it. The gate judges
+// the rename-free listing the snapshot records beside it.
+test("a workflow renamed onto an approved name, or out of the directory, is recorded by its source and stops the gate", () => {
+  const body = Array.from({ length: 20 }, (_, index) => `    - run: echo step ${index}`).join("\n");
+  const workflow = (name) => `name: ${name}\non: push\njobs:\n  build:\n${body}\n`;
+  const approvedPath = ".github/workflows/approved.yml";
+  const unapproved = ".github/workflows/unapproved.yml";
+  const gateFor = (workflowPaths, changedPaths) => {
+    const spec = "01-x";
+    let state = recordPlanRoute(initState({ spec, slug: "s", branch: "b", base: "plan/s", reviewers: [] }), "plan/s");
+    state = bindCandidate(state, "a".repeat(40), "c".repeat(40), changedPaths, workflowPaths);
+    return evaluate(state, { base: "main" }, { [spec]: [approvedPath] });
+  };
+  for (const [what, destination, expected] of [
+    ["onto an approved name", approvedPath, [approvedPath, unapproved]],
+    ["out of .github/workflows/", "docs/moved.yml", [unapproved]]
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-candidate-"));
+    const repo = path.join(root, "repo");
+    const git = (...args) => {
+      const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    try {
+      fs.mkdirSync(path.join(repo, ".github", "workflows"), { recursive: true });
+      git("init", "-q", ".");
+      git("config", "user.email", "test@example.com");
+      git("config", "user.name", "test");
+      fs.writeFileSync(path.join(repo, unapproved), workflow("ci"));
+      git("add", "-A");
+      git("commit", "-qm", "base");
+      const baseOid = git("rev-parse", "HEAD");
+      fs.mkdirSync(path.dirname(path.join(repo, destination)), { recursive: true });
+      git("mv", unapproved, destination);
+      git("commit", "-qam", "candidate");
+      const result = snapshotCandidate({
+        worktree: repo, primary: repo, base: baseOid, candidate: git("rev-parse", "HEAD"), "out-dir": path.join(root, "out")
+      });
+      assert.deepEqual(result.changedPaths, [destination], `${what}: control — only the destination is listed`);
+      assert.deepEqual([...result.workflowPaths].sort(), expected, what);
+      const verdict = gateFor(result.workflowPaths, result.changedPaths);
+      assert.ok(verdict.approvals.includes("workflow-change"), what);
+      assert.deepEqual(verdict.unapprovedWorkflows, [unapproved], what);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }
 });
