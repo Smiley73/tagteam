@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { root, git, stage, ship, write, outputOf, arriveAll, findings, major, quietPath,
-  assertEffort } from "./ship-stage.mjs";
+  assertEffort, checkReportOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
 
 // --- the Recurring signal and its two person-only answers ---------------------
@@ -78,6 +78,13 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   assert.equal(state().state, "fixing");
   const pending = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-pending.json"), "utf8"));
   assert.deepEqual([pending.from, pending.files, pending.record, pending.round], ["redesign", ["app.js"], briefPath, 3]);
+
+  // The redesign implementer is told to check its report, against the schema
+  // an implementer reports by.
+  const implemented = { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [] };
+  const passed = checkReportOf(implementer, implemented);
+  assert.equal([passed.schema, passed.stdout.trim()].join(" "), "implement-report valid");
+  assert.equal(checkReportOf(implementer, { status: "complete", summary: "rewrote sub" }).status, 1);
 
   // The implementer rewrites the area and reports as the first one did. A run
   // interrupted here resumes through begin, which lands on the same snapshot.
@@ -395,16 +402,20 @@ test("a redesign that never touched the requested file resets nothing, and the s
   const redesign = run("redesign");
   fs.writeFileSync(path.join(worktree, "other.js"), "export const noop = () => {};\n");
   // A report the schema refuses: the commit is made and bound, the redesign
-  // record is written, and the rerun a person is told to do re-enters the round
-  // and writes the same record again, byte for byte.
+  // record is written, and the implementer sent back for the report is followed
+  // by a rerun that re-enters the round and writes the same record again, byte
+  // for byte.
   const reportPath = outputOf(redesign.json.dispatch[0]);
   write(reportPath, { status: "complete", unfinished: [] });
   arriveAll(redesign);
-  const refused = ship("snapshot", staged.plan, ["--spec", "01-a"]);
-  assert.equal(refused.status, 2, refused.stderr);
+  const resent = ship("snapshot", staged.plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.equal(resent.json.dispatch[0].description, "Resend report for 01-a");
+  assert.match(resent.json.dispatch[0].prompt, /^Job: implementer$/m);
   const recordPath = path.join(shipDir, "01-a", "rounds", "4", "redesign.json");
   const firstBytes = fs.readFileSync(recordPath, "utf8");
-  fs.renameSync(reportPath, `${reportPath}.refused`);
+  write(reportPath, { status: "complete", summary: "rewrote it", unfinished: [] });
+  arriveAll(resent);
   const snapshot = run("snapshot");
   assert.equal(snapshot.json.round, 4);
   assert.match(snapshot.json.say.join("\n"), /re-entering the round/);

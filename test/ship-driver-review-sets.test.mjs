@@ -16,7 +16,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
 import { root, git, stage, ship, write, outputOf, arrive, arriveAll, findings, major, quietPath,
-  resultOf, assertEffort, sessionsFor } from "./ship-stage.mjs";
+  resultOf, assertEffort, sessionsFor, checkReportOf } from "./ship-stage.mjs";
 import { driveToRecurrence, driveToReadyAndWaiting, pushToBase } from "./ship-driver-shared.mjs";
 
 // --- review sets: the record decides when a review is judged ------------------
@@ -554,6 +554,10 @@ test("snapshot waits the same way for the first implementer, a redesign implemen
   assert.deepEqual(repair.json.set.labels, ["Repair CI for 01-a"]);
   assertEffort(repair.json.dispatch[0], "high", "a CI repair passes effort.fixer");
   assert.match(repair.json.dispatch[0].prompt, /^Verify commands \(/m, "a CI repair is told what verify will run");
+  const ciReport = { outcomes: [], notes: "", status: "complete", summary: "the check is flaky; nothing to change", unfinished: [] };
+  const ciChecked = checkReportOf(repair.json.dispatch[0], ciReport);
+  assert.equal([ciChecked.schema, ciChecked.stdout.trim()].join(" "), "fix-report valid", "a CI repair is told to check its report");
+  assert.equal(checkReportOf(repair.json.dispatch[0], { ...ciReport, outcomes: "none" }).status, 1);
   const waiting = ship("snapshot", red.plan, ["--spec", "01-a"]);
   assert.equal(waiting.status, NOT_IN_YET, waiting.stderr);
   assert.match(waiting.stderr, /still waiting on Repair CI for 01-a/);
@@ -658,7 +662,7 @@ test("a ship restarted from another identified session releases its fixer, and d
     if (edited) {
       assert.equal(snapshot.json.round, 2);
       assert.equal(git(worktree, "log", "-1", "--format=%s"), "Address review findings on 01-a");
-      assert.match(snapshot.json.say.join("\n"), /report: missing/);
+      assert.equal(snapshot.json.dispatch[0].description, "Resend report for 01-a", "a fixer that left no report is sent back for it, not sealed as having none");
     } else {
       assert.match(snapshot.json.say.join("\n"), /The fixer changed nothing and wrote no report/);
       assert.match(snapshot.json.next, /recheck --plan/);
@@ -698,7 +702,7 @@ test("a restart that cannot tell which session it is asks about the fixer; no ke
   assert.match(judged.json.say.join("\n"), /The fixer changed nothing/);
 });
 
-test("snapshot refuses only an open set: a commit nobody dispatched, the rerun after a refused report and a marker with no set all go through", () => {
+test("snapshot refuses only an open set: a commit nobody dispatched, the rerun after a resent report and a marker with no set all go through", () => {
   // A commit nobody dispatched, once the implementer's set has been judged.
   const loose = stage();
   const { panel, state, worktree, oid } = toPanel(loose);
@@ -712,22 +716,25 @@ test("snapshot refuses only an open set: a commit nobody dispatched, the rerun a
   assert.equal(git(worktree, "log", "-1", "--format=%s"), "Amend 01-a");
   assert.equal(state().fixRoundsUsed, 1);
 
-  // The rerun a refused report asks for, with the fixer's set in but not yet
-  // judged when the report was refused.
+  // A refused report, with the fixer's set in but not yet judged: the fixer is
+  // sent back, and the resend's set is the one the rerun waits for.
   const rerun = stage();
   const { fix, worktree: rerunTree } = toFix(rerun);
   fs.appendFileSync(path.join(rerunTree, "app.js"), "export const mul = (a, b) => a * b;\n");
   const reportPath = outputOf(fix.json.dispatch[0]);
   write(reportPath, { outcomes: "fixed it", status: "complete", summary: "fixed" });
   arriveAll(fix);
-  const refused = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
-  assert.equal(refused.status, 2, refused.stderr);
-  assert.equal(setRecord(rerun.shipDir, fix.json.set.id).closed, null, "a snapshot that stopped judged nothing");
-  fs.renameSync(reportPath, `${reportPath}.refused`);
+  assert.equal(setRecord(rerun.shipDir, fix.json.set.id).closed, null, "nothing has judged the fixer's set yet");
+  const resent = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.equal(setRecord(rerun.shipDir, fix.json.set.id).closed.reason, "judged");
+  assert.equal(ship("snapshot", rerun.plan, ["--spec", "01-a"]).status, 5, "the resend's set is open");
+  write(reportPath, fixed);
+  arriveAll(resent);
   const retried = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
   assert.equal(retried.status, 0, retried.stderr);
   assert.equal(retried.json.round, 2);
-  assert.equal(setRecord(rerun.shipDir, fix.json.set.id).closed.reason, "judged");
+  assert.equal(setRecord(rerun.shipDir, resent.json.set.id).closed.reason, "judged");
   const again = ship("snapshot", rerun.plan, ["--spec", "01-a"]);
   assert.equal(again.status, 0, `a judged set is never waited on again: ${again.stderr}`);
 

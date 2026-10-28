@@ -428,10 +428,16 @@ What is yours at each point:
 
 The driver's `snapshot` step commits through `git add -A`, `guard-staged.mjs`
 and `git commit` as one chain, so a copied ignored file never reaches history;
-nothing in this file runs git by hand. If it exits 2 the round's report could
-not be recorded: say what it printed — it names the file and what to move
-aside — and rerun the same `snapshot` command afterwards. Do not commit anything
-in between.
+nothing in this file runs git by hand. When the implementer's or the fixer's
+report cannot be used, `snapshot` does not stop: it moves the refused file aside
+and prints one fresh agent of the same role to send back for the report, which
+is an ordinary dispatch to relay and wait on. A rerun before that agent is in
+is a wait. If the report is still unusable, or the resend changed the code,
+`snapshot` stops with a plain reason; that stop is the person's. Say it as it is
+and offer what it offers. Never move, write or correct a report yourself, and do
+not commit anything in between. A commit nobody dispatched has no agent to ask:
+a malformed report stops `snapshot` for a person, and an absent one is recorded
+as missing and stops at `finish`.
 
 ## The pull request body
 
@@ -577,8 +583,8 @@ itself. Every reader rules on each item it is handed, and when every one is
 ruled environmental or out-of-scope — with the review clean, verify passed and
 the checks passed or not waited for — `evaluate` drops that approval and the
 spec merges into the plan branch like any other. An item a reader rules missing
-is a finding the fixer gets. A round that wrote no report, an item left
-unruled, and anything merging straight into the base still stop, and
+is a finding the fixer gets. A commit made by hand that has no report, an item
+left unruled, and anything merging straight into the base still stop, and
 `unaccounted` then shows each item's ruling where it has one.
 
 The two halves take different answers. A person's approval is what `evaluate`

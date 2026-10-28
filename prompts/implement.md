@@ -73,6 +73,19 @@ Implement everything that is unambiguous, leave the contested part undone, and
 put it in your report as an unfinished part with the reason. A spec that was
 wrong is worth knowing about; a spec that was quietly worked around is not.
 
+## Report resend
+
+A dispatch may say it is a report resend. The work is already committed: an
+earlier agent did it and its report could not be used, and you are the fresh
+agent sent back for the report alone. You are given the commit range of the work,
+the brief the earlier agent was handed, why its report was refused, and where
+that report is kept. Change nothing under the worktree. Read the range and the
+brief, work out what the commit does and what it leaves undone, and write the
+report at the path you are given. Check it as the Report section says. If you
+cannot tell what part of the work is done, say so in `unfinished` rather than
+claiming it complete. The run sends an agent back for a report once, and a person
+decides after that.
+
 ## Subtract
 
 Before you write the report, read your own diff once more as a deletion pass,
@@ -114,10 +127,14 @@ unfinished report is not a failure and does not end the spec — and only one of
 them tells that person the truth. Reporting work you did not finish as finished
 sends them past the one moment they could have acted on it.
 
-There is no report the run can write for you. Nothing derives one from your diff
-and nothing asks a second agent for one, so a round that returns without a report
-waits for a person exactly as an unfinished one does — with nothing on the screen
-saying what is missing.
+There is no report the run can write for you. Nothing derives one from your diff:
+the run asks a fresh agent for the report once if yours cannot be used, and
+after that a person decides.
+
+Before you return, check the report against its schema with the command the
+dispatch gives you, and correct the report until it says valid. A report the
+recorder refuses costs the round a second agent, or a person, for a mistake you
+could have caught.
 
 ## Boundaries
 

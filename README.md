@@ -322,8 +322,10 @@ still needs, something the agent could not do where it ran, or something this
 change does not owe. One the readers say the spec still needs goes back for a
 fix like any other finding. When all of them are the other two kinds, and the
 review, verify and checks are clean, the spec merges into the plan branch and
-its pull request names what was left under Risk. A round with no report at all
-still waits, and so does everything that merges straight into the base.
+its pull request names what was left under Risk. A commit made by hand,
+with no agent to ask for a report, still waits, and so does everything that
+merges straight into the base. An agent that leaves a report the run cannot use
+is sent back for it once, and a person decides if that fails too.
 
 An open finding can stop being a stop on a plan branch too, if you turn
 carrying on (`carry` in `.tagteam/config.json`; it is off by default). Then a
