@@ -200,6 +200,7 @@ test("a resend that also fails stops snapshot for a person, and every rerun stop
     assert.notEqual(stopped.status, 2, "nothing about it is the orchestrator's to correct");
     assert.notEqual(stopped.status, 5);
     assert.match(stopped.stderr, /^The report for round 1 \(\w+\) is still unusable after the implementer was sent back for it once/);
+    assert.match(stopped.stderr.split("\n")[0], /You decide: put a valid report at .*run snapshot again[\s\S]*or stop the train/, "the first line carries the choices");
     assert.ok(stopped.stderr.includes(spec(shipDir, "refused-reports")), "the first attempt is named");
     assert.match(stopped.stderr, /put a valid report at .*implement-report\.json[\s\S]*or stop the train \(run .* end /);
     assert.equal(stopped.json, null, "a second resend went out");
@@ -303,6 +304,7 @@ test("a malformed report on an out-of-band commit is a plain stop, not a resend 
   const stopped = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(stopped.status, 1, stopped.stdout);
   assert.match(stopped.stderr, /^The report for \w+ cannot be used:[\s\S]*not dispatched by this run, so there is no agent to send back/);
+  assert.match(stopped.stderr.split("\n")[0], /You decide: correct the file[\s\S]*run snapshot again[\s\S]*or stop the train/, "the first line carries the choices");
   assert.doesNotMatch(stopped.stderr, /Move the refused file aside/);
   assert.equal(fs.existsSync(spec(shipDir, "report-resend.json")), false);
   assert.equal(keptFiles(shipDir).length, 0, "nothing is moved for a round nobody dispatched");

@@ -212,7 +212,7 @@ function fixUnitSpec(ctx, id) {
   }
   let front;
   try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw Stop.raw(error.message, "a spec document could not be read or parsed"); }
-  if (front.id !== id) throw new Stop(`${file} names ${front.id}, not ${id}`);
+  if (front.id !== id) throw new Stop(`The spec document for ${id} names ${front.id} instead (${file})`);
   return {
     id, path: file, dependsOn: [],
     reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], fixUnit: true
@@ -2769,8 +2769,8 @@ async function start(options) {
   if (exists(worktree)) {
     const listed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout);
     const registered = listed.includes(`worktree ${fs.realpathSync(worktree)}`) || listed.includes(`worktree ${worktree}`);
-    if (!registered) throw new Stop(`${worktree} exists but is not a worktree of this repository; move it aside and rerun`);
-    if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`${worktree} is dirty; a worktree that will not come clean is holding something — look before removing it`);
+    if (!registered) throw new Stop(`The worktree directory for this plan exists but is not a worktree of this repository; move it aside and rerun (${worktree})`);
+    if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`The worktree for this plan is dirty; a worktree that will not come clean is holding something — look before removing it (${worktree})`);
     say.push(`Reusing the existing worktree at ${worktree}.`);
   } else {
     await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "add", "--detach", worktree, baseOid]));
@@ -3138,17 +3138,20 @@ function unusableReportStop(ctx, id, { oid, round, refused, resent, role }) {
   const end = nextCommand(ctx, "end", null);
   const what = refused.problems.join("\n");
   if (!resent) {
-    return new Stop(`The report for ${short(oid)} cannot be used:\n${what}\nThis commit was not dispatched by this run, so there is no `
+    return new Stop(`The report for ${short(oid)} cannot be used: this commit was not dispatched by this run, so there is no `
       + "agent to send back and ask for a new one, and nothing was recorded. You decide: correct the file"
       + `${refused.files.length ? ` (${refused.files.join(", ")})` : ""}, or move it out of the way to have this round recorded as having no report `
-      + `(finish then stops for you to read it), and run snapshot again (${snapshotCommand}) without committing first; or stop the train (run ${end}).`);
+      + `(finish then stops for you to read it), and run snapshot again (${snapshotCommand}) without committing first; or stop the train (run ${end}).\n`
+      + `Why the report was refused:\n${what}`);
   }
-  return new Stop(`The report for round ${round} (${short(oid)}) is still unusable after the ${role} was sent back for it once:\n${what}\n`
+  return new Stop(`The report for round ${round} (${short(oid)}) is still unusable after the ${role} was sent back for it once, and no agent `
+    + "is asked a third time. You decide: put a valid report at "
+    + `${role === "implementer" ? implementReportPath(ctx, id) : fixReportPath(ctx, id)} (an honest unfinished one is enough when nobody knows `
+    + `what the agent did) and run snapshot again (${snapshotCommand}); or stop the train (run ${end}).\n`
+    + `Why the report was refused:\n${what}\n`
     + `The first attempt is kept at ${resent.kept.join(", ") || "nowhere: it wrote nothing"}; the second `
     + `${refused.files.length ? `is left at ${refused.files.join(", ")}` : "wrote nothing"}. The work itself is committed and nothing about it is lost. `
-    + "No agent is asked a third time, and the round is not recorded as having no report. You decide: put a valid report at "
-    + `${role === "implementer" ? implementReportPath(ctx, id) : fixReportPath(ctx, id)} (an honest unfinished one is enough when nobody knows `
-    + `what the agent did) and run snapshot again (${snapshotCommand}); or stop the train (run ${end}).`);
+    + "The round is not recorded as having no report.");
 }
 
 async function snapshot(options) {
@@ -4119,7 +4122,7 @@ function ciStartLimit(ctx, commit) {
   try {
     workflows = hasPullRequestWorkflow(ctx.repo, commit);
   } catch (error) {
-    throw new Stop(`could not read the workflow files at ${short(commit)} to decide whether to wait for checks to start: ${error.message}`);
+    throw Stop.raw(`could not read the workflow files at ${short(commit)} to decide whether to wait for checks to start: ${error.message}`, "the workflow files could not be read to decide whether to wait for checks to start");
   }
   return workflows.found ? { seconds, files: workflows.files } : off;
 }
@@ -4482,8 +4485,8 @@ async function resolveCommit(options) {
     // did not say it finished is pushed.
     const recorded = node("record-round-report.mjs", ["--dir", home, "--out", path.join(dir, ROUND_REPORT)], { allow: [2] });
     if (recorded.status === 2) {
-      throw new Stop(`the resolver's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) `
-        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.`, 2);
+      throw new Stop(`The resolver's report could not be recorded: move the refused file aside (keep it) `
+        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.\n${recorded.stderr.trim()}`, 2);
     }
     say.push(...recorded.stdout.trim().split("\n"));
     const report = readJson(path.join(dir, ROUND_REPORT));
@@ -5220,7 +5223,7 @@ function viewPlanPr(ctx, selector, { allowMissing = false } = {}) {
     throw new Stop(`could not read the plan's pull request #${selector} from GitHub (${(result.stderr || result.stdout || "").trim().split("\n")[0]}), `
       + "so whether it is open or merged is unknown, and nothing was decided from it; run this again.");
   }
-  try { return JSON.parse(result.stdout); } catch (error) { throw new Stop(`gh pr view printed no document for the plan's pull request: ${error.message}`); }
+  try { return JSON.parse(result.stdout); } catch (error) { throw Stop.raw(`gh pr view printed no document for the plan's pull request: ${error.message}`, "GitHub's answer about the plan's pull request could not be read"); }
 }
 
 // What a person is told the plan pull request is, and what `end` and the
@@ -5798,14 +5801,14 @@ async function finalTipStep(ctx, record, tip, options, say) {
   const route = routeOf(ctx);
   const entries = versionFilesOf(route);
   if (!entries) {
-    throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be made against the `
-      + "list it was routed under; run start again, which records them");
+    throw new Stop(`The train record records no version lines for ${route.branch}, so the plan's increase cannot be made against the `
+      + `list it was routed under; run start again, which records them (${ctx.trainPath})`);
   }
   if (entries.length === 0) return null;
   const kind = declaredIncreaseOfRoute(route);
   if (!kind) {
-    throw new Stop(`${ctx.trainPath} records no kind of increase for ${route.branch}, so the plan's increase cannot be made; run start `
-      + "again, which reads it from the plan document");
+    throw new Stop(`The train record records no kind of increase for ${route.branch}, so the plan's increase cannot be made; run start `
+      + `again, which reads it from the plan document (${ctx.trainPath})`);
   }
   const baseOid = await currentBase(ctx);
   const where = `${route.base} at ${short(baseOid)}`;
@@ -6165,8 +6168,8 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
   const route = routeOf(ctx);
   const entries = versionFilesOf(route);
   if (!entries) {
-    throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be judged against the `
-      + `list it was routed under, and the configuration as it is now is not that list; run start again, which records them`);
+    throw new Stop(`The train record records no version lines for ${route.branch}, so the plan's increase cannot be judged against the `
+      + `list it was routed under, and the configuration as it is now is not that list; run start again, which records them (${ctx.trainPath})`);
   }
   const version = versionConditionAt(ctx.repo, { entries, tipOid: tip, baseOid, kind: increaseOf(ctx), decided: decisionOf(route) });
   record.version = { tip, baseOid, holds: version.holds, kind: version.kind, lines: version.lines, at: new Date().toISOString() };

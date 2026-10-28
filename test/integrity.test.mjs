@@ -1249,14 +1249,59 @@ test("the README and the skill introduce the plan branch as the familiar feature
 });
 
 // A caught error's message rethrown as a bare `Stop` reaches the person as the
-// raw error with nothing above it. `Stop.raw` is what puts the plain lead there.
-const BARE_RETHROW = /new Stop\(\s*(?:`\$\{)?\w+\.message\b/;
+// raw error with nothing above it, whether it is the whole text or follows a
+// prefix of the driver's own. `Stop.raw` is what puts the plain lead there. A
+// written sentence that gives the error after its own plain reason, and goes on
+// in words (`${error.message}. Nothing was recorded`), is not a rewrap.
+function bareStopCalls(source) {
+  const calls = [];
+  for (let at = source.indexOf("new Stop("); at !== -1; at = source.indexOf("new Stop(", at + 1)) {
+    let depth = 1;
+    const templates = [];
+    let index = at + "new Stop(".length;
+    for (; index < source.length && depth > 0; index += 1) {
+      const char = source[index];
+      const quote = templates.at(-1);
+      if (quote === "`") {
+        if (char === "\\") index += 1;
+        else if (char === "`") templates.pop();
+        else if (char === "$" && source[index + 1] === "{") { templates.push("{"); index += 1; }
+      } else if (quote === '"' || quote === "'") {
+        if (char === "\\") index += 1;
+        else if (char === quote) templates.pop();
+      } else if (char === '"' || char === "'" || char === "`") templates.push(char);
+      else if (quote === "{" && char === "}") templates.pop();
+      else if (char === "(") depth += 1;
+      else if (char === ")") depth -= 1;
+    }
+    calls.push({ text: source.slice(at, index), line: source.slice(0, at).split("\n").length });
+  }
+  return calls;
+}
+const REWRAPS_ERROR = (text) => /\b\w+\.message\b/.test(text.replace(/\$\{\w+\.message\}\.\s/g, ""));
 
 test("no site rethrows a caught error's message as a bare Stop", () => {
-  const bare = shipDriver.split("\n").map((line, index) => ({ line, number: index + 1 })).filter(({ line }) => BARE_RETHROW.test(line));
-  assert.deepEqual(bare.map(({ number, line }) => `scripts/ship.mjs:${number}: ${line.trim()}`), []);
-  for (const rewrap of ["throw new Stop(error.message);", "throw new Stop(`${err.message}`, 2);", "throw new Stop( e.message )"]) {
-    assert.match(rewrap, BARE_RETHROW, `the guard misses ${rewrap}`);
+  const bare = bareStopCalls(shipDriver).filter(({ text }) => REWRAPS_ERROR(text));
+  assert.deepEqual(bare.map(({ line, text }) => `scripts/ship.mjs:${line}: ${text.split("\n")[0].trim()}`), []);
+  assert.ok(bareStopCalls(shipDriver).length > 100, "the scan found the Stop sites it is meant to check");
+  for (const rewrap of [
+    "throw new Stop(error.message);",
+    "throw new Stop(`${err.message}`, 2);",
+    "throw new Stop( e.message )",
+    "throw new Stop(`could not read ${file}: ${error.message}`);",
+    "throw new Stop(`gh pr view printed no document (the plan's pull request): ${error.message}`);",
+    "throw new Stop(`could not read the files at ${short(commit)}: ${error.message}`);",
+    "throw new Stop(`the resolver stopped\n${error.message}`);",
+    "throw new Stop(`${spec.id} was merged: `\n        + error.message);"
+  ]) {
+    const [call] = bareStopCalls(rewrap);
+    assert.ok(call && REWRAPS_ERROR(call.text), `the guard misses ${rewrap}`);
   }
-  assert.doesNotMatch('throw Stop.raw(error.message, "a git command failed");', BARE_RETHROW);
+  for (const written of [
+    'throw Stop.raw(error.message, "a git command failed");',
+    "throw Stop.raw(`could not read ${file}: ${error.message}`, \"a record could not be read\");",
+    "throw new Stop(`${spec.id} was merged, and GitHub's account does not match: ${error.message}. Nothing was recorded.`);"
+  ]) {
+    assert.ok(!bareStopCalls(written).some(({ text }) => REWRAPS_ERROR(text)), `the guard flags ${written}`);
+  }
 });
