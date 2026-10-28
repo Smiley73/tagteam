@@ -580,6 +580,53 @@ test("a fixer handed a mixed round gets the code findings only, and a settled ro
   assert.equal(state().fixRoundsUsed, 1);
 });
 
+// The commit history cannot be rewritten by a body, but no fixer can reach it
+// either, so it takes the same road a finding about the pull request does.
+function collectRaising(raised) {
+  const { plan, shipDir } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
+  fs.appendFileSync(path.join(worktree, "app.js"), "export const sub = (a, b) => a - b;\n");
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
+  ship("snapshot", plan, ["--spec", "01-a"]);
+  ship("verify", plan, ["--spec", "01-a"]);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, state().candidateOid, lens === "correctness" ? raised : []));
+  }
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", state().candidateOid));
+  arriveAll(panel);
+  assert.equal(ship("collect", plan, ["--spec", "01-a"]).json.review, "open");
+  return { plan, shipDir, state };
+}
+
+const aboutHistory = { severity: "major", scope: "history", file: null, line: null, title: "the commit message does not say sub was added", detail: "the log reads as a typo fix", fix: null };
+
+test("a finding about the commit history alone dispatches no fixer, spends no fix round, and is sent to the re-check with the body to write", () => {
+  const { plan, shipDir, state } = collectRaising([aboutHistory]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.equal(fix.json.dispatch, undefined);
+  assert.equal(state().fixRoundsUsed, 0);
+  assert.match(fix.json.say[0], /1 finding\(s\) are about the commit history[\s\S]*1\.correctness\.1[\s\S]*The body can disclose the commit history but not rewrite it/);
+  assert.match(fix.json.next, /recheck/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-declined.json"), "utf8")).kind, "pull-request");
+});
+
+test("a mixed round keeps the commit history finding out of the fixer's brief", () => {
+  const { plan, state } = collectRaising([major("app.js"), aboutHistory]);
+  const fix = ship("fix", plan, ["--spec", "01-a"]);
+  assert.equal(fix.status, 0, fix.stderr);
+  assert.equal(state().fixRoundsUsed, 1);
+  const brief = /Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1];
+  assert.deepEqual(JSON.parse(fs.readFileSync(brief, "utf8")).findings.map((entry) => entry.id), ["1.correctness.1"]);
+  assert.match(fix.json.say.join("\n"), /1 finding\(s\) are about the commit history/);
+});
+
 test("a code finding that names no file goes to the fixer, keeps its scope through a settle, and is handed to the fixer again", () => {
   const { plan, shipDir } = stage();
   ship("start", plan);

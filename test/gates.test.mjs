@@ -137,6 +137,27 @@ test("the ship's carry lifts review-open only on the plan branch, with carrying 
   ]) assert.ok(evaluate(state, config).blockers.includes("review-open"), what);
 });
 
+test("on the plan branch, a non-blocking finding about the pull request or the commit history lifts review-open with no accept and no carry", () => {
+  const opened = (open, overrides) => recordGate(reviewed(overrides), "review", A, { status: "open", open });
+  const text = { id: "3.correctness.1", severity: "major", scope: "pull-request", file: null };
+  const history = { id: "3.correctness.2", severity: "major", scope: "history", file: null };
+  const code = { id: "4.adversary.1", severity: "major", scope: "code", file: "app.js" };
+  for (const finding of [text, history, { ...text, severity: "minor" }]) {
+    const lifted = evaluate(opened([finding]), CONFIG);
+    assert.deepEqual([lifted.ready, lifted.blockers], [true, []], finding.scope);
+  }
+  assert.equal(evaluate(opened([text, history]), CONFIG).ready, true, "both kinds together");
+  for (const [what, state] of [
+    ["a blocking pull request finding", opened([{ ...text, severity: "blocking" }])],
+    ["a blocking history finding", opened([{ ...history, severity: "blocking" }])],
+    ["a major code finding beside it", opened([text, code])],
+    ["straight to the base", opened([text], { base: "main", planRouteBranch: null })]
+  ]) assert.ok(evaluate(state, CONFIG).blockers.includes("review-open"), what);
+  const accepting = (state, ids) => ({ ...state, accept: { candidateOid: A, ids, at: "2026-01-01T00:00:00Z" } });
+  assert.equal(evaluate(accepting(opened([history, code]), [code.id]), CONFIG).ready, true, "an accept need only cover the code findings");
+  assert.ok(evaluate(accepting(opened([history, code]), [history.id]), CONFIG).blockers.includes("review-open"), "and an accept of the text one does not cover the code one");
+});
+
 // --- where the candidate lands ---
 //
 // Nothing reaches the base without a person. The verdict knows where a spec

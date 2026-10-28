@@ -156,6 +156,11 @@ test("a spec's own Risk line says the accept merges it, or else that it waits wi
   assert.equal(pendingLine(nobody, { merges: false, recommendation: "re-plan" }),
     "- 2.adversary.1 (major, about the pull request): sub loses the sign — still open: the plan needs re-planning. "
     + "Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request.");
+  const [disclosed] = entriesOf("01-a", "a".repeat(40), [{ ...finding, scope: "history", file: null }], new Set(), new Set(), true);
+  assert.equal(disclosed.reason, "disclosed");
+  assert.equal(pendingLine(disclosed, { merges: true, recommendation: "accept" }),
+    "- 2.adversary.1 (major, about the commit history): sub loses the sign — it is about the pull request's text or the commit history, which no fixer can change, "
+    + "so it goes into the plan branch unresolved and is listed in the plan's pull request.");
   assert.equal(pendingLine(nobody, { merges: false, recommendation: "carry" }),
     "- 2.adversary.1 (major, about the pull request): sub loses the sign — still open: it could be carried as it is. "
     + "Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request.");

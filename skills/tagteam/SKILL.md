@@ -96,7 +96,7 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   ledger.json      on a plan branch, the plan's ledger: entries, one per finding
                    a spec or fix unit still had open when it merged into the
                    plan branch (spec, severity, scope, files, title, detail,
-                   why it was left open — accepted or merged-by-hand — and the
+                   why it was left open — accepted, disclosed or merged-by-hand — and the
                    merged commit), and retries, the failures that passed when
                    run again, kept for the plan's body and never re-judged   ignored
   <spec-id>/
@@ -796,12 +796,14 @@ and still waits; so does every spec that merges straight into `base`.
 
 Carrying is opt-in: with `carry` on in `.tagteam/config.json`, a spec on a plan
 branch whose open review alone blocks it, and whose fix rounds for this cycle
-are spent or whose open findings are all about the pull request, has a carry
-recorded at `finish` — the same record a person's accept is, bound to the
+are spent, has a carry recorded at `finish` — the same record a person's accept is, bound to the
 candidate and marked as a carry. `evaluate` lifts `review-open` on it only on the
 plan branch, with carrying on, outside a whole-plan fix, past no `blocking`
 finding and no `major` code finding on a spec an unmerged spec depends on, and
-with the rounds spent or nothing open a fixer could reach. Every finding carried
+with the rounds spent. A carry covers the open code findings only: a
+non-blocking finding about the pull request's text or the commit history lifts
+`review-open` on a plan branch by itself, with carrying on or off, is entered in
+the ledger as disclosed, and does not count toward the cap. Every finding carried
 goes into the plan's ledger. When carrying a spec would take the plan past
 `limits.carried`, nothing is carried and the ship stops and asks.
 

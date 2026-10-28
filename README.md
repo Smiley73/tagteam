@@ -329,10 +329,12 @@ is sent back for it once, and a person decides if that fails too.
 
 An open finding can stop being a stop on a plan branch too, if you turn
 carrying on (`carry` in `.tagteam/config.json`; it is off by default). Then a
-spec whose fix rounds have run out, or whose only open findings are about the
-pull request itself, merges into the plan branch anyway: each open finding goes
-into the plan's ledger and under Risk in the spec's pull request and in the
-plan's, where you judge it. Carrying is never used for a blocking finding, for
+spec whose fix rounds have run out merges into the plan branch anyway: each open
+finding goes into the plan's ledger and under Risk in the spec's pull request and
+in the plan's, where you judge it. A finding about the pull request's text or the
+commit history, which no fixer can change, does not wait for carrying: on a plan
+branch it is disclosed the same way and the spec merges, carrying on or off, as
+long as it is not blocking, and it does not count toward the cap. Carrying is never used for a blocking finding, for
 a whole-plan fix, for a major finding in the code of a spec that another spec
 still to merge depends on, or for anything that goes straight to the base. When
 carrying one more spec would take the plan past `limits.carried`, the run stops

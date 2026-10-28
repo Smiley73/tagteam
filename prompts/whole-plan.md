@@ -71,6 +71,11 @@ given, after reading the code it names:
 - `needs-person` — the problem is present, but only a person or a re-plan
   settles it: its only remedy is a decision, or planning the work differently.
 
+An entry about the pull request's text or the commit history is already
+disclosed in the plan's pull request: judge it `resolved` only when the tip no
+longer has the problem, and otherwise as the problem stands, knowing nothing
+more is done with it.
+
 Give every entry exactly one verdict, its `id` copied unchanged from the
 ledger, with `evidence` saying what in the tip settles it. Write them to the
 path you were given, matching `schemas/ledger-verdicts.schema.json`, with

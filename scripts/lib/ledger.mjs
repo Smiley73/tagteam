@@ -4,6 +4,7 @@
 // are disclosure only, and never become an entry.
 import fs from "node:fs";
 import path from "node:path";
+import { isPullRequestFinding } from "../collect-findings.mjs";
 
 const ledgerPath = (shipDir) => path.join(shipDir, "ledger.json");
 
@@ -14,15 +15,21 @@ export function readLedger(shipDir) {
 
 /**
  * The entries `spec` makes by merging `commit` with `open` still open: each one
- * `accepted` when `accepted` holds its id, `carried` when `carried` does,
- * `merged-by-hand` otherwise. The id is derived from the spec and the finding,
- * so writing the same merge twice adds nothing.
+ * `accepted` when `accepted` holds its id, `disclosed` when the merge is into a
+ * plan branch (`onPlanBranch`) and no fixer can reach it, `carried` when
+ * `carried` holds its id, `merged-by-hand` otherwise. The id is derived from the
+ * spec and the finding, so writing the same merge twice adds nothing.
  */
-export function entriesOf(spec, commit, open, accepted, carried = new Set()) {
+export function entriesOf(spec, commit, open, accepted, carried = new Set(), onPlanBranch = false) {
+  const scopeOf = (finding) => (finding.scope === "history" ? "history" : isPullRequestFinding(finding) ? "pull-request" : "code");
+  const reasonOf = (finding) => {
+    if (accepted.has(finding.id)) return "accepted";
+    if (onPlanBranch && isPullRequestFinding(finding)) return "disclosed";
+    return carried.has(finding.id) ? "carried" : "merged-by-hand";
+  };
   return open.map((finding) => ({
-    id: `${spec}:${finding.id}`, spec, finding: finding.id, severity: finding.severity, scope: finding.scope ?? "code",
-    files: finding.file ? [finding.file] : [], title: finding.title, detail: finding.detail,
-    reason: accepted.has(finding.id) ? "accepted" : carried.has(finding.id) ? "carried" : "merged-by-hand", commit
+    id: `${spec}:${finding.id}`, spec, finding: finding.id, severity: finding.severity, scope: scopeOf(finding),
+    files: finding.file ? [finding.file] : [], title: finding.title, detail: finding.detail, reason: reasonOf(finding), commit
   }));
 }
 
@@ -48,6 +55,7 @@ export function enterMerge(shipDir, spec, { entries, retries }) {
 
 const REASONS = {
   accepted: "a person accepted it open",
+  disclosed: "it is about the pull request's text or the commit history, which no fixer can change",
   carried: "the ship carried it open, as this repository's carrying setting allows",
   "merged-by-hand": "it was open when the pull request was merged by hand"
 };
@@ -64,7 +72,7 @@ const ADVICE = {
 // The finding as the fixer table gives it: its id, its severity and a short
 // title, so that a finding never appears in two formats.
 function describe(entry) {
-  const about = entry.scope === "pull-request" ? ", about the pull request" : "";
+  const about = { "pull-request": ", about the pull request", history: ", about the commit history" }[entry.scope] ?? "";
   const title = String(entry.title).replace(/\s+/g, " ").trim().replace(/\.$/, "");
   return `${entry.finding} (${entry.severity}${about}): ${title}`;
 }

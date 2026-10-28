@@ -205,21 +205,27 @@ is reviewed like any other, and from then on `fix` sends the spec on towards
 stop*.
 
 A finding about the pull request itself — one its reviewer scoped
-`pull-request`, or one naming the pull request body whatever its scope — never
-reaches a fixer, which could only decline it. A `code` finding that names no
-single file is a fixer's like any other. `fix`
-and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
-that it says what they ask for; the readers that raised them judge that body at
-the next re-check, before it is published, and `publish` sends it. When nothing
-else is open, no fix round is spent on them.
+`pull-request`, or one naming the pull request body whatever its scope — or
+about the commit history — scoped `history`, its remedy a change to a message,
+an author or how the change is split into commits — never reaches a fixer, which
+could only decline it. A `code` finding that names no single file is a fixer's
+like any other. `fix` and `settle` name such findings and tell you to write
+`$S/<id>/pr-body.md` so that it says what they ask for; the readers that raised
+them judge that body at the next re-check, before it is published, and `publish`
+sends it. When nothing else is open, no fix round is spent on them. The body can
+disclose a history finding but not rewrite the commits, so one usually stays
+open after the re-check. On a plan branch a spec left with only such findings
+open, none of them `blocking`, merges at `finish` with them disclosed, whatever
+`carry` is set to: each is entered in the plan's ledger and listed under Risk,
+and it does not count against `limits.carried`. Relay the `say` that tells you
+so and run `next`.
 
 With `carry` on in `.tagteam/config.json` — it is off unless the owner turns it
-on — a spec on a plan branch does not wait for a person merely because findings
-are still open, once its fix rounds for this cycle are spent, or once the
-readers have judged the body and everything still open is about the pull
-request. When everything open may be carried, the `say` of `fix` or `settle`
-says it will be carried at `finish` instead of saying a person decides; relay
-it and run `next`. See *Merge or stop*.
+on — a spec on a plan branch does not wait for a person merely because code
+findings are still open, once its fix rounds for this cycle are spent. When
+everything open may be carried, the `say` of `fix` or `settle` says it will be
+carried at `finish` instead of saying a person decides; relay it and run `next`.
+See *Merge or stop*.
 
 On a plan branch, `begin` on a spec that has not started first asks whether the
 base still merges cleanly into this plan's branch. When it does, nothing happens
@@ -638,10 +644,12 @@ should a reader later withdraw it. `begin` records a merge made by hand and
 moves on.
 
 With `carry` on, a spec on a plan branch whose open review is the only thing
-blocking it is carried: when its fix rounds for this cycle are spent, or when
-everything open is about the pull request, `finish` records the carry, merges
-it into the plan branch like any ready spec, and enters each open finding in
-the plan's ledger and under Risk in the spec's pull request and the plan's. Its
+blocking it is carried: when its fix rounds for this cycle are spent, `finish`
+records the carry, merges it into the plan branch like any ready spec, and
+enters each open code finding in the plan's ledger and under Risk in the spec's
+pull request and the plan's. Findings about the pull request or the commit
+history are not part of a carry and do not count toward the cap: they merge
+disclosed on their own, as above. Its
 `say` carries one line saying how many it carried and how many of
 `limits.carried` the plan has used: relay it. Carrying is never used for a
 `blocking` finding, a whole-plan fix, a `major` finding in the code of a spec
