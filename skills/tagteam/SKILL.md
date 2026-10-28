@@ -533,6 +533,16 @@ before the push, so a branch someone moved, rewound or deleted is the stop above
 rather than something a fast-forward goes over; a push refused all the same is
 that stop too, never retried and never forced.
 
+A person who pushed commits of their own on top of the recorded tip can have the
+ship take them with `plan-adopt`, on their word and for the oid the stop showed.
+Nothing is rewritten or forced: it reads only, and records the tip. Its forms:
+
+```bash
+git -C "$R" merge-base --is-ancestor <recordedTip> <originTip>  # read-only: whether commits pushed by hand sit on top of the recorded tip
+git -C "$R" log --reverse --format="%h %s" <recordedTip>..<originTip>  # read-only: the commits an adoption takes, which it lists
+git -C "$R" diff-tree -r --no-renames --name-status -z <recordedTip> <originTip>  # read-only: the files they change
+```
+
 Once every spec of such a train is merged, the whole-plan check reads the plan
 branch's tip as one change: every verify command, whatever its `when`, and one
 reviewer over the diff from where the tip last met the base. Beside the hand-push
@@ -592,7 +602,7 @@ the base resets it. These are its forms, beside those above:
 ```bash
 git -C "$R" cat-file blob origin/<base>:<file>                # read-only, from git objects: the base's version, never the worktree's
 git -C "$R" cat-file blob <commit>:<file>                     # read-only: a version line at a commit — the tip, a spec's candidate and its base
-git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: whether a merge of the base sits above the recorded increase
+git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: whether a merge of the base sits above the recorded increase or adopted version
 git -C "$R" merge-base --is-ancestor <baseOid> <planTip>      # read-only: whether the plan already holds the base
 git -C "$W" checkout --detach <planTip>                       # the tip the version commit goes on
 git -C "$W" add -- <files> && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree

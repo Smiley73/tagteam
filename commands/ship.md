@@ -255,12 +255,14 @@ person can do is set the line back in the worktree, keeping the rest of the
 change, and run `snapshot` again, or stop the train. A dependency added to the
 same file is not a version change and does not stop.
 
-You do not choose the route; `next` does. Three steps are a person's to
+You do not choose the route; `next` does. Four steps are a person's to
 decide: `revisit`, which looks at a spec that stopped for a person again — see
-*Looking again* below — and `redesign` and `accept`, the answers to the
+*Looking again* below — `redesign` and `accept`, the answers to the
 *Recurring* question that are not "fix it again" or "publish as it is" — see
-*After `collect` and `settle`* below. `next` never prints `revisit` or
-`accept`. It prints `redesign` in one case only: with `autoRedesign` on, the
+*After `collect` and `settle`* below — and `plan-adopt`, the answer to a stop
+that says someone pushed commits of their own to the plan branch — see *Commits
+pushed to the plan branch* below. `next` never prints `revisit`, `accept` or
+`plan-adopt`. It prints `redesign` in one case only: with `autoRedesign` on, the
 first time in a cycle that the same file keeps failing and a fix round is left.
 What is yours at each point:
 
@@ -275,6 +277,9 @@ What is yours at each point:
 - **After `revisit`**: say what `say` says — that the same commit is being looked
   at again, that looking spends nothing, and where the pull request as it stands
   was recorded — then run `next`.
+- **After `plan-adopt`**: say what `say` says — which commits and files the plan
+  took, that they had no spec review, and what the plan now lands as — then run
+  `next`, as usual.
 - **After `collect` and `settle`**: say the finding summary in `say` as
   behaviour — what goes wrong and for whom — never as ids or file coordinates.
   A line beginning *Recurring:* is a signal of its own and is relayed whole,
@@ -659,6 +664,36 @@ base; those stop as above. When carrying the spec would take the plan past
 carried so far. The answers are raising `limits.carried` and running `finish`
 again, merging it by hand on GitHub — what is open then enters the ledger as
 merged by hand — leaving it open, or stopping the train.
+
+## Commits pushed to the plan branch
+
+A stop that says the plan branch on origin is at a commit this ship did not
+record making — someone pushed to it by hand — and that names `plan-adopt` is
+asking the person a question. Say what the stop says, in plain words, and ask
+whether the commits are theirs for the plan to take, or whether they will put
+the branch back. Only when they say the commits are theirs, run
+
+```bash
+node "$P/scripts/ship.mjs" plan-adopt --plan "$D" --tip <the oid the stop named>
+```
+
+It takes the commits as the plan's tip and says which commits and which files it
+took. Nothing is rewritten or forced, so it works only when the branch is a
+straight continuation of the tip the ship recorded; for any other push the stop
+says adoption is not possible, and putting the branch back is the answer. It
+refuses, recording nothing, when origin is anywhere else than the `--tip` it was
+given, while a resolve round is open, and once the plan has landed. Never run it
+on your own judgement, never run it on an answer given about an earlier push,
+and after it run `next`.
+
+The commits had no spec review: the whole-plan check covers them, and so does
+the person's Merge of the plan's pull request. If they change the version lines,
+the value they set is the plan's version, and the ship makes no increase of its
+own on top — `say` tells the person so, including when it is exactly the base's
+version, which lands the plan with no increase. If the base's version moves
+afterwards, the landing stops and says so; that value no longer holds, and the
+person can run the step again for the ship's own increase, or push a commit that
+sets the value they want and have it adopted.
 
 ## Looking again
 

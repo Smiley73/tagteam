@@ -31,7 +31,7 @@ import { evaluate, readApprovedWorkflows } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
-import { increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
+import { decisionOf, increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
 import { checkFor, ciFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
 import { isCleanFor } from "./lib/whole-plan.mjs";
 import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
@@ -252,11 +252,13 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
     const found = spawnSync("git", ["-C", repo, "cat-file", "-e", `${tip}^{commit}`], { encoding: "utf8", shell: false });
     if (found.status !== 0) throw refuse(`${short(tip)} is not in this checkout after the fetch`);
 
-    // The kind the plan declared, as its route recorded it when the train started.
-    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: increaseOf(route) ?? "patch" });
+    // The kind the plan declared, as its route recorded it when the train started,
+    // or the version a person set in commits the ship adopted, which replaces it.
+    const decided = decisionOf(route);
+    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: increaseOf(route) ?? "patch", decided });
     if (!version.holds) {
-      throw refuse(`the version lines at ${short(tip)} are not exactly one increase over origin/${route.base} at ${short(baseOid)}: `
-        + versionLines(version, route.base).join("; "), VERSION_NOT_ONE_INCREASE);
+      throw refuse(`the version lines at ${short(tip)} are not ${decided ? "the version decided for the plan, against" : "exactly one increase over"} `
+        + `origin/${route.base} at ${short(baseOid)}: ${versionLines(version, route.base).join("; ")}`, VERSION_NOT_ONE_INCREASE);
     }
 
     // The reviewed base is where the tip last met the base. A base the tip

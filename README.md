@@ -452,7 +452,12 @@ it is outside that guarantee and can collide with a plan landing beside it. The
 guarantee is one checkout's: two people confirming two plans from two machines
 within seconds are guarded only by your repository's own rule that a branch be
 up to date before it merges, a setting you change on GitHub. An empty
-`versionFiles` makes no increase at all.
+`versionFiles` makes no increase at all; emptying it mid-plan takes effect at the
+next `start`, which drops the lines, the increase and any version you set, says
+so, and leaves a version commit already pushed on the branch. A version line you
+set yourself in commits you pushed to the plan's branch and had the ship adopt is
+your decision: the plan lands as that value and the ship makes no increase on
+top, until the base's version moves, when the ship stops and says so.
 
 After each spec, `/tagteam:status` can say what it cost: tagteam reads the
 session transcripts Claude Code keeps and reports the spend as input-token

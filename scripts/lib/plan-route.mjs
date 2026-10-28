@@ -9,7 +9,7 @@
 // - `{ kind: "base" }` — every spec branches from the configured base and
 //   merges back into it, as every train did before plan branches existed.
 // - `{ kind: "plan", branch, base, createdOid, tipOid, pendingOid, versionFiles,
-//   increase, bump }` — the specs branch from, target and squash into
+//   increase, bump, decision }` — the specs branch from, target and squash into
 //   `plan/<slug>`, which was created on origin from `base` at `createdOid`.
 //   `tipOid` is the commit the ship last recorded putting at the branch's tip on
 //   origin, and `pendingOid` a commit it is about to push or has pushed and not
@@ -22,6 +22,11 @@
 //   the ship last made — `{ oid, base, value, baseOid }`, the version commit, the
 //   base's value it was computed from, the value it wrote and the base commit it
 //   was read at — or null. A merge of the base resets the lines, and clears it.
+//   `decision` is the version a person set in commits the ship adopted —
+//   `{ oid, base, value, baseOid }`, the adopted tip, the base's value and commit
+//   it was set against, and the value every line reads — or null. While it holds
+//   the plan lands as that value and the ship makes no increase of its own; a
+//   merge of the base leaves it, and a base whose version has moved ends it.
 //
 // The record is the ship's answer to one question — is what is on origin a
 // commit the ship made? — and it is general on purpose: any commit the ship
@@ -50,10 +55,20 @@ export const landingBranch = (route, configBase) => (isPlanRoute(route) ? route.
  * setting says now. Otherwise: a train with a spec already under way was started
  * before this existed and stays on the base; the setting off, or a plan of one
  * spec, is the base too; the setting on with two or more specs is a plan branch,
- * not yet created.
+ * not yet created. A recorded plan route whose list of version lines the
+ * configuration has since emptied comes back with the list, its increase and its
+ * decision dropped, as `why: "version-off"`, and `dropped` says what went.
  */
 export function decideRoute({ recorded, planBranch, specCount, started, slug, base, versionFiles = [] }) {
   if (recorded && typeof recorded === "object" && typeof recorded.kind === "string") {
+    // `start` alone reads an emptied list as the person turning the version off;
+    // every other step, and `merge.mjs`, keep the list the route recorded.
+    if (isPlanRoute(recorded) && asList(versionFiles).length === 0 && (versionFilesOf(recorded) ?? []).length > 0) {
+      return {
+        route: withoutVersionLines(recorded), why: "version-off",
+        dropped: { files: recorded.versionFiles, bump: recorded.bump ?? null, decision: decisionOf(recorded) }
+      };
+    }
     // A plan route recorded before it kept its version lines takes them now, once,
     // and keeps them from then on like everything else it recorded.
     if (isPlanRoute(recorded) && versionFilesOf(recorded) === null) return { route: { ...recorded, versionFiles: asList(versionFiles) }, why: "recorded" };
@@ -65,7 +80,7 @@ export function decideRoute({ recorded, planBranch, specCount, started, slug, ba
   return {
     route: {
       kind: "plan", branch: planBranchOf(slug), base, createdOid: null, tipOid: null, pendingOid: null, versionFiles: asList(versionFiles),
-      bump: null
+      bump: null, decision: null
     },
     why: "new"
   };
@@ -79,6 +94,12 @@ export const increaseOf = (route) => (route?.increase === "patch" || route?.incr
 
 /** A plan route that has not recorded its kind of increase, taking `kind` once. */
 export const withIncrease = (route, kind) => (isPlanRoute(route) && increaseOf(route) === null ? { ...route, increase: kind } : route);
+
+/** The version a person decided by a commit the ship adopted, or null for none. */
+export const decisionOf = (route) => {
+  const decision = route?.decision;
+  return decision && typeof decision.value === "string" && typeof decision.base === "string" ? decision : null;
+};
 
 const asList = (versionFiles) => (Array.isArray(versionFiles) ? versionFiles : []);
 
@@ -141,6 +162,19 @@ export const withIncreaseMade = (route, bump) => ({ ...withPending(route, bump.o
 // no increase on the plan branch any more.
 export const withoutIncrease = (route) => ({ ...route, bump: null });
 
+// Commits of a person's own adopted as the tip: the tip they were pushed to
+// replaces any pending push. With `decision`, the lines they set are the plan's
+// version and the ship's own increase is gone; without, both are left as they were.
+export const withAdopted = (route, oid, decision) => ({
+  ...route, tipOid: oid, pendingOid: null, ...(decision ? { bump: null, decision } : {})
+});
+
+// The base's version moved past the decision, or the tip no longer reads it.
+export const withoutDecision = (route) => ({ ...route, decision: null });
+
+// `versionFiles` emptied at a `start`: no lines, and nothing made or decided about them.
+export const withoutVersionLines = (route) => ({ ...route, versionFiles: [], bump: null, decision: null });
+
 // --- the record on disk ----------------------------------------------------------
 
 // The record lives in `train.json` beside the other train fields, and only its
@@ -179,3 +213,9 @@ export const recordIncrease = (trainPath, bump) => writeRoute(trainPath, withInc
 
 /** After a merge of the base is pushed: the increase it reset is gone. */
 export const clearIncrease = (trainPath) => writeRoute(trainPath, withoutIncrease(requirePlanRoute(trainPath))).route;
+
+/** A person's commits adopted as the tip, with the version they decided if they set one. */
+export const recordAdoption = (trainPath, oid, decision) => writeRoute(trainPath, withAdopted(requirePlanRoute(trainPath), oid, decision)).route;
+
+/** The decision no longer holds: the plan goes back to making its own increase. */
+export const clearDecision = (trainPath) => writeRoute(trainPath, withoutDecision(requirePlanRoute(trainPath))).route;

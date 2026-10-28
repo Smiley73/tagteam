@@ -361,8 +361,8 @@ export function fileAt(repo, oid, file) {
 const reader = (repo) => (oid, file) => fileAt(repo, oid, file);
 
 /** The condition read off two commits in `repo`, which must both be there. */
-export function versionConditionAt(repo, { entries = [], tipOid, baseOid, kind = "patch" }) {
-  return versionCondition({ entries, read: reader(repo), tipOid, baseOid, kind });
+export function versionConditionAt(repo, { entries = [], tipOid, baseOid, kind = "patch", decided = null }) {
+  return versionCondition({ entries, read: reader(repo), tipOid, baseOid, kind, decided });
 }
 
 export const readLinesAt = (repo, { entries = [], oid }) => readLines({ entries, read: reader(repo), oid });
@@ -516,17 +516,24 @@ export function scriptedMergeProblem(repo, { entries = [], tipOid, baseOid, tree
  * The condition, from facts: `read(oid, file)` is a file's text at a commit, or
  * null. Holds trivially with no lines configured. Every line says the two values
  * it compared, so whoever is told the result is told why.
+ *
+ * With `decided` — `{ value, base }`, a version a person set in commits the ship
+ * adopted — it is not one increase that is held, but the decision: every tip line
+ * reads `value`, and the base still reads `base`, the value it was set against.
  */
-export function versionCondition({ entries = [], read, tipOid, baseOid, kind = "patch" }) {
-  if (!INCREASES.includes(kind)) throw new Error(`the increase is one of ${INCREASES.join(", ")}, not ${JSON.stringify(kind)}`);
+export function versionCondition({ entries = [], read, tipOid, baseOid, kind = "patch", decided = null }) {
+  if (!decided && !INCREASES.includes(kind)) throw new Error(`the increase is one of ${INCREASES.join(", ")}, not ${JSON.stringify(kind)}`);
   const lines = entries.map((entry) => {
     const tip = readVersionLine(read(tipOid, entry.file), entry);
     const base = readVersionLine(read(baseOid, entry.file), entry);
     const problem = tip.problem ?? base.problem ?? null;
-    const holds = problem === null && isOneIncrease(base.value, tip.value, kind);
-    return { file: entry.file, locator: locatorOf(entry), tip: tip.value ?? null, base: base.value ?? null, holds, problem };
+    const holds = problem === null && (decided ? tip.value === decided.value && base.value === decided.base : isOneIncrease(base.value, tip.value, kind));
+    return {
+      file: entry.file, locator: locatorOf(entry), tip: tip.value ?? null, base: base.value ?? null, holds, problem,
+      ...(decided ? { decided: decided.value, decidedBase: decided.base } : {})
+    };
   });
-  return { holds: lines.every((line) => line.holds), kind, tipOid, baseOid, lines };
+  return { holds: lines.every((line) => line.holds), kind: decided ? "decided" : kind, tipOid, baseOid, lines };
 }
 
 /** One clause per line, in a person's terms: what was compared and whether it holds. */
@@ -535,6 +542,11 @@ export function versionLines(condition, base) {
   return condition.lines.map((line) => {
     const where = `${line.file} (${line.locator})`;
     if (line.problem) return `${where}: ${line.problem}, so the increase cannot be checked`;
+    if (line.decided !== undefined) {
+      if (line.tip !== line.decided) return `${where} is ${line.tip} here, not ${line.decided}, the version set by the commits the ship adopted`;
+      if (line.base !== line.decidedBase) return `${where} is ${line.base} on ${base} now, not ${line.decidedBase}, the version that was set against`;
+      return `${where} is ${line.tip} here, as set by the commits the ship adopted, and ${line.base} on ${base}, where it was set against: it lands as decided`;
+    }
     if (line.holds) return `${where} is ${line.tip} here and ${line.base} on ${base}: one ${condition.kind} increase, as it must be`;
     if (line.tip === line.base) return `${where} is ${line.tip} here and on ${base}: the plan carries no increase over ${base}'s value`;
     return `${where} is ${line.tip} here and ${line.base} on ${base}, which is not one ${condition.kind} increase over ${base}'s value`;
