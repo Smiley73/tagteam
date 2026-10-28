@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, stagePlan, commitByHand, shipThrough, trainOf, onOrigin, A_CHANGE, B_CHANGE, commitToMain, reviewWholePlan } from "./ship-stage.mjs";
+import { git, ship, stagePlan, commitByHand, shipThrough, trainOf, onOrigin, A_CHANGE, B_CHANGE, commitToMain, reviewWholePlan, pullsOf } from "./ship-stage.mjs";
 import { manifests, linesAt, stageVersioned, walkToDialog, approve, sayOf, landingRecordOf } from "./ship-plan-version-shared.mjs";
 
 // A commit of `files` on top of plan/demo from a clone of the person's own,
@@ -217,6 +217,47 @@ test("after an adopted version, a base that moves without touching the lines is 
   assert.equal(trainOf(shipDir).route.decision.oid, oid);
   assert.equal(dialog.json.planLanding.landsAs, "0.1.0 → 0.2.0");
   assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("versionFiles emptied after a version was adopted drops the decision as well, and says which version it was", () => {
+  const staged = checkedPlan();
+  const { dir, plan, shipDir, env, configPath } = staged;
+  adoptVersion(staged, "0.2.0");
+  assert.equal(trainOf(shipDir).route.decision.value, "0.2.0", "no decision was recorded to drop");
+
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, versionFiles: [] }, null, 2));
+  assert.equal(trainOf(shipDir).route.decision.value, "0.2.0", "editing the configuration alone changed the record");
+  assert.equal(ship("end", plan, [], env).status, 0);
+  const started = ship("start", plan, [], env);
+  assert.equal(started.status, 0, started.stderr);
+  const route = trainOf(shipDir).route;
+  assert.deepEqual([route.versionFiles, route.bump, route.decision], [[], null, null]);
+  assert.match(started.json.say.join("\n"), /the version 0\.2\.0 set by commits it adopted/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plan pull request merged by hand on GitHub before the ship saw it takes no adoption, and nothing is recorded or deleted", () => {
+  const staged = checkedPlan();
+  const { dir, plan, shipDir, origin, env } = staged;
+  walkToDialog(staged);
+  assert.ok(landingRecordOf(shipDir).pr?.number, "no pull request was opened");
+  const pulls = pullsOf(env);
+  assert.equal(pulls.length > 0, true);
+  // Merged on GitHub, the branch kept; the ship's landing record has no `merged` yet.
+  for (const pull of pulls) pull.state = "MERGED";
+  fs.writeFileSync(env.GH_STUB_STATE, JSON.stringify({ pulls }, null, 2));
+  assert.equal(landingRecordOf(shipDir).merged, undefined);
+  const route = trainOf(shipDir).route;
+  const oid = handCommit(staged, { "late.txt": "after the merge\n" });
+
+  const refused = adopt(staged, oid);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /already merged into main on GitHub/);
+  assert.match(refused.stderr, /Nothing was adopted or recorded/);
+  assert.deepEqual(trainOf(shipDir).route, route, "a refused adoption changed the record");
+  assert.equal(onOrigin(origin, "plan/demo"), oid, "the branch was touched");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

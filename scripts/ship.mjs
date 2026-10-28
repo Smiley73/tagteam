@@ -6491,8 +6491,15 @@ async function planAdopt(options) {
   if (!/^[0-9a-f]{40,64}$/i.test(options.tip ?? "")) {
     throw new Stop("plan-adopt takes --tip <oid>, the commit the hand-push stop showed as where the plan branch is on origin", 2);
   }
-  if (readLanding(ctx).merged) {
+  const landing = readLanding(ctx);
+  if (landing.merged) {
     throw new Stop(`the plan's pull request is already merged into ${route.base}, so there is no plan branch left to adopt commits onto. ${none}`);
+  }
+  // A merge made by hand is not in the record until a landing step sees it, and a commit adopted
+  // after it would never reach the base while the landing deletes the branch that holds it.
+  if (landing.pr?.number && viewPlanPr(ctx, landing.pr.number).state === "MERGED") {
+    throw new Stop(`the plan's pull request #${landing.pr.number} is already merged into ${route.base} on GitHub, so commits pushed to ${route.branch} since `
+      + `would never land there. ${none} Run ${nextCommand(ctx, "plan-land", null)}, which records the merge; the commits are yours to take to ${route.base} some other way.`);
   }
   const open = openResolveRound(ctx);
   if (open) {
