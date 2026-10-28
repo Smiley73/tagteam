@@ -837,8 +837,9 @@ test("a pull request GitHub cannot be read for is its own stop, never a hand pus
   // Right after the squash: the read that follows it fails.
   const finished = ship("finish", plan, ["--spec", "01-a"], failing);
   assert.equal(finished.status, 1, finished.stdout);
-  assert.match(finished.stderr, /could not read pull request #1 from GitHub \(gh stub: HTTP 502: Bad Gateway\)/);
-  assert.match(finished.stderr, /run this again/);
+  const [reason, ...beneath] = finished.stderr.trim().split("\n");
+  assert.match(reason, /^could not read pull request #1 from GitHub, so .*run this again\.$/);
+  assert.match(beneath.join("\n"), /gh stub: HTTP 502: Bad Gateway/);
   assert.doesNotMatch(finished.stderr, /did not record making|no merge commit|back at/);
   assert.equal(pullsOf(env)[0].state, "MERGED");
   assert.notEqual(a.state().state, "merged");

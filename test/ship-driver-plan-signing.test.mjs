@@ -26,7 +26,12 @@ const uncommitted = (worktree) => git(worktree, "status", "--porcelain", "--untr
 function assertSigningStop(stopped, subject, again) {
   assert.notEqual(stopped.status, 0, "the landing went on past a signer that failed");
   const said = stopped.stderr;
-  assert.ok(said.includes(`git could not make the commit "${subject}"`), said);
+  // The first line is the reason and the way on; git's own several lines are beneath it.
+  const [first, ...beneath] = said.trim().split("\n");
+  assert.ok(first.includes(`git could not make the commit "${subject}"`), said);
+  assert.match(first, /unlock the key, or start the agent that holds it/, "the recovery is not on the first line");
+  assert.match(first, again, "the first line does not name the command to run again");
+  assert.match(beneath.join("\n"), /gpg failed to sign the data/, "git's own error is not beneath the first line");
   assert.match(said, /gpg failed to sign the data/, "git's own error is not quoted");
   assert.match(said, /stand-in signer: no key is unlocked/);
   assert.match(said, /Nothing was committed, recorded or pushed/);

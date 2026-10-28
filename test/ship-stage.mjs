@@ -81,13 +81,46 @@ export function stage() {
   return { dir, repo, plan, config, shipDir: path.join(repo, ".tagteam", "ships", "demo") };
 }
 
+// Whether a stop's opening is a plain reason for a person and not a value passed
+// through from a child process, a record or a library: a command the driver
+// spawns, a script name, a path, an error-class or errno name, a read that could
+// not happen at a path, or a JSON document. A heuristic, and test code, so that
+// a miss costs a reworded stop and never a stop the person cannot act on.
+export function opensPlainly(text) {
+  const opening = String(text ?? "").trimStart().split("\n")[0];
+  if (opening.trim() === "") return false;
+  return !(
+    /^(?:git|gh|node)\s+(?:-|[a-z]+(?:-[a-z]+)*\s)[^.]*?:/.test(opening)
+    || /^[\w.-]+\.mjs\b/.test(opening)
+    || /^could not read\s+(?:[/~.]|[A-Za-z]:[\\/])/.test(opening)
+    || /^(?:[A-Z]\w*)?Error\b/.test(opening) || /^E[A-Z]{3,}\b/.test(opening)
+    || /^[[{]/.test(opening)
+    || /^(?:[/~]|\.{1,2}[/\\]|\.[\w-]+\/|[A-Za-z]:[/\\])/.test(opening)
+  );
+}
+
+// Every stop the driver ends on opens with a plain reason: an emitted ask and a
+// thrown stop alike. A wait (exit 5) is not a stop. Checked on every call here,
+// so a stop added later with a raw opening fails the first test that reaches it.
+function assertStopOpensPlainly({ status, stderr, json }) {
+  if (json && json.ask !== undefined && json.ask !== null) {
+    assert.ok(typeof json.ask === "string" && opensPlainly(json.ask), `an ask opens with a raw value or nothing:\n${JSON.stringify(json.ask)}`);
+  }
+  if (status !== 0 && status !== 5) {
+    assert.ok(opensPlainly(stderr), `a stop opens with a raw value or nothing, exit ${status}:\n${stderr}`);
+    assert.ok(!stderr.trimStart().split("\n")[0].trimEnd().endsWith(":"), `a stop's first line hands over to the lines beneath it, where the person will not read, exit ${status}:\n${stderr}`);
+  }
+}
+
 export function ship(sub, plan, extra = [], env = {}) {
   const result = spawnSync(process.execPath, [SHIP, sub, "--plan", plan, ...extra], {
     encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", ...env }
   });
   let json = null;
   try { json = JSON.parse(result.stdout); } catch {}
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr, json };
+  const outcome = { status: result.status, stdout: result.stdout, stderr: result.stderr, json };
+  assertStopOpensPlainly(outcome);
+  return outcome;
 }
 
 export const write = (file, value) => {
