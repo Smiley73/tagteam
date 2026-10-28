@@ -34,7 +34,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
 import { listRounds } from "./lib/rounds.mjs";
-import { acceptLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
+import { reviewOpenLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
@@ -565,11 +565,19 @@ function pullRequestLines(ctx, id, state) {
 
 // What the orchestrator is told about findings no fixer can reach, wherever
 // they turn up: at `fix`, where they are kept out of the fixer's brief, and at
-// `settle`, where they may be all that is left open.
+// `settle`, where they may be all that is left open. A finding about the commit
+// history is told that the body cannot rewrite it, since the spec merge's squash
+// message is not taken from the body.
 function pullRequestFindingsLine(ctx, id, findings) {
-  const named = findings.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
-  return `${findings.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named}. `
-    + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
+  const named = (list) => list.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
+  const history = findings.filter((finding) => finding.scope === "history");
+  const text = findings.filter((finding) => finding.scope !== "history");
+  return [
+    text.length > 0 ? `${text.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named(text)}.` : "",
+    history.length > 0 ? `${history.length} finding(s) are about the commit history, not the code, and no fixer can reach it: ${named(history)}.` : "",
+    `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`,
+    history.length > 0 ? "The body can disclose the commit history but not rewrite it, so a finding about it may well stay open after the re-check and be disclosed rather than resolved." : ""
+  ].filter(Boolean).join(" ");
 }
 
 // --- retries and what the pull request says about them ----------------------
@@ -653,7 +661,8 @@ function retryLines(ctx, id, base) {
  * given. Null unless `onPlanBranch` holds, the question the gates ask. `open` is
  * what its review gate holds open; `entries`, one for each, what it would put in
  * the plan's ledger if it merged now — `accepted` where a person's accept of this
- * candidate covers it, `carried` where the ship's carry does; `merges`, whether
+ * candidate covers it, `disclosed` where it is about the pull request or the
+ * commit history, `carried` where the ship's carry does; `merges`, whether
  * the record in its gate state lifts `review-open`, as `evaluate` decides it.
  */
 function planStanding(ctx, id, state) {
@@ -667,13 +676,15 @@ function planStanding(ctx, id, state) {
     ...(file?.candidate === state.candidateOid && Array.isArray(file.ids) ? file.ids : [])
   ]);
   const carried = new Set(recorded?.mode === "carry" ? recorded.ids : []);
-  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted, carried), merges: acceptLifts(state, ctx.config) };
+  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted, carried, true), merges: reviewOpenLifts(state, ctx.config) };
 }
 
 /**
- * Whether `finish` would carry this spec's open findings into the plan branch
- * on the review gate as now recorded: null when carrying is off, the spec is
- * not on the plan branch, a finding open may not be carried (05's rule) or
+ * Whether `finish` would carry this spec's open code findings into the plan
+ * branch on the review gate as now recorded: null when carrying is off, the spec
+ * is not on the plan branch, no code finding is open (those about the pull
+ * request or the commit history merge disclosed without a carry), one may not be
+ * carried (05's rule) or
  * `evaluate` would not lift `review-open` on the record; otherwise the record
  * to write, how many findings the plan's ledger already holds carried by other
  * units, and whether this one would take that past `limits.carried`. A carry
@@ -686,18 +697,19 @@ function planStanding(ctx, id, state) {
 function carryStanding(ctx, id, state) {
   if (ctx.config.carry !== true) return null;
   const standing = planStanding(ctx, id, state);
-  if (!standing || standing.open.length === 0) return null;
+  const code = standing?.open.filter((finding) => !isPullRequestFinding(finding)) ?? [];
+  if (code.length === 0) return null;
   const recorded = standing.merges && state.accept?.mode === "carry";
   if (standing.merges && !recorded) return null;
   let record = state.accept;
   if (!recorded) {
     const facts = carryFacts(ctx, id);
-    if (standing.open.some((finding) => carryRefusal(finding, facts))) return null;
+    if (code.some((finding) => carryRefusal(finding, facts))) return null;
     record = {
-      candidateOid: state.candidateOid, ids: standing.open.map((finding) => finding.id), mode: "carry",
+      candidateOid: state.candidateOid, ids: code.map((finding) => finding.id), mode: "carry",
       dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
     };
-    if (!acceptLifts({ ...state, accept: record }, ctx.config)) return null;
+    if (!reviewOpenLifts({ ...state, accept: record }, ctx.config)) return null;
   }
   const others = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried" && entry.spec !== id).length;
   return {
@@ -717,8 +729,12 @@ function carriedAtFinish(ctx, id) {
 
 function pullRequestOnlyLine(ctx, id) {
   const said = "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write";
-  const carried = carriedAtFinish(ctx, id);
-  return carried ? `${said}. ${carried}` : `${said}, and revisit puts it to the readers again.`;
+  const state = readState(ctx, id);
+  const standing = planStanding(ctx, id, state);
+  return standing?.merges
+    ? `${said}. At finish it merges into ${state.base} with these findings disclosed, whatever carrying is set to, unless something other than its review stops it: `
+      + "each is entered in the plan's ledger and listed under Risk, and the plan's pull request lists them for a person."
+    : `${said}, and revisit puts it to the readers again.`;
 }
 
 const enteredLines = (count) =>
@@ -1409,7 +1425,7 @@ function acceptOnPlanBranch(ctx, id, ids) {
   const facts = carryFacts(ctx, id);
   const kept = standing.open.map((finding) => ({ finding, why: carryRefusal(finding, facts) })).find((entry) => entry.why);
   if (kept) return { merges: false, line: `${kept.finding.id} keeps it from merging into ${state.base} on its own: ${kept.why}.` };
-  if (!acceptLifts({ ...state, accept: { candidateOid: state.candidateOid, ids } }, ctx.config)) {
+  if (!reviewOpenLifts({ ...state, accept: { candidateOid: state.candidateOid, ids } }, ctx.config)) {
     return { merges: false, line: `Its review is ${standing.review.status}, and an accept lets only a complete review with findings open merge into ${state.base} on its own.` };
   }
   node("gates.mjs", ["accept", statePath(ctx, id), state.candidateOid, ids.join(",")]);
@@ -3539,7 +3555,7 @@ async function fix(options) {
     if (settled) {
       // The readers have judged these once already, against the body as it was.
       // The body is rewritten, published, and judged again on a revisit — or
-      // carried at finish.
+      // disclosed at finish.
       transition(ctx, id, "verifying");
       return emit({ say: [...prSay, pullRequestOnlyLine(ctx, id)], next: nextCommand(ctx, "publish", id) });
     }
@@ -4009,7 +4025,12 @@ async function settle(options) {
     // way on passes an accept by.
     const accepted = readJson(acceptedPath(ctx, id), null);
     const acceptedIds = new Set(Array.isArray(accepted?.ids) ? accepted.ids : []);
-    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && open.every((finding) => acceptedIds.has(finding.id));
+    // On a plan branch a finding about the pull request or the commit history
+    // needs no accept — no fixer reaches it, and it merges disclosed — so a fresh
+    // one does not undo an accept that covers everything a fixer could reach.
+    // Off the plan branch an accept covers every finding open.
+    const needsAccept = onPlanBranch(state, ctx.config) ? open.filter((finding) => !isPullRequestFinding(finding)) : open;
+    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && needsAccept.every((finding) => acceptedIds.has(finding.id));
     const onPlan = covered ? acceptOnPlanBranch(ctx, id, [...acceptedIds]) : null;
     // Everything still open is about the pull request: no fixer can reach it,
     // so no fix round is spent on it. The spec publishes with the body the
@@ -4728,7 +4749,7 @@ function unitTables(ctx, records, record, status) {
 const OUTCOME_WORDS = {
   resolved: "resolved",
   "follow-up": "handed to a follow-up",
-  "pull-request": "still real and about the pull request",
+  "pull-request": "about the pull request's text or commit history, and disclosed",
   "needs-person": "needing a person or a re-plan",
   spent: "still real with every follow-up limits.followUps allows made",
   "after-fix": "still real, judged again once the whole-plan fix merges",
@@ -5222,7 +5243,7 @@ function ledgerFacts(entries, records) {
     const unit = records.flatMap((record) => record.followUps ?? []).filter((item) => item.entries.includes(entry.id)).at(-1)?.id ?? null;
     const endedUp = {
       resolved: `resolved at ${short(latest?.tip)}${unit ? `, after the follow-up ${unit}` : ""}`,
-      "pull-request": "still unresolved: it is about the pull request, so no fix unit can answer it",
+      "pull-request": "still unresolved: it is about the pull request's text or commit history, so no fix unit can answer it, and it is disclosed",
       "needs-person": "still unresolved: only a person or a re-plan settles it",
       spent: "still unresolved: every follow-up limits.followUps allows was made",
       "after-fix": "still unresolved: the latest check was not clean, so it is judged again once the whole-plan fix merges",

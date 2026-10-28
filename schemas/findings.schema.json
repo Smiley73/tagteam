@@ -35,8 +35,8 @@
           },
           "scope": {
             "type": "string",
-            "enum": ["code", "pull-request"],
-            "description": "Who answers the finding. pull-request when the remedy is a change to the pull request's text. code otherwise, including a code defect that names no single file."
+            "enum": ["code", "pull-request", "history"],
+            "description": "Who answers the finding. pull-request when the remedy is a change to the pull request's text. history when the remedy is a change to the commits (a message, an author, how the change is split into commits) and not to any file. code otherwise, including a code defect that names no single file."
           },
           "file": {
             "type": ["string", "null"],

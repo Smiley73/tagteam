@@ -103,10 +103,10 @@ export const findingRound = (id) => {
 export const PULL_REQUEST_FILES = new Set(["pull-request.md", "pr-body.md"]);
 
 /**
- * Whether a finding is about the pull request rather than about the code: the
- * reviewer gave it `scope: "pull-request"`, or it names one of the pull request
- * files whatever its scope says. A `code` finding that names no single file is
- * for a fixer.
+ * Whether a finding is about the pull request or the commit history rather than
+ * about the code: the reviewer gave it `scope: "pull-request"` or `"history"`, or
+ * it names one of the pull request files whatever its scope says. A `code`
+ * finding that names no single file is for a fixer.
  *
  * A fixer works beneath the worktree and cannot reach either file, and a finding
  * it cannot reach is one it can only decline. Handing it one spent a fix round
@@ -122,7 +122,7 @@ export const isPullRequestFinding = (finding) => {
   // a reviewer's own output without one fails the schema. They are routed by
   // the rule they were written under, where no file meant the pull request.
   if (finding?.scope === undefined) return finding?.file == null;
-  return finding.scope === "pull-request";
+  return finding.scope === "pull-request" || finding.scope === "history";
 };
 
 /**

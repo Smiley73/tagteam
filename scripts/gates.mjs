@@ -45,12 +45,12 @@ const LANDING = "landing";
 // for which one it was.
 const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
 
-// A person's accept of the findings this candidate's review left open, recorded
+// A person's accept of the code findings this candidate's review left open, recorded
 // only when every one of them may be carried into the plan branch: `{candidateOid,
 // ids, at}`. The ship's own carry is the same record with `mode: "carry"` and
 // `dependedOn`, whether a spec not yet merged depends on this one — which the
 // plan knows and this state does not. A top-level key for the reason `landing`
-// is one, and cleared by a bind as it is. Weighed by `acceptLifts` alone, which
+// is one, and cleared by a bind as it is. Weighed by `reviewOpenLifts` alone, which
 // `evaluate` asks to lift `review-open`.
 const ACCEPT = "accept";
 
@@ -680,32 +680,35 @@ const currentGate = (state, gate) =>
   state.gates?.[gate]?.candidateOid === state.candidateOid ? state.gates[gate] : null;
 
 /**
- * Whether a person's accept lifts `review-open` from this state's verdict: on
- * the plan branch, and there alone, an accept of this candidate that covers
- * everything its open review holds — never past a blocking finding, and never
- * an incomplete review. Exported so that what the driver tells a person about
- * an accept, or does about a carry, is this answer and not one of its own.
+ * Whether `review-open` lifts from this state's verdict: on the plan branch, and
+ * there alone, for a complete review that is open and holds no blocking finding,
+ * and whose open findings are either about the pull request's text or the commit
+ * history — which no fixer can reach, and which merge disclosed — or covered by
+ * an accept of this candidate that holds under the rules below. Exported so that
+ * what the driver tells a person about an accept, or does about a carry, is this
+ * answer and not one of its own.
  */
-export function acceptLifts(state, config) {
+export function reviewOpenLifts(state, config) {
   const review = currentGate(state, "review");
   const open = Array.isArray(review?.open) ? review.open : [];
+  if (!onPlanBranch(state, config) || review?.status !== "open" || open.length === 0) return false;
+  if (open.some((finding) => finding.severity === "blocking")) return false;
+  const code = open.filter((finding) => !isPullRequestFinding(finding));
+  if (code.length === 0) return true;
   const accept = state[ACCEPT];
-  return onPlanBranch(state, config) && review?.status === "open" && open.length > 0
-    && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
-    && open.every((finding) => accept.ids.includes(finding.id))
-    && !open.some((finding) => finding.severity === "blocking")
-    && (accept.mode !== "carry" || carryHolds(state, config, accept, open));
+  return accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
+    && code.every((finding) => accept.ids.includes(finding.id))
+    && (accept.mode !== "carry" || carryHolds(state, config, accept, code));
 }
 
 // What a carry needs beyond an accept, since no person looked: carrying on, no
 // whole-plan fix, no major code finding on a spec something unmerged depends on
-// — read as depended on unless the record says otherwise — and either this
-// cycle's fix rounds spent or nothing open that a fixer could reach.
-function carryHolds(state, config, accept, open) {
-  const forFixer = open.filter((finding) => !isPullRequestFinding(finding));
+// — read as depended on unless the record says otherwise — and this cycle's fix
+// rounds spent.
+function carryHolds(state, config, accept, code) {
   return config?.carry === true && !isFixUnitId(state.spec)
-    && !(accept.dependedOn !== false && forFixer.some((finding) => finding.severity === "major"))
-    && (forFixer.length === 0 || counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds);
+    && !(accept.dependedOn !== false && code.some((finding) => finding.severity === "major"))
+    && counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds;
 }
 
 // The workflow files a person approved `spec` to change, out of the map
@@ -748,9 +751,9 @@ export function evaluate(state, config, approvedWorkflows = null) {
   // absent, unparseable, or wrongly-bound findings file reads as an empty
   // finding set, and an empty finding set reads as clean, so this is checked
   // before anything else is believed. A person's accept, or the ship's carry, is
-  // weighed here and nowhere else in the verdict — see `acceptLifts`.
+  // weighed here and nowhere else in the verdict — see `reviewOpenLifts`.
   if (!review) blockers.push("review-not-recorded");
-  else if (review.status !== "clean" && !acceptLifts(state, config)) blockers.push(`review-${review.status}`);
+  else if (review.status !== "clean" && !reviewOpenLifts(state, config)) blockers.push(`review-${review.status}`);
 
   // (b) Verification and CI.
   if (!verify) blockers.push("verification-not-recorded");

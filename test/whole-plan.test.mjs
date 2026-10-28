@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  checkDir, cleanResultFor, fixUnitIds, isCleanFor, isFixUnitId, nextUnitId, saveCheck, unitDocument, unitDir, verdict
+  checkDir, cleanResultFor, fixUnitIds, isCleanFor, isFixUnitId, ledgerOutcomes, nextUnitId, saveCheck, unitDocument, unitDir, verdict
 } from "../scripts/lib/whole-plan.mjs";
 
 const A = "a".repeat(40);
@@ -101,4 +101,18 @@ test("a fix unit's document is in spec shape and lists every gating finding and 
   assert.match(text, /`npm test` failed on the plan's tip\. Its log is \/s\/whole-plan\/2\/rounds\/1\/verify\/1\.log/);
   assert.match(text, /## Out of scope\n\nNothing else changes\./);
   assert.match(text, /## Sign-offs\n\nNone\./);
+});
+
+test("a ledger entry about the pull request or the commit history is disclosed unless resolved, and never makes a follow-up unit", () => {
+  const entry = (id, scope) => ({ id, scope, severity: "major", files: ["a.js"] });
+  const entries = [entry("01:h1", "history"), entry("01:h2", "history"), entry("01:h3", "history"), entry("01:p1", "pull-request"), entry("01:c1", "code")];
+  const verdicts = [
+    { id: "01:h1", verdict: "needs-person" }, { id: "01:h2", verdict: "still-real" }, { id: "01:h3", verdict: "resolved" },
+    { id: "01:p1", verdict: "needs-person" }, { id: "01:c1", verdict: "still-real" }
+  ];
+  const result = ledgerOutcomes({ entries, verdicts, status: "clean", made: [], limit: 3 });
+  assert.deepEqual(result.entries.map((item) => [item.id, item.outcome]), [
+    ["01:h1", "pull-request"], ["01:h2", "pull-request"], ["01:h3", "resolved"], ["01:p1", "pull-request"], ["01:c1", "follow-up"]
+  ]);
+  assert.deepEqual(result.units.map((unit) => unit.entries), [["01:c1"]], "only the code entry is handed to a follow-up");
 });

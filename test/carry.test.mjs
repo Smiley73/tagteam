@@ -2,7 +2,7 @@
 // the driver and the later carry and accept steps all read.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { carryEligible, recommendation } from "../scripts/lib/carry.mjs";
+import { carryEligible, carryRefusal, recommendation } from "../scripts/lib/carry.mjs";
 
 const PLAN = { slug: "s", base: "plan/s", planRouteBranch: "plan/s" };
 const CONFIG = { base: "main" };
@@ -27,6 +27,15 @@ test("a blocking finding, a fix unit and a spec straight to the base never carry
   assert.equal(carryEligible(finding("blocking", "pull-request"), on(B, all)), false);
   assert.equal(carryEligible(finding("minor"), on({ id: "plan-fix-1", dependsOn: [], fixUnit: true }, all)), false);
   assert.equal(carryEligible(finding("minor"), on(B, all, { slug: "s", base: "main", planRouteBranch: null })), false);
+});
+
+test("a whole-plan fix unit carries a non-blocking pull request or history finding, and refuses a code one", () => {
+  const unit = on({ id: "plan-fix-1", dependsOn: [], fixUnit: true }, ["01-a", "02-b", "03-c"]);
+  for (const scope of ["pull-request", "history"]) {
+    assert.equal(carryRefusal(finding("major", scope), unit), null, scope);
+    assert.notEqual(carryRefusal(finding("blocking", scope), unit), null, `${scope} blocking`);
+  }
+  assert.equal(carryRefusal(finding("minor"), unit), "a whole-plan fix never merges with a finding open");
 });
 
 test("the recommendation is the first rule that applies, and an addressed finding has none", () => {
