@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { NOT_IN_YET } from "../scripts/ship.mjs";
-import { ship, stage, stagePlan, driveToPublishable, opensPlainly, A_CHANGE } from "./ship-stage.mjs";
+import { ship, stage, stagePlan, driveToPublishable, opensPlainly, onOrigin, reviewWholePlan, A_CHANGE } from "./ship-stage.mjs";
+import { stageVersioned } from "./ship-plan-version-shared.mjs";
 
 const failingGh = (staged) => {
   const bin = path.join(staged.dir, "failing-bin");
@@ -34,6 +35,27 @@ test("a failing GitHub command at publish is led by the step, what failed and th
   assert.match(lead, /run the same command again, or stop the train with `ship\.mjs end`\.$/);
   assert.match(raw, /^gh pr \w+: gh: HTTP 502 from the stub$/m, "the raw error is kept under the lead");
   assert.ok(opensPlainly(published.stderr));
+});
+
+// A push origin refuses after the record was checked: git's several lines of
+// stderr are the raw part, so the first line is the reason and the way on and
+// not a sentence cut off mid-way through the git command.
+test("a plan-branch push origin refuses is led by the push that failed and the way on, with git's whole refusal beneath", () => {
+  const staged = stageVersioned();
+  const { plan, origin, env } = staged;
+  assert.equal(reviewWholePlan(staged, ship("plan-check", plan, [], env)).json.wholePlan.status, "clean");
+  const before = onOrigin(origin, "plan/demo");
+  fs.writeFileSync(path.join(origin, "hooks", "pre-receive"),
+    "#!/bin/sh\necho 'error: GH006: Protected branch update failed for refs/heads/plan/demo.' >&2\nexit 1\n", { mode: 0o755 });
+  const refused = ship("plan-land", plan, [], env);
+  assert.equal(refused.status, 1, refused.stderr);
+  const { lead, raw } = leadAndRaw(refused);
+  assert.match(lead, /^The plan-land step stopped because the push of the version commit \w{12} to plan\/demo failed while plan\/demo on origin is still where this ship recorded it, and nothing else changed\. /);
+  assert.match(lead, /run the same command again, or stop the train with `ship\.mjs end`\.$/);
+  assert.ok(!/git push/.test(lead), `the git command is in the opening:\n${lead}`);
+  assert.match(raw, /^git push origin \w{40}:refs\/heads\/plan\/demo: remote: error: GH006: /);
+  assert.match(raw, /\[remote rejected\]/, "git's refusal is kept whole under the lead");
+  assert.equal(onOrigin(origin, "plan/demo"), before, "the plan branch moved on origin");
 });
 
 test("a record that cannot be parsed is led the same way, with its path in the raw part and not in the opening", () => {

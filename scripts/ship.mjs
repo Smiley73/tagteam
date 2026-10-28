@@ -2472,8 +2472,8 @@ async function pushResolution(ctx, record, attempt, say) {
       await pushToPlanBranch(ctx, attempt.mergeOid);
     } catch (error) {
       await planTipCheck(ctx, outcome);
-      throw new Stop(`the push of the resolved merge ${attempt.mergeOid.slice(0, 12)} to ${record.branch} failed while `
-        + `${record.branch} on origin is still where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
+      throw Stop.raw(error.message, `the push of the resolved merge ${attempt.mergeOid.slice(0, 12)} to ${record.branch} failed while `
+        + `${record.branch} on origin is still where this ship recorded it, and nothing else changed`);
     }
   }
   forgetIncrease(ctx);
@@ -5651,8 +5651,8 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
       await pushToPlanBranch(ctx, oid);
     } catch (error) {
       await planTipCheck(ctx, outcome);
-      throw new Stop(`the push of the merge ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still where `
-        + `this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
+      throw Stop.raw(error.message, `the push of the merge ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still `
+        + "where this ship recorded it, and nothing else changed");
     }
   }
   forgetIncrease(ctx);
@@ -5879,8 +5879,8 @@ async function finalTipStep(ctx, record, tip, options, say) {
       await pushToPlanBranch(ctx, oid, { recorded: true });
     } catch (error) {
       await planTipCheck(ctx, outcome);
-      throw new Stop(`the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still `
-        + `where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
+      throw Stop.raw(error.message, `the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin `
+        + "is still where this ship recorded it, and nothing else changed");
     }
     say.push(`The plan's one version increase, ${kindLine}: ${base.value} → ${value} in ${listOf(entries.map(describeEntry))}, from `
       + `${route.base}'s version at ${short(baseOid)}. It is ${short(oid)} on ${route.branch}, a commit of the version lines and nothing `
@@ -5943,8 +5943,8 @@ async function decidedTipStep(ctx, tip, { decision, base, lines, entries }, say)
     await pushToPlanBranch(ctx, oid);
   } catch (error) {
     await planTipCheck(ctx, outcome);
-    throw new Stop(`the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still `
-      + `where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
+    throw Stop.raw(error.message, `the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin `
+      + "is still where this ship recorded it, and nothing else changed");
   }
   say.push(`A merge of ${route.base} had set the version lines back to ${base.value}. The version ${decision.value}, set by the commits the `
     + `ship adopted, is written back in ${short(oid)} on ${route.branch}: a commit of the version lines and nothing else, pushed by the `
