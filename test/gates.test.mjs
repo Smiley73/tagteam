@@ -153,6 +153,9 @@ test("on the plan branch, a non-blocking finding about the pull request or the c
     ["a major code finding beside it", opened([text, code])],
     ["straight to the base", opened([text], { base: "main", planRouteBranch: null })]
   ]) assert.ok(evaluate(state, CONFIG).blockers.includes("review-open"), what);
+  const unit = { spec: "plan-fix-1" };
+  for (const finding of [text, history]) assert.equal(evaluate(opened([finding], unit), CONFIG).ready, true, `a whole-plan fix unit with only a ${finding.scope} finding open`);
+  assert.ok(evaluate(opened([text, code], unit), CONFIG).blockers.includes("review-open"), "a whole-plan fix unit with a code finding beside it");
   const accepting = (state, ids) => ({ ...state, accept: { candidateOid: A, ids, at: "2026-01-01T00:00:00Z" } });
   assert.equal(evaluate(accepting(opened([history, code]), [code.id]), CONFIG).ready, true, "an accept need only cover the code findings");
   assert.ok(evaluate(accepting(opened([history, code]), [history.id]), CONFIG).blockers.includes("review-open"), "and an accept of the text one does not cover the code one");

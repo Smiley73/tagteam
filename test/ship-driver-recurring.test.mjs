@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { root, git, stage, ship, write, outputOf, arriveAll, findings, major, quietPath,
+import { root, git, stage, stagePlan, ship, write, outputOf, arriveAll, findings, major, quietPath,
   assertEffort, checkReportOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
 
@@ -375,6 +375,24 @@ test("an accept given at collect is honoured by settle only for what the person 
   assert.match(settleB.json.next, /fix --plan/);
   assert.ok(!fs.existsSync(path.join(fresh.shipDir, "01-a", "accepted.json")), "the accept is withdrawn: the person has not seen this finding");
   assert.equal(b.state().state, "reviewing");
+});
+
+test("on a plan branch, a history finding the re-check adds does not undo an accept that covers every code finding", () => {
+  const staged = stagePlan();
+  const { state, run } = driveToRecurrence(staged, { env: staged.env });
+  run("accept");
+  const recheck = run("recheck");
+  const third = state().candidateOid;
+  const history = { severity: "major", scope: "history", file: null, line: null, title: "the commits say nothing about sub", detail: "one commit, no message", fix: null };
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", third, [history]));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "adversary", candidate: third, verdicts: [{ id: "2.adversary.1", resolved: false, evidence: "still there" }] });
+  arriveAll(recheck, staged.env);
+  const settle = run("settle");
+  assert.equal(settle.json.review, "open");
+  assert.match(settle.json.say.join("\n"), /Publishing as it is, as you decided at round 3/);
+  assert.equal(settle.json.accepted, true);
+  assert.match(settle.json.next, /publish/);
+  assert.ok(fs.existsSync(path.join(staged.shipDir, "01-a", "accepted.json")), "the accept stays: the history finding needs none");
 });
 
 test("a redesign answered at settle goes to the whole panel", () => {

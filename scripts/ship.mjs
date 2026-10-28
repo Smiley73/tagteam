@@ -4025,7 +4025,12 @@ async function settle(options) {
     // way on passes an accept by.
     const accepted = readJson(acceptedPath(ctx, id), null);
     const acceptedIds = new Set(Array.isArray(accepted?.ids) ? accepted.ids : []);
-    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && open.every((finding) => acceptedIds.has(finding.id));
+    // On a plan branch a finding about the pull request or the commit history
+    // needs no accept — no fixer reaches it, and it merges disclosed — so a fresh
+    // one does not undo an accept that covers everything a fixer could reach.
+    // Off the plan branch an accept covers every finding open.
+    const needsAccept = onPlanBranch(state, ctx.config) ? open.filter((finding) => !isPullRequestFinding(finding)) : open;
+    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && needsAccept.every((finding) => acceptedIds.has(finding.id));
     const onPlan = covered ? acceptOnPlanBranch(ctx, id, [...acceptedIds]) : null;
     // Everything still open is about the pull request: no fixer can reach it,
     // so no fix round is spent on it. The spec publishes with the body the
