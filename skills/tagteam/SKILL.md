@@ -142,6 +142,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  read, kept outside every round                             ignored
     declined/    the reports of fixers and redesign implementers that changed
                  nothing                                                    ignored
+    refused-reports/  a report that could not be recorded, kept outside every
+                 round while a fresh agent is sent back for it              ignored
+    report-resend.json  that agent was sent: the round, the commit and the
+                 files kept; written once, so a round is resent only once   ignored
     pr-body.md  ci.json  usage.json                                          ignored
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
                  under ## Risk — on a plan branch each finding it would carry

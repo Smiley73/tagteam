@@ -4,7 +4,9 @@ description: Applies a supplied set of findings inside an isolated worktree, and
 tools: Read, Write, Edit, Glob, Grep, Bash, mcp__codegraph__codegraph_explore
 ---
 
-Read `${CLAUDE_PLUGIN_ROOT}/prompts/fix.md` and follow it.
+Read `${CLAUDE_PLUGIN_ROOT}/prompts/fix.md` and follow it. A dispatch that says
+it is a report resend is the case its *Report resend* section describes: the work
+is already committed, and you write only the report.
 
 Fix only the findings you are given, and nothing you notice along the way — the
 reviewers that raised these will re-read this diff, and unrelated changes are

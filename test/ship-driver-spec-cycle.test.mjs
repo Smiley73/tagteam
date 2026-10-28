@@ -656,12 +656,12 @@ test("lastJson returns the whole document a script printed, never one line of it
   assert.equal(lastJson("not a document\n"), null);
 });
 
-// The recovery the snapshot step documents — move the refused report aside and
-// rerun the same command — on a fix round. The fix commit was made and bound
-// before its report was refused, so the rerun arrives with a clean tree, HEAD at
-// the state's candidate and the fix-pending marker still on disk: the same shape
-// as a fixer that changed nothing, which it is not.
-test("a fix round whose report is refused reruns into the same round, is verified, and reaches finish without verification-not-recorded", () => {
+// A fix report the schema refuses. The fix commit was made and bound before its
+// report was judged, so the resend arrives with a clean tree, HEAD at the state's
+// candidate and the fix-pending marker still on disk: the same shape as a fixer
+// that changed nothing, which it is not. The fresh fixer sent back for the report
+// writes it, and the round records it as any snapshot does.
+test("a fix round whose report is refused is resent, reruns into the same round, is verified, and reaches finish without verification-not-recorded", () => {
   const { dir, plan, shipDir } = stage();
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
@@ -688,24 +688,25 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   const reportPath = outputOf(fix.json.dispatch[0]);
   write(reportPath, { outcomes: "fixed it", status: "complete", summary: "fixed sub" });
   arriveAll(fix);
-  const refused = ship("snapshot", plan, ["--spec", "01-a"]);
-  assert.equal(refused.status, 2, refused.stderr);
-  assert.match(refused.stderr, /could not be recorded[\s\S]*Move the refused file aside/);
+  const resent = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.equal(resent.json.dispatch.length, 1, "the fixer is sent back for its report");
   const second = state().candidateOid;
   assert.notEqual(second, first, "the fix was committed and bound before its report was refused");
   assert.equal(git(worktree, "rev-parse", "HEAD"), second);
   assert.ok(fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")), "the marker outlives the refusal");
 
-  // A person moves the refused file aside, keeps it, and reruns the same command.
-  fs.renameSync(reportPath, `${reportPath}.refused`);
+  // The fixer that was sent back writes the report, and the rerun records it.
+  write(outputOf(resent.json.dispatch[0]), { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: [] });
+  arriveAll(resent);
   const retried = ship("snapshot", plan, ["--spec", "01-a"]);
   assert.equal(retried.status, 0, retried.stderr);
   assert.equal(retried.json.round, 2, "the rerun re-enters the fix commit's round");
   assert.equal(retried.json.candidate, second);
-  assert.match(retried.json.say.join("\n"), /re-entering the round[\s\S]*report: missing/);
+  assert.match(retried.json.say.join("\n"), /re-entering the round[\s\S]*fix report: complete/);
   assert.match(retried.json.next, /verify --plan/, "a rerun goes on to verify, as every snapshot does");
   assert.equal(fs.readdirSync(path.join(shipDir, "01-a", "rounds")).filter((n) => /^\d+$/.test(n)).length, 2, "no new round");
-  assert.equal(state().gates.report?.status, "missing", "the round records that it has no account");
+  assert.equal(state().gates.report?.status, "complete");
   assert.equal(state().gates.report?.candidateOid, second);
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")), "the marker is consumed");
   assert.ok(!fs.existsSync(path.join(shipDir, "01-a", "declined")), "a committed fix is never filed as a fixer that changed nothing");
@@ -727,19 +728,13 @@ test("a fix round whose report is refused reruns into the same round, is verifie
   assert.equal(settle.json.review, "clean");
   assert.match(settle.json.next, /publish/);
 
-  // The verdict carries a non-empty approvals array — the round has no account,
-  // which is right — and that alone used to crash finish. Verification is not
-  // among the reasons the spec stops. A one-spec plan lands on the base, so the
-  // person's wait for that is the one other reason.
+  // The round has its account, so the only reason to stop is where it lands: a
+  // one-spec plan lands on the base, and the person's wait for that is all.
   const finish = ship("finish", plan, ["--spec", "01-a"], { PATH: quietPath(dir) });
   assert.equal(finish.status, 0, finish.stderr);
-  assert.deepEqual(finish.json.reasons, ["straight-to-base", "work-not-accounted-for"],
-    "the only reasons to stop are where it lands and the account the fixer never gave");
-  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["straight-to-base", "work-not-accounted-for"]]);
-  assert.match(finish.json.ask, /never confirmed it finished/);
-  assert.match(finish.json.ask, /--approve/, "nothing is blocked, so approving is offered: evaluate honours it");
-  assert.equal(finish.json.unaccounted.length, 1);
-  assert.match(finish.json.unaccounted[0], /wrote no report/);
+  assert.deepEqual(finish.json.reasons, ["straight-to-base"]);
+  assert.deepEqual([finish.json.blockers, finish.json.approvals], [[], ["straight-to-base"]]);
+  assert.deepEqual(finish.json.unaccounted, [], "a resent report is an account like any other");
   assert.equal(state().state, "verifying", "a finish that stops before publish leaves the state where it was");
 });
 

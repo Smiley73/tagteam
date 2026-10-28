@@ -519,20 +519,23 @@ test("the refusal at the round's report does not send its reader to re-enter the
     /rebuilds it, but empties it first/, "a round file that re-entry does rebuild lost its recovery");
 });
 
-test("a malformed report is refused with what it costs every later round of the spec", () => {
+test("a malformed report is refused with what it costs every later round of the spec, and names the file for the driver", () => {
   // The file sits at a path with no round number in it and nothing removes it, so
-  // an orchestrator that reads this as a warning and commits again meets the same
-  // refusal in the next round — where it lands before the report that round does
-  // have is looked at, and that round's real account is lost. The refusal is only
-  // survivable if it says so where it is read.
+  // a refusal that is not dealt with now is met again in the next round — where it
+  // lands before the report that round does have is looked at. The refusal says
+  // so where it is read, and prints the refused paths as a document: the driver
+  // moves them aside and sends the agent back, and does not parse prose for them.
   const ship = shipAt();
   roundIn(ship, 1);
-  fs.writeFileSync(path.join(ship, "implement-report.json"), JSON.stringify({ summary: "did it", unfinished: [] }));
+  const file = path.join(ship, "implement-report.json");
+  fs.writeFileSync(file, JSON.stringify({ summary: "did it", unfinished: [] }));
   const result = record(ship, reportPath(ship, 1));
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /every later round of this spec reads this same file/);
-  assert.match(result.stderr, /before the next commit/);
+  const { refused } = JSON.parse(result.stdout);
+  assert.deepEqual(refused.files, [file]);
+  assert.match(refused.problems[0], /does not match the implement-report schema/);
 });
 
 test("a report that claims complete while listing unfinished work is recorded as unfinished", () => {

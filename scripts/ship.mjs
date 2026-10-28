@@ -319,6 +319,18 @@ function verifyLine(ctx) {
     + commands.map((entry) => `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`).join("\n");
 }
 
+// The check an agent runs on its own report before it returns, so that a report
+// the recorder would refuse is corrected while the agent that wrote it is still
+// there to correct it.
+function validateLine(ctx, file, schema) {
+  return `Check your report before you return: node ${q(path.join(SCRIPTS, "validate-json.mjs"))} --repo ${q(ctx.repo)} `
+    + `${q(path.join(PLUGIN, "schemas", schema))} ${q(file)} — it prints valid when the report passes and says what is wrong when it does not; `
+    + "correct the report until it passes.";
+}
+
+const implementReportPath = (ctx, id) => path.join(specDir(ctx, id), "implement-report.json");
+const fixReportPath = (ctx, id) => path.join(specDir(ctx, id), "fix-report.json");
+
 function implementerDispatch(ctx, spec, job) {
   return {
     ...agent("implementer", job),
@@ -329,7 +341,8 @@ function implementerDispatch(ctx, spec, job) {
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
       verifyLine(ctx),
-      `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
+      validateLine(ctx, implementReportPath(ctx, spec.id), "implement-report.schema.json"),
+      `Write your report to: ${implementReportPath(ctx, spec.id)}`
     ].join("\n")
   };
 }
@@ -352,7 +365,8 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
       verifyLine(ctx),
-      `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
+      validateLine(ctx, implementReportPath(ctx, spec.id), "implement-report.schema.json"),
+      `Write your report to: ${implementReportPath(ctx, spec.id)}`
     ].join("\n")
   };
 }
@@ -902,7 +916,8 @@ function fixerDispatch(ctx, spec, recordPath, job) {
       `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       verifyLine(ctx),
-      `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")}`
+      validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
+      `Write your fix report to: ${fixReportPath(ctx, spec.id)}`
     ].join("\n")
   };
 }
@@ -932,7 +947,8 @@ function repairDispatch(ctx, spec, state, job) {
         `What failed and its log: ${landing.resultPath ?? landing.dir}. Read it before changing anything; the commands `
           + "there are this repository's own, and they ran against the merged tree.",
         `Worktree (work only beneath this path): ${ctx.worktree}`,
-        `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
+        validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
+        `Write your fix report to: ${fixReportPath(ctx, spec.id)} — outcomes is an empty array, and the repair is described in summary.`
       ].join("\n")
     };
   }
@@ -945,7 +961,45 @@ function repairDispatch(ctx, spec, state, job) {
       `Pull request #${state.pr?.number ?? "?"} on branch ${state.branch}: read the failed check's log with gh (for example \`gh pr checks ${state.pr?.number ?? ""}\` and \`gh run view --log-failed\`) before changing anything.`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       verifyLine(ctx),
-      `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
+      validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
+      `Write your fix report to: ${fixReportPath(ctx, spec.id)} — outcomes is an empty array, and the repair is described in summary.`
+    ].join("\n")
+  };
+}
+
+// The fresh agent of the role that left an unusable report, sent back to write
+// only the report for work that is already committed. It reconstructs the account
+// from the commit range and the brief the original was handed, and it runs at the
+// agent, model and effort the original was sent at.
+function reportResendDispatch(ctx, spec, { pending, state, oid, request, problems, kept }) {
+  const implementer = !pending || pending.from === "redesign";
+  const landing = pending?.from === "repair" ? landingFailure(state) : null;
+  const brief = [
+    ...(pending?.from === "redesign" ? [`Redesign brief: ${pending.record}`, `Files to redesign: ${(pending.files ?? []).join(", ")}`] : []),
+    ...(["panel", "settle"].includes(pending?.from) ? [`Findings to fix: ${pending.record}`] : []),
+    ...(pending?.from === "repair"
+      ? [landing
+        ? `A landing repair: what failed and its log is ${landing.resultPath ?? landing.dir}.`
+        : `A CI repair: its record is ${path.join(specDir(ctx, spec.id), "ci.json")}.`]
+      : []),
+    `Spec: ${spec.path}`
+  ];
+  return {
+    ...request,
+    description: `Resend report for ${spec.id}`,
+    prompt: [
+      `Job: ${implementer ? "implementer" : "fixer"}`,
+      `This is a report resend, not a new job: read prompts/${implementer ? "implement" : "fix"}.md and its Report resend section. `
+        + "The work is already committed; change nothing under the worktree, and write only the report.",
+      `Commit range of the work: ${pending?.candidate ?? ctx.baseOid}..${oid}`,
+      ...brief,
+      `Worktree (read only): ${ctx.worktree}`,
+      `Why the report you were sent back for was refused:\n${problems.join("\n")}`,
+      kept.length > 0 ? `The refused report is kept at ${kept.join(", ")}; the report path is empty.` : "Nothing was written at the report path.",
+      validateLine(ctx, implementer ? implementReportPath(ctx, spec.id) : fixReportPath(ctx, spec.id), `${implementer ? "implement" : "fix"}-report.schema.json`),
+      implementer
+        ? `Write your report to: ${implementReportPath(ctx, spec.id)}`
+        : `Write your fix report to: ${fixReportPath(ctx, spec.id)}${pending.from === "repair" ? " — outcomes is an empty array, and the repair is described in summary." : ""}`
     ].join("\n")
   };
 }
@@ -1169,6 +1223,14 @@ function listOf(words) {
 // commit that went on to be reviewed and published was never verified — so
 // `finish` stopped it for verification-not-recorded.
 const fixPendingPath = (ctx, id) => path.join(specDir(ctx, id), "fix-pending.json");
+
+// Written by `snapshot` when a dispatched agent's report was unusable and a fresh
+// agent of its role was sent back for it. It names the round and the commit the
+// report is for, and it is what makes the resend happen once: written before the
+// resend goes out, so no ordering of crashes and reruns can send a second one.
+// A marker for another candidate is stale and ignored; it goes where the
+// fix-pending marker does, once the round's report is recorded.
+const reportResendPath = (ctx, id) => path.join(specDir(ctx, id), "report-resend.json");
 
 // Written by `snapshot` when a fixer was handed findings and changed nothing —
 // every one of them answered `wont-fix` or `failed`. It names the candidate the
@@ -3000,6 +3062,53 @@ function versionLineStop(ctx, id, state, step) {
   };
 }
 
+// An unusable report from an agent the ship dispatched is sent back once. The
+// refused files leave the report path first — it carries no round number, so a
+// file left there is refused again by every later round — and are kept beside
+// the spec's rounds for a person to read. Nothing here commits, allocates a
+// round or moves the state: the round is the one the commit already owns.
+async function resendReport(ctx, id, spec, { state, pending, round, oid, refused, judged }) {
+  const implementer = !pending || pending.from === "redesign";
+  const role = implementer ? "implementer" : "fixer";
+  const keptDir = path.join(specDir(ctx, id), "refused-reports");
+  fs.mkdirSync(keptDir, { recursive: true, mode: 0o700 });
+  const stamp = stampNow();
+  const kept = refused.files.map((file) => {
+    const target = path.join(keptDir, `round-${round}-${stamp}-${path.basename(file)}`);
+    fs.renameSync(file, target);
+    return target;
+  });
+  const job = roles(ctx, id).jobs[implementer ? "implement" : pending.from === "repair" ? "repair-fix" : "fix"];
+  const request = (judged ? readSet(setDir(ctx, id, judged), judged)?.agents?.[0]?.request : null)
+    ?? agent(role, job);
+  const dispatch = reportResendDispatch(ctx, spec, { pending, state, oid, request, problems: refused.problems, kept });
+  writeJson(reportResendPath(ctx, id), {
+    round, candidate: oid, role, kept, problems: refused.problems, at: new Date().toISOString()
+  });
+  const set = await sendForSnapshot(ctx, id, { kind: "report-resend", round, dispatch, job });
+  return { dispatch, set, kept, role };
+}
+
+// The stop for a report that cannot be used and will not be sent back: nobody
+// dispatched the commit, or the one resend has been spent.
+function unusableReportStop(ctx, id, { oid, round, refused, resent, role }) {
+  const snapshotCommand = nextCommand(ctx, "snapshot", id);
+  const end = nextCommand(ctx, "end", null);
+  const what = refused.problems.join("\n");
+  if (!resent) {
+    return new Stop(`The report for ${short(oid)} cannot be used:\n${what}\nThis commit was not dispatched by this run, so there is no `
+      + "agent to send back and ask for a new one, and nothing was recorded. You decide: correct the file"
+      + `${refused.files.length ? ` (${refused.files.join(", ")})` : ""}, or move it out of the way to have this round recorded as having no report `
+      + `(finish then stops for you to read it), and run snapshot again (${snapshotCommand}) without committing first; or stop the train (run ${end}).`);
+  }
+  return new Stop(`The report for round ${round} (${short(oid)}) is still unusable after the ${role} was sent back for it once:\n${what}\n`
+    + `The first attempt is kept at ${resent.kept.join(", ") || "nowhere: it wrote nothing"}; the second `
+    + `${refused.files.length ? `is left at ${refused.files.join(", ")}` : "wrote nothing"}. The work itself is committed and nothing about it is lost. `
+    + "No agent is asked a third time, and the round is not recorded as having no report. You decide: put a valid report at "
+    + `${role === "implementer" ? implementReportPath(ctx, id) : fixReportPath(ctx, id)} (an honest unfinished one is enough when nobody knows `
+    + `what the agent did) and run snapshot again (${snapshotCommand}); or stop the train (run ${end}).`);
+}
+
 async function snapshot(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -3034,6 +3143,18 @@ async function snapshot(options) {
   // seen, and every fix round after it was refused at the snapshot that would
   // have landed its work.
   const outOfBand = dirty && !pending && state.state !== "implementing";
+
+  // A resend was asked to write the report and nothing else. Its marker is only
+  // about the commit the round was bound to, so it is checked before anything is
+  // committed: whatever else is in the tree is not the work that was reviewed.
+  const sent = readJson(reportResendPath(ctx, id), null);
+  const resent = sent?.candidate === state.candidateOid ? sent : null;
+  if (resent && (dirty || head !== resent.candidate)) {
+    throw new Stop(`The ${resent.role} was sent back to write only the report for round ${resent.round} (${short(resent.candidate)}), `
+      + `but the worktree has changed: ${dirty ? "it has changes that are not committed" : `it is at ${short(head)}`}. Nothing was committed and `
+      + `the report was not read. You decide: put ${ctx.worktree} back at ${short(resent.candidate)}, discarding what changed, and run snapshot `
+      + `again (${nextCommand(ctx, "snapshot", id)}), which then reads the report; or stop the train (run ${nextCommand(ctx, "end", null)}).`);
+  }
 
   // A fixer that changed nothing does not make a round. Its report is carried
   // by this output, then moved aside so no later round adopts it as its own.
@@ -3181,9 +3302,23 @@ async function snapshot(options) {
     writeRoundFile(path.join(dir, ROUND_REDESIGN), `${JSON.stringify(redesigned, null, 2)}\n`);
   }
   node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "candidate.json")]);
-  const recorded = node("record-round-report.mjs", ["--dir", specDir(ctx, id), "--out", path.join(dir, "report.json")], { allow: [2] });
+  // A round an agent was dispatched for is not recorded as having no report: it
+  // is refused, and the agent sent back for it.
+  const dispatched = Boolean(pending) || state.state === "implementing";
+  const recorded = node("record-round-report.mjs", [
+    "--dir", specDir(ctx, id), "--out", path.join(dir, "report.json"), ...(dispatched ? ["--absence", "refuse"] : [])
+  ], { allow: [2] });
   if (recorded.status === 2) {
-    throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
+    const refused = lastJson(recorded.stdout)?.refused;
+    if (!refused) throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}`);
+    if (!dispatched || resent) {
+      throw unusableReportStop(ctx, id, { oid, round, refused, resent, role: resent?.role });
+    }
+    const sending = await resendReport(ctx, id, spec, { state, pending, round, oid, refused, judged });
+    say.push(`The ${sending.role}'s report for round ${round} (${short(oid)}) cannot be used:\n${refused.problems.join("\n")}`,
+      `The commit stands and nothing is redone. One fresh ${sending.role} is sent back, once, to write only the report`
+        + `${sending.kept.length ? `; what was refused is kept at ${sending.kept.join(", ")}` : ""}.`);
+    return done({ say, round, candidate: oid, dispatch: [sending.dispatch], set: sending.set, next: nextCommand(ctx, "snapshot", id) });
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
   let conflict = null;
@@ -3193,6 +3328,7 @@ async function snapshot(options) {
     if (goalConflicts(report).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
   }
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
+  fs.rmSync(reportResendPath(ctx, id), { force: true });
 
   say.push(allocation.granted
     ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by your answer to the question at the cap. No round is left after it in this cycle.`

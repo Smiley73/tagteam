@@ -27,13 +27,21 @@
 // validated, not only the one that turns out to be its own — the alternative
 // files malformed agent output away as an absence nobody has to look at.
 //
-// That refusal has to be dealt with in the round that raises it, and the message
-// says so, because nothing here can deal with it later: the refused file sits at
-// a path with no round number in it, nothing removes it, and it was never
-// recorded anywhere, so no later round can tell it from a report of its own. Left
-// where it is, it is re-read and refused by every round after this one — before
-// the report that round does have has been looked at — and each of those rounds
-// ends up with no account of its work. Exiting 2 is a stop, not a warning.
+// That refusal has to be dealt with in the round that raises it, because
+// nothing here can deal with it later: the refused file sits at a path with no
+// round number in it, nothing removes it, and it was never recorded anywhere, so
+// no later round can tell it from a report of its own. Left where it is, it is
+// re-read and refused by every round after this one — before the report that
+// round does have has been looked at.
+//
+// So the refusal says which files it refused, and why, in a document the driver
+// reads rather than prose it parses (`ReportRefused`, printed on stdout). For a
+// round an agent was dispatched for, the driver moves those files aside and asks
+// one fresh agent of the same role for the report again. `--absence refuse` is
+// how it says the round is such a one: a dispatched round with no new report, or
+// two, is refused like a malformed one instead of being recorded as having none.
+// A round nobody dispatched has no agent to ask; there the refusal is a stop for
+// a person, and an absence is still recorded as `missing`.
 //
 // **A report already recorded in another round of this spec is not a report for
 // this round.** The agents' paths carry no round number — the recording happens
@@ -73,15 +81,26 @@ const KINDS = [
   { kind: "fix", file: "fix-report.json", schema: "fix-report.schema.json" }
 ];
 
-// Carried by both refusals, whose reader is an autonomous orchestrator: a broken
-// report is only broken once if it is rewritten now, and is a stop for every
-// later round of the spec if it is not.
-const CORRECT_IT_NOW = "Nothing was recorded, so this round has no account of its work and the gate that reads "
-  + "one is unsatisfied. The path has no round number in it and nothing clears it: left as it is, every later "
-  + "round of this spec reads this same file and refuses here too, before the report that round does have is "
-  + "looked at. No agent can be asked to rewrite it — the one that wrote it is gone, and a fresh one never did "
-  + "the work. Move the file aside, keeping it for the person who reads this round, and re-run this before the "
-  + "next commit: the round then records that it has no account, and the run waits for a person.";
+// What every refusal ends with. The reader of the message is a person, or the
+// driver, which reads the document beside it instead: a broken report is only
+// broken once if it is dealt with now, and is a refusal for every later round of
+// the spec if it is not.
+const CORRECT_IT_NOW = "Nothing was recorded, so this round has no account of its work. The refused file sits at a path "
+  + "with no round number in it and nothing clears it: left as it is, every later round of this spec reads this same "
+  + "file and refuses here too, before the report that round does have is looked at.";
+
+/**
+ * A refusal the driver acts on. `files` are the new reports refused, which the
+ * driver moves out of the report path, and `problems` say what is wrong with
+ * them, one plain sentence each — both printed as a document on stdout.
+ */
+export class ReportRefused extends Error {
+  constructor({ files, problems }) {
+    super(`${problems.join("\n")}\n${CORRECT_IT_NOW}`);
+    this.files = files;
+    this.problems = problems;
+  }
+}
 
 function parseArgs(argv) {
   const options = {};
@@ -94,6 +113,9 @@ function parseArgs(argv) {
   }
   for (const required of ["dir", "out"]) {
     if (!options[required]) throw new Error(`--${required} is required`);
+  }
+  if (options.absence !== undefined && !["record", "refuse"].includes(options.absence)) {
+    throw new Error("--absence is record or refuse");
   }
   return options;
 }
@@ -168,9 +190,11 @@ function heldWrapper(target) {
  * Returns the wrapper it wrote: `{status, kind, source, reason, report}`, with
  * `status: "missing"` and everything else null when this round has no report of
  * its own. Throws — and writes nothing — when the one report it found is
- * unreadable, fails its schema, or was written inside a round.
+ * unreadable, fails its schema, or was written inside a round. With
+ * `absence: "refuse"` it also throws, and writes nothing, when there is no new
+ * report or two of them, instead of recording that the round has none.
  */
-export function recordRoundReport({ dir, out, schemaDir }) {
+export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
   const source = path.resolve(dir);
   const target = path.resolve(out);
   const ownRound = path.dirname(target);
@@ -185,6 +209,7 @@ export function recordRoundReport({ dir, out, schemaDir }) {
   const held = recordedElsewhere(path.dirname(ownRound), ownRound);
   const considered = [];
   const found = [];
+  const refused = [];
   for (const candidate of KINDS) {
     const file = path.join(source, candidate.file);
     if (!fs.existsSync(file)) {
@@ -195,7 +220,8 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     try {
       parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     } catch (error) {
-      throw new Error(`the report at ${file} is unreadable: ${error.message}\n${CORRECT_IT_NOW}`);
+      refused.push({ file, problem: `the report at ${file} is unreadable: ${error.message}` });
+      continue;
     }
     const round = held.get(serialize(parsed));
     if (round !== undefined) {
@@ -224,11 +250,15 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     const schemaPath = path.join(schemaDir, candidate.schema);
     const errors = validateJson(JSON.parse(fs.readFileSync(schemaPath, "utf8")), parsed);
     if (errors.length > 0) {
-      throw new Error(`the report at ${file} does not match the `
+      refused.push({ file, problem: `the report at ${file} does not match the `
         + `${candidate.schema.replace(/\.schema\.json$/, "")} schema:\n`
-        + `${errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n")}\n${CORRECT_IT_NOW}`);
+        + errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n") });
+      continue;
     }
     found.push({ ...candidate, file, parsed, filled });
+  }
+  if (refused.length > 0) {
+    throw new ReportRefused({ files: refused.map((entry) => entry.file), problems: refused.map((entry) => entry.problem) });
   }
 
   // No new report, and the round already holds its account — a re-entered round
@@ -250,6 +280,9 @@ export function recordRoundReport({ dir, out, schemaDir }) {
     const reason = found.length === 0
       ? `no new report from this round: ${considered.join(", ")}`
       : `two new reports for one round, and a round is one agent's work: ${considered.join(", ")}`;
+    if (absence === "refuse") {
+      throw new ReportRefused({ files: found.map((entry) => entry.file), problems: [reason] });
+    }
     const record = { status: "missing", kind: null, source: null, reason, report: null };
     writeRoundFile(target, serialize(record));
     return record;
@@ -307,6 +340,7 @@ async function main() {
     const record = recordRoundReport({ ...options, schemaDir });
     process.stdout.write(`${summaryLines(record, path.resolve(options.out)).join("\n")}\n`);
   } catch (error) {
+    if (error instanceof ReportRefused) process.stdout.write(`${JSON.stringify({ refused: { files: error.files, problems: error.problems } })}\n`);
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 2;
   }

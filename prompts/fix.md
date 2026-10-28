@@ -76,6 +76,11 @@ them what is missing.
 dependency, a new top-level file or directory — to fix a finding. That repair is
 a person's decision: answer the finding `wont-fix` and say so in the note.
 
+**Before you return, check the report against its schema** with the command the
+dispatch gives you, and correct it until it says valid. A report the recorder
+refuses costs the round a second fixer, or a person, for a mistake you could have
+caught.
+
 ## Repairs
 
 Fix the cause, not the symptom. A finding that says a value can be null is not
@@ -111,6 +116,19 @@ ignores it.
 
 Match the surrounding code. This diff has already been reviewed for conventions,
 and will be again.
+
+## Report resend
+
+A dispatch may say it is a report resend. The work is already committed: an
+earlier fixer did it and its report could not be used, and you are the fresh
+fixer sent back for the report alone. You are given the commit range of the work,
+the brief the earlier fixer was handed, why its report was refused, and where
+that report is kept. Change nothing under the worktree. Read the range and the
+brief, work out which finding each change answers, and write the report at the
+path you are given, with one entry per finding as above. Check it before you return,
+as the end of Scope says. If you cannot tell whether a finding was fixed, answer it `failed`
+and say so in the note rather than claiming `fixed`. The run sends a fixer back
+for a report once, and a person decides after that.
 
 ## Boundaries
 

@@ -96,8 +96,9 @@ export const write = (file, value) => {
 };
 
 // What a dispatch's prompt names as the file to write, so the fake agent writes
-// exactly where the real one would.
-export const outputOf = (dispatch) => /Write your (?:findings|verdicts|report|fix report) to: (.*)$/m.exec(dispatch.prompt)[1].trim();
+// exactly where the real one would. A repair's line carries a note after the
+// path, which is not part of it.
+export const outputOf = (dispatch) => /Write your (?:findings|verdicts|report|fix report) to: (.*?)(?: — .*)?$/m.exec(dispatch.prompt)[1].trim();
 
 // Every dispatch is a set — a review, or the one implementer or fixer whose
 // work `snapshot` reads — judged only once every agent in it has been recorded
