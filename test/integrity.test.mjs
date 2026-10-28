@@ -1248,11 +1248,12 @@ test("the README and the skill introduce the plan branch as the familiar feature
   assert.ok(skill.replace(/\s+/g, " ").indexOf("feature branch") < firstInSkill, "SKILL.md names the plan branch before its overview introduces it");
 });
 
-// A caught error's message rethrown as a bare `Stop` reaches the person as the
-// raw error with nothing above it, whether it is the whole text or follows a
-// prefix of the driver's own. `Stop.raw` is what puts the plain lead there. A
-// written sentence that gives the error after its own plain reason, and goes on
-// in words (`${error.message}. Nothing was recorded`), is not a rewrap.
+// What a person reads first of a stop is the first line, and it has to be the
+// whole reason. The text of a child process, a caught error or a record therefore
+// never goes into a stop built with `new Stop`: not as the whole text, not after
+// a prefix, not mid-sentence, and not as further lines. It goes through
+// `Stop.raw`, which puts a plain lead above it, or `Stop.beneath`, which keeps
+// the driver's own first line and puts it on the lines below.
 function bareStopCalls(source) {
   const calls = [];
   for (let at = source.indexOf("new Stop("); at !== -1; at = source.indexOf("new Stop(", at + 1)) {
@@ -1278,30 +1279,27 @@ function bareStopCalls(source) {
   }
   return calls;
 }
-const REWRAPS_ERROR = (text) => /\b\w+\.message\b/.test(text.replace(/\$\{\w+\.message\}\.\s/g, ""));
+const CARRIES_RAW_TEXT = (text) => /\.(?:message|stderr|stdout)\b|\\n/.test(text);
 
-test("no site rethrows a caught error's message as a bare Stop", () => {
-  const bare = bareStopCalls(shipDriver).filter(({ text }) => REWRAPS_ERROR(text));
-  assert.deepEqual(bare.map(({ line, text }) => `scripts/ship.mjs:${line}: ${text.split("\n")[0].trim()}`), []);
-  assert.ok(bareStopCalls(shipDriver).length > 100, "the scan found the Stop sites it is meant to check");
-  for (const rewrap of [
+test("no stop is built with a caught error's or a child's text in it", () => {
+  const calls = bareStopCalls(shipDriver);
+  assert.deepEqual(calls.filter(({ text }) => CARRIES_RAW_TEXT(text)).map(({ line, text }) => `scripts/ship.mjs:${line}: ${text.split("\n")[0].trim()}`), []);
+  assert.ok(calls.length > 100, "the scan found the Stop sites it is meant to check");
+  for (const carries of [
     "throw new Stop(error.message);",
-    "throw new Stop(`${err.message}`, 2);",
-    "throw new Stop( e.message )",
-    "throw new Stop(`could not read ${file}: ${error.message}`);",
-    "throw new Stop(`gh pr view printed no document (the plan's pull request): ${error.message}`);",
-    "throw new Stop(`could not read the files at ${short(commit)}: ${error.message}`);",
-    "throw new Stop(`the resolver stopped\n${error.message}`);",
-    "throw new Stop(`${spec.id} was merged: `\n        + error.message);"
+    "throw new Stop(`the push of ${short(oid)} failed: ${error.message}. Nothing else changed.`);",
+    "throw new Stop(`${spec.id} was merged: `\n        + error.message);",
+    "throw new Stop(`verify could not run: ${(verified.stderr || verified.stdout).trim()}`);",
+    "throw new Stop(`the resolver stopped.\\n${what}`);"
   ]) {
-    const [call] = bareStopCalls(rewrap);
-    assert.ok(call && REWRAPS_ERROR(call.text), `the guard misses ${rewrap}`);
+    const [call] = bareStopCalls(carries);
+    assert.ok(call && CARRIES_RAW_TEXT(call.text), `the guard misses ${carries}`);
   }
-  for (const written of [
+  for (const fine of [
     'throw Stop.raw(error.message, "a git command failed");',
-    "throw Stop.raw(`could not read ${file}: ${error.message}`, \"a record could not be read\");",
-    "throw new Stop(`${spec.id} was merged, and GitHub's account does not match: ${error.message}. Nothing was recorded.`);"
+    "throw Stop.beneath(`${spec.id} was merged; run this again.`, error.message);",
+    "throw new Stop(`${spec.id} was merged, so nothing was recorded; run this again.`);"
   ]) {
-    assert.ok(!bareStopCalls(written).some(({ text }) => REWRAPS_ERROR(text)), `the guard flags ${written}`);
+    assert.ok(!bareStopCalls(fine).some(({ text }) => CARRIES_RAW_TEXT(text)), `the guard flags ${fine}`);
   }
 });

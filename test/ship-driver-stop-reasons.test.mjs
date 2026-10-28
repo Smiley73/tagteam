@@ -58,6 +58,21 @@ test("a plan-branch push origin refuses is led by the push that failed and the w
   assert.equal(onOrigin(origin, "plan/demo"), before, "the plan branch moved on origin");
 });
 
+// The tool checks are skipped in every suite; this one runs them, with a Codex at
+// the floor and a GitHub command line that is not signed in.
+test("a GitHub command line that is not signed in is led by that, with its own words beneath", () => {
+  const { dir, plan } = stage();
+  const bin = path.join(dir, "bin-signed-out");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\necho 'codex-cli 0.153.0'\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\necho 'You are not logged into any GitHub hosts.' >&2\nexit 1\n", { mode: 0o755 });
+  const refused = ship("start", plan, [], { PATH: `${bin}${path.delimiter}${process.env.PATH}`, TAGTEAM_SKIP_TOOL_CHECKS: "", TAGTEAM_CODEX_BIN: "" });
+  assert.equal(refused.status, 1, refused.stdout);
+  const { lead, raw } = leadAndRaw(refused);
+  assert.match(lead, /^The start step stopped because the GitHub command line is not signed in\. Put right what the error below says/);
+  assert.equal(raw, "You are not logged into any GitHub hosts.");
+});
+
 test("a record that cannot be parsed is led the same way, with its path in the raw part and not in the opening", () => {
   const staged = stagePlan();
   assert.equal(ship("start", staged.plan, [], staged.env).status, 0);

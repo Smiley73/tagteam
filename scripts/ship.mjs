@@ -87,17 +87,29 @@ const SCRIPTS = path.join(PLUGIN, "scripts");
 
 // --- process helpers -------------------------------------------------------
 
+// A stop reaches the person in one of three forms, and the text of a child
+// process, a caught error or a record enters a stop through the last two only:
+//   new Stop(text)        the driver's own words, one line: the reason and what to decide.
+//   Stop.beneath(text, d) the same first line, with `d` on the lines beneath it as the evidence.
+//   Stop.raw(d, failure)  `d` unchanged, under a lead `main` writes from `failure`.
+// The integrity test keeps the first of these free of both, so the first line a
+// person reads is always complete.
 class Stop extends Error {
   constructor(message, exitCode = 1, failure = null) {
     super(message);
     this.exitCode = exitCode;
-    // Set only on a stop that carries someone else's error text unchanged: a
-    // clause saying what failed, which `main` puts a plain lead above.
     this.failure = failure;
   }
 
-  static raw(message, failure, exitCode = 1) {
-    return new Stop(message, exitCode, failure);
+  static beneath(message, detail, exitCode = 1) {
+    const stop = new Stop(message, exitCode);
+    const evidence = String(detail ?? "").trim();
+    if (evidence) stop.message = `${message}\n${evidence}`;
+    return stop;
+  }
+
+  static raw(detail, failure, exitCode = 1) {
+    return new Stop(detail, exitCode, failure);
   }
 }
 
@@ -1545,6 +1557,18 @@ async function pushToPlanBranch(ctx, oid, { recorded = false } = {}) {
   ctx.train = readJson(ctx.trainPath);
 }
 
+// A push git refused, with the branch still where the record has it: the same
+// check that judges a branch moved in between says so first, and otherwise
+// git's refusal stands beneath a lead. Nothing is retried or forced.
+async function pushShipCommit(ctx, oid, { what, outcome, recorded = false }) {
+  try { await pushToPlanBranch(ctx, oid, { recorded }); } catch (error) {
+    await planTipCheck(ctx, outcome);
+    const branch = routeOf(ctx).branch;
+    throw Stop.raw(error.message, `the push of the ${what} ${short(oid)} to ${branch} failed while ${branch} on origin is still where `
+      + "this ship recorded it, and nothing else changed");
+  }
+}
+
 // The sentence a plan branch that is not where the record says stops with.
 // `adopt` is the command that takes origin's commits as the plan's tip, when they
 // sit on top of the recorded tip; null says they do not, and nothing offers it.
@@ -1602,9 +1626,8 @@ async function planTipCheck(ctx, outcome) {
 // advice that takes a merged spec back off the plan branch.
 function mergeFactsOf(ctx, number, outcome) {
   try { return readMergedPr(ctx.repo, number); } catch (error) {
-    const why = String(error.message).replace(/^could not read pull request #\d+: /, "");
-    throw new Stop(`could not read pull request #${number} from GitHub (${why}), so ${outcome}. `
-      + "Nothing about the plan branch was decided from it; run this again.");
+    throw Stop.beneath(`could not read pull request #${number} from GitHub, so ${outcome}. `
+      + "Nothing about the plan branch was decided from it; run this again.", error.message);
   }
 }
 
@@ -1715,7 +1738,10 @@ async function reconcileMerged(ctx, { own = null, landed = false } = {}) {
       ? `${spec.id} is merged and the plan branch's record has not followed it; nothing else was recorded`
       : `whether ${spec.id} is merged into ${route.branch} is not known, and nothing was recorded`);
     try { adoptMerge(state, facts); } catch (error) {
-      if (required) throw new Stop(`${spec.id} was merged, and GitHub's account of pull request #${state.pr.number} does not match: ${error.message}. Nothing was recorded.`);
+      if (required) {
+        throw Stop.beneath(`${spec.id} was merged, and GitHub's account of pull request #${state.pr.number} does not match what the `
+          + "ship recorded for it. Nothing was recorded; look at the pull request, then run this again.", error.message);
+      }
       continue;
     }
     found.push({ id: spec.id, squash: facts.mergeCommitOid ?? null });
@@ -2010,8 +2036,8 @@ const routeEntries = (ctx) => versionFilesOf(routeOf(ctx)) ?? [];
 function signsCommits(ctx) {
   const read = gpgsignIn(ctx.worktree);
   if (!read.error) return read.on;
-  throw new Stop(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
-    + `nothing was committed or pushed: ${read.error}. git commit refuses that setting as well; correct it, then run this again.`);
+  throw Stop.beneath(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
+    + "nothing was committed or pushed. git commit refuses that setting as well; correct it, then run this again.", read.error);
 }
 
 // `key` as git reads it in `dir` — its last value, null when unset — or git's
@@ -2103,10 +2129,10 @@ function shipCommit(ctx, args, { subject, again, held, settle = () => {}, kept =
   const made = git(ctx.worktree, call, { allowFailure: true });
   if (made.status === 0) return made;
   settle();
-  throw new Stop(`git could not make the commit "${subject}". This repository's git configuration signs commits, so the signer is `
-    + `the likely cause; git said: ${(made.stderr || made.stdout || "").trim() || `exit status ${made.status}`}. Nothing was `
-    + `committed, recorded or pushed, and ${held}.${kept} Get git signing again: unlock the key, or start the agent that holds `
-    + `it, and check the key gpg.format points git at. Then run ${again}, which goes on from here.`);
+  throw Stop.beneath(`git could not make the commit "${subject}". This repository's git configuration signs commits, so the signer is `
+    + `the likely cause. Nothing was committed, recorded or pushed, and ${held}.${kept} Get git signing again: unlock the key, or start `
+    + `the agent that holds it, and check the key gpg.format points git at. Then run ${again}, which goes on from here.`,
+  (made.stderr || made.stdout || "").trim() || `git exited with status ${made.status}`);
 }
 
 /**
@@ -2123,7 +2149,7 @@ function startBaseMerge(ctx, { tip, baseOid }) {
   git(ctx.worktree, ["checkout", "--detach", tip]);
   const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", baseOid], { allowFailure: true });
   if (!mergeInProgress(ctx)) {
-    throw new Stop(`The merge of ${short(baseOid)} into ${short(tip)} did not start; git said: ${(merging.stderr || merging.stdout || "").trim()}`);
+    throw Stop.raw((merging.stderr || merging.stdout || "").trim(), `the merge of ${short(baseOid)} into ${short(tip)} did not start`);
   }
   let reset;
   try { reset = versionStep({ worktree: ctx.worktree, entries: routeEntries(ctx), baseOid }); } catch (error) {
@@ -2468,13 +2494,7 @@ async function pushResolution(ctx, record, attempt, say) {
   const outcome = `the resolved merge was not pushed, and ${record.held}`;
   await planTipCheck(ctx, outcome);
   if (routeOf(ctx).tipOid !== attempt.mergeOid) {
-    try {
-      await pushToPlanBranch(ctx, attempt.mergeOid);
-    } catch (error) {
-      await planTipCheck(ctx, outcome);
-      throw Stop.raw(error.message, `the push of the resolved merge ${attempt.mergeOid.slice(0, 12)} to ${record.branch} failed while `
-        + `${record.branch} on origin is still where this ship recorded it, and nothing else changed`);
-    }
+    await pushShipCommit(ctx, attempt.mergeOid, { what: "resolved merge", outcome });
   }
   forgetIncrease(ctx);
   record.status = "passed";
@@ -2709,7 +2729,9 @@ async function start(options) {
 
   const validation = node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "config.schema.json"), ctx.configPath], { allow: [1, 3] });
   if (validation.status === 3) throw new Stop("the configuration was written by an older plugin: run /tagteam:configure", 3);
-  if (validation.status === 1) throw new Stop(`the configuration is invalid:\n${validation.stderr.trim()}`);
+  if (validation.status === 1) {
+    throw Stop.beneath("The configuration is invalid: correct the problems listed beneath in .tagteam/config.json and run start again.", validation.stderr);
+  }
   for (const line of validation.stderr.split("\n").filter((line) => /^(note|warning):/.test(line))) say.push(line);
 
   // The tests stage trains in repositories with no GitHub remote and no Codex
@@ -2724,10 +2746,11 @@ async function start(options) {
     const version = spawnSync("git", ["--version"], { encoding: "utf8", shell: false });
     const found = parseGitVersion(version.stdout);
     if (!gitIsAtLeast(found, GIT_MINIMUM)) {
-      throw new Stop(`git ${GIT_MINIMUM.join(".")} or newer is required and this machine has `
-        + `${found ? found.join(".") : `no version \`git --version\` could be read from (${JSON.stringify((version.stdout || version.stderr || "").trim())})`}. `
+      throw Stop.beneath(`git ${GIT_MINIMUM.join(".")} or newer is required and this machine has `
+        + `${found ? found.join(".") : "no version that `git --version` could be read from"}. `
         + "When the base branch moves under a reviewed change, the ship checks that the same change still lands on "
-        + "the new base with `git merge-tree --write-tree`, and older git has no such thing. Upgrade git and run this again.");
+        + "the new base with `git merge-tree --write-tree`, and older git has no such thing. Upgrade git and run this again.",
+      found ? "" : version.stdout || version.stderr);
     }
     // The binary the bridge will run, `TAGTEAM_CODEX_BIN` included: checking
     // the `codex` on the PATH instead would pass a machine whose reviews then run
@@ -2736,7 +2759,7 @@ async function start(options) {
     const codexProblem = codexVersionProblem(codexBinary());
     if (codexProblem) throw new Stop(codexProblem);
     const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf8", shell: false });
-    if (auth.status !== 0) throw new Stop(`gh is not authenticated: ${(auth.stderr || auth.stdout).trim()}`);
+    if (auth.status !== 0) throw Stop.raw((auth.stderr || auth.stdout).trim(), "the GitHub command line is not signed in");
   }
 
   const snapshot = lastJson(node("running-plugin.mjs", [ctx.repo], { allow: [1] }).stdout);
@@ -3137,19 +3160,18 @@ function unusableReportStop(ctx, id, { oid, round, refused, resent, role }) {
   const snapshotCommand = nextCommand(ctx, "snapshot", id);
   const end = nextCommand(ctx, "end", null);
   const what = refused.problems.join("\n");
+  const why = `Why the report was refused:\n${what}`;
   if (!resent) {
-    return new Stop(`The report for ${short(oid)} cannot be used: this commit was not dispatched by this run, so there is no `
+    return Stop.beneath(`The report for ${short(oid)} cannot be used: this commit was not dispatched by this run, so there is no `
       + "agent to send back and ask for a new one, and nothing was recorded. You decide: correct the file"
       + `${refused.files.length ? ` (${refused.files.join(", ")})` : ""}, or move it out of the way to have this round recorded as having no report `
-      + `(finish then stops for you to read it), and run snapshot again (${snapshotCommand}) without committing first; or stop the train (run ${end}).\n`
-      + `Why the report was refused:\n${what}`);
+      + `(finish then stops for you to read it), and run snapshot again (${snapshotCommand}) without committing first; or stop the train (run ${end}).`, why);
   }
-  return new Stop(`The report for round ${round} (${short(oid)}) is still unusable after the ${role} was sent back for it once, and no agent `
+  return Stop.beneath(`The report for round ${round} (${short(oid)}) is still unusable after the ${role} was sent back for it once, and no agent `
     + "is asked a third time. You decide: put a valid report at "
     + `${role === "implementer" ? implementReportPath(ctx, id) : fixReportPath(ctx, id)} (an honest unfinished one is enough when nobody knows `
-    + `what the agent did) and run snapshot again (${snapshotCommand}); or stop the train (run ${end}).\n`
-    + `Why the report was refused:\n${what}\n`
-    + `The first attempt is kept at ${resent.kept.join(", ") || "nowhere: it wrote nothing"}; the second `
+    + `what the agent did) and run snapshot again (${snapshotCommand}); or stop the train (run ${end}).`,
+  `${why}\nThe first attempt is kept at ${resent.kept.join(", ") || "nowhere: it wrote nothing"}; the second `
     + `${refused.files.length ? `is left at ${refused.files.join(", ")}` : "wrote nothing"}. The work itself is committed and nothing about it is lost. `
     + "The round is not recorded as having no report.");
 }
@@ -3355,7 +3377,7 @@ async function snapshot(options) {
   ], { allow: [2] });
   if (recorded.status === 2) {
     const refused = lastJson(recorded.stdout)?.refused;
-    if (!refused) throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}`);
+    if (!refused) throw Stop.raw(recorded.stderr.trim(), "the round's report could not be recorded");
     if (!dispatched || resent) {
       throw unusableReportStop(ctx, id, { oid, round, refused, resent, role: resent?.role });
     }
@@ -4485,8 +4507,8 @@ async function resolveCommit(options) {
     // did not say it finished is pushed.
     const recorded = node("record-round-report.mjs", ["--dir", home, "--out", path.join(dir, ROUND_REPORT)], { allow: [2] });
     if (recorded.status === 2) {
-      throw new Stop(`The resolver's report could not be recorded: move the refused file aside (keep it) `
-        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.\n${recorded.stderr.trim()}`, 2);
+      throw Stop.beneath(`The resolver's report could not be recorded: move the refused file aside (keep it) `
+        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.`, recorded.stderr, 2);
     }
     say.push(...recorded.stdout.trim().split("\n"));
     const report = readJson(path.join(dir, ROUND_REPORT));
@@ -4526,7 +4548,7 @@ async function resolveCommit(options) {
       "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
-      throw new Stop(`verify could not run against ${at}: ${(verified.stderr || verified.stdout || "").trim()}`);
+      throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
     }
     // What the verify commands wrote while the worktree sat on the merge commit
     // is theirs, and is discarded, as the landing check discards it.
@@ -5065,7 +5087,7 @@ async function planCheck(options) {
       "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
-      throw new Stop(`verify could not run against ${tip.slice(0, 12)}: ${(verified.stderr || verified.stdout || "").trim()}`);
+      throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
     }
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip]);
     const outcome = readJson(path.join(dir, "verify.json"));
@@ -5220,8 +5242,8 @@ function viewPlanPr(ctx, selector, { allowMissing = false } = {}) {
   const result = gh(ctx.repo, ["pr", "view", String(selector), "--json", "number,url,state,headRefOid,baseRefName,mergeCommit"], { allowFailure: true });
   if (result.status !== 0) {
     if (allowMissing) return null;
-    throw new Stop(`could not read the plan's pull request #${selector} from GitHub (${(result.stderr || result.stdout || "").trim().split("\n")[0]}), `
-      + "so whether it is open or merged is unknown, and nothing was decided from it; run this again.");
+    throw Stop.beneath(`could not read the plan's pull request #${selector} from GitHub, so whether it is open or merged is unknown, `
+      + "and nothing was decided from it; run this again.", result.stderr || result.stdout);
   }
   try { return JSON.parse(result.stdout); } catch (error) { throw Stop.raw(`gh pr view printed no document for the plan's pull request: ${error.message}`, "GitHub's answer about the plan's pull request could not be read"); }
 }
@@ -5428,8 +5450,8 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
     // what the ship says under Risk.
     const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", sent.file], { allowFailure: true });
     if (edited.status !== 0) {
-      throw new Stop(`the plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body `
-        + "it had, which may lack what the ship says under Risk, so nothing else was done. Run this again to send it.");
+      throw Stop.beneath(`the plan's pull request #${view.number} could not be updated; it keeps the body it had, which may lack what `
+        + "the ship says under Risk, so nothing else was done. Run this again to send it.", edited.stderr);
     }
     say.push(`The plan's pull request #${view.number} now carries the body and title as written.`);
   }
@@ -5647,13 +5669,7 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
   // the hand-push stop, said by its own check, and never pushed over or forced.
   await planTipCheck(ctx, outcome);
   if (routeOf(ctx).tipOid !== oid) {
-    try {
-      await pushToPlanBranch(ctx, oid);
-    } catch (error) {
-      await planTipCheck(ctx, outcome);
-      throw Stop.raw(error.message, `the push of the merge ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still `
-        + "where this ship recorded it, and nothing else changed");
-    }
+    await pushShipCommit(ctx, oid, { what: "merge", outcome });
   }
   forgetIncrease(ctx);
   say.push(`${route.base} at ${short(baseOid)} is merged into ${route.branch}: ${short(oid)}, whose first parent is the plan tip `
@@ -5875,13 +5891,7 @@ async function finalTipStep(ctx, record, tip, options, say) {
     // a run that dies after the push finds its own commit on origin and the
     // increase it made, and makes no second one.
     recordIncrease(ctx.trainPath, { oid, base: base.value, value, baseOid, at: new Date().toISOString() });
-    try {
-      await pushToPlanBranch(ctx, oid, { recorded: true });
-    } catch (error) {
-      await planTipCheck(ctx, outcome);
-      throw Stop.raw(error.message, `the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin `
-        + "is still where this ship recorded it, and nothing else changed");
-    }
+    await pushShipCommit(ctx, oid, { what: "version commit", outcome, recorded: true });
     say.push(`The plan's one version increase, ${kindLine}: ${base.value} → ${value} in ${listOf(entries.map(describeEntry))}, from `
       + `${route.base}'s version at ${short(baseOid)}. It is ${short(oid)} on ${route.branch}, a commit of the version lines and nothing `
       + "else, pushed by the driver itself; its whole-plan check keeps the review of the commit under it, and verify and the landing "
@@ -5939,13 +5949,7 @@ async function decidedTipStep(ctx, tip, { decision, base, lines, entries }, say)
   const oid = makeVersionCommit(ctx, tip, entries, decision.value,
     `Writes back ${decision.value}, the version set by commits the ship adopted, which a merge of ${route.base} reset.`);
   await planTipCheck(ctx, outcome);
-  try {
-    await pushToPlanBranch(ctx, oid);
-  } catch (error) {
-    await planTipCheck(ctx, outcome);
-    throw Stop.raw(error.message, `the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin `
-      + "is still where this ship recorded it, and nothing else changed");
-  }
+  await pushShipCommit(ctx, oid, { what: "version commit", outcome });
   say.push(`A merge of ${route.base} had set the version lines back to ${base.value}. The version ${decision.value}, set by the commits the `
     + `ship adopted, is written back in ${short(oid)} on ${route.branch}: a commit of the version lines and nothing else, pushed by the `
     + "driver itself. The plan is checked again on it.");
@@ -7285,14 +7289,14 @@ function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
     const key = rest[index];
-    if (!key.startsWith("--")) throw new Stop(`unexpected argument: ${key}\n${USAGE}`, 2);
+    if (!key.startsWith("--")) throw Stop.beneath(`unexpected argument: ${key}`, USAGE, 2);
     if (key === "--reclaim") { options.reclaim = true; continue; }
     if (key === "--run-gone") { options.runGone = true; continue; }
     if (key === "--run-live") { options.runLive = true; continue; }
     if (key === "--stop") { options.stop = true; continue; }
     if (key === "--squash") { options.squash = true; continue; }
     const value = rest[++index];
-    if (value === undefined) throw new Stop(`${key} requires a value\n${USAGE}`, 2);
+    if (value === undefined) throw Stop.beneath(`${key} requires a value`, USAGE, 2);
     options[key.slice(2)] = value;
   }
   if (options.runGone && options.runLive) throw new Stop("--run-gone and --run-live are the two answers to one question; give one", 2);
@@ -7317,7 +7321,7 @@ async function main() {
     ({ sub, options } = parseArgs(process.argv.slice(2)));
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
-    if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
+    if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
     await run(options);
   } catch (error) {
     process.stderr.write(`${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`);

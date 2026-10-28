@@ -108,6 +108,7 @@ function assertStopOpensPlainly({ status, stderr, json }) {
   }
   if (status !== 0 && status !== 5) {
     assert.ok(opensPlainly(stderr), `a stop opens with a raw value or nothing, exit ${status}:\n${stderr}`);
+    assert.ok(!stderr.trimStart().split("\n")[0].trimEnd().endsWith(":"), `a stop's first line hands over to the lines beneath it, where the person will not read, exit ${status}:\n${stderr}`);
   }
 }
 

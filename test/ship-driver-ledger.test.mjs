@@ -205,7 +205,9 @@ test("a plan pull request body that could not be sent again is a stop, is not re
 
   const refused = ship("plan-land", staged.plan, [], { ...env, GH_STUB_EDIT_FAILS: "1" });
   assert.notEqual(refused.status, 0, refused.stdout);
-  assert.match(refused.stderr, /could not be updated .*so nothing else was done/);
+  const [refusal, ...beneath] = refused.stderr.trim().split("\n");
+  assert.match(refusal, /could not be updated; .*so nothing else was done\. Run this again/);
+  assert.match(beneath.join("\n"), /gh stub: HTTP 502/);
   assert.equal(landingRecordOf(shipDir).bodySent, sent, "a body GitHub refused was recorded as sent");
   assert.ok(!planPullOf(env).body.includes(retry));
 
