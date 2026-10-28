@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { root, git, stage, ship, write, outputOf, arriveAll, findings, major, quietPath,
-  assertEffort } from "./ship-stage.mjs";
+  assertEffort, checkReportOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
 
 // --- the Recurring signal and its two person-only answers ---------------------
@@ -78,6 +78,13 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   assert.equal(state().state, "fixing");
   const pending = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-pending.json"), "utf8"));
   assert.deepEqual([pending.from, pending.files, pending.record, pending.round], ["redesign", ["app.js"], briefPath, 3]);
+
+  // The redesign implementer is told to check its report, against the schema
+  // an implementer reports by.
+  const implemented = { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [] };
+  const passed = checkReportOf(implementer, implemented);
+  assert.equal([passed.schema, passed.stdout.trim()].join(" "), "implement-report valid");
+  assert.equal(checkReportOf(implementer, { status: "complete", summary: "rewrote sub" }).status, 1);
 
   // The implementer rewrites the area and reports as the first one did. A run
   // interrupted here resumes through begin, which lands on the same snapshot.

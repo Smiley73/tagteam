@@ -24,7 +24,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { lastJson } from "../scripts/ship.mjs";
 import { root, git, stage, ship, write, outputOf, arriveAll, findings, major, quietPath,
-  assertEffort } from "./ship-stage.mjs";
+  assertEffort, checkReportOf } from "./ship-stage.mjs";
 import { driveToReadyAndWaiting, pushToBase } from "./ship-driver-shared.mjs";
 
 const A = "a".repeat(40);
@@ -885,6 +885,10 @@ test("a change that passes alone and fails on the base as it now stands stops, c
   assert.match(repair.json.dispatch[0].prompt, /This is a landing repair, not a CI repair/);
   assert.match(repair.json.dispatch[0].prompt, /fails this repository's verify commands once it is merged onto main/);
   assert.doesNotMatch(repair.json.dispatch[0].prompt, /a failing check/);
+  const landingReport = { outcomes: [], notes: "", status: "complete", summary: "merged the base in and fixed the clash", unfinished: [] };
+  const landingChecked = checkReportOf(repair.json.dispatch[0], landingReport);
+  assert.equal([landingChecked.schema, landingChecked.stdout.trim()].join(" "), "fix-report valid", "a landing repair is told to check its report");
+  assert.equal(checkReportOf(repair.json.dispatch[0], { ...landingReport, outcomes: "none" }).status, 1);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

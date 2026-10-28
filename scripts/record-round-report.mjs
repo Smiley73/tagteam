@@ -258,7 +258,13 @@ export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
     found.push({ ...candidate, file, parsed, filled });
   }
   if (refused.length > 0) {
-    throw new ReportRefused({ files: refused.map((entry) => entry.file), problems: refused.map((entry) => entry.problem) });
+    // Every new report is named, the valid ones beside the malformed: the driver
+    // moves the named files aside before the resend, and a valid report left at
+    // its path would sit beside the one the resent agent writes — two new reports,
+    // which is a refusal the resend can no longer answer. Reports already recorded
+    // in another round are not new and stay where they are.
+    const named = new Set([...refused, ...found].map((entry) => entry.file));
+    throw new ReportRefused({ files: KINDS.map((entry) => path.join(source, entry.file)).filter((file) => named.has(file)), problems: refused.map((entry) => entry.problem) });
   }
 
   // No new report, and the round already holds its account — a re-entered round

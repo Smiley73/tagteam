@@ -100,6 +100,23 @@ export const write = (file, value) => {
 // path, which is not part of it.
 export const outputOf = (dispatch) => /Write your (?:findings|verdicts|report|fix report) to: (.*?)(?: — .*)?$/m.exec(dispatch.prompt)[1].trim();
 
+// Runs the command a dispatch tells its agent to check its report with, against
+// the report given, at the path the dispatch names for it. The file is removed
+// afterwards, so the check leaves nothing for the step that reads the report.
+// Returns the process result, with `schema` the schema the command names.
+export function checkReportOf(dispatch, report) {
+  const line = /^Check your report before you return: (node .*?) — it prints valid/m.exec(dispatch.prompt);
+  assert.ok(line, `the dispatch names no report check:\n${dispatch.prompt}`);
+  const file = outputOf(dispatch);
+  assert.ok(line[1].includes(file), `the check names a different file than the dispatch writes to: ${line[1]}`);
+  write(file, report);
+  try {
+    return { ...spawnSync("/bin/sh", ["-c", line[1]], { encoding: "utf8" }), schema: /([\w-]+)\.schema\.json/.exec(line[1])?.[1] };
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+}
+
 // Every dispatch is a set — a review, or the one implementer or fixer whose
 // work `snapshot` reads — judged only once every agent in it has been recorded
 // as arrived. This runs the arrival command a payload printed, exactly as printed,

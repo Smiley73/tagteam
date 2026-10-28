@@ -378,6 +378,10 @@ test("a malformed report beside a second one is still refused, not downgraded to
   assert.equal(result.status, 2, "a schema-invalid report was recorded as this round having none");
   assert.match(result.stderr, /fix-report schema/);
   assert.equal(fs.existsSync(reportPath(ship, 1)), false);
+  // The valid report beside it is named too: the driver moves named files aside
+  // before the resend, and one left behind would meet the resent agent's report
+  // as a second new report and defeat the resend.
+  assert.deepEqual(JSON.parse(result.stdout).refused.files, [path.join(ship, "implement-report.json"), path.join(ship, "fix-report.json")]);
 });
 
 test("a report is recorded once: a re-dispatched agent cannot replace it", () => {

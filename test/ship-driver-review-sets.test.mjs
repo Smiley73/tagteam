@@ -16,7 +16,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
 import { root, git, stage, ship, write, outputOf, arrive, arriveAll, findings, major, quietPath,
-  resultOf, assertEffort, sessionsFor } from "./ship-stage.mjs";
+  resultOf, assertEffort, sessionsFor, checkReportOf } from "./ship-stage.mjs";
 import { driveToRecurrence, driveToReadyAndWaiting, pushToBase } from "./ship-driver-shared.mjs";
 
 // --- review sets: the record decides when a review is judged ------------------
@@ -554,6 +554,10 @@ test("snapshot waits the same way for the first implementer, a redesign implemen
   assert.deepEqual(repair.json.set.labels, ["Repair CI for 01-a"]);
   assertEffort(repair.json.dispatch[0], "high", "a CI repair passes effort.fixer");
   assert.match(repair.json.dispatch[0].prompt, /^Verify commands \(/m, "a CI repair is told what verify will run");
+  const ciReport = { outcomes: [], notes: "", status: "complete", summary: "the check is flaky; nothing to change", unfinished: [] };
+  const ciChecked = checkReportOf(repair.json.dispatch[0], ciReport);
+  assert.equal([ciChecked.schema, ciChecked.stdout.trim()].join(" "), "fix-report valid", "a CI repair is told to check its report");
+  assert.equal(checkReportOf(repair.json.dispatch[0], { ...ciReport, outcomes: "none" }).status, 1);
   const waiting = ship("snapshot", red.plan, ["--spec", "01-a"]);
   assert.equal(waiting.status, NOT_IN_YET, waiting.stderr);
   assert.match(waiting.stderr, /still waiting on Repair CI for 01-a/);

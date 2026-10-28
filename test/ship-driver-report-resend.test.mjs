@@ -10,8 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { git, stage, ship, write, outputOf, arriveAll, findings, major, quietPath } from "./ship-stage.mjs";
+import { git, stage, ship, write, outputOf, arriveAll, findings, major, quietPath, checkReportOf } from "./ship-stage.mjs";
 
 const FIXED = { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "minus" }], notes: "", status: "complete", summary: "fixed sub", unfinished: [] };
 const BAD = { outcomes: "fixed it", status: "complete", summary: "fixed sub" };
@@ -160,12 +159,7 @@ test("a first implementation with no report at all sends the implementer back, a
 
 test("the dispatches name a command that passes a valid report and fails an invalid one, before the agent returns", () => {
   const { begin } = begun();
-  const check = (dispatch, report) => {
-    const file = outputOf(dispatch);
-    write(file, report);
-    const command = /^Check your report before you return: (node .*?) — it prints valid/m.exec(dispatch.prompt)[1];
-    return spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
-  };
+  const check = checkReportOf;
   const [implementer] = begin.json.dispatch;
   assert.equal(check(implementer, IMPLEMENTED).stdout.trim(), "valid");
   const refused = check(implementer, { status: "complete", summary: "added sub" });
