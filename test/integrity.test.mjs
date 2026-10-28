@@ -1247,3 +1247,16 @@ test("the README and the skill introduce the plan branch as the familiar feature
   const firstInSkill = skill.replace(/\s+/g, " ").search(/plan branch|plan\/<slug>/i);
   assert.ok(skill.replace(/\s+/g, " ").indexOf("feature branch") < firstInSkill, "SKILL.md names the plan branch before its overview introduces it");
 });
+
+// A caught error's message rethrown as a bare `Stop` reaches the person as the
+// raw error with nothing above it. `Stop.raw` is what puts the plain lead there.
+const BARE_RETHROW = /new Stop\(\s*(?:`\$\{)?\w+\.message\b/;
+
+test("no site rethrows a caught error's message as a bare Stop", () => {
+  const bare = shipDriver.split("\n").map((line, index) => ({ line, number: index + 1 })).filter(({ line }) => BARE_RETHROW.test(line));
+  assert.deepEqual(bare.map(({ number, line }) => `scripts/ship.mjs:${number}: ${line.trim()}`), []);
+  for (const rewrap of ["throw new Stop(error.message);", "throw new Stop(`${err.message}`, 2);", "throw new Stop( e.message )"]) {
+    assert.match(rewrap, BARE_RETHROW, `the guard misses ${rewrap}`);
+  }
+  assert.doesNotMatch('throw Stop.raw(error.message, "a git command failed");', BARE_RETHROW);
+});

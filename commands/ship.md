@@ -48,9 +48,12 @@ Run the command the previous step printed as `next`. It prints one JSON object:
 - **`next`** — the command to run. With a `set`, run it once the last arrival
   says the set is complete; that arrival prints it too. Run it as printed.
 
-A non-zero exit is a stop. Say what stderr says, in plain words, and stop —
-except exit 3, which means the configuration is older than this plugin: tell
-them to run `/tagteam:configure` and stop; and exit 5, which is not a stop at
+A non-zero exit is a stop. The first line of stderr is the reason and what
+they must decide: relay that, in plain words, and stop. Anything printed beneath
+it is a raw error kept for the record — summarise it only if they ask, and never
+give it as the reason. Two exits are not that: exit 3, which means the
+configuration is older than this plugin: tell them to run `/tagteam:configure`
+and stop; and exit 5, which is not a stop at
 all: `collect`, `settle`, `snapshot`, `resolve-commit`, `resolve-collect` or
 `plan-collect` refused because the set it judges is not all in yet — see *Sets*. A spent
 budget never exits: the driver prints where the spec goes instead and says so

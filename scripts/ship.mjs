@@ -88,9 +88,16 @@ const SCRIPTS = path.join(PLUGIN, "scripts");
 // --- process helpers -------------------------------------------------------
 
 class Stop extends Error {
-  constructor(message, exitCode = 1) {
+  constructor(message, exitCode = 1, failure = null) {
     super(message);
     this.exitCode = exitCode;
+    // Set only on a stop that carries someone else's error text unchanged: a
+    // clause saying what failed, which `main` puts a plain lead above.
+    this.failure = failure;
+  }
+
+  static raw(message, failure, exitCode = 1) {
+    return new Stop(message, exitCode, failure);
   }
 }
 
@@ -99,7 +106,7 @@ function node(script, args, { cwd, allow = [] } = {}) {
     cwd, encoding: "utf8", shell: false, maxBuffer: 64 * 1024 * 1024
   });
   if (result.status !== 0 && !allow.includes(result.status)) {
-    throw new Stop(`${script} ${args[0] ?? ""}: ${(result.stderr || result.stdout || "").trim()}`, result.status === 4 ? 4 : 1);
+    throw Stop.raw(`${script} ${args[0] ?? ""}: ${(result.stderr || result.stdout || "").trim()}`, "one of the driver's own scripts failed", result.status === 4 ? 4 : 1);
   }
   return result;
 }
@@ -124,20 +131,20 @@ export const lastJson = (stdout) => {
 
 function git(cwd, args, { allowFailure = false } = {}) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", shell: false, maxBuffer: 64 * 1024 * 1024 });
-  if (result.status !== 0 && !allowFailure) throw new Stop(`git ${args.join(" ")}: ${(result.stderr || result.stdout || "").trim()}`);
+  if (result.status !== 0 && !allowFailure) throw Stop.raw(`git ${args.join(" ")}: ${(result.stderr || result.stdout || "").trim()}`, "a git command failed");
   return result;
 }
 
 function gh(cwd, args, { allowFailure = false } = {}) {
   const result = spawnSync("gh", args, { cwd, encoding: "utf8", shell: false });
-  if (result.status !== 0 && !allowFailure) throw new Stop(`gh ${args.slice(0, 2).join(" ")}: ${(result.stderr || result.stdout || "").trim()}`);
+  if (result.status !== 0 && !allowFailure) throw Stop.raw(`gh ${args.slice(0, 2).join(" ")}: ${(result.stderr || result.stdout || "").trim()}`, "a GitHub command failed");
   return result;
 }
 
 const readJson = (file, fallback) => {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (error) {
     if (fallback !== undefined) return fallback;
-    throw new Stop(`could not read ${file}: ${error.message}`);
+    throw Stop.raw(`could not read ${file}: ${error.message}`, "a local record or configuration could not be read or parsed");
   }
 };
 const writeJson = (file, value) => {
@@ -204,7 +211,7 @@ function fixUnitSpec(ctx, id) {
     throw new Stop(`${id} is not a spec of ${ctx.plan}, and no whole-plan check made a fix unit of that name (${file} is not there)`);
   }
   let front;
-  try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw new Stop(error.message); }
+  try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw Stop.raw(error.message, "a spec document could not be read or parsed"); }
   if (front.id !== id) throw new Stop(`${file} names ${front.id}, not ${id}`);
   return {
     id, path: file, dependsOn: [],
@@ -2116,12 +2123,12 @@ function startBaseMerge(ctx, { tip, baseOid }) {
   git(ctx.worktree, ["checkout", "--detach", tip]);
   const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", baseOid], { allowFailure: true });
   if (!mergeInProgress(ctx)) {
-    throw new Stop(`git merge of ${short(baseOid)} into ${short(tip)} did not start: ${(merging.stderr || merging.stdout || "").trim()}`);
+    throw new Stop(`The merge of ${short(baseOid)} into ${short(tip)} did not start; git said: ${(merging.stderr || merging.stdout || "").trim()}`);
   }
   let reset;
   try { reset = versionStep({ worktree: ctx.worktree, entries: routeEntries(ctx), baseOid }); } catch (error) {
     settleWorktree(ctx);
-    throw new Stop(error.message);
+    throw Stop.raw(error.message, "the version-line step failed");
   }
   const unmerged = git(ctx.worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
   return { unmerged, reset };
@@ -2422,7 +2429,7 @@ function markerSizesOf(ctx, paths) {
 // spec's are, plus Codex, reading the remerge view against the round's brief.
 async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {}) {
   let briefs;
-  try { briefs = resolveLensBriefs(lenses.filter((lens) => lens !== "codex"), { repo: ctx.repo }); } catch (error) { throw new Stop(error.message); }
+  try { briefs = resolveLensBriefs(lenses.filter((lens) => lens !== "codex"), { repo: ctx.repo }); } catch (error) { throw Stop.raw(error.message, "the review lenses could not be read"); }
   const { jobs } = resolveJobs(ctx);
   const lensJob = jobs["review-lens"];
   const codexJob = jobs["review-codex"];
@@ -2495,7 +2502,7 @@ async function resolveBeforeBegin(ctx, id, planTip, options, say) {
   const route = routeOf(ctx);
   const baseOid = git(ctx.repo, ["rev-parse", `origin/${route.base}`]).stdout.trim();
   let dry;
-  try { dry = dryRunMerge(ctx.repo, planTip, baseOid); } catch (error) { throw new Stop(error.message); }
+  try { dry = dryRunMerge(ctx.repo, planTip, baseOid); } catch (error) { throw Stop.raw(error.message, "the trial merge of the plan branch into its base failed"); }
   if (dry.clean) return null;
   const same = resolveRounds(ctx)
     .find((entry) => entry.record.baseOid === baseOid && entry.record.planTip === planTip && entry.record.status === "stopped");
@@ -2610,7 +2617,7 @@ function planDeclaration(ctx) {
   try { text = fs.readFileSync(file, "utf8"); } catch {}
   const declared = declaredIncrease(text);
   if (declared.problem) {
-    throw new Stop(`${file} cannot ship through a plan branch as it is: ${declared.problem}. Nothing was created; correct that line and `
+    throw new Stop(`The plan cannot ship through a plan branch as it is: ${declared.problem}. Nothing was created; correct that line in ${file} and `
       + "run start again.");
   }
   return declared.kind;
@@ -2698,7 +2705,7 @@ async function routeLines(ctx, decided) {
 async function start(options) {
   const ctx = context(options, { requireTrain: false });
   const say = [];
-  if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`${ctx.plan} has no approved.json; run /tagteam:plan first`);
+  if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`The plan has not been approved, so there is nothing to ship; run /tagteam:plan first (${ctx.plan} has no approved.json).`);
 
   const validation = node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "config.schema.json"), ctx.configPath], { allow: [1, 3] });
   if (validation.status === 3) throw new Stop("the configuration was written by an older plugin: run /tagteam:configure", 3);
@@ -2744,7 +2751,7 @@ async function start(options) {
   const lockResult = lastJson(lock.stdout) ?? {};
   if (!lockResult.acquired) {
     emit({
-      ask: `${lockResult.reason ?? `${ctx.slug} is already being shipped from this checkout`}. Only a person can tell a live run from one that was killed. If they confirm the other run is gone, rerun this command with --reclaim.`,
+      ask: `The ship of ${ctx.slug} did not start, because the lock it needs is already held${lockResult.reason ? `: ${lockResult.reason}` : ""}. Only a person can tell a live run from one that was killed. If they confirm the other run is gone, rerun this command with --reclaim.`,
       lock: lockResult, snapshot, say
     });
     return;
@@ -5578,7 +5585,7 @@ async function planLandingCheck(ctx, record, tip, check, say) {
         baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
         landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all"
       });
-    } catch (error) { throw new Stop(error.message); }
+    } catch (error) { throw Stop.raw(error.message, "the check of the landing failed"); }
     landing = {
       tip, baseOid, mergeBase, status: outcome.status, conflicts: outcome.conflicts ?? null,
       verify: outcome.verify ? { status: outcome.verify.status, commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath }) => ({ command, status, timedOut, logPath })) } : null,
@@ -7289,16 +7296,29 @@ function parseArgs(argv) {
   return { sub, options };
 }
 
+// The line a person reads first when the stop is someone else's error text: the
+// step that stopped, what kind of thing failed, and the way on. A written stop
+// has its own reason and gets none. An exception that is not a `Stop` is a bug
+// or an `fs` error, which is raw by definition.
+function leadOf(error, sub, spec) {
+  const failure = error instanceof Stop ? error.failure : "something unexpected went wrong";
+  if (!failure) return "";
+  return `The ${sub ?? "ship"} step${spec ? ` for ${spec}` : ""} stopped because ${failure}. `
+    + "Put right what the error below says and run the same command again, or stop the train with `ship.mjs end`.\n";
+}
+
 async function main() {
+  let sub;
+  let options = {};
   try {
-    const { sub, options } = parseArgs(process.argv.slice(2));
+    ({ sub, options } = parseArgs(process.argv.slice(2)));
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
     await run(options);
   } catch (error) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = error.exitCode ?? 1;
+    process.stderr.write(`${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`);
+    process.exitCode = error?.exitCode ?? 1;
   }
 }
 
