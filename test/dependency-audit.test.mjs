@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  classify, collateral, decideUpgrades, makeUpgrade, parseNpm, parsePipAudit, parsePnpm, parseUv, parseYarnBerry, parseYarnClassic,
+  auditAll, auditLines, classify, collateral, decideUpgrades, makeUpgrade, parseNpm, parsePipAudit, parsePnpm, parseUv, parseYarnBerry, parseYarnClassic,
   parseVersion, pickFix, proposedFor
 } from "../scripts/lib/dependency-audit.mjs";
 
@@ -87,6 +87,70 @@ test("a package that moves past a minor while another is upgraded is named, and 
   const before = new Map([["a", ["1.0.0"]], ["b", ["1.2.0"]], ["c", ["0.4.1"]], ["d", ["1.0.0"]]]);
   const after = new Map([["a", ["9.0.0"]], ["b", ["1.9.0"]], ["c", ["0.5.0"]], ["d", ["1.0.0"]], ["e", ["1.0.0"]]]);
   assert.deepEqual(collateral(before, after, "a", "node"), ["c 0.4.1 to 0.5.0 (a minor upgrade of a 0.x package)"]);
+});
+
+test("a package that has several resolved versions is checked for every move, not only the highest", () => {
+  const before = new Map([["x", ["1.0.0", "3.0.0"]], ["y", ["1.0.0", "1.1.0"]]]);
+  const after = new Map([["x", ["2.0.0", "3.1.0"]], ["y", ["1.1.0", "1.2.0"]]]);
+  assert.deepEqual(collateral(before, after, "a", "node"), ["x 1.0.0 to 2.0.0 (a major upgrade)"]);
+});
+
+test("the target may not move past what its upgrade authorizes", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-target-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bin-"));
+  const lockOf = (...versions) => JSON.stringify({
+    lockfileVersion: 3,
+    packages: { "": {}, ...Object.fromEntries(versions.map((version, index) => [`${"node_modules/x/".repeat(index)}node_modules/child`, { version }])) }
+  });
+  const finding = { manager: "npm", name: "child", installed: "0.2.0", proposed: "0.2.1" };
+  const original = process.env.PATH;
+  try {
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ name: "demo" }));
+    // A stub npm that leaves the lockfile as the test says an update would.
+    const stub = (...versions) => {
+      fs.writeFileSync(path.join(bin, "npm"), `#!/bin/sh\ncat > package-lock.json <<'EOF'\n${lockOf(...versions)}\nEOF\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(cwd, "package-lock.json"), lockOf("0.2.0"));
+    };
+    process.env.PATH = `${bin}${path.delimiter}${original}`;
+    stub("0.3.0");
+    assert.match(makeUpgrade(finding, cwd).reason, /short of 0\.2\.1/);
+    stub("0.2.1", "0.3.0");
+    const beyond = makeUpgrade(finding, cwd);
+    assert.equal(beyond.ok, false);
+    assert.match(beyond.reason, /moved child to 0\.3\.0, which is more than the 0\.2\.1 the upgrade authorizes/);
+    assert.equal(fs.readFileSync(path.join(cwd, "package-lock.json"), "utf8"), lockOf("0.2.0"), "the lockfile is put back");
+    stub("0.2.5");
+    assert.deepEqual(makeUpgrade(finding, cwd), { ok: true });
+  } finally {
+    process.env.PATH = original;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("pip-audit is given only the == pins and installs nothing, and the lines it cannot check are said", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-pipaudit-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bin-"));
+  const original = process.env.PATH;
+  try {
+    fs.writeFileSync(path.join(cwd, "requirements.txt"), "# pins\nRequests[security]==2.19.0 ; python_version > '3'\nflask\ndjango>=3\n");
+    const log = path.join(bin, "argv.txt");
+    fs.writeFileSync(path.join(bin, "pip-audit"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\nwhile [ $# -gt 0 ]; do [ "$1" = -r ] && cat "$2" >> '${log}'; shift; done\n`
+      + `echo '{"dependencies":[{"name":"requests","version":"2.19.0","vulns":[{"id":"PYSEC-1","fix_versions":["2.20.0"],"description":"d"}]}]}'\nexit 1\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}${path.delimiter}${original}`;
+    const record = auditAll(cwd);
+    const printed = fs.readFileSync(log, "utf8");
+    assert.match(printed, /^--no-deps$/m);
+    assert.match(printed, /^--disable-pip$/m);
+    assert.match(printed, /^requests==2\.19\.0$/m, "the pin is audited");
+    assert.doesNotMatch(printed, /flask|django|python_version/, "nothing else is handed to pip-audit");
+    assert.deepEqual([record.audits[0].status, record.audits[0].unchecked, record.findings[0].kind], ["found", 2, "make"]);
+    assert.match(auditLines({ ...record, answers: {} }).join("\n"), /2 requirement\(s\) of pip are not pinned with ==, so the audit did not check them/);
+  } finally {
+    process.env.PATH = original;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("verify is tried together first, then alone, then the survivors together, and the base last", async () => {

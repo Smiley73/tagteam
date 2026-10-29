@@ -177,6 +177,10 @@ test("a major and a package with no fix stop the start, and the answers are reme
   assert.equal(git(trainOf(shipDir).worktree, "status", "--porcelain"), "", "nothing was changed");
   assert.equal(ship("start", plan, ["--reclaim"], env).json.ask.split("\n")[0], stopped.json.ask.split("\n")[0], "a rerun asks again from the record");
 
+  const early = staged.begin("01-a");
+  assert.notEqual(early.status, 0, "no spec begins while a question is open");
+  assert.match(early.stderr, /^01-a was not begun, because the dependency audit has questions nobody has answered/);
+
   const answer = (...flags) => ship("dependencies", plan, flags, env);
   assert.match(answer("--approve", "npm:nofix@no-fix").stderr, /has no fixed version to upgrade to, so it can only be declined/);
   assert.match(answer("--approve", "npm:lodash@4.17.21").stderr, /is not an open question/);

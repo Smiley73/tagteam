@@ -272,6 +272,8 @@ function dependencyEntered(ctx) {
   return Boolean(record) && !record.skipped && !record.unit?.dropped && openQuestions(record).length === 0 && chosenUpgrades(record).length > 0;
 }
 const dependencyPending = (ctx) => dependencyEntered(ctx) && stateOf(ctx, DEPENDENCY_ID) !== "merged";
+// Questions the audit put to the person and nobody has answered: until they are, which upgrades there are is not settled.
+const dependencyQuestions = (ctx) => { const record = readAudit(ctx.shipDir); return record ? openQuestions(record) : []; };
 
 // The unit as the cycle reads a spec. Its document is written once the upgrades
 // are made, so `begin` reads this before there is one.
@@ -2933,6 +2935,10 @@ async function begin(options) {
   const spec = specById(ctx, id);
   const say = [];
   const branch = branchOf(ctx, id);
+  if (!isDependencyId(id) && dependencyQuestions(ctx).length > 0) {
+    throw new Stop(`${id} was not begun, because the dependency audit has questions nobody has answered and no spec branches before the upgrades it decides on have merged. `
+      + `The person has to decide each package it names to upgrade or to leave as it is; run ${nextCommand(ctx, "start", null)} to put the questions to them again.`);
+  }
   if (!isDependencyId(id) && dependencyPending(ctx)) {
     throw new Stop(`${id} was not begun, because the dependency upgrades the audit decided on have not merged yet and no spec branches before they do. `
       + `Run ${nextCommand(ctx, "begin", DEPENDENCY_ID)} for them, or, if their pull request is waiting for your approval on ${ctx.config.base}, approve it with finish --approve.`);

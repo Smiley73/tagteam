@@ -238,14 +238,17 @@ const npmLockOf = (cwd) => {
 };
 
 // A pinned `name==version` line of a requirements file, by normalized name.
+const PIN = /^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s;#]+)/;
 function pinsOf(text) {
   const pins = new Map();
   String(text).split("\n").forEach((line, index) => {
-    const found = /^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s;#]+)/.exec(line);
+    const found = PIN.exec(line);
     if (found) pins.set(pythonName(found[1]), { index, version: found[2] });
   });
   return pins;
 }
+// The requirement lines of a file that are not `==` pins: the ones an audit that installs nothing cannot check.
+const unpinnedIn = (text) => String(text).split("\n").filter((line) => /^\s*[A-Za-z0-9]/.test(line) && !PIN.test(line)).length;
 
 const yarnFlavour = (cwd) => (/^__metadata:/m.test(readFile(cwd, "yarn.lock") ?? "") ? "berry" : "classic");
 
@@ -361,16 +364,28 @@ function auditOne(manager, cwd) {
       fs.rmSync(path.dirname(made.file), { recursive: true, force: true });
     }
   }
-  const { result, early } = ran(["pip-audit", "-r", "requirements.txt", "-f", "json", "--progress-spinner", "off"]);
-  if (early) return early;
-  const parsed = parsePipAudit(result.stdout, "pip");
-  if (!parsed.findings) return parsed;
-  // Only an `==` pin is upgraded; a vulnerable package the file leaves unpinned is reported and left alone.
-  const pins = pinsOf(readFile(cwd, "requirements.txt") ?? "");
-  return {
-    findings: parsed.findings.map((finding) => (finding.kind !== "left-out" && pins.get(pythonName(finding.name))?.version !== finding.installed
-      ? { ...finding, kind: "unpinned", why: "it is not pinned with == in requirements.txt" } : finding))
-  };
+  // pip-audit would resolve a requirements file by building what it names, which runs
+  // third-party code before anyone has been asked. It is given only the `==` pins, with
+  // nothing resolved and pip not run; the lines that are not pins are counted and said.
+  const text = readFile(cwd, "requirements.txt") ?? "";
+  const lines = [];
+  let unchecked = unpinnedIn(text);
+  for (const [name, pin] of pinsOf(text)) {
+    if (SAFE_VERSION.test(pin.version)) lines.push(`${name}==${pin.version}`);
+    else unchecked += 1;
+  }
+  if (lines.length === 0) return { findings: [], unchecked };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-pins-"));
+  try {
+    const file = path.join(dir, "requirements.txt");
+    fs.writeFileSync(file, `${lines.join("\n")}\n`);
+    const { result, early } = ran(["pip-audit", "-r", file, "-f", "json", "--no-deps", "--disable-pip", "--progress-spinner", "off"]);
+    if (early) return early;
+    const parsed = parsePipAudit(result.stdout, "pip");
+    return parsed.findings ? { ...parsed, unchecked } : parsed;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Audits every manager found at `cwd`, and returns the record's audit half. Never throws on a tool. */
@@ -381,7 +396,7 @@ export function auditAll(cwd, declines = {}) {
   for (const manager of managers) {
     const outcome = auditOne(manager, cwd);
     if (outcome.unavailable) { audits.push({ manager, status: "could-not-run", reason: outcome.unavailable }); continue; }
-    audits.push({ manager, status: outcome.findings.length > 0 ? "found" : "clean" });
+    audits.push({ manager, status: outcome.findings.length > 0 ? "found" : "clean", ...(outcome.unchecked ? { unchecked: outcome.unchecked } : {}) });
     for (const finding of outcome.findings) {
       const key = questionKey(finding);
       findings.push({ ...finding, key, ...(["ask", "nofix"].includes(finding.kind) && declines[declineKey(finding)] ? { kind: "declined", why: "a person declined it for this repository earlier" } : {}) });
@@ -433,8 +448,13 @@ export function collateral(before, after, target, ecosystem) {
     const removed = was.filter((version) => !now.includes(version));
     const added = now.filter((version) => !was.includes(version));
     if (removed.length === 0 || added.length === 0) continue;
-    const verdict = classify(removed.at(-1), added.at(-1), ecosystem);
-    if (!verdict.make) problems.push(`${name} ${removed.at(-1)} to ${added.at(-1)} (${verdict.why})`);
+    // Every version that appeared has to be a move the ship makes unasked from one that went.
+    for (const version of added) {
+      const verdicts = removed.map((old) => ({ old, verdict: classify(old, version, ecosystem) }));
+      if (verdicts.some((entry) => entry.verdict.make)) continue;
+      const nearest = verdicts.filter((entry) => entry.verdict.why !== "a version that is not higher than the installed one").at(-1) ?? verdicts.at(-1);
+      problems.push(`${name} ${nearest.old} to ${version} (${nearest.verdict.why})`);
+    }
   }
   return problems;
 }
@@ -479,10 +499,15 @@ export function makeUpgrade(finding, cwd) {
   const listed = listedAs(finding.manager, finding.name);
   const now = after.get(listed) ?? [];
   const wanted = parseVersion(finding.proposed, ecosystem);
-  const reached = wanted
-    ? now.some((version) => { const got = parseVersion(version, ecosystem); return got && got[0] === wanted[0] && compare(got, wanted) >= 0; })
-    : now.includes(finding.proposed);
-  if (!reached || now.includes(finding.installed)) return back(`the manager left ${finding.name} at ${now.join(", ") || "nothing"}, short of ${finding.proposed}`);
+  // What the upgrade authorizes for the target: its major, and for a 0.x package its minor, at the proposed version or above.
+  const authorized = (version) => {
+    if (!wanted) return version === finding.proposed;
+    const got = parseVersion(version, ecosystem);
+    return Boolean(got) && got[0] === wanted[0] && (wanted[0] !== 0 || got[1] === wanted[1]) && compare(got, wanted) >= 0;
+  };
+  if (!now.some(authorized) || now.includes(finding.installed)) return back(`the manager left ${finding.name} at ${now.join(", ") || "nothing"}, short of ${finding.proposed}`);
+  const beyond = now.filter((version) => !(before.get(listed) ?? []).includes(version) && !authorized(version));
+  if (beyond.length > 0) return back(`the manager moved ${finding.name} to ${beyond.join(", ")}, which is more than the ${finding.proposed} the upgrade authorizes`);
   const moved = collateral(before, after, listed, ecosystem);
   return moved.length > 0 ? back(`making it moves ${moved.slice(0, 3).join("; ")}, which is more than a minor`) : { ok: true };
 }
@@ -553,6 +578,9 @@ export function auditLines(record) {
   }
   const lines = record.audits.filter((audit) => audit.status === "could-not-run")
     .map((audit) => `The ${audit.manager} audit could not run (${audit.reason}), so nothing was upgraded for it.`);
+  for (const audit of record.audits.filter((entry) => entry.unchecked > 0)) {
+    lines.push(`${audit.unchecked} requirement(s) of ${audit.manager} are not pinned with ==, so the audit did not check them: it installs nothing, and they have no version to check.`);
+  }
   if (record.findings.length === 0) {
     const ran = record.audits.filter((audit) => audit.status === "clean").map((audit) => audit.manager);
     return ran.length > 0 ? [...lines, `The dependency audit found nothing vulnerable (${ran.join(", ")}).`] : lines;
