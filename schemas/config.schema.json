@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 11",
+  "title": "tagteam project configuration, version 12",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,7 +10,7 @@
     "carry", "autoRedesign"
   ],
   "properties": {
-    "version": { "const": 11, "type": "integer" },
+    "version": { "const": 12, "type": "integer" },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -86,11 +86,7 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 3600,
-      "description": "How long to wait for a first check to appear on a pull request whose commit has a workflow that runs on pull requests, before stopping for a person. One of two keys that may be missing, with `progressBoard`: a missing key means 120. Zero turns the start wait off."
-    },
-    "progressBoard": {
-      "type": "boolean",
-      "description": "Whether ship and plan runs show a table of the current step's agents as running or done under one line of plan progress. False turns the board off and a run prints exactly what it printed before it existed. One of two keys that may be missing, with `ciStartWaitSec`: a missing key means on."
+      "description": "How long to wait for a first check to appear on a pull request whose commit has a workflow that runs on pull requests, before stopping for a person. The one key that may be missing: a missing key means 120. Zero turns the start wait off."
     },
     "autoMerge": {
       "type": "boolean",

@@ -38,11 +38,6 @@ Run the command the previous step printed as `next`. It prints one JSON object:
 - **`set`** — present with every `dispatch`, and when a resumed spec is still
   waiting on agents an earlier run sent out. Its `arrive` is the command that
   records an agent as having reported; see *Sets*.
-- **`board`** — present only when the progress board is on, with a `dispatch`
-  and on an arrival. Show it to the person exactly as printed, as Markdown,
-  before you put the dispatch into one message. Do not reword it, recompose it
-  or summarise it; it is a field value meant to be shown as it is, not JSON to
-  paste. When `board` is absent, do nothing extra.
 - **`ask`** — a decision only a person can make. Ask it the way *Asking* says,
   then run what their answer calls for.
 - **`next`** — the command to run. With a `set`, run it once the last arrival
@@ -83,8 +78,7 @@ when that agent finishes.
 - **If it returns before they have finished**, end your turn. Each finished
   notice wakes you: run `set.arrive` with that one label in double quotes and
   nothing else. It prints one line — "The correctness reviewer is in (1 of 3)" —
-  and you relay it as written, and when it also prints a `board`, you show the
-  board exactly as printed with it. Run nothing else on that wake-up: not `next`, not
+  and you relay it as written. Run nothing else on that wake-up: not `next`, not
   a check, not a status. The last arrival prints "All 3 are in. Judging the
   review now." — or, for a set of one, "Fix 01-a is in. Taking the snapshot
   now." — with `next`, and then you run it.

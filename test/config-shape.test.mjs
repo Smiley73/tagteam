@@ -24,15 +24,15 @@ const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.sch
 // This repository's own configuration, as `/tagteam:configure` would leave it.
 // The file is untracked, and every ship of this repository copies it from the
 // primary checkout into its worktree, so while the plan that introduces version
-// 11 is itself being shipped the copy is still at version 10: bumping it there
-// would break the run reviewing the change. A version-10 file is read the way
-// configure carries one forward — every value kept, the four version-11 keys
-// written at their safe values — and anything else is held to the schema
-// exactly as it is.
+// 12 is itself being shipped the copy is still at version 11: bumping it there
+// would break the run reviewing the change. A version-11 file is read the way
+// configure carries one forward — every value kept, `progressBoard` dropped — and
+// anything else is held to the schema exactly as it is.
 function ownConfiguration() {
   const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
-  if (own.version !== 10) return own;
-  return { ...own, version: 11, carry: false, autoRedesign: false, limits: { ...own.limits, carried: 5, followUps: 2 } };
+  if (own.version !== 11) return own;
+  const { progressBoard, ...kept } = own;
+  return { ...kept, version: 12 };
 }
 
 // Every dotted key a script dereferences off the config object, and where.
@@ -50,15 +50,14 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "progressBoard"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
-  ["scripts/lib/plan-sets.mjs", ["progressBoard"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
 
 // Keys older config shapes had and the current one does not. A key that comes
 // back — `limits` did — has to leave this list, or the guard below fails.
-const RETIRED = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "policyPaths", "limits.planReviewRounds"];
+const RETIRED = ["worktree.setupCommands", "codegraph", "verify.commands", "reviewTiers", "complexity", "prTrain", "transport", "policyPaths", "limits.planReviewRounds", "progressBoard"];
 
 // Keys the schema still accepts and nothing reads. Not retired — the root of the
 // schema refuses an undeclared key, so retiring one would make every file that
@@ -259,7 +258,7 @@ test("a current-version configuration carrying the old role-keyed effort map is 
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 11,
+    version: 12,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { lead: "high", worker: "high", codex: "high" }
   };
@@ -350,8 +349,8 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
     `expected effort.codex: "ultra" to be refused, got: ${codexErrors.join("; ")}`
   );
   const { CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(CONFIG_VERSION, 11, "a Codex effort word joining the ladder is not a new configuration shape");
-  assert.equal(schema.properties?.version?.const, 11);
+  assert.equal(CONFIG_VERSION, 12, "a Codex effort word joining the ladder is not a new configuration shape");
+  assert.equal(schema.properties?.version?.const, 12);
 
   const recheckMax = { ...example, effort: { ...example.effort, recheck: "max" } };
   const recheckErrors = validateJson(schema, recheckMax).filter((error) => error.includes("effort.recheck"));
@@ -1012,9 +1011,8 @@ test("the shipped example states today's behaviour", () => {
 test("the schema declares no default anywhere", () => {
   // The whole refuse-don't-migrate decision rests on this: a default makes a
   // missing key invisible, and the file stops being the whole configuration.
-  // `ciStartWaitSec` and `progressBoard`, the two keys that may be missing, are
-  // no exception here: a script supplies each one's fallback, and the schema
-  // only describes it.
+  // `ciStartWaitSec`, the one key that may be missing, is no exception here: a
+  // script supplies its fallback, and the schema only describes it.
   const defaults = [];
   // `reviewers.default` is a property *name*, not the keyword; only the map a
   // `properties` or `$defs` holds may legitimately contain one.
@@ -1227,17 +1225,32 @@ test("a version-9 or version-10 configuration is refused as older, with the run-
     assert.match(result.stdout, /run \/tagteam:configure/);
   }
   // Bumping the number by hand does not make it current: the keys are still missing.
-  const bumped = validateFile(versionRepo(), { ...ten, version: 11 });
+  const bumped = validateFile(versionRepo(), { ...ten, version: 12 });
   assert.equal(bumped.status, 1, `a hand-bumped version-10 file must be invalid: ${bumped.stdout}${bumped.stderr}`);
   for (const key of VERSION_11_KEYS) {
     assert.match(bumped.stderr, new RegExp(`\\$\\.${key.replace(".", "\\.")}: is required`));
   }
 });
 
-test("the example validates at version 11 with every setting at its safe value", async () => {
+test("a version-11 file is stale whatever `progressBoard` holds, and a version-12 file that carries it is invalid", () => {
+  const dir = versionRepo();
+  for (const board of [true, false, undefined]) {
+    const document = { ...example, version: 11, ...(board === undefined ? {} : { progressBoard: board }) };
+    const result = validateFile(dir, document);
+    assert.equal(result.status, 3, `progressBoard ${board}: expected exit 3, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /run \/tagteam:configure/);
+  }
+  for (const board of [true, false]) {
+    const result = validateFile(dir, { ...example, progressBoard: board });
+    assert.equal(result.status, 1, `a version-12 file with progressBoard ${board} must be invalid: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /\$\.progressBoard: is not allowed/);
+  }
+});
+
+test("the example validates at version 12 with every setting at its safe value", async () => {
   const { validateJson, CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(example.version, 11);
-  assert.equal(CONFIG_VERSION, 11);
+  assert.equal(example.version, 12);
+  assert.equal(CONFIG_VERSION, 12);
   assert.equal(example.planBranch, false, "examples/config.json must ship the setting off");
   assert.deepEqual(example.versionFiles, [], "examples/config.json must ship no version lines");
   // The defaults an upgrade promises: carrying off and redesign asked. The 5 and
@@ -1256,7 +1269,7 @@ test("the version-10 and version-11 keys are required and typed", () => {
     const { [child]: removed, ...rest } = parent ? example[parent] : example;
     const without = parent ? { ...example, [parent]: rest } : rest;
     const result = validateFile(dir, without);
-    assert.equal(result.status, 1, `a version-11 file without ${key} must be invalid: ${result.stderr}`);
+    assert.equal(result.status, 1, `a version-12 file without ${key} must be invalid: ${result.stderr}`);
     assert.match(result.stderr, new RegExp(`\\$\\.${key.replace(".", "\\.")}: is required`));
   }
   const wrongs = [
@@ -1302,7 +1315,7 @@ test("a version line names one file and exactly one locator: a JSON Pointer or a
   }
 });
 
-// --- the start wait and the progress board: the two keys that may be missing ---
+// --- the start wait: the one key that may be missing ---
 
 test("a current file without ciStartWaitSec is valid and current, not stale", async () => {
   // The key was added to version 10 without a version bump so that every
@@ -1331,37 +1344,14 @@ test("ciStartWaitSec is an integer from 0 to 3600", () => {
   }
 });
 
-test("a current file without progressBoard is valid and current, not stale", async () => {
-  const { validateJson } = await import("../scripts/validate-json.mjs");
-  const { progressBoard, ...without } = example;
-  assert.equal(progressBoard, true, "examples/config.json states the board on, as configure always writes it");
-  assert.deepEqual(validateJson(schema, without), []);
-  const result = validateFile(versionRepo(), without);
-  assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
-  assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
-});
-
-test("progressBoard is a boolean", () => {
-  const dir = versionRepo();
-  for (const good of [true, false]) {
-    const result = validateFile(dir, { ...example, progressBoard: good });
-    assert.equal(result.status, 0, `progressBoard: ${good} must validate: ${result.stderr}`);
-  }
-  for (const bad of ["on", 1, null]) {
-    const result = validateFile(dir, { ...example, progressBoard: bad });
-    assert.equal(result.status, 1, `progressBoard: ${JSON.stringify(bad)} must be invalid`);
-    assert.match(result.stderr, /progressBoard/, `progressBoard: ${JSON.stringify(bad)}: the refusal names the key`);
-  }
-});
-
-test("ciStartWaitSec, progressBoard and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("ciStartWaitSec and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
-  // 120 when it is missing, `progressBoard`, which a missing key reads as on, and
-  // `autoMerge`, which nothing reads at all. Another key quietly going optional
-  // would be a missing key read as something nobody wrote down.
+  // 120 when it is missing, and `autoMerge`, which nothing reads at all. Another
+  // key quietly going optional would be a missing key read as something nobody
+  // wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "progressBoard", ...ACCEPTED_AND_IGNORED].sort());
-  assert.equal(schema.properties.version.const, 11, "the optional keys were added without a version bump");
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", ...ACCEPTED_AND_IGNORED].sort());
+  assert.equal(schema.properties.version.const, 12);
 });
 
 // --- autoMerge: accepted, ignored, and said so ---

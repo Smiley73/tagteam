@@ -25,7 +25,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { arriveCommand, closeSet, readSet, readiness, recordSet, renderBoard, restart } from "../dispatch-set.mjs";
+import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "../dispatch-set.mjs";
 import { runnerDispatch } from "./codex-command.mjs";
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -165,37 +165,9 @@ function nameFor(kind, subject) {
 }
 const subjectOf = (output) => path.basename(output).replace(/\.(json|md)$/, "");
 
-// --- the progress board -------------------------------------------------------
-
 // The label the drafter's revision after the owner answered goes out under. It is
 // what tells that draft apart from the others when only the label is known.
 export const REVISE_LABEL = "Revise the plan";
-
-const STEP_TITLES = { 1: "Orienting on the repository", 4: "Drafting the plan", 5: "Reviewing the plan", 6: "Writing the specs" };
-
-// Where a set falls in the plan's seven steps. A draft is used in three of
-// them: the revision is step 5, and a cut is step 4 until a review is on record
-// and step 6 after.
-function boardHeader(kind, labels, sets) {
-  let step;
-  if (kind === "explore") step = 1;
-  else if (kind === "draft") step = labels.includes(REVISE_LABEL) ? 5 : sets.some((set) => set.kind === "review") ? 6 : 4;
-  else step = familyOf(kind) === "spec-writers" ? 6 : 5;
-  return `${STEP_TITLES[step]}, step ${step} of 7`;
-}
-
-const boardOn = (config) => config != null && config.progressBoard !== false;
-
-/**
- * The board of a set going out, every agent `running`, or nothing when the
- * setting is off. `subjects` is one entry per agent, as `nameFor` takes it.
- */
-export function sentBoard({ config, planDir, kind, labels, subjects }) {
-  if (!boardOn(config)) return undefined;
-  const board = { header: boardHeader(kind, labels, listSets(planDir)) };
-  const agents = subjects.map((subject) => ({ label: subject, name: nameFor(kind, subject) }));
-  return renderBoard({ board, agents });
-}
 
 // Each kind's agents write files the run knows in advance. A record that names
 // any other file was copied wrong, and is refused before it is written.
@@ -375,7 +347,6 @@ export async function recordPlanSet({ planDir, kind, agents, repo, env = process
   }
   const record = await recordSet({
     dir, id, repo, env, next, closing,
-    ...(boardOn(config) ? { board: { header: boardHeader(kind, entries.map((entry) => entry.label), sets) } } : {}),
     agents: entries.map((entry, index) => ({
       ...entry, name: nameFor(kind, subjectOf(entry.output)), ...(requests[index] ? { request: requests[index] } : {})
     }))

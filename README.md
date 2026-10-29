@@ -77,12 +77,6 @@ Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**. The interview
 loads repository material that shipping does not need, and context is the thing
 that runs out.
 
-A run shows a progress board: under one line of how far the plan has got, a
-table of the current step's agents as `running` or `done`. It costs a little
-more output per step. `"progressBoard": false` in `.tagteam/config.json` turns
-it off, and a run then prints what it printed before the board existed; a
-configuration without the key has the board on.
-
 ### Planning
 
 ```mermaid
@@ -584,7 +578,7 @@ one is a text edit here, with no image files to regenerate.
 A repository that calibrates its own lenses needs plugin 0.8.2 or newer
 **everywhere it is run**, one configured at version 9 needs 0.9.0 or newer, one
 configured at version 10 needs 0.10.6 or newer, and one configured at version 11
-needs 0.13.0 or newer.
+needs 0.13.0 or newer, and one configured at version 12 needs 0.14.0 or newer.
 Commit a brief and the roster entry that names it in the same commit, and
 refresh the plugin below.
 
