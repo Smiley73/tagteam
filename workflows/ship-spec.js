@@ -161,6 +161,14 @@ if (!plan || !plugin || !stamp || !command || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.te
   return stopped("The run was started without a plan, a plugin root, a command and a stamp made of letters, digits, dots, dashes and underscores; nothing ran.");
 }
 
+// The driver prints every command with the plan and the scripts as resolved
+// absolute paths, and the run compares strings, so a path written any other way
+// would be refused on the first next. Say so now, before anything runs.
+const plain = (value) => value.startsWith("/") && !value.split("/").some((part) => part === "." || part === "..");
+if (!plain(plan) || !plain(plugin)) {
+  return stopped("The run was started with a plan or a plugin root that is not an absolute path without . or .. in it, which the driver's own commands would not match; nothing ran.");
+}
+
 const shipDir = `${plan.slice(0, plan.lastIndexOf("/", plan.lastIndexOf("/") - 1))}/ships/${plan.slice(plan.lastIndexOf("/") + 1)}`;
 const scriptPrefix = (name) => `node ${JSON.stringify(`${plugin}/scripts/${name}`)} `;
 

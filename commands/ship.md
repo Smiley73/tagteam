@@ -7,6 +7,10 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
 `${CLAUDE_PLUGIN_ROOT}`, `$R` is the repository root, `$D` is the plan directory,
 `$S` is `$R/.tagteam/ships/<slug>` where `<slug>` is the plan directory's name.
+`$D` and `$P` are absolute paths with no `.` or `..` in them: resolve `$D` once,
+before `start`, even when the person gave it relative, and write that same value
+in every command and every Workflow call. The run compares them as text with what
+the driver prints, and refuses to start on a path that is not written that way.
 
 You are the orchestrator. `$P/scripts/ship.mjs` sequences every step of every
 spec and decides every gate. The `tagteam:ship-spec` workflow runs a unit of it

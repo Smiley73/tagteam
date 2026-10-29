@@ -253,6 +253,22 @@ test("a command that is not this run's to run is refused before anything runs", 
   assert.match(wrongNext.result.reason, /which only the main session runs/);
 });
 
+test("a plan or plugin root that is not an absolute path without . or .. is refused at launch, before the driver's own next can be refused", async () => {
+  const bad = [
+    { plan: ".tagteam/plans/demo" },
+    { plan: "/repo/.tagteam/plans/../plans/demo" },
+    { plan: "/repo/./.tagteam/plans/demo" },
+    { plugin: "scripts/.." },
+    { plugin: "plugin" }
+  ];
+  for (const args of bad) {
+    const { result, calls } = await run(cmd("begin"), () => { throw new Error("nothing should run"); }, { args });
+    assert.equal(result.ending, "stopped", JSON.stringify(args));
+    assert.match(result.reason, /not an absolute path/, JSON.stringify(args));
+    assert.equal(calls.length, 0, `${JSON.stringify(args)}: no call of any kind`);
+  }
+});
+
 test("each subcommand runs in the phase of the ship.md step it belongs to", async () => {
   const table = {
     Implement: ["begin", "redesign"],
