@@ -278,6 +278,24 @@ test("uv without an audit of its own is audited by pip-audit over its export, an
   }
 });
 
+test("uv audit reads the lockfile as committed and never relocks it", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-uv-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bin-"));
+  const original = process.env.PATH;
+  try {
+    fs.writeFileSync(path.join(cwd, "uv.lock"), "version = 1\n");
+    const seen = path.join(bin, "seen.txt");
+    fs.writeFileSync(path.join(bin, "uv"), `#!/bin/sh\n[ "$2" = --help ] && exit 0\nprintf '%s\\n' "$*" > '${seen}'\necho '{"vulnerabilities":[]}'\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}${path.delimiter}${original}`;
+    assert.equal(auditAll(cwd).audits[0].status, "clean");
+    assert.match(fs.readFileSync(seen, "utf8"), /^audit .*--frozen\b/);
+  } finally {
+    process.env.PATH = original;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("verify is tried together first, then alone, then the survivors together, and the base last", async () => {
   const run = async (failing, base = "passed") => {
     const asked = [];
