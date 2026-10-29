@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.6
+
+- Remove the throwaway `/tagteam:workflow-spike` command and its workflow script. While it was installed, `/tagteam:ship` started the throwaway workflow instead of a ship, because a plugin's workflow shadows the command of the same name; `/tagteam:ship` works again. What the spike found is in `docs/workflow-spike-findings.md`.
+
 ## 0.13.5
 
 - Let the throwaway `/tagteam:workflow-spike` take `silent=<minutes>`, so how a workflow treats a quiet agent can be tried at a few minutes without raising the Bash timeout. Nothing else changes, and the command will still be removed.

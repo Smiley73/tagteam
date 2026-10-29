@@ -24,7 +24,7 @@ const root = path.resolve(import.meta.dirname, "..");
 // two that can disagree.
 export function stagePlugin(into) {
   fs.mkdirSync(into, { recursive: true });
-  for (const dir of [".claude-plugin", "agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"]) {
+  for (const dir of [".claude-plugin", "agents", "commands", "prompts", "schemas", "scripts", "skills"]) {
     fs.cpSync(path.join(root, dir), path.join(into, dir), { recursive: true });
   }
 }
