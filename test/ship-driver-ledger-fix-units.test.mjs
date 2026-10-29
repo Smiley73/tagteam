@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { ship, write, outputOf, resultOf, arriveAll, findings, major, onOrigin, unitDirIn, unitStateOf, checkRoundIn,
-  stageMerged, reviewWholePlan, shipUnit } from "./ship-stage.mjs";
+  stageMerged, reviewWholePlan, shipUnit, bodyWriterOf, factsFileOf, answerBodyWriter } from "./ship-stage.mjs";
 import { enterMerge, entriesOf } from "../scripts/lib/ledger.mjs";
 import { fixUnitIds, followUpIds } from "../scripts/lib/whole-plan.mjs";
 import { PLAN_BODY, RED_CHECK, planPullOf } from "./ship-plan-landing-shared.mjs";
@@ -54,13 +54,16 @@ function judge(staged, check, verdicts, list = []) {
 }
 const everyone = (verdict) => Object.fromEntries(ALL.map((id) => [id, verdict]));
 
-// The landing step's body facts: the first plan-land asks for the body.
-function bodyFactsOf(staged) {
+// The landing step's body facts: the first plan-land sends the writer, and the
+// facts it was told to write from are in a file.
+function bodyWriterSent(staged) {
   const land = ship("plan-land", staged.plan, [], staged.env);
   assert.equal(land.status, 0, land.stderr);
-  assert.ok(land.json.body, land.stdout);
-  return land.json.body;
+  const writer = bodyWriterOf(land);
+  assert.ok(writer, land.stdout);
+  return { land, facts: JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8")) };
 }
+const bodyFactsOf = (staged) => bodyWriterSent(staged).facts;
 
 test("a clean check makes one follow-up for the shared-file group within limits.followUps, and the body says where every other entry went", () => {
   const staged = stageLedger({ followUps: 1 });
@@ -236,9 +239,9 @@ test("a plan body written before a later check moved a ledger entry is asked for
   const staged = stageLedger({ followUps: 0, ciRepairs: 1 });
   const { plan, shipDir, env } = staged;
   assert.match(judge(staged, ship("plan-check", plan, [], env), everyone("resolved")).json.next, /plan-land --plan /);
-  const first = bodyFactsOf(staged);
-  assert.equal(first.ledger.entries.find((entry) => entry.id === FILELESS).outcome, "resolved");
-  write(first.path, PLAN_BODY);
+  const first = bodyWriterSent(staged);
+  assert.equal(first.facts.ledger.entries.find((entry) => entry.id === FILELESS).outcome, "resolved");
+  answerBodyWriter(first.land, PLAN_BODY);
   assert.equal(ship("plan-land", plan, [], env).status, 0);
   assert.ok(planPullOf(env), "the plan's pull request was not opened");
 
@@ -257,17 +260,18 @@ test("a plan body written before a later check moved a ledger entry is asked for
 
   const asked = ship("plan-land", plan, [], env);
   assert.equal(asked.status, 0, asked.stderr);
-  assert.ok(asked.json.body, `a body written from the earlier verdicts was sent as it is: ${asked.stdout}`);
-  assert.equal(asked.json.body.ledger.entries.find((entry) => entry.id === FILELESS).outcome, "spent");
+  const writer = bodyWriterOf(asked);
+  assert.ok(writer, `a body written from the earlier verdicts was sent as it is: ${asked.stdout}`);
+  assert.equal(JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8")).ledger.entries.find((entry) => entry.id === FILELESS).outcome, "spent");
   const said = asked.json.say.join("\n");
   assert.match(said, new RegExp(`ledger entry ${FILELESS} went from resolved \\(resolved\\) to still-real \\(spent\\)`), said);
   assert.match(said, /now the plan made every whole-plan fix limits\.ciRepairs allows \(plan-fix-1\)/, said);
 
   const rewritten = PLAN_BODY.replace("nothing known", "Twice and add still disagree, and the follow-up budget is spent.");
-  write(asked.json.body.path, rewritten);
+  answerBodyWriter(asked, rewritten);
   const sent = ship("plan-land", plan, [], env);
   assert.equal(sent.status, 0, sent.stderr);
-  assert.equal(sent.json.body, undefined, "the body was asked for twice for one change");
+  assert.equal(bodyWriterOf(sent), undefined, "the body was asked for twice for one change");
   assert.match(planPullOf(env).body, /Twice and add still disagree/);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });

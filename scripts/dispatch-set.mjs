@@ -35,8 +35,8 @@
 //
 // There is deliberately no timeout and no override. A set whose finished notice
 // never comes stays open, and a restart from the same session keeps waiting on
-// it; a restart from another session, or a person's yes when no session can be
-// identified, is the way out (see `restart`).
+// it; a restart from another session, from a later run of the same session, or a
+// person's yes when no session can be identified, is the way out (see `restart`).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -180,6 +180,26 @@ export function identifySession(repo, { env = process.env, home = env?.HOME || o
   }
 }
 
+// --- run --------------------------------------------------------------------
+
+/**
+ * The run this process executes inside, from `TAGTEAM_RUN_ID`, or null when
+ * there is none: unset or empty is the main session's own commands. A workflow's
+ * agents all carry the main session's id, so a set records its run as well, and
+ * a restart can tell a set left by an earlier run from one a live run is still
+ * waiting on. A value that is set but cannot be a set id is refused rather than
+ * read as "no run": a mistyped id would otherwise fall back to waiting on a set
+ * nobody is working on.
+ */
+function runOf(env) {
+  const run = env?.TAGTEAM_RUN_ID;
+  if (run === undefined || run === "") return null;
+  if (!SET_ID.test(run)) {
+    refuse(`TAGTEAM_RUN_ID ${q(run)} must start with a letter or digit and hold only letters, digits, dots, dashes and underscores`, 2);
+  }
+  return run;
+}
+
 // --- the command line the main agent runs -----------------------------------
 
 /**
@@ -244,6 +264,7 @@ export async function recordSet({ dir, id, agents, next, closing, repo, env = pr
   if (!nonEmpty(closing)) refuse(`set ${id} needs the phrase that closes its completion line`);
   if (!nonEmpty(repo)) refuse(`set ${id} needs the repository, to identify the session sending it out`);
   const session = identifySession(repo, { env, home });
+  const run = runOf(env);
   return withSetLock(dir, id, (file) => {
     if (fs.existsSync(file)) {
       refuse(`set ${id} already exists in ${path.dirname(file)}; set ids are written once, so a re-send or a later attempt is a new set`);
@@ -253,6 +274,7 @@ export async function recordSet({ dir, id, agents, next, closing, repo, env = pr
       id,
       createdAt: new Date().toISOString(),
       session,
+      run,
       next,
       closing,
       agents: entries,
@@ -397,15 +419,19 @@ export async function closeSet({ dir, id } = {}) {
  *
  * - Both sessions identified and different: the earlier run is gone, so the set
  *   is released and what is on disk decides.
- * - Both identified and the same: the agents may still be working; the set stays
- *   open and is reported in `waiting`.
+ * - Both identified and the same, and both runs identified and different: a
+ *   run in this session starts only after the earlier one's agents have ended,
+ *   finished or crashed, so the set is released.
+ * - Both identified and the same, and either run unknown or both the same: the
+ *   agents may still be working; the set stays open and is reported in `waiting`.
  * - Either side unidentified: without `confirmed`, nothing changes and
  *   `question` asks the person whether the earlier run is gone; with it, the set
  *   is released.
  *
- * Only two positive, differing identifications count as different sessions.
- * Reading a live run as gone would mark working agents as failed and spend
- * their one re-send, so a null on either side is always the person's call.
+ * Only two positive, differing identifications count as different sessions, or
+ * as different runs. Reading a live run as gone would mark working agents as
+ * failed and spend their one re-send, so a null on either side is always the
+ * person's call, and a run unknown on either side changes nothing.
  */
 export async function restart({ dir, repo, confirmed = false, env = process.env, home } = {}) {
   if (!nonEmpty(dir)) refuse("restart needs the directory sets are kept in", 2);
@@ -430,13 +456,14 @@ export async function restart({ dir, repo, confirmed = false, env = process.env,
   }
 
   const current = identifySession(repo, { env, home });
+  const run = runOf(env);
   const release = (id, because) => withSetLock(root, id, (file) => {
     const record = requireSet(root, id);
     const { arrived, missing } = split(record);
     // Re-read under the lock: an arrival or a judging step may have got there
     // between the listing and now.
     if (record.closed || missing.length === 0) return;
-    record.closed = { reason: "released", at: new Date().toISOString(), because, session: current };
+    record.closed = { reason: "released", at: new Date().toISOString(), because, session: current, run };
     writeJsonAtomic(file, record);
     result.released.push({ set: id, because, arrived, missing });
   });
@@ -444,6 +471,7 @@ export async function restart({ dir, repo, confirmed = false, env = process.env,
     const { missing } = split(record);
     if (record.session && current) {
       if (record.session !== current) await release(record.id, "different-session");
+      else if (record.run && run && record.run !== run) await release(record.id, "different-run");
       else result.waiting.push({ set: record.id, missing });
     } else if (confirmed) {
       await release(record.id, "confirmed");
@@ -456,7 +484,9 @@ export async function restart({ dir, repo, confirmed = false, env = process.env,
   for (const { set, because, missing } of result.released) {
     lines.push(because === "confirmed"
       ? `Released set ${set} on your word that the earlier run is gone; what is on disk decides for ${namesOf(missing)}.`
-      : `Set ${set} was sent out from another session, which is gone; released it, so what is on disk decides for ${namesOf(missing)}.`);
+      : because === "different-run"
+        ? `Set ${set} was sent out by an earlier run in this session, which has ended; released it, so what is on disk decides for ${namesOf(missing)}.`
+        : `Set ${set} was sent out from another session, which is gone; released it, so what is on disk decides for ${namesOf(missing)}.`);
   }
   for (const { set, missing } of result.waiting) {
     lines.push(`Set ${set} was sent out from this session and is still waiting on ${namesOf(missing)}.`);

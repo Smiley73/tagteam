@@ -32,7 +32,7 @@ const collect = (ws, session) => runScript(ws, "plan.mjs", ["collect", "--dir", 
 const check = (ws) => runScript(ws, "plan.mjs", ["check", "--dir", ws.review]);
 const specs = (ws) => runScript(ws, "specs.mjs", [ws.D, path.join(ws.repo, ".tagteam", "config.json"), "--enforce-size"]);
 const deliverables = (ws) => runScript(ws, "deliverables.mjs", [path.join(ws.D, "plan.md")]);
-const resume = (ws, session, flags = []) => runScript(ws, "plan.mjs", ["resume", "--plan", ws.D, ...flags], session);
+const resume = (ws, session, flags = [], extra = {}) => runScript(ws, "plan.mjs", ["resume", "--plan", ws.D, ...flags], session, extra);
 
 const PLAN = [
   "# A plan", "", "## Deliverables", "",
@@ -41,9 +41,9 @@ const PLAN = [
 ].join("\n");
 const spec = (id, depends = "[]") => `---\nid: ${id}\ndepends_on: ${depends}\nreviewers: []\n---\n\n## Outcome\nSomething.\n\n## Sign-offs\nNone.\n`;
 
-function reviewOut(ws, session = null) {
+function reviewOut(ws, session = null, extra = {}) {
   stageExplored(ws, session);
-  const readers = recordPlanSet(ws, "review", PLAN_READERS(ws), session);
+  const readers = recordPlanSet(ws, "review", PLAN_READERS(ws), session, extra);
   assert.equal(readers.status, 0, readers.stderr);
   return readers;
 }
@@ -367,6 +367,45 @@ test("a restart from the same session keeps waiting on the reader still out, and
   assert.equal(collect(ws, "same").status, 5);
   // And the wait it describes is the real one: the last arrival names collect.
   assert.match(arriveInto(ws, resumed, ["Codex plan review"]).json.next, /plan\.mjs" collect/);
+});
+
+test("a later run in the same session releases the review an earlier run left out, and keeps waiting when either run is unknown or both are the same", () => {
+  const ws = stagePlanWorkspace();
+  stageTranscript(ws, "same");
+  const readers = reviewOut(ws, "same", { TAGTEAM_RUN_ID: "run-a" });
+  assert.equal(readSet(setsDir(ws), readers.json.set.id).run, "run-a", "the set did not record the run that sent it out");
+  arriveInto(ws, readers, ["Plan review: Claude", "Plan review: adversary"]);
+
+  for (const extra of [{}, { TAGTEAM_RUN_ID: "run-a" }]) {
+    const kept = resume(ws, "same", [], extra);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.equal(kept.json.set.id, readers.json.set.id, `a restart with ${JSON.stringify(extra)} did not keep waiting`);
+    assert.equal(stateOf(ws, readers), "open");
+  }
+  const later = resume(ws, "same", [], { TAGTEAM_RUN_ID: "run-b" });
+  assert.equal(later.status, 0, later.stderr);
+  assert.match(later.json.say.join("\n"), /sent out by an earlier run in this session, which has ended; released it/);
+  assert.equal(later.json.set, undefined);
+  assert.equal(stateOf(ws, readers), "closed");
+  assert.equal(readSet(setsDir(ws), readers.json.set.id).closed.because, "different-run");
+  assert.equal(readSet(setsDir(ws), readers.json.set.id).closed.run, "run-b");
+  assert.match(later.json.next, /plan\.mjs" collect/);
+
+  const bare = stagePlanWorkspace();
+  stageTranscript(bare, "same");
+  const unrecorded = reviewOut(bare, "same");
+  assert.equal(readSet(setsDir(bare), unrecorded.json.set.id).run, null);
+  const waiting = resume(bare, "same", [], { TAGTEAM_RUN_ID: "run-b" });
+  assert.equal(waiting.json.set.id, unrecorded.json.set.id, "a set that recorded no run was released by a run");
+});
+
+test("a run id that cannot be a set id is refused, not read as no run", () => {
+  const ws = stagePlanWorkspace();
+  stageTranscript(ws, "same");
+  stageExplored(ws, "same");
+  const refused = recordPlanSet(ws, "review", PLAN_READERS(ws), "same", { TAGTEAM_RUN_ID: "../run" });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /TAGTEAM_RUN_ID "\.\.\/run" must start with a letter or digit/);
 });
 
 test("with no session identified the resume asks, a no keeps the set open, and a yes lets disk decide", () => {

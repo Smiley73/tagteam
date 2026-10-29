@@ -10,7 +10,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
 
 You are the orchestrator. `$P/scripts/ship.mjs` sequences every step of every
 spec and prints what happens next; you run it, dispatch exactly what it prints,
-write the pull request body, and talk to the person. You never read a diff, a
+and talk to the person. You never read a diff, a
 findings file or a spec body, and you never decide a round number, a model or
 an effort — the driver has decided them and printed them.
 
@@ -206,9 +206,9 @@ verify commands all run whatever their `when`. On a plan branch it merges into
 the plan branch without asking. Straight to the base, it waits for the person's
 Merge like a spec: its `next` is `end`, and the first spec begins once they have
 merged it. Its records are under `$S/dependencies/unit/`, so its pull request body
-is `$S/dependencies/unit/pr-body.md`; write it as the pull request body section
-says, about which packages get a fix for what, and never list the upgrades left
-out — the driver writes those under `## Risk` itself.
+is `$S/dependencies/unit/pr-body.md`; at `publish` the driver sends a writer for
+it, about which packages get a fix for what, and the writer never lists the
+upgrades left out — the driver writes those under `## Risk` itself.
 
 ## Per spec
 
@@ -434,11 +434,12 @@ What is yours at each point:
   say how it ran* below before running `next`. A non-zero exit
   code on that line is a failed Codex call; `collect` or `settle` will report the
   lens as having produced no usable evidence, and re-dispatch it once.
-- **Before `publish`**: write the pull request body and choose a title, as the
-  next section says, then run
+- **Before `publish`**: run it as printed. It may dispatch a writer for the pull
+  request body and title; its `next` is then `publish` again, which sends what the
+  writer wrote. The command is
 
   ```bash
-  node "$P/scripts/ship.mjs" publish --plan "$D" --spec <id> --title "<title>" --body "$S/<id>/pr-body.md"
+  node "$P/scripts/ship.mjs" publish --plan "$D" --spec <id>
   ```
 
   `publish` waits for the pull request's checks before it returns, and that can
@@ -493,72 +494,21 @@ as missing and stops at `finish`.
 
 ## The pull request body
 
-Write `$S/<id>/pr-body.md` yourself, never in the worktree, in this shape:
+You write none of it. `publish` dispatches one agent of the implementer role to
+write the body and the title, from the facts the driver gathered: the findings
+still open, the work left undone that the readers ruled environmental or out of
+scope, the rows the last fixer table left not addressed, the budgets that ran
+out, and the live body when a pull request is already open. The brief it follows
+is `$P/prompts/pull-request-body.md`; the lines the driver writes under `## Risk`
+itself — each finding still open that merging carries into the plan branch, and
+a failure that passed when it was run again on the same commit — are the
+driver's, and it sends the body again on its own when such a line comes after the
+pull request opened.
 
-```md
-## Summary
-## What you can now do
-## Risk
-```
-
-Write it for whoever reads this pull request cold, and for whoever reads it a
-year from now looking for when a behaviour changed. That reader wants what is
-different for the person using this software and why it was worth doing.
-Anything about *how* is in the diff, one click away, and does not belong here.
-
-So: no file paths, function names, constants or schema keys. No account of how
-the change was built, and **nothing about the review or the verification** — not
-how many rounds it took, not what the lenses raised, not the test count. That
-record exists under `.tagteam/ships/` for anyone who needs it, and none of it
-tells a reader whether to merge.
-
-Two things do carry over from the run, because they are about the software:
-
-- **A finding still open goes under `## Risk`**, said as what goes wrong and for
-  whom, in the same plain English you use for a person. `settle`'s `say` gives
-  you each one. On a plan branch the driver writes these lines itself, one per
-  finding — each saying whether the person's accept or a carry merges the spec, and
-  otherwise the fixer table's recommendation for it — so do not write them a
-  second time. A finding the person accepted — they answered the *Recurring*
-  question with `accept` — goes there the same way: it is still open, and the
-  body is where it is disclosed. So does one the person chose to publish with at
-  the cap, answering that question with "publish as it is".
-- **Work an agent left undone that every reader ruled environmental or
-  out-of-scope goes there too**, said as what was not done or not checked and
-  why that is no fault in the change — a check the agent could not run where it
-  ran, a part another spec owns. `settle`'s `say` gives each item with its
-  ruling, and on a plan branch these are what let the spec merge without a
-  person, so the body is the one place a reader learns of them.
-- **Every row the last fixer table left not addressed goes there too**, on every
-  route — a plan branch, straight to the base, a whole-plan fix — said as what
-  goes wrong and for whom, with its recommendation in words: that it needs a
-  person, that the plan needs re-planning, or that it could be carried or
-  accepted as it is. `publish` lists those rows again in `notAddressed` — less
-  any the driver's own lines already say, recommendation included; when the
-  body you sent leaves one out, add it and run the same `publish` again.
-- **A budget that ran out goes there too** — what the change still gets wrong,
-  and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
-  to let it try again. When the area was rewritten at the cap and the rewrite
-  still failed, say that too: a fresh rewrite was tried and did not settle it,
-  and merging is the person's to do by hand.
-
-`## Risk` says "nothing known" when there is nothing, rather than being dropped.
-
-The body `publish` sends is yours plus lines the driver writes under `## Risk`
-itself — on a plan branch each finding still open, which merging carries into
-the plan branch, and a failure that passed when it was run again on the same
-commit — and it sends the body again on its own when such a line comes after
-the pull request opened. Never repeat a line the driver writes. Those lines replace a "nothing known". When you write the body again
-from the one on GitHub, keep them; the driver adds back any that are missing,
-and nothing merges while one is.
-
-When the pull request already exists — after a CI repair, or after a revisit —
-`publish` replaces its body with what you give it. After a revisit, start from
-the body as it stands: `revisit`'s `say` names the file holding it, and a person
-may have edited it by hand. Keep what they wrote and change only what the run
-changed, `## Risk` above all.
-
-The title is at most 70 characters of letters, digits, spaces and `. _ : -`.
+Each `publish` that finds no writer out sends a new one, so a repair, or a revisit
+that changed what the pull request must say, has its body written again from the
+body as it stands. A body someone wrote by hand is sent with `publish --title
+"<title>" --body <file>`; only a person asks for that.
 
 ## Merge or stop
 
@@ -785,8 +735,8 @@ what verify found, and at what model and effort the reviewer runs.
   *fix unit*, and `next` is `begin` for it. A fix unit ships exactly like a
   spec: the same steps, sets, review, gates and `finish`, and the same answers
   to every question on the way. Its records are under `$S/whole-plan/units/<id>/`,
-  so its pull request body is `$S/whole-plan/units/<id>/pr-body.md`; write it as
-  the pull request body section says, about what the fix changes for the person
+  so its pull request body is `$S/whole-plan/units/<id>/pr-body.md`; at `publish`
+  the driver sends a writer for it, about what the fix changes for the person
   using the software. Once it is merged, `next` is the check again, on the new
   tip.
 - **A stop** — every fix `limits.ciRepairs` allows already made and still not
@@ -824,27 +774,17 @@ train recorded, waits for its checks, checks it against the base as it now
 stands, and asks the person what to do. Run it as printed whenever `next` names
 it; `/tagteam:ship` on a plan whose specs have all merged comes back here too.
 
-**The body first.** The first time, before anything is opened, it returns `body`
-with the path to write and what the plan carries. Write that file yourself, in
-the same shape as a spec's — *The pull request body* above — but for the plan as
-a whole: what is different for the person using the software once the whole plan
-is in. `body.plan` is the plan's deliverables; read it for the summary. Under
-`## Risk` carry over what each spec's own body disclosed — `body.lands` names
-each one's `pr-body.md` — above all one disclosed when a fix budget ran out; and
-say each budget in `body.spent` that ran out, with the setting a person would
-raise. The plan's ledger — every finding a spec carried into the plan branch
-open, grouped by spec, and every failure that passed when it was run again —
-the ship adds under `## Risk` itself, as `body.ledger.riskLines` says when there
-is any: do not write those lines a second time. `body.ledger.entries` says where
-each entry ended up: for every one whose `endedUp` says it is still unresolved,
-add under `## Risk` what it means for the person using the software — what
-still goes wrong, and when — and why it was not fixed. `## Risk` says "nothing known" when
-there is nothing. Then run `next`. A `--title "<title>"` of your own is taken the
-same way as for `publish`; without one, the plan document's heading is used.
+**The body first.** The first time, before anything is opened, the driver sends
+a writer of the implementer role for the plan's body, in the same shape as a
+spec's, for the plan as a whole: what is different for the person using the
+software once the whole plan is in. Its `next` is `plan-land` again once the
+writer is in, and that run opens the pull request. The brief it follows,
+`$P/prompts/pull-request-body.md`, covers what a plan's body carries over from
+each spec's own and from the plan's ledger. A `--title "<title>"` of your own is
+taken before the writer's; without either, the plan document's heading is used.
 When a later check changes what the body answers for — where a ledger entry
-ended up, or a budget in `body.spent` — `plan-land` returns `body` again, and
-`say` names what changed: write the file again from it, the same way, and run
-`next`.
+ended up, or a budget that ran out — `plan-land` sends a writer again, and `say`
+names what changed.
 
 **What it does on the way**, each step said in `say` — relay it plainly:
 

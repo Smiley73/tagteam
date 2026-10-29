@@ -38,7 +38,7 @@ const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 // defence of this check. The install is a copy of the *entire* repository, so an
 // unscoped comparison reports everything a copy differs on by construction: on a
 // clean checkout `diff -rq` between an installed copy and the working tree found
-// 134 differences, every one of them machine state. Scoped to these six the same
+// 134 differences, every one of them machine state. Scoped to these seven the same
 // pair was byte-identical — 0. A report that names `.tagteam/ships/…` is a report
 // nobody reads twice.
 //
@@ -46,7 +46,8 @@ const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 // follows literally, so a stale one is a stale procedure), `agents/` (subagent
 // definitions dispatched by name out of the snapshot), `prompts/` (the briefs
 // every dispatch reads), `schemas/` (what every structured output is validated
-// against), `skills/` (read first by both commands).
+// against), `skills/` (read first by both commands), `workflows/` (Claude Code
+// workflow scripts, run out of the snapshot like `scripts/`, by an agent).
 //
 // Out, and meant to stay out: `.claude-plugin/` — identity, reported as a
 // version on its own line rather than as a differing file, so a version bump
@@ -55,7 +56,7 @@ const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 // `.codegraph/`, `.claude/`, `.plan/`, `.in_use`, `.git/`, `node_modules/` —
 // machine state a copy-based install carries by construction and differs on
 // against every working tree, whatever anyone edited.
-export const EXECUTED_ROOTS = ["agents", "commands", "prompts", "schemas", "scripts", "skills"];
+export const EXECUTED_ROOTS = ["agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"];
 
 // A `.claude-plugin/plugin.json`, and — when there is none to be had — whether
 // it was *missing* or merely unreadable. `status.mjs` folds both into absence,

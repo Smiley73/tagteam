@@ -24,7 +24,8 @@ const root = path.resolve(import.meta.dirname, "..");
 // two that can disagree.
 export function stagePlugin(into) {
   fs.mkdirSync(into, { recursive: true });
-  for (const dir of [".claude-plugin", "agents", "commands", "prompts", "schemas", "scripts", "skills"]) {
+  for (const dir of [".claude-plugin", "agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"]) {
+    if (!fs.existsSync(path.join(root, dir))) continue;
     fs.cpSync(path.join(root, dir), path.join(into, dir), { recursive: true });
   }
 }
@@ -79,11 +80,12 @@ export function stageTranscript(ws, session) {
   fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "");
 }
 
-export function planEnv(ws, session = null) {
+export function planEnv(ws, session = null, extra = {}) {
   const env = { ...process.env, HOME: ws.home };
   for (const name of SESSION_VARIABLES) delete env[name];
+  delete env.TAGTEAM_RUN_ID;
   if (session) env.TAGTEAM_SESSION_ID = session;
-  return env;
+  return { ...env, ...extra };
 }
 
 function ran(result) {
@@ -92,13 +94,13 @@ function ran(result) {
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, json };
 }
 
-export function runScript(ws, script, args, session = null) {
-  return ran(spawnSync(process.execPath, [path.join(root, "scripts", script), ...args], { encoding: "utf8", env: planEnv(ws, session) }));
+export function runScript(ws, script, args, session = null, extra = {}) {
+  return ran(spawnSync(process.execPath, [path.join(root, "scripts", script), ...args], { encoding: "utf8", env: planEnv(ws, session, extra) }));
 }
 
 // `agents` is `[label, output]` pairs, as the main agent passes them.
-export function recordPlanSet(ws, kind, agents, session = null) {
-  return runScript(ws, "plan.mjs", ["record", "--plan", ws.D, "--kind", kind, ...agents.flatMap((pair) => ["--agent", ...pair])], session);
+export function recordPlanSet(ws, kind, agents, session = null, extra = {}) {
+  return runScript(ws, "plan.mjs", ["record", "--plan", ws.D, "--kind", kind, ...agents.flatMap((pair) => ["--agent", ...pair])], session, extra);
 }
 
 // The arrival command a payload printed, run exactly as printed, with the labels

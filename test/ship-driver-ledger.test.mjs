@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { git, ship, write, outputOf, arriveAll, findings, stagePlan, pullsOf } from "./ship-stage.mjs";
+import { git, ship, write, outputOf, arriveAll, findings, stagePlan, pullsOf, factsFileOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
 import { PLAN_BODY, landingRecordOf, planPullOf, stageClean, toDialog } from "./ship-plan-landing-shared.mjs";
 import { enterMerge, entriesOf, pendingLine, readLedger } from "../scripts/lib/ledger.mjs";
@@ -52,8 +52,9 @@ test("on a plan branch, an accept of major code findings on a spec nothing waits
     first: path.join(rounds, latest, "verify.json"), second: path.join(rounds, latest, "verify-retry.json"), result: "passed"
   });
 
-  const published = run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
-  assert.equal(published.json.notAddressed, undefined, "a finding the driver's Risk lines say was handed over to be said again");
+  const writer = run("publish").json.dispatch[0];
+  assert.deepEqual(JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8")).notAddressed, [], "a finding the driver's Risk lines say was handed over to be said again");
+  run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
   const body = pullsOf(env)[0].body;
   assert.match(body, /## Risk\n\n- 3\.correctness\.1 \(major\): sub truncates large results — a person accepted it open/);
   assert.match(body, /\n- 2\.adversary\.1 \(major\): sub loses the sign of a negative result — a person accepted it open/);
@@ -87,8 +88,9 @@ test("an accept the carry rule refuses records nothing, finish stops on the open
   // The fixer's table left 2.adversary.1 not addressed, needing a person. The
   // driver's own Risk line stands in for that row, so it says so — and does not
   // tell the reader the merge is arranged, since the spec waits for a person.
-  const published = run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
-  assert.equal(published.json.notAddressed, undefined, "a row the driver's Risk line says, recommendation included, was handed over to be said again");
+  const writer = run("publish").json.dispatch[0];
+  assert.deepEqual(JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8")).notAddressed, [], "a row the driver's Risk line says, recommendation included, was handed over to be said again");
+  run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
   const body = pullsOf(env)[0].body;
   const waits = (finding, title) => new RegExp(`\\n- ${finding.replaceAll(".", "\\.")} \\(major\\): ${title} — a person accepted it open, but the spec does not merge on that alone: `
     + "it needs a person\\. Merged by hand as it is, it goes into the plan branch unresolved and is listed in the plan's pull request\\.\\n");

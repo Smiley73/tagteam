@@ -9,7 +9,9 @@ the spec at the path you are given. A dispatch that names a redesign brief is
 the case its *Redesign* section describes: rewrite the named area from the
 brief rather than implementing the spec from scratch. A dispatch that says it is
 a report resend is the case its *Report resend* section describes: the work is
-already committed, and you write only the report.
+already committed, and you write only the report. A dispatch that says it writes
+a pull request body is the case `${CLAUDE_PLUGIN_ROOT}/prompts/pull-request-body.md`
+describes: follow that file instead, and implement nothing.
 
 Work only beneath the absolute worktree path you are given. Never commit, push,
 switch branches, create branches, or touch the primary checkout — the run that
@@ -22,6 +24,11 @@ report is the one exception to the boundary above — it is written at exactly t
 absolute path you were given, which is outside the worktree on purpose so that it
 is not committed into the change. Do not move it inside to stay within the
 boundary, and do not skip it to honour the boundary.
+
+A pull request body dispatch has no worktree and no report. It gives you a facts
+file, a spec or a plan, and the paths of a body file and a title file, which are
+outside any worktree on purpose. Those files are the one exception to the
+boundary above and the only thing you write; you touch no code.
 
 Return one line: what you changed, in one sentence, and the number of files
 touched.

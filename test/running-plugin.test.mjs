@@ -94,6 +94,24 @@ test("a file edited in the checkout is named, under whichever executed root it s
   ]);
 });
 
+test("a workflow script edited in the checkout is named, and a staged plugin carries the workflows directory", () => {
+  const snapshot = stageTree("snapshot");
+  const worktree = stageTree("worktree");
+  assert.ok(fs.existsSync(path.join(worktree, "workflows")), "a staged plugin does not carry workflows/");
+  for (const tree of [snapshot, worktree]) fs.writeFileSync(path.join(tree, "workflows", "ship-spec.js"), "// the workflow\n");
+  fs.appendFileSync(path.join(worktree, "workflows", "ship-spec.js"), "// edited\n");
+
+  assert.deepEqual(report(snapshot, worktree).drift, [{ file: "workflows/ship-spec.js", state: "differs" }]);
+});
+
+test("a workflows directory neither side has reports nothing", () => {
+  const snapshot = stageTree("snapshot");
+  const worktree = stageTree("worktree");
+  for (const tree of [snapshot, worktree]) fs.rmSync(path.join(tree, "workflows"), { recursive: true, force: true });
+
+  assert.deepEqual(report(snapshot, worktree).drift, []);
+});
+
 // The edit that only a byte comparison catches, in the place only a
 // relative-path key finds it. `sameBytes` compares sizes first and reads
 // contents only when they match, so a size-changing edit — which is every other
