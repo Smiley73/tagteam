@@ -357,7 +357,7 @@ function auditOne(manager, cwd) {
   }
   if (manager === "uv") {
     if (run(["uv", "audit", "--help"], cwd, 30_000).status === 0) {
-      const { result, early } = ran(["uv", "audit", "--output-format", "json"]);
+      const { result, early } = ran(["uv", "audit", "--frozen", "--output-format", "json"]);
       return early ?? parseUv(result.stdout);
     }
     // This uv has no audit of its own: pip-audit over what it exports.
