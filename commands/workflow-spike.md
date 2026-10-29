@@ -30,7 +30,9 @@ measures that instead of the stall detector. Do not set it for them.
 1. Print this session's id the way the implementer will:
    `node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { identifySession } = await import(pathToFileURL(process.argv[2]).href); const names = ["TAGTEAM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]; console.log(JSON.stringify({ session: identifySession(process.argv[1]), env: Object.fromEntries(names.map((name) => [name, process.env[name] ?? null])) }))' "$R" "$P/scripts/dispatch-set.mjs"`
    and show its output.
-2. Make one Workflow call naming the workflow `ship`, with `args` of
+2. Make one Workflow call naming the workflow `tagteam:ship` (the plugin
+   registers it under that name, which is what the `Workflow(tagteam:ship)`
+   grant matches), with `args` of
    `{"repo": "$R", "pluginRoot": "$P", "mode": "<normal|long>", "stall": "<default|raised>"}`,
    the paths written out.
 3. Say in one line what to watch: the Background tasks pane, the approval card
