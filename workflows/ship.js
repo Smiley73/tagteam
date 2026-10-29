@@ -37,12 +37,14 @@ if (typeof repo !== "string" || !repo || typeof pluginRoot !== "string" || !plug
 const sh = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 const fixture = `${pluginRoot}/test/fixtures/toyapp`;
 const lens = `${pluginRoot}/prompts/lenses/correctness.md`;
+// The repository goes first and the module second: dispatch-set.mjs runs its CLI
+// when its own path is process.argv[1], and importing it must run nothing.
 const sessionCommand = `node --input-type=module -e ${sh(
   `import { pathToFileURL } from "node:url";
-const { identifySession } = await import(pathToFileURL(process.argv[1]).href);
+const { identifySession } = await import(pathToFileURL(process.argv[2]).href);
 const names = ["TAGTEAM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"];
-console.log(JSON.stringify({ session: identifySession(process.argv[2]), env: Object.fromEntries(names.map((name) => [name, process.env[name] ?? null])) }));`
-)} ${sh(`${pluginRoot}/scripts/dispatch-set.mjs`)} ${sh(repo)}`;
+console.log(JSON.stringify({ session: identifySession(process.argv[1]), env: Object.fromEntries(names.map((name) => [name, process.env[name] ?? null])) }));`
+)} ${sh(repo)} ${sh(`${pluginRoot}/scripts/dispatch-set.mjs`)}`;
 
 const implementerModel = "sonnet";
 const implementerEffort = "high";
@@ -112,13 +114,13 @@ await run("reviewer", reviewerPrompt, {
   effort: reviewerEffort
 });
 
-let sibling;
-try {
-  sibling = (await import("./lib/sibling.mjs")).sibling;
-  log(`sibling import: ${sibling}`);
-} catch (error) {
-  sibling = { error: String(error?.message ?? error) };
-  log(`sibling import failed: ${sibling.error}`);
-}
+// The spec asked for a dynamic import() of workflows/lib/sibling.mjs inside a
+// try/catch. Claude Code's compiler rejects any import expression in a workflow
+// script ("import() is not available in workflow scripts") before the script
+// runs, so the try/catch would never execute and no agent would start. The
+// documentation wins over the spec here: the script does not try the import,
+// and says so in what it returns.
+const sibling = { attempted: false, reason: "import() is not available in workflow scripts" };
+log(`sibling import: not attempted -- ${sibling.reason}`);
 
 return { started: true, mode, stall, ...results, sibling };

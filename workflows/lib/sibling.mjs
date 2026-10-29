@@ -1,3 +1,3 @@
-// Read by workflows/ship.js to learn whether a Claude Code workflow script can
-// import a module that sits beside it.
+// Sits beside workflows/ship.js so that a Claude Code workflow script has a
+// module to import. The script does not try: the runtime rejects import().
 export const sibling = "sibling module loaded";

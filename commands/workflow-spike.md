@@ -28,7 +28,7 @@ measures that instead of the stall detector. Do not set it for them.
 **Steps.**
 
 1. Print this session's id the way the implementer will:
-   `node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { identifySession } = await import(pathToFileURL(process.argv[1]).href); const names = ["TAGTEAM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]; console.log(JSON.stringify({ session: identifySession(process.argv[2]), env: Object.fromEntries(names.map((name) => [name, process.env[name] ?? null])) }))' "$P/scripts/dispatch-set.mjs" "$R"`
+   `node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { identifySession } = await import(pathToFileURL(process.argv[2]).href); const names = ["TAGTEAM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]; console.log(JSON.stringify({ session: identifySession(process.argv[1]), env: Object.fromEntries(names.map((name) => [name, process.env[name] ?? null])) }))' "$R" "$P/scripts/dispatch-set.mjs"`
    and show its output.
 2. Make one Workflow call naming the workflow `ship`, with `args` of
    `{"repo": "$R", "pluginRoot": "$P", "mode": "<normal|long>", "stall": "<default|raised>"}`,
