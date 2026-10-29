@@ -782,7 +782,7 @@ test("commands/status.md documents every reason drift can be unknown", () => {
 
 test("the compared set is exactly the directories the plugin reaches into", async () => {
   const { EXECUTED_ROOTS } = await import("../scripts/running-plugin.mjs");
-  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills"]);
+  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"]);
   const unclassified = [];
   for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
     for (const [, dir] of text.matchAll(/(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$P)\/([A-Za-z0-9._-]+)\//g)) {
