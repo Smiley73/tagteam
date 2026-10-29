@@ -235,19 +235,28 @@ function tally(projectDir, names, { from, to }) {
   };
   for (const name of names) {
     const file = path.join(projectDir, name);
-    // A session that ended before the window opened has nothing in it to read.
-    if (fs.statSync(file).mtimeMs < from) continue;
-    const main = readTranscript(file, { since: from, until: to });
-    if (!main) {
-      totals.unreadable += 1;
-      continue;
+    // The orchestrator's own turns are read only if the transcript was written
+    // since the window opened. Its agents are looked for either way: a workflow
+    // launched before the window keeps running in it, while the parent sits idle.
+    let main = null;
+    if (fs.statSync(file).mtimeMs >= from) {
+      main = readTranscript(file, { since: from, until: to });
+      if (!main) {
+        totals.unreadable += 1;
+        continue;
+      }
     }
-    if (main.usage.turns === 0) continue;
-    totals.sessions += 1;
-    for (const key of Object.keys(zero())) totals.orchestrator[key] += main.usage[key];
+    const mainTurns = main?.usage.turns ?? 0;
+    if (mainTurns > 0) for (const key of Object.keys(zero())) totals.orchestrator[key] += main.usage[key];
     const subagents = path.join(projectDir, name.replace(/\.jsonl$/, ""), "subagents");
+    const agentsBefore = totals.agents.count;
     for (const dir of agentDirectories(subagents)) for (const agentFile of agentFilesIn(dir)) {
       const file = path.join(dir, agentFile);
+      try {
+        if (fs.statSync(file).mtimeMs < from) continue;
+      } catch {
+        continue;
+      }
       const agent = readTranscript(file, { since: from, until: to });
       if (!agent || agent.usage.turns === 0) continue;
       const type = classifyAgent(agent.prompt, agentTypeOf(file));
@@ -260,6 +269,7 @@ function tally(projectDir, names, { from, to }) {
       }
       bucket.equiv = Math.round(equivOf(bucket));
     }
+    if (mainTurns > 0 || totals.agents.count > agentsBefore) totals.sessions += 1;
   }
   return totals;
 }

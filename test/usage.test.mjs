@@ -315,12 +315,16 @@ test("a scoped read of a readable transcript that is silent in the window stays 
   assert.match(summaryLines(silent)[0], /this ship's own session/);
   assert.doesNotMatch(summaryLines(silent)[0], /may include other ships/);
 
-  // A transcript older than the window is skipped before it is read at all, and
-  // is the same silence rather than a different one.
+  // A parent transcript older than the window is not read for its own turns, but
+  // the agents beside it are still looked for: a workflow launched earlier keeps
+  // spending while the parent sits idle. Only the agent's spend is counted.
   const stale = Date.parse("2026-08-01T00:00:00Z") / 1000;
   fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), stale, stale);
-  assert.equal(reportFor(fixture, "mine").summary.scope, "session");
-  assert.equal(reportFor(fixture, "mine").summary.equivalentTokens, 0);
+  const idle = reportFor(fixture, "mine");
+  assert.equal(idle.summary.scope, "session");
+  assert.equal(idle.orchestrator.turns, 0);
+  assert.deepEqual(Object.keys(idle.agents.byType), ["reviewer"]);
+  assert.ok(idle.summary.equivalentTokens > 0);
 
   // And a scoped read that does find turns is the narrow number, as before.
   const now = Date.now() / 1000;
@@ -450,6 +454,27 @@ test("workflow agents are counted under the session, by the job line behind the 
   assert.equal(result.agents.output, 20, "nothing was counted from the journal or the prefix");
   assert.deepEqual(Object.keys(result.agents.byType).sort(), ["implementer", "reviewer"]);
   assert.equal(result.agents.byType.reviewer.count, 1);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("a workflow that runs after the session's last turn in the window is still counted, though the parent is idle and was last written before the window", () => {
+  const fixture = oneAgent("");
+  const parent = path.join(fixture.projectDir, "s.jsonl");
+  fs.writeFileSync(parent, assistant("o1", "2026-09-01T10:00:00Z", usage(0, 0, 100, 1), [{ type: "text", text: "launch" }]));
+  const before = new Date("2026-09-01T10:00:01Z");
+  fs.utimesSync(parent, before, before);
+  fs.rmSync(path.join(fixture.projectDir, "s", "subagents", "agent-1.jsonl"));
+  const dir = path.join(fixture.projectDir, "s", "subagents", "workflows", "wf_a");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "agent-w1.jsonl"),
+    line({ timestamp: "2026-09-01T10:02:00Z", message: { role: "user", content: framed("Job: reviewer\nReview 01-a") } })
+    + assistant("m-w1", "2026-09-01T10:02:01Z", usage(1, 0, 0, 100), [{ type: "text", text: "ok" }]));
+  const result = report({ repo: fixture.repo, since: "2026-09-01T10:01:00Z", until: "2026-09-01T11:00:00Z", projectDir: fixture.projectDir, session: "s" });
+  assert.equal(result.agents.count, 1);
+  assert.equal(result.agents.output, 100);
+  assert.equal(result.agents.byType.reviewer.count, 1);
+  assert.equal(result.orchestrator.turns, 0, "the parent said nothing in the window");
+  assert.equal(result.sessions, 1);
   fs.rmSync(fixture.home, { recursive: true, force: true });
 });
 
