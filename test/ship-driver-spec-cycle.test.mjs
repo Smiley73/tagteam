@@ -76,7 +76,6 @@ test("a clean spec runs begin → snapshot → verify → panel → collect → 
   assertEffort(panel.json.dispatch[2], "low", "the runner passes its own effort");
   assert.match(panel.json.dispatch[2].prompt, /Command file: .*codex\.json\.cmd\.sh\nStatus file: .*codex\.json\.status/);
   assert.match(fs.readFileSync(/Command file: (.*)$/m.exec(panel.json.dispatch[2].prompt)[1], "utf8"), /'--var' 'LENSES=code-quality, correctness'/);
-  assert.match(panel.json.howToDispatch, /run_in_background: false/);
   assert.equal(state().state, "reviewing");
 
   // Every reader finds nothing.

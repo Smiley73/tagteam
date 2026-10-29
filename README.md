@@ -34,7 +34,9 @@ flowchart LR
 
 ## Install
 
-Requires Claude Code 2.1.301 or newer, Git, the
+Requires Claude Code 2.1.301 or newer with its Workflow tool (`/tagteam:ship`
+runs each spec as a Claude Code workflow, and stops before creating anything
+when the session has no such tool), Git, the
 [Codex CLI](https://github.com/openai/codex) 0.153.0 or newer, and an
 authenticated GitHub CLI. An older Codex is refused before a plan or a ship
 starts: every Codex call goes through `codex app-server`, and 0.153.0 is the
@@ -149,8 +151,14 @@ flowchart TD
 
 Per spec, in dependency order: branch, implement, verify, review, fix, re-check,
 publish, merge — with the fix and the review repeating for as many rounds as you
-allow. A driver script sequences every step and prints every dispatch; the
-orchestrating agent runs it, dispatches what it prints, and talks to you.
+allow. A driver script sequences every step and prints every dispatch; each spec
+runs as one Claude Code workflow run, `tagteam:ship-spec`, which runs the driver,
+dispatches what it prints and records the agents as they report. The session you
+started it in starts the run, goes quiet until the run finishes, and talks to you.
+Progress is in Claude Code's own workflow view: the phases, each agent under its
+name, and every line the driver says, worded as the driver wrote it. A run ends
+with the spec merged, with a stop and its reason, or with a question for you; you
+answer in the session, and a new run carries on from your answer.
 
 ```mermaid
 ---
@@ -376,6 +384,22 @@ flowchart TD
     evaluate -->|"the agent that wrote it never confirmed it finished"| wait
 ```
 
+#### Running a ship as workflows
+
+- `/tagteam:ship` needs the Workflow tool. Without it the command says so in one
+  sentence and creates nothing.
+- In auto mode, Claude Code asks once per workflow name the first time
+  `tagteam:ship-spec` is launched, and remembers the answer.
+- Recommended: set `subagentPromptCacheTtl` to `"1h"` in your own Claude Code
+  settings. `/tagteam:configure` does not write it.
+- Known exposure: a Codex review makes the run wait in a shell call of up to ten
+  minutes with no output. Claude Code was seen to let a call stay silent for eight
+  minutes, and nothing longer has been tried, so whether a run survives the last two
+  minutes is not known. A run that is cut short ends as a stop, and starting the
+  ship again reads what is on disk and carries on.
+- The efforts of agents inside a run come from the agent files, which pin them,
+  and the configuration's per-role efforts do not reach them.
+
 ### Shipping a plan as one
 
 A plan shipped as one goes on the familiar feature branch: the branch one feature
@@ -480,13 +504,15 @@ confirmed, as a report that never holds anything up.
 ## How it is built
 
 The orchestrator is the main Claude Code agent following the command files. In a
-ship it runs `scripts/ship.mjs` once per step; the driver runs git, Codex and
-the other scripts, decides the round, the route and every model and effort, and
-prints the agents to dispatch with their prompts written out. The orchestrator
-sends them out together and tells the driver as each one reports, one short line
-per agent, and the driver judges their work only once all are in. The
-orchestrator relays what happened in plain English, writes the pull request
-body, and asks the questions only a person can answer.
+ship it starts one `tagteam:ship-spec` workflow run per spec and ends its turn;
+the run runs `scripts/ship.mjs` once per step, through a small helper agent whose
+answers are checksummed so a copy that was altered or cut short is refused. The
+driver runs git, Codex and the other scripts, decides the round, the route and
+every model and effort, and prints the agents to dispatch with their prompts
+written out. The run sends them out together and tells the driver as each one
+reports, and the driver judges their work only once all are in. The orchestrator
+asks the questions only a person can answer, and starts the next run from the
+answer. A dedicated agent writes the pull request body.
 Subagents write their own outputs; scripts read them. Nothing large is ever
 moved between steps by passing it through a model.
 

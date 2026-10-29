@@ -916,18 +916,89 @@ function dispatchRuleProblems(name, text) {
   return problems;
 }
 
-test("both commands tell the orchestrator how to dispatch, and it is the driver's rule", () => {
-  const ship = read("commands", "ship.md");
+test("the plan command and the skill tell the orchestrator how to dispatch, and it is the driver's rule", () => {
   const plan = read("commands", "plan.md");
   const problems = [
-    ["commands/ship.md", ship], ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
+    ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill]
   ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
   assert.deepEqual(problems, [], problems.join("\n"));
-  assert.match(ship, /one message/i);
   assert.match(plan, /one message/i);
   // The plan side records its sets through its own script, in the ship's shape.
   assert.match(plan, /scripts\/plan\.mjs" record --plan/, "plan.md never records a set");
   assert.match(plan, /scripts\/plan\.mjs" resume --plan/, "plan.md's resume never applies the restart rule");
+});
+
+// The ship command no longer dispatches: one run of the ship-spec workflow does,
+// and the session starts it, ends its turn, and is woken by its completion notice.
+test("the ship command starts a run of tagteam:ship-spec, ends its turn after the call, and stops without the Workflow tool", () => {
+  const ship = read("commands", "ship.md");
+  const flat = ship.replace(/\s+/g, " ");
+  assert.match(ship, /Workflow\(\{name: "tagteam:ship-spec"/);
+  assert.match(ship, /^allowed-tools: .*\bWorkflow, Workflow\(tagteam:ship-spec\)/m);
+  assert.match(flat, /\*\*Then end your turn\.\*\*/);
+  assert.match(flat, /completion notice wakes you/);
+  assert.match(ship, /^## The Workflow tool is required$/m);
+  assert.match(flat, /\(it needs the Workflow tool\), so nothing was started/);
+  assert.match(flat, /Never stand in for the run by dispatching agents yourself/);
+  assert.doesNotMatch(flat, /Agent call|set\.arrive|run_in_background/, "the session records no arrival and makes no Agent call");
+});
+
+// A turn that exists only to wait is the most expensive thing the main session
+// can do. Every command file is held to saying "end your turn" and nothing else
+// about waiting: no shell sleep, no wait loop, no background Bash call, and no
+// instruction to poll, watch or schedule a wake-up. A sentence that forbids one
+// is the rule itself and passes.
+function waitingProblems(name, text) {
+  const flat = text.replace(/\s+/g, " ");
+  const problems = [];
+  if (/\bsleep\s+\d/.test(flat)) problems.push(`${name} runs a shell sleep`);
+  if (/until \[|while true/.test(flat)) problems.push(`${name} describes a wait loop`);
+  if (/run_in_background: true/.test(flat)) problems.push(`${name} runs a command in the background`);
+  for (const sentence of flat.split(/(?<=[.!?])\s+/)) {
+    if (/\b(?:sleep|poll(?:s|ing)?|watch(?:es|ing)?|wake-?ups?|schedul\w+)\b/i.test(sentence)
+      && !/\b(?:never|not|no|nothing|without|neither|nor|don't)\b/i.test(sentence)) {
+      problems.push(`${name} tells the session to wait some way other than ending its turn: ${sentence.slice(0, 100)}`);
+    }
+  }
+  return problems;
+}
+
+test("no command file sleeps, loops, polls or runs a command in the background to wait", () => {
+  const problems = commands.flatMap((entry) => waitingProblems(`commands/${entry.file}`, entry.text));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the waiting guard fails on the publish passage ship.md had, and passes the rule that forbids waiting", () => {
+  const publish = "  `publish` waits for the pull request's checks before it returns, and that can\n"
+    + "  take a long time: up to `ciStartWaitSec` for a first check to appear when the\n"
+    + "  commit has a workflow that runs on pull requests, then up to `ciWaitSec` for\n"
+    + "  the checks to finish, plus a few seconds — far past the limit of a foreground\n"
+    + "  Bash call. So run this one command as a background Bash call\n"
+    + "  (`run_in_background: true`), end your turn, and act on its output when its\n"
+    + "  completion notice arrives, exactly as if it had returned in the foreground.\n"
+    + "  Nothing in between: its own completion notice is what wakes you. When it\n"
+    + "  says `Waiting up to …s for checks to start`, relay that line. A spec's repair\n"
+    + "  and its revisit both come back through `publish`, and wait the same way.\n";
+  assert.ok(waitingProblems("ship.md", publish).some((problem) => /in the background/.test(problem)), "the publish passage");
+  assert.ok(waitingProblems("ship.md", "Wait with `sleep 30` between calls.").some((problem) => /shell sleep/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "until [ -f \"$f\" ]; do :; done").some((problem) => /wait loop/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "while true; do check; done").some((problem) => /wait loop/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "Poll the status every minute until the run is in.").some((problem) => /other than ending its turn/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "Schedule a wake-up for the agent.").some((problem) => /other than ending its turn/.test(problem)));
+  assert.deepEqual(waitingProblems("ship.md", "Never sleep, poll, watch or schedule a wake-up for a run: its completion notice is what wakes you."), []);
+  assert.deepEqual(waitingProblems("ship.md", "Then end your turn. Never run a command only to pass the time."), []);
+});
+
+// A workflow script cannot import, so each piece of the step helper it needs is
+// pasted into it. They are held equal to the module's text, so a change to one
+// without the other fails here and not mid-run.
+test("the ship-spec script carries the step helper's checksum, schema and prompt exactly as the module does", async () => {
+  const script = read("workflows", "ship-spec.js");
+  const helper = await import("../scripts/lib/step-helper.mjs");
+  for (const piece of [helper.checksumOf, helper.stepHelperSchema, helper.stepHelperPrompt]) {
+    const pasted = new RegExp(`^function ${piece.name}\\(.*?\\n\\}$`, "ms").exec(script)?.[0];
+    assert.equal(pasted, piece.toString(), `workflows/ship-spec.js carries ${piece.name} differently from scripts/lib/step-helper.mjs`);
+  }
 });
 
 test("the dispatch guard fails on the plan command as it read before it had sets", () => {
