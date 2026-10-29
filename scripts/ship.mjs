@@ -28,6 +28,7 @@
 // guard — the round store, the state machine, the gates — so the invariants their
 // tests prove hold here by construction.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -3046,8 +3047,23 @@ async function begin(options) {
 
 // The configured worktree.setup commands, which bring what the worktree has
 // installed up to the lockfile it holds; null when they succeed, otherwise why not.
+// What the commands print is kept off this driver's own streams: stderr's first
+// line is the one a stop's checksum covers, so it can never be a setup command's
+// output. A failure carries that output beneath its reason instead.
 async function bringUpToLockfile(ctx) {
-  try { await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-setup-"));
+  const log = path.join(dir, "output");
+  const fd = fs.openSync(log, "w", 0o600);
+  try {
+    await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", fd, fd] });
+    return null;
+  } catch (error) {
+    const output = fs.readFileSync(log, "utf8").trim();
+    return output ? `${error.message}\n${output}` : error.message;
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // The dependency unit's `begin`, in place of an implementer: the ship makes the
