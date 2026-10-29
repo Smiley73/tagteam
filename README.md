@@ -146,8 +146,10 @@ flowchart TD
    findings the drafter declined and why, and one question. Anything a spec
    needs that the repository's conventions say to ask about first — a new
    dependency, a new top-level directory — is listed there as that spec's
-   sign-off and approved with the plan, so shipping does not stop to ask (a change
-   to the CI workflows still does).
+   sign-off and approved with the plan, so shipping does not stop to ask. The
+   `.github/workflows/` files a spec will change are listed per spec, one per
+   line, and approved the same way: that spec may then change exactly those
+   files and merge into the plan branch without stopping.
 
 ### Shipping
 
@@ -218,6 +220,18 @@ whose correctness lives in tax years or dosages gets a `financial` or a `math`
 reviewer the plugin could never have written, and a brief named after one the
 plugin ships replaces it. A rostered lens with a brief in neither place is
 refused rather than reviewed on improvisation.
+
+Before the first spec begins, the ship audits the dependencies of the repository
+root: pnpm, npm, yarn, uv and pip, from their lockfiles, in the ship's worktree.
+Patch and minor fixes are made without asking and go through the full cycle as one
+pull request of their own, with every verify command run whatever its `when`; no
+spec begins until it has merged. A major, a minor of a `0.x` package, a version
+the ship cannot class and a package with no fixed version are never touched
+without you: the ship stops, names each one, and takes your approval or decline
+package by package, remembering a decline for the repository. An upgrade that
+makes verify fail, cannot be made, or moves another package past a minor is left
+out and listed under Risk. The check runs once per ship, never again after a spec
+has begun, and changes no version of your project.
 
 The review panel is the spec's lenses plus a Codex cross-review, sent out
 together to run at the same time. As each one reports you see one line saying
@@ -308,7 +322,11 @@ satisfied, because the plan's own pull request is where you judge the combined
 change. On either route, a pull request also stops when verification failed or
 CI proved nothing or never started, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
-wrote it never confirmed it finished what it was given.
+wrote it never confirmed it finished what it was given. A workflow change does
+not stop a spec on a plan branch when the plan's approval named every workflow
+file it changed for that spec. A file the approval did not name still stops it,
+and the stop names that file; a spec going straight to the base stops whatever
+was approved.
 
 On a plan branch that last stop can clear without you. Every reader of the
 change rules on each thing the agent said it left undone: something the spec
@@ -316,15 +334,19 @@ still needs, something the agent could not do where it ran, or something this
 change does not owe. One the readers say the spec still needs goes back for a
 fix like any other finding. When all of them are the other two kinds, and the
 review, verify and checks are clean, the spec merges into the plan branch and
-its pull request names what was left under Risk. A round with no report at all
-still waits, and so does everything that merges straight into the base.
+its pull request names what was left under Risk. A commit made by hand,
+with no agent to ask for a report, still waits, and so does everything that
+merges straight into the base. An agent that leaves a report the run cannot use
+is sent back for it once, and a person decides if that fails too.
 
 An open finding can stop being a stop on a plan branch too, if you turn
 carrying on (`carry` in `.tagteam/config.json`; it is off by default). Then a
-spec whose fix rounds have run out, or whose only open findings are about the
-pull request itself, merges into the plan branch anyway: each open finding goes
-into the plan's ledger and under Risk in the spec's pull request and in the
-plan's, where you judge it. Carrying is never used for a blocking finding, for
+spec whose fix rounds have run out merges into the plan branch anyway: each open
+finding goes into the plan's ledger and under Risk in the spec's pull request and
+in the plan's, where you judge it. A finding about the pull request's text or the
+commit history, which no fixer can change, does not wait for carrying: on a plan
+branch it is disclosed the same way and the spec merges, carrying on or off, as
+long as it is not blocking, and it does not count toward the cap. Carrying is never used for a blocking finding, for
 a whole-plan fix, for a major finding in the code of a spec that another spec
 still to merge depends on, or for anything that goes straight to the base. When
 carrying one more spec would take the plan past `limits.carried`, the run stops
@@ -335,8 +357,8 @@ file yields an empty finding set, and an empty finding set otherwise reads as a
 clean review.
 
 A person can approve past some of those stops and not others. Merging straight
-into the base, a workflow change, and an unconfirmed account are theirs to
-accept; a failed verification, an open finding, and a reviewer that produced no
+into the base, a workflow change the plan's approval did not name, and an
+unconfirmed account are theirs to accept; a failed verification, an open finding, and a reviewer that produced no
 usable evidence are cleared only by new evidence, and `finish` offers approval
 only when it would count.
 
@@ -442,7 +464,12 @@ it is outside that guarantee and can collide with a plan landing beside it. The
 guarantee is one checkout's: two people confirming two plans from two machines
 within seconds are guarded only by your repository's own rule that a branch be
 up to date before it merges, a setting you change on GitHub. An empty
-`versionFiles` makes no increase at all.
+`versionFiles` makes no increase at all; emptying it mid-plan takes effect at the
+next `start`, which drops the lines, the increase and any version you set, says
+so, and leaves a version commit already pushed on the branch. A version line you
+set yourself in commits you pushed to the plan's branch and had the ship adopt is
+your decision: the plan lands as that value and the ship makes no increase on
+top, until the base's version moves, when the ship stops and says so.
 
 After each spec, `/tagteam:status` can say what it cost: tagteam reads the
 session transcripts Claude Code keeps and reports the spend as input-token

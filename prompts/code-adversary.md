@@ -85,7 +85,8 @@ finding that proposes no repair is complete, and it is the expected shape. Write
 
 Set `scope` on every finding, the same way. `pull-request` when the remedy is a
 change to the pull request's text — what its description says or leaves out.
-`code` otherwise, including a code defect that names no single file: write
+`history` when the remedy is a change to the commits — a message, an author, how
+the change is split into commits — and not to any file. `code` otherwise, including a code defect that names no single file: write
 `file` as null and it still goes to a fixer. A finding whose only remedy is
 re-planning — this diff should have been two specs, or the work should have
 been planned differently — is `minor` at most, because no fixer can answer it.

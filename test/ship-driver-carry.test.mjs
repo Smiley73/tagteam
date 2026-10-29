@@ -1,8 +1,8 @@
-// Carrying: with `carry` on, a spec on a plan branch whose fix rounds are spent,
-// or whose open findings are all about the pull request, merges into the plan
-// branch at finish with what is open entered in the plan's ledger — unless a spec
-// not yet merged depends on a major code finding, `limits.carried` would be
-// passed, or carrying is off.
+// Carrying: with `carry` on, a spec on a plan branch whose fix rounds are spent
+// merges into the plan branch at finish with what is open entered in the plan's
+// ledger — unless a spec not yet merged depends on a major code finding,
+// `limits.carried` would be passed, or carrying is off. Findings about the pull
+// request or the commit history merge disclosed whatever carrying is set to.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -100,7 +100,7 @@ test("with carrying on, a spent plan-branch spec nothing waits on merges at fini
   assert.match(body, /## Risk[\s\S]*\n- 1\.correctness\.1 \(major\): wrong — the ship carried it open, as this repository's carrying setting allows, so it goes into the plan branch unresolved/, body);
 });
 
-test("a major code finding on a spec an unmerged spec depends on is not carried; a major pull request finding on it is, with rounds left", () => {
+test("a major code finding on a spec an unmerged spec depends on is not carried", () => {
   const blocked = stageCarry({ standalone: false });
   const { run, state, spent } = driveToSpent(blocked);
   assert.match(spent.json.say.join("\n"), /a person decides/);
@@ -109,23 +109,58 @@ test("a major code finding on a spec an unmerged spec depends on is not carried;
   assert.equal(state().state, "awaiting-approval");
   assert.equal(state().accept, null);
   assert.equal(fs.existsSync(ledgerFile(blocked.shipDir)), false);
+});
 
-  const staged = stageCarry({ standalone: false });
-  const driven = driveToCollect(staged, [ABOUT_PR]);
+// 01-a from collect, the correctness lens raising `raised`, the body written and
+// the re-check leaving it open, to the settle: the finding about the pull
+// request is judged once and is still there.
+function driveTextToSettle(staged, raised) {
+  const driven = driveToCollect(staged, [raised]);
   assert.match(driven.run("fix").json.next, /recheck/);
   write(path.join(staged.shipDir, "01-a", "pr-body.md"), "## Summary\n\nAdds sub.\n");
   const recheck = driven.run("recheck");
   const oid = driven.state().candidateOid;
-  write(outputOf(recheck.json.dispatch[0]), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "the body still says nothing of sub" }], rulings: [] });
+  write(outputOf(recheck.json.dispatch[0]), { lens: "correctness", candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "the body still says nothing of it" }], rulings: [] });
   arriveAll(recheck, staged.env);
-  const settle = driven.run("settle");
-  assert.match(settle.json.say.join("\n"), /no fix round is spent: the spec publishes with the body you write\. Carrying is on/);
-  assert.doesNotMatch(settle.json.say.join("\n"), /revisit puts it to the readers again/);
-  driven.run("publish", ["--title", "Ship 01-a", "--body", path.join(staged.shipDir, "01-a", "pr-body.md")]);
-  const merged = driven.run("finish");
-  assert.equal(driven.state().state, "merged", merged.stdout);
-  assert.equal(driven.state().fixRoundsUsed, 0);
-  assert.deepEqual(readLedger(staged.shipDir).entries.map((entry) => [entry.id, entry.reason, entry.scope]), [["01-a:1.correctness.1", "carried", "pull-request"]]);
+  return { ...driven, settle: driven.run("settle") };
+}
+
+const ABOUT_HISTORY = { ...ABOUT_PR, scope: "history", title: "the commit message does not say sub was added", detail: "the log reads as a typo fix" };
+
+for (const [kind, raised] of [["pull request", ABOUT_PR], ["commit history", ABOUT_HISTORY]]) {
+  for (const carry of [false, true]) {
+    test(`a spec whose major ${kind} finding the re-check leaves open merges at finish disclosed, with carrying ${carry ? "on" : "off"}`, () => {
+      const staged = stageCarry({ carry, standalone: false });
+      const { run, state, settle } = driveTextToSettle(staged, raised);
+      const said = settle.json.say.join("\n");
+      assert.match(said, /no fix round is spent: the spec publishes with the body you write\. At finish it merges into plan\/demo with these findings disclosed, whatever carrying is set to/);
+      assert.doesNotMatch(said, /revisit puts it to the readers again/);
+      run("publish", ["--title", "Ship 01-a", "--body", path.join(staged.shipDir, "01-a", "pr-body.md")]);
+      const merged = run("finish");
+      assert.equal(state().state, "merged", merged.stdout);
+      assert.equal(merged.json.ask, undefined);
+      assert.equal(state().fixRoundsUsed, 0);
+      assert.equal(state().accept, null, "nothing was carried or accepted");
+      assert.deepEqual(readLedger(staged.shipDir).entries.map((entry) => [entry.id, entry.reason, entry.scope]),
+        [["01-a:1.correctness.1", "disclosed", raised.scope]]);
+      assert.match(pullsOf(staged.env)[0].body, new RegExp(`## Risk[\\s\\S]*\\n- 1\\.correctness\\.1 \\(major, about the ${kind}\\): the .* — it is about the pull request's text or the commit history`));
+    });
+  }
+}
+
+test("at limits.carried a spec with only a text finding open still merges, and the carried count does not move", () => {
+  const staged = stageCarry({ carried: 5 });
+  const other = { severity: "minor", scope: "code", file: "b.js", title: "terse", detail: "says little" };
+  const carried = [1, 2, 3, 4, 5].map((n) => ({ ...other, id: `1.correctness.${n}` }));
+  enterMerge(staged.shipDir, "00-z", { entries: entriesOf("00-z", "d".repeat(40), carried, new Set(), new Set(carried.map((f) => f.id))), retries: [] });
+  const { run, state } = driveTextToSettle(staged, ABOUT_HISTORY);
+  run("publish", ["--title", "Ship 01-a", "--body", path.join(staged.shipDir, "01-a", "pr-body.md")]);
+  const merged = run("finish");
+  assert.equal(state().state, "merged", merged.stdout);
+  assert.equal(merged.json.ask, undefined);
+  const entries = readLedger(staged.shipDir).entries;
+  assert.equal(entries.filter((entry) => entry.reason === "carried").length, 5);
+  assert.deepEqual(entries.filter((entry) => entry.spec === "01-a").map((entry) => entry.reason), ["disclosed"]);
 });
 
 test("a spec that would take the plan past limits.carried stops naming the cap, carries nothing, and merges once the limit is raised", () => {

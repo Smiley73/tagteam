@@ -116,6 +116,7 @@ test("an unparseable or schema-invalid findings file is incomplete", () => {
 test("a finding is for the pull request by its scope or a pull request file, and a code finding with no file is a fixer's", () => {
   assert.equal(isPullRequestFinding(finding({ scope: "code", file: null })), false);
   assert.equal(isPullRequestFinding(finding({ scope: "pull-request", file: "src/x.js" })), true);
+  assert.equal(isPullRequestFinding(finding({ scope: "history", file: null })), true, "no fixer can reach the commit history either");
   assert.equal(isPullRequestFinding(finding({ scope: "code", file: "pr-body.md" })), true);
   const { scope, ...legacy } = finding({ file: null });
   assert.equal(isPullRequestFinding(legacy), true, "a record written before scope keeps the rule it was written under");

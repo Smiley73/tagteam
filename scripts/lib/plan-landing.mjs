@@ -154,7 +154,9 @@ export function withholding(shipDir, record, results, { openRound = openResolveR
   if (results.landing.status === "not-run") reasons.push("the landing check has not run for this tip against the base as it stands");
   else if (results.landing.status !== "passed") reasons.push(`the landing check found ${results.landing.outcome === "conflict" ? "a conflict with the base" : results.landing.outcome === "differs" ? "that what would land is not what was reviewed" : "that the plan fails on the base as it stands"}`);
   if (results.version.status !== "passed") {
-    reasons.push(results.version.status === "not-run" ? "the version lines were not read for this tip and base" : "the version lines are not exactly one increase over the base's");
+    reasons.push(results.version.status === "not-run" ? "the version lines were not read for this tip and base"
+      : results.version.kind === "decided" ? "the version lines are not the version set by the commits the ship adopted, on the base's version they were set against"
+        : "the version lines are not exactly one increase over the base's");
   }
   if (openRound) reasons.push("a merge of the base into the plan branch is still under way");
   return reasons;

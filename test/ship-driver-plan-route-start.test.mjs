@@ -243,7 +243,8 @@ test("with the setting off, a two-spec plan ships each spec to the base with no 
   const { dir, plan, shipDir, origin, env } = staged;
   const started = ship("start", plan, [], env);
   assert.equal(started.status, 0, started.stderr);
-  assert.deepEqual(started.json.say.filter((line) => !/^(note|warning):/.test(line)), ["2 specs in dependency order; 0 already merged."],
+  // The dependency audit's own line says a repository with no lockfile has nothing to audit; the route says nothing.
+  assert.deepEqual(started.json.say.filter((line) => !/^(note|warning):/.test(line) && !/^No package manager was found/.test(line)), ["2 specs in dependency order; 0 already merged."],
     "start said something new with the setting off");
   assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
   const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);
@@ -837,8 +838,9 @@ test("a pull request GitHub cannot be read for is its own stop, never a hand pus
   // Right after the squash: the read that follows it fails.
   const finished = ship("finish", plan, ["--spec", "01-a"], failing);
   assert.equal(finished.status, 1, finished.stdout);
-  assert.match(finished.stderr, /could not read pull request #1 from GitHub \(gh stub: HTTP 502: Bad Gateway\)/);
-  assert.match(finished.stderr, /run this again/);
+  const [reason, ...beneath] = finished.stderr.trim().split("\n");
+  assert.match(reason, /^could not read pull request #1 from GitHub, so .*run this again\.$/);
+  assert.match(beneath.join("\n"), /gh stub: HTTP 502: Bad Gateway/);
   assert.doesNotMatch(finished.stderr, /did not record making|no merge commit|back at/);
   assert.equal(pullsOf(env)[0].state, "MERGED");
   assert.notEqual(a.state().state, "merged");

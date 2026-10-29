@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Reads a plan's spec files, validates their front matter, resolves each one's
 // review lenses against the configured default set, and returns them in
-// dependency order with each one's sign-offs.
+// dependency order with each one's sign-offs and workflow files.
 //
 // Shipping calls this once and works from the answer, so the order a train runs
 // in is decided arithmetically rather than by reading a table in a plan.
@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { closeJudged, requireFamilyIn } from "./lib/plan-sets.mjs";
+import { normalizeRepoPath } from "./lib/matcher.mjs";
 
 // A spec is written for a capable implementer reading the repository with full
 // tool access. Its target is 12 KB and this is the ceiling the run enforces: left
@@ -101,6 +102,29 @@ export function resolveReviewers(specReviewers, config, { file }) {
   return [...selected].sort();
 }
 
+// A spec's `workflows`: the exact workflow files its work changes, which the
+// plan's approval approves for it alone. Refused by spec and by entry, in words a
+// spec writer can act on when it is re-sent. Checked here rather than at the
+// spec-writing step so that shipping, which reads specs through `readSpecs` too,
+// never works from an entry the writer's check would have refused.
+function checkWorkflows(entries, name) {
+  const seen = new Set();
+  for (const entry of entries) {
+    const refusal = /[*?[\]{}]/.test(entry) ? "has a wildcard"
+      : entry.split("/").includes("..") ? "has a .. segment"
+        : entry.endsWith("/") ? "ends in a slash, so it names a directory"
+          : entry !== normalizeRepoPath(entry) ? `is not in normalized form (${normalizeRepoPath(entry)})`
+            : !entry.startsWith(".github/workflows/") ? "is not under .github/workflows/"
+              : seen.has(entry) ? "is listed twice"
+                : null;
+    if (refusal) {
+      throw new Error(`${name}: workflows entry "${entry}" ${refusal} — re-dispatch its writer to list each workflow file the `
+        + "spec changes once, as an exact path under .github/workflows/ with no wildcard or directory, or to leave `workflows` out");
+    }
+    seen.add(entry);
+  }
+}
+
 function topologicalOrder(specs, planDir) {
   const byId = new Map(specs.map((spec) => [spec.id, spec]));
   for (const spec of specs) {
@@ -157,12 +181,15 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
     if (front.id !== name.replace(/\.md$/, "")) {
       throw new Error(`${name}: front matter id is "${front.id}" but the file is named "${name}"`);
     }
+    const workflows = front.workflows ?? [];
+    checkWorkflows(workflows, name);
     specs.push({
       id: front.id,
       path: file,
       dependsOn: front.depends_on,
       reviewers: resolveReviewers(front.reviewers, config, { file: name }),
-      signOffs: signOffs.entries
+      signOffs: signOffs.entries,
+      workflows
     });
   }
   if (specs.length === 0) throw new Error(`${specsDir} holds no spec files`);

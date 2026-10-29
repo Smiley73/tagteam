@@ -48,9 +48,15 @@ Run the command the previous step printed as `next`. It prints one JSON object:
 - **`next`** — the command to run. With a `set`, run it once the last arrival
   says the set is complete; that arrival prints it too. Run it as printed.
 
-A non-zero exit is a stop. Say what stderr says, in plain words, and stop —
-except exit 3, which means the configuration is older than this plugin: tell
-them to run `/tagteam:configure` and stop; and exit 5, which is not a stop at
+A non-zero exit is a stop. The first line of stderr is the reason and what
+they must decide: relay that, in plain words, and stop. The lines beneath it are
+the evidence — git's or GitHub's own error, the list of what a check refused.
+They are kept for the record: summarise them only if they ask, and never give
+them as the reason. The one exception is a first line that points to a list beneath
+of what is wrong in their own files (the configuration's invalid keys): give them
+that list. Two exits are not that: exit 3, which means the
+configuration is older than this plugin: tell them to run `/tagteam:configure`
+and stop; and exit 5, which is not a stop at
 all: `collect`, `settle`, `snapshot`, `resolve-commit`, `resolve-collect` or
 `plan-collect` refused because the set it judges is not all in yet — see *Sets*. A spent
 budget never exits: the driver prints where the spec goes instead and says so
@@ -169,6 +175,47 @@ whether they still have a `/tagteam:ship` of this plan running anywhere. Only if
 they confirm that run is gone, rerun with `--reclaim`. Never reclaim on your own
 judgement — reclaiming a lock a live run holds puts two of them in one worktree.
 
+## Dependency upgrades
+
+Once per ship, before the first spec begins, `start` audits the package managers
+the repository root has lockfiles for (pnpm, npm, yarn, uv, pip), in the ship's
+worktree. Its `say` tells the person one of four things, in plain words: no
+package manager was found, nothing is vulnerable, an audit could not run (which
+one, and why), or which upgrades it will make. In the first three cases nothing
+more happens and `next` is the first spec's `begin`. A ship with a spec already
+begun is not audited, and `start` says so.
+
+A patch or minor fix is made without asking. A major, a minor of a `0.x`
+package, a version the ship cannot class and a package with no fixed version are
+the person's: `start` returns `ask` and a `next` of `end`, changes nothing, and
+names each package with its manager, its installed and proposed versions and the
+audit's finding. Put it to them as it stands. Only on their word, run
+
+```bash
+node "$P/scripts/ship.mjs" dependencies --plan "$D" --approve "<keys>" --decline "<keys>"
+```
+
+with the keys the stop printed, each package in the list they approved or the
+list they declined; a package with no fixed version can only be declined. Never
+run it on your own judgement, and `next` never prints it. A decline is kept for
+the repository, so no later ship asks about that package at that version again.
+It prints the stop again for what is still open, and otherwise says what will be
+made and prints `next`.
+
+The upgrades are one unit of their own, `plan-dependencies`, and no spec begins
+until it has merged: a spec's `begin` before then refuses and says so. Its
+`begin` dispatches no agent — the ship makes the upgrades itself, tries them
+against every verify command, and leaves out any that fail verify, cannot be
+made, or move another package past a minor, saying which and why in `say` — and
+points at `snapshot`. From there the unit ships exactly like a spec, with its
+verify commands all run whatever their `when`. On a plan branch it merges into
+the plan branch without asking. Straight to the base, it waits for the person's
+Merge like a spec: its `next` is `end`, and the first spec begins once they have
+merged it. Its records are under `$S/dependencies/unit/`, so its pull request body
+is `$S/dependencies/unit/pr-body.md`; write it as the pull request body section
+says, about which packages get a fix for what, and never list the upgrades left
+out — the driver writes those under `## Risk` itself.
+
 ## Per spec
 
 The driver walks each spec through: `begin` (branch, dispatch the implementer),
@@ -205,21 +252,27 @@ is reviewed like any other, and from then on `fix` sends the spec on towards
 stop*.
 
 A finding about the pull request itself — one its reviewer scoped
-`pull-request`, or one naming the pull request body whatever its scope — never
-reaches a fixer, which could only decline it. A `code` finding that names no
-single file is a fixer's like any other. `fix`
-and `settle` name such findings and tell you to write `$S/<id>/pr-body.md` so
-that it says what they ask for; the readers that raised them judge that body at
-the next re-check, before it is published, and `publish` sends it. When nothing
-else is open, no fix round is spent on them.
+`pull-request`, or one naming the pull request body whatever its scope — or
+about the commit history — scoped `history`, its remedy a change to a message,
+an author or how the change is split into commits — never reaches a fixer, which
+could only decline it. A `code` finding that names no single file is a fixer's
+like any other. `fix` and `settle` name such findings and tell you to write
+`$S/<id>/pr-body.md` so that it says what they ask for; the readers that raised
+them judge that body at the next re-check, before it is published, and `publish`
+sends it. When nothing else is open, no fix round is spent on them. The body can
+disclose a history finding but not rewrite the commits, so one usually stays
+open after the re-check. On a plan branch a spec left with only such findings
+open, none of them `blocking`, merges at `finish` with them disclosed, whatever
+`carry` is set to: each is entered in the plan's ledger and listed under Risk,
+and it does not count against `limits.carried`. Relay the `say` that tells you
+so and run `next`.
 
 With `carry` on in `.tagteam/config.json` — it is off unless the owner turns it
-on — a spec on a plan branch does not wait for a person merely because findings
-are still open, once its fix rounds for this cycle are spent, or once the
-readers have judged the body and everything still open is about the pull
-request. When everything open may be carried, the `say` of `fix` or `settle`
-says it will be carried at `finish` instead of saying a person decides; relay
-it and run `next`. See *Merge or stop*.
+on — a spec on a plan branch does not wait for a person merely because code
+findings are still open, once its fix rounds for this cycle are spent. When
+everything open may be carried, the `say` of `fix` or `settle` says it will be
+carried at `finish` instead of saying a person decides; relay it and run `next`.
+See *Merge or stop*.
 
 On a plan branch, `begin` on a spec that has not started first asks whether the
 base still merges cleanly into this plan's branch. When it does, nothing happens
@@ -249,12 +302,14 @@ person can do is set the line back in the worktree, keeping the rest of the
 change, and run `snapshot` again, or stop the train. A dependency added to the
 same file is not a version change and does not stop.
 
-You do not choose the route; `next` does. Three steps are a person's to
+You do not choose the route; `next` does. Four steps are a person's to
 decide: `revisit`, which looks at a spec that stopped for a person again — see
-*Looking again* below — and `redesign` and `accept`, the answers to the
+*Looking again* below — `redesign` and `accept`, the answers to the
 *Recurring* question that are not "fix it again" or "publish as it is" — see
-*After `collect` and `settle`* below. `next` never prints `revisit` or
-`accept`. It prints `redesign` in one case only: with `autoRedesign` on, the
+*After `collect` and `settle`* below — and `plan-adopt`, the answer to a stop
+that says someone pushed commits of their own to the plan branch — see *Commits
+pushed to the plan branch* below. `next` never prints `revisit`, `accept` or
+`plan-adopt`. It prints `redesign` in one case only: with `autoRedesign` on, the
 first time in a cycle that the same file keeps failing and a fix round is left.
 What is yours at each point:
 
@@ -269,6 +324,9 @@ What is yours at each point:
 - **After `revisit`**: say what `say` says — that the same commit is being looked
   at again, that looking spends nothing, and where the pull request as it stands
   was recorded — then run `next`.
+- **After `plan-adopt`**: say what `say` says — which commits and files the plan
+  took, that they had no spec review, and what the plan now lands as — then run
+  `next`, as usual.
 - **After `collect` and `settle`**: say the finding summary in `say` as
   behaviour — what goes wrong and for whom — never as ids or file coordinates.
   A line beginning *Recurring:* is a signal of its own and is relayed whole,
@@ -428,10 +486,16 @@ What is yours at each point:
 
 The driver's `snapshot` step commits through `git add -A`, `guard-staged.mjs`
 and `git commit` as one chain, so a copied ignored file never reaches history;
-nothing in this file runs git by hand. If it exits 2 the round's report could
-not be recorded: say what it printed — it names the file and what to move
-aside — and rerun the same `snapshot` command afterwards. Do not commit anything
-in between.
+nothing in this file runs git by hand. When the implementer's or the fixer's
+report cannot be used, `snapshot` does not stop: it moves the refused file aside
+and prints one fresh agent of the same role to send back for the report, which
+is an ordinary dispatch to relay and wait on. A rerun before that agent is in
+is a wait. If the report is still unusable, or the resend changed the code,
+`snapshot` stops with a plain reason; that stop is the person's. Say it as it is
+and offer what it offers. Never move, write or correct a report yourself, and do
+not commit anything in between. A commit nobody dispatched has no agent to ask:
+a malformed report stops `snapshot` for a person, and an absent one is recorded
+as missing and stops at `finish`.
 
 ## The pull request body
 
@@ -517,6 +581,14 @@ queue of pull requests each waiting for a keystroke. When a person should
 decide, the gates say so — that is what they are for. A spec carried into the
 plan branch with findings open, below, merges on that same `ready` verdict.
 
+A change to `.github/workflows/` is the one thing on that route that still waits,
+unless the plan's approval named every workflow file the spec changed, for that
+spec: the person approved those files when they approved the plan, so `finish`
+merges without asking and says which files it merged with. A file not named stops
+it as `workflow-change` and the stop names it. The approval is read from the
+plan's `approved.json` by `evaluate` and by `merge.mjs` alike, and never lifts the
+stop for a spec going straight to the base.
+
 **Onto the base, only a person's approval or Merge authorizes a merge** — one
 they gave for that change, in this session. A spec that merges straight into the
 base, on a one-spec plan or with `planBranch` off, always stops at `finish` with
@@ -569,14 +641,15 @@ itself. Every reader rules on each item it is handed, and when every one is
 ruled environmental or out-of-scope — with the review clean, verify passed and
 the checks passed or not waited for — `evaluate` drops that approval and the
 spec merges into the plan branch like any other. An item a reader rules missing
-is a finding the fixer gets. A round that wrote no report, an item left
-unruled, and anything merging straight into the base still stop, and
+is a finding the fixer gets. A commit made by hand that has no report, an item
+left unruled, and anything merging straight into the base still stop, and
 `unaccounted` then shows each item's ruling where it has one.
 
 The two halves take different answers. A person's approval is what `evaluate`
-honours for `approvals` — merging straight into the base, a workflow change, a
-round nobody accounted for, nothing executable having run, inconclusive checks,
-checks that never started within `ciStartWaitSec` — and for nothing in
+honours for `approvals` — merging straight into the base, a workflow change the
+plan's approval did not name for this spec, a round nobody accounted for,
+nothing executable having run, inconclusive checks, checks that never started
+within `ciStartWaitSec` — and for nothing in
 `blockers`: a reviewer that produced no usable
 evidence, a finding still open, a verification or check that failed or never
 ran. **No approval clears a blocker.** `finish --approve` given while one is
@@ -623,10 +696,12 @@ should a reader later withdraw it. `begin` records a merge made by hand and
 moves on.
 
 With `carry` on, a spec on a plan branch whose open review is the only thing
-blocking it is carried: when its fix rounds for this cycle are spent, or when
-everything open is about the pull request, `finish` records the carry, merges
-it into the plan branch like any ready spec, and enters each open finding in
-the plan's ledger and under Risk in the spec's pull request and the plan's. Its
+blocking it is carried: when its fix rounds for this cycle are spent, `finish`
+records the carry, merges it into the plan branch like any ready spec, and
+enters each open code finding in the plan's ledger and under Risk in the spec's
+pull request and the plan's. Findings about the pull request or the commit
+history are not part of a carry and do not count toward the cap: they merge
+disclosed on their own, as above. Its
 `say` carries one line saying how many it carried and how many of
 `limits.carried` the plan has used: relay it. Carrying is never used for a
 `blocking` finding, a whole-plan fix, a `major` finding in the code of a spec
@@ -636,6 +711,36 @@ base; those stop as above. When carrying the spec would take the plan past
 carried so far. The answers are raising `limits.carried` and running `finish`
 again, merging it by hand on GitHub — what is open then enters the ledger as
 merged by hand — leaving it open, or stopping the train.
+
+## Commits pushed to the plan branch
+
+A stop that says the plan branch on origin is at a commit this ship did not
+record making — someone pushed to it by hand — and that names `plan-adopt` is
+asking the person a question. Say what the stop says, in plain words, and ask
+whether the commits are theirs for the plan to take, or whether they will put
+the branch back. Only when they say the commits are theirs, run
+
+```bash
+node "$P/scripts/ship.mjs" plan-adopt --plan "$D" --tip <the oid the stop named>
+```
+
+It takes the commits as the plan's tip and says which commits and which files it
+took. Nothing is rewritten or forced, so it works only when the branch is a
+straight continuation of the tip the ship recorded; for any other push the stop
+says adoption is not possible, and putting the branch back is the answer. It
+refuses, recording nothing, when origin is anywhere else than the `--tip` it was
+given, while a resolve round is open, and once the plan has landed. Never run it
+on your own judgement, never run it on an answer given about an earlier push,
+and after it run `next`.
+
+The commits had no spec review: the whole-plan check covers them, and so does
+the person's Merge of the plan's pull request. If they change the version lines,
+the value they set is the plan's version, and the ship makes no increase of its
+own on top — `say` tells the person so, including when it is exactly the base's
+version, which lands the plan with no increase. If the base's version moves
+afterwards, the landing stops and says so; that value no longer holds, and the
+person can run the step again for the ship's own increase, or push a commit that
+sets the value they want and have it adopted.
 
 ## Looking again
 

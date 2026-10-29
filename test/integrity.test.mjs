@@ -1247,3 +1247,59 @@ test("the README and the skill introduce the plan branch as the familiar feature
   const firstInSkill = skill.replace(/\s+/g, " ").search(/plan branch|plan\/<slug>/i);
   assert.ok(skill.replace(/\s+/g, " ").indexOf("feature branch") < firstInSkill, "SKILL.md names the plan branch before its overview introduces it");
 });
+
+// What a person reads first of a stop is the first line, and it has to be the
+// whole reason. The text of a child process, a caught error or a record therefore
+// never goes into a stop built with `new Stop`: not as the whole text, not after
+// a prefix, not mid-sentence, and not as further lines. It goes through
+// `Stop.raw`, which puts a plain lead above it, or `Stop.beneath`, which keeps
+// the driver's own first line and puts it on the lines below.
+function bareStopCalls(source) {
+  const calls = [];
+  for (let at = source.indexOf("new Stop("); at !== -1; at = source.indexOf("new Stop(", at + 1)) {
+    let depth = 1;
+    const templates = [];
+    let index = at + "new Stop(".length;
+    for (; index < source.length && depth > 0; index += 1) {
+      const char = source[index];
+      const quote = templates.at(-1);
+      if (quote === "`") {
+        if (char === "\\") index += 1;
+        else if (char === "`") templates.pop();
+        else if (char === "$" && source[index + 1] === "{") { templates.push("{"); index += 1; }
+      } else if (quote === '"' || quote === "'") {
+        if (char === "\\") index += 1;
+        else if (char === quote) templates.pop();
+      } else if (char === '"' || char === "'" || char === "`") templates.push(char);
+      else if (quote === "{" && char === "}") templates.pop();
+      else if (char === "(") depth += 1;
+      else if (char === ")") depth -= 1;
+    }
+    calls.push({ text: source.slice(at, index), line: source.slice(0, at).split("\n").length });
+  }
+  return calls;
+}
+const CARRIES_RAW_TEXT = (text) => /\.(?:message|stderr|stdout)\b|\\n/.test(text);
+
+test("no stop is built with a caught error's or a child's text in it", () => {
+  const calls = bareStopCalls(shipDriver);
+  assert.deepEqual(calls.filter(({ text }) => CARRIES_RAW_TEXT(text)).map(({ line, text }) => `scripts/ship.mjs:${line}: ${text.split("\n")[0].trim()}`), []);
+  assert.ok(calls.length > 100, "the scan found the Stop sites it is meant to check");
+  for (const carries of [
+    "throw new Stop(error.message);",
+    "throw new Stop(`the push of ${short(oid)} failed: ${error.message}. Nothing else changed.`);",
+    "throw new Stop(`${spec.id} was merged: `\n        + error.message);",
+    "throw new Stop(`verify could not run: ${(verified.stderr || verified.stdout).trim()}`);",
+    "throw new Stop(`the resolver stopped.\\n${what}`);"
+  ]) {
+    const [call] = bareStopCalls(carries);
+    assert.ok(call && CARRIES_RAW_TEXT(call.text), `the guard misses ${carries}`);
+  }
+  for (const fine of [
+    'throw Stop.raw(error.message, "a git command failed");',
+    "throw Stop.beneath(`${spec.id} was merged; run this again.`, error.message);",
+    "throw new Stop(`${spec.id} was merged, so nothing was recorded; run this again.`);"
+  ]) {
+    assert.ok(!bareStopCalls(fine).some(({ text }) => CARRIES_RAW_TEXT(text)), `the guard flags ${fine}`);
+  }
+});

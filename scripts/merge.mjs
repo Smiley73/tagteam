@@ -27,11 +27,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { evaluate } from "./gates.mjs";
+import { evaluate, readApprovedWorkflows } from "./gates.mjs";
 import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
-import { increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
+import { decisionOf, increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
 import { checkFor, ciFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
 import { isCleanFor } from "./lib/whole-plan.mjs";
 import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
@@ -49,7 +49,7 @@ export const BASE_NOT_ACCEPTED = 5;
 // its landing loop, which makes one, rather than spending a landing attempt.
 export const VERSION_NOT_ONE_INCREASE = 6;
 
-export async function mergeSpec(statePath, { repo, configPath, dryRun = false } = {}) {
+export async function mergeSpec(statePath, { repo, configPath, approvedPath, dryRun = false } = {}) {
   const resolved = path.resolve(statePath);
   const state = JSON.parse(fs.readFileSync(resolved, "utf8"));
   const { candidateOid, branch, pr } = state;
@@ -60,9 +60,13 @@ export async function mergeSpec(statePath, { repo, configPath, dryRun = false } 
   // the evaluation entirely gets a merge anyway. A candidate whose gates are all
   // null satisfies every other check in this function.
   const config = JSON.parse(fs.readFileSync(path.resolve(configPath), "utf8"));
-  const verdict = evaluate(state, config);
+  // Handed the same plan approval `finish` evaluated with, or the two would
+  // disagree about a workflow change a person approved at plan time.
+  const verdict = evaluate(state, config, approvedPath ? readApprovedWorkflows(approvedPath) : null);
   if (!verdict.ready) {
-    const reasons = [...verdict.blockers, ...verdict.approvals].join(", ") || "the gates were never recorded";
+    const reasons = [...verdict.blockers, ...verdict.approvals].map((reason) =>
+      reason === "workflow-change" ? `${reason} (${verdict.unapprovedWorkflows.join(", ")})` : reason).join(", ")
+      || "the gates were never recorded";
     throw new Error(`the gates for ${state.spec} are not satisfied (${reasons}); nothing was merged`);
   }
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) {
@@ -248,11 +252,13 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
     const found = spawnSync("git", ["-C", repo, "cat-file", "-e", `${tip}^{commit}`], { encoding: "utf8", shell: false });
     if (found.status !== 0) throw refuse(`${short(tip)} is not in this checkout after the fetch`);
 
-    // The kind the plan declared, as its route recorded it when the train started.
-    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: increaseOf(route) ?? "patch" });
+    // The kind the plan declared, as its route recorded it when the train started,
+    // or the version a person set in commits the ship adopted, which replaces it.
+    const decided = decisionOf(route);
+    const version = versionConditionAt(repo, { entries, tipOid: tip, baseOid, kind: increaseOf(route) ?? "patch", decided });
     if (!version.holds) {
-      throw refuse(`the version lines at ${short(tip)} are not exactly one increase over origin/${route.base} at ${short(baseOid)}: `
-        + versionLines(version, route.base).join("; "), VERSION_NOT_ONE_INCREASE);
+      throw refuse(`the version lines at ${short(tip)} are not ${decided ? "the version decided for the plan, against" : "exactly one increase over"} `
+        + `origin/${route.base} at ${short(baseOid)}: ${versionLines(version, route.base).join("; ")}`, VERSION_NOT_ONE_INCREASE);
     }
 
     // The reviewed base is where the tip last met the base. A base the tip
@@ -304,7 +310,7 @@ async function main() {
   const statePath = argv.find((entry, index) =>
     !entry.startsWith("--") && !argv[index - 1]?.startsWith("--"));
   if (!statePath && !planShip) {
-    process.stderr.write("usage: merge.mjs <state.json> [--repo <path>] [--config <path>] [--dry-run]\n"
+    process.stderr.write("usage: merge.mjs <state.json> [--repo <path>] [--config <path>] [--approved <approved.json>] [--dry-run]\n"
       + "       merge.mjs --plan-ship <ship-dir> [--repo <path>] [--config <path>] [--dry-run]\n");
     process.exitCode = 2;
     return;
@@ -312,7 +318,7 @@ async function main() {
   try {
     const result = planShip
       ? await mergePlan(planShip, { repo, dryRun })
-      : await mergeSpec(statePath, { repo, configPath, dryRun });
+      : await mergeSpec(statePath, { repo, configPath, approvedPath: flagValue("--approved"), dryRun });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

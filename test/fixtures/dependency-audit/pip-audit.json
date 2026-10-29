@@ -1,0 +1,107 @@
+{
+  "dependencies": [
+    {
+      "name": "requests",
+      "version": "2.19.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2018-28",
+          "fix_versions": [
+            "2.20.0"
+          ],
+          "aliases": [
+            "CVE-2018-18074",
+            "GHSA-x84v-xcm2-53pg"
+          ],
+          "description": "The Requests package before 2.20.0 for Python sends an HTTP Authorization header..."
+        },
+        {
+          "id": "PYSEC-2018-28",
+          "fix_versions": [
+            "2.20.0"
+          ],
+          "aliases": [
+            "CVE-2018-18074",
+            "GHSA-x84v-xcm2-53pg"
+          ],
+          "description": "The Requests package through 2.19.1 before 2018-09-14 for Python sends an HTTP A..."
+        },
+        {
+          "id": "PYSEC-2023-74",
+          "fix_versions": [
+            "2.31.0"
+          ],
+          "aliases": [
+            "CVE-2023-32681",
+            "GHSA-j8r2-6x86-q33q"
+          ],
+          "description": "### Impact  Since Requests v2.3.0, Requests has been vulnerable to potentially l..."
+        },
+        {
+          "id": "PYSEC-2023-74",
+          "fix_versions": [
+            "2.31.0"
+          ],
+          "aliases": [
+            "CVE-2023-32681",
+            "GHSA-j8r2-6x86-q33q"
+          ],
+          "description": "Requests is a HTTP library. Since Requests 2.3.0, Requests has been leaking Prox..."
+        }
+      ]
+    },
+    {
+      "name": "pyyaml",
+      "version": "5.3",
+      "vulns": [
+        {
+          "id": "PYSEC-2020-96",
+          "fix_versions": [
+            "5.3.1"
+          ],
+          "aliases": [
+            "GHSA-6757-jp84-gxfx",
+            "CVE-2025-50460",
+            "GHSA-fm6c-f59h-7mmg",
+            "CVE-2020-1747"
+          ],
+          "description": "A vulnerability was discovered in the PyYAML library in versions before 5.3.1, w..."
+        },
+        {
+          "id": "PYSEC-2021-142",
+          "fix_versions": [
+            "5.4"
+          ],
+          "aliases": [
+            "CVE-2020-14343",
+            "GHSA-8q59-q68h-6hv4"
+          ],
+          "description": "A vulnerability was discovered in the PyYAML library in versions before 5.4, whe..."
+        },
+        {
+          "id": "PYSEC-2021-142",
+          "fix_versions": [
+            "5.4"
+          ],
+          "aliases": [
+            "CVE-2020-14343",
+            "GHSA-8q59-q68h-6hv4"
+          ],
+          "description": "A vulnerability was discovered in the PyYAML library in versions before 5.4, whe..."
+        },
+        {
+          "id": "PYSEC-2020-96",
+          "fix_versions": [
+            "5.3.1"
+          ],
+          "aliases": [
+            "CVE-2020-1747",
+            "GHSA-6757-jp84-gxfx"
+          ],
+          "description": "A vulnerability was discovered in the PyYAML library in versions before 5.3.1, w..."
+        }
+      ]
+    }
+  ],
+  "fixes": []
+}

@@ -15,6 +15,8 @@ import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { onPlanBranch } from "./lib/carry.mjs";
 import { isFixUnitId } from "./lib/whole-plan.mjs";
+import { normalizeRepoPath } from "./lib/matcher.mjs";
+import { isWorkflowPath } from "./lib/workflows.mjs";
 import { isPullRequestFinding } from "./collect-findings.mjs";
 
 const GATES = ["review", "verify", "ci", "report", "human"];
@@ -43,12 +45,12 @@ const LANDING = "landing";
 // for which one it was.
 const LANDING_STATUSES = ["passed", "failed", "conflict", "differs"];
 
-// A person's accept of the findings this candidate's review left open, recorded
+// A person's accept of the code findings this candidate's review left open, recorded
 // only when every one of them may be carried into the plan branch: `{candidateOid,
 // ids, at}`. The ship's own carry is the same record with `mode: "carry"` and
 // `dependedOn`, whether a spec not yet merged depends on this one — which the
 // plan knows and this state does not. A top-level key for the reason `landing`
-// is one, and cleared by a bind as it is. Weighed by `acceptLifts` alone, which
+// is one, and cleared by a bind as it is. Weighed by `reviewOpenLifts` alone, which
 // `evaluate` asks to lift `review-open`.
 const ACCEPT = "accept";
 
@@ -542,18 +544,25 @@ export function reconcileBudgets(state, rounds) {
 // the fixer commits, and a bind falls between the two. It is not evidence about
 // a commit either — it is a record of what this cycle may spend, and it stops
 // counting by itself once the cycle's scope moves on.
-export function bindCandidate(state, candidateOid, baseOid, changedPaths = null) {
+//
+// So is the list of workflow paths the candidate touched, `workflowPaths`, for the
+// opposite reason: it is replaced by every bind, and a bind that is not handed one
+// leaves none. A list left over from an earlier candidate would speak for this one,
+// and a state without it is judged from `changedPaths` and never approved.
+export function bindCandidate(state, candidateOid, baseOid, changedPaths = null, workflowPaths = null) {
   if (!/^[0-9a-f]{40,64}$/.test(candidateOid ?? "")) throw new Error(`candidate OID is required, got: ${candidateOid}`);
   if (!/^[0-9a-f]{40,64}$/.test(baseOid ?? "")) throw new Error(`base OID is required, got: ${baseOid}`);
   const outgoing = state.candidateOid ?? null;
   const reported = state.gates?.report;
   const accounted = reported?.candidateOid === outgoing && reported?.status === "complete";
   const carried = state[UNACCOUNTED] ?? [];
+  const { workflowPaths: _earlier, ...kept } = state;
   return {
-    ...state,
+    ...kept,
     candidateOid,
     baseOid,
     changedPaths: changedPaths ?? state.changedPaths,
+    ...(workflowPaths ? { workflowPaths } : {}),
     gates: Object.fromEntries(GATES.map((gate) => [gate, null])),
     [UNACCOUNTED]: outgoing !== null && outgoing !== candidateOid && !accounted ? [...carried, outgoing] : carried,
     [LANDING]: null,
@@ -671,35 +680,65 @@ const currentGate = (state, gate) =>
   state.gates?.[gate]?.candidateOid === state.candidateOid ? state.gates[gate] : null;
 
 /**
- * Whether a person's accept lifts `review-open` from this state's verdict: on
- * the plan branch, and there alone, an accept of this candidate that covers
- * everything its open review holds — never past a blocking finding, and never
- * an incomplete review. Exported so that what the driver tells a person about
- * an accept, or does about a carry, is this answer and not one of its own.
+ * Whether `review-open` lifts from this state's verdict: on the plan branch, and
+ * there alone, for a complete review that is open and holds no blocking finding,
+ * and whose open findings are either about the pull request's text or the commit
+ * history — which no fixer can reach, and which merge disclosed — or covered by
+ * an accept of this candidate that holds under the rules below. Exported so that
+ * what the driver tells a person about an accept, or does about a carry, is this
+ * answer and not one of its own.
  */
-export function acceptLifts(state, config) {
+export function reviewOpenLifts(state, config) {
   const review = currentGate(state, "review");
   const open = Array.isArray(review?.open) ? review.open : [];
+  if (!onPlanBranch(state, config) || review?.status !== "open" || open.length === 0) return false;
+  if (open.some((finding) => finding.severity === "blocking")) return false;
+  const code = open.filter((finding) => !isPullRequestFinding(finding));
+  if (code.length === 0) return true;
   const accept = state[ACCEPT];
-  return onPlanBranch(state, config) && review?.status === "open" && open.length > 0
-    && accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
-    && open.every((finding) => accept.ids.includes(finding.id))
-    && !open.some((finding) => finding.severity === "blocking")
-    && (accept.mode !== "carry" || carryHolds(state, config, accept, open));
+  return accept?.candidateOid === state.candidateOid && Array.isArray(accept.ids)
+    && code.every((finding) => accept.ids.includes(finding.id))
+    && (accept.mode !== "carry" || carryHolds(state, config, accept, code));
 }
 
 // What a carry needs beyond an accept, since no person looked: carrying on, no
 // whole-plan fix, no major code finding on a spec something unmerged depends on
-// — read as depended on unless the record says otherwise — and either this
-// cycle's fix rounds spent or nothing open that a fixer could reach.
-function carryHolds(state, config, accept, open) {
-  const forFixer = open.filter((finding) => !isPullRequestFinding(finding));
+// — read as depended on unless the record says otherwise — and this cycle's fix
+// rounds spent.
+function carryHolds(state, config, accept, code) {
   return config?.carry === true && !isFixUnitId(state.spec)
-    && !(accept.dependedOn !== false && forFixer.some((finding) => finding.severity === "major"))
-    && (forFixer.length === 0 || counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds);
+    && !(accept.dependedOn !== false && code.some((finding) => finding.severity === "major"))
+    && counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds;
 }
 
-export function evaluate(state, config) {
+// The workflow files a person approved `spec` to change, out of the map
+// `approved.json` records at plan approval. Nothing for a spec the map does not
+// name, and nothing for a map that is not one.
+function approvedWorkflowsFor(approved, spec) {
+  const listed = approved !== null && typeof approved === "object" ? approved[spec] : null;
+  return Array.isArray(listed) ? listed.filter((file) => typeof file === "string").map(normalizeRepoPath) : [];
+}
+
+/**
+ * The per-spec workflow approval out of a plan's `approved.json`, or null when the
+ * file cannot be read, is not JSON, or records none. The one place the approval
+ * is read from: it is written by `plan.mjs approve` at the moment a person
+ * approves, and nothing in a spec file or a candidate stands in for it.
+ */
+export function readApprovedWorkflows(file) {
+  try {
+    const workflows = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"))?.workflows;
+    return workflows !== null && typeof workflows === "object" && !Array.isArray(workflows) ? workflows : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `approvedWorkflows` is `approved.json`'s `workflows` map, spec id to the files
+ * that spec may change; a caller that passes none approves nothing.
+ */
+export function evaluate(state, config, approvedWorkflows = null) {
   const blockers = [];
   const approvals = [];
   const review = currentGate(state, "review");
@@ -712,9 +751,9 @@ export function evaluate(state, config) {
   // absent, unparseable, or wrongly-bound findings file reads as an empty
   // finding set, and an empty finding set reads as clean, so this is checked
   // before anything else is believed. A person's accept, or the ship's carry, is
-  // weighed here and nowhere else in the verdict — see `acceptLifts`.
+  // weighed here and nowhere else in the verdict — see `reviewOpenLifts`.
   if (!review) blockers.push("review-not-recorded");
-  else if (review.status !== "clean" && !acceptLifts(state, config)) blockers.push(`review-${review.status}`);
+  else if (review.status !== "clean" && !reviewOpenLifts(state, config)) blockers.push(`review-${review.status}`);
 
   // (b) Verification and CI.
   if (!verify) blockers.push("verification-not-recorded");
@@ -741,10 +780,21 @@ export function evaluate(state, config) {
   const planBranch = onPlanBranch(state, config);
   if (!planBranch) approvals.push("straight-to-base");
 
-  // (e) A change to CI is a change to what every later gate is worth.
-  if ((state.changedPaths ?? []).some((file) => file.startsWith(".github/workflows/"))) {
-    approvals.push("workflow-change");
-  }
+  // (e) A change to CI is a change to what every later gate is worth. Judged from
+  // the rename-free listing the snapshot recorded, which names both sides of a
+  // rename; `changedPaths` names only its destination, so it is read as well, and
+  // it alone is all a state bound before the listing existed has. That state is
+  // never approved.
+  //
+  // A person's plan-time approval of named files for this spec lifts it on a plan
+  // branch, where the plan's own pull request is still theirs to merge, and only
+  // when every touched file is named.
+  const listed = Array.isArray(state.workflowPaths);
+  const touched = [...new Set([...(listed ? state.workflowPaths : []), ...(state.changedPaths ?? [])]
+    .map(normalizeRepoPath).filter(isWorkflowPath))];
+  const allowed = listed && planBranch ? approvedWorkflowsFor(approvedWorkflows, state.spec) : [];
+  const unapprovedWorkflows = touched.filter((file) => !allowed.includes(file));
+  if (unapprovedWorkflows.length > 0) approvals.push("workflow-change");
 
   // (f) The agent that wrote this code never said it finished what it was given.
   // An absent report and an `unfinished` one are the same answer to the only
@@ -791,6 +841,8 @@ export function evaluate(state, config) {
     candidateOid: state.candidateOid,
     blockers: uniqueBlockers,
     approvals: uniqueApprovals,
+    unapprovedWorkflows,
+    approvedWorkflows: touched.filter((file) => allowed.includes(file)),
     ready: uniqueBlockers.length === 0 && satisfied,
     needsHuman: uniqueBlockers.length > 0 || !satisfied
   };
@@ -812,12 +864,12 @@ const USAGE = `usage:
   gates.mjs state    <state.json> <next-state> [config.json]
   gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
   gates.mjs grant    <state.json> <rounds-root> <config.json>
-  gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json]
+  gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json|candidate.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
   gates.mjs landing  <state.json> <candidateOid> <record.json>
   gates.mjs accept   <state.json> <candidateOid> <id,id,...> [--carry <depended-on|independent>]
   gates.mjs pr       <state.json> <number> <url> <headOid>
-  gates.mjs evaluate <state.json> <config.json>
+  gates.mjs evaluate <state.json> <config.json> [approved.json]
   gates.mjs roles    <state.json> <config.json>
   gates.mjs adopt-merge <state.json> --repo <repo>
 
@@ -852,6 +904,9 @@ const USAGE = `usage:
   \`carry\` on, outside a whole-plan fix, with this cycle's fix rounds spent or
   nothing open for a fixer, and never past a major code finding on a spec that
   is \`depended-on\` by one not yet merged.
+
+  \`evaluate\` reads the workflow files a person approved for this spec from
+  \`approved.json\`; given none, or one it cannot read, it approves none.
 
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
@@ -895,7 +950,8 @@ export function readMergedPr(repo, number) {
 async function main() {
   const [action, ...values] = process.argv.slice(2);
   if (action === "evaluate") {
-    process.stdout.write(`${JSON.stringify(evaluate(readJson(values[0]), readJson(values[1])), null, 2)}\n`);
+    const approved = values[2] ? readApprovedWorkflows(values[2]) : null;
+    process.stdout.write(`${JSON.stringify(evaluate(readJson(values[0]), readJson(values[1]), approved), null, 2)}\n`);
     return;
   }
   if (action === "roles") {
@@ -1076,7 +1132,8 @@ async function main() {
     budget = budgetTaken(before, next, { limits });
   } else if (action === "bind") {
     const changed = values[3] ? readJson(values[3]) : null;
-    next = bindCandidate(readJson(values[0]), values[1], values[2], Array.isArray(changed) ? changed : changed?.changedPaths ?? null);
+    const workflows = Array.isArray(changed?.workflowPaths) ? changed.workflowPaths : null;
+    next = bindCandidate(readJson(values[0]), values[1], values[2], Array.isArray(changed) ? changed : changed?.changedPaths ?? null, workflows);
   } else if (action === "record") {
     next = recordGate(readJson(values[0]), values[1], values[2], readJson(values[3]));
   } else if (action === "landing") {

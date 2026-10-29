@@ -19,9 +19,9 @@ function planWith(specs) {
 
 // `retired` writes the retired `user_visible` key, which only a spec written
 // before it was retired still carries. Left out, the key is not written at all.
-const spec = (id, { depends = [], reviewers = [], retired } = {}) =>
+const spec = (id, { depends = [], reviewers = [], retired, workflows } = {}) =>
   `---\nid: ${id}\ndepends_on: [${depends.join(", ")}]\n${retired === undefined ? "" : `user_visible: ${retired}\n`}`
-  + `reviewers: [${reviewers.join(", ")}]\n---\n\n## Outcome\nSomething.\n`;
+  + `${workflows === undefined ? "" : `workflows: [${workflows.join(", ")}]\n`}reviewers: [${reviewers.join(", ")}]\n---\n\n## Outcome\nSomething.\n`;
 
 test("front matter parses scalars, booleans, and inline lists", () => {
   // An older spec's front matter, the one place a boolean still turns up.
@@ -83,7 +83,7 @@ test("resolved lenses ride along with the order", () => {
 
 test("a spec without the retired user_visible key validates, and nothing about visibility comes back", () => {
   const [entry] = readSpecs(planWith({ "01-a.md": spec("01-a") }), CONFIG, SCHEMA);
-  assert.deepEqual(Object.keys(entry).sort(), ["dependsOn", "id", "path", "reviewers", "signOffs"]);
+  assert.deepEqual(Object.keys(entry).sort(), ["dependsOn", "id", "path", "reviewers", "signOffs", "workflows"]);
 });
 
 test("an older spec that still carries user_visible reads exactly as one without it", () => {
@@ -148,4 +148,33 @@ test("sign-offs are read around code fences, nesting, prose and the ways of sayi
   assert.deepEqual(entries("## Sign-offs\n- pdfkit\n\nThe spec also adds a top-level `exports/` directory.\n"), ["pdfkit", "The spec also adds a top-level `exports/` directory."]);
   assert.equal(parseSignOffs("## Sign-offs\r\n- dep A\r\n").entries[0], "dep A");
   assert.throws(() => parseSignOffs("## Sign-offs\n- a\n## Sign-offs\n- b\n", "01-a.md"), /01-a\.md has 2 "## Sign-offs" sections/);
+});
+
+test("a spec's workflows come back as listed, and a spec without the key has none", () => {
+  const order = readSpecs(planWith({
+    "01-a.md": spec("01-a", { workflows: [".github/workflows/ci.yml", ".github/workflows/release.yml"] }),
+    "02-b.md": spec("02-b")
+  }), CONFIG, SCHEMA);
+  assert.deepEqual(order.map((entry) => entry.workflows), [[".github/workflows/ci.yml", ".github/workflows/release.yml"], []]);
+});
+
+test("a workflows entry that is not an exact workflow file is refused, naming the spec and the entry", () => {
+  const ci = ".github/workflows/ci.yml";
+  for (const [entry, reason] of [
+    ["src/app.js", /not under \.github\/workflows\//],
+    [".github/other/ci.yml", /not under \.github\/workflows\//],
+    [".github/workflows/*.yml", /wildcard/],
+    [".github/workflows/ci.y?l", /wildcard/],
+    [".github/workflows/../ci.yml", /\.\. segment/],
+    [".github/workflows/", /directory/],
+    ["./.github/workflows/ci.yml", /normalized form/],
+    [".github/workflows//ci.yml", /normalized form/],
+    [".github\\workflows\\ci.yml", /normalized form/]
+  ]) {
+    assert.throws(() => readSpecs(planWith({ "01-a.md": spec("01-a", { workflows: [ci, entry] }) }), CONFIG, SCHEMA),
+      (error) => error.message.startsWith("01-a.md: ") && error.message.includes(`"${entry}"`) && reason.test(error.message),
+      entry);
+  }
+  assert.throws(() => readSpecs(planWith({ "01-a.md": spec("01-a", { workflows: [ci, ci] }) }), CONFIG, SCHEMA),
+    /01-a\.md: workflows entry "\.github\/workflows\/ci\.yml" is listed twice/);
 });

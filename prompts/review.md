@@ -53,7 +53,8 @@ not clean, and is re-dispatched rather than merged.
 
 Set `scope` on every finding, the same way. `pull-request` when the remedy is a
 change to the pull request's text — what its description says or leaves out.
-`code` otherwise, including a code defect that names no single file, such as
+`history` when the remedy is a change to the commits — a message, an author, how
+the change is split into commits — and not to any file. `code` otherwise, including a code defect that names no single file, such as
 three modules that disagree: write `file` as `null` and it still goes to a fixer.
 
 Severity:

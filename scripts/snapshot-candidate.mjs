@@ -7,6 +7,7 @@ import { normalizeRepoPath, pathExclusions } from "./lib/matcher.mjs";
 import { enterRound, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { judgeView, markerSizes, markersLeft } from "./lib/resolve.mjs";
+import { isWorkflowPath } from "./lib/workflows.mjs";
 
 function git(cwd, args, { allowFailure = false, encoding = "utf8" } = {}) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding, shell: false, maxBuffer: 128 * 1024 * 1024 });
@@ -224,6 +225,11 @@ export function snapshotCandidate(options) {
   const candidateOid = git(worktree, ["rev-parse", options.candidate]).stdout.trim();
   const changedBuffer = git(worktree, ["diff", "--name-only", "-M", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" }).stdout;
   const changedPaths = changedBuffer.toString("utf8").split("\0").filter(Boolean).map(normalizeRepoPath);
+  // Every workflow path the change touches, from a listing that does not detect
+  // renames: `changedPaths` names only a rename's destination, so a workflow
+  // renamed onto another name or out of the directory would not show there.
+  const workflowPaths = git(worktree, ["diff", "--name-only", "--no-renames", "-z", `${baseOid}..${candidateOid}`], { encoding: "buffer" })
+    .stdout.toString("utf8").split("\0").filter(Boolean).map(normalizeRepoPath).filter(isWorkflowPath);
   const config = readConfig(options.config);
   // Shared with the landing check, which has to exclude the same set against the
   // same rename rule — see `pathExclusions`.
@@ -365,6 +371,7 @@ export function snapshotCandidate(options) {
     reviewDiffPath,
     reviewDiffHash,
     changedPaths,
+    workflowPaths,
     addedLines,
     matchedKeywords,
     excluded,

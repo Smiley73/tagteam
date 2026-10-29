@@ -28,12 +28,12 @@ function killGroup(child, signal) {
   } catch {}
 }
 
-async function runSetup(command, cwd, remainingMs) {
+async function runSetup(command, cwd, remainingMs, stdio) {
   const child = spawn("/bin/sh", ["-lc", command], {
     cwd,
     shell: false,
     detached: process.platform !== "win32",
-    stdio: "inherit"
+    stdio
   });
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -49,8 +49,20 @@ async function runSetup(command, cwd, remainingMs) {
   if (exit !== 0) throw new Error(`worktree setup command failed (${exit}): ${command}`);
 }
 
-export async function setupWorktree({ primary, worktree, config }) {
+// The command half of setup: what brings a worktree up to its lockfile, run
+// again whenever the dependencies change under it. A caller whose own standard
+// output is a JSON document passes `stdio` to keep the commands' off it.
+export async function runSetupCommands({ worktree, config, stdio = "inherit" }) {
   const started = Date.now();
+  for (const command of config.worktree.setup) {
+    const remaining = config.worktree.setupTimeoutSec * 1000 - (Date.now() - started);
+    if (remaining <= 0) throw new Error("worktree setup timed out before all commands ran");
+    await runSetup(command, worktree, remaining, stdio);
+  }
+  return config.worktree.setup.length;
+}
+
+export async function setupWorktree({ primary, worktree, config }) {
   for (const configured of config.worktree.copyUntracked) {
     const relative = assertSafeRelativePath(configured);
     assertNoSymlinkedSegment(primary, relative, "configured copy source");
@@ -61,12 +73,7 @@ export async function setupWorktree({ primary, worktree, config }) {
     if (ignored.status !== 0) throw new Error(`refusing to copy ${relative}: Git would not ignore it in the worktree`);
     copyPreservingMode(path.join(primary, relative), path.join(worktree, relative));
   }
-  for (const command of config.worktree.setup) {
-    const remaining = config.worktree.setupTimeoutSec * 1000 - (Date.now() - started);
-    if (remaining <= 0) throw new Error("worktree setup timed out before all commands ran");
-    await runSetup(command, worktree, remaining);
-  }
-  return { copied: config.worktree.copyUntracked, commands: config.worktree.setup.length };
+  return { copied: config.worktree.copyUntracked, commands: await runSetupCommands({ worktree, config }) };
 }
 
 async function main() {

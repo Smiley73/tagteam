@@ -100,6 +100,21 @@ test("a base that moved without touching the plan's change opens no round: begin
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// Git's own refusal to start the merge, led by the merge that did not start and the
+// way on; the base's file is the one an untracked file of the worktree is in the way of.
+test("a merge of the base that git will not start is led by the merge, with git's whole refusal beneath", () => {
+  const staged = stageConflict();
+  fs.writeFileSync(path.join(staged.worktree, "other.js"), "in the way\n");
+  const begun = ship("begin", staged.plan, ["--spec", "02-b"], staged.env);
+  assert.equal(begun.status, 1, begun.stdout);
+  const [lead, ...raw] = begun.stderr.trimEnd().split("\n");
+  assert.match(lead, new RegExp(`^The begin step for 02-b stopped because the merge of ${staged.baseOid.slice(0, 12)} into ${staged.planTip.slice(0, 12)} did not start\\. `));
+  assert.match(lead, /run the same command again, or stop the train with `ship\.mjs end`\.$/);
+  assert.ok(!/git/.test(lead), `git's text is in the opening:\n${lead}`);
+  assert.match(raw.join("\n"), /other\.js/, "git's refusal is not kept beneath the lead");
+  assert.ok(!mergeInProgress(staged.worktree), "a merge was left half-started");
+});
+
 test("a base that conflicts is resolved before the next spec: a two-parent merge reviewed as its remerge view, verified, pushed by the driver, and the spec branches from it", async () => {
   const staged = stageConflict();
   const { dir, repo, plan, shipDir, origin, env, planTip, baseOid, worktree } = staged;

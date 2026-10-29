@@ -33,8 +33,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import {
+  DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
+  dependencyUnitDir, disclosureLines, isDependencyId, makeUpgrade, openQuestions, questionText, readAudit, readDeclines,
+  recordDeclines, saveAudit
+} from "./lib/dependency-audit.mjs";
+import { runSetupCommands } from "./worktree-setup.mjs";
+import { verify as verifyCommands } from "./verify-run.mjs";
 import { listRounds } from "./lib/rounds.mjs";
-import { acceptLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
+import { reviewOpenLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
@@ -78,8 +85,8 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
-  clearIncrease, confirmPending, decideRoute, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip, landingBranch, recordIncrease,
-  recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
+  clearDecision, clearIncrease, confirmPending, decideRoute, decisionOf, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip,
+  landingBranch, recordAdoption, recordIncrease, recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
 } from "./lib/plan-route.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -87,10 +94,29 @@ const SCRIPTS = path.join(PLUGIN, "scripts");
 
 // --- process helpers -------------------------------------------------------
 
+// A stop reaches the person in one of three forms, and the text of a child
+// process, a caught error or a record enters a stop through the last two only:
+//   new Stop(text)        the driver's own words, one line: the reason and what to decide.
+//   Stop.beneath(text, d) the same first line, with `d` on the lines beneath it as the evidence.
+//   Stop.raw(d, failure)  `d` unchanged, under a lead `main` writes from `failure`.
+// The integrity test keeps the first of these free of both, so the first line a
+// person reads is always complete.
 class Stop extends Error {
-  constructor(message, exitCode = 1) {
+  constructor(message, exitCode = 1, failure = null) {
     super(message);
     this.exitCode = exitCode;
+    this.failure = failure;
+  }
+
+  static beneath(message, detail, exitCode = 1) {
+    const stop = new Stop(message, exitCode);
+    const evidence = String(detail ?? "").trim();
+    if (evidence) stop.message = `${message}\n${evidence}`;
+    return stop;
+  }
+
+  static raw(detail, failure, exitCode = 1) {
+    return new Stop(detail, exitCode, failure);
   }
 }
 
@@ -99,7 +125,7 @@ function node(script, args, { cwd, allow = [] } = {}) {
     cwd, encoding: "utf8", shell: false, maxBuffer: 64 * 1024 * 1024
   });
   if (result.status !== 0 && !allow.includes(result.status)) {
-    throw new Stop(`${script} ${args[0] ?? ""}: ${(result.stderr || result.stdout || "").trim()}`, result.status === 4 ? 4 : 1);
+    throw Stop.raw(`${script} ${args[0] ?? ""}: ${(result.stderr || result.stdout || "").trim()}`, "one of the driver's own scripts failed", result.status === 4 ? 4 : 1);
   }
   return result;
 }
@@ -124,20 +150,20 @@ export const lastJson = (stdout) => {
 
 function git(cwd, args, { allowFailure = false } = {}) {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", shell: false, maxBuffer: 64 * 1024 * 1024 });
-  if (result.status !== 0 && !allowFailure) throw new Stop(`git ${args.join(" ")}: ${(result.stderr || result.stdout || "").trim()}`);
+  if (result.status !== 0 && !allowFailure) throw Stop.raw(`git ${args.join(" ")}: ${(result.stderr || result.stdout || "").trim()}`, "a git command failed");
   return result;
 }
 
 function gh(cwd, args, { allowFailure = false } = {}) {
   const result = spawnSync("gh", args, { cwd, encoding: "utf8", shell: false });
-  if (result.status !== 0 && !allowFailure) throw new Stop(`gh ${args.slice(0, 2).join(" ")}: ${(result.stderr || result.stdout || "").trim()}`);
+  if (result.status !== 0 && !allowFailure) throw Stop.raw(`gh ${args.slice(0, 2).join(" ")}: ${(result.stderr || result.stdout || "").trim()}`, "a GitHub command failed");
   return result;
 }
 
 const readJson = (file, fallback) => {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (error) {
     if (fallback !== undefined) return fallback;
-    throw new Stop(`could not read ${file}: ${error.message}`);
+    throw Stop.raw(`could not read ${file}: ${error.message}`, "a local record or configuration could not be read or parsed");
   }
 };
 const writeJson = (file, value) => {
@@ -181,10 +207,12 @@ function context(options, { requireTrain = true } = {}) {
 
 // A spec's directory, or — for a whole-plan fix unit, which runs the same cycle
 // under an id of its own — the unit's, under `whole-plan/units/`, where
-// `status.mjs` does not count it as a spec. Everything keyed by a spec id goes
+// `status.mjs` does not count it as a spec; the dependency unit's is likewise
+// beneath `dependencies/`. Everything keyed by a spec id goes
 // through here, so a fix unit's state, rounds, sets and reports land beside its
 // generated document and nowhere else.
-const specDir = (ctx, id) => (isFixUnitId(id) ? unitDir(ctx.shipDir, id) : path.join(ctx.shipDir, id));
+const specDir = (ctx, id) => (isDependencyId(id) ? dependencyUnitDir(ctx.shipDir)
+  : isFixUnitId(id) ? unitDir(ctx.shipDir, id) : path.join(ctx.shipDir, id));
 const statePath = (ctx, id) => path.join(specDir(ctx, id), "state.json");
 const roundsRoot = (ctx, id) => path.join(specDir(ctx, id), "rounds");
 const roundDir = (ctx, id, round) => path.join(roundsRoot(ctx, id), String(round));
@@ -204,8 +232,8 @@ function fixUnitSpec(ctx, id) {
     throw new Stop(`${id} is not a spec of ${ctx.plan}, and no whole-plan check made a fix unit of that name (${file} is not there)`);
   }
   let front;
-  try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw new Stop(error.message); }
-  if (front.id !== id) throw new Stop(`${file} names ${front.id}, not ${id}`);
+  try { ({ front } = parseFrontMatter(text, file)); } catch (error) { throw Stop.raw(error.message, "a spec document could not be read or parsed"); }
+  if (front.id !== id) throw new Stop(`The spec document for ${id} names ${front.id} instead (${file})`);
   return {
     id, path: file, dependsOn: [],
     reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], fixUnit: true
@@ -236,11 +264,30 @@ function madeUnitIds(ctx) {
   return { newest, ids: unitIds(ctx.shipDir, records).filter((id) => exists(unitDocumentPath(ctx.shipDir, id)) || named.has(id)) };
 }
 
-// The specs and then the fix units: everything of this train that becomes a pull
-// request into its landing branch.
-const unitsInOrder = (ctx) => [...specsInOrder(ctx), ...fixUnitSpecs(ctx)];
+// The dependency unit, once the audit has decided on upgrades and every question
+// about them is answered; it stands before the first spec until it has merged
+// into the branch the specs build on, or has nothing left to upgrade.
+function dependencyEntered(ctx) {
+  const record = readAudit(ctx.shipDir);
+  return Boolean(record) && !record.unit?.dropped && openQuestions(record).length === 0 && chosenUpgrades(record).length > 0;
+}
+const dependencyPending = (ctx) => dependencyEntered(ctx) && stateOf(ctx, DEPENDENCY_ID) !== "merged";
+// Questions the audit put to the person and nobody has answered: until they are, which upgrades there are is not settled.
+const dependencyQuestions = (ctx) => { const record = readAudit(ctx.shipDir); return record ? openQuestions(record) : []; };
+
+// The unit as the cycle reads a spec. Its document is written once the upgrades
+// are made, so `begin` reads this before there is one.
+const dependencyUnitSpec = (ctx) => ({
+  id: DEPENDENCY_ID, path: dependencyDocumentPath(ctx.shipDir), dependsOn: [],
+  reviewers: resolveReviewers([], ctx.config, { file: dependencyDocumentPath(ctx.shipDir) }), signOffs: [], dependencyUnit: true
+});
+
+// The dependency unit, then the specs and then the fix units: everything of this
+// train that becomes a pull request into its landing branch.
+const unitsInOrder = (ctx) => [...(dependencyEntered(ctx) ? [dependencyUnitSpec(ctx)] : []), ...specsInOrder(ctx), ...fixUnitSpecs(ctx)];
 
 function specById(ctx, id) {
+  if (isDependencyId(id)) return dependencyUnitSpec(ctx);
   if (isFixUnitId(id)) return fixUnitSpec(ctx, id);
   const spec = specsInOrder(ctx).find((entry) => entry.id === id);
   if (!spec) throw new Stop(`${id} is not a spec of ${ctx.plan}`);
@@ -319,6 +366,18 @@ function verifyLine(ctx) {
     + commands.map((entry) => `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`).join("\n");
 }
 
+// The check an agent runs on its own report before it returns, so that a report
+// the recorder would refuse is corrected while the agent that wrote it is still
+// there to correct it.
+function validateLine(ctx, file, schema) {
+  return `Check your report before you return: node ${q(path.join(SCRIPTS, "validate-json.mjs"))} --repo ${q(ctx.repo)} `
+    + `${q(path.join(PLUGIN, "schemas", schema))} ${q(file)} — it prints valid when the report passes and says what is wrong when it does not; `
+    + "correct the report until it passes.";
+}
+
+const implementReportPath = (ctx, id) => path.join(specDir(ctx, id), "implement-report.json");
+const fixReportPath = (ctx, id) => path.join(specDir(ctx, id), "fix-report.json");
+
 function implementerDispatch(ctx, spec, job) {
   return {
     ...agent("implementer", job),
@@ -329,7 +388,8 @@ function implementerDispatch(ctx, spec, job) {
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
       verifyLine(ctx),
-      `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
+      validateLine(ctx, implementReportPath(ctx, spec.id), "implement-report.schema.json"),
+      `Write your report to: ${implementReportPath(ctx, spec.id)}`
     ].join("\n")
   };
 }
@@ -352,7 +412,8 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
       verifyLine(ctx),
-      `Write your report to: ${path.join(specDir(ctx, spec.id), "implement-report.json")}`
+      validateLine(ctx, implementReportPath(ctx, spec.id), "implement-report.schema.json"),
+      `Write your report to: ${implementReportPath(ctx, spec.id)}`
     ].join("\n")
   };
 }
@@ -551,11 +612,19 @@ function pullRequestLines(ctx, id, state) {
 
 // What the orchestrator is told about findings no fixer can reach, wherever
 // they turn up: at `fix`, where they are kept out of the fixer's brief, and at
-// `settle`, where they may be all that is left open.
+// `settle`, where they may be all that is left open. A finding about the commit
+// history is told that the body cannot rewrite it, since the spec merge's squash
+// message is not taken from the body.
 function pullRequestFindingsLine(ctx, id, findings) {
-  const named = findings.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
-  return `${findings.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named}. `
-    + `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`;
+  const named = (list) => list.map((finding) => `${finding.id} (${String(finding.title ?? "").replace(/\s+/g, " ").trim()})`).join("; ");
+  const history = findings.filter((finding) => finding.scope === "history");
+  const text = findings.filter((finding) => finding.scope !== "history");
+  return [
+    text.length > 0 ? `${text.length} finding(s) are about the pull request itself, not the code, and no fixer can reach it: ${named(text)}.` : "",
+    history.length > 0 ? `${history.length} finding(s) are about the commit history, not the code, and no fixer can reach it: ${named(history)}.` : "",
+    `Write ${prBodyPath(ctx, id)} so that it says what they ask for; the readers that raised them judge that body at the next re-check, and publish sends it.`,
+    history.length > 0 ? "The body can disclose the commit history but not rewrite it, so a finding about it may well stay open after the re-check and be disclosed rather than resolved." : ""
+  ].filter(Boolean).join(" ");
 }
 
 // --- retries and what the pull request says about them ----------------------
@@ -592,12 +661,13 @@ const firstFailed = (verify) => (verify?.commands ?? []).find((command) => comma
 /**
  * The lines the driver itself writes under `## Risk` in this spec's pull
  * request: the one place that decides what they are. One per finding the spec
- * would carry into the plan branch open if it merged now, and one per failure
- * that passed when it was run again on the same commit.
+ * would carry into the plan branch open if it merged now, one per failure
+ * that passed when it was run again on the same commit, and — for the dependency
+ * unit — one per upgrade it did not make.
  */
 function riskLines(ctx, id) {
   const state = readState(ctx, id);
-  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base)];
+  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base), ...(isDependencyId(id) ? disclosureLines(readAudit(ctx.shipDir)) : [])];
 }
 
 /**
@@ -639,7 +709,8 @@ function retryLines(ctx, id, base) {
  * given. Null unless `onPlanBranch` holds, the question the gates ask. `open` is
  * what its review gate holds open; `entries`, one for each, what it would put in
  * the plan's ledger if it merged now — `accepted` where a person's accept of this
- * candidate covers it, `carried` where the ship's carry does; `merges`, whether
+ * candidate covers it, `disclosed` where it is about the pull request or the
+ * commit history, `carried` where the ship's carry does; `merges`, whether
  * the record in its gate state lifts `review-open`, as `evaluate` decides it.
  */
 function planStanding(ctx, id, state) {
@@ -653,13 +724,15 @@ function planStanding(ctx, id, state) {
     ...(file?.candidate === state.candidateOid && Array.isArray(file.ids) ? file.ids : [])
   ]);
   const carried = new Set(recorded?.mode === "carry" ? recorded.ids : []);
-  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted, carried), merges: acceptLifts(state, ctx.config) };
+  return { review, open, entries: entriesOf(id, state.candidateOid, open, accepted, carried, true), merges: reviewOpenLifts(state, ctx.config) };
 }
 
 /**
- * Whether `finish` would carry this spec's open findings into the plan branch
- * on the review gate as now recorded: null when carrying is off, the spec is
- * not on the plan branch, a finding open may not be carried (05's rule) or
+ * Whether `finish` would carry this spec's open code findings into the plan
+ * branch on the review gate as now recorded: null when carrying is off, the spec
+ * is not on the plan branch, no code finding is open (those about the pull
+ * request or the commit history merge disclosed without a carry), one may not be
+ * carried (05's rule) or
  * `evaluate` would not lift `review-open` on the record; otherwise the record
  * to write, how many findings the plan's ledger already holds carried by other
  * units, and whether this one would take that past `limits.carried`. A carry
@@ -672,18 +745,19 @@ function planStanding(ctx, id, state) {
 function carryStanding(ctx, id, state) {
   if (ctx.config.carry !== true) return null;
   const standing = planStanding(ctx, id, state);
-  if (!standing || standing.open.length === 0) return null;
+  const code = standing?.open.filter((finding) => !isPullRequestFinding(finding)) ?? [];
+  if (code.length === 0) return null;
   const recorded = standing.merges && state.accept?.mode === "carry";
   if (standing.merges && !recorded) return null;
   let record = state.accept;
   if (!recorded) {
     const facts = carryFacts(ctx, id);
-    if (standing.open.some((finding) => carryRefusal(finding, facts))) return null;
+    if (code.some((finding) => carryRefusal(finding, facts))) return null;
     record = {
-      candidateOid: state.candidateOid, ids: standing.open.map((finding) => finding.id), mode: "carry",
-      dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
+      candidateOid: state.candidateOid, ids: code.map((finding) => finding.id), mode: "carry",
+      dependedOn: awaitedByUnmerged(facts.spec, facts.specs, facts.merged)
     };
-    if (!acceptLifts({ ...state, accept: record }, ctx.config)) return null;
+    if (!reviewOpenLifts({ ...state, accept: record }, ctx.config)) return null;
   }
   const others = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried" && entry.spec !== id).length;
   return {
@@ -703,8 +777,12 @@ function carriedAtFinish(ctx, id) {
 
 function pullRequestOnlyLine(ctx, id) {
   const said = "Nothing open is for a fixer, so no fix round is spent: the spec publishes with the body you write";
-  const carried = carriedAtFinish(ctx, id);
-  return carried ? `${said}. ${carried}` : `${said}, and revisit puts it to the readers again.`;
+  const state = readState(ctx, id);
+  const standing = planStanding(ctx, id, state);
+  return standing?.merges
+    ? `${said}. At finish it merges into ${state.base} with these findings disclosed, whatever carrying is set to, unless something other than its review stops it: `
+      + "each is entered in the plan's ledger and listed under Risk, and the plan's pull request lists them for a person."
+    : `${said}, and revisit puts it to the readers again.`;
 }
 
 const enteredLines = (count) =>
@@ -902,7 +980,8 @@ function fixerDispatch(ctx, spec, recordPath, job) {
       `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       verifyLine(ctx),
-      `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")}`
+      validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
+      `Write your fix report to: ${fixReportPath(ctx, spec.id)}`
     ].join("\n")
   };
 }
@@ -932,7 +1011,8 @@ function repairDispatch(ctx, spec, state, job) {
         `What failed and its log: ${landing.resultPath ?? landing.dir}. Read it before changing anything; the commands `
           + "there are this repository's own, and they ran against the merged tree.",
         `Worktree (work only beneath this path): ${ctx.worktree}`,
-        `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
+        validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
+        `Write your fix report to: ${fixReportPath(ctx, spec.id)} — outcomes is an empty array, and the repair is described in summary.`
       ].join("\n")
     };
   }
@@ -945,7 +1025,45 @@ function repairDispatch(ctx, spec, state, job) {
       `Pull request #${state.pr?.number ?? "?"} on branch ${state.branch}: read the failed check's log with gh (for example \`gh pr checks ${state.pr?.number ?? ""}\` and \`gh run view --log-failed\`) before changing anything.`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       verifyLine(ctx),
-      `Write your fix report to: ${path.join(specDir(ctx, spec.id), "fix-report.json")} — outcomes is an empty array, and the repair is described in summary.`
+      validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
+      `Write your fix report to: ${fixReportPath(ctx, spec.id)} — outcomes is an empty array, and the repair is described in summary.`
+    ].join("\n")
+  };
+}
+
+// The fresh agent of the role that left an unusable report, sent back to write
+// only the report for work that is already committed. It reconstructs the account
+// from the commit range and the brief the original was handed, and it runs at the
+// agent, model and effort the original was sent at.
+function reportResendDispatch(ctx, spec, { pending, state, oid, request, problems, kept }) {
+  const implementer = !pending || pending.from === "redesign";
+  const landing = pending?.from === "repair" ? landingFailure(state) : null;
+  const brief = [
+    ...(pending?.from === "redesign" ? [`Redesign brief: ${pending.record}`, `Files to redesign: ${(pending.files ?? []).join(", ")}`] : []),
+    ...(["panel", "settle"].includes(pending?.from) ? [`Findings to fix: ${pending.record}`] : []),
+    ...(pending?.from === "repair"
+      ? [landing
+        ? `A landing repair: what failed and its log is ${landing.resultPath ?? landing.dir}.`
+        : `A CI repair: its record is ${path.join(specDir(ctx, spec.id), "ci.json")}.`]
+      : []),
+    `Spec: ${spec.path}`
+  ];
+  return {
+    ...request,
+    description: `Resend report for ${spec.id}`,
+    prompt: [
+      `Job: ${implementer ? "implementer" : "fixer"}`,
+      `This is a report resend, not a new job: read prompts/${implementer ? "implement" : "fix"}.md and its Report resend section. `
+        + "The work is already committed; change nothing under the worktree, and write only the report.",
+      `Commit range of the work: ${pending?.candidate ?? ctx.baseOid}..${oid}`,
+      ...brief,
+      `Worktree (read only): ${ctx.worktree}`,
+      `Why the report you were sent back for was refused:\n${problems.join("\n")}`,
+      kept.length > 0 ? `The refused report is kept at ${kept.join(", ")}; the report path is empty.` : "Nothing was written at the report path.",
+      validateLine(ctx, implementer ? implementReportPath(ctx, spec.id) : fixReportPath(ctx, spec.id), `${implementer ? "implement" : "fix"}-report.schema.json`),
+      implementer
+        ? `Write your report to: ${implementReportPath(ctx, spec.id)}`
+        : `Write your fix report to: ${fixReportPath(ctx, spec.id)}${pending.from === "repair" ? " — outcomes is an empty array, and the repair is described in summary." : ""}`
     ].join("\n")
   };
 }
@@ -1086,12 +1204,12 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
 // step where a unit would go. The count includes the fix units a whole-plan
 // check has made, which is why it can grow near the end.
 function boardHeader(ctx, id, kind) {
-  const units = [...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
+  const units = [...(dependencyEntered(ctx) ? [DEPENDENCY_ID] : []), ...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
   const merged = units.filter((unit) => stateOf(ctx, unit) === "merged").length;
   const queued = units.filter((unit) => unit !== id && [null, "pending"].includes(stateOf(ctx, unit)));
   const where = id === null
     ? `${kind.startsWith("whole-plan") ? "The whole-plan check" : "Resolving the merge that lands the plan"}, ${units.length} units`
-    : `${isFixUnitId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
+    : `${isFixUnitId(id) || isDependencyId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
   return `${where} · ${merged} merged · ${queued.length ? `queued: ${queued.join(", ")}` : "nothing queued"}`;
 }
 
@@ -1169,6 +1287,14 @@ function listOf(words) {
 // commit that went on to be reviewed and published was never verified — so
 // `finish` stopped it for verification-not-recorded.
 const fixPendingPath = (ctx, id) => path.join(specDir(ctx, id), "fix-pending.json");
+
+// Written by `snapshot` when a dispatched agent's report was unusable and a fresh
+// agent of its role was sent back for it. It names the round and the commit the
+// report is for, and it is what makes the resend happen once: written before the
+// resend goes out, so no ordering of crashes and reruns can send a second one.
+// A marker for another candidate is stale and ignored; it goes where the
+// fix-pending marker does, once the round's report is recorded.
+const reportResendPath = (ctx, id) => path.join(specDir(ctx, id), "report-resend.json");
 
 // Written by `snapshot` when a fixer was handed findings and changed nothing —
 // every one of them answered `wont-fix` or `failed`. It names the candidate the
@@ -1347,7 +1473,7 @@ function acceptOnPlanBranch(ctx, id, ids) {
   const facts = carryFacts(ctx, id);
   const kept = standing.open.map((finding) => ({ finding, why: carryRefusal(finding, facts) })).find((entry) => entry.why);
   if (kept) return { merges: false, line: `${kept.finding.id} keeps it from merging into ${state.base} on its own: ${kept.why}.` };
-  if (!acceptLifts({ ...state, accept: { candidateOid: state.candidateOid, ids } }, ctx.config)) {
+  if (!reviewOpenLifts({ ...state, accept: { candidateOid: state.candidateOid, ids } }, ctx.config)) {
     return { merges: false, line: `Its review is ${standing.review.status}, and an accept lets only a complete review with findings open merge into ${state.base} on its own.` };
   }
   node("gates.mjs", ["accept", statePath(ctx, id), state.candidateOid, ids.join(",")]);
@@ -1460,8 +1586,22 @@ async function pushToPlanBranch(ctx, oid, { recorded = false } = {}) {
   ctx.train = readJson(ctx.trainPath);
 }
 
+// A push git refused, with the branch still where the record has it: the same
+// check that judges a branch moved in between says so first, and otherwise
+// git's refusal stands beneath a lead. Nothing is retried or forced.
+async function pushShipCommit(ctx, oid, { what, outcome, recorded = false }) {
+  try { await pushToPlanBranch(ctx, oid, { recorded }); } catch (error) {
+    await planTipCheck(ctx, outcome);
+    const branch = routeOf(ctx).branch;
+    throw Stop.raw(error.message, `the push of the ${what} ${short(oid)} to ${branch} failed while ${branch} on origin is still where `
+      + "this ship recorded it, and nothing else changed");
+  }
+}
+
 // The sentence a plan branch that is not where the record says stops with.
-function planTipStop(route, origin, reason, outcome) {
+// `adopt` is the command that takes origin's commits as the plan's tip, when they
+// sit on top of the recorded tip; null says they do not, and nothing offers it.
+function planTipStop(route, origin, reason, outcome, adopt = null) {
   const short = (oid) => String(oid).slice(0, 12);
   if (reason === "not-created") {
     return `${route.branch} has not been created on origin yet, so ${outcome}. Run start again: it creates the branch from `
@@ -1480,7 +1620,12 @@ function planTipStop(route, origin, reason, outcome) {
     + `${short(route.tipOid)} there${route.pendingOid ? `, and was about to push ${short(route.pendingOid)}` : ""}. Someone pushed `
     + `to the plan branch by hand, and the ship does not build on or merge into a commit nobody reviewed, so ${outcome}. `
     + `To go on, put ${route.branch} on origin back at ${short(route.tipOid)} — keep the commit on a branch of its own if you `
-    + "want it — and run this again. Taking a commit of your own onto the plan branch is not something the ship does yet.";
+    + "want it — and run this again"
+    + (adopt
+      ? `; or, if the commits on top of ${short(route.tipOid)} are yours for the plan to take, run \`${adopt}\` on your word, which `
+        + "takes origin's commits as the plan's tip, lists what it took, and then run this again. Nothing is forced either way."
+      : `. The commits on origin are not on top of ${short(route.tipOid)} — the branch was rewritten or replaced — so the ship cannot `
+        + "take them as the plan's tip, and nothing force-pushes.");
 }
 
 /**
@@ -1495,7 +1640,11 @@ async function planTipCheck(ctx, outcome) {
   const route = routeOf(ctx);
   const origin = await originTipOf(ctx, route.branch);
   const judged = judgeTip(route, origin);
-  if (!judged.ok) throw new Stop(planTipStop(route, origin, judged.reason, outcome));
+  if (!judged.ok) {
+    const adopt = judged.reason === "unrecorded" && isAtOrBelow(ctx, route.tipOid, origin)
+      ? nextCommand(ctx, "plan-adopt", null, ` --tip ${origin}`) : null;
+    throw new Stop(planTipStop(route, origin, judged.reason, outcome, adopt));
+  }
   if (judged.route !== route) saveRoute(ctx, judged.route);
   return origin;
 }
@@ -1506,9 +1655,8 @@ async function planTipCheck(ctx, outcome) {
 // advice that takes a merged spec back off the plan branch.
 function mergeFactsOf(ctx, number, outcome) {
   try { return readMergedPr(ctx.repo, number); } catch (error) {
-    const why = String(error.message).replace(/^could not read pull request #\d+: /, "");
-    throw new Stop(`could not read pull request #${number} from GitHub (${why}), so ${outcome}. `
-      + "Nothing about the plan branch was decided from it; run this again.");
+    throw Stop.beneath(`could not read pull request #${number} from GitHub, so ${outcome}. `
+      + "Nothing about the plan branch was decided from it; run this again.", error.message);
   }
 }
 
@@ -1619,7 +1767,10 @@ async function reconcileMerged(ctx, { own = null, landed = false } = {}) {
       ? `${spec.id} is merged and the plan branch's record has not followed it; nothing else was recorded`
       : `whether ${spec.id} is merged into ${route.branch} is not known, and nothing was recorded`);
     try { adoptMerge(state, facts); } catch (error) {
-      if (required) throw new Stop(`${spec.id} was merged, and GitHub's account of pull request #${state.pr.number} does not match: ${error.message}. Nothing was recorded.`);
+      if (required) {
+        throw Stop.beneath(`${spec.id} was merged, and GitHub's account of pull request #${state.pr.number} does not match what the `
+          + "ship recorded for it. Nothing was recorded; look at the pull request, then run this again.", error.message);
+      }
       continue;
     }
     found.push({ id: spec.id, squash: facts.mergeCommitOid ?? null });
@@ -1914,8 +2065,8 @@ const routeEntries = (ctx) => versionFilesOf(routeOf(ctx)) ?? [];
 function signsCommits(ctx) {
   const read = gpgsignIn(ctx.worktree);
   if (!read.error) return read.on;
-  throw new Stop(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
-    + `nothing was committed or pushed: ${read.error}. git commit refuses that setting as well; correct it, then run this again.`);
+  throw Stop.beneath(`git cannot read commit.gpgsign in ${ctx.worktree}, so whether the ship's commits are to be signed is unknown, and `
+    + "nothing was committed or pushed. git commit refuses that setting as well; correct it, then run this again.", read.error);
 }
 
 // `key` as git reads it in `dir` — its last value, null when unset — or git's
@@ -2007,10 +2158,10 @@ function shipCommit(ctx, args, { subject, again, held, settle = () => {}, kept =
   const made = git(ctx.worktree, call, { allowFailure: true });
   if (made.status === 0) return made;
   settle();
-  throw new Stop(`git could not make the commit "${subject}". This repository's git configuration signs commits, so the signer is `
-    + `the likely cause; git said: ${(made.stderr || made.stdout || "").trim() || `exit status ${made.status}`}. Nothing was `
-    + `committed, recorded or pushed, and ${held}.${kept} Get git signing again: unlock the key, or start the agent that holds `
-    + `it, and check the key gpg.format points git at. Then run ${again}, which goes on from here.`);
+  throw Stop.beneath(`git could not make the commit "${subject}". This repository's git configuration signs commits, so the signer is `
+    + `the likely cause. Nothing was committed, recorded or pushed, and ${held}.${kept} Get git signing again: unlock the key, or start `
+    + `the agent that holds it, and check the key gpg.format points git at. Then run ${again}, which goes on from here.`,
+  (made.stderr || made.stdout || "").trim() || `git exited with status ${made.status}`);
 }
 
 /**
@@ -2027,12 +2178,12 @@ function startBaseMerge(ctx, { tip, baseOid }) {
   git(ctx.worktree, ["checkout", "--detach", tip]);
   const merging = git(ctx.worktree, ["merge", "--no-ff", "--no-commit", baseOid], { allowFailure: true });
   if (!mergeInProgress(ctx)) {
-    throw new Stop(`git merge of ${short(baseOid)} into ${short(tip)} did not start: ${(merging.stderr || merging.stdout || "").trim()}`);
+    throw Stop.raw((merging.stderr || merging.stdout || "").trim(), `the merge of ${short(baseOid)} into ${short(tip)} did not start`);
   }
   let reset;
   try { reset = versionStep({ worktree: ctx.worktree, entries: routeEntries(ctx), baseOid }); } catch (error) {
     settleWorktree(ctx);
-    throw new Stop(error.message);
+    throw Stop.raw(error.message, "the version-line step failed");
   }
   const unmerged = git(ctx.worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).stdout.split("\0").filter(Boolean);
   return { unmerged, reset };
@@ -2333,7 +2484,7 @@ function markerSizesOf(ctx, paths) {
 // spec's are, plus Codex, reading the remerge view against the round's brief.
 async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {}) {
   let briefs;
-  try { briefs = resolveLensBriefs(lenses.filter((lens) => lens !== "codex"), { repo: ctx.repo }); } catch (error) { throw new Stop(error.message); }
+  try { briefs = resolveLensBriefs(lenses.filter((lens) => lens !== "codex"), { repo: ctx.repo }); } catch (error) { throw Stop.raw(error.message, "the review lenses could not be read"); }
   const { jobs } = resolveJobs(ctx);
   const lensJob = jobs["review-lens"];
   const codexJob = jobs["review-codex"];
@@ -2372,13 +2523,7 @@ async function pushResolution(ctx, record, attempt, say) {
   const outcome = `the resolved merge was not pushed, and ${record.held}`;
   await planTipCheck(ctx, outcome);
   if (routeOf(ctx).tipOid !== attempt.mergeOid) {
-    try {
-      await pushToPlanBranch(ctx, attempt.mergeOid);
-    } catch (error) {
-      await planTipCheck(ctx, outcome);
-      throw new Stop(`the push of the resolved merge ${attempt.mergeOid.slice(0, 12)} to ${record.branch} failed while `
-        + `${record.branch} on origin is still where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
-    }
+    await pushShipCommit(ctx, attempt.mergeOid, { what: "resolved merge", outcome });
   }
   forgetIncrease(ctx);
   record.status = "passed";
@@ -2406,7 +2551,7 @@ async function resolveBeforeBegin(ctx, id, planTip, options, say) {
   const route = routeOf(ctx);
   const baseOid = git(ctx.repo, ["rev-parse", `origin/${route.base}`]).stdout.trim();
   let dry;
-  try { dry = dryRunMerge(ctx.repo, planTip, baseOid); } catch (error) { throw new Stop(error.message); }
+  try { dry = dryRunMerge(ctx.repo, planTip, baseOid); } catch (error) { throw Stop.raw(error.message, "the trial merge of the plan branch into its base failed"); }
   if (dry.clean) return null;
   const same = resolveRounds(ctx)
     .find((entry) => entry.record.baseOid === baseOid && entry.record.planTip === planTip && entry.record.status === "stopped");
@@ -2521,7 +2666,7 @@ function planDeclaration(ctx) {
   try { text = fs.readFileSync(file, "utf8"); } catch {}
   const declared = declaredIncrease(text);
   if (declared.problem) {
-    throw new Stop(`${file} cannot ship through a plan branch as it is: ${declared.problem}. Nothing was created; correct that line and `
+    throw new Stop(`The plan cannot ship through a plan branch as it is: ${declared.problem}. Nothing was created; correct that line in ${file} and `
       + "run start again.");
   }
   return declared.kind;
@@ -2592,7 +2737,15 @@ async function routeLines(ctx, decided) {
   }
   lines.push(`This plan ships through ${route.branch}: each spec branches from it, opens its pull request against it and merges `
     + `into it, and nothing from the plan reaches ${route.base}.`);
-  if (decided.why === "recorded" && ctx.config.planBranch !== true) {
+  if (decided.why === "version-off") {
+    const { files, bump, decision } = decided.dropped;
+    const gone = [bump && `the increase it made, ${bump.base} → ${bump.value}`, decision && `the version ${decision.value} set by commits it adopted`]
+      .filter(Boolean);
+    lines.push(`versionFiles is empty in .tagteam/config.json now, so this plan no longer carries version lines: ${listOf(files.map(describeEntry))}`
+      + `${gone.length > 0 ? `, and ${listOf(gone)},` : ""} are dropped from its route. The increase is not made again, and the plan lands with no `
+      + `version condition.${bump ? ` The version commit ${short(bump.oid)} the ship already pushed stays on ${route.branch}, because nothing force-pushes.` : ""}`);
+  }
+  if ((decided.why === "recorded" || decided.why === "version-off") && ctx.config.planBranch !== true) {
     lines.push("planBranch is off now, which applies to plans that have not started; this one keeps the route it started with.");
   }
   return lines;
@@ -2601,11 +2754,13 @@ async function routeLines(ctx, decided) {
 async function start(options) {
   const ctx = context(options, { requireTrain: false });
   const say = [];
-  if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`${ctx.plan} has no approved.json; run /tagteam:plan first`);
+  if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`The plan has not been approved, so there is nothing to ship; run /tagteam:plan first (${ctx.plan} has no approved.json).`);
 
   const validation = node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "config.schema.json"), ctx.configPath], { allow: [1, 3] });
   if (validation.status === 3) throw new Stop("the configuration was written by an older plugin: run /tagteam:configure", 3);
-  if (validation.status === 1) throw new Stop(`the configuration is invalid:\n${validation.stderr.trim()}`);
+  if (validation.status === 1) {
+    throw Stop.beneath("The configuration is invalid: correct the problems listed beneath in .tagteam/config.json and run start again.", validation.stderr);
+  }
   for (const line of validation.stderr.split("\n").filter((line) => /^(note|warning):/.test(line))) say.push(line);
 
   // The tests stage trains in repositories with no GitHub remote and no Codex
@@ -2620,10 +2775,11 @@ async function start(options) {
     const version = spawnSync("git", ["--version"], { encoding: "utf8", shell: false });
     const found = parseGitVersion(version.stdout);
     if (!gitIsAtLeast(found, GIT_MINIMUM)) {
-      throw new Stop(`git ${GIT_MINIMUM.join(".")} or newer is required and this machine has `
-        + `${found ? found.join(".") : `no version \`git --version\` could be read from (${JSON.stringify((version.stdout || version.stderr || "").trim())})`}. `
+      throw Stop.beneath(`git ${GIT_MINIMUM.join(".")} or newer is required and this machine has `
+        + `${found ? found.join(".") : "no version that `git --version` could be read from"}. `
         + "When the base branch moves under a reviewed change, the ship checks that the same change still lands on "
-        + "the new base with `git merge-tree --write-tree`, and older git has no such thing. Upgrade git and run this again.");
+        + "the new base with `git merge-tree --write-tree`, and older git has no such thing. Upgrade git and run this again.",
+      found ? "" : version.stdout || version.stderr);
     }
     // The binary the bridge will run, `TAGTEAM_CODEX_BIN` included: checking
     // the `codex` on the PATH instead would pass a machine whose reviews then run
@@ -2632,7 +2788,7 @@ async function start(options) {
     const codexProblem = codexVersionProblem(codexBinary());
     if (codexProblem) throw new Stop(codexProblem);
     const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf8", shell: false });
-    if (auth.status !== 0) throw new Stop(`gh is not authenticated: ${(auth.stderr || auth.stdout).trim()}`);
+    if (auth.status !== 0) throw Stop.raw((auth.stderr || auth.stdout).trim(), "the GitHub command line is not signed in");
   }
 
   const snapshot = lastJson(node("running-plugin.mjs", [ctx.repo], { allow: [1] }).stdout);
@@ -2647,7 +2803,7 @@ async function start(options) {
   const lockResult = lastJson(lock.stdout) ?? {};
   if (!lockResult.acquired) {
     emit({
-      ask: `${lockResult.reason ?? `${ctx.slug} is already being shipped from this checkout`}. Only a person can tell a live run from one that was killed. If they confirm the other run is gone, rerun this command with --reclaim.`,
+      ask: `The ship of ${ctx.slug} did not start, because the lock it needs is already held${lockResult.reason ? `: ${lockResult.reason}` : ""}. Only a person can tell a live run from one that was killed. If they confirm the other run is gone, rerun this command with --reclaim.`,
       lock: lockResult, snapshot, say
     });
     return;
@@ -2665,8 +2821,10 @@ async function start(options) {
   if (exists(worktree)) {
     const listed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout);
     const registered = listed.includes(`worktree ${fs.realpathSync(worktree)}`) || listed.includes(`worktree ${worktree}`);
-    if (!registered) throw new Stop(`${worktree} exists but is not a worktree of this repository; move it aside and rerun`);
-    if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`${worktree} is dirty; a worktree that will not come clean is holding something — look before removing it`);
+    if (!registered) throw new Stop(`The worktree directory for this plan exists but is not a worktree of this repository; move it aside and rerun (${worktree})`);
+    // A begin of the dependency unit that died while making leaves its scratch work here; the next begin makes it again from the base.
+    if (readAudit(ctx.shipDir)?.unit?.making) { git(worktree, ["reset", "--hard"]); git(worktree, ["clean", "-fdq"]); }
+    if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`The worktree for this plan is dirty; a worktree that will not come clean is holding something — look before removing it (${worktree})`);
     say.push(`Reusing the existing worktree at ${worktree}.`);
   } else {
     await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "add", "--detach", worktree, baseOid]));
@@ -2703,16 +2861,74 @@ async function start(options) {
   ctx.train = readJson(ctx.trainPath);
   say.push(...await routeLines(ctx, decided));
 
+  const audit = dependencyAudit(ctx, order, baseOid, say);
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
     return { id: spec.id, state, lenses: spec.reviewers };
   });
-  const first = specs.find((spec) => spec.state !== "merged");
   say.push(`${specs.length} specs in dependency order; ${specs.filter((spec) => spec.state === "merged").length} already merged.`);
-  emit({
-    say, snapshot, specs,
-    next: first ? nextCommand(ctx, "begin", first.id) : afterSpecs(ctx)
-  });
+  emit({ say, snapshot, specs, ...dependencyNext(ctx, audit) });
+}
+
+// The audit, once per ship, at the commit the first spec starts from, and its
+// record read back by every later `start`. A ship with a spec already past
+// pending is never audited: the audit runs before the first spec begins.
+function dependencyAudit(ctx, order, baseOid, say) {
+  let audit = readAudit(ctx.shipDir);
+  if (!audit) {
+    const begun = order.find((spec) => !["pending", null].includes(stateOf(ctx, spec.id)));
+    audit = { version: 1, managers: [], audits: [], findings: [], answers: {}, skipped: null };
+    if (begun) {
+      audit.skipped = `The dependency audit was skipped: ${begun.id} has already begun, and the audit runs once, before the first spec.`;
+    } else {
+      const route = routeOf(ctx);
+      const at = isPlanRoute(route) ? route.tipOid ?? route.createdOid ?? baseOid : baseOid;
+      git(ctx.worktree, ["checkout", "--detach", at]);
+      Object.assign(audit, { baseOid: at, ...auditAll(ctx.worktree, readDeclines(ctx.repo)) });
+    }
+    saveAudit(ctx.shipDir, audit);
+  }
+  say.push(...auditLines(audit));
+  return audit;
+}
+
+// What a train does once the audit is settled: stop for the questions still
+// open, or go on to the dependency unit or the first spec.
+function dependencyNext(ctx, audit) {
+  if (openQuestions(audit).length === 0) return { next: startingCommand(ctx) };
+  const command = nextCommand(ctx, "dependencies", null);
+  return {
+    ask: questionText(audit, command),
+    answers: { approve: `${command} --approve "<keys>"`, decline: `${command} --decline "<keys>"` },
+    next: nextCommand(ctx, "end", null)
+  };
+}
+
+// A person's answer to the dependency stop, never printed by `next`: which of the
+// packages the audit would not upgrade unasked to upgrade, and which to leave as
+// they are. A decline is kept for the repository, so no later ship asks again.
+async function dependencies(options) {
+  const ctx = context(options);
+  const audit = readAudit(ctx.shipDir);
+  const keysOf = (list) => String(list ?? "").split(",").map((key) => key.trim()).filter(Boolean);
+  const approve = keysOf(options.approve);
+  const decline = keysOf(options.decline);
+  const open = audit ? openQuestions(audit) : [];
+  const listing = open.length > 0 ? `the open ones are ${listOf(open.map((finding) => finding.key))}` : "none is open";
+  if (approve.length + decline.length === 0) throw new Stop(`No package was named, so nothing was recorded. Give --approve and --decline the keys of the open questions: ${listing}.`);
+  for (const key of [...approve, ...decline]) {
+    const finding = open.find((entry) => entry.key === key);
+    if (!finding) throw new Stop(`${key} is not an open question of the dependency audit, so nothing was recorded; ${listing}.`);
+    if (approve.includes(key) && decline.includes(key)) throw new Stop(`${key} was both approved and declined, so nothing was recorded. Give each package one answer.`);
+    if (approve.includes(key) && finding.kind === "nofix") throw new Stop(`${key} has no fixed version to upgrade to, so it can only be declined; nothing was recorded.`);
+  }
+  for (const key of approve) audit.answers[key] = "approve";
+  for (const key of decline) audit.answers[key] = "decline";
+  saveAudit(ctx.shipDir, audit);
+  recordDeclines(ctx.repo, decline.map((key) => declineKey(audit.findings.find((finding) => finding.key === key))), ctx.slug);
+  const say = [`Recorded: ${approve.length} approved, ${decline.length} declined${decline.length > 0 ? ", and kept for this repository so no later ship asks again" : ""}.`];
+  if (openQuestions(audit).length === 0) say.push(...auditLines(audit));
+  emit({ say, ...dependencyNext(ctx, audit) });
 }
 
 async function begin(options) {
@@ -2721,6 +2937,14 @@ async function begin(options) {
   const spec = specById(ctx, id);
   const say = [];
   const branch = branchOf(ctx, id);
+  if (!isDependencyId(id) && dependencyQuestions(ctx).length > 0) {
+    throw new Stop(`${id} was not begun, because the dependency audit has questions nobody has answered and no spec branches before the upgrades it decides on have merged. `
+      + `The person has to decide each package it names to upgrade or to leave as it is; run ${nextCommand(ctx, "start", null)} to put the questions to them again.`);
+  }
+  if (!isDependencyId(id) && dependencyPending(ctx)) {
+    throw new Stop(`${id} was not begun, because the dependency upgrades the audit decided on have not merged yet and no spec branches before they do. `
+      + `Run ${nextCommand(ctx, "begin", DEPENDENCY_ID)} for them, or, if their pull request is waiting for your approval on ${ctx.config.base}, approve it with finish --approve.`);
+  }
 
   // On a plan branch, before anything is created or switched: what is already
   // merged is taken in, and then the branch on origin has to be where the ship
@@ -2827,6 +3051,7 @@ async function begin(options) {
   }
 
   // A genuinely new spec.
+  if (isDependencyId(id)) return beginDependencies(ctx, { baseOid, branch, say });
   git(ctx.worktree, ["checkout", "--detach", baseOid]);
   git(ctx.worktree, ["switch", "-c", branch]);
   transition(ctx, id, "implementing");
@@ -2835,6 +3060,108 @@ async function begin(options) {
   const dispatch = implementerDispatch(ctx, spec, job);
   const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
+}
+
+// The configured worktree.setup commands, which bring what the worktree has
+// installed up to the lockfile it holds; null when they succeed, otherwise why not.
+async function bringUpToLockfile(ctx) {
+  try { await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
+}
+
+// The dependency unit's `begin`, in place of an implementer: the ship makes the
+// upgrades itself, from the base each time, and keeps those verify allows (see
+// `decideUpgrades`). Every trial is recorded as it ends and reused by a rerun on
+// the same base; the tree is only left holding upgrades once the report that
+// `snapshot` records as round 1's is written, so a half-made tree is never committed.
+async function beginDependencies(ctx, { baseOid, branch, say }) {
+  const id = DEPENDENCY_ID;
+  const audit = readAudit(ctx.shipDir);
+  // What was left out is worked out again each time, from the recorded trials.
+  const unit = audit.unit = { trials: [], ...audit.unit, leftOut: [], dropped: null };
+  if (unit.baseOid !== baseOid) Object.assign(unit, { baseOid, trials: [] });
+  unit.making = true;
+  saveAudit(ctx.shipDir, audit);
+  const wt = ctx.worktree;
+  const lands = ctx.train.route?.branch ?? ctx.config.base;
+  const byKey = new Map(audit.findings.map((finding) => [finding.key, finding]));
+  const onBase = () => { git(wt, ["checkout", "--force", "--detach", baseOid]); git(wt, ["clean", "-fdq"]); };
+  const made = (keys) => {
+    onBase();
+    const result = { made: [], out: [] };
+    for (const key of keys) {
+      const outcome = makeUpgrade(byKey.get(key), wt);
+      if (outcome.ok) result.made.push(key); else result.out.push({ key, reason: outcome.reason });
+    }
+    return result;
+  };
+  const attempt = async (keys) => {
+    const name = [...keys].sort().join(" ");
+    const known = unit.trials.find((trial) => trial.keys === name);
+    if (known) return known;
+    const tried = made(keys);
+    const brought = tried.out.length > 0 ? tried.out[0].reason : await bringUpToLockfile(ctx);
+    let trial = { keys: name, status: "failed", command: "the worktree setup commands", logPath: null, why: brought };
+    if (brought === null) {
+      const result = await verifyCommands({
+        config: ctx.config, candidate: { changedPaths: [], addedLines: [] }, worktree: wt, select: "all",
+        outDir: path.join(dependencyUnitDir(ctx.shipDir), "trials", `${unit.trials.length + 1}-${stampNow()}`)
+      });
+      const failed = (result.commands ?? []).find((command) => command.status === "failed");
+      trial = { keys: name, status: result.status === "failed" ? "failed" : "passed", command: failed?.command ?? null, logPath: failed?.logPath ?? null };
+    }
+    unit.trials.push(trial);
+    saveAudit(ctx.shipDir, audit);
+    return trial;
+  };
+  // `onBase` puts the lockfile back but keeps what the trials' setups installed
+  // (ignored files survive `git clean`), and a rerun may have found every trial
+  // on record and run no setup at all: the setup runs once more, so that the
+  // specs verify against what the base's own lockfile installs and not the last
+  // trial's upgrades. The drop is recorded only once that has succeeded, so a
+  // begin after the stop drops again and tries the setup again.
+  const dropped = async (reason) => {
+    onBase();
+    const broken = await bringUpToLockfile(ctx);
+    if (broken !== null) {
+      throw Stop.beneath(`The dependency upgrades were dropped (${reason}), but the worktree could not be brought back up to the lockfile of ${lands} afterwards, `
+        + `so no spec was started. Look at the worktree at ${wt}, then run begin again.`, broken);
+    }
+    unit.dropped = reason;
+    delete unit.making;
+    saveAudit(ctx.shipDir, audit);
+    say.push(`No dependency upgrade is made: ${reason}.`, ...disclosureLines(audit).map((line) => line.replace(/^- /, "")));
+    emit({ say, next: startingCommand(ctx) });
+  };
+
+  onBase();
+  const live = chosenUpgrades(audit).filter((finding) => {
+    if (!alreadyUpgraded(finding, wt)) return true;
+    say.push(`${finding.name} is already at or past ${finding.proposed} on ${lands}, so its upgrade from ${finding.installed} is not made.`);
+    return false;
+  });
+  const screened = made(live.map((finding) => finding.key));
+  for (const out of screened.out) unit.leftOut.push({ key: out.key, reason: `it cannot be made: ${out.reason}` });
+  if (screened.made.length === 0) return dropped("none of the upgrades could be made");
+  const decided = await decideUpgrades(screened.made, attempt);
+  if (decided.baseFails) return dropped(`verify fails on ${ctx.config.base} itself (\`${decided.base.command}\`), so nothing can be blamed on the upgrades`);
+  for (const out of decided.out) unit.leftOut.push({ key: out.key, reason: out.reason, command: out.failed.command, logPath: out.failed.logPath });
+  if (decided.keep.length === 0) return dropped("every upgrade was left out");
+  const final = made(decided.keep);
+  const broken = final.out.length > 0 ? final.out[0].reason : await bringUpToLockfile(ctx);
+  if (broken !== null) throw Stop.beneath(`The upgrades verify allowed could not be made again in the worktree, so the dependency unit was not started. Look at the worktree at ${wt}, then run begin again.`, broken);
+
+  const upgrades = decided.keep.map((key) => byKey.get(key));
+  fs.mkdirSync(dependencyUnitDir(ctx.shipDir), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(dependencyDocumentPath(ctx.shipDir), dependencyDocument({ slug: ctx.slug, upgrades, recordPath: path.join(ctx.shipDir, "dependencies", "record.json") }), { mode: 0o600 });
+  writeJson(implementReportPath(ctx, id), { status: "complete", summary: `Upgraded ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")}.`, unfinished: [] });
+  unit.made = decided.keep;
+  delete unit.making;
+  saveAudit(ctx.shipDir, audit);
+  git(wt, ["switch", "-C", branch]);
+  transition(ctx, id, "implementing");
+  say.push(`Upgrading ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")} on ${branch}; nothing is dispatched, and snapshot commits the change as round 1.`,
+    ...disclosureLines(audit).map((line) => line.replace(/^- /, "")));
+  emit({ say, next: nextCommand(ctx, "snapshot", id) });
 }
 
 /**
@@ -2909,8 +3236,19 @@ function finishNext(ctx, id, say) {
 // there is none, whatever follows the specs on this train's route. A fix unit
 // has no place in the spec order; every spec was merged before it was made.
 function followingCommand(ctx, id) {
+  // The dependency unit waits for a person on the base route, and holds every
+  // spec until it has merged; once it has, the first spec follows it.
+  if (isDependencyId(id)) return dependencyPending(ctx) ? nextCommand(ctx, "end", null) : startingCommand(ctx);
   const following = isFixUnitId(id) ? null : nextSpecAfter(ctx, id);
   return following ? nextCommand(ctx, "begin", following) : afterSpecs(ctx, id);
+}
+
+// Where a train goes from its start: the dependency unit while it stands, then
+// the first spec not merged, then whatever follows the specs.
+function startingCommand(ctx) {
+  if (dependencyPending(ctx)) return nextCommand(ctx, "begin", DEPENDENCY_ID);
+  const first = specsInOrder(ctx).find((spec) => stateOf(ctx, spec.id) !== "merged");
+  return first ? nextCommand(ctx, "begin", first.id) : afterSpecs(ctx);
 }
 
 // What a clean whole-plan check is followed by on the plan route: the plan's
@@ -2977,7 +3315,7 @@ function versionLineStop(ctx, id, state, step) {
   if (changed.length === 0) return null;
   const what = changed.map((line) => `${line.file} line ${line.line ?? "?"} (${line.locator}) reads ${line.after ?? "nothing"} at `
     + `${short(state.candidateOid)} and ${line.before ?? "nothing"} on ${route.branch} at ${short(state.baseOid)}, where ${id} began`);
-  const unit = isFixUnitId(id) ? "whole-plan fix" : "spec";
+  const unit = isDependencyId(id) ? "dependency upgrade" : isFixUnitId(id) ? "whole-plan fix" : "spec";
   spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "it changes a version line"], { stdio: "ignore" });
   const back = listOf(changed.map((line) => `${line.file} (${line.locator}) to ${line.before ?? "what it was"}`));
   const snapshotCommand = nextCommand(ctx, "snapshot", id);
@@ -2998,6 +3336,55 @@ function versionLineStop(ctx, id, state, step) {
     answers: step === "finish" ? { end } : { snapshot: snapshotCommand, end },
     next: end
   };
+}
+
+// An unusable report from an agent the ship dispatched is sent back once. The
+// refused files leave the report path first — it carries no round number, so a
+// file left there is refused again by every later round — and are kept beside
+// the spec's rounds for a person to read. Nothing here commits, allocates a
+// round or moves the state: the round is the one the commit already owns.
+async function resendReport(ctx, id, spec, { state, pending, round, oid, refused, judged }) {
+  const implementer = !pending || pending.from === "redesign";
+  const role = implementer ? "implementer" : "fixer";
+  const keptDir = path.join(specDir(ctx, id), "refused-reports");
+  fs.mkdirSync(keptDir, { recursive: true, mode: 0o700 });
+  const stamp = stampNow();
+  const kept = refused.files.map((file) => {
+    const target = path.join(keptDir, `round-${round}-${stamp}-${path.basename(file)}`);
+    fs.renameSync(file, target);
+    return target;
+  });
+  const job = roles(ctx, id).jobs[implementer ? "implement" : pending.from === "repair" ? "repair-fix" : "fix"];
+  const request = (judged ? readSet(setDir(ctx, id, judged), judged)?.agents?.[0]?.request : null)
+    ?? agent(role, job);
+  const dispatch = reportResendDispatch(ctx, spec, { pending, state, oid, request, problems: refused.problems, kept });
+  writeJson(reportResendPath(ctx, id), {
+    round, candidate: oid, role, kept, problems: refused.problems, at: new Date().toISOString()
+  });
+  const set = await sendForSnapshot(ctx, id, { kind: "report-resend", round, dispatch, job });
+  return { dispatch, set, kept, role };
+}
+
+// The stop for a report that cannot be used and will not be sent back: nobody
+// dispatched the commit, or the one resend has been spent.
+function unusableReportStop(ctx, id, { oid, round, refused, resent, role }) {
+  const snapshotCommand = nextCommand(ctx, "snapshot", id);
+  const end = nextCommand(ctx, "end", null);
+  const what = refused.problems.join("\n");
+  const why = `Why the report was refused:\n${what}`;
+  if (!resent) {
+    return Stop.beneath(`The report for ${short(oid)} cannot be used: this commit was not dispatched by this run, so there is no `
+      + "agent to send back and ask for a new one, and nothing was recorded. You decide: correct the file"
+      + `${refused.files.length ? ` (${refused.files.join(", ")})` : ""}, or move it out of the way to have this round recorded as having no report `
+      + `(finish then stops for you to read it), and run snapshot again (${snapshotCommand}) without committing first; or stop the train (run ${end}).`, why);
+  }
+  return Stop.beneath(`The report for round ${round} (${short(oid)}) is still unusable after the ${role} was sent back for it once, and no agent `
+    + "is asked a third time. You decide: put a valid report at "
+    + `${role === "implementer" ? implementReportPath(ctx, id) : fixReportPath(ctx, id)} (an honest unfinished one is enough when nobody knows `
+    + `what the agent did) and run snapshot again (${snapshotCommand}); or stop the train (run ${end}).`,
+  `${why}\nThe first attempt is kept at ${resent.kept.join(", ") || "nowhere: it wrote nothing"}; the second `
+    + `${refused.files.length ? `is left at ${refused.files.join(", ")}` : "wrote nothing"}. The work itself is committed and nothing about it is lost. `
+    + "The round is not recorded as having no report.");
 }
 
 async function snapshot(options) {
@@ -3034,6 +3421,18 @@ async function snapshot(options) {
   // seen, and every fix round after it was refused at the snapshot that would
   // have landed its work.
   const outOfBand = dirty && !pending && state.state !== "implementing";
+
+  // A resend was asked to write the report and nothing else. Its marker is only
+  // about the commit the round was bound to, so it is checked before anything is
+  // committed: whatever else is in the tree is not the work that was reviewed.
+  const sent = readJson(reportResendPath(ctx, id), null);
+  const resent = sent?.candidate === state.candidateOid ? sent : null;
+  if (resent && (dirty || head !== resent.candidate)) {
+    throw new Stop(`The ${resent.role} was sent back to write only the report for round ${resent.round} (${short(resent.candidate)}), `
+      + `but the worktree has changed: ${dirty ? "it has changes that are not committed" : `it is at ${short(head)}`}. Nothing was committed and `
+      + `the report was not read. You decide: put ${ctx.worktree} back at ${short(resent.candidate)}, discarding what changed, and run snapshot `
+      + `again (${nextCommand(ctx, "snapshot", id)}), which then reads the report; or stop the train (run ${nextCommand(ctx, "end", null)}).`);
+  }
 
   // A fixer that changed nothing does not make a round. Its report is carried
   // by this output, then moved aside so no later round adopts it as its own.
@@ -3134,7 +3533,7 @@ async function snapshot(options) {
     const message = options.message
       ?? (pending?.from === "repair" ? `Repair CI for ${id}`
         : pending?.from === "redesign" ? `Redesign ${id}: ${(pending.files ?? []).join(", ")}`
-          : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : `Implement ${id}`);
+          : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : isDependencyId(id) ? "Upgrade vulnerable dependencies" : `Implement ${id}`);
     git(ctx.worktree, ["add", "-A"]);
     node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
     git(ctx.worktree, ["commit", "-m", message]);
@@ -3180,10 +3579,28 @@ async function snapshot(options) {
     redesigned = { requested, files: requested.filter((file) => changed.has(file)), brief: pending.record ?? null, fromRound: pending.round };
     writeRoundFile(path.join(dir, ROUND_REDESIGN), `${JSON.stringify(redesigned, null, 2)}\n`);
   }
-  node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "changed-paths.json")]);
-  const recorded = node("record-round-report.mjs", ["--dir", specDir(ctx, id), "--out", path.join(dir, "report.json")], { allow: [2] });
+  node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "candidate.json")]);
+  // A round an agent was dispatched for is not recorded as having no report: it
+  // is refused, and the agent sent back for it.
+  const dispatched = Boolean(pending) || state.state === "implementing";
+  const recorded = node("record-round-report.mjs", [
+    "--dir", specDir(ctx, id), "--out", path.join(dir, "report.json"), ...(dispatched ? ["--absence", "refuse"] : [])
+  ], { allow: [2] });
   if (recorded.status === 2) {
-    throw new Stop(`the round's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) and rerun this command; do not commit again first.`, 2);
+    const refused = lastJson(recorded.stdout)?.refused;
+    if (!refused) throw Stop.raw(recorded.stderr.trim(), "the round's report could not be recorded");
+    if (isDependencyId(id) && !pending) {
+      throw Stop.beneath("The report the ship wrote for the dependency unit does not validate, which is a bug in the ship and no agent wrote it, so nothing was sent back. "
+        + `Stop the train (run ${nextCommand(ctx, "end", null)}) and report it.`, refused.problems.join("\n"));
+    }
+    if (!dispatched || resent) {
+      throw unusableReportStop(ctx, id, { oid, round, refused, resent, role: resent?.role });
+    }
+    const sending = await resendReport(ctx, id, spec, { state, pending, round, oid, refused, judged });
+    say.push(`The ${sending.role}'s report for round ${round} (${short(oid)}) cannot be used:\n${refused.problems.join("\n")}`,
+      `The commit stands and nothing is redone. One fresh ${sending.role} is sent back, once, to write only the report`
+        + `${sending.kept.length ? `; what was refused is kept at ${sending.kept.join(", ")}` : ""}.`);
+    return done({ say, round, candidate: oid, dispatch: [sending.dispatch], set: sending.set, next: nextCommand(ctx, "snapshot", id) });
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
   let conflict = null;
@@ -3193,6 +3610,7 @@ async function snapshot(options) {
     if (goalConflicts(report).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
   }
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
+  fs.rmSync(reportResendPath(ctx, id), { force: true });
 
   say.push(allocation.granted
     ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by your answer to the question at the cap. No round is left after it in this cycle.`
@@ -3211,16 +3629,26 @@ async function snapshot(options) {
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
-function verify(options) {
+async function verify(options) {
   const ctx = context(options);
   const id = options.spec;
   const state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}; run snapshot first`);
   const dir = round.dir;
+  // Round 1 is the lockfile `begin` installed. A later round is a fixer's, which can back an
+  // upgrade out of the lockfile and leaves what is installed at the upgrade.
+  if (isDependencyId(id) && path.basename(dir) !== "1") {
+    const broken = await bringUpToLockfile(ctx);
+    if (broken !== null) {
+      throw Stop.beneath(`${id} was not verified, because the worktree could not be brought up to the lockfile this round commits. Look at the worktree at ${ctx.worktree}, then run verify again.`, broken);
+    }
+  }
   const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`)
+    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),
+    // A lockfile-only change matches no `when` in most configurations, which would wait for a person.
+    ...(isDependencyId(id) ? ["--select", "all"] : [])
   ], { allow: [1] });
   run("verify");
   const first = readJson(path.join(dir, "verify.json"));
@@ -3403,7 +3831,7 @@ async function fix(options) {
     if (settled) {
       // The readers have judged these once already, against the body as it was.
       // The body is rewritten, published, and judged again on a revisit — or
-      // carried at finish.
+      // disclosed at finish.
       transition(ctx, id, "verifying");
       return emit({ say: [...prSay, pullRequestOnlyLine(ctx, id)], next: nextCommand(ctx, "publish", id) });
     }
@@ -3873,7 +4301,12 @@ async function settle(options) {
     // way on passes an accept by.
     const accepted = readJson(acceptedPath(ctx, id), null);
     const acceptedIds = new Set(Array.isArray(accepted?.ids) ? accepted.ids : []);
-    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && open.every((finding) => acceptedIds.has(finding.id));
+    // On a plan branch a finding about the pull request or the commit history
+    // needs no accept — no fixer reaches it, and it merges disclosed — so a fresh
+    // one does not undo an accept that covers everything a fixer could reach.
+    // Off the plan branch an accept covers every finding open.
+    const needsAccept = onPlanBranch(state, ctx.config) ? open.filter((finding) => !isPullRequestFinding(finding)) : open;
+    const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && needsAccept.every((finding) => acceptedIds.has(finding.id));
     const onPlan = covered ? acceptOnPlanBranch(ctx, id, [...acceptedIds]) : null;
     // Everything still open is about the pull request: no fixer can reach it,
     // so no fix round is spent on it. The spec publishes with the body the
@@ -3936,7 +4369,7 @@ function ciStartLimit(ctx, commit) {
   try {
     workflows = hasPullRequestWorkflow(ctx.repo, commit);
   } catch (error) {
-    throw new Stop(`could not read the workflow files at ${short(commit)} to decide whether to wait for checks to start: ${error.message}`);
+    throw Stop.raw(`could not read the workflow files at ${short(commit)} to decide whether to wait for checks to start: ${error.message}`, "the workflow files could not be read to decide whether to wait for checks to start");
   }
   return workflows.found ? { seconds, files: workflows.files } : off;
 }
@@ -4299,8 +4732,8 @@ async function resolveCommit(options) {
     // did not say it finished is pushed.
     const recorded = node("record-round-report.mjs", ["--dir", home, "--out", path.join(dir, ROUND_REPORT)], { allow: [2] });
     if (recorded.status === 2) {
-      throw new Stop(`the resolver's report could not be recorded:\n${recorded.stderr.trim()}\nMove the refused file aside (keep it) `
-        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.`, 2);
+      throw Stop.beneath(`The resolver's report could not be recorded: move the refused file aside (keep it) `
+        + `and rerun resolve-commit${id ? ` --spec ${id}` : ""}; the merge commit stays as it is.`, recorded.stderr, 2);
     }
     say.push(...recorded.stdout.trim().split("\n"));
     const report = readJson(path.join(dir, ROUND_REPORT));
@@ -4340,7 +4773,7 @@ async function resolveCommit(options) {
       "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
-      throw new Stop(`verify could not run against ${at}: ${(verified.stderr || verified.stdout || "").trim()}`);
+      throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
     }
     // What the verify commands wrote while the worktree sat on the merge commit
     // is theirs, and is discarded, as the landing check discards it.
@@ -4592,7 +5025,7 @@ function unitTables(ctx, records, record, status) {
 const OUTCOME_WORDS = {
   resolved: "resolved",
   "follow-up": "handed to a follow-up",
-  "pull-request": "still real and about the pull request",
+  "pull-request": "about the pull request's text or commit history, and disclosed",
   "needs-person": "needing a person or a re-plan",
   spent: "still real with every follow-up limits.followUps allows made",
   "after-fix": "still real, judged again once the whole-plan fix merges",
@@ -4879,7 +5312,7 @@ async function planCheck(options) {
       "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
-      throw new Stop(`verify could not run against ${tip.slice(0, 12)}: ${(verified.stderr || verified.stdout || "").trim()}`);
+      throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
     }
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip]);
     const outcome = readJson(path.join(dir, "verify.json"));
@@ -5034,10 +5467,10 @@ function viewPlanPr(ctx, selector, { allowMissing = false } = {}) {
   const result = gh(ctx.repo, ["pr", "view", String(selector), "--json", "number,url,state,headRefOid,baseRefName,mergeCommit"], { allowFailure: true });
   if (result.status !== 0) {
     if (allowMissing) return null;
-    throw new Stop(`could not read the plan's pull request #${selector} from GitHub (${(result.stderr || result.stdout || "").trim().split("\n")[0]}), `
-      + "so whether it is open or merged is unknown, and nothing was decided from it; run this again.");
+    throw Stop.beneath(`could not read the plan's pull request #${selector} from GitHub, so whether it is open or merged is unknown, `
+      + "and nothing was decided from it; run this again.", result.stderr || result.stdout);
   }
-  try { return JSON.parse(result.stdout); } catch (error) { throw new Stop(`gh pr view printed no document for the plan's pull request: ${error.message}`); }
+  try { return JSON.parse(result.stdout); } catch (error) { throw Stop.raw(`gh pr view printed no document for the plan's pull request: ${error.message}`, "GitHub's answer about the plan's pull request could not be read"); }
 }
 
 // What a person is told the plan pull request is, and what `end` and the
@@ -5057,12 +5490,12 @@ function landingSummary(ctx, record) {
 // and every whole-plan fix, merged into the plan branch, with its pull request.
 function landsList(ctx) {
   return unitsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) === "merged").map((unit) => ({
-    id: unit.id, fixUnit: unit.fixUnit === true, pr: readState(ctx, unit.id).pr?.number ?? null, prBody: prBodyPath(ctx, unit.id)
+    id: unit.id, fixUnit: unit.fixUnit === true, dependencyUnit: unit.dependencyUnit === true, pr: readState(ctx, unit.id).pr?.number ?? null, prBody: prBodyPath(ctx, unit.id)
   }));
 }
 
 function landsText(lands) {
-  const one = (entry) => `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.id}${entry.pr ? ` (#${entry.pr})` : ""}`;
+  const one = (entry) => `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.dependencyUnit ? "the dependency upgrades" : entry.id}${entry.pr ? ` (#${entry.pr})` : ""}`;
   return lands.length > 0 ? listOf(lands.map(one)) : "nothing";
 }
 
@@ -5086,7 +5519,7 @@ function ledgerFacts(entries, records) {
     const unit = records.flatMap((record) => record.followUps ?? []).filter((item) => item.entries.includes(entry.id)).at(-1)?.id ?? null;
     const endedUp = {
       resolved: `resolved at ${short(latest?.tip)}${unit ? `, after the follow-up ${unit}` : ""}`,
-      "pull-request": "still unresolved: it is about the pull request, so no fix unit can answer it",
+      "pull-request": "still unresolved: it is about the pull request's text or commit history, so no fix unit can answer it, and it is disclosed",
       "needs-person": "still unresolved: only a person or a re-plan settles it",
       spent: "still unresolved: every follow-up limits.followUps allows was made",
       "after-fix": "still unresolved: the latest check was not clean, so it is judged again once the whole-plan fix merges",
@@ -5242,8 +5675,8 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
     // what the ship says under Risk.
     const edited = gh(ctx.repo, ["pr", "edit", String(view.number), "--title", title, "--body-file", sent.file], { allowFailure: true });
     if (edited.status !== 0) {
-      throw new Stop(`the plan's pull request #${view.number} could not be updated (${(edited.stderr || "").trim().split("\n")[0]}); it keeps the body `
-        + "it had, which may lack what the ship says under Risk, so nothing else was done. Run this again to send it.");
+      throw Stop.beneath(`the plan's pull request #${view.number} could not be updated; it keeps the body it had, which may lack what `
+        + "the ship says under Risk, so nothing else was done. Run this again to send it.", edited.stderr);
     }
     say.push(`The plan's pull request #${view.number} now carries the body and title as written.`);
   }
@@ -5402,7 +5835,7 @@ async function planLandingCheck(ctx, record, tip, check, say) {
         baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
         landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all"
       });
-    } catch (error) { throw new Stop(error.message); }
+    } catch (error) { throw Stop.raw(error.message, "the check of the landing failed"); }
     landing = {
       tip, baseOid, mergeBase, status: outcome.status, conflicts: outcome.conflicts ?? null,
       verify: outcome.verify ? { status: outcome.verify.status, commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath }) => ({ command, status, timedOut, logPath })) } : null,
@@ -5461,13 +5894,7 @@ async function mergeInBase(ctx, record, { tip, baseOid, why }, say) {
   // the hand-push stop, said by its own check, and never pushed over or forced.
   await planTipCheck(ctx, outcome);
   if (routeOf(ctx).tipOid !== oid) {
-    try {
-      await pushToPlanBranch(ctx, oid);
-    } catch (error) {
-      await planTipCheck(ctx, outcome);
-      throw new Stop(`the push of the merge ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still where `
-        + `this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
-    }
+    await pushShipCommit(ctx, oid, { what: "merge", outcome });
   }
   forgetIncrease(ctx);
   say.push(`${route.base} at ${short(baseOid)} is merged into ${route.branch}: ${short(oid)}, whose first parent is the plan tip `
@@ -5538,11 +5965,19 @@ function currentIncrease(ctx, tip) {
   return rows.at(-1)[1] === bump.oid ? bump : null;
 }
 
-// "0.10.6 → 0.10.7", what the plan lands as, while its increase is current.
+// "0.10.6 → 0.10.7", what the plan lands as, while its increase is current — or,
+// for a version a person decided, while the tip's lines still read it.
 const landsAsOf = (ctx, tip) => {
+  const decision = decisionOf(routeOf(ctx));
+  if (decision) {
+    const lines = tip ? readLinesAt(ctx.repo, { entries: routeEntries(ctx), oid: tip }) : [];
+    return lines.length > 0 && lines.every((line) => line.value === decision.value) ? decidedLandsAs(decision.base, decision.value) : null;
+  }
   const bump = currentIncrease(ctx, tip);
   return bump ? `${bump.base} → ${bump.value}` : null;
 };
+
+const decidedLandsAs = (base, value) => (base === value ? `${value} (no increase)` : `${base} → ${value}`);
 
 // The version commit: each configured line set to `value` in the worktree at
 // the tip, by its own bytes, through the add → guard-staged chain, and made with
@@ -5550,8 +5985,7 @@ const landsAsOf = (ctx, tip) => {
 // git signs; a signing stop switches back to the tip, discarding the edits —
 // they are remade from the base's value on the next pass — so that the next run
 // does not meet them as uncommitted work.
-function makeVersionCommit(ctx, tip, entries, value) {
-  const route = routeOf(ctx);
+function makeVersionCommit(ctx, tip, entries, value, note = `The one version increase of ${routeOf(ctx).branch}, made by the ship.`) {
   settleWorktree(ctx);
   if (git(ctx.worktree, ["status", "--porcelain", "--untracked-files=no"]).stdout.trim() !== "") {
     throw new Stop(`the worktree at ${ctx.worktree} has uncommitted work, and the plan's version increase has to be made there; `
@@ -5569,7 +6003,7 @@ function makeVersionCommit(ctx, tip, entries, value) {
   node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
   const tree = git(ctx.worktree, ["write-tree"]).stdout.trim();
   const subject = `Version ${value}`;
-  const oid = shipCommit(ctx, ["commit-tree", tree, "-p", tip, "-m", `${subject}\n\nThe one version increase of ${route.branch}, made by the ship.`], {
+  const oid = shipCommit(ctx, ["commit-tree", tree, "-p", tip, "-m", `${subject}\n\n${note}`], {
     subject, again: nextCommand(ctx, "plan-land", null), held: "the plan was not landed",
     settle: () => git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip])
   }).stdout.trim();
@@ -5598,6 +6032,9 @@ function makeVersionCommit(ctx, tip, entries, value) {
  *      in first — unless the tip holds it already, and then the version commit
  *      of case 3 sets the lines whatever they read
  *
+ * A version a person set in commits the ship adopted replaces all four while it
+ * holds (see `decidedTipStep`).
+ *
  * After a merge-in the check runs on the merge, and the next pass is case 3.
  * Returns the payload that moves the plan on, or null when the tip did not move.
  */
@@ -5605,14 +6042,14 @@ async function finalTipStep(ctx, record, tip, options, say) {
   const route = routeOf(ctx);
   const entries = versionFilesOf(route);
   if (!entries) {
-    throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be made against the `
-      + "list it was routed under; run start again, which records them");
+    throw new Stop(`The train record records no version lines for ${route.branch}, so the plan's increase cannot be made against the `
+      + `list it was routed under; run start again, which records them (${ctx.trainPath})`);
   }
   if (entries.length === 0) return null;
   const kind = declaredIncreaseOfRoute(route);
   if (!kind) {
-    throw new Stop(`${ctx.trainPath} records no kind of increase for ${route.branch}, so the plan's increase cannot be made; run start `
-      + "again, which reads it from the plan document");
+    throw new Stop(`The train record records no kind of increase for ${route.branch}, so the plan's increase cannot be made; run start `
+      + `again, which reads it from the plan document (${ctx.trainPath})`);
   }
   const baseOid = await currentBase(ctx);
   const where = `${route.base} at ${short(baseOid)}`;
@@ -5623,6 +6060,8 @@ async function finalTipStep(ctx, record, tip, options, say) {
       + "one version in every one of them, run this again.");
   }
   const lines = readLinesAt(ctx.repo, { entries, oid: tip });
+  const decision = decisionOf(route);
+  if (decision) return decidedTipStep(ctx, tip, { decision, base, lines, entries }, say);
   const bump = currentIncrease(ctx, tip);
   if (bump && bump.base === base.value) {
     const off = lines.filter((line) => line.value !== bump.value);
@@ -5677,13 +6116,7 @@ async function finalTipStep(ctx, record, tip, options, say) {
     // a run that dies after the push finds its own commit on origin and the
     // increase it made, and makes no second one.
     recordIncrease(ctx.trainPath, { oid, base: base.value, value, baseOid, at: new Date().toISOString() });
-    try {
-      await pushToPlanBranch(ctx, oid, { recorded: true });
-    } catch (error) {
-      await planTipCheck(ctx, outcome);
-      throw new Stop(`the push of the version commit ${short(oid)} to ${route.branch} failed while ${route.branch} on origin is still `
-        + `where this ship recorded it: ${error.message}. Nothing else changed; run this again.`);
-    }
+    await pushShipCommit(ctx, oid, { what: "version commit", outcome, recorded: true });
     say.push(`The plan's one version increase, ${kindLine}: ${base.value} → ${value} in ${listOf(entries.map(describeEntry))}, from `
       + `${route.base}'s version at ${short(baseOid)}. It is ${short(oid)} on ${route.branch}, a commit of the version lines and nothing `
       + "else, pushed by the driver itself; its whole-plan check keeps the review of the commit under it, and verify and the landing "
@@ -5693,6 +6126,59 @@ async function finalTipStep(ctx, record, tip, options, say) {
   say.push(`${route.branch}'s version lines are not ${route.base}'s ${base.value}: the plan has not taken ${route.base}'s latest version `
     + `in. ${route.base} is merged in first, and the plan's one increase is made from its value once the plan is checked again.`);
   return mergeForVersion(ctx, record, tip, baseOid, options, say);
+}
+
+// Whether a merge sits on the plan branch's first-parent line above `oid`.
+function mergedAbove(ctx, oid, tip) {
+  const listed = git(ctx.repo, ["rev-list", "--first-parent", "--parents", `${oid}..${tip}`], { allowFailure: true });
+  return listed.status === 0 && listed.stdout.split("\n").some((row) => row.trim().split(" ").length > 2);
+}
+
+/**
+ * `finalTipStep` for a plan whose version a person set in commits the ship
+ * adopted: the plan lands as that value, and the ship makes no increase on top.
+ *
+ *   1  the base's version moved past the one the value was set against: the
+ *      decision is let go, in the same write as the stop, so the next pass is
+ *      the ship's own increase
+ *   2  the tip's lines read the value: nothing to do
+ *   3  they read the base's value, and a merge of the base sits above the adopted
+ *      commits — the merge reset them: the value is written back, in a commit of
+ *      the version lines alone
+ *   4  anything else moved a line off it: the decision is let go and the step stops
+ */
+async function decidedTipStep(ctx, tip, { decision, base, lines, entries }, say) {
+  const route = routeOf(ctx);
+  const ways = `Run this again, and the ship merges ${route.base} in and makes the plan's own increase over its version `
+    + `itself; or push a commit to ${route.branch} that sets the version you want, and have the ship adopt it.`;
+  if (base.value !== decision.base) {
+    clearDecision(ctx.trainPath);
+    throw new Stop(`${route.base}'s version moved from ${decision.base} to ${base.value} since ${decision.value} was set for ${route.branch} in `
+      + `the commits the ship adopted (${short(decision.oid)}), so the value you chose no longer means what it did. Nothing was landed, `
+      + `and the ship no longer counts ${decision.value} as the plan's version. ${ways}`);
+  }
+  const off = lines.filter((line) => line.value !== decision.value);
+  if (off.length === 0) {
+    say.push(`${route.branch} carries ${decision.value}, the version set by the commits the ship adopted (${short(decision.oid)}), `
+      + `against ${route.base}'s ${decision.base}; the ship makes no increase of its own on top.`);
+    return null;
+  }
+  if (!off.every((line) => line.value === base.value) || !mergedAbove(ctx, decision.oid, tip)) {
+    clearDecision(ctx.trainPath);
+    throw new Stop(`${route.branch} at ${short(tip)} was set to ${decision.value} by the commits the ship adopted (${short(decision.oid)}), and `
+      + `${listOf(off.map((line) => `${describeEntry(line.entry)} reads ${line.value ?? "nothing"}, not ${decision.value}`))} now. Something `
+      + "above those commits changed a version line — most likely a pull request merged by hand on GitHub, past the stop on spec pull "
+      + `requests. Nothing was landed, and the ship no longer counts ${decision.value} as the plan's version. ${ways}`);
+  }
+  const outcome = "the version commit was not pushed, and the plan was not landed";
+  const oid = makeVersionCommit(ctx, tip, entries, decision.value,
+    `Writes back ${decision.value}, the version set by commits the ship adopted, which a merge of ${route.base} reset.`);
+  await planTipCheck(ctx, outcome);
+  await pushShipCommit(ctx, oid, { what: "version commit", outcome });
+  say.push(`A merge of ${route.base} had set the version lines back to ${base.value}. The version ${decision.value}, set by the commits the `
+    + `ship adopted, is written back in ${short(oid)} on ${route.branch}: a commit of the version lines and nothing else, pushed by the `
+    + "driver itself. The plan is checked again on it.");
+  return { say, next: nextCommand(ctx, "plan-check", null) };
 }
 
 // The merge the increase needs first, through the same route as every merge of
@@ -5911,10 +6397,10 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
   const route = routeOf(ctx);
   const entries = versionFilesOf(route);
   if (!entries) {
-    throw new Stop(`${ctx.trainPath} records no version lines for ${route.branch}, so the plan's increase cannot be judged against the `
-      + `list it was routed under, and the configuration as it is now is not that list; run start again, which records them`);
+    throw new Stop(`The train record records no version lines for ${route.branch}, so the plan's increase cannot be judged against the `
+      + `list it was routed under, and the configuration as it is now is not that list; run start again, which records them (${ctx.trainPath})`);
   }
-  const version = versionConditionAt(ctx.repo, { entries, tipOid: tip, baseOid, kind: increaseOf(ctx) });
+  const version = versionConditionAt(ctx.repo, { entries, tipOid: tip, baseOid, kind: increaseOf(ctx), decided: decisionOf(route) });
   record.version = { tip, baseOid, holds: version.holds, kind: version.kind, lines: version.lines, at: new Date().toISOString() };
   saveLanding(ctx, record);
   const results = resultsFor(ctx.shipDir, record, { tip, baseOid, version });
@@ -5945,7 +6431,7 @@ async function landingDialog(ctx, record, tip, baseOid, options, say, notes = []
   // either, and say what clears them themselves.
   const spent = results.wholePlan.status === "failed" && results.wholePlan.reason === "spent";
   const moves = `${spent ? "limits.ciRepairs raised, as said above, or " : ""}the plan or the base changing`;
-  const landsAs = version.holds && version.lines.length > 0 ? `${version.lines[0].base} → ${version.lines[0].tip}` : null;
+  const landsAs = version.holds && version.lines.length > 0 ? decidedLandsAs(version.lines[0].base, version.lines[0].tip) : null;
   // What the plan's pull request would do, true for what is offered: a merge
   // commit, or — with commits GitHub shows unverified — only a squash, or nothing.
   const how = unverified.length === 0
@@ -6026,8 +6512,10 @@ async function confirmAndMerge(ctx, record, tip, by, method, say) {
       // version moved past the one the increase was made from, and the next pass
       // merges it in and makes the increase again.
       if (result.status === VERSION_NOT_ONE_INCREASE) {
-        return { stop: `The merge was refused on the version lines, read again against the base as it now stands: ${why}. The next `
-          + `run merges ${route.base} in and makes the plan's increase again over its version.` };
+        return { stop: `The merge was refused on the version lines, read again against the base as it now stands: ${why}. `
+          + (decisionOf(routeOf(ctx))
+            ? "The next run says what moved and what can be done about it."
+            : `The next run merges ${route.base} in and makes the plan's increase again over its version.`) };
       }
       say.push(`${route.base} moved again between the check and the merge, so the merge was refused: ${why}. Checking the plan against the base as it now stands.`);
       return {};
@@ -6201,6 +6689,122 @@ async function planLand(options) {
       + "yet — what is due first is below. No approval clears a blocker.");
   }
   emit(payload);
+}
+
+// --- adopting a person's commits --------------------------------------------------
+
+// Where the train goes once the plan branch's tip is settled: the first unit that
+// has not merged — `begin` resumes one that is under way — or the landing.
+function afterTip(ctx) {
+  const unit = unitsInOrder(ctx).find((entry) => stateOf(ctx, entry.id) !== "merged");
+  return unit ? nextCommand(ctx, "begin", unit.id) : nextCommand(ctx, "plan-land", null);
+}
+
+// The paths a change from `from` to `to` touches, each as its status and path.
+function pathsChanged(ctx, from, to) {
+  const listed = git(ctx.repo, ["diff-tree", "-r", "--no-renames", "--name-status", "-z", from, to], { allowFailure: false }).stdout.split("\0");
+  const paths = [];
+  for (let index = 0; index + 1 < listed.length; index += 2) paths.push(`${listed[index]} ${listed[index + 1]}`);
+  return paths;
+}
+
+// The first `limit` of `items`, and how many more there were.
+const firstOf = (items, limit) => `${items.slice(0, limit).join("; ")}${items.length > limit ? `; and ${items.length - limit} more` : ""}`;
+
+/**
+ * A person's answer to the hand-push stop: the commits they pushed on top of the
+ * plan branch are theirs to take. Run on their word, with `--tip` the commit the
+ * stop showed them, so an answer about one push is never applied to a later one.
+ * Origin's plan branch has to be a fast-forward from the tip the ship recorded —
+ * nothing is rewritten or forced — and then that tip is recorded as the plan's.
+ * Commits that change the configured version lines set the plan's version, as a
+ * decision of the person's: no increase of the ship's is made on top.
+ */
+async function planAdopt(options) {
+  const ctx = context(options);
+  const route = routeOf(ctx);
+  const none = "Nothing was adopted or recorded.";
+  if (!isPlanRoute(route)) {
+    throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no plan branch to adopt commits onto. ${none}`);
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(options.tip ?? "")) {
+    throw new Stop("plan-adopt takes --tip <oid>, the commit the hand-push stop showed as where the plan branch is on origin", 2);
+  }
+  const landing = readLanding(ctx);
+  if (landing.merged) {
+    throw new Stop(`the plan's pull request is already merged into ${route.base}, so there is no plan branch left to adopt commits onto. ${none}`);
+  }
+  // A merge made by hand is not in the record until a landing step sees it, and a commit adopted
+  // after it would never reach the base while the landing deletes the branch that holds it.
+  if (landing.pr?.number && viewPlanPr(ctx, landing.pr.number).state === "MERGED") {
+    throw new Stop(`the plan's pull request #${landing.pr.number} is already merged into ${route.base} on GitHub, so commits pushed to ${route.branch} since `
+      + `would never land there. ${none} Run ${nextCommand(ctx, "plan-land", null)}, which records the merge; the commits are yours to take to ${route.base} some other way.`);
+  }
+  const open = openResolveRound(ctx);
+  if (open) {
+    throw new Stop(`resolve round ${open.n}, merging ${route.base} into ${route.branch} at ${short(open.planTip)}, is still open, and the merge it `
+      + `commits has that tip as its first parent, so it could never be pushed over commits adopted now. ${none} Put ${route.branch} on origin `
+      + `back at ${short(route.tipOid)} and run ${nextCommand(ctx, open.spec ? "begin" : "plan-land", open.spec ?? null)} to finish the round, `
+      + `or stop the train (run ${nextCommand(ctx, "end", null)}).`);
+  }
+  const origin = await originTipOf(ctx, route.branch);
+  const judged = judgeTip(route, origin);
+  if (judged.ok) {
+    emit({
+      say: [`${route.branch} on origin is at ${short(origin)}, a commit this ship recorded putting there: there is nothing to adopt, and nothing changed.`],
+      next: afterTip(ctx)
+    });
+    return;
+  }
+  if (judged.reason !== "unrecorded" || !route.tipOid) throw new Stop(planTipStop(route, origin, judged.reason, "nothing was adopted"));
+  if (origin !== options.tip.toLowerCase()) {
+    throw new Stop(`${route.branch} on origin is at ${short(origin)} now, not at ${short(options.tip)}, the commit the answer was given about. `
+      + `${none} A push made since is not taken on an answer about an earlier one: run the step that stopped again, which shows what is there now.`);
+  }
+  if (!isAtOrBelow(ctx, route.tipOid, origin)) throw new Stop(planTipStop(route, origin, "unrecorded", "nothing was adopted"));
+
+  const commits = git(ctx.repo, ["log", "--reverse", "--format=%h %s", `${route.tipOid}..${origin}`], { allowFailure: false }).stdout.split("\n").filter(Boolean);
+  const entries = versionFilesOf(route) ?? [];
+  let decision = null;
+  if (changedLinesAt(ctx.repo, { entries, fromOid: route.tipOid, toOid: origin }).length > 0) {
+    const lines = readLinesAt(ctx.repo, { entries, oid: origin });
+    const broken = lines.filter((line) => line.problem);
+    if (broken.length > 0) {
+      throw new Stop(`the commits change a version line, and ${broken.map((line) => line.problem).join("; ")}. Push a commit that sets every version `
+        + `line to the version you want, and offer the adoption again. ${none}`);
+    }
+    const values = [...new Set(lines.map((line) => line.value))];
+    if (values.length > 1) {
+      throw new Stop(`the commits change a version line, and the version lines in ${route.branch} at ${short(origin)} do not agree: `
+        + `${lines.map((line) => `${describeEntry(line.entry)} is ${line.value}`).join(", ")}. They all have to read the one version the plan lands as, `
+        + `as ${route.base}'s do. Push a commit that sets them all to the version you want, and offer the adoption again. ${none}`);
+    }
+    const baseOid = git(ctx.repo, ["rev-parse", `origin/${route.base}`]).stdout.trim();
+    const base = baseVersionAt(ctx.repo, { entries, baseOid, where: `${route.base} at ${short(baseOid)}` });
+    if (base.problem) throw new Stop(`the commits change a version line, and ${base.problem}, so the version they set cannot be placed against it. ${none}`);
+    decision = { oid: origin, base: base.value, value: values[0], baseOid, at: new Date().toISOString() };
+  }
+  recordAdoption(ctx.trainPath, origin, decision);
+  ctx.train = readJson(ctx.trainPath);
+
+  const say = [
+    `Adopted ${commits.length} commit${commits.length === 1 ? "" : "s"} onto ${route.branch}: its tip is ${short(origin)} now, where this ship had ${short(route.tipOid)}.`,
+    `Commits taken: ${firstOf(commits, 10)}.`,
+    `Files they change: ${firstOf(pathsChanged(ctx, route.tipOid, origin), 30) || "none"}.`,
+    "These commits had no spec review. The whole-plan check covers them, as it covers any new tip, and so does your Merge of the plan's final pull request."
+  ];
+  if (decision) {
+    say.push(`The commits set the version lines to ${decision.value}. That is your decision, whatever the plan declared: the plan lands as `
+      + `${decidedLandsAs(decision.base, decision.value)}, and the ship makes no increase of its own on top`
+      + `${route.bump ? ` (the increase it had made, ${route.bump.base} → ${route.bump.value}, is dropped)` : ""}`
+      + `${decisionOf(route) ? `; it replaces the version you set before, ${route.decision.value}` : ""}.`
+      + `${decision.value === decision.base ? ` That is exactly ${route.base}'s version, so the plan lands with no version increase. If you did not mean that — you merged ${route.base} in by hand, say — push a commit that sets the version you want and adopt it again.` : " Pushing another commit and adopting it replaces this."}`);
+  } else if (entries.length > 0) {
+    say.push("No configured version line changed, so what the plan lands as is as it was.");
+  }
+  const next = afterTip(ctx);
+  say.push(`Run ${next} to go on.`);
+  emit({ say, adopted: { branch: route.branch, from: route.tipOid, tip: origin, commits: commits.length }, next });
 }
 
 const REASONS = {
@@ -6413,7 +7017,7 @@ async function landingCheck(ctx, id, state, say) {
     config: ctx.config, configPath: ctx.configPath,
     baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
     candidatePath: path.join(round.dir, "candidate.json"),
-    landingDir: path.join(round.dir, "landing")
+    landingDir: path.join(round.dir, "landing"), select: isDependencyId(id) ? "all" : null
   });
   let outcome = check();
   // A verify that fails on the merge is run once more on the same merge, in an
@@ -6462,7 +7066,7 @@ async function landingCheck(ctx, id, state, say) {
 // base, and the next check would otherwise re-verify the spec on top of it and
 // pass. Another spec of this plan merged meanwhile is taken in first, so that it
 // is not mistaken for one.
-function landAndMerge(ctx, id, state, say, planRoute) {
+function landAndMerge(ctx, id, state, say, planRoute, approvedPath) {
   return mergeWithLanding({
     check: async () => {
       if (planRoute) {
@@ -6482,7 +7086,7 @@ function landAndMerge(ctx, id, state, say, planRoute) {
       };
     },
     merge: () => {
-      const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath],
+      const result = node("merge.mjs", [statePath(ctx, id), "--repo", ctx.repo, "--config", ctx.configPath, "--approved", approvedPath],
         { allow: [BASE_NOT_ACCEPTED] });
       if (result.status === 0) return { merged: lastJson(result.stdout) };
       say.push(`${state.base} moved again between the check and the merge, so the merge was refused: `
@@ -6541,7 +7145,10 @@ async function finish(options) {
   }
   freezePlanRoute(ctx, id);
   endChecksWait(ctx, id, state, say);
-  const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath]).stdout);
+  // The workflow files a person approved at plan time are read from the plan's
+  // own `approved.json`, here and in `merge.mjs`, and from nowhere else.
+  const approvedPath = path.join(ctx.plan, "approved.json");
+  const evaluateGates = () => lastJson(node("gates.mjs", ["evaluate", statePath(ctx, id), ctx.configPath, approvedPath]).stdout);
   let verdict = evaluateGates();
   // A goal conflict a fixer reported is a person's to re-plan whatever the gates
   // say: a fixer that changed the code all the same has its commit reviewed like
@@ -6580,7 +7187,7 @@ async function finish(options) {
     }
   }
   if (verdict.ready && !conflict) {
-    const landed = await landAndMerge(ctx, id, state, say, planRoute);
+    const landed = await landAndMerge(ctx, id, state, say, planRoute, approvedPath);
     if (landed.merged) {
       // The squash GitHub just made becomes the plan branch's recorded tip before
       // the spec is recorded as merged, so a run that dies in between finds the
@@ -6592,6 +7199,9 @@ async function finish(options) {
       if (readState(ctx, id).state !== "merged") transition(ctx, id, "merged");
       git(ctx.repo, ["push", "origin", "--delete", state.branch], { allowFailure: true });
       say.push(`Merged ${id} at ${landed.merged.candidateOid.slice(0, 12)} through pull request #${landed.merged.pr}.`);
+      if (verdict.approvedWorkflows.length > 0 && verdict.unapprovedWorkflows.length === 0) {
+        say.push(`${id} changed ${verdict.approvedWorkflows.join(", ")}: the plan's approval named ${verdict.approvedWorkflows.length === 1 ? "that file" : "those files"} for this spec, so it merged into ${state.base} without stopping on ${verdict.approvedWorkflows.length === 1 ? "it" : "them"}.`);
+      }
       if (carry && !carry.over) {
         // Read again, since what the landing check took in can have added to it.
         const total = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried").length;
@@ -6637,7 +7247,11 @@ async function finish(options) {
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
-  const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, notStartedWords(state), { goalConflict: Boolean(conflict) });
+  const words = verdict.unapprovedWorkflows.length === 0 ? notStartedWords(state) : {
+    ...notStartedWords(state),
+    "workflow-change": `${REASONS["workflow-change"]} (${verdict.unapprovedWorkflows.join(", ")} not named for ${id} in the plan's approval)`
+  };
+  const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, words, { goalConflict: Boolean(conflict) });
   emit({
     say,
     ask: [
@@ -6835,19 +7449,23 @@ async function end(options) {
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
-  start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
+  start, dependencies, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
   "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect,
-  "plan-land": planLand
+  "plan-land": planLand, "plan-adopt": planAdopt
 };
 
 // The steps that belong to the plan rather than to one of its specs, and those
 // that take `--spec` only when what they resume has one: a resolve round opened
 // to land the plan has no spec about to begin.
-const PLAN_LEVEL = new Set(["start", "end", "plan-check", "plan-collect", "plan-land"]);
+const PLAN_LEVEL = new Set(["start", "dependencies", "end", "plan-check", "plan-collect", "plan-land", "plan-adopt"]);
 const SPEC_WHEN_ANY = new Set(["resolve-commit", "resolve-collect"]);
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
+  dependencies [--approve <keys>] [--decline <keys>]
+                                      a person's answer to the dependency audit's stop, never printed by next: approve or decline
+                                      each package it would not upgrade unasked, by the keys the stop printed. A decline is kept
+                                      for the repository, so no later ship asks about that package at that version again
   begin   --spec <id> [--run-gone | --run-live]
                                       branch and dispatch the implementer, or resume; the flags answer
                                       the question a resume asks about agents an earlier run sent out
@@ -6887,6 +7505,11 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       checks, check it against the base, and ask what lands; --approve is the person's
                                       Merge, the only thing that merges a plan, and with --squash their Squash, taken
                                       only where the question offers it; --stop records that they stopped it
+  plan-adopt --tip <oid>              a person's answer to the hand-push stop, never printed by next: take the commits they
+                                      pushed on top of the plan branch as its tip, when origin is at <oid> and <oid> sits on top
+                                      of the tip the ship recorded; lists what it took. Commits that set the version lines set
+                                      the plan's version, and the ship makes no increase on top. Refused, recording nothing, for
+                                      a rewritten branch, an open resolve round or a plan that landed
   end                                 release the lock and remove the worktree
 `;
 
@@ -6895,30 +7518,43 @@ function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
     const key = rest[index];
-    if (!key.startsWith("--")) throw new Stop(`unexpected argument: ${key}\n${USAGE}`, 2);
+    if (!key.startsWith("--")) throw Stop.beneath(`unexpected argument: ${key}`, USAGE, 2);
     if (key === "--reclaim") { options.reclaim = true; continue; }
     if (key === "--run-gone") { options.runGone = true; continue; }
     if (key === "--run-live") { options.runLive = true; continue; }
     if (key === "--stop") { options.stop = true; continue; }
     if (key === "--squash") { options.squash = true; continue; }
     const value = rest[++index];
-    if (value === undefined) throw new Stop(`${key} requires a value\n${USAGE}`, 2);
+    if (value === undefined) throw Stop.beneath(`${key} requires a value`, USAGE, 2);
     options[key.slice(2)] = value;
   }
   if (options.runGone && options.runLive) throw new Stop("--run-gone and --run-live are the two answers to one question; give one", 2);
   return { sub, options };
 }
 
+// The line a person reads first when the stop is someone else's error text: the
+// step that stopped, what kind of thing failed, and the way on. A written stop
+// has its own reason and gets none. An exception that is not a `Stop` is a bug
+// or an `fs` error, which is raw by definition.
+function leadOf(error, sub, spec) {
+  const failure = error instanceof Stop ? error.failure : "something unexpected went wrong";
+  if (!failure) return "";
+  return `The ${sub ?? "ship"} step${spec ? ` for ${spec}` : ""} stopped because ${failure}. `
+    + "Put right what the error below says and run the same command again, or stop the train with `ship.mjs end`.\n";
+}
+
 async function main() {
+  let sub;
+  let options = {};
   try {
-    const { sub, options } = parseArgs(process.argv.slice(2));
+    ({ sub, options } = parseArgs(process.argv.slice(2)));
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
-    if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw new Stop(`${sub} needs --spec <id>\n${USAGE}`, 2);
+    if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
     await run(options);
   } catch (error) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = error.exitCode ?? 1;
+    process.stderr.write(`${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`);
+    process.exitCode = error?.exitCode ?? 1;
   }
 }
 

@@ -43,6 +43,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
@@ -67,6 +68,8 @@ import {
   setsDir
 } from "./lib/plan-sets.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
+import { verify as verifyGoal } from "./goal-gate.mjs";
+import { readSpecs } from "./specs.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMAS = path.resolve(here, "..", "schemas");
@@ -351,6 +354,7 @@ const USAGE = `usage:
   plan.mjs collect  --dir <work/review>
   plan.mjs check    --dir <work/review>
   plan.mjs effort-check --plan <plan-dir>
+  plan.mjs approve  --plan <plan-dir> --config <config.json>
 
   \`roles\` prints the model and effort of every planning dispatch, with the plan
   override applied when there is one; the Codex command takes its pair from it.
@@ -373,7 +377,11 @@ const USAGE = `usage:
   ${REFUSED} when none was recorded, changing nothing either way. \`effort-check\`
   names, for step 7, every planning agent that ran at a different effort or model
   than it was sent at and every one that could not be confirmed; it prints
-  nothing to say when all matched, and exits 0 whatever it finds.
+  nothing to say when all matched, and exits 0 whatever it finds. \`approve\` writes
+  the plan's \`approved.json\` whole, at the moment of Approve: the hashes it
+  computes itself, and the workflow files each spec may change, from the specs as
+  they validate now. It writes nothing when the specs do not validate or the goal
+  is not the one the owner approved.
 `;
 
 function flags(argv) {
@@ -472,6 +480,31 @@ const planDirOf = (reviewDir) => path.resolve(reviewDir, "..", "..");
 
 const print = (payload) => process.stdout.write(`${JSON.stringify({ ok: true, ...payload }, null, 2)}\n`);
 
+const sha256 = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+
+/**
+ * Writes `approved.json` for the plan at the moment of Approve. The one writer of
+ * it: the shipping gate reads the workflow files a person approved from here and
+ * from nowhere else, so what is written is what validates now — never what the
+ * orchestrator remembers, and never a hash it supplied.
+ */
+function approvePlan(planDir, config) {
+  const dir = path.resolve(planDir);
+  const goal = verifyGoal(dir);
+  if (!goal.ok) throw new Error(`nothing was approved: ${goal.reason}`);
+  const specs = readSpecs(dir, config, path.join(SCHEMAS, "spec.schema.json"), { enforceSize: true });
+  const approved = {
+    approvedAt: new Date().toISOString(),
+    slug: path.basename(dir),
+    specs: specs.map((spec) => spec.id),
+    goalSha256: goal.goalSha256,
+    planSha256: sha256(path.join(dir, "plan.md")),
+    workflows: Object.fromEntries(specs.map((spec) => [spec.id, spec.workflows]))
+  };
+  fs.writeFileSync(path.join(dir, "approved.json"), `${JSON.stringify(approved, null, 2)}\n`);
+  return { approved: path.join(dir, "approved.json"), ...approved };
+}
+
 async function main() {
   const [action, ...rest] = process.argv.slice(2);
   try {
@@ -507,6 +540,12 @@ async function main() {
           ? effortCheckLines({ side: "plan", root: setsDir(options.plan), repo })
           : [`Could not confirm what any planning agent ran at: ${path.resolve(options.plan)} is not inside a git repository.`]
       });
+      return;
+    }
+    if (action === "approve") {
+      const options = flags(rest);
+      if (!options.plan || !options.config) throw new Error(`approve needs --plan and --config\n${USAGE}`);
+      print(approvePlan(options.plan, readJson(options.config)));
       return;
     }
     if (action === "roles") {

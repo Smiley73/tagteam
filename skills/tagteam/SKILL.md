@@ -96,7 +96,7 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
   ledger.json      on a plan branch, the plan's ledger: entries, one per finding
                    a spec or fix unit still had open when it merged into the
                    plan branch (spec, severity, scope, files, title, detail,
-                   why it was left open — accepted or merged-by-hand — and the
+                   why it was left open — accepted, disclosed or merged-by-hand — and the
                    merged commit), and retries, the failures that passed when
                    run again, kept for the plan's body and never re-judged   ignored
   <spec-id>/
@@ -142,6 +142,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  read, kept outside every round                             ignored
     declined/    the reports of fixers and redesign implementers that changed
                  nothing                                                    ignored
+    refused-reports/  a report that could not be recorded, kept outside every
+                 round while a fresh agent is sent back for it              ignored
+    report-resend.json  that agent was sent: the round, the commit and the
+                 files kept; written once, so a round is resent only once   ignored
     pr-body.md  ci.json  usage.json                                          ignored
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
                  under ## Risk — on a plan branch each finding it would carry
@@ -529,6 +533,16 @@ before the push, so a branch someone moved, rewound or deleted is the stop above
 rather than something a fast-forward goes over; a push refused all the same is
 that stop too, never retried and never forced.
 
+A person who pushed commits of their own on top of the recorded tip can have the
+ship take them with `plan-adopt`, on their word and for the oid the stop showed.
+Nothing is rewritten or forced: it reads only, and records the tip. Its forms:
+
+```bash
+git -C "$R" merge-base --is-ancestor <recordedTip> <originTip>  # read-only: whether commits pushed by hand sit on top of the recorded tip
+git -C "$R" log --reverse --format="%h %s" <recordedTip>..<originTip>  # read-only: the commits an adoption takes, which it lists
+git -C "$R" diff-tree -r --no-renames --name-status -z <recordedTip> <originTip>  # read-only: the files they change
+```
+
 Once every spec of such a train is merged, the whole-plan check reads the plan
 branch's tip as one change: every verify command, whatever its `when`, and one
 reviewer over the diff from where the tip last met the base. Beside the hand-push
@@ -588,7 +602,7 @@ the base resets it. These are its forms, beside those above:
 ```bash
 git -C "$R" cat-file blob origin/<base>:<file>                # read-only, from git objects: the base's version, never the worktree's
 git -C "$R" cat-file blob <commit>:<file>                     # read-only: a version line at a commit — the tip, a spec's candidate and its base
-git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: whether a merge of the base sits above the recorded increase
+git -C "$R" rev-list --first-parent --parents <bump>..<planTip>  # read-only: whether a merge of the base sits above the recorded increase or adopted version
 git -C "$R" merge-base --is-ancestor <baseOid> <planTip>      # read-only: whether the plan already holds the base
 git -C "$W" checkout --detach <planTip>                       # the tip the version commit goes on
 git -C "$W" add -- <files> && node "$P/scripts/guard-staged.mjs" "$W" "$R/.tagteam/config.json" && git -C "$W" write-tree
@@ -745,6 +759,15 @@ started; a finding is still open after the re-check, unless it is carried (below
 produced no usable evidence**; `.github/workflows/**` changed; or the agent that
 wrote the code never confirmed it finished what it was given.
 
+A plan can approve named workflow files for named specs. A spec's front matter
+lists them under `workflows`, `plan.mjs approve` records them per spec in
+`approved.json` when the person approves the plan, and `gates.mjs evaluate` and
+`merge.mjs` both read them from there and from nowhere else. On a plan branch, a
+spec whose change touches only files approved for it — both sides of a rename and
+every deletion counted — does not stop on `workflow-change`; a spec going straight
+to the base, a file not named, a plan approved before this existed and a
+whole-plan fix still do.
+
 The first is read off the spec's state alone: a spec merges with nobody asked
 only when the base it recorded is exactly its plan's plan branch, and anything
 else — no recorded base included — counts as straight to `base` and waits for a
@@ -783,12 +806,14 @@ and still waits; so does every spec that merges straight into `base`.
 
 Carrying is opt-in: with `carry` on in `.tagteam/config.json`, a spec on a plan
 branch whose open review alone blocks it, and whose fix rounds for this cycle
-are spent or whose open findings are all about the pull request, has a carry
-recorded at `finish` — the same record a person's accept is, bound to the
+are spent, has a carry recorded at `finish` — the same record a person's accept is, bound to the
 candidate and marked as a carry. `evaluate` lifts `review-open` on it only on the
 plan branch, with carrying on, outside a whole-plan fix, past no `blocking`
 finding and no `major` code finding on a spec an unmerged spec depends on, and
-with the rounds spent or nothing open a fixer could reach. Every finding carried
+with the rounds spent. A carry covers the open code findings only: a
+non-blocking finding about the pull request's text or the commit history lifts
+`review-open` on a plan branch by itself, with carrying on or off, is entered in
+the ledger as disclosed, and does not count toward the cap. Every finding carried
 goes into the plan's ledger. When carrying a spec would take the plan past
 `limits.carried`, nothing is carried and the ship stops and asks.
 

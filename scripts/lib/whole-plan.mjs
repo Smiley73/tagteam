@@ -163,8 +163,9 @@ export function ledgerOutcomes({ entries, verdicts, status, made, limit }) {
   const outcome = (entry) => {
     const verdict = judged(entry)?.verdict;
     if (!verdict) return "not-re-judged";
+    // Already disclosed in the plan's pull request: only `resolved` moves it.
+    if (entry.scope !== "code" && verdict !== "resolved") return "pull-request";
     if (verdict !== "still-real") return verdict;
-    if (entry.scope !== "code") return "pull-request";
     if (status === "clean") return handed.has(entry.id) ? "follow-up" : "spent";
     return status === "open" ? "after-fix" : "check-stopped";
   };
