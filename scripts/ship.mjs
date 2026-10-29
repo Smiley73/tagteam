@@ -33,6 +33,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import { checksumOf } from "./lib/step-helper.mjs";
 import {
   DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
   dependencyUnitDir, disclosureLines, isDependencyId, makeUpgrade, openQuestions, questionText, readAudit, readDeclines,
@@ -1108,7 +1109,8 @@ function emit(payload) {
   // Every agent this driver sends out is waited on through a set; a dispatch
   // printed without one would be read from disk while it is still working.
   if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
-  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...instructionFor(payload) }, null, 2)}\n`);
+  const printed = { ok: true, ...payload, ...instructionFor(payload) };
+  process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
 }
 
 // --- dispatched sets ---------------------------------------------------------
@@ -7533,8 +7535,9 @@ async function main() {
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
     await run(options);
   } catch (error) {
-    process.stderr.write(`${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`);
+    const stop = `${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`;
     process.exitCode = error?.exitCode ?? 1;
+    process.stderr.write(`${stop}checksum: ${checksumOf({ exit: process.exitCode, stop: stop.split("\n")[0] })}\n`);
   }
 }
 

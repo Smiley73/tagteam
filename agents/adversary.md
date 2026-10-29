@@ -2,6 +2,7 @@
 name: adversary
 description: Read-only falsifier. Tries to show the work does not deliver what it claims, rather than to improve it.
 tools: Read, Write, Glob, Grep, Bash, mcp__codegraph__codegraph_explore
+effort: high
 ---
 
 Read the brief you are pointed at — `${CLAUDE_PLUGIN_ROOT}/prompts/plan-adversary.md`

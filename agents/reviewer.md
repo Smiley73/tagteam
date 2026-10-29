@@ -2,6 +2,7 @@
 name: reviewer
 description: Read-only reviewer of one candidate diff through one named lens.
 tools: Read, Write, Glob, Grep, mcp__codegraph__codegraph_explore
+effort: medium
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/prompts/review.md`, then the lens brief at the path

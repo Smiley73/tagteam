@@ -1,11 +1,18 @@
 // One agent per role, and the effort on the call.
 //
-// Claude Code honours the Agent call's `effort` over an agent file's, and pins
-// an agent whose file names none to the one it was called with. So the plugin
-// ships one agent per role, no role agent's file carries an effort or a model,
-// and both drivers print the effort beside a bare name. A role agent file that
-// named either would be a fallback: a dispatch that forgot its effort would run
-// at a plausible wrong one instead of being refused by the driver.
+// Outside a workflow run, Claude Code honours the Agent call's `effort` over an
+// agent file's, and pins an agent whose file names none to the one it was called
+// with. So the plugin ships one agent per role and both drivers print the effort
+// beside a bare name. A role agent file that named a model or an effort would be
+// a fallback: a dispatch that forgot its effort would run at a plausible wrong
+// one instead of being refused by the driver.
+//
+// Three kinds of file pin something anyway. The two plumbing agents, the Codex
+// runner and the step helper, run one command and nothing else, so each carries
+// its own fixed pair. And while docs/workflow-spike-findings.md does not show
+// that a per-call effort applies inside a workflow run, the three review roles
+// pin an effort (never a model), the example configuration's for the role's
+// first job: a run cannot pass it per call. Outside a run the call still wins.
 //
 // The pieces still break each other unless they agree: the files on disk, the
 // names the drivers print, and the grants in each command. A name printed with
@@ -25,8 +32,17 @@ const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const example = () => JSON.parse(read("examples/config.json"));
 
-const ROLES = ["adversary", "codex-runner", "explorer", "fixer", "implementer", "plan-drafter", "plan-reviewer", "reviewer", "spec-writer"];
-const RUNNER = "codex-runner";
+const ROLES = ["adversary", "codex-runner", "explorer", "fixer", "implementer", "plan-drafter", "plan-reviewer", "reviewer", "spec-writer", "step-helper"];
+const PLUMBING = { "codex-runner": ["haiku", "low", "Bash"], "step-helper": ["sonnet", "low", "Bash"] };
+// Each review role's first job, whose configured effort its file pins.
+const FIRST_JOB = { reviewer: "reviewer", adversary: "adversary", "plan-reviewer": "planner" };
+
+// Answer (b) of the findings doc. Anything but a recorded "applies" is the pin outcome.
+function effortApplies() {
+  const answer = /\*\*\(b\)[\s\S]*?(?=\*\*\(c\))/.exec(read("docs/workflow-spike-findings.md"));
+  assert.ok(answer, "the findings doc has no answer (b) to read");
+  return /per-call effort applies|\*\*applies\*\*/i.test(answer[0]);
+}
 
 /** `---\n…\n---` off an agent file, as key/value pairs. */
 function frontmatter(file, text) {
@@ -40,7 +56,7 @@ function frontmatter(file, text) {
 }
 
 // Read from the directory, never from a list: a loop over a list passes with a
-// stray file left beside the nine.
+// stray file left beside the roles.
 const agentFiles = () => fs.readdirSync(path.join(root, "agents")).sort();
 
 /** The `Agent(tagteam:…)` grants on a command's allowed-tools line, in order, repeats kept. */
@@ -90,22 +106,27 @@ test("agents/ holds one file per role and nothing else", () => {
   assert.deepEqual(agentFiles(), ROLES.map((role) => `${role}.md`));
 });
 
-test("each agent declares its name, a description and its tools, and only the runner pins a model or an effort", () => {
+test("each agent declares its name, a description and its tools, and pins only what its kind of role allows", () => {
+  const pinning = !effortApplies();
   for (const file of agentFiles()) {
     const fields = frontmatter(`agents/${file}`, read(`agents/${file}`));
     const stem = path.basename(file, ".md");
     assert.equal(fields.name, stem, `agents/${file}: name must match its filename`);
     assert.ok(fields.description, `agents/${file} has no description`);
     assert.ok(fields.tools, `agents/${file} has no tools`);
-    if (stem === RUNNER) continue;
+    if (PLUMBING[stem]) {
+      assert.deepEqual([fields.model, fields.effort, fields.tools], PLUMBING[stem],
+        `${stem} keeps its own fixed pair and runs one command and nothing else`);
+      continue;
+    }
     // The key, not its value: `model: inherit` is a model the file decides too.
-    for (const key of ["effort", "model"]) {
-      assert.ok(!Object.hasOwn(fields, key), `agents/${file} carries '${key}'; a role agent takes it from the call`);
+    assert.ok(!Object.hasOwn(fields, "model"), `agents/${file} carries 'model'; a role agent takes it from the call`);
+    if (pinning && FIRST_JOB[stem]) {
+      assert.equal(fields.effort, example().effort[FIRST_JOB[stem]], `agents/${file} pins the configured effort of its first job`);
+    } else {
+      assert.ok(!Object.hasOwn(fields, "effort"), `agents/${file} carries 'effort'; a role agent takes it from the call`);
     }
   }
-  const runner = frontmatter(`agents/${RUNNER}.md`, read(`agents/${RUNNER}.md`));
-  assert.deepEqual([runner.model, runner.effort, runner.tools], ["haiku", "low", "Bash"],
-    "the runner keeps its own fixed pair and runs one command and nothing else");
 });
 
 test("both drivers compose a bare agent name in one helper", () => {
