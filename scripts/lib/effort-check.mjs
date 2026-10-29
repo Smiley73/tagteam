@@ -18,10 +18,13 @@
 //
 // **What Claude Code writes is observed, not documented** (2.1.302): each
 // subagent of a session leaves `<projectDir>/<session>/subagents/agent-<id>.jsonl`
-// with an `agent-<id>.meta.json` beside it whose `description` is the label. The
-// meta file's own `model` and `effort` are the request the call carried, so they
-// are not read. What the agent ran on is on its assistant records: `message.model`,
-// a full id, and `effort` and `perTurnEffort`. Records whose model is
+// with an `agent-<id>.meta.json` beside it whose `description` is the label. An
+// agent a workflow ran leaves the same pair one level down, in
+// `subagents/workflows/<run>/`, under the main session's id
+// (`docs/workflow-spike-findings.md`, question d). The meta file's own `model`
+// and `effort` are the request the call carried, so they are not read. What the
+// agent ran on is on its assistant records: `message.model`, a full id, and
+// `effort` and `perTurnEffort`. Records whose model is
 // `<synthetic>` are errors and interruptions and say nothing about the run. A
 // field that is not there is "not confirmed", never a guess.
 //
@@ -36,7 +39,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readSet } from "../dispatch-set.mjs";
-import { projectDirectoryFor } from "../usage.mjs";
+import { agentDirectories, projectDirectoryFor } from "../usage.mjs";
 
 const SYNTHETIC = "<synthetic>";
 const SHIP_SET = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -107,16 +110,17 @@ function sessionIndex(projectDir) {
   const runs = new Map();
   const candidatesOf = (session) => {
     if (!sessions.has(session)) {
-      const dir = path.join(projectDir, session, "subagents");
       const found = [];
-      let names = [];
-      try { names = fs.readdirSync(dir); } catch {}
-      for (const name of names) {
-        const id = /^agent-(.+)\.meta\.json$/.exec(name)?.[1];
-        if (!id) continue;
-        let meta;
-        try { meta = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")); } catch { continue; }
-        if (nonEmpty(meta?.description)) found.push({ label: meta.description, file: path.join(dir, `agent-${id}.jsonl`) });
+      for (const dir of agentDirectories(path.join(projectDir, session, "subagents"))) {
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch {}
+        for (const name of names) {
+          const id = /^agent-(.+)\.meta\.json$/.exec(name)?.[1];
+          if (!id) continue;
+          let meta;
+          try { meta = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")); } catch { continue; }
+          if (nonEmpty(meta?.description)) found.push({ label: meta.description, file: path.join(dir, `agent-${id}.jsonl`) });
+        }
       }
       sessions.set(session, found);
     }

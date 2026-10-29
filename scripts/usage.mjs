@@ -7,7 +7,10 @@
 // writes every message's usage into the session transcript under
 // `~/.claude/projects/<project>/<session>.jsonl`, and every subagent's into
 // `<session>/subagents/agent-<id>.jsonl`. This reads those for a window of time
-// and sums them.
+// and sums them. An agent a workflow ran sits one level further down, in
+// `<session>/subagents/workflows/<run>/`, under the main session's id, and its
+// first message carries the harness's own frame ahead of an indented prompt (see
+// `docs/workflow-spike-findings.md`, question d; observed, not documented).
 //
 // Two things about the transcripts decide the shape of this file. A transcript
 // logs one assistant response as several lines, one per content block, and the
@@ -110,15 +113,19 @@ const equivOf = (usage) =>
 
 const parts = (message) => (Array.isArray(message?.content) ? message.content : []);
 
-// The kind of agent a subagent transcript records, from what it was told first.
-// The dispatch prompts `ship.mjs` and `plan.mjs` print each open with a line
-// naming the job, so this is a lookup rather than a guess; the fallbacks are for
-// transcripts written before that.
-export function classifyAgent(prompt) {
-  const first = String(prompt ?? "").split("\n", 1)[0].toLowerCase();
-  const named = /^(?:job|tagteam job): ([a-z-]+)/.exec(first)?.[1];
-  if (named) return named;
+// The kind of agent a subagent transcript records. The dispatch prompts
+// `ship.mjs` and `plan.mjs` print each open with a line naming the job, so this
+// is a lookup rather than a guess. Inside a workflow that line follows the
+// harness's frame and may be indented, so it is the first line anywhere in the
+// prompt that opens with the pattern. Failing that, the `tagteam:<name>` agent
+// type from the agent's meta file names it; the fallbacks are for transcripts
+// written before either.
+export function classifyAgent(prompt, agentType = null) {
   const p = String(prompt ?? "").toLowerCase();
+  const named = /^[ \t]*(?:job|tagteam job): ([a-z-]+)/m.exec(p)?.[1];
+  if (named) return named;
+  const typed = /^tagteam:([a-z-]+)$/.exec(String(agentType ?? ""))?.[1];
+  if (typed) return typed;
   if (p.includes("command file:") && p.includes("status file:")) return "codex-runner";
   if (p.includes("recheck")) return "recheck";
   if (p.includes("adversary")) return "adversary";
@@ -156,7 +163,7 @@ export function readTranscript(file, { since, until }) {
     if (!message) continue;
     if (message.role === "user" && prompt === null) {
       const content = message.content;
-      prompt = typeof content === "string" ? content : parts(message).map((part) => part.text ?? "").join(" ");
+      prompt = typeof content === "string" ? content : parts(message).map((part) => part.text ?? "").join("\n");
     }
     if (message.role !== "assistant") continue;
     const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
@@ -181,6 +188,37 @@ export function readTranscript(file, { since, until }) {
   return { usage, prompt: prompt ?? "", first, last };
 }
 
+// The directories holding one session's agent transcripts: `subagents` itself,
+// and each run directory directly under `subagents/workflows`. Every directory
+// there counts rather than those named `wf_*`, so a rename does not lose agents
+// silently; a missing or unreadable `workflows` is no workflow agents.
+export function agentDirectories(subagents) {
+  let runs = [];
+  try {
+    runs = fs.readdirSync(path.join(subagents, "workflows"), { withFileTypes: true })
+      .filter((item) => item.isDirectory())
+      .map((item) => path.join(subagents, "workflows", item.name));
+  } catch {}
+  return [subagents, ...runs];
+}
+
+const agentFilesIn = (dir) => {
+  try {
+    return fs.readdirSync(dir).filter((entry) => entry.startsWith("agent-") && entry.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+};
+
+// The agent type a transcript's meta file names, or null.
+function agentTypeOf(transcript) {
+  try {
+    return JSON.parse(fs.readFileSync(transcript.replace(/\.jsonl$/, ".meta.json"), "utf8"))?.agentType ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // One pass over a list of transcript filenames in `projectDir`: what they and
 // the subagents beside them say was spent in the window. Kept apart from
 // `report` because a scoped pass over a transcript that cannot be read is run
@@ -197,22 +235,31 @@ function tally(projectDir, names, { from, to }) {
   };
   for (const name of names) {
     const file = path.join(projectDir, name);
-    // A session that ended before the window opened has nothing in it to read.
-    if (fs.statSync(file).mtimeMs < from) continue;
-    const main = readTranscript(file, { since: from, until: to });
-    if (!main) {
-      totals.unreadable += 1;
-      continue;
+    // The orchestrator's own turns are read only if the transcript was written
+    // since the window opened. Its agents are looked for either way: a workflow
+    // launched before the window keeps running in it, while the parent sits idle.
+    let main = null;
+    if (fs.statSync(file).mtimeMs >= from) {
+      main = readTranscript(file, { since: from, until: to });
+      if (!main) {
+        totals.unreadable += 1;
+        continue;
+      }
     }
-    if (main.usage.turns === 0) continue;
-    totals.sessions += 1;
-    for (const key of Object.keys(zero())) totals.orchestrator[key] += main.usage[key];
+    const mainTurns = main?.usage.turns ?? 0;
+    if (mainTurns > 0) for (const key of Object.keys(zero())) totals.orchestrator[key] += main.usage[key];
     const subagents = path.join(projectDir, name.replace(/\.jsonl$/, ""), "subagents");
-    if (!fs.existsSync(subagents)) continue;
-    for (const agentFile of fs.readdirSync(subagents).filter((entry) => entry.startsWith("agent-") && entry.endsWith(".jsonl"))) {
-      const agent = readTranscript(path.join(subagents, agentFile), { since: from, until: to });
+    const agentsBefore = totals.agents.count;
+    for (const dir of agentDirectories(subagents)) for (const agentFile of agentFilesIn(dir)) {
+      const file = path.join(dir, agentFile);
+      try {
+        if (fs.statSync(file).mtimeMs < from) continue;
+      } catch {
+        continue;
+      }
+      const agent = readTranscript(file, { since: from, until: to });
       if (!agent || agent.usage.turns === 0) continue;
-      const type = classifyAgent(agent.prompt);
+      const type = classifyAgent(agent.prompt, agentTypeOf(file));
       const bucket = totals.agents.byType[type] ??= { count: 0, ...zero(), equiv: 0 };
       bucket.count += 1;
       totals.agents.count += 1;
@@ -222,6 +269,7 @@ function tally(projectDir, names, { from, to }) {
       }
       bucket.equiv = Math.round(equivOf(bucket));
     }
+    if (mainTurns > 0 || totals.agents.count > agentsBefore) totals.sessions += 1;
   }
   return totals;
 }
