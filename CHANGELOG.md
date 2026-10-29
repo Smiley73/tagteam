@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.4
+
+- Add `/tagteam:workflow-spike`, a throwaway command that tries a Claude Code workflow from this plugin on a toy project, so its behaviour in a session can be watched before anything is built on it. Planning, shipping, configuring and the cost report are unchanged, and the command will be removed.
+
 ## 0.13.2
 
 - Tell implementers and fixers which verify commands this repository runs, and have them run the ones that apply to their change before they report, so a failure is found by the agent instead of costing a fix round. A command they cannot run, or cannot tell whether they broke, is said in their summary and does not stop the spec.
