@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  arriveAll, findings, git, outputOf, resultOf, ship, stagePlan, trainOf, write
+  arriveAll, findings, git, major, outputOf, resultOf, ship, stagePlan, trainOf, write
 } from "./ship-stage.mjs";
 
 const UNIT = "plan-dependencies";
@@ -59,7 +60,7 @@ const report = (entries) => JSON.stringify({
 
 // The staged plan with a lockfile on main, the stub, and a verify command whose
 // `when` does not match the lockfile.
-function stageDependencies({ planBranch = true, audit = null, moves = {}, failOn = "", locks = LOCK } = {}) {
+function stageDependencies({ planBranch = true, audit = null, moves = {}, failOn = "", locks = LOCK, carry = false, fixRounds = null } = {}) {
   const staged = stagePlan({ planBranch });
   const { repo, dir, configPath } = staged;
   const bin = path.join(dir, "dep-bin");
@@ -75,6 +76,8 @@ function stageDependencies({ planBranch = true, audit = null, moves = {}, failOn
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.verify = [{ command: "node check.mjs", when: { globs: ["src/**"], keywords: [] }, timeoutSec: 60 }];
   config.worktree.setup = ["node setup.mjs"];
+  config.carry = carry;
+  if (fixRounds !== null) config.limits = { ...config.limits, fixRounds };
   fs.writeFileSync(path.join(repo, "setup.mjs"), SETUP);
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   git(repo, "add", "-A");
@@ -96,7 +99,7 @@ const lockAt = (repo, ref) => JSON.parse(git(repo, "show", `${ref}:package-lock.
 const lockIn = (file) => JSON.parse(fs.readFileSync(file, "utf8")).packages;
 
 // The unit from `snapshot` through `finish`, as `next` walks it: the same cycle as a spec.
-function walkUnit(staged, { approve = false } = {}) {
+function walkUnit(staged, { approve = false, beforeFinish = () => {} } = {}) {
   const { plan, env, body, shipDir } = staged;
   assert.equal(ship("snapshot", plan, ["--spec", UNIT], env).status, 0);
   const verified = ship("verify", plan, ["--spec", UNIT], env);
@@ -115,6 +118,7 @@ function walkUnit(staged, { approve = false } = {}) {
   assert.equal(ship("settle", plan, ["--spec", UNIT], env).json.review, "clean");
   const published = ship("publish", plan, ["--spec", UNIT, "--title", "Upgrade dependencies", "--body", body], env);
   assert.equal(published.status, 0, published.stderr);
+  beforeFinish();
   return ship("finish", plan, ["--spec", UNIT, ...(approve ? ["--approve", "owner@example.com"] : [])], env);
 }
 
@@ -334,4 +338,120 @@ test("a report the driver wrote that does not validate is a stop, and no agent i
   assert.notEqual(stopped.status, 0);
   assert.match(stopped.stderr, /^The report the ship wrote for the dependency unit does not validate/);
   assert.equal(stopped.json, null, "nothing was dispatched");
+});
+
+test("a fix round on the dependency unit brings the worktree up to its lockfile, and a major finding left open is not carried", () => {
+  const staged = stageDependencies({
+    audit: report([["minimist", "GHSA-mini", "<1.2.8", "1.2.8"], ["lodash", "GHSA-lo", "<4.17.21", "4.17.21"]]), carry: true, fixRounds: 1
+  });
+  const { plan, env, shipDir, body } = staged;
+  const setups = () => Number(fs.readFileSync(env.SETUP_COUNT, "utf8"));
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(staged.begin(UNIT).status, 0);
+  const run = (sub, extra = []) => {
+    const result = ship(sub, plan, ["--spec", UNIT, ...extra], env);
+    assert.equal(result.status, 0, `${sub}: ${result.stderr}`);
+    return result;
+  };
+  run("snapshot");
+  const afterBegin = setups();
+  run("verify");
+  assert.equal(setups(), afterBegin, "round 1 is the lockfile begin installed: no setup again");
+  const panel = run("panel");
+  const oid = unitState(shipDir).candidateOid;
+  for (const dispatch of panel.json.dispatch) {
+    if (dispatch.agent === "tagteam:codex-runner") write(resultOf(dispatch), findings("codex", oid));
+    else {
+      const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+      write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? [major("package-lock.json")] : []));
+    }
+  }
+  arriveAll(panel);
+  assert.equal(run("collect").json.review, "open");
+  const fix = run("fix");
+
+  // The fixer backs minimist out of the lockfile; what is installed still has it upgraded.
+  const worktree = trainOf(shipDir).worktree;
+  const lockFile = path.join(worktree, "package-lock.json");
+  const lock = JSON.parse(fs.readFileSync(lockFile, "utf8"));
+  lock.packages["node_modules/minimist"].version = "1.2.0";
+  fs.writeFileSync(lockFile, JSON.stringify(lock, null, 2));
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [{ id: "1.correctness.1", outcome: "fixed", note: "backed minimist out" }], notes: "", status: "complete", summary: "backed minimist out", unfinished: [] });
+  arriveAll(fix);
+  run("snapshot");
+  assert.equal(lockIn(env.INSTALLED)["node_modules/minimist"].version, "1.2.8", "nothing has installed the fixer's lockfile yet");
+  run("verify");
+  assert.deepEqual([lockIn(env.INSTALLED)["node_modules/minimist"].version, lockIn(env.INSTALLED)["node_modules/lodash"].version], ["1.2.0", "4.17.21"], "verify ran against what the committed lockfile names");
+
+  const recheck = run("recheck");
+  const next = unitState(shipDir).candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", next));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: next, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still wrong" }], rulings: [] });
+  arriveAll(recheck);
+  assert.equal(run("settle").json.review, "open");
+  assert.equal(run("fix").json.budget, "spent");
+  run("publish", ["--title", "Upgrade dependencies", "--body", body]);
+  const finished = run("finish");
+  assert.deepEqual(finished.json.blockers, ["review-open"]);
+  assert.equal(unitState(shipDir).state, "awaiting-approval");
+  assert.equal(unitState(shipDir).accept, null, "nothing was carried");
+});
+
+test("a ship with a spec already begun is not audited, and says so", () => {
+  const staged = stageDependencies({ planBranch: false });
+  const { plan, env, shipDir } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(staged.begin("01-a").status, 0);
+  // The audit now would stop for a major; the record from before the spec began is gone.
+  fs.writeFileSync(staged.auditFile, report([["other", "GHSA-other", "<3.0.0", "3.0.0"]]));
+  fs.rmSync(path.join(shipDir, "dependencies"), { recursive: true });
+  const again = ship("start", plan, ["--reclaim"], env);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(say(again), /The dependency audit was skipped: 01-a has already begun/);
+  assert.equal(again.json.ask, undefined);
+  assert.match(again.json.next, /--spec 01-a/);
+});
+
+test("the base moving after the unit's review is verified again with every command, whatever its when", () => {
+  const staged = stageDependencies({ planBranch: false, audit: report([["minimist", "GHSA-mini", "<1.2.8", "1.2.8"]]) });
+  const { plan, env, repo, marks } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(staged.begin(UNIT).status, 0);
+  assert.equal(walkUnit(staged).status, 0);
+  const verified = fs.readFileSync(marks, "utf8").trim().split("\n").length;
+  // Someone else lands a commit on main while the unit waits for the person's Merge.
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-mover-"));
+  git(repo, "clone", "-q", git(repo, "remote", "get-url", "origin"), clone);
+  write(path.join(clone, "elsewhere.txt"), "moved\n");
+  git(clone, "add", "-A");
+  git(clone, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "moved");
+  git(clone, "push", "-q", "origin", "HEAD:main");
+  const approved = ship("finish", plan, ["--spec", UNIT, "--approve", "owner@example.com"], env);
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.equal(fs.readFileSync(marks, "utf8").trim().split("\n").length, verified + 1, "the landing check ran the verify command, which no when selects for a lockfile");
+  assert.equal(unitState(staged.shipDir).state, "merged");
+  assert.equal(unitState(staged.shipDir).landing.status, "passed");
+});
+
+test("a begin that died while making leaves scratch work that start clears, and the begin it points at makes the upgrades again", () => {
+  const staged = stageDependencies({ audit: report([["minimist", "GHSA-mini", "<1.2.8", "1.2.8"]]) });
+  const { plan, env, shipDir } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  assert.equal(staged.begin(UNIT).status, 0);
+  const worktree = trainOf(shipDir).worktree;
+  const recordFile = path.join(shipDir, "dependencies", "record.json");
+  assert.equal(JSON.parse(fs.readFileSync(recordFile, "utf8")).unit.making, undefined, "a finished begin is not marked as making");
+
+  // Put it back to a begin that died after the making and before the unit began.
+  fs.rmSync(path.join(shipDir, "dependencies", "unit", "state.json"));
+  const record = JSON.parse(fs.readFileSync(recordFile, "utf8"));
+  record.unit.making = true;
+  fs.writeFileSync(recordFile, JSON.stringify(record));
+  assert.match(git(worktree, "status", "--porcelain"), /package-lock\.json/);
+  const resumed = ship("start", plan, ["--reclaim"], env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(git(worktree, "status", "--porcelain"), "");
+  assert.match(resumed.json.next, new RegExp(`begin .*--spec ${UNIT}`));
+  assert.equal(staged.begin(UNIT).status, 0);
+  assert.match(git(worktree, "status", "--porcelain"), /package-lock\.json/);
 });

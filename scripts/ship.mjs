@@ -269,7 +269,7 @@ function madeUnitIds(ctx) {
 // into the branch the specs build on, or has nothing left to upgrade.
 function dependencyEntered(ctx) {
   const record = readAudit(ctx.shipDir);
-  return Boolean(record) && !record.skipped && !record.unit?.dropped && openQuestions(record).length === 0 && chosenUpgrades(record).length > 0;
+  return Boolean(record) && !record.unit?.dropped && openQuestions(record).length === 0 && chosenUpgrades(record).length > 0;
 }
 const dependencyPending = (ctx) => dependencyEntered(ctx) && stateOf(ctx, DEPENDENCY_ID) !== "merged";
 // Questions the audit put to the person and nobody has answered: until they are, which upgrades there are is not settled.
@@ -755,7 +755,7 @@ function carryStanding(ctx, id, state) {
     if (code.some((finding) => carryRefusal(finding, facts))) return null;
     record = {
       candidateOid: state.candidateOid, ids: code.map((finding) => finding.id), mode: "carry",
-      dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
+      dependedOn: awaitedByUnmerged(facts.spec, facts.specs, facts.merged)
     };
     if (!reviewOpenLifts({ ...state, accept: record }, ctx.config)) return null;
   }
@@ -2822,6 +2822,8 @@ async function start(options) {
     const listed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout);
     const registered = listed.includes(`worktree ${fs.realpathSync(worktree)}`) || listed.includes(`worktree ${worktree}`);
     if (!registered) throw new Stop(`The worktree directory for this plan exists but is not a worktree of this repository; move it aside and rerun (${worktree})`);
+    // A begin of the dependency unit that died while making leaves its scratch work here; the next begin makes it again from the base.
+    if (readAudit(ctx.shipDir)?.unit?.making) { git(worktree, ["reset", "--hard"]); git(worktree, ["clean", "-fdq"]); }
     if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`The worktree for this plan is dirty; a worktree that will not come clean is holding something — look before removing it (${worktree})`);
     say.push(`Reusing the existing worktree at ${worktree}.`);
   } else {
@@ -3060,6 +3062,12 @@ async function begin(options) {
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
 }
 
+// The configured worktree.setup commands, which bring what the worktree has
+// installed up to the lockfile it holds; null when they succeed, otherwise why not.
+async function bringUpToLockfile(ctx) {
+  try { await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
+}
+
 // The dependency unit's `begin`, in place of an implementer: the ship makes the
 // upgrades itself, from the base each time, and keeps those verify allows (see
 // `decideUpgrades`). Every trial is recorded as it ends and reused by a rerun on
@@ -3071,6 +3079,8 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   // What was left out is worked out again each time, from the recorded trials.
   const unit = audit.unit = { trials: [], ...audit.unit, leftOut: [], dropped: null };
   if (unit.baseOid !== baseOid) Object.assign(unit, { baseOid, trials: [] });
+  unit.making = true;
+  saveAudit(ctx.shipDir, audit);
   const wt = ctx.worktree;
   const lands = ctx.train.route?.branch ?? ctx.config.base;
   const byKey = new Map(audit.findings.map((finding) => [finding.key, finding]));
@@ -3084,15 +3094,12 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
     }
     return result;
   };
-  const settle = async () => {
-    try { await runSetupCommands({ worktree: wt, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
-  };
   const attempt = async (keys) => {
     const name = [...keys].sort().join(" ");
     const known = unit.trials.find((trial) => trial.keys === name);
     if (known) return known;
     const tried = made(keys);
-    const brought = tried.out.length > 0 ? tried.out[0].reason : await settle();
+    const brought = tried.out.length > 0 ? tried.out[0].reason : await bringUpToLockfile(ctx);
     let trial = { keys: name, status: "failed", command: "the worktree setup commands", logPath: null, why: brought };
     if (brought === null) {
       const result = await verifyCommands({
@@ -3114,12 +3121,13 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   // begin after the stop drops again and tries the setup again.
   const dropped = async (reason) => {
     onBase();
-    const broken = await settle();
+    const broken = await bringUpToLockfile(ctx);
     if (broken !== null) {
       throw Stop.beneath(`The dependency upgrades were dropped (${reason}), but the worktree could not be brought back up to the lockfile of ${lands} afterwards, `
         + `so no spec was started. Look at the worktree at ${wt}, then run begin again.`, broken);
     }
     unit.dropped = reason;
+    delete unit.making;
     saveAudit(ctx.shipDir, audit);
     say.push(`No dependency upgrade is made: ${reason}.`, ...disclosureLines(audit).map((line) => line.replace(/^- /, "")));
     emit({ say, next: startingCommand(ctx) });
@@ -3139,17 +3147,15 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   for (const out of decided.out) unit.leftOut.push({ key: out.key, reason: out.reason, command: out.failed.command, logPath: out.failed.logPath });
   if (decided.keep.length === 0) return dropped("every upgrade was left out");
   const final = made(decided.keep);
-  const broken = final.out.length > 0 ? final.out[0].reason : await settle();
+  const broken = final.out.length > 0 ? final.out[0].reason : await bringUpToLockfile(ctx);
   if (broken !== null) throw Stop.beneath(`The upgrades verify allowed could not be made again in the worktree, so the dependency unit was not started. Look at the worktree at ${wt}, then run begin again.`, broken);
 
   const upgrades = decided.keep.map((key) => byKey.get(key));
   fs.mkdirSync(dependencyUnitDir(ctx.shipDir), { recursive: true, mode: 0o700 });
   fs.writeFileSync(dependencyDocumentPath(ctx.shipDir), dependencyDocument({ slug: ctx.slug, upgrades, recordPath: path.join(ctx.shipDir, "dependencies", "record.json") }), { mode: 0o600 });
-  const report = implementReportPath(ctx, id);
-  writeJson(report, { status: "complete", summary: `Upgraded ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")}.`, unfinished: [] });
-  const checked = node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "implement-report.schema.json"), report], { allow: [1] });
-  if (checked.status !== 0) throw Stop.beneath("The report the ship wrote for the dependency unit does not validate, which is a bug in the ship and not something to put right by hand. Stop the train and report it.", checked.stderr);
+  writeJson(implementReportPath(ctx, id), { status: "complete", summary: `Upgraded ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")}.`, unfinished: [] });
   unit.made = decided.keep;
+  delete unit.making;
   saveAudit(ctx.shipDir, audit);
   git(wt, ["switch", "-C", branch]);
   transition(ctx, id, "implementing");
@@ -3623,13 +3629,21 @@ async function snapshot(options) {
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
-function verify(options) {
+async function verify(options) {
   const ctx = context(options);
   const id = options.spec;
   const state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}; run snapshot first`);
   const dir = round.dir;
+  // Round 1 is the lockfile `begin` installed. A later round is a fixer's, which can back an
+  // upgrade out of the lockfile and leaves what is installed at the upgrade.
+  if (isDependencyId(id) && path.basename(dir) !== "1") {
+    const broken = await bringUpToLockfile(ctx);
+    if (broken !== null) {
+      throw Stop.beneath(`${id} was not verified, because the worktree could not be brought up to the lockfile this round commits. Look at the worktree at ${ctx.worktree}, then run verify again.`, broken);
+    }
+  }
   const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
     "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),

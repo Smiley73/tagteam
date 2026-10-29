@@ -111,8 +111,8 @@ const lowerBounds = (range) => String(range ?? "").split("||").map((clause) => /
 
 // A finding, from what one adapter read: `entries` is `{ name, installed: [version], candidates: [version], id, title }`
 // for each advisory. The kind says who decides: `make`, `ask` (a person approves
-// or declines), `nofix` (a person can only decline), `unpinned` (reported, left
-// alone) or `left-out` (what the audit printed is not safe to run).
+// or declines), `nofix` (a person can only decline) or `left-out` (what the audit
+// printed is not safe to run).
 function findingsOf(manager, entries) {
   const ecosystem = ECOSYSTEM[manager];
   const names = [...new Set(entries.map((entry) => entry.name))];
@@ -167,15 +167,17 @@ export function parseNpm(stdout, lock) {
   return { findings: findingsOf("npm", entries) };
 }
 
+// pnpm and yarn classic print the npm advisory shape.
+const fromAdvisory = (advisory) => ({
+  name: String(advisory.module_name), installed: (advisory.findings ?? []).map((found) => found.version),
+  candidates: lowerBounds(advisory.patched_versions), id: advisory.github_advisory_id ?? advisory.id, title: advisory.title
+});
+
 export function parsePnpm(stdout) {
   const doc = parseJson(stdout);
   if (isObject(doc?.error)) return unavailable(`pnpm audit reported ${doc.error.message ?? doc.error.code ?? "an error"}`);
   if (!isObject(doc?.advisories)) return unavailable("pnpm audit printed no advisories report");
-  const entries = Object.values(doc.advisories).filter(isObject).map((advisory) => ({
-    name: String(advisory.module_name), installed: (advisory.findings ?? []).map((found) => found.version),
-    candidates: lowerBounds(advisory.patched_versions), id: advisory.github_advisory_id ?? advisory.id, title: advisory.title
-  }));
-  return { findings: findingsOf("pnpm", entries) };
+  return { findings: findingsOf("pnpm", Object.values(doc.advisories).filter(isObject).map(fromAdvisory)) };
 }
 
 export function parseYarnClassic(stdout) {
@@ -184,11 +186,7 @@ export function parseYarnClassic(stdout) {
   const failure = lines.find((line) => line.type === "error");
   if (failure) return unavailable(`yarn audit reported ${failure.data}`);
   if (!lines.some((line) => line.type === "auditSummary")) return unavailable("yarn audit printed no summary");
-  const entries = lines.filter((line) => line.type === "auditAdvisory").map((line) => line.data.advisory).map((advisory) => ({
-    name: String(advisory.module_name), installed: (advisory.findings ?? []).map((found) => found.version),
-    candidates: lowerBounds(advisory.patched_versions), id: advisory.github_advisory_id ?? advisory.id, title: advisory.title
-  }));
-  return { findings: findingsOf("yarn", entries) };
+  return { findings: findingsOf("yarn", lines.filter((line) => line.type === "auditAdvisory").map((line) => fromAdvisory(line.data.advisory))) };
 }
 
 // Berry prints nothing at all for a clean audit, so empty output with a clean exit is the answer.
@@ -268,18 +266,26 @@ function parseYarnLock(text) {
   return resolved;
 }
 
+// pnpm lists a root's production, development and optional trees apart; a package only in one of them is resolved all the same.
 function pnpmTree(nodes, resolved) {
-  for (const node of nodes) {
-    for (const [name, dependency] of Object.entries(node.dependencies ?? {})) {
-      if (typeof dependency?.version === "string") resolved.set(name, [...(resolved.get(name) ?? []), dependency.version]);
-      pnpmTree([dependency], resolved);
+  for (const node of nodes.filter(isObject)) {
+    for (const key of ["dependencies", "devDependencies", "optionalDependencies"]) {
+      for (const [name, dependency] of Object.entries(isObject(node[key]) ? node[key] : {})) {
+        if (typeof dependency?.version === "string") resolved.set(name, [...(resolved.get(name) ?? []), dependency.version]);
+        pnpmTree([dependency], resolved);
+      }
     }
   }
   return resolved;
 }
 
+function uvExport(cwd) {
+  const listed = run(["uv", "export", "--format", "requirements-txt", "--no-hashes", "--no-emit-project", "--frozen"], cwd, AUDIT_MS);
+  return { ...listed, problem: listed.problem ?? (listed.status !== 0 ? `uv export failed (${tail(listed)})` : null) };
+}
+
 /** Every resolved version, by package name, as the manager's own record or listing gives it. Throws if it cannot be read. */
-export function resolvedVersions(manager, cwd) {
+function resolvedVersions(manager, cwd) {
   const fail = (reason) => { throw new Error(reason); };
   let resolved;
   if (manager === "npm") {
@@ -300,8 +306,8 @@ export function resolvedVersions(manager, cwd) {
     if (text === null) fail("yarn.lock cannot be read");
     resolved = parseYarnLock(text);
   } else if (manager === "uv") {
-    const listed = run(["uv", "export", "--format", "requirements-txt", "--no-hashes", "--no-emit-project", "--frozen"], cwd, AUDIT_MS);
-    if (listed.problem || listed.status !== 0) fail(listed.problem ?? `uv export failed (${tail(listed)})`);
+    const listed = uvExport(cwd);
+    if (listed.problem) fail(listed.problem);
     resolved = new Map([...pinsOf(listed.stdout)].map(([name, pin]) => [name, [pin.version]]));
   } else {
     const text = readFile(cwd, "requirements.txt");
@@ -321,8 +327,8 @@ function detectManagers(cwd) {
 }
 
 function exported(cwd) {
-  const listed = run(["uv", "export", "--format", "requirements-txt", "--no-hashes", "--no-emit-project", "--frozen"], cwd, AUDIT_MS);
-  if (listed.problem || listed.status !== 0) return { problem: listed.problem ?? `uv export failed (${tail(listed)})` };
+  const listed = uvExport(cwd);
+  if (listed.problem) return { problem: listed.problem };
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-export-")), "requirements.txt");
   fs.writeFileSync(file, listed.stdout);
   return { file };
@@ -459,33 +465,64 @@ export function collateral(before, after, target, ecosystem) {
   return problems;
 }
 
+// What the upgrade of `finding` asks of a resolved version of its package. A
+// version reaches it at or past the proposed one; a target the ship cannot class,
+// which only a person's approval brings here, is reached by being that version.
+// A version is authorized, as a new one of the target may be, when it reaches the
+// target within the proposed version's major, and for a 0.x package its minor.
+function reaches(finding, version) {
+  const ecosystem = ECOSYSTEM[finding.manager];
+  const wanted = parseVersion(finding.proposed, ecosystem);
+  const got = parseVersion(version, ecosystem);
+  return wanted ? Boolean(got) && compare(got, wanted) >= 0 : version === finding.proposed;
+}
+function authorizes(finding, version) {
+  const ecosystem = ECOSYSTEM[finding.manager];
+  const wanted = parseVersion(finding.proposed, ecosystem);
+  const got = parseVersion(version, ecosystem);
+  return reaches(finding, version) && (!wanted || (got[0] === wanted[0] && (wanted[0] !== 0 || got[1] === wanted[1])));
+}
+
 /**
  * Whether `cwd` already holds the upgrade: every resolved version of the package
- * is at or past the proposed one. A package the base moved to another version
- * still short of it, between the audit and now, has not been upgraded. For a
- * target the ship cannot class, which only a person's approval brings here, all
- * that can be read is whether the audited version is gone.
+ * reaches the proposed one. A package the base moved to another version still
+ * short of it, between the audit and now, has not been upgraded.
  */
 export function alreadyUpgraded(finding, cwd) {
   try {
     const versions = resolvedVersions(finding.manager, cwd).get(listedAs(finding.manager, finding.name)) ?? [];
-    if (versions.length === 0) return false;
-    const ecosystem = ECOSYSTEM[finding.manager];
-    const wanted = parseVersion(finding.proposed, ecosystem);
-    if (!wanted) return !versions.includes(finding.installed);
-    return versions.every((version) => { const got = parseVersion(version, ecosystem); return Boolean(got) && compare(got, wanted) >= 0; });
+    return versions.length > 0 && versions.every((version) => reaches(finding, version));
   } catch {
     return false;
   }
 }
 
 /**
+ * Why the move from the `before` listing to the `after` one is not the upgrade
+ * of `finding` and nothing more; null when it is. The target must be at its
+ * version in every copy and gain nothing beyond what the upgrade authorizes, and
+ * no other package may move past a minor.
+ */
+export function upgradeProblem(finding, before, after) {
+  const listed = listedAs(finding.manager, finding.name);
+  const was = before.get(listed) ?? [];
+  const now = after.get(listed) ?? [];
+  if (!now.some((version) => authorizes(finding, version)) || now.some((version) => !reaches(finding, version))) {
+    return `the manager left ${finding.name} at ${now.join(", ") || "nothing"}, short of ${finding.proposed}`;
+  }
+  const beyond = now.filter((version) => !was.includes(version) && !authorizes(finding, version));
+  if (beyond.length > 0) return `the manager moved ${finding.name} to ${beyond.join(", ")}, which is more than the ${finding.proposed} the upgrade authorizes`;
+  const moved = collateral(before, after, listed, ECOSYSTEM[finding.manager]);
+  return moved.length > 0 ? `making it moves ${moved.slice(0, 3).join("; ")}, which is more than a minor` : null;
+}
+
+/**
  * One upgrade, made in `cwd` with the manager's own command, never forced. If it
- * cannot be made, or leaves the target short of its version, or moves another
- * package past a minor, the manager's files are put back and the reason returned.
+ * cannot be made, or is not the upgrade and nothing more (`upgradeProblem`), or
+ * changes the manifest of a package the project does not declare, the manager's
+ * files are put back and the reason returned.
  */
 export function makeUpgrade(finding, cwd) {
-  const ecosystem = ECOSYSTEM[finding.manager];
   const saved = FILES[finding.manager].map((name) => [name, readFile(cwd, name)]);
   const back = (reason) => {
     for (const [name, text] of saved) {
@@ -494,6 +531,7 @@ export function makeUpgrade(finding, cwd) {
     }
     return { ok: false, reason: flat(reason, 300) };
   };
+  const declared = ECOSYSTEM[finding.manager] === "node" && isDirect(cwd, finding.name);
   let before;
   try { before = resolvedVersions(finding.manager, cwd); } catch (error) { return back(`its resolved versions could not be listed: ${error.message}`); }
   if (finding.manager === "pip") {
@@ -503,23 +541,13 @@ export function makeUpgrade(finding, cwd) {
     const argv = commandFor(finding, cwd);
     const result = run(argv, cwd, MAKE_MS);
     if (result.problem || result.status !== 0) return back(`${argv.slice(0, 3).join(" ")} failed: ${result.problem ?? tail(result)}`);
+    const [manifest, manifestBefore] = saved[0];
+    if (!declared && readFile(cwd, manifest) !== manifestBefore) return back(`it changed ${manifest}, and the project does not declare ${finding.name}`);
   }
   let after;
   try { after = resolvedVersions(finding.manager, cwd); } catch (error) { return back(`its resolved versions could not be listed afterwards: ${error.message}`); }
-  const listed = listedAs(finding.manager, finding.name);
-  const now = after.get(listed) ?? [];
-  const wanted = parseVersion(finding.proposed, ecosystem);
-  // What the upgrade authorizes for the target: its major, and for a 0.x package its minor, at the proposed version or above.
-  const authorized = (version) => {
-    if (!wanted) return version === finding.proposed;
-    const got = parseVersion(version, ecosystem);
-    return Boolean(got) && got[0] === wanted[0] && (wanted[0] !== 0 || got[1] === wanted[1]) && compare(got, wanted) >= 0;
-  };
-  if (!now.some(authorized) || now.includes(finding.installed)) return back(`the manager left ${finding.name} at ${now.join(", ") || "nothing"}, short of ${finding.proposed}`);
-  const beyond = now.filter((version) => !(before.get(listed) ?? []).includes(version) && !authorized(version));
-  if (beyond.length > 0) return back(`the manager moved ${finding.name} to ${beyond.join(", ")}, which is more than the ${finding.proposed} the upgrade authorizes`);
-  const moved = collateral(before, after, listed, ecosystem);
-  return moved.length > 0 ? back(`making it moves ${moved.slice(0, 3).join("; ")}, which is more than a minor`) : { ok: true };
+  const problem = upgradeProblem(finding, before, after);
+  return problem === null ? { ok: true } : back(problem);
 }
 
 /**
@@ -597,7 +625,6 @@ export function auditLines(record) {
   }
   const chosen = chosenUpgrades(record);
   if (chosen.length > 0) lines.push(`The dependency audit found vulnerable packages; the ship will upgrade ${chosen.map(upgradeText).join(", ")} before the first spec, as one change that goes through review like a spec.`);
-  for (const finding of record.findings.filter((entry) => entry.kind === "unpinned")) lines.push(`${upgradeText(finding)} is vulnerable and was left alone: ${finding.why}.`);
   for (const finding of record.findings.filter((entry) => entry.kind === "left-out")) lines.push(`${finding.name} is vulnerable and was left alone: ${finding.why}.`);
   for (const finding of record.findings.filter((entry) => entry.kind === "declined" || record.answers[entry.key] === "decline")) lines.push(`${upgradeText(finding)} stays as it is, because a person declined it.`);
   return lines;

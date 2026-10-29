@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   alreadyUpgraded, auditAll, auditLines, classify, collateral, decideUpgrades, makeUpgrade, parseNpm, parsePipAudit, parsePnpm, parseUv, parseYarnBerry,
-  parseYarnClassic, parseVersion, pickFix, proposedFor
+  parseYarnClassic, parseVersion, pickFix, proposedFor, upgradeProblem
 } from "../scripts/lib/dependency-audit.mjs";
 
 const sample = (name) => fs.readFileSync(path.join(import.meta.dirname, "fixtures", "dependency-audit", name), "utf8");
@@ -128,6 +128,49 @@ test("the target may not move past what its upgrade authorizes", () => {
   }
 });
 
+test("an upgrade that leaves another copy of the target short of its fix is not the upgrade", () => {
+  const finding = { manager: "npm", name: "lodash", installed: "4.17.15", proposed: "4.17.21" };
+  const listing = (...versions) => new Map([["lodash", versions]]);
+  assert.equal(upgradeProblem(finding, listing("4.17.15", "4.17.19"), listing("4.17.19", "4.17.21")), "the manager left lodash at 4.17.19, 4.17.21, short of 4.17.21");
+  assert.equal(upgradeProblem(finding, listing("4.17.15", "4.17.19"), listing("4.17.21")), null);
+  assert.equal(upgradeProblem(finding, listing("4.17.15", "5.0.0"), listing("4.17.21", "5.0.0")), null, "a copy that was already past the fix and is untouched stays");
+  assert.match(upgradeProblem(finding, listing("4.17.15"), listing("4.17.21", "5.0.0")), /moved lodash to 5\.0\.0, which is more than/);
+  assert.match(upgradeProblem(finding, listing("4.17.15"), new Map()), /left lodash at nothing/);
+});
+
+test("a package only a development or optional tree of a pnpm listing holds is resolved, and moving it is seen", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-pnpm-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bin-"));
+  const original = process.env.PATH;
+  try {
+    const listing = (a, dev, optional) => JSON.stringify([{
+      name: "demo", dependencies: { a: { version: a, dependencies: { deep: { version: "1.0.0" } } } },
+      devDependencies: { dev: { version: dev, dependencies: { nested: { version: "1.0.0" } } } }, optionalDependencies: { opt: { version: optional } }
+    }]);
+    // A stub pnpm whose `update` leaves the listing the test says it would.
+    const stub = (dev, optional) => {
+      fs.writeFileSync(path.join(bin, "pnpm"), `#!/bin/sh\nif [ "$1" = list ]; then cat "${cwd}/listing.json"; exit 0; fi\ncat > "${cwd}/listing.json" <<'EOF'\n${listing("1.0.1", dev, optional)}\nEOF\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(cwd, "listing.json"), listing("1.0.0", "1.0.0", "1.0.0"));
+      fs.writeFileSync(path.join(cwd, "pnpm-lock.yaml"), "lock\n");
+      fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ name: "demo", dependencies: { a: "1.0.0" } }));
+    };
+    process.env.PATH = `${bin}${path.delimiter}${original}`;
+    const finding = { manager: "pnpm", name: "a", installed: "1.0.0", proposed: "1.0.1" };
+    stub("1.0.0", "1.0.0");
+    assert.equal(alreadyUpgraded({ ...finding, name: "dev", proposed: "1.0.0" }, cwd), true, "the development tree is listed");
+    assert.equal(alreadyUpgraded({ ...finding, name: "opt", proposed: "1.0.1" }, cwd), false, "the optional tree is listed");
+    assert.equal(alreadyUpgraded({ ...finding, name: "nested", proposed: "1.0.0" }, cwd), true, "so is what it holds");
+    assert.deepEqual(makeUpgrade(finding, cwd), { ok: true }, "a moves and nothing else does");
+    stub("2.0.0", "2.0.0");
+    const moved = makeUpgrade(finding, cwd);
+    assert.match(moved.reason, /moves dev 1\.0\.0 to 2\.0\.0 \(a major upgrade\); opt 1\.0\.0 to 2\.0\.0 \(a major upgrade\)/);
+  } finally {
+    process.env.PATH = original;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("an upgrade counts as already made only when every resolved version is at or past its target", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-already-"));
   try {
@@ -148,8 +191,11 @@ test("an upgrade counts as already made only when every resolved version is at o
     assert.equal(alreadyUpgraded(finding, cwd), true, "past the fix is made as well");
     lockOf();
     assert.equal(alreadyUpgraded(finding, cwd), false, "a package no longer listed is left for the making to report");
+    const odd = { ...finding, proposed: "4.17.21-rc.1" };
     lockOf("4.17.21");
-    assert.equal(alreadyUpgraded({ ...finding, proposed: "4.17.21-rc.1" }, cwd), true, "a target the ship cannot class is read by the audited version being gone");
+    assert.equal(alreadyUpgraded(odd, cwd), false, "a target the ship cannot class is reached only by being that version");
+    lockOf("4.17.21-rc.1");
+    assert.equal(alreadyUpgraded(odd, cwd), true);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -173,6 +219,58 @@ test("pip-audit is given only the == pins and installs nothing, and the lines it
     assert.doesNotMatch(printed, /flask|django|python_version/, "nothing else is handed to pip-audit");
     assert.deepEqual([record.audits[0].status, record.audits[0].unchecked, record.findings[0].kind], ["found", 2, "make"]);
     assert.match(auditLines({ ...record, answers: {} }).join("\n"), /2 requirement\(s\) of pip are not pinned with ==, so the audit did not check them/);
+  } finally {
+    process.env.PATH = original;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("an upgrade of a package the project does not declare may not change the manifest", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-manifest-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bin-"));
+  const original = process.env.PATH;
+  try {
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ name: "demo", dependencies: { other: "1.0.0" } }));
+    fs.writeFileSync(path.join(cwd, "yarn.lock"), 'child@^1.0.0:\n  version "1.0.0"\n');
+    // A yarn that upgrades the package and declares it, as yarn classic is thought to do for one named on its command line.
+    fs.writeFileSync(path.join(bin, "yarn"), `#!/bin/sh\nprintf 'child@^1.0.0:\\n  version "1.0.1"\\n' > yarn.lock\nprintf '%s' "$DECLARE" > package.json\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}${path.delimiter}${original}`;
+    const manifest = fs.readFileSync(path.join(cwd, "package.json"), "utf8");
+    process.env.DECLARE = JSON.stringify({ name: "demo", dependencies: { other: "1.0.0", child: "^1.0.1" } });
+    const finding = { manager: "yarn", name: "child", installed: "1.0.0", proposed: "1.0.1" };
+    const refused = makeUpgrade(finding, cwd);
+    assert.equal(refused.reason, "it changed package.json, and the project does not declare child");
+    assert.equal(fs.readFileSync(path.join(cwd, "package.json"), "utf8"), manifest, "the manifest is put back");
+    assert.match(fs.readFileSync(path.join(cwd, "yarn.lock"), "utf8"), /1\.0\.0/, "so is the lockfile");
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ name: "demo", dependencies: { child: "^1.0.0" } }));
+    assert.deepEqual(makeUpgrade(finding, cwd), { ok: true }, "a declared package's range may move with it");
+  } finally {
+    delete process.env.DECLARE;
+    process.env.PATH = original;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("uv without an audit of its own is audited by pip-audit over its export, and the finding is uv's", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-uv-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-bin-"));
+  const original = process.env.PATH;
+  try {
+    fs.writeFileSync(path.join(cwd, "uv.lock"), "version = 1\n");
+    const seen = path.join(bin, "seen.txt");
+    fs.writeFileSync(path.join(bin, "uv"), `#!/bin/sh\n[ "$1" = audit ] && exit 2\nprintf 'requests==2.19.0\\n'\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "pip-audit"), `#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -r ] && { printf '%s\\n' "$2" > '${seen}'; cat "$2" >> '${seen}'; }; shift; done\n`
+      + `echo '{"dependencies":[{"name":"requests","version":"2.19.0","vulns":[{"id":"PYSEC-1","fix_versions":["2.20.0"],"description":"d"}]}]}'\nexit 1\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}${path.delimiter}${original}`;
+    const record = auditAll(cwd);
+    assert.deepEqual([record.audits[0].manager, record.audits[0].status, record.findings[0].manager, record.findings[0].kind], ["uv", "found", "uv", "make"]);
+    const [exportedAt, pins] = fs.readFileSync(seen, "utf8").split("\n");
+    assert.equal(pins, "requests==2.19.0", "pip-audit was given what uv exported");
+    assert.equal(fs.existsSync(exportedAt), false, "and the export is gone afterwards");
+    fs.writeFileSync(path.join(bin, "uv"), `#!/bin/sh\n[ "$1" = audit ] && exit 2\necho boom >&2\nexit 1\n`, { mode: 0o755 });
+    assert.match(auditAll(cwd).audits[0].reason, /uv export failed \(boom\)/);
   } finally {
     process.env.PATH = original;
     fs.rmSync(cwd, { recursive: true, force: true });
