@@ -112,9 +112,13 @@ function assertStopOpensPlainly({ status, stderr, json }) {
   }
 }
 
+// No run unless the test names one. A run that executes this suite carries its
+// own TAGTEAM_RUN_ID, and inherited it would be recorded on every set a test
+// sends, so a restart a test means as "no run" would release, or wait on, the
+// wrong set. Empty is how the driver reads "no run"; a run given in `env` wins.
 export function ship(sub, plan, extra = [], env = {}) {
   const result = spawnSync(process.execPath, [SHIP, sub, "--plan", plan, ...extra], {
-    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", ...env }
+    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...env }
   });
   let json = null;
   try { json = JSON.parse(result.stdout); } catch {}

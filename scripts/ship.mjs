@@ -4430,13 +4430,38 @@ function notAddressedRows(ctx, id, state) {
   return [...new Map(missed.map((row) => [row.id, row])).values()];
 }
 
+// The budgets that ran out on this candidate, as the body rules mean it: a cap
+// reached with the thing the budget pays for still wrong, so that raising the
+// setting is what would let the spec try again. A counter at its cap alone is
+// not that. A spec whose last fix round left the review clean has nothing a
+// person would raise the limit for, and a repaired commit has had no checks run
+// on it yet. So each budget is said only where the step that owns it refuses:
+// the fix budget where `fix` would — a finding a fixer could take is still open
+// on this candidate, no goal conflict stands (`fix` routes on that before it
+// looks at the budget, and more rounds do not settle it), and the rounds are at
+// the cap, the comparison `fix` makes — and the repair budget where `repair`
+// would: the checks are red on this candidate, or it fails on the base, and the
+// repairs are at the cap.
+function spentBudgets(ctx, id, state) {
+  const { limits } = ctx.config;
+  const spent = [];
+  const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
+  const forFixer = (review?.open ?? []).some((finding) => !isPullRequestFinding(finding));
+  if (forFixer && !exists(goalConflictPath(ctx, id)) && (state.fixRoundsUsed ?? 0) >= limits.fixRounds) {
+    spent.push(`limits.fixRounds: every one of the ${limits.fixRounds} fix rounds it allows was used`);
+  }
+  const checks = readJson(ciPath(ctx, id), null);
+  const red = (checks?.candidateOid === state.candidateOid && checks.status === "failed") || landingFailure(state) !== null;
+  if (red && (state.ciRepairsUsed ?? 0) >= limits.ciRepairs) {
+    spent.push(`limits.ciRepairs: every one of the ${limits.ciRepairs} repairs it allows was used`);
+  }
+  return spent;
+}
+
 // What `prompts/pull-request-body.md` sends a writer to take from the run, each
 // from the function that produces it.
 function bodyWriterFacts(ctx, id, state) {
-  const { limits } = ctx.config;
-  const spent = [];
-  if ((state.fixRoundsUsed ?? 0) >= limits.fixRounds) spent.push(`limits.fixRounds: every one of the ${limits.fixRounds} fix rounds it allows was used`);
-  if ((state.ciRepairsUsed ?? 0) >= limits.ciRepairs) spent.push(`limits.ciRepairs: every one of the ${limits.ciRepairs} repairs it allows was used`);
+  const spent = spentBudgets(ctx, id, state);
   const live = pullRequestRecord(ctx, id, state);
   const draft = prBodyPath(ctx, id);
   return {

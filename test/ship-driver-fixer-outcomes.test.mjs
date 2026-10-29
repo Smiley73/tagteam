@@ -100,6 +100,23 @@ test("after a fixer the settle prints its table, one addressed row and one not, 
   const facts = JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8"));
   assert.deepEqual(facts.notAddressed.map((row) => [row.id, row.severity, row.addressed, row.recommendation]),
     [["1.correctness.2", "major", false, "needs a person"]]);
+  assert.deepEqual(facts.spent, ["limits.fixRounds: every one of the 1 fix rounds it allows was used"], "the budget ran out with a finding still open");
+});
+
+test("a fix budget at its cap is not in the writer's facts when the round it paid for left the review clean", () => {
+  const staged = stagePlan({ specs: 1 });
+  const cycle = begun(staged, { fixRounds: 1 });
+  panelRaises(cycle, staged.shipDir, 1, [titled("sub adds")]);
+  fixWith(cycle, [{ id: "1.correctness.1", outcome: "fixed", note: "subtracts now" }]);
+  cycle.run("snapshot");
+  assert.match(cycle.run("verify").json.next, /recheck/);
+  const settled = recheckJudging(cycle, () => true);
+  assert.equal(settled.json.review, "clean", settled.stdout);
+  assert.match(settled.json.next, /publish/);
+  assert.equal(cycle.state().fixRoundsUsed, 1, "the one fix round was used");
+
+  const facts = JSON.parse(fs.readFileSync(factsFileOf(cycle.run("publish").json.dispatch[0]), "utf8"));
+  assert.deepEqual(facts.spent, [], "a budget was said to have run out on a review that came back clean");
 });
 
 test("a fixer sent after a settle and a second one sent after the panel it led to are both tabled at the next settle, in order", () => {

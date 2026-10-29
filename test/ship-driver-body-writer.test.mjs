@@ -8,11 +8,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { NOT_IN_YET } from "../scripts/ship.mjs";
 import { resolveRoles } from "../scripts/gates.mjs";
 import { classifyAgent } from "../scripts/usage.mjs";
-import { ship, write, stagePlan, driveToPublishable, pullsOf, ghCalls, sessionsFor, A_CHANGE, bodyWriterOf, bodyFileOf,
-  titleFileOf, factsFileOf, answerBodyWriter, arrive, trainOf } from "./ship-stage.mjs";
+import { root, ship, write, outputOf, arriveAll, findings, stagePlan, driveToPublishable, pullsOf, ghCalls, sessionsFor, A_CHANGE,
+  bodyWriterOf, bodyFileOf, titleFileOf, factsFileOf, answerBodyWriter, arrive, trainOf } from "./ship-stage.mjs";
 import { PLAN_BODY, planPullOf, stageClean } from "./ship-plan-landing-shared.mjs";
 
 const BODY = "## Summary\nAdds subtraction.\n\n## What you can now do\nSubtract two numbers.\n\n## Risk\nNothing known.\n";
@@ -77,6 +78,43 @@ test("a writer's facts hold what the body rules took from the run, less what the
   assert.equal(facts.livePullRequest, null);
   assert.deepEqual(facts.driverRiskLines, []);
   assert.ok(fs.existsSync(path.join(staged.shipDir, "01-a", "pr-facts.json")));
+});
+
+test("a repair budget at its cap is not in the writer's facts before the repaired commit's checks have run", () => {
+  // limits.ciRepairs is 1 here, so one CI repair is the whole budget. The
+  // repaired commit is a new candidate, and nothing is red on it until its own
+  // checks run — the budget has not run out, it has been used.
+  const { staged, at, publish } = publishable();
+  const { plan, shipDir } = staged;
+  const statePath = path.join(shipDir, "01-a", "state.json");
+  const state = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "state", statePath, "publishing"], { encoding: "utf8" }).status, 0);
+  const repair = ship("repair", plan, ["--spec", "01-a"], at);
+  assert.equal(repair.status, 0, repair.stderr);
+  fs.appendFileSync(path.join(trainOf(shipDir).worktree, "app.js"), "// repaired\n");
+  write(outputOf(repair.json.dispatch[0]), { outcomes: [], notes: "", status: "complete", summary: "fixed the check", unfinished: [] });
+  arriveAll(repair);
+  const run = (sub) => {
+    const result = ship(sub, plan, ["--spec", "01-a"], at);
+    assert.equal(result.status, 0, `${sub}: ${result.stderr}`);
+    return result;
+  };
+  const round = run("snapshot").json.round;
+  assert.equal(state().ciRepairsUsed, 1, "the one repair limits.ciRepairs allows was taken");
+  assert.match(run("verify").json.next, /panel/, "a repaired commit goes through the whole review again");
+  const panel = run("panel");
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+  write(path.join(shipDir, "01-a", "rounds", String(round), "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
+  run("collect");
+  const recheck = run("recheck");
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  arriveAll(recheck);
+  assert.equal(run("settle").json.review, "clean");
+
+  const facts = JSON.parse(fs.readFileSync(factsFileOf(publish().json.dispatch[0]), "utf8"));
+  assert.deepEqual(facts.spent, [], "the repair budget was said to have run out before the repaired commit's checks ran");
 });
 
 test("a title that breaks the rule gets one fresh writer, told what was wrong; a second bad title stops with nothing pushed", () => {
