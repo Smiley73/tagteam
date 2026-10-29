@@ -2,7 +2,7 @@
 // the driver and the later carry and accept steps all read.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { carryEligible, carryRefusal, recommendation } from "../scripts/lib/carry.mjs";
+import { awaitedByUnmerged, carryEligible, carryRefusal, recommendation } from "../scripts/lib/carry.mjs";
 
 const PLAN = { slug: "s", base: "plan/s", planRouteBranch: "plan/s" };
 const CONFIG = { base: "main" };
@@ -36,6 +36,15 @@ test("a whole-plan fix unit carries a non-blocking pull request or history findi
     assert.notEqual(carryRefusal(finding("blocking", scope), unit), null, `${scope} blocking`);
   }
   assert.equal(carryRefusal(finding("minor"), unit), "a whole-plan fix never merges with a finding open");
+});
+
+test("the dependency unit is awaited by every spec not yet merged, so a major code finding on it is not carried until they all have", () => {
+  const unit = { id: "plan-dependencies", dependsOn: [], dependencyUnit: true };
+  assert.equal(awaitedByUnmerged(unit, SPECS, new Set(["01-a", "02-b"])), true, "03-c does not name the unit in its dependsOn");
+  assert.equal(awaitedByUnmerged(unit, SPECS, new Set(["01-a", "02-b", "03-c"])), false);
+  assert.equal(carryEligible(finding("major"), on(unit, [])), false);
+  assert.equal(carryEligible(finding("minor"), on(unit, [])), true);
+  assert.equal(carryEligible(finding("major"), on(unit, ["01-a", "02-b", "03-c"])), true);
 });
 
 test("the recommendation is the first rule that applies, and an addressed finding has none", () => {

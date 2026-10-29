@@ -221,6 +221,18 @@ reviewer the plugin could never have written, and a brief named after one the
 plugin ships replaces it. A rostered lens with a brief in neither place is
 refused rather than reviewed on improvisation.
 
+Before the first spec begins, the ship audits the dependencies of the repository
+root: pnpm, npm, yarn, uv and pip, from their lockfiles, in the ship's worktree.
+Patch and minor fixes are made without asking and go through the full cycle as one
+pull request of their own, with every verify command run whatever its `when`; no
+spec begins until it has merged. A major, a minor of a `0.x` package, a version
+the ship cannot class and a package with no fixed version are never touched
+without you: the ship stops, names each one, and takes your approval or decline
+package by package, remembering a decline for the repository. An upgrade that
+makes verify fail, cannot be made, or moves another package past a minor is left
+out and listed under Risk. The check runs once per ship, never again after a spec
+has begun, and changes no version of your project.
+
 The review panel is the spec's lenses plus a Codex cross-review, sent out
 together to run at the same time. As each one reports you see one line saying
 who is in and how many of the panel have reported ("The correctness reviewer is

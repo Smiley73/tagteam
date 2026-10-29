@@ -27,10 +27,13 @@ export function onPlanBranch(state, config) {
 }
 
 /**
- * Whether any spec not yet merged depends on `id`, directly or through other
- * specs, by their `dependsOn`. `merged` is the set of merged spec ids.
+ * Whether any spec not yet merged depends on `unit`, directly or through other
+ * specs, by their `dependsOn`; on the dependency unit, which every spec waits
+ * for, any spec not yet merged does. `merged` is the set of merged spec ids.
  */
-export function awaitedByUnmerged(id, specs, merged) {
+export function awaitedByUnmerged(unit, specs, merged) {
+  if (unit.dependencyUnit === true) return specs.some((spec) => !merged.has(spec.id));
+  const id = unit.id;
   const dependants = new Set();
   for (let grew = true; grew;) {
     grew = false;
@@ -57,7 +60,7 @@ export function carryRefusal(finding, { spec, state, config, specs, merged }) {
   const disclosed = isPullRequestFinding(finding) && finding.severity !== "blocking";
   if (spec.fixUnit && !disclosed) return "a whole-plan fix never merges with a finding open";
   if (finding.severity === "blocking") return "it is blocking, and nothing blocking merges unresolved";
-  if (finding.severity === "major" && !isPullRequestFinding(finding) && awaitedByUnmerged(spec.id, specs, merged)) {
+  if (finding.severity === "major" && !isPullRequestFinding(finding) && awaitedByUnmerged(spec, specs, merged)) {
     return "it is a major finding in the code, and a spec not yet merged depends on this one";
   }
   return null;

@@ -33,6 +33,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import {
+  DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
+  dependencyUnitDir, disclosureLines, isDependencyId, makeUpgrade, openQuestions, questionText, readAudit, readDeclines,
+  recordDeclines, saveAudit
+} from "./lib/dependency-audit.mjs";
+import { runSetupCommands } from "./worktree-setup.mjs";
+import { verify as verifyCommands } from "./verify-run.mjs";
 import { listRounds } from "./lib/rounds.mjs";
 import { reviewOpenLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
@@ -200,10 +207,12 @@ function context(options, { requireTrain = true } = {}) {
 
 // A spec's directory, or — for a whole-plan fix unit, which runs the same cycle
 // under an id of its own — the unit's, under `whole-plan/units/`, where
-// `status.mjs` does not count it as a spec. Everything keyed by a spec id goes
+// `status.mjs` does not count it as a spec; the dependency unit's is likewise
+// beneath `dependencies/`. Everything keyed by a spec id goes
 // through here, so a fix unit's state, rounds, sets and reports land beside its
 // generated document and nowhere else.
-const specDir = (ctx, id) => (isFixUnitId(id) ? unitDir(ctx.shipDir, id) : path.join(ctx.shipDir, id));
+const specDir = (ctx, id) => (isDependencyId(id) ? dependencyUnitDir(ctx.shipDir)
+  : isFixUnitId(id) ? unitDir(ctx.shipDir, id) : path.join(ctx.shipDir, id));
 const statePath = (ctx, id) => path.join(specDir(ctx, id), "state.json");
 const roundsRoot = (ctx, id) => path.join(specDir(ctx, id), "rounds");
 const roundDir = (ctx, id, round) => path.join(roundsRoot(ctx, id), String(round));
@@ -255,11 +264,30 @@ function madeUnitIds(ctx) {
   return { newest, ids: unitIds(ctx.shipDir, records).filter((id) => exists(unitDocumentPath(ctx.shipDir, id)) || named.has(id)) };
 }
 
-// The specs and then the fix units: everything of this train that becomes a pull
-// request into its landing branch.
-const unitsInOrder = (ctx) => [...specsInOrder(ctx), ...fixUnitSpecs(ctx)];
+// The dependency unit, once the audit has decided on upgrades and every question
+// about them is answered; it stands before the first spec until it has merged
+// into the branch the specs build on, or has nothing left to upgrade.
+function dependencyEntered(ctx) {
+  const record = readAudit(ctx.shipDir);
+  return Boolean(record) && !record.unit?.dropped && openQuestions(record).length === 0 && chosenUpgrades(record).length > 0;
+}
+const dependencyPending = (ctx) => dependencyEntered(ctx) && stateOf(ctx, DEPENDENCY_ID) !== "merged";
+// Questions the audit put to the person and nobody has answered: until they are, which upgrades there are is not settled.
+const dependencyQuestions = (ctx) => { const record = readAudit(ctx.shipDir); return record ? openQuestions(record) : []; };
+
+// The unit as the cycle reads a spec. Its document is written once the upgrades
+// are made, so `begin` reads this before there is one.
+const dependencyUnitSpec = (ctx) => ({
+  id: DEPENDENCY_ID, path: dependencyDocumentPath(ctx.shipDir), dependsOn: [],
+  reviewers: resolveReviewers([], ctx.config, { file: dependencyDocumentPath(ctx.shipDir) }), signOffs: [], dependencyUnit: true
+});
+
+// The dependency unit, then the specs and then the fix units: everything of this
+// train that becomes a pull request into its landing branch.
+const unitsInOrder = (ctx) => [...(dependencyEntered(ctx) ? [dependencyUnitSpec(ctx)] : []), ...specsInOrder(ctx), ...fixUnitSpecs(ctx)];
 
 function specById(ctx, id) {
+  if (isDependencyId(id)) return dependencyUnitSpec(ctx);
   if (isFixUnitId(id)) return fixUnitSpec(ctx, id);
   const spec = specsInOrder(ctx).find((entry) => entry.id === id);
   if (!spec) throw new Stop(`${id} is not a spec of ${ctx.plan}`);
@@ -633,12 +661,13 @@ const firstFailed = (verify) => (verify?.commands ?? []).find((command) => comma
 /**
  * The lines the driver itself writes under `## Risk` in this spec's pull
  * request: the one place that decides what they are. One per finding the spec
- * would carry into the plan branch open if it merged now, and one per failure
- * that passed when it was run again on the same commit.
+ * would carry into the plan branch open if it merged now, one per failure
+ * that passed when it was run again on the same commit, and — for the dependency
+ * unit — one per upgrade it did not make.
  */
 function riskLines(ctx, id) {
   const state = readState(ctx, id);
-  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base)];
+  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base), ...(isDependencyId(id) ? disclosureLines(readAudit(ctx.shipDir)) : [])];
 }
 
 /**
@@ -726,7 +755,7 @@ function carryStanding(ctx, id, state) {
     if (code.some((finding) => carryRefusal(finding, facts))) return null;
     record = {
       candidateOid: state.candidateOid, ids: code.map((finding) => finding.id), mode: "carry",
-      dependedOn: awaitedByUnmerged(id, facts.specs, facts.merged)
+      dependedOn: awaitedByUnmerged(facts.spec, facts.specs, facts.merged)
     };
     if (!reviewOpenLifts({ ...state, accept: record }, ctx.config)) return null;
   }
@@ -1175,12 +1204,12 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
 // step where a unit would go. The count includes the fix units a whole-plan
 // check has made, which is why it can grow near the end.
 function boardHeader(ctx, id, kind) {
-  const units = [...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
+  const units = [...(dependencyEntered(ctx) ? [DEPENDENCY_ID] : []), ...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
   const merged = units.filter((unit) => stateOf(ctx, unit) === "merged").length;
   const queued = units.filter((unit) => unit !== id && [null, "pending"].includes(stateOf(ctx, unit)));
   const where = id === null
     ? `${kind.startsWith("whole-plan") ? "The whole-plan check" : "Resolving the merge that lands the plan"}, ${units.length} units`
-    : `${isFixUnitId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
+    : `${isFixUnitId(id) || isDependencyId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
   return `${where} · ${merged} merged · ${queued.length ? `queued: ${queued.join(", ")}` : "nothing queued"}`;
 }
 
@@ -2793,6 +2822,8 @@ async function start(options) {
     const listed = await withPrimaryGitLock(ctx.repo, () => git(ctx.repo, ["worktree", "list", "--porcelain"]).stdout);
     const registered = listed.includes(`worktree ${fs.realpathSync(worktree)}`) || listed.includes(`worktree ${worktree}`);
     if (!registered) throw new Stop(`The worktree directory for this plan exists but is not a worktree of this repository; move it aside and rerun (${worktree})`);
+    // A begin of the dependency unit that died while making leaves its scratch work here; the next begin makes it again from the base.
+    if (readAudit(ctx.shipDir)?.unit?.making) { git(worktree, ["reset", "--hard"]); git(worktree, ["clean", "-fdq"]); }
     if (git(worktree, ["status", "--porcelain"]).stdout.trim() !== "") throw new Stop(`The worktree for this plan is dirty; a worktree that will not come clean is holding something — look before removing it (${worktree})`);
     say.push(`Reusing the existing worktree at ${worktree}.`);
   } else {
@@ -2830,16 +2861,74 @@ async function start(options) {
   ctx.train = readJson(ctx.trainPath);
   say.push(...await routeLines(ctx, decided));
 
+  const audit = dependencyAudit(ctx, order, baseOid, say);
   const specs = order.map((spec) => {
     const state = exists(statePath(ctx, spec.id)) ? readJson(statePath(ctx, spec.id)).state : "pending";
     return { id: spec.id, state, lenses: spec.reviewers };
   });
-  const first = specs.find((spec) => spec.state !== "merged");
   say.push(`${specs.length} specs in dependency order; ${specs.filter((spec) => spec.state === "merged").length} already merged.`);
-  emit({
-    say, snapshot, specs,
-    next: first ? nextCommand(ctx, "begin", first.id) : afterSpecs(ctx)
-  });
+  emit({ say, snapshot, specs, ...dependencyNext(ctx, audit) });
+}
+
+// The audit, once per ship, at the commit the first spec starts from, and its
+// record read back by every later `start`. A ship with a spec already past
+// pending is never audited: the audit runs before the first spec begins.
+function dependencyAudit(ctx, order, baseOid, say) {
+  let audit = readAudit(ctx.shipDir);
+  if (!audit) {
+    const begun = order.find((spec) => !["pending", null].includes(stateOf(ctx, spec.id)));
+    audit = { version: 1, managers: [], audits: [], findings: [], answers: {}, skipped: null };
+    if (begun) {
+      audit.skipped = `The dependency audit was skipped: ${begun.id} has already begun, and the audit runs once, before the first spec.`;
+    } else {
+      const route = routeOf(ctx);
+      const at = isPlanRoute(route) ? route.tipOid ?? route.createdOid ?? baseOid : baseOid;
+      git(ctx.worktree, ["checkout", "--detach", at]);
+      Object.assign(audit, { baseOid: at, ...auditAll(ctx.worktree, readDeclines(ctx.repo)) });
+    }
+    saveAudit(ctx.shipDir, audit);
+  }
+  say.push(...auditLines(audit));
+  return audit;
+}
+
+// What a train does once the audit is settled: stop for the questions still
+// open, or go on to the dependency unit or the first spec.
+function dependencyNext(ctx, audit) {
+  if (openQuestions(audit).length === 0) return { next: startingCommand(ctx) };
+  const command = nextCommand(ctx, "dependencies", null);
+  return {
+    ask: questionText(audit, command),
+    answers: { approve: `${command} --approve "<keys>"`, decline: `${command} --decline "<keys>"` },
+    next: nextCommand(ctx, "end", null)
+  };
+}
+
+// A person's answer to the dependency stop, never printed by `next`: which of the
+// packages the audit would not upgrade unasked to upgrade, and which to leave as
+// they are. A decline is kept for the repository, so no later ship asks again.
+async function dependencies(options) {
+  const ctx = context(options);
+  const audit = readAudit(ctx.shipDir);
+  const keysOf = (list) => String(list ?? "").split(",").map((key) => key.trim()).filter(Boolean);
+  const approve = keysOf(options.approve);
+  const decline = keysOf(options.decline);
+  const open = audit ? openQuestions(audit) : [];
+  const listing = open.length > 0 ? `the open ones are ${listOf(open.map((finding) => finding.key))}` : "none is open";
+  if (approve.length + decline.length === 0) throw new Stop(`No package was named, so nothing was recorded. Give --approve and --decline the keys of the open questions: ${listing}.`);
+  for (const key of [...approve, ...decline]) {
+    const finding = open.find((entry) => entry.key === key);
+    if (!finding) throw new Stop(`${key} is not an open question of the dependency audit, so nothing was recorded; ${listing}.`);
+    if (approve.includes(key) && decline.includes(key)) throw new Stop(`${key} was both approved and declined, so nothing was recorded. Give each package one answer.`);
+    if (approve.includes(key) && finding.kind === "nofix") throw new Stop(`${key} has no fixed version to upgrade to, so it can only be declined; nothing was recorded.`);
+  }
+  for (const key of approve) audit.answers[key] = "approve";
+  for (const key of decline) audit.answers[key] = "decline";
+  saveAudit(ctx.shipDir, audit);
+  recordDeclines(ctx.repo, decline.map((key) => declineKey(audit.findings.find((finding) => finding.key === key))), ctx.slug);
+  const say = [`Recorded: ${approve.length} approved, ${decline.length} declined${decline.length > 0 ? ", and kept for this repository so no later ship asks again" : ""}.`];
+  if (openQuestions(audit).length === 0) say.push(...auditLines(audit));
+  emit({ say, ...dependencyNext(ctx, audit) });
 }
 
 async function begin(options) {
@@ -2848,6 +2937,14 @@ async function begin(options) {
   const spec = specById(ctx, id);
   const say = [];
   const branch = branchOf(ctx, id);
+  if (!isDependencyId(id) && dependencyQuestions(ctx).length > 0) {
+    throw new Stop(`${id} was not begun, because the dependency audit has questions nobody has answered and no spec branches before the upgrades it decides on have merged. `
+      + `The person has to decide each package it names to upgrade or to leave as it is; run ${nextCommand(ctx, "start", null)} to put the questions to them again.`);
+  }
+  if (!isDependencyId(id) && dependencyPending(ctx)) {
+    throw new Stop(`${id} was not begun, because the dependency upgrades the audit decided on have not merged yet and no spec branches before they do. `
+      + `Run ${nextCommand(ctx, "begin", DEPENDENCY_ID)} for them, or, if their pull request is waiting for your approval on ${ctx.config.base}, approve it with finish --approve.`);
+  }
 
   // On a plan branch, before anything is created or switched: what is already
   // merged is taken in, and then the branch on origin has to be where the ship
@@ -2954,6 +3051,7 @@ async function begin(options) {
   }
 
   // A genuinely new spec.
+  if (isDependencyId(id)) return beginDependencies(ctx, { baseOid, branch, say });
   git(ctx.worktree, ["checkout", "--detach", baseOid]);
   git(ctx.worktree, ["switch", "-c", branch]);
   transition(ctx, id, "implementing");
@@ -2962,6 +3060,108 @@ async function begin(options) {
   const dispatch = implementerDispatch(ctx, spec, job);
   const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
+}
+
+// The configured worktree.setup commands, which bring what the worktree has
+// installed up to the lockfile it holds; null when they succeed, otherwise why not.
+async function bringUpToLockfile(ctx) {
+  try { await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
+}
+
+// The dependency unit's `begin`, in place of an implementer: the ship makes the
+// upgrades itself, from the base each time, and keeps those verify allows (see
+// `decideUpgrades`). Every trial is recorded as it ends and reused by a rerun on
+// the same base; the tree is only left holding upgrades once the report that
+// `snapshot` records as round 1's is written, so a half-made tree is never committed.
+async function beginDependencies(ctx, { baseOid, branch, say }) {
+  const id = DEPENDENCY_ID;
+  const audit = readAudit(ctx.shipDir);
+  // What was left out is worked out again each time, from the recorded trials.
+  const unit = audit.unit = { trials: [], ...audit.unit, leftOut: [], dropped: null };
+  if (unit.baseOid !== baseOid) Object.assign(unit, { baseOid, trials: [] });
+  unit.making = true;
+  saveAudit(ctx.shipDir, audit);
+  const wt = ctx.worktree;
+  const lands = ctx.train.route?.branch ?? ctx.config.base;
+  const byKey = new Map(audit.findings.map((finding) => [finding.key, finding]));
+  const onBase = () => { git(wt, ["checkout", "--force", "--detach", baseOid]); git(wt, ["clean", "-fdq"]); };
+  const made = (keys) => {
+    onBase();
+    const result = { made: [], out: [] };
+    for (const key of keys) {
+      const outcome = makeUpgrade(byKey.get(key), wt);
+      if (outcome.ok) result.made.push(key); else result.out.push({ key, reason: outcome.reason });
+    }
+    return result;
+  };
+  const attempt = async (keys) => {
+    const name = [...keys].sort().join(" ");
+    const known = unit.trials.find((trial) => trial.keys === name);
+    if (known) return known;
+    const tried = made(keys);
+    const brought = tried.out.length > 0 ? tried.out[0].reason : await bringUpToLockfile(ctx);
+    let trial = { keys: name, status: "failed", command: "the worktree setup commands", logPath: null, why: brought };
+    if (brought === null) {
+      const result = await verifyCommands({
+        config: ctx.config, candidate: { changedPaths: [], addedLines: [] }, worktree: wt, select: "all",
+        outDir: path.join(dependencyUnitDir(ctx.shipDir), "trials", `${unit.trials.length + 1}-${stampNow()}`)
+      });
+      const failed = (result.commands ?? []).find((command) => command.status === "failed");
+      trial = { keys: name, status: result.status === "failed" ? "failed" : "passed", command: failed?.command ?? null, logPath: failed?.logPath ?? null };
+    }
+    unit.trials.push(trial);
+    saveAudit(ctx.shipDir, audit);
+    return trial;
+  };
+  // `onBase` puts the lockfile back but keeps what the trials' setups installed
+  // (ignored files survive `git clean`), and a rerun may have found every trial
+  // on record and run no setup at all: the setup runs once more, so that the
+  // specs verify against what the base's own lockfile installs and not the last
+  // trial's upgrades. The drop is recorded only once that has succeeded, so a
+  // begin after the stop drops again and tries the setup again.
+  const dropped = async (reason) => {
+    onBase();
+    const broken = await bringUpToLockfile(ctx);
+    if (broken !== null) {
+      throw Stop.beneath(`The dependency upgrades were dropped (${reason}), but the worktree could not be brought back up to the lockfile of ${lands} afterwards, `
+        + `so no spec was started. Look at the worktree at ${wt}, then run begin again.`, broken);
+    }
+    unit.dropped = reason;
+    delete unit.making;
+    saveAudit(ctx.shipDir, audit);
+    say.push(`No dependency upgrade is made: ${reason}.`, ...disclosureLines(audit).map((line) => line.replace(/^- /, "")));
+    emit({ say, next: startingCommand(ctx) });
+  };
+
+  onBase();
+  const live = chosenUpgrades(audit).filter((finding) => {
+    if (!alreadyUpgraded(finding, wt)) return true;
+    say.push(`${finding.name} is already at or past ${finding.proposed} on ${lands}, so its upgrade from ${finding.installed} is not made.`);
+    return false;
+  });
+  const screened = made(live.map((finding) => finding.key));
+  for (const out of screened.out) unit.leftOut.push({ key: out.key, reason: `it cannot be made: ${out.reason}` });
+  if (screened.made.length === 0) return dropped("none of the upgrades could be made");
+  const decided = await decideUpgrades(screened.made, attempt);
+  if (decided.baseFails) return dropped(`verify fails on ${ctx.config.base} itself (\`${decided.base.command}\`), so nothing can be blamed on the upgrades`);
+  for (const out of decided.out) unit.leftOut.push({ key: out.key, reason: out.reason, command: out.failed.command, logPath: out.failed.logPath });
+  if (decided.keep.length === 0) return dropped("every upgrade was left out");
+  const final = made(decided.keep);
+  const broken = final.out.length > 0 ? final.out[0].reason : await bringUpToLockfile(ctx);
+  if (broken !== null) throw Stop.beneath(`The upgrades verify allowed could not be made again in the worktree, so the dependency unit was not started. Look at the worktree at ${wt}, then run begin again.`, broken);
+
+  const upgrades = decided.keep.map((key) => byKey.get(key));
+  fs.mkdirSync(dependencyUnitDir(ctx.shipDir), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(dependencyDocumentPath(ctx.shipDir), dependencyDocument({ slug: ctx.slug, upgrades, recordPath: path.join(ctx.shipDir, "dependencies", "record.json") }), { mode: 0o600 });
+  writeJson(implementReportPath(ctx, id), { status: "complete", summary: `Upgraded ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")}.`, unfinished: [] });
+  unit.made = decided.keep;
+  delete unit.making;
+  saveAudit(ctx.shipDir, audit);
+  git(wt, ["switch", "-C", branch]);
+  transition(ctx, id, "implementing");
+  say.push(`Upgrading ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")} on ${branch}; nothing is dispatched, and snapshot commits the change as round 1.`,
+    ...disclosureLines(audit).map((line) => line.replace(/^- /, "")));
+  emit({ say, next: nextCommand(ctx, "snapshot", id) });
 }
 
 /**
@@ -3036,8 +3236,19 @@ function finishNext(ctx, id, say) {
 // there is none, whatever follows the specs on this train's route. A fix unit
 // has no place in the spec order; every spec was merged before it was made.
 function followingCommand(ctx, id) {
+  // The dependency unit waits for a person on the base route, and holds every
+  // spec until it has merged; once it has, the first spec follows it.
+  if (isDependencyId(id)) return dependencyPending(ctx) ? nextCommand(ctx, "end", null) : startingCommand(ctx);
   const following = isFixUnitId(id) ? null : nextSpecAfter(ctx, id);
   return following ? nextCommand(ctx, "begin", following) : afterSpecs(ctx, id);
+}
+
+// Where a train goes from its start: the dependency unit while it stands, then
+// the first spec not merged, then whatever follows the specs.
+function startingCommand(ctx) {
+  if (dependencyPending(ctx)) return nextCommand(ctx, "begin", DEPENDENCY_ID);
+  const first = specsInOrder(ctx).find((spec) => stateOf(ctx, spec.id) !== "merged");
+  return first ? nextCommand(ctx, "begin", first.id) : afterSpecs(ctx);
 }
 
 // What a clean whole-plan check is followed by on the plan route: the plan's
@@ -3104,7 +3315,7 @@ function versionLineStop(ctx, id, state, step) {
   if (changed.length === 0) return null;
   const what = changed.map((line) => `${line.file} line ${line.line ?? "?"} (${line.locator}) reads ${line.after ?? "nothing"} at `
     + `${short(state.candidateOid)} and ${line.before ?? "nothing"} on ${route.branch} at ${short(state.baseOid)}, where ${id} began`);
-  const unit = isFixUnitId(id) ? "whole-plan fix" : "spec";
+  const unit = isDependencyId(id) ? "dependency upgrade" : isFixUnitId(id) ? "whole-plan fix" : "spec";
   spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "it changes a version line"], { stdio: "ignore" });
   const back = listOf(changed.map((line) => `${line.file} (${line.locator}) to ${line.before ?? "what it was"}`));
   const snapshotCommand = nextCommand(ctx, "snapshot", id);
@@ -3322,7 +3533,7 @@ async function snapshot(options) {
     const message = options.message
       ?? (pending?.from === "repair" ? `Repair CI for ${id}`
         : pending?.from === "redesign" ? `Redesign ${id}: ${(pending.files ?? []).join(", ")}`
-          : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : `Implement ${id}`);
+          : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : isDependencyId(id) ? "Upgrade vulnerable dependencies" : `Implement ${id}`);
     git(ctx.worktree, ["add", "-A"]);
     node("guard-staged.mjs", [ctx.worktree, ctx.configPath]);
     git(ctx.worktree, ["commit", "-m", message]);
@@ -3378,6 +3589,10 @@ async function snapshot(options) {
   if (recorded.status === 2) {
     const refused = lastJson(recorded.stdout)?.refused;
     if (!refused) throw Stop.raw(recorded.stderr.trim(), "the round's report could not be recorded");
+    if (isDependencyId(id) && !pending) {
+      throw Stop.beneath("The report the ship wrote for the dependency unit does not validate, which is a bug in the ship and no agent wrote it, so nothing was sent back. "
+        + `Stop the train (run ${nextCommand(ctx, "end", null)}) and report it.`, refused.problems.join("\n"));
+    }
     if (!dispatched || resent) {
       throw unusableReportStop(ctx, id, { oid, round, refused, resent, role: resent?.role });
     }
@@ -3414,16 +3629,26 @@ async function snapshot(options) {
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
-function verify(options) {
+async function verify(options) {
   const ctx = context(options);
   const id = options.spec;
   const state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}; run snapshot first`);
   const dir = round.dir;
+  // Round 1 is the lockfile `begin` installed. A later round is a fixer's, which can back an
+  // upgrade out of the lockfile and leaves what is installed at the upgrade.
+  if (isDependencyId(id) && path.basename(dir) !== "1") {
+    const broken = await bringUpToLockfile(ctx);
+    if (broken !== null) {
+      throw Stop.beneath(`${id} was not verified, because the worktree could not be brought up to the lockfile this round commits. Look at the worktree at ${ctx.worktree}, then run verify again.`, broken);
+    }
+  }
   const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`)
+    "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),
+    // A lockfile-only change matches no `when` in most configurations, which would wait for a person.
+    ...(isDependencyId(id) ? ["--select", "all"] : [])
   ], { allow: [1] });
   run("verify");
   const first = readJson(path.join(dir, "verify.json"));
@@ -5265,12 +5490,12 @@ function landingSummary(ctx, record) {
 // and every whole-plan fix, merged into the plan branch, with its pull request.
 function landsList(ctx) {
   return unitsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) === "merged").map((unit) => ({
-    id: unit.id, fixUnit: unit.fixUnit === true, pr: readState(ctx, unit.id).pr?.number ?? null, prBody: prBodyPath(ctx, unit.id)
+    id: unit.id, fixUnit: unit.fixUnit === true, dependencyUnit: unit.dependencyUnit === true, pr: readState(ctx, unit.id).pr?.number ?? null, prBody: prBodyPath(ctx, unit.id)
   }));
 }
 
 function landsText(lands) {
-  const one = (entry) => `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.id}${entry.pr ? ` (#${entry.pr})` : ""}`;
+  const one = (entry) => `${entry.fixUnit ? `the whole-plan fix ${entry.id}` : entry.dependencyUnit ? "the dependency upgrades" : entry.id}${entry.pr ? ` (#${entry.pr})` : ""}`;
   return lands.length > 0 ? listOf(lands.map(one)) : "nothing";
 }
 
@@ -6792,7 +7017,7 @@ async function landingCheck(ctx, id, state, say) {
     config: ctx.config, configPath: ctx.configPath,
     baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
     candidatePath: path.join(round.dir, "candidate.json"),
-    landingDir: path.join(round.dir, "landing")
+    landingDir: path.join(round.dir, "landing"), select: isDependencyId(id) ? "all" : null
   });
   let outcome = check();
   // A verify that fails on the merge is run once more on the same merge, in an
@@ -7224,7 +7449,7 @@ async function end(options) {
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
-  start, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
+  start, dependencies, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
   "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect,
   "plan-land": planLand, "plan-adopt": planAdopt
 };
@@ -7232,11 +7457,15 @@ const SUBCOMMANDS = {
 // The steps that belong to the plan rather than to one of its specs, and those
 // that take `--spec` only when what they resume has one: a resolve round opened
 // to land the plan has no spec about to begin.
-const PLAN_LEVEL = new Set(["start", "end", "plan-check", "plan-collect", "plan-land", "plan-adopt"]);
+const PLAN_LEVEL = new Set(["start", "dependencies", "end", "plan-check", "plan-collect", "plan-land", "plan-adopt"]);
 const SPEC_WHEN_ANY = new Set(["resolve-commit", "resolve-collect"]);
 
 const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [--spec <id>] [options]
   start   [--reclaim]                 preflight, lock, worktree; prints the spec order
+  dependencies [--approve <keys>] [--decline <keys>]
+                                      a person's answer to the dependency audit's stop, never printed by next: approve or decline
+                                      each package it would not upgrade unasked, by the keys the stop printed. A decline is kept
+                                      for the repository, so no later ship asks about that package at that version again
   begin   --spec <id> [--run-gone | --run-live]
                                       branch and dispatch the implementer, or resume; the flags answer
                                       the question a resume asks about agents an earlier run sent out
