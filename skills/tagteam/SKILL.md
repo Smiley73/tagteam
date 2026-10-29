@@ -227,15 +227,14 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 11, validated by
+`.tagteam/config.json`, version 12, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. Only two keys have a
-fallback in a script, so an older configuration is incomplete. They are
-`ciStartWaitSec` and `progressBoard`: either may be missing, a missing
-`ciStartWaitSec` reads as 120 and a missing `progressBoard` as on, so the files
-written before they existed stayed current. `autoMerge` is the
+tell the person to run `/tagteam:configure` and stop. Only one key has a
+fallback in a script, so an older configuration is incomplete. It is
+`ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
+written before it existed stayed current. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
 it. Configure carries a version-9 or version-10 file forward: every value it
@@ -243,7 +242,9 @@ holds but `autoMerge` is offered back, and the keys it lacks are asked about —
 version 10's `planBranch` and `versionFiles`, and version 11's `carry`,
 `autoRedesign`, `limits.carried` and `limits.followUps`, each offered at its
 safe value: off, empty, off, off, 5 and 2. At those values nothing about how a
-plan ships changes. Anything older is a different shape and is replaced.
+plan ships changes. A version-11 file is carried forward without asking anything:
+every value stays, `progressBoard`, which nothing reads any more, is dropped, and
+the file is written at version 12. Anything older is a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -257,7 +258,6 @@ plan ships changes. Anything older is a different shape and is replaced.
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
 | `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |
-| `progressBoard` | On by default, and a missing key reads as on. On, ship and plan runs show a table of the current step's agents as `running` or `done` under one line of plan progress, at a little more output per step. Off, nothing extra is printed |
 | `autoMerge` | Accepted and ignored, in either value: nothing reads it, and the validator prints a `note:` saying so. `planBranch` replaced it as the setting that lets specs merge without waiting; a spec that merges straight into `base` always waits for a person. Configure no longer writes it |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
@@ -338,7 +338,7 @@ Each agent's label is its `description`, the name Claude Code repeats in the
 notice it posts when that agent finishes. The orchestrator records every arrival
 with `set.arrive` — once with every label when they come back together, or one
 quick call per finished notice when they do not — and relays the one line it
-prints, with the `board` exactly as printed when there is one. The step that judges the set refuses, changing nothing, until every
+prints. The step that judges the set refuses, changing nothing, until every
 label is in, so an agent still working is never read as one that failed or
 changed nothing. There is no watcher and nothing to poll for, and a wake-up that
 is not the last arrival runs that one call and nothing else.
@@ -929,7 +929,7 @@ fixer. None of them is a reason to answer one way rather than the other.
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts. A
 key in their own configuration is one of these: `ciWaitSec`, `ciStartWaitSec`,
-`progressBoard`, `limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
+`limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
 edit in `.tagteam/config.json`. A lens name is one too. So say what the setting
 or the lens does *and* name it wherever they might go looking for it afterwards.
 

@@ -37,16 +37,9 @@ behind. You keep that record by telling the run each time an agent reports.
   Otherwise end your turn.
 - **On each finished notice**, run `set.arrive` with that one label in double
   quotes and nothing else. It prints one line — "The plan reviewer is in (1 of
-  3)" — and you relay it as written, with the `board` it also prints when the
-  progress board is on. Run nothing else on that wake-up. The last
+  3)" — and you relay it as written. Run nothing else on that wake-up. The last
   arrival prints "All 3 are in. Judging the review now." with `next`: run the
   command it names.
-- **`board`** — printed by `dispatch`, by `codex` when only Codex is sent again,
-  and by an arrival, when the progress board is on. Show it to the person
-  exactly as printed, as Markdown, before you make the Agent calls for a
-  dispatch. Do not reword it, recompose it or summarise it; it is a field value
-  meant to be shown as it is, not JSON to paste. When there is no `board`, do
-  nothing extra.
 - **When you are unsure whether you recorded one**, record it anyway: a label
   already in is refused by name and changes nothing. A label refused as not in
   the set was copied wrong; the refusal lists the labels still out, so correct
@@ -78,7 +71,7 @@ Every Claude call is printed for you instead. Before each Claude dispatch, run
 the command for that step, with the kind of set it is recorded as:
 
 ```bash
-node "$P/scripts/plan.mjs" dispatch "$R/.tagteam/config.json" --kind <kind> [selector] --plan "$D"
+node "$P/scripts/plan.mjs" dispatch "$R/.tagteam/config.json" --kind <kind> [selector]
 ```
 
 It prints `dispatch`, one entry per Agent call, each with an `agent`, a `model`,
@@ -262,7 +255,7 @@ node "$P/scripts/goal-gate.mjs" verify "$D"
 mkdir -p "$D/work/review"
 node "$P/scripts/plan.mjs" codex --dir "$D/work/review" --goal "$D/goal.md" --plan "$D/plan.md" \
   --cd "$R" --model <plan-codex model> --effort <plan-codex effort> --max-concurrent <maxConcurrentCodex>
-node "$P/scripts/plan.mjs" dispatch "$R/.tagteam/config.json" --kind review --plan "$D"
+node "$P/scripts/plan.mjs" dispatch "$R/.tagteam/config.json" --kind review
 ```
 
 The second command prepares the Codex plan review and prints the runner dispatch:

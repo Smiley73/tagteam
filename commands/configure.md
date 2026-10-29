@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 11. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 12. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -196,14 +196,6 @@ names, internal ids. See *Asking* in the skill.
     on; any later time in that cycle it asks as before, and publishing with
     what is still open is always a person's answer. It applies whether or not a plan has a branch of its own.
     Offer off first: the run always asks.
-
-    Ask `progressBoard` in the same call, as one more question about what a run
-    costs and shows: whether ship and plan runs print a table of the current
-    step's agents as running or done, under one line of how far the plan has got.
-    Say plainly that it costs a little more per step, because every table is
-    more output the run has to produce, and that off prints exactly what a run
-    printed before the board existed. Offer on first: that is what a missing key
-    means, and the person has chosen the cost by leaving it.
 11. `planBranch` — whether a plan of two or more specs ships as one: its specs
     collect on a branch of its own, each still its own reviewed pull request
     into that branch, merged there without asking a person once it is clean;
@@ -349,33 +341,25 @@ Say two things afterwards, because neither is visible from the file:
   refresh commands.
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
-configured them; the only keys with a fallback are `ciStartWaitSec` and
-`progressBoard`, so any other omitted key is an invalid file rather than an
-unused feature. `autoMerge` is the one key the file may omit without either,
-because nothing reads it — and this command always omits it.
+configured them; the only key with a fallback is `ciStartWaitSec`, so
+any other omitted key is an invalid file rather than an unused feature.
+`autoMerge` is the one key the file may omit without either, because nothing
+reads it — and this command always omits it.
 
 Always write `ciStartWaitSec`: the answer when question 7 asked it, 120 when it
-did not. It is one of two keys that may be missing — the ship reads a missing one
+did not. It is the one key that may be missing — the ship reads a missing one
 as 120, so the version-10 files written before it existed stayed current — but a
 file this command writes is complete. Under `--reconfigure`, and when a version-9
 or version-10 file is carried forward, offer back the value the file holds, or 120
 when it has none.
 
-Always write `progressBoard`: the answer to question 10, on when it was not
-asked. It is the other key that may be missing — a missing one reads as on, so
-the version-11 files written before it existed stayed current — but a file this
-command writes is complete. Under `--reconfigure`, and when a version-9 or
-version-10 file is carried forward, offer back the value the file holds, or on
-when it has none.
-
 Write `planBranch` and `versionFiles` as question 11 answered them, explicitly:
-there is no fallback for either. Under `--reconfigure` of a version-10 or
-version-11 file both are offered back with the values the file already has, so a
+there is no fallback for either. Under `--reconfigure` of a current file both are offered back with the values the file already has, so a
 setting or a list someone wrote in by hand is not reset.
 
 Write `carry`, `autoRedesign`, `limits.carried` and `limits.followUps`
 explicitly too, as questions 10 and 11 answered them or at the values the file
-holds when they were not asked. Under `--reconfigure` of a version-11 file all
+holds when they were not asked. Under `--reconfigure` of a current file all
 four are offered back with the values the file already has.
 
 A version-9 configuration is carried forward, not replaced. Run the interview as
@@ -387,7 +371,7 @@ this repository's version, asked about only when that is on. Off and empty,
 nothing about how a plan ships changes. Say what version 11 adds as well, as
 below. Answering every question as before, and leaving the setting off, writes
 the old file with those two keys, version 11's four at their safe values,
-`ciStartWaitSec` added and `progressBoard` at on, `autoMerge` left out, and nothing else different.
+`ciStartWaitSec` added, `autoMerge` left out, version 12, and nothing else different.
 
 A version-10 configuration is carried forward the same way: every value the
 file holds is offered back as the default, `autoMerge` is still never written,
@@ -396,8 +380,13 @@ and say what version 11 adds — `autoRedesign`, whether the run answers its fir
 plan branch, `carry`, whether a spec out of fix rounds with only carriable
 findings merges into the plan's branch with them disclosed, offered off, with
 `limits.carried` at 5 and `limits.followUps` at 2. Answering every question as
-before writes the old file with those four keys at their safe values and
-`progressBoard` at on, and nothing else different.
+before writes the old file with those four keys at their safe values, version 12,
+and nothing else different.
+
+A version-11 configuration is carried forward without an interview. Keep every
+value the file holds, drop `progressBoard` whatever its value, write version 12,
+validate it, and show the file as *Write* says. Tell the person in one sentence
+that the setting was retired and that nothing else changed.
 
 A configuration older than version 9 is not upgraded — each of those versions is
 a different shape, not an extension. Say that the old file is being replaced.

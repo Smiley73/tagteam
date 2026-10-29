@@ -78,7 +78,7 @@ import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 import { codexSpend, codexUsageLine, recordCodexUsage } from "./codex-usage.mjs";
-import { arriveCommand, closeSet, readSet, readiness, recordSet, renderBoard, restart } from "./dispatch-set.mjs";
+import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
@@ -1108,8 +1108,7 @@ function emit(payload) {
   // Every agent this driver sends out is waited on through a set; a dispatch
   // printed without one would be read from disk while it is still working.
   if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
-  const board = payload.set?.[BOARD];
-  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...(board ? { board } : {}), ...instructionFor(payload) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...instructionFor(payload) }, null, 2)}\n`);
 }
 
 // --- dispatched sets ---------------------------------------------------------
@@ -1187,30 +1186,14 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
   // Each entry keeps the agent, model and effort exactly as printed — an
   // escalated fixer's raised pair, the runner's own — because `finish` compares
   // what ran against this and must never work the request out again later.
-  const recorded = await recordSet({
+  await recordSet({
     dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing,
-    ...(ctx.config.progressBoard === false ? {} : { board: { header: boardHeader(ctx, id, kind) } }),
     agents: agents.map(({ dispatch, name }) => ({
       label: dispatch.description, name, output: expectedOutput(dispatch),
       request: { agent: dispatch.agent ?? null, model: dispatch.model ?? null, effort: dispatch.effort ?? null }
     }))
   });
-  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description), board: renderBoard(recorded) };
-}
-
-// The line a set's progress board opens with, built as the set goes out and
-// never updated: which unit is in progress out of how many, how many have
-// merged, and which have not started. A set of no unit (`id` null) names its
-// step where a unit would go. The count includes the fix units a whole-plan
-// check has made, which is why it can grow near the end.
-function boardHeader(ctx, id, kind) {
-  const units = [...(dependencyEntered(ctx) ? [DEPENDENCY_ID] : []), ...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
-  const merged = units.filter((unit) => stateOf(ctx, unit) === "merged").length;
-  const queued = units.filter((unit) => unit !== id && [null, "pending"].includes(stateOf(ctx, unit)));
-  const where = id === null
-    ? `${kind.startsWith("whole-plan") ? "The whole-plan check" : "Resolving the merge that lands the plan"}, ${units.length} units`
-    : `${isFixUnitId(id) || isDependencyId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
-  return `${where} · ${merged} merged · ${queued.length ? `queued: ${queued.join(", ")}` : "nothing queued"}`;
+  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description) };
 }
 
 /**
@@ -1227,10 +1210,7 @@ async function sendForSnapshot(ctx, id, { kind, round = null, dispatch, job }) {
 
 // What a payload carries about its set: the labels, and the arrival command with
 // the set already named, so only the label is left to append.
-// A freshly sent set's board rides on it under a key `JSON.stringify` skips, and
-// `emit` prints it beside the set.
-const BOARD = Symbol("board");
-const setPayload = ({ id, dir, labels, board }) => ({ id, labels, arrive: arriveCommand(dir, id), ...(board ? { [BOARD]: board } : {}) });
+const setPayload = ({ id, dir, labels }) => ({ id, labels, arrive: arriveCommand(dir, id) });
 
 /**
  * Refuse, changing nothing, unless `set` is in. A set released by a restart is

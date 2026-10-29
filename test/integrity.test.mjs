@@ -302,13 +302,38 @@ test("the configure command asks about both of the settings a person can only ge
 
 // Version 11's settings are required so that nobody ships before seeing them,
 // which only holds if configure puts each one to the person by name.
-// `progressBoard` is optional, and is asked all the same: configure always
-// writes it, and a dropped question would leave the person no way to learn it.
 test("the configure command asks about every setting version 11 added", () => {
   const items = thenAskItems(read("commands", "configure.md"));
-  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps", "progressBoard"]) {
+  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps"]) {
     assert.ok(items.some((item) => item.includes(`\`${key}\``)), `no numbered question in configure.md asks about ${key}`);
   }
+});
+
+// `progressBoard` is retired: configure carries it out of a version-11 file and
+// asks nothing about it.
+test("configure asks no question about progressBoard", () => {
+  const asking = thenAskItems(read("commands", "configure.md")).filter((item) => item.includes("`progressBoard`"));
+  assert.deepEqual(asking, [], `a numbered question in configure.md names progressBoard:\n${asking.join("\n")}`);
+});
+
+// No command prints a progress board any more, so none may tell the main session
+// to show one. The key is named `progressBoard`, which is not the word.
+const boardMentions = (name, text) => text.split("\n").flatMap((line, index) =>
+  /\bboard\b/i.test(line) ? [`${name}:${index + 1} mentions a board: ${line.trim()}`] : []);
+
+test("no command file mentions a board", () => {
+  const problems = commandFiles.flatMap((file) => boardMentions(`commands/${file}`, read("commands", file)));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the board guard fails on the wording commands had and passes the key's name", () => {
+  const shipBullet = "- **`board`** — present only when the progress board is on, with a `dispatch`\n"
+    + "  and on an arrival. Show it to the person exactly as printed, as Markdown,\n"
+    + "  before you put the dispatch into one message.";
+  assert.equal(boardMentions("commands/ship.md", shipBullet).length, 1);
+  assert.equal(boardMentions("commands/plan.md", "Show the board to the person.").length, 1);
+  assert.equal(boardMentions("commands/plan.md", "SHOW THE BOARD").length, 1);
+  assert.deepEqual(boardMentions("commands/configure.md", "Drop `progressBoard` from the file. A keyboard, a dashboard."), []);
 });
 
 // `autoMerge` does nothing, so no question may ask about it, and a configuration
