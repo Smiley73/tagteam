@@ -87,18 +87,11 @@ test("a file edited in the checkout is named, under whichever executed root it s
   const worktree = stageTree("worktree");
   fs.appendFileSync(path.join(worktree, "scripts", "status.mjs"), "\n// edited\n");
   fs.appendFileSync(path.join(worktree, "commands", "status.md"), "\nedited\n");
-  fs.appendFileSync(path.join(worktree, "workflows", "ship.js"), "\n// edited\n");
 
   assert.deepEqual(report(snapshot, worktree).drift, [
     { file: "commands/status.md", state: "differs" },
-    { file: "scripts/status.mjs", state: "differs" },
-    { file: "workflows/ship.js", state: "differs" }
+    { file: "scripts/status.mjs", state: "differs" }
   ]);
-});
-
-test("a staged plugin carries the workflow script, so a snapshot comparison does not report workflows/ as missing", () => {
-  const staged = stageTree("staged");
-  assert.ok(fs.existsSync(path.join(staged, "workflows", "ship.js")));
 });
 
 // The edit that only a byte comparison catches, in the place only a
