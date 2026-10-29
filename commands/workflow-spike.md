@@ -13,15 +13,16 @@ workflow does here can be watched. It touches nothing in this repository.
 `$P` is `${CLAUDE_PLUGIN_ROOT}`, `$R` is the repository root, from
 `git rev-parse --show-toplevel`.
 
-**Arguments.** `$ARGUMENTS` is empty, or any of the two words `long` and
-`raised-stall`, in either order. `long` makes one agent stay silent for about 20
-minutes; `raised-stall` also gives that agent a stall allowance of 45 minutes. No
+**Arguments.** `$ARGUMENTS` is empty, or any of `long`, `raised-stall` and
+`silent=<minutes>` (a whole number), in any order. `long` makes one agent stay
+silent for about 20 minutes, or for the minutes `silent=` gives (which implies
+`long`; it needs no raised Bash ceiling when under 10); `raised-stall` also gives that agent a stall allowance of 45 minutes. No
 word means mode `normal` and stall `default`; `long` alone means mode `long` and
 stall `default`; `raised-stall` alone means mode `normal` and stall `raised`.
-Anything else: say that only those two words are accepted, and start nothing.
+Anything else: say that only those words are accepted, and start nothing.
 
 **Long mode.** In one sentence, tell the person that the Bash tool's ceiling,
-the `BASH_MAX_TIMEOUT_MS` setting, must have been raised above 30 minutes before
+the `BASH_MAX_TIMEOUT_MS` setting, must have been raised above the silence (30 minutes for the 20-minute default) before
 this session started, or the long call ends at the tool's limit and the run
 measures that instead of the stall detector. Do not set it for them.
 
@@ -33,7 +34,7 @@ measures that instead of the stall detector. Do not set it for them.
 2. Make one Workflow call naming the workflow `tagteam:ship` (the plugin
    registers it under that name, which is what the `Workflow(tagteam:ship)`
    grant matches), with `args` of
-   `{"repo": "$R", "pluginRoot": "$P", "mode": "<normal|long>", "stall": "<default|raised>"}`,
+   `{"repo": "$R", "pluginRoot": "$P", "mode": "<normal|long>", "stall": "<default|raised>", "silentMinutes": <minutes, omitted unless silent= was given>}`,
    the paths written out.
 3. Say in one line what to watch: the Background tasks pane, the approval card
    if one appears, and the two agents, `Implement spec 01-spike` and

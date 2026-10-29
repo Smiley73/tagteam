@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.5
+
+- Let the throwaway `/tagteam:workflow-spike` take `silent=<minutes>`, so how a workflow treats a quiet agent can be tried at a few minutes without raising the Bash timeout. Nothing else changes, and the command will still be removed.
+
 ## 0.13.4
 
 - Add `/tagteam:workflow-spike`, a throwaway command that tries a Claude Code workflow from this plugin on a toy project, so its behaviour in a session can be watched before anything is built on it. Planning, shipping, configuring and the cost report are unchanged, and the command will be removed.

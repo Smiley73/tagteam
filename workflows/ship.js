@@ -23,11 +23,14 @@ input = input || {};
 const { repo, pluginRoot } = input;
 const mode = input.mode === "long" ? "long" : "normal";
 const stall = input.stall === "raised" ? "raised" : "default";
+// Minutes of silence in long mode: 20 unless the command passes a whole number.
+const silentMinutes = Number.isInteger(input.silentMinutes) && input.silentMinutes > 0 ? input.silentMinutes : 20;
 
 log(`repo: ${JSON.stringify(repo)}`);
 log(`pluginRoot: ${JSON.stringify(pluginRoot)}`);
 log(`mode: ${mode}`);
 log(`stall: ${stall}`);
+log(`silentMinutes: ${silentMinutes}`);
 
 if (typeof repo !== "string" || !repo || typeof pluginRoot !== "string" || !pluginRoot) {
   log("the repository root or the plugin root is missing -- nothing was dispatched");
@@ -66,7 +69,7 @@ const implementerPrompt = [
   ...(mode === "long" ? [
     "",
     "6. One more task, before step 5: make a single Bash call with the longest timeout the Bash tool allows (set its timeout parameter to the maximum) that runs",
-    `   date -u +%T; sleep 1200; date -u +%T; npm --prefix <that directory> test`,
+    `   date -u +%T; sleep ${silentMinutes * 60}; date -u +%T; npm --prefix <that directory> test`,
     "   and wait for it. Do not poll, split the sleep, or run it in the background. If the tool ends the call early, say when and with what message."
   ] : [])
 ].join("\n");
