@@ -68,16 +68,27 @@ test("a bare publish sends one implementer for the body, waits for it, then open
   const [second] = again.json.dispatch;
   assert.notEqual(again.json.set.id, sent.json.set.id);
   assert.match(factsOf(second).livePullRequest, /pull-request\.md$/);
+  assert.equal(factsOf(second).draft, null, "the body that was sent is on disk still, and is not a draft of anything");
 });
 
-test("a writer's facts hold what the body rules took from the run, less what the driver's own lines already say", () => {
+test("a writer's facts name the kind of unit, and a body written before any pull request exists as the draft", () => {
   const { staged, publish } = publishable();
+  write(path.join(staged.shipDir, "01-a", "pr-body.md"), BODY);
   const facts = factsOf(publish().json.dispatch[0]);
-  assert.deepEqual(Object.keys(facts).sort(), ["draft", "driverRiskLines", "id", "livePullRequest", "notAddressed", "settled", "spent", "unit"]);
   assert.equal(facts.unit, "a spec");
   assert.equal(facts.livePullRequest, null);
   assert.deepEqual(facts.driverRiskLines, []);
-  assert.ok(fs.existsSync(path.join(staged.shipDir, "01-a", "pr-facts.json")));
+  assert.match(facts.draft, /pr-body\.md$/);
+});
+
+test("the budget of CI repairs is in the writer's facts when the checks are red on the candidate and the repairs are at the cap", () => {
+  const { staged, publish } = publishable();
+  const dir = path.join(staged.shipDir, "01-a");
+  const statePath = path.join(dir, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  write(statePath, { ...state, ciRepairsUsed: 1 });
+  write(path.join(dir, "ci.json"), { candidateOid: state.candidateOid, status: "failed" });
+  assert.deepEqual(factsOf(publish().json.dispatch[0]).spent, ["limits.ciRepairs: every one of the 1 repairs it allows was used"]);
 });
 
 test("a repair budget at its cap is not in the writer's facts before the repaired commit's checks have run", () => {
@@ -157,8 +168,85 @@ test("a body left empty is as unusable as a title that is not there", () => {
   write(titleFileOf(writer), "Add subtraction\n");
   arrive(first, [writer.description], at);
   const resent = publish();
-  assert.match(resent.json.dispatch[0].prompt, /the body .*pr-body\.md is missing or empty/);
+  assert.match(resent.json.dispatch[0].prompt, /the body .*pr-body\.md is missing, empty, or was not written since you were sent/);
   assert.deepEqual(prCreates(at), []);
+});
+
+test("a body left from before the writer was sent does not stand for the writer's: a writer that rewrites only its title is sent back", () => {
+  const { at, publish } = publishable();
+  const first = publish();
+  answerBodyWriter(first, BODY, "Add subtraction", at);
+  assert.equal(publish().status, 0);
+
+  const second = publish();
+  const [writer] = second.json.dispatch;
+  assert.ok(fs.existsSync(bodyFileOf(writer)), "the body sent last time is still on disk");
+  write(titleFileOf(writer), "Add subtraction again\n");
+  arrive(second, [writer.description], at);
+  const resent = publish();
+  assert.equal(resent.status, 0, resent.stderr);
+  assert.match(resent.json.dispatch[0].prompt, /Your last attempt was refused[^\n]*the body .*pr-body\.md is missing, empty, or was not written since you were sent/);
+  assert.equal(pullsOf(at)[0].title, "Add subtraction", "the old body went out under the new title");
+});
+
+test("a publish by hand drops the writer pointed at, so the next bare publish sends a fresh writer and not the old one's files", () => {
+  const { staged, at, publish } = publishable();
+  const byHand = () => ship("publish", staged.plan, ["--spec", "01-a", "--title", "By hand", "--body", staged.body], at);
+  const first = publish();
+  const [writer] = first.json.dispatch;
+  write(bodyFileOf(writer), BODY);
+  write(titleFileOf(writer), "Written by the agent\n");
+  arrive(first, [writer.description], at);
+  assert.equal(byHand().status, 0);
+  assert.equal(pullsOf(at)[0].title, "By hand");
+  assert.equal(setOf(staged.shipDir, first.json.set.id).closed.reason, "judged");
+
+  const next = publish();
+  assert.equal(next.status, 0, next.stderr);
+  assert.notEqual(next.json.set.id, first.json.set.id);
+  assert.equal(next.json.dispatch.length, 1, "the agent's old files were published as they stood");
+  assert.equal(pullsOf(at)[0].title, "By hand");
+
+  // A writer still out when the person publishes by hand is not waited on by the next bare publish either.
+  assert.equal(byHand().status, 0);
+  const again = publish();
+  assert.equal(again.status, 0, again.stderr);
+  assert.notEqual(again.json.set.id, next.json.set.id);
+});
+
+test("a spec that already has its pull request still releases or waits on a writer a crashed run left out, and sends no one past it to merge", () => {
+  for (const state of ["publishing", "awaiting-approval"]) {
+    const staged = stagePlan({ specs: 1 });
+    const sessions = sessionsFor(staged);
+    sessions.transcript("A");
+    const as = (run) => ({ ...staged.env, ...sessions.as("A"), TAGTEAM_RUN_ID: run });
+    const { plan } = staged;
+    assert.equal(ship("start", plan, [], as("run-a")).status, 0);
+    driveToPublishable(staged, "01-a", "app.js", A_CHANGE, as("run-a"));
+    answerBodyWriter(ship("publish", plan, ["--spec", "01-a"], as("run-a")), BODY, "Add subtraction", as("run-a"));
+    assert.equal(ship("publish", plan, ["--spec", "01-a"], as("run-a")).status, 0);
+    const statePath = path.join(staged.shipDir, "01-a", "state.json");
+    if (state !== "publishing") {
+      assert.equal(spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "state", statePath, state], { encoding: "utf8" }).status, 0);
+    }
+
+    const again = ship("publish", plan, ["--spec", "01-a"], as("run-a"));
+    assert.equal(again.json.dispatch.length, 1, `${state}: ${again.stdout}`);
+    const kept = ship("begin", plan, ["--spec", "01-a"], as("run-a"));
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.deepEqual(kept.json.set.labels, [again.json.dispatch[0].description], `${state}: the writer was not waited on`);
+    assert.match(kept.json.next, /publish --plan .* --spec 01-a$/);
+
+    const later = ship("begin", plan, ["--spec", "01-a"], as("run-b"));
+    assert.equal(later.status, 0, later.stderr);
+    assert.equal(later.json.set, undefined);
+    assert.match(later.json.say.join("\n"), /earlier run in this session, which has ended; released it/);
+    assert.match(later.json.next, /publish --plan .* --spec 01-a$/, `${state}: begin went on to finish past the writer`);
+    assert.equal(setOf(staged.shipDir, again.json.set.id).closed.reason, "released");
+
+    const judged = ship("publish", plan, ["--spec", "01-a"], as("run-b"));
+    assert.match(judged.json.dispatch[0].prompt, /Your last attempt was refused/, "the writer left nothing, so publish sends one that is told");
+  }
 });
 
 test("a title and body given by hand are sent as they always were, and nothing is dispatched", () => {
@@ -212,7 +300,7 @@ test("a restart releases a writer an earlier run left out, and waits on it when 
   assert.ok(trainOf(shipDir).worktree);
 });
 
-test("with no body file the plan's landing sends the writer, opens the pull request with the title file's title, and sends it again when a disclosure changes", () => {
+test("with no body file the plan's landing sends the writer, and opens the pull request with the title file's title", () => {
   const staged = stageClean();
   const { plan, env } = staged;
   const asked = ship("plan-land", plan, [], env);
@@ -233,7 +321,16 @@ test("with no body file the plan's landing sends the writer, opens the pull requ
   assert.ok(!fs.existsSync(titleFileOf(writer)), "the title was left for a later run to prefer over a title a person gave");
 });
 
-test("a plan writer's unusable files get one fresh writer and then a stop with nothing opened, and a title of the person's own opens the body that is there", () => {
+test("a title of the person's own is taken before the title file's", () => {
+  const staged = stageClean();
+  const { plan, env } = staged;
+  const asked = ship("plan-land", plan, [], env);
+  answerBodyWriter(asked, PLAN_BODY, "Land the demo plan", env);
+  assert.equal(ship("plan-land", plan, ["--title", "From the person"], env).status, 0);
+  assert.equal(planPullOf(env).title, "From the person");
+});
+
+test("a plan writer's unusable files get one fresh writer and then a stop with nothing opened; the title refused twice is never the one a later plain plan-land opens with", () => {
   const staged = stageClean();
   const { plan, env } = staged;
   const first = ship("plan-land", plan, [], env);
@@ -245,31 +342,15 @@ test("a plan writer's unusable files get one fresh writer and then a stop with n
   const resent = ship("plan-land", plan, [], env);
   assert.equal(resent.status, 0, resent.stderr);
   assert.match(bodyWriterOf(resent).prompt, /Your last attempt was refused[^\n]*the title "Land \(the\) plan"/);
+  write(bodyFileOf(bodyWriterOf(resent)), PLAN_BODY);
+  write(titleFileOf(bodyWriterOf(resent)), "Land (the) plan\n");
   arrive(resent, [bodyWriterOf(resent).description], env);
   const stopped = ship("plan-land", plan, [], env);
   assert.equal(stopped.status, 1);
   assert.match(stopped.stderr, /still unusable after a writer was sent back for it once, so nothing was opened/);
   assert.equal(planPullOf(env), null);
+  assert.ok(fs.existsSync(titleFileOf(writer)), "the refused title is on disk for the run after the stop");
 
-  // The body is usable and only its title is not: a title of the person's own opens it.
-  assert.equal(ship("plan-land", plan, ["--title", "From the person"], env).status, 0);
-  assert.equal(planPullOf(env).title, "From the person");
-});
-
-test("a plan's title the writer was refused for twice is not the title a later plain plan-land opens the pull request with", () => {
-  const staged = stageClean();
-  const { plan, env } = staged;
-  const first = ship("plan-land", plan, [], env);
-  const writer = bodyWriterOf(first);
-  write(bodyFileOf(writer), PLAN_BODY);
-  write(titleFileOf(writer), "Land (the) plan\n");
-  arrive(first, [writer.description], env);
-  const resent = ship("plan-land", plan, [], env);
-  arrive(resent, [bodyWriterOf(resent).description], env);
-  assert.equal(ship("plan-land", plan, [], env).status, 1);
-  assert.equal(planPullOf(env), null);
-
-  // The stop left the refused title on disk; without a title of the person's own it must not be used.
   const plain = ship("plan-land", plan, [], env);
   assert.equal(plain.status, 0, plain.stderr);
   const pull = planPullOf(env);

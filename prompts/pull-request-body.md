@@ -3,7 +3,7 @@
 You are given a facts file, and the spec or the plan the pull request is for.
 You write two files, at the paths you are given: the pull request body and its
 title. You write nothing else and change no code. Read the spec or the plan, and
-the facts file, and write the body for whoever reads this pull request cold.
+the facts file.
 
 The facts file says what the pull request is for: `unit` names a spec, the
 dependency unit or a whole-plan fix unit, and the plan's facts carry `lands`
@@ -66,7 +66,10 @@ facts file gives each part:
   lines already say, recommendation included.
 - **A budget that ran out goes there too** — what the change still gets wrong,
   and that `limits.fixRounds` or `limits.ciRepairs` is what a person would raise
-  to let it try again. `spent` names each one that ran out.
+  to let it try again. `spent` names each one that ran out. When its entry says
+  a fresh rewrite of the area was tried and did not settle it, say that too: a
+  fresh rewrite was tried and did not settle it, and merging is the person's to
+  do by hand.
 
 `## Risk` says "nothing known" when there is nothing, rather than being dropped.
 
@@ -97,6 +100,8 @@ it stands, and a person may have edited it by hand. Start from it: keep what the
 wrote and change only what the run changed, `## Risk` above all. `draft`, when
 there is one, is a body written earlier and not yet sent, and a finding about the
 pull request itself may have been answered in it.
+Write the body file out in full even when it would be nearly the same: a body
+not written since you were sent is refused, and so is a title that is missing.
 
 ## The title
 

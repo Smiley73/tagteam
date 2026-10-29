@@ -601,15 +601,22 @@ function pullRequestLines(ctx, id, state) {
   } else if (record.error) {
     say.push(`Pull request #${state.pr.number} could not be read (${record.error}); the readers judge the diff alone.`);
   }
-  const draft = prBodyPath(ctx, id);
-  if (exists(draft)) {
-    const text = composeBody(fs.readFileSync(draft, "utf8"), riskLines(ctx, id));
-    if (record.body === null || text.trim() !== record.body.trim()) {
-      lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
-      say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
-    }
+  const draft = unsentDraft(ctx, id, record);
+  if (draft) {
+    lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
+    say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
   }
   return { lines, say };
+}
+
+// The file at `pr-body.md` while it is a body not yet sent: it is there and
+// either no pull request exists or it differs from the live body as it would be
+// sent. One sent already stays on disk, and is not a draft of anything.
+function unsentDraft(ctx, id, record) {
+  const draft = prBodyPath(ctx, id);
+  if (!exists(draft)) return null;
+  const text = composeBody(fs.readFileSync(draft, "utf8"), riskLines(ctx, id));
+  return record.body === null || text.trim() !== record.body.trim() ? draft : null;
 }
 
 // What the orchestrator is told about findings no fixer can reach, wherever
@@ -2996,6 +3003,17 @@ async function begin(options) {
     emit({ say, ask: `${id} is recorded as failed. Say what it set out to deliver and what stopped it, and ask before doing anything with it. To retry from scratch: \`gates.mjs state ... pending\` by hand, then rerun begin.`, state: state.state });
     return;
   }
+  // A writer a bare publish sent for this candidate and a crashed run never
+  // saw arrive is released, waited on or judged before anything else is done
+  // with a spec that already has its pull request: the next publish sends what
+  // it wrote, and nothing else may merge past it.
+  const writer = ["publishing", "awaiting-approval"].includes(state.state) ? pendingWriter(ctx, id, state) : null;
+  if (writer) {
+    const restarted = await restartPointed(ctx, id, [{ set: writer.set, step: "publish", dir: setDir(ctx, id, writer.set) }], options);
+    say.push(...restarted.say);
+    return emit(heldByRestart(ctx, id, state, restarted, say)
+      ?? { say: [...say, `${id} already has a pull request, and the agent writing its next body was interrupted; publish judges what it left.`], next: nextCommand(ctx, "publish", id) });
+  }
   // A wait for checks is taken up again, not ended: ending it is a person's
   // call, and finish is what ends it.
   const waiting = state.state === "publishing" && state.pr?.number ? readJson(ciPath(ctx, id), null) : null;
@@ -3013,22 +3031,8 @@ async function begin(options) {
     // still working as one that changed nothing. See `setsOnRestart`.
     const restarted = await setsOnRestart(ctx, id, state, options);
     say.push(...restarted.say);
-    if (restarted.ask) {
-      return emit({ say, ask: restarted.ask, answers: restarted.answers, state: state.state });
-    }
-    if (restarted.waiting) {
-      const { set, step, missing, dir } = restarted.waiting;
-      const why = step === "snapshot"
-        ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was committed, and snapshot takes its work once it has.`
-        : step === "publish"
-          ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was published, and publish sends what it writes once it has.`
-          : `the review it sent out is still running; nothing was rebuilt, and ${step} judges it once the rest are in.`;
-      return emit({
-        say: [...say, `${id} was interrupted while ${state.state}, and ${why}`],
-        set: { id: set, labels: missing.map((agent) => agent.label), arrive: arriveCommand(dir, set) },
-        next: nextCommand(ctx, step, id)
-      });
-    }
+    const held = heldByRestart(ctx, id, state, restarted, say);
+    if (held) return emit(held);
     return emit({
       say: [...say, `${id} was interrupted while ${state.state}; resuming from whatever is committed on ${branch}.`],
       next: nextCommand(ctx, "snapshot", id)
@@ -3045,6 +3049,24 @@ async function begin(options) {
   const dispatch = implementerDispatch(ctx, spec, job);
   const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
+}
+
+// What `begin` gives back while the restart rule leaves a set to the person or
+// to the agents still working on it; null when nothing is held.
+function heldByRestart(ctx, id, state, restarted, say) {
+  if (restarted.ask) return { say, ask: restarted.ask, answers: restarted.answers, state: state.state };
+  if (!restarted.waiting) return null;
+  const { set, step, missing, dir } = restarted.waiting;
+  const why = step === "snapshot"
+    ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was committed, and snapshot takes its work once it has.`
+    : step === "publish"
+      ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was published, and publish sends what it writes once it has.`
+      : `the review it sent out is still running; nothing was rebuilt, and ${step} judges it once the rest are in.`;
+  return {
+    say: [...say, `${id} was interrupted while ${state.state}, and ${why}`],
+    set: { id: set, labels: missing.map((agent) => agent.label), arrive: arriveCommand(dir, set) },
+    next: nextCommand(ctx, step, id)
+  };
 }
 
 // The configured worktree.setup commands, which bring what the worktree has
@@ -3190,8 +3212,8 @@ async function setsOnRestart(ctx, id, state, options) {
   if (collected && collected.candidate === state.candidateOid && collected.set) pointed.push({ set: collected.set, step: "collect" });
   const single = readJson(snapshotSetPath(ctx, id), null);
   if (single?.set) pointed.push({ set: single.set, step: "snapshot" });
-  const writer = readJson(bodyWriterPath(ctx, id), null);
-  if (writer?.set && writer.candidate === state.candidateOid) pointed.push({ set: writer.set, step: "publish" });
+  const writer = pendingWriter(ctx, id, state);
+  if (writer) pointed.push({ set: writer.set, step: "publish" });
   return restartPointed(ctx, id, pointed.map((entry) => ({ ...entry, dir: setDir(ctx, id, entry.set) })), options);
 }
 
@@ -4408,11 +4430,13 @@ function bodyWriterDispatch(ctx, job, { description, subject, facts, body, title
 const titleOf = (file) => (exists(file) ? fs.readFileSync(file, "utf8").trim() : null);
 
 // What a writer's two files are held to, as a list of what is wrong with them.
-// A body is usable when it is there and says something; a title when it follows
-// the title rule.
-function writerProblems(bodyFile, titleFile) {
+// A body is usable when it was written after the writer was sent and says
+// something — a body from before is the one sent last time, or a draft, and
+// would pass for the writer's own — and a title when it follows the title rule.
+function writerProblems(bodyFile, titleFile, sentAt) {
   const problems = [];
-  if (!exists(bodyFile) || fs.readFileSync(bodyFile, "utf8").trim() === "") problems.push(`the body ${bodyFile} is missing or empty`);
+  const fresh = exists(bodyFile) && fs.statSync(bodyFile).mtimeMs >= Date.parse(sentAt);
+  if (!fresh || fs.readFileSync(bodyFile, "utf8").trim() === "") problems.push(`the body ${bodyFile} is missing, empty, or was not written since you were sent`);
   const title = titleOf(titleFile);
   if (title === null) problems.push(`the title ${titleFile} is missing`);
   else if (!TITLE.test(title)) problems.push(`the title ${JSON.stringify(title)} must be at most 70 characters of letters, digits, spaces and . _ : -`);
@@ -4448,7 +4472,8 @@ function spentBudgets(ctx, id, state) {
   const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
   const forFixer = (review?.open ?? []).some((finding) => !isPullRequestFinding(finding));
   if (forFixer && !exists(goalConflictPath(ctx, id)) && (state.fixRoundsUsed ?? 0) >= limits.fixRounds) {
-    spent.push(`limits.fixRounds: every one of the ${limits.fixRounds} fix rounds it allows was used`);
+    spent.push(`limits.fixRounds: every one of the ${limits.fixRounds} fix rounds it allows was used`
+      + (redesignUsed(ctx, id, state) ? ", and the cycle's one fresh rewrite of the area was tried and did not settle it" : ""));
   }
   const checks = readJson(ciPath(ctx, id), null);
   const red = (checks?.candidateOid === state.candidateOid && checks.status === "failed") || landingFailure(state) !== null;
@@ -4463,7 +4488,6 @@ function spentBudgets(ctx, id, state) {
 function bodyWriterFacts(ctx, id, state) {
   const spent = spentBudgets(ctx, id, state);
   const live = pullRequestRecord(ctx, id, state);
-  const draft = prBodyPath(ctx, id);
   return {
     unit: isDependencyId(id) ? "the dependency unit" : isFixUnitId(id) ? "a whole-plan fix unit" : "a spec",
     id,
@@ -4473,8 +4497,15 @@ function bodyWriterFacts(ctx, id, state) {
     driverRiskLines: riskLines(ctx, id),
     livePullRequest: live.path,
     ...(live.error ? { livePullRequestError: live.error } : {}),
-    draft: exists(draft) ? draft : null
+    draft: unsentDraft(ctx, id, live)
   };
+}
+
+// The writer set `publish` sent for this candidate and has not consumed — on
+// disk, so that a pointer left by a set that is gone is not waited on.
+function pendingWriter(ctx, id, state) {
+  const pointer = readJson(bodyWriterPath(ctx, id), null);
+  return pointer?.set && pointer.candidate === state.candidateOid && readSet(setDir(ctx, id, pointer.set), pointer.set) ? pointer : null;
 }
 
 async function sendBodyWriter(ctx, id, state, { problems = [], resent = false } = {}) {
@@ -4505,15 +4536,13 @@ async function sendBodyWriter(ctx, id, state, { problems = [], resent = false } 
  * send one fresh writer told what was wrong; a second unusable pair is a stop
  * with no writer left pointed at, so the next `publish` starts again.
  */
-async function writtenBody(ctx, id, state) {
-  const pointer = readJson(bodyWriterPath(ctx, id), null);
-  if (!pointer?.set || pointer.candidate !== state.candidateOid) {
+async function writtenBody(ctx, id, state, pointer) {
+  if (!pointer) {
     await sendBodyWriter(ctx, id, state);
     return null;
   }
-  requireSetIn(ctx, id, pointer.set, "publish");
-  const problems = writerProblems(prBodyPath(ctx, id), prTitlePath(ctx, id));
-  if (problems.length === 0) return { title: titleOf(prTitlePath(ctx, id)), body: prBodyPath(ctx, id), set: pointer.set };
+  const problems = writerProblems(prBodyPath(ctx, id), prTitlePath(ctx, id), pointer.at);
+  if (problems.length === 0) return { title: titleOf(prTitlePath(ctx, id)), body: prBodyPath(ctx, id) };
   await closeReviewSet(ctx, id, pointer.set);
   if (!pointer.resent) {
     await sendBodyWriter(ctx, id, state, { problems, resent: true });
@@ -4529,13 +4558,14 @@ async function publish(options) {
   const id = options.spec;
   const state = readState(ctx, id);
   let { title, body } = options;
-  let written = null;
-  if (title === undefined && body === undefined) {
-    written = await writtenBody(ctx, id, state);
+  const byHand = title !== undefined || body !== undefined;
+  if (byHand && (!title || !body)) throw new Stop("publish needs --title <text> and --body <file> together, or neither, to have a writer write them");
+  const pending = pendingWriter(ctx, id, state);
+  if (!byHand) {
+    if (pending) requireSetIn(ctx, id, pending.set, "publish");
+    const written = await writtenBody(ctx, id, state, pending);
     if (!written) return;
     ({ title, body } = written);
-  } else if (!title || !body) {
-    throw new Stop("publish needs --title <text> and --body <file> together, or neither, to have a writer write them");
   }
   if (!TITLE.test(title)) throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -");
   if (!exists(body)) throw new Stop(`the body file ${body} does not exist`);
@@ -4556,11 +4586,13 @@ async function publish(options) {
   node("gates.mjs", ["pr", statePath(ctx, id), String(view.number), view.url, view.headRefOid]);
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
-  if (written) {
-    await closeReviewSet(ctx, id, written.set);
-    fs.rmSync(bodyWriterPath(ctx, id), { force: true });
-    fs.rmSync(prTitlePath(ctx, id), { force: true });
-  }
+  // Consumed by any publish that went through, a body sent by hand included, so
+  // the next bare one sends a fresh writer rather than reading these again. A
+  // writer still out when a person publishes by hand has nothing left to judge,
+  // and is not closed: only a restart closes a set with an agent out.
+  if (pending && readiness({ dir: setDir(ctx, id, pending.set), id: pending.set }).answer !== "refused") await closeReviewSet(ctx, id, pending.set);
+  fs.rmSync(bodyWriterPath(ctx, id), { force: true });
+  fs.rmSync(prTitlePath(ctx, id), { force: true });
   if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
   emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
 }
@@ -5829,7 +5861,7 @@ async function judgePlanBodyWriter(ctx, facts, options, say) {
       return { say, set: { id: set, labels: missing.map((entry) => entry.label), arrive: arriveCommand(at, set) }, next: nextCommand(ctx, "plan-land", null) };
     }
   }
-  const problems = writerProblems(facts.path, planTitlePath(ctx));
+  const problems = writerProblems(facts.path, planTitlePath(ctx), pointer.at);
   await closeSet({ dir, id: pointer.set });
   fs.rmSync(planWriterPath(ctx), { force: true });
   if (problems.length === 0) return null;

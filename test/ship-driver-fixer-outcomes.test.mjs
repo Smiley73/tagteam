@@ -101,6 +101,22 @@ test("after a fixer the settle prints its table, one addressed row and one not, 
   assert.deepEqual(facts.notAddressed.map((row) => [row.id, row.severity, row.addressed, row.recommendation]),
     [["1.correctness.2", "major", false, "needs a person"]]);
   assert.deepEqual(facts.spent, ["limits.fixRounds: every one of the 1 fix rounds it allows was used"], "the budget ran out with a finding still open");
+  assert.match(facts.settled.join("\n"), /1\.correctness\.2/, "settle's say, with the finding still open, reaches the writer");
+});
+
+test("a fix budget that ran out after the cycle's one rewrite tells the writer the rewrite was tried and did not settle it", () => {
+  const staged = stagePlan({ specs: 1 });
+  const cycle = begun(staged, { fixRounds: 1 });
+  panelRaises(cycle, staged.shipDir, 1, [titled("sub adds")]);
+  fixWith(cycle, [{ id: "1.correctness.1", outcome: "failed", note: "could not find where the sign goes" }]);
+  cycle.run("snapshot");
+  cycle.run("verify");
+  recheckJudging(cycle, () => false);
+  // `redesign` writes this record before it dispatches the rewrite; the rewrite's round is the one past the cap.
+  write(path.join(staged.shipDir, ID, "redesign-cycle.json"), { scope: "repair:0", at: new Date().toISOString() });
+  assert.match(cycle.run("fix").json.next, /publish/);
+  const facts = JSON.parse(fs.readFileSync(factsFileOf(cycle.run("publish").json.dispatch[0]), "utf8"));
+  assert.deepEqual(facts.spent, ["limits.fixRounds: every one of the 1 fix rounds it allows was used, and the cycle's one fresh rewrite of the area was tried and did not settle it"]);
 });
 
 test("a fix budget at its cap is not in the writer's facts when the round it paid for left the review clean", () => {
