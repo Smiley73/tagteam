@@ -5850,7 +5850,10 @@ async function openPlanPullRequest(ctx, record, tip, options, say) {
   }
   const sent = sentBody(ctx, fs.readFileSync(file, "utf8"), tip);
   const hash = createHash("sha256").update(sent.text).digest("hex");
-  const title = options.title ?? titleOf(planTitlePath(ctx)) ?? record.title ?? defaultTitle(ctx);
+  // The writer's title counts only if it passes the rule a person's own title is held to:
+  // one refused twice is left on disk, and must not be what the pull request opens with.
+  const written = titleOf(planTitlePath(ctx));
+  const title = options.title ?? (written && TITLE.test(written) ? written : null) ?? record.title ?? defaultTitle(ctx);
   let view = record.pr?.number ? viewPlanPr(ctx, record.pr.number) : viewPlanPr(ctx, route.branch, { allowMissing: true });
   if (view && (view.state !== "OPEN" || view.baseRefName !== route.base)) view = null;
   if (!view) {

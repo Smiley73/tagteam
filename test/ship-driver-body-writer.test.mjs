@@ -218,6 +218,28 @@ test("a plan writer's unusable files get one fresh writer and then a stop with n
   assert.equal(planPullOf(env).title, "From the person");
 });
 
+test("a plan's title the writer was refused for twice is not the title a later plain plan-land opens the pull request with", () => {
+  const staged = stageClean();
+  const { plan, env } = staged;
+  const first = ship("plan-land", plan, [], env);
+  const writer = bodyWriterOf(first);
+  write(bodyFileOf(writer), PLAN_BODY);
+  write(titleFileOf(writer), "Land (the) plan\n");
+  arrive(first, [writer.description], env);
+  const resent = ship("plan-land", plan, [], env);
+  arrive(resent, [bodyWriterOf(resent).description], env);
+  assert.equal(ship("plan-land", plan, [], env).status, 1);
+  assert.equal(planPullOf(env), null);
+
+  // The stop left the refused title on disk; without a title of the person's own it must not be used.
+  const plain = ship("plan-land", plan, [], env);
+  assert.equal(plain.status, 0, plain.stderr);
+  const pull = planPullOf(env);
+  assert.ok(pull, "the pull request was not opened");
+  assert.notEqual(pull.title, "Land (the) plan");
+  assert.match(pull.title, /^[A-Za-z0-9 ._:-]{1,70}$/);
+});
+
 test("a plan writer an earlier run left out is released by a later run of the same session, and the landing goes on to a fresh one", () => {
   const staged = stageClean();
   const { plan, env } = staged;
