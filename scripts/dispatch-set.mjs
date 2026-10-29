@@ -43,6 +43,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireLock } from "./lib/locks.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { checksumOf } from "./lib/step-helper.mjs";
 import { projectDirectoryFor, resolveSession } from "./usage.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -549,10 +550,12 @@ async function main() {
   try {
     const { sub, options, labels } = parseArgs(process.argv.slice(2));
     const payload = await COMMANDS[sub](options, labels);
-    process.stdout.write(`${JSON.stringify({ ok: true, ...payload }, null, 2)}\n`);
+    const printed = { ok: true, ...payload };
+    process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
   } catch (error) {
-    process.stderr.write(`${error.message}\n`);
+    const stop = `${error.message}\n`;
     process.exitCode = error.exitCode ?? 1;
+    process.stderr.write(`${stop}checksum: ${checksumOf({ exit: process.exitCode, stop: stop.split("\n")[0] })}\n`);
   }
 }
 

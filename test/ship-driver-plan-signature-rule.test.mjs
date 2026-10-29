@@ -84,7 +84,8 @@ test("a read of the base's rules that fails at plan-land, with git here not sign
     assert.ok(read.includes("repos/{owner}/{repo}/rules/branches/main"), "plan-land did not read the base's rules");
     fs.rmSync(staged.dir, { recursive: true, force: true });
     const dirs = [staged.dir, fs.realpathSync.native(path.dirname(staged.dir)) + path.sep + path.basename(staged.dir)];
-    return [landed.stdout, landed.stderr].map((text) => dirs.reduce((at, name) => at.replaceAll(name, "<dir>"), text));
+    // The checksum covers the path the output names, so it differs with the directory.
+    return [landed.stdout, landed.stderr].map((text) => dirs.reduce((at, name) => at.replaceAll(name, "<dir>"), text).replace(/("checksum": ")[0-9a-f]+/, "$1<sum>"));
   });
   assert.deepEqual(outputs[0], outputs[1]);
 });

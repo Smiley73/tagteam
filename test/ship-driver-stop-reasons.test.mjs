@@ -19,8 +19,10 @@ const failingGh = (staged) => {
   return { ...staged.env, PATH: `${bin}${path.delimiter}${staged.env.PATH}` };
 };
 
+// The stop's own lines: every stop ends with a checksum line, which is not part of what a person reads.
 const leadAndRaw = (result) => {
   const lines = result.stderr.trimEnd().split("\n");
+  assert.match(lines.pop(), /^checksum: [0-9a-f]+$/);
   return { lead: lines[0], raw: lines.slice(1).join("\n") };
 };
 

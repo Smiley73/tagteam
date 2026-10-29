@@ -28,11 +28,13 @@
 // guard — the round store, the state machine, the gates — so the invariants their
 // tests prove hold here by construction.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import { checksumOf } from "./lib/step-helper.mjs";
 import {
   DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
   dependencyUnitDir, disclosureLines, isDependencyId, makeUpgrade, openQuestions, questionText, readAudit, readDeclines,
@@ -1108,7 +1110,8 @@ function emit(payload) {
   // Every agent this driver sends out is waited on through a set; a dispatch
   // printed without one would be read from disk while it is still working.
   if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
-  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...instructionFor(payload) }, null, 2)}\n`);
+  const printed = { ok: true, ...payload, ...instructionFor(payload) };
+  process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
 }
 
 // --- dispatched sets ---------------------------------------------------------
@@ -3044,8 +3047,23 @@ async function begin(options) {
 
 // The configured worktree.setup commands, which bring what the worktree has
 // installed up to the lockfile it holds; null when they succeed, otherwise why not.
+// What the commands print is kept off this driver's own streams: stderr's first
+// line is the one a stop's checksum covers, so it can never be a setup command's
+// output. A failure carries that output beneath its reason instead.
 async function bringUpToLockfile(ctx) {
-  try { await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-setup-"));
+  const log = path.join(dir, "output");
+  const fd = fs.openSync(log, "w", 0o600);
+  try {
+    await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", fd, fd] });
+    return null;
+  } catch (error) {
+    const output = fs.readFileSync(log, "utf8").trim();
+    return output ? `${error.message}\n${output}` : error.message;
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // The dependency unit's `begin`, in place of an implementer: the ship makes the
@@ -7533,8 +7551,9 @@ async function main() {
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
     await run(options);
   } catch (error) {
-    process.stderr.write(`${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`);
+    const stop = `${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`;
     process.exitCode = error?.exitCode ?? 1;
+    process.stderr.write(`${stop}checksum: ${checksumOf({ exit: process.exitCode, stop: stop.split("\n")[0] })}\n`);
   }
 }
 

@@ -23,6 +23,7 @@ import {
   status
 } from "../scripts/dispatch-set.mjs";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
+import { checksumOf } from "../scripts/lib/step-helper.mjs";
 
 const SCRIPT = path.join(import.meta.dirname, "..", "scripts", "dispatch-set.mjs");
 
@@ -74,7 +75,11 @@ function childEnv(home) {
 
 function cli(ws, args) {
   const result = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", env: childEnv(ws.home) });
-  return { ...result, json: result.status === 0 ? JSON.parse(result.stdout) : null };
+  if (result.status !== 0) return { ...result, json: null };
+  // Every payload ends with the checksum of what it carries; the tests below read the rest.
+  const { checksum, ...json } = JSON.parse(result.stdout);
+  assert.equal(checksum, checksumOf(json), `${args[0]} printed a wrong or missing checksum`);
+  return { ...result, json };
 }
 
 // --- arrivals -----------------------------------------------------------------

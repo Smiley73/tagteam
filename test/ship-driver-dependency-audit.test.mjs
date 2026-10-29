@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { checksumOf } from "../scripts/lib/step-helper.mjs";
 import {
   arriveAll, findings, git, major, outputOf, resultOf, ship, stagePlan, trainOf, write
 } from "./ship-stage.mjs";
@@ -32,6 +33,7 @@ fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\\n");
 // it "installs" is the lockfile it ran against, kept at INSTALLED the way
 // node_modules keeps an install: outside what git puts back or cleans.
 const SETUP = `import fs from "node:fs";
+if (process.env.SETUP_BANNER) { console.log(process.env.SETUP_BANNER); console.error(process.env.SETUP_BANNER); }
 const count = (fs.existsSync(process.env.SETUP_COUNT) ? Number(fs.readFileSync(process.env.SETUP_COUNT, "utf8")) : 0) + 1;
 fs.writeFileSync(process.env.SETUP_COUNT, String(count));
 if (count === Number(process.env.SETUP_FAIL_AT)) process.exit(1);
@@ -279,6 +281,20 @@ test("upgrades that fail verify only together are all left out, and what the wor
   assert.deepEqual(versions(lockIn(path.join(worktree, "package-lock.json"))), ["4.17.15", "1.2.0"]);
   assert.deepEqual(versions(lockIn(env.INSTALLED)), ["4.17.15", "1.2.0"], "what setup installed is the base lockfile, not the last trial's upgrades");
   assert.equal(staged.begin("01-a").status, 0, "the spec is no longer held");
+});
+
+test("what the worktree setup prints never comes before a stop's reason, so the stop's checksum covers its first line", () => {
+  const staged = stageDependencies({
+    audit: report([["minimist", "GHSA-mini", "<1.2.8", "1.2.8"], ["lodash", "GHSA-lo", "<4.17.21", "4.17.21"]]), failOn: "minimist@1.2.8&lodash@4.17.21"
+  });
+  const { plan, env } = staged;
+  assert.equal(ship("start", plan, [], env).status, 0);
+  const stopped = ship("begin", plan, ["--spec", UNIT], { ...env, SETUP_FAIL_AT: "5", SETUP_BANNER: "setup-banner" });
+  assert.notEqual(stopped.status, 0);
+  const lines = stopped.stderr.trimEnd().split("\n");
+  assert.match(lines[0], /^The dependency upgrades were dropped /, "the reason comes first, not the setup's output");
+  assert.equal(lines.at(-1), `checksum: ${checksumOf({ exit: stopped.status, stop: lines[0] })}`);
+  assert.match(stopped.stderr, /worktree setup command failed \(1\): node setup\.mjs\nsetup-banner\nsetup-banner/, "the output is kept beneath the reason");
 });
 
 test("verify failing on the base itself blames no upgrade", () => {

@@ -303,11 +303,15 @@ plugin ships one agent per role — `tagteam:implementer`, `tagteam:fixer`,
 `model`, exactly as `ship.mjs` printed them, and a plan does the same with what
 `plan.mjs dispatch` printed. An effort left off does not fail: the agent
 silently runs at whatever effort the session uses. No role agent's file pins a
-model or an effort, so nothing but the call decides either. The one exception is
-`tagteam:codex-runner`, whose file pins its own fixed pair, `haiku` at `low` —
-what that plumbing agent runs at, which no configuration reaches; it is passed
-that pair as printed. The configured Codex model and effort belong to the Codex
-process it starts, and are already in the command file it is handed.
+model, so nothing but the call decides it, and outside a workflow run nothing but
+the call decides an effort either. Two plumbing agents pin a fixed pair:
+`tagteam:codex-runner`, `haiku` at `low`, and `tagteam:step-helper`, `sonnet` at
+`low`. Each is passed that pair as printed. The configured Codex model and effort
+belong to the Codex process the runner starts, and are already in the command
+file it is handed. While a per-call effort is not shown to apply inside a
+workflow run, the reviewer, adversary and plan-reviewer files also carry an
+effort, the configured one for the role's first job, and that is the one a
+workflow run uses.
 
 The agent files in `agents/` are written by hand, one per role.
 
