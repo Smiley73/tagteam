@@ -459,11 +459,21 @@ export function collateral(before, after, target, ecosystem) {
   return problems;
 }
 
-/** Whether `cwd` no longer holds the version the audit found installed: the upgrade was made already, or something else moved it. */
+/**
+ * Whether `cwd` already holds the upgrade: every resolved version of the package
+ * is at or past the proposed one. A package the base moved to another version
+ * still short of it, between the audit and now, has not been upgraded. For a
+ * target the ship cannot class, which only a person's approval brings here, all
+ * that can be read is whether the audited version is gone.
+ */
 export function alreadyUpgraded(finding, cwd) {
   try {
     const versions = resolvedVersions(finding.manager, cwd).get(listedAs(finding.manager, finding.name)) ?? [];
-    return versions.length > 0 && !versions.includes(finding.installed);
+    if (versions.length === 0) return false;
+    const ecosystem = ECOSYSTEM[finding.manager];
+    const wanted = parseVersion(finding.proposed, ecosystem);
+    if (!wanted) return !versions.includes(finding.installed);
+    return versions.every((version) => { const got = parseVersion(version, ecosystem); return Boolean(got) && compare(got, wanted) >= 0; });
   } catch {
     return false;
   }

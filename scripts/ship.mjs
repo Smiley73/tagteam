@@ -3072,6 +3072,7 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   const unit = audit.unit = { trials: [], ...audit.unit, leftOut: [], dropped: null };
   if (unit.baseOid !== baseOid) Object.assign(unit, { baseOid, trials: [] });
   const wt = ctx.worktree;
+  const lands = ctx.train.route?.branch ?? ctx.config.base;
   const byKey = new Map(audit.findings.map((finding) => [finding.key, finding]));
   const onBase = () => { git(wt, ["checkout", "--force", "--detach", baseOid]); git(wt, ["clean", "-fdq"]); };
   const made = (keys) => {
@@ -3105,8 +3106,19 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
     saveAudit(ctx.shipDir, audit);
     return trial;
   };
-  const dropped = (reason) => {
+  // `onBase` puts the lockfile back but keeps what the trials' setups installed
+  // (ignored files survive `git clean`), and a rerun may have found every trial
+  // on record and run no setup at all: the setup runs once more, so that the
+  // specs verify against what the base's own lockfile installs and not the last
+  // trial's upgrades. The drop is recorded only once that has succeeded, so a
+  // begin after the stop drops again and tries the setup again.
+  const dropped = async (reason) => {
     onBase();
+    const broken = await settle();
+    if (broken !== null) {
+      throw Stop.beneath(`The dependency upgrades were dropped (${reason}), but the worktree could not be brought back up to the lockfile of ${lands} afterwards, `
+        + `so no spec was started. Look at the worktree at ${wt}, then run begin again.`, broken);
+    }
     unit.dropped = reason;
     saveAudit(ctx.shipDir, audit);
     say.push(`No dependency upgrade is made: ${reason}.`, ...disclosureLines(audit).map((line) => line.replace(/^- /, "")));
@@ -3116,7 +3128,7 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   onBase();
   const live = chosenUpgrades(audit).filter((finding) => {
     if (!alreadyUpgraded(finding, wt)) return true;
-    say.push(`${finding.name} is already past ${finding.installed} on ${ctx.train.route?.branch ?? ctx.config.base}, so its upgrade to ${finding.proposed} is not made.`);
+    say.push(`${finding.name} is already at or past ${finding.proposed} on ${lands}, so its upgrade from ${finding.installed} is not made.`);
     return false;
   });
   const screened = made(live.map((finding) => finding.key));

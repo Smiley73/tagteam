@@ -27,19 +27,24 @@ for (const [other, moved] of Object.entries(JSON.parse(process.env.DEP_MOVES || 
 fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\\n");
 `;
 
-// The worktree setup, counted, and failing on the call SETUP_FAIL_AT names.
+// The worktree setup, counted, and failing on the call SETUP_FAIL_AT names. What
+// it "installs" is the lockfile it ran against, kept at INSTALLED the way
+// node_modules keeps an install: outside what git puts back or cleans.
 const SETUP = `import fs from "node:fs";
 const count = (fs.existsSync(process.env.SETUP_COUNT) ? Number(fs.readFileSync(process.env.SETUP_COUNT, "utf8")) : 0) + 1;
 fs.writeFileSync(process.env.SETUP_COUNT, String(count));
 if (count === Number(process.env.SETUP_FAIL_AT)) process.exit(1);
+fs.copyFileSync("package-lock.json", process.env.INSTALLED);
 `;
 
-// Fails when a pair named in FAIL_ON (name@version) is in the lockfile, and
-// leaves a line behind every time it runs.
+// Fails when a group named in FAIL_ON is in the lockfile: pairs (name@version)
+// separated by commas fail on any one of them, and joined with & only when every
+// one is there. Leaves a line behind every time it runs.
 const CHECK = `import fs from "node:fs";
 fs.appendFileSync(process.env.VERIFY_MARK, "ran\\n");
 const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
-const bad = (process.env.FAIL_ON || "").split(",").filter(Boolean).find((pair) => lock.packages["node_modules/" + pair.split("@")[0]]?.version === pair.split("@")[1]);
+const has = (pair) => lock.packages["node_modules/" + pair.split("@")[0]]?.version === pair.split("@")[1];
+const bad = (process.env.FAIL_ON || "").split(",").filter(Boolean).find((group) => group.split("&").every(has));
 if (bad) { console.error(bad + " is in the lockfile"); process.exit(1); }
 `;
 
@@ -80,7 +85,7 @@ function stageDependencies({ planBranch = true, audit = null, moves = {}, failOn
   const marks = path.join(dir, "verify-marks");
   const env = {
     ...staged.env, PATH: `${bin}${path.delimiter}${staged.env.PATH}`, DEP_AUDIT: auditFile, DEP_MOVES: JSON.stringify(moves),
-    VERIFY_MARK: marks, FAIL_ON: failOn, SETUP_COUNT: path.join(dir, "setups"), SETUP_FAIL_AT: "0"
+    VERIFY_MARK: marks, FAIL_ON: failOn, SETUP_COUNT: path.join(dir, "setups"), SETUP_FAIL_AT: "0", INSTALLED: path.join(dir, "installed.json")
   };
   return { ...staged, env, marks, auditFile, begin: (id) => ship("begin", staged.plan, ["--spec", id], env) };
 }
@@ -88,6 +93,7 @@ function stageDependencies({ planBranch = true, audit = null, moves = {}, failOn
 const say = (result) => result.json.say.join("\n");
 const unitState = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "dependencies", "unit", "state.json"), "utf8"));
 const lockAt = (repo, ref) => JSON.parse(git(repo, "show", `${ref}:package-lock.json`)).packages;
+const lockIn = (file) => JSON.parse(fs.readFileSync(file, "utf8")).packages;
 
 // The unit from `snapshot` through `finish`, as `next` walks it: the same cycle as a spec.
 function walkUnit(staged, { approve = false } = {}) {
@@ -239,6 +245,35 @@ test("an update that also moves another package across a major is backed out, an
   assert.match(begun.json.next, /begin .*--spec 01-a/);
   assert.equal(git(trainOf(shipDir).worktree, "status", "--porcelain"), "", "nothing was left in the tree");
   assert.equal(fs.existsSync(path.join(shipDir, "dependencies", "unit", "rounds")), false, "nothing was committed for a round");
+  assert.equal(staged.begin("01-a").status, 0, "the spec is no longer held");
+});
+
+test("upgrades that fail verify only together are all left out, and what the worktree has installed is the base lockfile again", () => {
+  const staged = stageDependencies({
+    audit: report([["minimist", "GHSA-mini", "<1.2.8", "1.2.8"], ["lodash", "GHSA-lo", "<4.17.21", "4.17.21"]]), failOn: "minimist@1.2.8&lodash@4.17.21"
+  });
+  const { plan, env, shipDir } = staged;
+  const versions = (lock) => [lock["node_modules/lodash"].version, lock["node_modules/minimist"].version];
+  assert.equal(ship("start", plan, [], env).status, 0);
+  // Setup ran once for the worktree, then once per trial: both together, minimist
+  // alone, lodash alone (the survivors together are the first trial, on record).
+  // The fifth run is the one that puts the tree back for the base: failing there
+  // is a stop, and the unit is not recorded as dropped.
+  const stopped = ship("begin", plan, ["--spec", UNIT], { ...env, SETUP_FAIL_AT: "5" });
+  assert.notEqual(stopped.status, 0);
+  assert.match(stopped.stderr, /^The dependency upgrades were dropped \(every upgrade was left out\), but the worktree could not be brought back up to the lockfile of plan\/demo afterwards, so no spec was started\./);
+  assert.deepEqual(versions(lockIn(env.INSTALLED)), ["4.17.21", "1.2.0"], "the last trial's upgrade is what setup installed");
+  assert.notEqual(staged.begin("01-a").status, 0, "the spec is still held");
+
+  // A begin after that finds every trial on record and runs none; the setup still runs for the base.
+  const begun = staged.begin(UNIT);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.match(say(begun), /No dependency upgrade is made: every upgrade was left out/);
+  assert.match(say(begun), /Not upgraded: lodash 4\.17\.15 to 4\.17\.21 \(npm\), because it makes verify fail together with the other upgrades/);
+  assert.match(begun.json.next, /begin .*--spec 01-a/);
+  const worktree = trainOf(shipDir).worktree;
+  assert.deepEqual(versions(lockIn(path.join(worktree, "package-lock.json"))), ["4.17.15", "1.2.0"]);
+  assert.deepEqual(versions(lockIn(env.INSTALLED)), ["4.17.15", "1.2.0"], "what setup installed is the base lockfile, not the last trial's upgrades");
   assert.equal(staged.begin("01-a").status, 0, "the spec is no longer held");
 });
 

@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  auditAll, auditLines, classify, collateral, decideUpgrades, makeUpgrade, parseNpm, parsePipAudit, parsePnpm, parseUv, parseYarnBerry, parseYarnClassic,
-  parseVersion, pickFix, proposedFor
+  alreadyUpgraded, auditAll, auditLines, classify, collateral, decideUpgrades, makeUpgrade, parseNpm, parsePipAudit, parsePnpm, parseUv, parseYarnBerry,
+  parseYarnClassic, parseVersion, pickFix, proposedFor
 } from "../scripts/lib/dependency-audit.mjs";
 
 const sample = (name) => fs.readFileSync(path.join(import.meta.dirname, "fixtures", "dependency-audit", name), "utf8");
@@ -125,6 +125,33 @@ test("the target may not move past what its upgrade authorizes", () => {
     process.env.PATH = original;
     fs.rmSync(cwd, { recursive: true, force: true });
     fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("an upgrade counts as already made only when every resolved version is at or past its target", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-already-"));
+  try {
+    const lockOf = (...versions) => fs.writeFileSync(path.join(cwd, "package-lock.json"), JSON.stringify({
+      lockfileVersion: 3,
+      packages: { "": {}, ...Object.fromEntries(versions.map((version, index) => [`${"node_modules/x/".repeat(index)}node_modules/lodash`, { version }])) }
+    }));
+    const finding = { manager: "npm", name: "lodash", installed: "4.17.15", proposed: "4.17.21" };
+    lockOf("4.17.15");
+    assert.equal(alreadyUpgraded(finding, cwd), false, "the audited version is still there");
+    lockOf("4.17.19");
+    assert.equal(alreadyUpgraded(finding, cwd), false, "the base moved it, but to a version still short of the fix");
+    lockOf("4.17.19", "4.17.21");
+    assert.equal(alreadyUpgraded(finding, cwd), false, "one copy is still short of the fix");
+    lockOf("4.17.21");
+    assert.equal(alreadyUpgraded(finding, cwd), true);
+    lockOf("4.17.22", "4.18.0");
+    assert.equal(alreadyUpgraded(finding, cwd), true, "past the fix is made as well");
+    lockOf();
+    assert.equal(alreadyUpgraded(finding, cwd), false, "a package no longer listed is left for the making to report");
+    lockOf("4.17.21");
+    assert.equal(alreadyUpgraded({ ...finding, proposed: "4.17.21-rc.1" }, cwd), true, "a target the ship cannot class is read by the audited version being gone");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
 
