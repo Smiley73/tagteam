@@ -243,7 +243,8 @@ test("with the setting off, a two-spec plan ships each spec to the base with no 
   const { dir, plan, shipDir, origin, env } = staged;
   const started = ship("start", plan, [], env);
   assert.equal(started.status, 0, started.stderr);
-  assert.deepEqual(started.json.say.filter((line) => !/^(note|warning):/.test(line)), ["2 specs in dependency order; 0 already merged."],
+  // The dependency audit's own line says a repository with no lockfile has nothing to audit; the route says nothing.
+  assert.deepEqual(started.json.say.filter((line) => !/^(note|warning):/.test(line) && !/^No package manager was found/.test(line)), ["2 specs in dependency order; 0 already merged."],
     "start said something new with the setting off");
   assert.deepEqual(trainOf(shipDir).route, { kind: "base" });
   const a = shipThrough(staged, "01-a", "app.js", A_CHANGE);

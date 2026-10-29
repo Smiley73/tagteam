@@ -175,6 +175,47 @@ whether they still have a `/tagteam:ship` of this plan running anywhere. Only if
 they confirm that run is gone, rerun with `--reclaim`. Never reclaim on your own
 judgement — reclaiming a lock a live run holds puts two of them in one worktree.
 
+## Dependency upgrades
+
+Once per ship, before the first spec begins, `start` audits the package managers
+the repository root has lockfiles for (pnpm, npm, yarn, uv, pip), in the ship's
+worktree. Its `say` tells the person one of four things, in plain words: no
+package manager was found, nothing is vulnerable, an audit could not run (which
+one, and why), or which upgrades it will make. In the first three cases nothing
+more happens and `next` is the first spec's `begin`. A ship with a spec already
+begun is not audited, and `start` says so.
+
+A patch or minor fix is made without asking. A major, a minor of a `0.x`
+package, a version the ship cannot class and a package with no fixed version are
+the person's: `start` returns `ask` and a `next` of `end`, changes nothing, and
+names each package with its manager, its installed and proposed versions and the
+audit's finding. Put it to them as it stands. Only on their word, run
+
+```bash
+node "$P/scripts/ship.mjs" dependencies --plan "$D" --approve "<keys>" --decline "<keys>"
+```
+
+with the keys the stop printed, each package in the list they approved or the
+list they declined; a package with no fixed version can only be declined. Never
+run it on your own judgement, and `next` never prints it. A decline is kept for
+the repository, so no later ship asks about that package at that version again.
+It prints the stop again for what is still open, and otherwise says what will be
+made and prints `next`.
+
+The upgrades are one unit of their own, `plan-dependencies`, and no spec begins
+until it has merged: a spec's `begin` before then refuses and says so. Its
+`begin` dispatches no agent — the ship makes the upgrades itself, tries them
+against every verify command, and leaves out any that fail verify, cannot be
+made, or move another package past a minor, saying which and why in `say` — and
+points at `snapshot`. From there the unit ships exactly like a spec, with its
+verify commands all run whatever their `when`. On a plan branch it merges into
+the plan branch without asking. Straight to the base, it waits for the person's
+Merge like a spec: its `next` is `end`, and the first spec begins once they have
+merged it. Its records are under `$S/dependencies/unit/`, so its pull request body
+is `$S/dependencies/unit/pr-body.md`; write it as the pull request body section
+says, about which packages get a fix for what, and never list the upgrades left
+out — the driver writes those under `## Risk` itself.
+
 ## Per spec
 
 The driver walks each spec through: `begin` (branch, dispatch the implementer),
