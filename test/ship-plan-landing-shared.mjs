@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { ship, write, pullsOf, setTrainRoute, commitByHand, stageMerged,
-  reviewWholePlan, shareBuilds } from "./ship-stage.mjs";
+  reviewWholePlan, shareBuilds, bodyWriterOf, answerBodyWriter } from "./ship-stage.mjs";
 
 export const landingRecordOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "plan-landing", "record.json"), "utf8"));
 export const planPullOf = (env) => pullsOf(env).find((pull) => pull.branch === "plan/demo") ?? null;
@@ -30,8 +30,8 @@ export const stageClean = shareBuilds(buildClean, { alike: [[{}, { ciRepairs: 1 
 // first time it is asked for, and the step runs again.
 export function toDialog(staged, extra = [], env = staged.env) {
   let result = ship("plan-land", staged.plan, extra, env);
-  if (result.json?.body) {
-    write(result.json.body.path, PLAN_BODY);
+  if (bodyWriterOf(result)) {
+    answerBodyWriter(result, PLAN_BODY, "Land the plan", env);
     result = ship("plan-land", staged.plan, extra, env);
   }
   assert.equal(result.status, 0, result.stderr);

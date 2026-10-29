@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, write, commitToMain, stageMerged, reviewWholePlan, shareBuilds } from "./ship-stage.mjs";
+import { git, ship, write, commitToMain, stageMerged, reviewWholePlan, shareBuilds, bodyWriterOf, answerBodyWriter } from "./ship-stage.mjs";
 
 export const PLAN_BODY = "## Summary\nAdd and double.\n## What you can now do\nSubtract, and double a number.\n## Risk\nnothing known\n";
 export const landingRecordOf = (shipDir) => JSON.parse(fs.readFileSync(path.join(shipDir, "plan-landing", "record.json"), "utf8"));
@@ -78,8 +78,8 @@ export function walkToDialog(staged, { env = staged.env, plan = staged.plan, max
     if (untilStop && result.status !== 0) return { stopped: result, steps, reviewers };
     assert.equal(result.status, 0, result.stderr);
     steps.push(result);
-    if (result.json.body) {
-      write(result.json.body.path, PLAN_BODY);
+    if (bodyWriterOf(result)) {
+      answerBodyWriter(result, PLAN_BODY, "Land the plan", env);
       result = ship("plan-land", plan, [], env);
       continue;
     }

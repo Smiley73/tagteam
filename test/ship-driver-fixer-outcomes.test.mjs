@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { ship, write, outputOf, arriveAll, findings, major, stagePlan, trainOf, pullsOf, A_CHANGE } from "./ship-stage.mjs";
+import { ship, write, outputOf, arriveAll, findings, major, stagePlan, trainOf, pullsOf, A_CHANGE, factsFileOf } from "./ship-stage.mjs";
 
 const ID = "01-a";
 
@@ -96,8 +96,9 @@ test("after a fixer the settle prints its table, one addressed row and one not, 
   assert.ok(say.includes("  Not addressed: 1.correctness.2 (needs a person)."), settled.stdout);
 
   assert.match(cycle.run("fix").json.next, /publish/, "the one fix round is spent");
-  const published = cycle.run("publish", ["--title", "Ship 01-a", "--body", staged.body]);
-  assert.deepEqual(published.json.notAddressed.map((row) => [row.id, row.severity, row.addressed, row.recommendation]),
+  const writer = cycle.run("publish").json.dispatch[0];
+  const facts = JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8"));
+  assert.deepEqual(facts.notAddressed.map((row) => [row.id, row.severity, row.addressed, row.recommendation]),
     [["1.correctness.2", "major", false, "needs a person"]]);
 });
 

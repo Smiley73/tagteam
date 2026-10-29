@@ -87,8 +87,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    its checks, the landing check, the version lines and the
                    merge of the base the ship made — each for the one tip it is
                    about — the person's Merge for a tip, a Stop, and the merge),
-                   pr-body.md (the body the orchestrator writes for the plan as
-                   a whole), pr-body.sent.md (that body with the line saying
+                   pr-body.md (the body an agent writes for the plan as
+                   a whole), pr-title.txt, pr-facts.json and body-writer-set.json (its
+                   title, the facts it writes from, and the set that is
+                   waiting on it), pr-body.sent.md (that body with the line saying
                    what the plan lands as, which the ship adds under
                    ## Summary, and the ledger under ## Risk), ci-<tip>.json, checks/<tip>/ (the landing check's
                    evidence, one directory per base) and snapshots/. Never a
@@ -147,6 +149,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     report-resend.json  that agent was sent: the round, the commit and the
                  files kept; written once, so a round is resent only once   ignored
     pr-body.md  ci.json  usage.json                                          ignored
+    pr-title.txt  pr-facts.json  body-writer-set.json  the title an agent writes for
+                 the body, the facts it writes from, and the set publish
+                 waits on                                                     ignored
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
                  under ## Risk — on a plan branch each finding it would carry
                  into the plan branch open, and each failure that passed when

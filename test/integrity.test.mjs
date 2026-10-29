@@ -807,7 +807,7 @@ test("commands/status.md documents every reason drift can be unknown", () => {
 
 test("the compared set is exactly the directories the plugin reaches into", async () => {
   const { EXECUTED_ROOTS } = await import("../scripts/running-plugin.mjs");
-  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills"]);
+  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"]);
   const unclassified = [];
   for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
     for (const [, dir] of text.matchAll(/(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$P)\/([A-Za-z0-9._-]+)\//g)) {
@@ -1327,4 +1327,33 @@ test("no stop is built with a caught error's or a child's text in it", () => {
   ]) {
     assert.ok(!bareStopCalls(fine).some(({ text }) => CARRIES_RAW_TEXT(text)), `the guard flags ${fine}`);
   }
+});
+
+// A workflow script named like a command shadows that command. Only the scripts
+// directly inside `workflows/` load, so those are the ones read. "Workflow" here
+// is a Claude Code workflow script, not a GitHub Actions file.
+function shadowedCommands(scripts, commandNames) {
+  return scripts.flatMap(({ file, text }) => {
+    const names = [file.replace(/\.js$/, ""), /\bname:\s*["']([^"']+)["']/.exec(text)?.[1]].filter(Boolean);
+    return names.filter((name) => commandNames.includes(name)).map((name) => `workflows/${file} is named ${name}, which shadows the ${name} command`);
+  });
+}
+
+test("no workflow script carries the name of a command", () => {
+  const dir = path.join(root, "workflows");
+  const scripts = fs.existsSync(dir)
+    ? fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
+      .map((entry) => ({ file: entry.name, text: read("workflows", entry.name) }))
+    : [];
+  const problems = shadowedCommands(scripts, commandFiles.map((file) => file.replace(/\.md$/, "")));
+  assert.deepEqual(problems, [], problems.join("\n"));
+
+  const names = ["ship", "plan", "status"];
+  assert.ok(commandFiles.includes("ship.md"), "the commands this guard compares against include ship");
+  assert.equal(shadowedCommands([{ file: "ship.js", text: 'export const meta = { name: "other" };' }], names).length, 1, "a script named ship");
+  assert.equal(shadowedCommands([{ file: "other.js", text: 'export const meta = {\n  name: "plan",\n};' }], names).length, 1, "a meta named plan");
+  assert.deepEqual(shadowedCommands([
+    { file: "ship-spec.js", text: 'export const meta = { name: "ship-spec" };' },
+    { file: "plan-specs.js", text: 'export const meta = { name: "plan-specs" };' }
+  ], names), []);
 });
