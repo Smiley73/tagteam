@@ -77,6 +77,8 @@ const classifierPrompt = (path) => [
   "prompted: it asked for approval before it ran, and detail says what it asked.",
   "not-tried: you did not run it for any other reason, including that you chose not to, and detail says why.",
   "Never record a step you declined yourself as refused. If a step was refused or not tried, still try the next steps that can run.",
+  "",
+  "Cleanup: the worktree must end clean, because the next ship run refuses a dirty one. If the commit in step 4 was not made, whatever the reason, record it as above first. Then remove only what this probe created: unstage probe-scratch.txt with `git -C <worktree> reset -q -- probe-scratch.txt` and delete the file. Touch no other file. Run step 5 after that cleanup. If the cleanup is itself refused, record that in the detail of the status-clean entry, with the refusal's text, and name probe-scratch.txt as left behind.",
 ].join("\n");
 
 phase("Effort");

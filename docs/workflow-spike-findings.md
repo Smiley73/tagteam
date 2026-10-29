@@ -81,23 +81,33 @@ Two questions are still open, (b) effort and (e) auto mode. The throwaway
 workflow `tagteam:workflow-probe` (`workflows/workflow-probe.js`) answers both in
 one launch. Do this with the ship stopped between specs 1 and 2:
 
-1. Check out the plan branch at its tip, in a checkout of its own.
-2. From that checkout start Claude Code in auto mode with
-   `--plugin-dir <that checkout>`. Confirm the session shows auto mode, and note
-   `claude --version`.
+1. Check out the plan branch at its tip, in a checkout of its own (for example
+   `git worktree add <path> <plan branch>`).
+2. From the repository root that owns the ship worktree, the directory the ship
+   runs from, and not from that checkout, start Claude Code in auto mode with
+   `--plugin-dir <that checkout>`. The ship worktree is then inside the
+   session's working directory, as it is in a real ship. Confirm the session
+   shows auto mode, and note `claude --version`.
 3. Launch `tagteam:workflow-probe` with `worktree` set to the ship worktree's
    absolute path (`<repo>/.tagteam/worktrees/<plan slug>`, printed by the ship as
    "Reusing the existing worktree at ..."). Auto mode may ask once, the first
    time this workflow name is launched. Its result lists each agent and the
-   outcome of each classifier command.
-4. Run this from the checkout's root. It prints the newest workflow run and one
-   line per agent: its label, then its output tokens.
+   outcome of each classifier command. If the commit could not be made, the
+   agent is told to unstage and delete `probe-scratch.txt`. Check
+   `git -C <ship worktree> status --porcelain` yourself afterwards. If it prints
+   anything, remove only `probe-scratch.txt` (`git -C <ship worktree> reset -q --
+   probe-scratch.txt`, then delete the file) before you resume the ship, which
+   refuses a dirty worktree. Keep the result's command outcomes as they are.
+4. Run this from the repository root you started the session in, with
+   `PROBE_CHECKOUT` set to the plan-branch checkout. It prints the newest
+   workflow run and one line per agent: its label, then its output tokens.
 
    ```sh
-   node --input-type=module -e '
+   PROBE_CHECKOUT=<that checkout> node --input-type=module -e '
    import fs from "node:fs";
    import path from "node:path";
-   import { projectDirectoryFor, readTranscript } from "./scripts/usage.mjs";
+   import { pathToFileURL } from "node:url";
+   const { projectDirectoryFor, readTranscript } = await import(pathToFileURL(path.join(process.env.PROBE_CHECKOUT, "scripts/usage.mjs")).href);
    const project = projectDirectoryFor(process.cwd());
    const runs = [];
    for (const session of fs.readdirSync(project, { withFileTypes: true })) {
