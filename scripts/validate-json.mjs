@@ -140,11 +140,14 @@ export function validateJson(schema, value) {
 // a version-11 file is reported stale, which `/tagteam:configure` carries
 // forward without asking anything.
 //
-// The exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120 when
+// The first exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120 when
 // it is missing. It was added as an optional key so that the version-10 and
 // version-11 files already written stayed current: requiring it would have meant
 // a version bump, and every existing file reported stale for one number. The rule
 // is unchanged for every other key, and `/tagteam:configure` still writes it.
+// `redesignEscalation` is the second such key, for the same reason: the ship
+// reads a missing one as `never`, and requiring it would have reported every
+// version-12 file stale for a setting whose absence changes nothing.
 //
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its

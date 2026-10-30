@@ -1237,6 +1237,55 @@ test("the resolver emits exactly ten jobs, each mapped to its role's settings", 
   }, "a raised round moves exactly the escalating five");
 });
 
+test("a redesign request moves implement alone, at any counter, and nothing without a request", () => {
+  const raisedImplement = { model: "opus", effort: "high", escalated: true };
+  for (const spent of [0, 1]) {
+    const state = at("fixing", { fixRoundsUsed: spent });
+    const plain = resolveRoles(state, RAISED).jobs;
+    assert.deepEqual(resolveRoles(state, RAISED, true).jobs, { ...plain, implement: raisedImplement },
+      `counter ${spent}, at or below after: only implement moves`);
+  }
+
+  // Past `after` the request adds nothing to the five that escalate by counter.
+  const past = at("fixing", { fixRoundsUsed: 2 });
+  const plain = resolveRoles(past, RAISED).jobs;
+  const asked = resolveRoles(past, RAISED, true).jobs;
+  assert.deepEqual(asked, { ...plain, implement: raisedImplement });
+  for (const job of ["review-lens", "review-codex", "adversary-fresh", "resolve"]) {
+    assert.equal(asked[job].escalated, false, `${job} stays on the ordinary settings`);
+  }
+
+  for (const spent of [0, 1, 2, 7]) {
+    const state = at("fixing", { fixRoundsUsed: spent });
+    assert.deepEqual(resolveRoles(state, ORDINARY, true), resolveRoles(state, ORDINARY),
+      `a null escalation ignores the request at counter ${spent}`);
+  }
+  assert.throws(() => resolveRoles(at("fixing", { fixRoundsUsed: "1" }), RAISED, true), /fixRoundsUsed/);
+});
+
+test("gates.mjs roles --redesign raises implement, the same call without it does not, and an unknown argument exits 2", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-roles-"));
+  const stateFile = path.join(dir, "state.json");
+  const configFile = path.join(dir, "config.json");
+  fs.writeFileSync(stateFile, JSON.stringify(at("fixing", { fixRoundsUsed: 0 })));
+  fs.writeFileSync(configFile, JSON.stringify(RAISED));
+  const run = (...extra) => spawnSync("node", [path.join(root, "scripts", "gates.mjs"), "roles", stateFile, configFile, ...extra], { encoding: "utf8" });
+
+  const asked = run("--redesign");
+  assert.equal(asked.status, 0, asked.stderr);
+  assert.deepEqual(JSON.parse(asked.stdout).jobs.implement, { model: "opus", effort: "high", escalated: true });
+  const plain = run();
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.deepEqual(JSON.parse(plain.stdout).jobs.implement, { model: "sonnet", effort: "medium", escalated: false });
+
+  for (const extra of [["--redesing"], ["--redesign", "--redesign"], ["--redesign", "x"]]) {
+    const refused = run(...extra);
+    assert.equal(refused.status, 2, `${extra.join(" ")}: ${refused.stdout}`);
+    assert.match(refused.stderr, /usage:/);
+    assert.equal(refused.stdout, "");
+  }
+});
+
 test("gates.mjs state takes the budgeted edge through the CLI with the configured limits", async () => {
   // The interface the ship loop drives. In-process `transition()` tests say
   // nothing about where `main()` reads the config from: one place off and every
