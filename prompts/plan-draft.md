@@ -43,6 +43,9 @@ section when there are none worth naming.>
 <Cut work belonging to excluded or deferred decisions. Omit when there is none.>
 ```
 
+In the depends column, use the spec name from the table, for example
+`01-redesign-settings`; row numbers also work.
+
 A plan of two or more specs shipped through a branch of its own carries one
 version increase, which the ship makes itself once the plan is done: a patch
 increase, unless the plan declares a minor one with a line of its own directly
