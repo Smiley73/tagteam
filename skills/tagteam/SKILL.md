@@ -213,6 +213,14 @@ entered in the plan's ledger. With `autoRedesign` on, the first such question in
 round left and the same file failing is not asked: `next` is `redesign`, and
 `say` says it was answered automatically. The loose signal alone, the question
 at the cap and every later question are still a person's, and so is `accept`.
+What a rewrite runs at is `redesignEscalation`'s to say, and only when `escalation` is set: an absent key
+reads as `never`, and with `escalation` null every rewrite runs at the ordinary settings. `always` runs every
+rewrite at the escalation block's implementer model and effort, whatever the fix counter; `never` runs none
+there; `ask` runs a rewrite `autoRedesign` started there, and for one a person chose the `redesign` stops
+before anything is spent and asks one question, whose `answers` are the raised and the ordinary settings —
+the same `redesign` command with `--escalated` or `--normal`, and the same `--file`. The answer decides that
+rewrite only, and a choice flag anywhere `redesignEscalation` is not `ask` is refused. A rewrite still moves
+the fix counter, so later fixers and re-checks escalate past `after` exactly as before.
 With every fix round spent they ask before anything publishes, and the
 question has three answers: `redesign`, which takes one round past
 `limits.fixRounds` — `gates.mjs grant`, taken only when this question was put

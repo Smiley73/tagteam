@@ -480,7 +480,7 @@ test("every dispatching step of the driver reads the resolver, and the driver na
     assert.ok(emitted.has(job), `ship.mjs dispatches roles job ${job}, which gates.mjs roles does not emit`);
   }
   for (const step of ["begin", "panel", "fix", "redesign", "recheck", "repair"]) {
-    assert.match(driverFunction(step), /roles\(ctx, id\)/, `${step} dispatches without reading the resolver`);
+    assert.match(driverFunction(step), /roles\(ctx, id[,)]/, `${step} dispatches without reading the resolver`);
   }
   // The plan-level dispatches have no spec state for `roles` to read, and go
   // through the same resolver with none rather than inventing one on disk.
@@ -512,17 +512,35 @@ test("redesign and accept are person-only doors, budgeted before dispatch, and t
   for (const door of ["accept", "revisit"]) {
     assert.ok(!nexts.some((call) => call.includes(`"${door}"`)), `next prints ${door}, which only a person decides`);
   }
+  // The one other command that names redesign is an answer to the escalation
+  // question, which carries a choice flag and is offered as `answers`, never `next`.
+  const redesign = driverFunction("redesign");
   for (const call of nexts.filter((call) => call.includes('"redesign"'))) {
+    if (call === "nextCommand(ctx, \"redesign\", id, ` ${flag}${withFiles}`)") {
+      assert.ok(redesign.includes(`const answer = (flag) => ${call};`), "a redesign answer command is built outside the question");
+      continue;
+    }
     assert.match(call, /^nextCommand\(ctx, churn\.auto \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
   }
   const churn = driverFunction("churnAsk");
   assert.equal(churn.split("result.auto = true").length - 1, 1, "churnAsk answers redesign in one place");
-  assert.match(churn, /if \(ctx\.config\.autoRedesign && !used && signals\.length > 0\) \{\s*result\.auto = true;/, "the automatic answer is not behind the setting, an unused rewrite and the same file failing");
-  const redesign = driverFunction("redesign");
+  assert.match(churn, /if \(autoRedesigns\(ctx, state, \{ signals, used \}\)\) \{\s*result\.auto = true;/, "churnAsk answers redesign without asking the shared condition");
+  assert.match(redesign, /autoRedesigns\(ctx, state, \{ signals, used: /, "redesign tells an automatic start from a person's by another condition than churnAsk's");
+  assert.match(driverFunction("autoRedesigns"),
+    /return Boolean\(ctx\.config\.autoRedesign\) && \(state\.fixRoundsUsed \?\? 0\) < ctx\.config\.limits\.fixRounds && !used && signals\.length > 0;/,
+    "the automatic answer is not behind the setting, a fix round left, an unused rewrite and the same file failing");
   const edge = redesign.indexOf('transition(ctx, id, "fixing", { budgeted: true })');
   const dispatch = redesign.indexOf("redesignDispatch(");
   assert.ok(edge > -1 && dispatch > -1 && edge < dispatch, "redesign dispatches before it takes the budgeted edge");
   assert.match(redesign, /jobs\.implement\b/, "a redesign is an implementer, never a fixer");
+  // The escalation question is the last thing that can return before anything is
+  // written, granted or spent.
+  const decided = redesign.indexOf("const escalated = ");
+  const question = redesign.indexOf("return emit({", redesign.indexOf('why === "ask"'));
+  assert.ok(question > -1 && question < decided, "the escalation question does not return before the decision is read");
+  for (const needle of ['["grant"', 'transition(ctx, id, "fixing"', "writeJson(redesignCyclePath", "fs.mkdirSync(", "fs.writeFileSync(briefPath", "writeJson(fixPendingPath", "fs.rmSync(fixDeclinedPath", "fs.rmSync(acceptedPath"]) {
+    assert.ok(redesign.indexOf(needle) > decided, `${needle} comes before the escalation question has returned`);
+  }
   const module = read("scripts", "lib", "redesign.mjs");
   const ask = module.slice(module.indexOf("export function redesignAsk("));
   assert.ok(ask.length > 0, "redesign.mjs has no redesignAsk");

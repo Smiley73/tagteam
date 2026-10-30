@@ -329,9 +329,10 @@ function carryFrom(ctx, id, round) {
 }
 
 // Each job's entry also carries its own name, so that a dispatch built from it
-// can be refused by the job a person looks up in the configuration.
-function roles(ctx, id) {
-  const resolved = lastJson(node("gates.mjs", ["roles", statePath(ctx, id), ctx.configPath]).stdout);
+// can be refused by the job a person looks up in the configuration. `redesign`
+// asks for the implementer as a redesign escalates it; see `resolveRoles`.
+function roles(ctx, id, redesign = false) {
+  const resolved = lastJson(node("gates.mjs", ["roles", statePath(ctx, id), ctx.configPath, ...(redesign ? ["--redesign"] : [])]).stdout);
   for (const [name, job] of Object.entries(resolved?.jobs ?? {})) job.name = name;
   return resolved;
 }
@@ -936,7 +937,7 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   const used = redesignUsed(ctx, id, state);
   const rewritable = files.length > 0;
   if (spent < limit) {
-    if (ctx.config.autoRedesign && !used && signals.length > 0) {
+    if (autoRedesigns(ctx, state, { signals, used })) {
       result.auto = true;
       return result;
     }
@@ -964,6 +965,22 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   result.ask = redesignAsk(signals, { spent, limit, atCollect, atCap: true, loose });
   return result;
 }
+
+// Whether `autoRedesign` answers the Recurring question: the one place the
+// setting is checked. `churnAsk` asks it to decide whether to ask at all, and
+// `redesign` to tell a rewrite the setting started from one a person chose.
+function autoRedesigns(ctx, state, { signals, used }) {
+  return Boolean(ctx.config.autoRedesign) && (state.fixRoundsUsed ?? 0) < ctx.config.limits.fixRounds && !used && signals.length > 0;
+}
+
+// Why a rewrite runs at the settings it does, by what decided it.
+const REWRITE_WHY = {
+  always: "Escalation raises this rewrite because redesignEscalation is always in this repository's configuration",
+  auto: "Escalation raises this rewrite because redesignEscalation is ask and autoRedesign started it",
+  raised: "Escalation raises this rewrite because you chose the raised settings",
+  ordinary: "Escalation does not raise this rewrite because you chose the ordinary settings, so only fixers and re-checks are raised",
+  never: "Escalation does not raise this rewrite, only fixers and re-checks"
+};
 
 const AUTO_REDESIGN = "The Recurring question is answered redesign automatically, because autoRedesign is on in this repository's configuration: "
   + "a fresh implementer rewrites the area on a fix round this cycle still has. If the rewrite does not settle it, a person is asked.";
@@ -3359,7 +3376,7 @@ async function resendReport(ctx, id, spec, { state, pending, round, oid, refused
     fs.renameSync(file, target);
     return target;
   });
-  const job = roles(ctx, id).jobs[implementer ? "implement" : pending.from === "repair" ? "repair-fix" : "fix"];
+  const job = roles(ctx, id, pending?.escalated === true).jobs[implementer ? "implement" : pending.from === "repair" ? "repair-fix" : "fix"];
   const request = (judged ? readSet(setDir(ctx, id, judged), judged)?.agents?.[0]?.request : null)
     ?? agent(role, job);
   const dispatch = reportResendDispatch(ctx, spec, { pending, state, oid, request, problems: refused.problems, kept });
@@ -3927,6 +3944,13 @@ async function fix(options) {
 // findings against it and the adversary reads it fresh; chosen at settle, the
 // whole panel reads it. Routing a collect-time redesign to the panel is not an
 // option — the collection would never be settled or carried.
+//
+// What the rewrite runs at is `redesignEscalation`'s to say, read as `never` when
+// the key is absent or escalation is off: `always` raises every rewrite, `never`
+// none, and `ask` raises one `autoRedesign` started and asks about one a person
+// chose. The question is put after every refusal and before anything is written
+// or spent, so an unanswered one leaves the spec exactly as it found it; its
+// answers are this command again with `--escalated` or `--normal`.
 async function redesign(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -3975,6 +3999,34 @@ async function redesign(options) {
   } else if (redesignUsed(ctx, id, state)) {
     throw new Stop(`${id} has had this cycle's one redesign already; a cycle gets one, in budget or past the cap, so the answers left are fix (run next), accept and end. Nothing was spent.`);
   }
+  const setting = ctx.config.escalation ? ctx.config.redesignEscalation ?? "never" : "never";
+  const choice = options.escalated ? "raised" : options.normal ? "ordinary" : null;
+  if (choice && setting !== "ask") {
+    const decides = !ctx.config.escalation
+      ? "this repository's configuration has no escalation, so there are no raised settings to choose"
+      : setting === "always"
+        ? "redesignEscalation is always here, so every rewrite already runs at the raised settings"
+        : `redesignEscalation is ${ctx.config.redesignEscalation === undefined ? "not set, which reads as never" : "never"} here, so every rewrite runs at the ordinary settings`;
+    throw new Stop(`A rewrite's settings are chosen only where redesignEscalation is ask, and ${decides}. Nothing was spent.`);
+  }
+  const why = setting === "ask"
+    ? choice ?? (autoRedesigns(ctx, state, { signals, used: redesignUsed(ctx, id, state) }) ? "auto" : "ask")
+    : setting === "always" ? "always" : null;
+  if (why === "ask") {
+    const withFiles = options.file ? ` --file ${q(options.file)}` : "";
+    const answer = (flag) => nextCommand(ctx, "redesign", id, ` ${flag}${withFiles}`);
+    const at = (job) => `${job.model} at ${job.effort} effort`;
+    return emit({
+      say: ["Nothing was spent and nothing was dispatched: the rewrite waits for the answer below."],
+      ask: `Rewriting ${files.join(", ")} can run at the settings this repository uses for its other implementation work, `
+        + `${at(roles(ctx, id).jobs.implement)}, or at the raised settings its escalation block configures, ${at(roles(ctx, id, true).jobs.implement)}. `
+        + "redesignEscalation is ask, so which one is yours to say. It is this cycle's one rewrite whichever you pick, it spends the same round, "
+        + "and the answer decides this rewrite only.",
+      answers: { escalated: answer("--escalated"), normal: answer("--normal") },
+      next: nextCommand(ctx, "end", null)
+    });
+  }
+  const escalated = ["always", "auto", "raised"].includes(why);
   const history = fileHistory(roundsRoot(ctx, id), { files, scope, round: round.round, declinedDir: path.join(specDir(ctx, id), "declined") });
   const reportPath = path.join(specDir(ctx, id), "implement-report.json");
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -3996,10 +4048,10 @@ async function redesign(options) {
   writeJson(redesignCyclePath(ctx, id), { scope, round: round.round, candidate: state.candidateOid, pastCap, at: new Date().toISOString() });
   fs.mkdirSync(path.dirname(briefPath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(briefPath, brief, { mode: 0o600 });
-  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: "redesign", record: briefPath, files, at: new Date().toISOString() });
+  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: "redesign", escalated, record: briefPath, files, at: new Date().toISOString() });
   fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
   fs.rmSync(acceptedPath(ctx, id), { force: true });
-  const resolved = roles(ctx, id);
+  const resolved = roles(ctx, id, escalated);
   const job = resolved.jobs.implement;
   const budget = edge.output?.budget ?? {};
   const collected = exists(path.join(round.dir, "review.json"));
@@ -4010,7 +4062,7 @@ async function redesign(options) {
     : `fix round ${budget.ordinal} of the ${budget.limit} this repository allows`;
   const say = [
     `Redesign of ${files.join(", ")} on ${id}: ${which}, spent on a fresh implementer ${settings(job)}. `
-      + "Escalation never raises an implementer, only fixers and re-checks"
+      + REWRITE_WHY[why ?? "never"]
       + (escalation ? `; this round moved the counter, so the re-checks of this round and any later fixer run raised once it passes ${escalation.after}.` : "."),
     ...(pastCap
       ? ["This is the cycle's only rewrite, and no round is left after it: if the rewrite still fails, the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub."]
@@ -7722,11 +7774,14 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   panel   --spec <id>                 dispatch every lens plus Codex
   collect --spec <id>                 collect the panel; decides fix or recheck
   fix     --spec <id>                 spend a fix round and dispatch the fixer
-  redesign --spec <id> [--file a,b]   a person's answer to the Recurring question — asked once when the same file keeps failing,
+  redesign --spec <id> [--file a,b] [--escalated | --normal]
+                                      a person's answer to the Recurring question — asked once when the same file keeps failing,
                                       new findings keep arriving on different files, or both — never printed by next: spend a fix
                                       round on a fresh implementer with a brief of everything raised on the files either signal names
                                       — or, when the question was put at the cap, the one round past limits.fixRounds that only this
-                                      answer grants. One per cycle: refused once this cycle has had one
+                                      answer grants. One per cycle: refused once this cycle has had one. Where redesignEscalation is
+                                      ask, a person's redesign first asks which settings the rewrite runs at, and --escalated or
+                                      --normal, repeated with the same --file, is that answer; refused anywhere else
   accept  --spec <id>                 a person's other answer to it, for either signal, while a fix round is left, never printed by
                                       next: publish as it is with what is open disclosed. On a plan branch, when everything accepted
                                       may be carried there, finish then merges it into the plan branch with each finding entered in
@@ -7773,12 +7828,15 @@ function parseArgs(argv) {
     if (key === "--run-gone") { options.runGone = true; continue; }
     if (key === "--run-live") { options.runLive = true; continue; }
     if (key === "--stop") { options.stop = true; continue; }
+    if (key === "--escalated") { options.escalated = true; continue; }
+    if (key === "--normal") { options.normal = true; continue; }
     if (key === "--squash") { options.squash = true; continue; }
     const value = rest[++index];
     if (value === undefined) throw Stop.beneath(`${key} requires a value`, USAGE, 2);
     options[key.slice(2)] = value;
   }
   if (options.runGone && options.runLive) throw new Stop("--run-gone and --run-live are the two answers to one question; give one", 2);
+  if (options.escalated && options.normal) throw new Stop("--escalated and --normal are the two answers to one question; give one", 2);
   return { sub, options };
 }
 
