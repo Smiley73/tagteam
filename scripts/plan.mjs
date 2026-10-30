@@ -116,7 +116,10 @@ const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effo
 
 // What the drafter is sent for under a `draft` set, and the label of each. A
 // cut is the same job whether step 4 or step 6 asks for it, so it has one label.
-export const DRAFTER_PURPOSES = { draft: "Draft the plan", cut: "Cut the plan", revise: REVISE_LABEL };
+export const DRAFTER_PURPOSES = { draft: "Draft the plan", cut: "Cut the plan", revise: REVISE_LABEL, dependencies: "Correct the plan's dependencies" };
+
+// Only `writers` sends this one: its prompt quotes a refusal that only `writers` has.
+const DRAFT_STEP_PURPOSES = Object.keys(DRAFTER_PURPOSES).filter((purpose) => purpose !== "dependencies");
 
 // The review's two Claude readers. Codex, the third, is a runner `review` and
 // `collect` prepare and print themselves.
@@ -340,7 +343,7 @@ export function checkResponse({ findings, response, schemaPath = path.join(SCHEM
 
 const USAGE = `usage:
   plan.mjs explore --plan <plan-dir>
-  plan.mjs draft   --plan <plan-dir> [--purpose ${Object.keys(DRAFTER_PURPOSES).join("|")}]
+  plan.mjs draft   --plan <plan-dir> [--purpose ${DRAFT_STEP_PURPOSES.join("|")}]
   plan.mjs review  --plan <plan-dir>
   plan.mjs collect --plan <plan-dir>
   plan.mjs check   --plan <plan-dir>
@@ -572,7 +575,8 @@ function explorerPrompt(ctx) {
   ].join("\n");
 }
 
-function drafterPrompt(ctx, purpose) {
+function drafterPrompt(ctx, purpose, refusal) {
+  const work = { cut: ["cut", "cut"], revise: ["revise", "revised"], dependencies: ["correct", "corrected"] }[purpose];
   return [
     "Job: plan-drafter",
     ...(purpose === "cut"
@@ -581,10 +585,14 @@ function drafterPrompt(ctx, purpose) {
         ? ["Revise the plan against the goal the owner read.",
           `The owner's answers: ${ctx.answers}`,
           "If their answer does not change the goal — the reader was wrong, or the point belongs in a spec — the file says so; revise the plan accordingly."]
-        : []),
+        : purpose === "dependencies"
+          ? ["The plan's Deliverables table has a dependency problem, and no spec writer can be sent until it is corrected.",
+            `The refusal: ${refusal}`,
+            "Correct the depends-on entries so each names a spec from the table (a row number also works), and none names its own spec or closes a cycle. Change nothing else that this does not require."]
+          : []),
     ...inputs(ctx, "goal", "exploration"),
-    ...(purpose === "draft" ? [] : [`Plan to ${purpose === "cut" ? "cut" : "revise"}: ${ctx.plan}`]),
-    `Write ${purpose === "draft" ? "the plan" : `the ${purpose === "cut" ? "cut" : "revised"} plan`} to: ${ctx.plan}`
+    ...(work ? [`Plan to ${work[0]}: ${ctx.plan}`] : []),
+    `Write ${work ? `the ${work[1]} plan` : "the plan"} to: ${ctx.plan}`
   ].join("\n");
 }
 
@@ -669,19 +677,19 @@ async function explore(options) {
   return send(ctx, "explore", entries, { say: ["Sending the explorer."] });
 }
 
-function sendDraft(ctx, purpose, say) {
+function sendDraft(ctx, purpose, say, refusal = null) {
   if (purpose === "revise" && !fs.existsSync(ctx.answers)) {
     throw new PlanSetError(`revise refused: the owner's answers are not at ${ctx.answers}. Write them there — "the goal did not change" `
       + "when that is the answer — and run this step again.");
   }
-  const entries = claudeParts(ctx, "draft", { purpose }, [{ prompt: drafterPrompt(ctx, purpose), output: ctx.plan }]);
+  const entries = claudeParts(ctx, "draft", { purpose }, [{ prompt: drafterPrompt(ctx, purpose, refusal), output: ctx.plan }]);
   return send(ctx, "draft", entries, { say });
 }
 
 async function draft(options) {
   const ctx = contextFor(options);
   const purpose = options.purpose ?? "draft";
-  if (!Object.hasOwn(DRAFTER_PURPOSES, purpose)) throw new PlanSetError(`--purpose takes one of ${Object.keys(DRAFTER_PURPOSES).join(", ")}; got ${JSON.stringify(purpose)}`);
+  if (!DRAFT_STEP_PURPOSES.includes(purpose)) throw new PlanSetError(`--purpose takes one of ${DRAFT_STEP_PURPOSES.join(", ")}; got ${JSON.stringify(purpose)}`);
   requireNothingOut(ctx.D, "draft");
   requireGoal(ctx);
   return sendDraft(ctx, purpose, [`Sending the drafter to ${{ draft: "draft the plan", cut: "cut the plan", revise: "revise the plan" }[purpose]}.`]);
@@ -801,7 +809,20 @@ async function writersStep(options) {
     throw new Error(`${over.sentence}, and the drafter's cut did not bring it under. Cut it by hand, or move what belongs in a spec out of it, `
       + "then run resume.");
   }
-  const rows = readDeliverables(ctx.plan);
+  let rows;
+  try {
+    rows = readDeliverables(ctx.plan);
+  } catch (error) {
+    // A single-writer re-send reads a table that was clean a moment ago, and a
+    // drafter rewriting it would leave the other specs matching nothing.
+    if (!error.dependencyProblem || options.spec) throw error;
+    const asked = listSets(ctx.D).some((set) => DRAFTER_KINDS.has(set.kind) && set.record.agents[0]?.label === DRAFTER_PURPOSES.dependencies);
+    if (asked) {
+      throw new Error(`${error.message}. The drafter already had its one send-back for the dependencies; correct the depends-on cell of `
+        + `${ctx.plan} by hand, then run resume.`);
+    }
+    return sendDraft(ctx, "dependencies", ["A dependency in the Deliverables table is refused: sending the drafter to correct it."], error.message);
+  }
   const chosen = options.spec ? rows.filter((row) => row.id === options.spec) : rows;
   if (chosen.length === 0) throw new Error(`${options.spec} is not a deliverable of ${ctx.plan}`);
   if (options.note && !fs.existsSync(options.note)) throw new PlanSetError(`the note ${options.note} does not exist`);
