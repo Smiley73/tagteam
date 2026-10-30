@@ -23,6 +23,16 @@ function readLadder() {
 
 export const EFFORT_LADDER = readLadder();
 
+// Codex's own ladder, `$defs.jobEffort.properties.codex.enum`: its words are
+// Codex's to change, so it is not the Claude one even where the two agree.
+function readCodexLadder() {
+  const ladder = JSON.parse(fs.readFileSync(SCHEMA, "utf8"))?.$defs?.jobEffort?.properties?.codex?.enum;
+  if (!Array.isArray(ladder) || ladder.length === 0) throw new Error(`${SCHEMA} has no $defs.jobEffort.properties.codex.enum`);
+  return Object.freeze([...ladder]);
+}
+
+export const CODEX_EFFORT_LADDER = readCodexLadder();
+
 export const onEffortLadder = (effort) => typeof effort === "string" && EFFORT_LADDER.includes(effort);
 
 /**

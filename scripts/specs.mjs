@@ -129,8 +129,8 @@ function topologicalOrder(specs, planDir) {
   const byId = new Map(specs.map((spec) => [spec.id, spec]));
   for (const spec of specs) {
     for (const dependency of spec.dependsOn) {
-      if (!byId.has(dependency)) throw new Error(`${spec.id} depends on ${dependency}, which is not a spec in ${planDir}`);
-      if (dependency === spec.id) throw new Error(`${spec.id} cannot depend on itself`);
+      if (!byId.has(dependency)) throw Object.assign(new Error(`${spec.id} depends on ${dependency}, which is not a spec in ${planDir}`), { specId: spec.id });
+      if (dependency === spec.id) throw Object.assign(new Error(`${spec.id} cannot depend on itself`), { specId: spec.id });
     }
   }
   const ordered = [];
@@ -158,39 +158,45 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   const specs = [];
   for (const name of fs.readdirSync(specsDir).filter((entry) => entry.endsWith(".md")).sort()) {
-    const file = path.join(specsDir, name);
-    const text = fs.readFileSync(file, "utf8");
-    const size = Buffer.byteLength(text, "utf8");
-    // Enforced where a spec is written, at step 6 of the plan. A plan approved
-    // before the ceiling existed still ships from the specs it has.
-    if (enforceSize && size > SPEC_MAX_BYTES) {
-      throw new Error(`${name} is ${size} bytes; a spec has a ${SPEC_TARGET_BYTES / 1000} KB target and a `
-        + `${SPEC_MAX_BYTES / 1000} KB ceiling — re-dispatch its writer to cut it to the target, dropping anything `
-        + "the implementer can read out of the repository");
+    try {
+      const file = path.join(specsDir, name);
+      const text = fs.readFileSync(file, "utf8");
+      const size = Buffer.byteLength(text, "utf8");
+      // Enforced where a spec is written, at step 6 of the plan. A plan approved
+      // before the ceiling existed still ships from the specs it has.
+      if (enforceSize && size > SPEC_MAX_BYTES) {
+        throw new Error(`${name} is ${size} bytes; a spec has a ${SPEC_TARGET_BYTES / 1000} KB target and a `
+          + `${SPEC_MAX_BYTES / 1000} KB ceiling — re-dispatch its writer to cut it to the target, dropping anything `
+          + "the implementer can read out of the repository");
+      }
+      const { front, body } = parseFrontMatter(text, name);
+      // Same rule as the size: enforced where a spec is written. A plan approved
+      // before the section existed ships from specs without it, approving nothing.
+      const signOffs = parseSignOffs(body, name);
+      if (enforceSize && !signOffs.present) {
+        throw new Error(`${name} has no "## Sign-offs" section — re-dispatch its writer to add it, `
+          + "listing what the conventions say to ask about first, or `None.`");
+      }
+      const errors = validateJson(schema, front);
+      if (errors.length > 0) throw new Error(`${name}: ${errors.join("; ")}`);
+      if (front.id !== name.replace(/\.md$/, "")) {
+        throw new Error(`${name}: front matter id is "${front.id}" but the file is named "${name}"`);
+      }
+      const workflows = front.workflows ?? [];
+      checkWorkflows(workflows, name);
+      specs.push({
+        id: front.id,
+        path: file,
+        dependsOn: front.depends_on,
+        reviewers: resolveReviewers(front.reviewers, config, { file: name }),
+        signOffs: signOffs.entries,
+        workflows
+      });
+    } catch (error) {
+      // The refusal says which spec it is about, as data, for a driver that sends its writer again.
+      error.specId ??= name.replace(/\.md$/, "");
+      throw error;
     }
-    const { front, body } = parseFrontMatter(text, name);
-    // Same rule as the size: enforced where a spec is written. A plan approved
-    // before the section existed ships from specs without it, approving nothing.
-    const signOffs = parseSignOffs(body, name);
-    if (enforceSize && !signOffs.present) {
-      throw new Error(`${name} has no "## Sign-offs" section — re-dispatch its writer to add it, `
-        + "listing what the conventions say to ask about first, or `None.`");
-    }
-    const errors = validateJson(schema, front);
-    if (errors.length > 0) throw new Error(`${name}: ${errors.join("; ")}`);
-    if (front.id !== name.replace(/\.md$/, "")) {
-      throw new Error(`${name}: front matter id is "${front.id}" but the file is named "${name}"`);
-    }
-    const workflows = front.workflows ?? [];
-    checkWorkflows(workflows, name);
-    specs.push({
-      id: front.id,
-      path: file,
-      dependsOn: front.depends_on,
-      reviewers: resolveReviewers(front.reviewers, config, { file: name }),
-      signOffs: signOffs.entries,
-      workflows
-    });
   }
   if (specs.length === 0) throw new Error(`${specsDir} holds no spec files`);
   return topologicalOrder(specs, dir);

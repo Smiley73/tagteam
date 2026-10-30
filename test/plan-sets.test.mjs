@@ -2,15 +2,16 @@
 // arrival is one call, and no step reads an agent's output until the run says
 // its set is in — whether Claude Code ran the agents in the foreground or not.
 //
-// Everything here drives the scripts as subprocesses, the way the main agent
-// does, against a plan directory in a repository of its own. Agents are faked by
-// writing their output files, and sessions by a HOME holding transcripts named
-// for them, with `TAGTEAM_SESSION_ID` naming the current one.
+// Everything here drives the scripts as subprocesses against a plan directory in
+// a repository of its own. Sets the driver would not reach in a given order are
+// recorded directly. Agents are faked by writing their output files, and sessions
+// by a HOME holding transcripts named for them, with `TAGTEAM_SESSION_ID` naming
+// the current one.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { readSet, status } from "../scripts/dispatch-set.mjs";
+import { closeSet, readSet, status } from "../scripts/dispatch-set.mjs";
 import {
   PLAN_READERS,
   arriveInto,
@@ -28,9 +29,11 @@ const labels = (ws) => PLAN_READERS(ws).map(([label]) => label);
 const setsDir = (ws) => path.join(ws.D, "work", "sets");
 const stateOf = (ws, payload) => status({ dir: setsDir(ws), id: payload.json.set.id }).state;
 
-const collect = (ws, session) => runScript(ws, "plan.mjs", ["collect", "--dir", ws.review], session);
-const check = (ws) => runScript(ws, "plan.mjs", ["check", "--dir", ws.review]);
-const specs = (ws) => runScript(ws, "specs.mjs", [ws.D, path.join(ws.repo, ".tagteam", "config.json"), "--enforce-size"]);
+const collect = (ws, session) => runScript(ws, "plan.mjs", ["collect", "--plan", ws.D], session);
+const check = (ws) => runScript(ws, "plan.mjs", ["check", "--plan", ws.D]);
+const specs = (ws) => runScript(ws, "plan.mjs", ["specs", "--plan", ws.D]);
+const writers = (ws) => runScript(ws, "plan.mjs", ["writers", "--plan", ws.D]);
+const judge = (ws, payload) => closeSet({ dir: setsDir(ws), id: payload.json.set.id });
 const deliverables = (ws) => runScript(ws, "deliverables.mjs", [path.join(ws.D, "plan.md")]);
 const resume = (ws, session, flags = [], extra = {}) => runScript(ws, "plan.mjs", ["resume", "--plan", ws.D, ...flags], session, extra);
 
@@ -54,7 +57,6 @@ test("the three readers arrive one at a time and out of order, each saying so, a
   const ws = stagePlanWorkspace();
   const readers = reviewOut(ws);
   assert.deepEqual(readers.json.set.labels, labels(ws));
-  assert.match(readers.json.howToWait, /set\.arrive/);
 
   const codex = arriveInto(ws, readers, ["Codex plan review"]);
   assert.equal(codex.status, 0, codex.stderr);
@@ -64,7 +66,7 @@ test("the three readers arrive one at a time and out of order, each saying so, a
   assert.equal(adversary.json.say, "The adversary is in (2 of 3)");
   const claude = arriveInto(ws, readers, ["Plan review: Claude"]);
   assert.equal(claude.json.say, "All 3 are in. Judging the review now.");
-  assert.match(claude.json.next, /plan\.mjs" collect --dir/);
+  assert.match(claude.json.next, /plan\.mjs" collect --plan/);
 
   // The same set reported in one call: the same completion, the same next step.
   const together = stagePlanWorkspace();
@@ -72,7 +74,7 @@ test("the three readers arrive one at a time and out of order, each saying so, a
   const once = arriveInto(together, all, labels(together));
   assert.equal(once.status, 0, once.stderr);
   assert.equal(once.json.say, "All 3 are in. Judging the review now.");
-  assert.match(once.json.next, /plan\.mjs" collect --dir/);
+  assert.match(once.json.next, /plan\.mjs" collect --plan/);
 });
 
 // --- early steps ---------------------------------------------------------------
@@ -107,10 +109,10 @@ test("check and deliverables.mjs run early are refused by name, changing nothing
     write(path.join(ws.review, `${name}.json`), review(reader, name === "claude" ? [finding("major", "a")] : []));
   }
   arriveInto(ws, readers, labels(ws));
-  assert.equal(collect(ws).status, 0);
-
-  const drafter = recordPlanSet(ws, "response", [["Answer the plan review", path.join(ws.review, "response.json")]]);
+  // The review has a major finding, so collect sends the drafter to answer it.
+  const drafter = collect(ws);
   assert.equal(drafter.status, 0, drafter.stderr);
+  assert.equal(drafter.json.set.labels[0], "Answer the plan review");
   write(path.join(ws.review, "response.json"), { responses: [] });
   const early = check(ws);
   assert.equal(early.status, 5);
@@ -133,7 +135,7 @@ test("a consuming step with no set ever recorded is refused, naming what to disp
   const collected = collect(ws);
   assert.equal(collected.status, 2);
   assert.match(collected.stderr, /no review set was recorded/);
-  assert.match(collected.stderr, /three readers/);
+  assert.match(collected.stderr, /run the `review` step/);
   assert.ok(!fs.existsSync(path.join(ws.review, "findings.json")));
   assert.ok(!fs.existsSync(path.join(ws.review, "brief.md")));
 
@@ -184,24 +186,24 @@ test("a drafter set waits for a judged explorer, and no set is recorded while an
 test("a reader that arrives with an invalid file is missing, gets one re-send set, and a second is refused", () => {
   const ws = stagePlanWorkspace();
   const readers = reviewOut(ws);
-  write(path.join(ws.review, "claude.json"), review("claude", [finding("major", "a")]));
+  write(path.join(ws.review, "claude.json"), review("claude"));
   write(path.join(ws.review, "codex.json"), "{ not json");
   write(path.join(ws.review, "adversary.json"), review("adversary"));
   arriveInto(ws, readers, labels(ws));
 
   const first = collect(ws);
-  assert.equal(first.status, 1);
-  assert.match(first.stdout, /MISSING  codex: unreadable/);
-
-  const resend = recordPlanSet(ws, "review-resend", [["Codex plan review", path.join(ws.review, "codex.json")]]);
-  assert.equal(resend.status, 0, resend.stderr);
-  assert.notEqual(resend.json.set.id, readers.json.set.id, "the re-send is a set of its own");
+  assert.equal(first.status, 0, first.stderr);
+  assert.deepEqual(first.json.missing, ["codex"]);
+  assert.deepEqual(first.json.set.labels, ["Codex plan review"], "only the reader that was missing is sent again");
+  assert.match(first.json.set.id, /-review-resend$/);
+  assert.notEqual(first.json.set.id, readers.json.set.id, "the re-send is a set of its own");
   assert.equal(collect(ws).status, 5, "collect judged the re-send before it was in");
   write(path.join(ws.review, "codex.json"), review("codex"));
-  assert.equal(arriveInto(ws, resend, ["Codex plan review"]).json.say, "Codex is in. Judging the review now.");
+  assert.equal(arriveInto(ws, first, ["Codex plan review"]).json.say, "Codex is in. Judging the review now.");
   const second = collect(ws);
   assert.equal(second.status, 0, second.stderr);
-  assert.match(second.stdout, /plan review: open — 1 major across 3\/3 readers/);
+  assert.equal(second.json.status, "clean");
+  assert.equal(second.json.dispatch, undefined);
 
   const again = recordPlanSet(ws, "review-resend", [["Codex plan review", path.join(ws.review, "codex.json")]]);
   assert.equal(again.status, 2);
@@ -213,13 +215,13 @@ test("a reader that arrives with an invalid file is missing, gets one re-send se
   assert.match(fresh.stderr, /one re-send/);
 });
 
-test("a second review set is refused before the re-send too, naming the re-send kind", () => {
+test("a second review set is refused before the re-send too, naming the re-send kind", async () => {
   const ws = stagePlanWorkspace();
   const readers = reviewOut(ws);
   write(path.join(ws.review, "claude.json"), review("claude"));
   write(path.join(ws.review, "adversary.json"), review("adversary"));
   arriveInto(ws, readers, labels(ws));
-  assert.equal(collect(ws).status, 1);
+  await judge(ws, readers);
   const fresh = recordPlanSet(ws, "review", PLAN_READERS(ws));
   assert.equal(fresh.status, 2, "a second review set was accepted");
   assert.match(fresh.stderr, /reviewed once/);
@@ -227,22 +229,28 @@ test("a second review set is refused before the re-send too, naming the re-send 
   assert.deepEqual(fs.readdirSync(setsDir(ws)).filter((name) => name.endsWith("-review.json")).length, 1);
 });
 
-test("a reader still missing after its re-send is carried on, as before", () => {
+test("a reader still missing after its re-send is carried on, said by name, and sends nothing", () => {
   const ws = stagePlanWorkspace();
   const readers = reviewOut(ws);
   write(path.join(ws.review, "claude.json"), review("claude"));
   write(path.join(ws.review, "adversary.json"), review("adversary"));
   arriveInto(ws, readers, labels(ws));
-  assert.equal(collect(ws).status, 1);
-  const resend = recordPlanSet(ws, "review-resend", [["Codex plan review", path.join(ws.review, "codex.json")]]);
-  arriveInto(ws, resend, ["Codex plan review"]);
+  const first = collect(ws);
+  assert.equal(first.status, 0, first.stderr);
+  assert.deepEqual(first.json.set.labels, ["Codex plan review"]);
+  arriveInto(ws, first, ["Codex plan review"]);
   const still = collect(ws);
-  assert.equal(still.status, 1);
-  assert.match(still.stdout, /MISSING  codex: no file was written/);
+  assert.equal(still.status, 0, still.stderr);
+  assert.match(still.json.say.join("\n"), /Codex is still missing \(no file was written\)/);
+  assert.deepEqual(still.json.missing, ["codex"]);
+  assert.equal(still.json.dispatch, undefined);
+  assert.equal(still.json.set, undefined);
+  assert.match(still.json.next, /plan\.mjs" writers --plan/);
   assert.ok(fs.existsSync(path.join(ws.review, "brief.md")), "the brief is still written for the readers that did report");
+  assert.equal(fs.readdirSync(setsDir(ws)).filter((name) => name.endsWith("-review-resend.json")).length, 1, "a second re-send was recorded");
 });
 
-test("the drafter answering the brief gets one re-send after check, and a second is refused", () => {
+test("the drafter answering the brief gets one re-send after check, and a second is refused", async () => {
   const ws = stagePlanWorkspace();
   const readers = reviewOut(ws);
   write(path.join(ws.review, "claude.json"), review("claude", [finding("major", "a")]));
@@ -254,23 +262,29 @@ test("the drafter answering the brief gets one re-send after check, and a second
   const unjudged = recordPlanSet(ws, "response", [["Answer the plan review", response]]);
   assert.equal(unjudged.status, 2);
   assert.match(unjudged.stderr, /collect has not judged it/);
-  assert.equal(collect(ws).status, 0);
 
-  const drafter = recordPlanSet(ws, "response", [["Answer the plan review", response]]);
+  const drafter = collect(ws);
   assert.equal(drafter.status, 0, drafter.stderr);
+  assert.match(drafter.json.set.id, /-response$/);
   write(response, { responses: [] });
   assert.equal(arriveInto(ws, drafter, ["Answer the plan review"]).json.say, "The drafter is in. Checking the answers now.");
-  assert.equal(check(ws).status, 1);
   // A second response set in place of the re-send is refused, naming the re-send kind.
+  await judge(ws, drafter);
   const second = recordPlanSet(ws, "response", [["Answer the plan review again", response]]);
   assert.equal(second.status, 2, "a second response set was accepted");
   assert.match(second.stderr, /already answered this review/);
   assert.match(second.stderr, /`response-resend`/);
-  const resend = recordPlanSet(ws, "response-resend", [["Answer the plan review again", response]]);
+
+  const resend = check(ws);
   assert.equal(resend.status, 0, resend.stderr);
+  assert.match(resend.json.set.id, /-response-resend$/);
   write(response, { responses: [{ id: "claude.1", action: "applied", note: "done" }] });
   arriveInto(ws, resend, ["Answer the plan review again"]);
-  assert.equal(check(ws).status, 0);
+  const done = check(ws);
+  assert.equal(done.status, 0, done.stderr);
+  assert.equal(done.json.status, "complete");
+  assert.match(done.json.next, /plan\.mjs" writers --plan/);
+  assert.equal(done.json.ask, undefined);
   const again = recordPlanSet(ws, "response-resend", [["Answer the plan review a third time", response]]);
   assert.equal(again.status, 2);
   assert.match(again.stderr, /one re-send/);
@@ -282,45 +296,42 @@ test("the drafter answering the brief gets one re-send after check, and a second
 
 // --- the spec writers -----------------------------------------------------------
 
-test("specs.mjs waits for every writer, validates as before, and a failed writer's re-send is its own set", () => {
+test("specs waits for every writer, validates, and a failed writer's re-send is its own set", () => {
   const ws = stagePlanWorkspace();
   stageExplored(ws);
-  const plan = path.join(ws.D, "plan.md");
-  const drafter = recordPlanSet(ws, "draft", [["Draft the plan", plan]]);
-  write(plan, PLAN);
-  arriveInto(ws, drafter, ["Draft the plan"]);
+  write(path.join(ws.D, "plan.md"), PLAN);
   const listed = deliverables(ws);
   assert.equal(listed.status, 0, listed.stderr);
   assert.equal(listed.json.count, 2);
 
   const a = path.join(ws.D, "specs", "01-a.md");
   const b = path.join(ws.D, "specs", "01-b.md");
-  const writers = recordPlanSet(ws, "spec-writers", [["Write spec 01-a", a], ["Write spec 01-b", b]]);
-  assert.equal(writers.status, 0, writers.stderr);
+  const sent = writers(ws);
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.deepEqual(sent.json.set.labels, ["Write spec 01-a", "Write spec 01-b"]);
   write(a, spec("01-a"));
   write(b, "no front matter at all");
-  assert.equal(arriveInto(ws, writers, ["Write spec 01-a"]).json.say, "The writer of 01-a is in (1 of 2)");
+  assert.equal(arriveInto(ws, sent, ["Write spec 01-a"]).json.say, "The writer of 01-a is in (1 of 2)");
   const early = specs(ws);
   assert.equal(early.status, 5);
   assert.match(early.stderr, /still waiting on the writer of 01-b/);
   assert.equal(early.stdout, "");
 
-  const last = arriveInto(ws, writers, ["Write spec 01-b"]);
+  const last = arriveInto(ws, sent, ["Write spec 01-b"]);
   assert.equal(last.json.say, "All 2 are in. Validating the specs now.");
-  assert.match(last.json.next, /specs\.mjs" .* --enforce-size/);
+  assert.match(last.json.next, /plan\.mjs" specs --plan/);
   const failed = specs(ws);
-  assert.equal(failed.status, 1);
-  assert.match(failed.stderr, /01-b\.md: has no front matter/);
-
-  const resend = recordPlanSet(ws, "spec-writers-resend", [["Write spec 01-b again", b]]);
-  assert.equal(resend.status, 0, resend.stderr);
-  assert.notEqual(resend.json.set.id, writers.json.set.id);
-  assert.equal(specs(ws).status, 5, "specs.mjs ran while the re-sent writer was out");
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.deepEqual(failed.json.set.labels, ["Write spec 01-b again"]);
+  assert.match(failed.json.say[0], /01-b\.md: has no front matter/);
+  assert.notEqual(failed.json.set.id, sent.json.set.id);
+  assert.equal(specs(ws).status, 5, "specs ran while the re-sent writer was out");
   write(b, spec("01-b", "[01-a]"));
-  arriveInto(ws, resend, ["Write spec 01-b again"]);
+  arriveInto(ws, failed, ["Write spec 01-b again"]);
   const passed = specs(ws);
   assert.equal(passed.status, 0, passed.stderr);
   assert.deepEqual(passed.json.order.map((entry) => entry.id), ["01-a", "01-b"]);
+  assert.equal(passed.json.next, undefined, "validated specs are the end of planning");
 });
 
 // --- restarts ---------------------------------------------------------------------
@@ -344,10 +355,9 @@ test("a restart from a different identified session releases the review, and col
   assert.equal(stateOf(ws, readers), "closed");
 
   const judged = collect(ws, "second");
-  assert.equal(judged.status, 1);
-  assert.match(judged.stdout, /across 2\/3 readers/, "a valid file left by a reader whose notice never came did not count");
-  assert.match(judged.stdout, /MISSING  codex: no file was written/);
-  assert.doesNotMatch(judged.stdout, /MISSING  adversary/);
+  assert.equal(judged.status, 0, judged.stderr);
+  assert.match(judged.json.say[0], /across 2\/3 readers/, "a valid file left by a reader whose notice never came did not count");
+  assert.deepEqual(judged.json.missing, ["codex"]);
 });
 
 test("a restart from the same session keeps waiting on the reader still out, and collect stays refused", () => {
@@ -433,14 +443,14 @@ test("with no session identified the resume asks, a no keeps the set open, and a
   assert.equal(gone.status, 0, gone.stderr);
   assert.match(gone.json.say.join("\n"), /on your word that the earlier run is gone/);
   assert.equal(stateOf(ws, readers), "closed");
-  const judged = collect(ws);
-  assert.equal(judged.status, 1);
-  assert.match(judged.stdout, /MISSING  codex/);
-  assert.match(judged.stdout, /MISSING  adversary/);
-
   const nothing = resume(ws, null);
   assert.equal(nothing.status, 0);
   assert.match(nothing.json.say.join("\n"), /No set is still waiting on anyone/);
+  assert.match(nothing.json.next, /plan\.mjs" collect --plan/);
+
+  const judged = collect(ws);
+  assert.equal(judged.status, 0, judged.stderr);
+  assert.deepEqual(judged.json.missing, ["codex", "adversary"]);
 });
 
 test("a resume after a set came in but before its step ran names that step, not the first missing output", () => {
@@ -453,21 +463,21 @@ test("a resume after a set came in but before its step ran names that step, not 
   assert.equal(deliverables(ws).status, 0);
   const a = path.join(ws.D, "specs", "01-a.md");
   const b = path.join(ws.D, "specs", "01-b.md");
-  const writers = recordPlanSet(ws, "spec-writers", [["Write spec 01-a", a], ["Write spec 01-b", b]]);
+  const sent = recordPlanSet(ws, "spec-writers", [["Write spec 01-a", a], ["Write spec 01-b", b]]);
   write(a, spec("01-a"));
-  write(b, "no front matter at all");
-  arriveInto(ws, writers, ["Write spec 01-a", "Write spec 01-b"]);
+  write(b, spec("01-b", "[01-a]"));
+  arriveInto(ws, sent, ["Write spec 01-a", "Write spec 01-b"]);
   // The session stopped here, before running what the last arrival printed.
 
   const resumed = resume(ws, null);
   assert.equal(resumed.status, 0, resumed.stderr);
-  assert.match(resumed.json.say.join("\n"), /specs\.mjs has not judged it yet/);
-  assert.match(resumed.json.next, /specs\.mjs" .* --enforce-size/);
+  assert.match(resumed.json.say.join("\n"), /specs has not judged it yet/);
+  assert.match(resumed.json.next, /plan\.mjs" specs --plan/);
   assert.equal(resumed.json.ask, undefined);
-  assert.equal(specs(ws).status, 1, "the specs the resume pointed at were not the ones validated");
+  assert.deepEqual(specs(ws).json.order.map((entry) => entry.id), ["01-a", "01-b"], "the specs the resume pointed at were not the ones validated");
 
-  // Once judged, nothing is pending and the resume says so.
+  // Once judged, nothing is pending: the resume says so, and names the step to pick up at.
   const after = resume(ws, null);
-  assert.equal(after.json.next, undefined);
-  assert.match(after.json.say.join("\n"), /pick up at the first step whose output is missing/);
+  assert.match(after.json.say.join("\n"), /No set is still waiting on anyone/);
+  assert.match(after.json.next, /plan\.mjs" specs --plan/);
 });
