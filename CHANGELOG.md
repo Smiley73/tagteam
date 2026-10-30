@@ -12,7 +12,7 @@
 - A run's command on a spec, or on the plan, ends the command an earlier run left going there and everything that command started, whether or not the command itself is still running, so stopping a run during `checks` and starting another at `finish` leaves nothing writing behind the new run. A checks wait or a verification whose driver was killed stops and writes nothing; the verification also ends the command it was running.
 - Count the agents that ran inside a workflow in the cost report and in the report of which agents ran at another effort or model than they were sent at, and report the step helper as its own kind of agent rather than as a spec writer.
 - Recommend setting `subagentPromptCacheTtl` to `"1h"` in your own Claude Code settings. `/tagteam:configure` does not write it.
-- The configured per-role efforts do not reach the agents inside a run: Claude Code was not shown to apply an effort passed on a call there, so those agents run at the effort their agent file pins, or at the session's, and the effort report shows any difference. The explorer that `/tagteam:plan` sends itself does get its configured effort.
+- The configured per-role efforts, and an escalation's raised ones, reach the agents inside a run as they reach one sent from the session: a per-call effort applies inside a workflow and overrides an agent file's (confirmed on Claude Code 2.1.309), so no role agent file pins one. The effort report at `finish` and at a plan's approval shows any difference.
 
 ## 0.13.6
 

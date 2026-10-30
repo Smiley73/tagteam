@@ -2,7 +2,6 @@
 name: plan-reviewer
 description: Read-only critic of a draft plan, grounded in the repository and the settled goal.
 tools: Read, Write, Glob, Grep, mcp__codegraph__codegraph_explore
-effort: high
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/prompts/plan-review.md` and follow it.

@@ -7,12 +7,13 @@
 // a fallback: a dispatch that forgot its effort would run at a plausible wrong
 // one instead of being refused by the driver.
 //
-// Three kinds of file pin something anyway. The two plumbing agents, the Codex
-// runner and the step helper, run one command and nothing else, so each carries
-// its own fixed pair. And while docs/workflow-spike-findings.md does not show
-// that a per-call effort applies inside a workflow run, the three review roles
-// pin an effort (never a model), the example configuration's for the role's
-// first job: a run cannot pass it per call. Outside a run the call still wins.
+// Two files pin something anyway. The two plumbing agents, the Codex runner and
+// the step helper, run one command and nothing else, so each carries its own
+// fixed pair. The three review roles would pin an effort (never a model), the
+// example configuration's for the role's first job, only while
+// docs/workflow-spike-findings.md did not show that a per-call effort applies
+// inside a workflow run; its answer (b) now records that it does, so they pin
+// nothing, and the guards below read that answer rather than a constant.
 //
 // The pieces still break each other unless they agree: the files on disk, the
 // names the drivers print, and the grants in each command. A name printed with

@@ -408,9 +408,11 @@ flowchart TD
   minutes, and nothing longer has been tried, so whether a run survives the last two
   minutes is not known. A run that is cut short ends as a stop, and starting the
   ship again reads what is on disk and carries on.
-- The efforts of agents inside a run come from the agent files, which pin them,
-  and the configuration's per-role efforts do not reach them. The one agent
-  `/tagteam:plan` sends outside a run, the explorer, does get its configured effort.
+- The configured per-role efforts, and an escalation's raised ones, reach the
+  agents inside a run exactly as they reach an agent sent from the session: a
+  per-call effort applies inside a workflow and overrides an agent file's. The one
+  thing that beats it is `CLAUDE_CODE_EFFORT_LEVEL` in your environment, which
+  overrides every effort, an escalated fixer's included.
 
 ### Shipping a plan as one
 

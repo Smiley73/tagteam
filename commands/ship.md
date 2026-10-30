@@ -95,8 +95,8 @@ whole output, which you read with Read).
   driver's, and `codex-routing` is *When Codex could not say how it ran* below.
 
 A run that does not come back as one of these is not finished: say so and stop.
-The efforts of agents inside a run come from the agent files, which pin them, and
-the configuration's per-role efforts do not reach them.
+The agents inside a run run at the effort the driver printed for each, the
+configured one or the escalation's, exactly as they would sent from the session.
 
 Every command a run starts at or follows is `ship.mjs` for this plan. `start`,
 `dependencies` and `end` are the session's own and are never a run's. The commands

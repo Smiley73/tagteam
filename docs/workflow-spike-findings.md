@@ -21,13 +21,20 @@ Runs:
 start in an interactive session and no approval dialog at any point. What the
 pane shows in detail was not recorded.
 
-**(b) Per-call model and effort.** The model passed per call was honoured:
-both agents ran on Sonnet (the transcripts' metadata say so). The per-call
-effort is not recorded in the agent metadata, the transcript or the prefix file,
-so whether it is applied is **unconfirmed**. The reviewer agent file pins
-neither model nor effort, so this does not show that a per-call setting beats
-an agent file. The plugin agent type (`tagteam:implementer`) and the label
-passed to `agent()` are both kept, and the label is the agent's description.
+**(b) Per-call model and effort.** Both apply. The model passed per call was
+honoured: both agents ran on Sonnet (the transcripts' metadata say so). The
+per-call effort applies too, and it beats the agent file: a probe on Claude
+Code 2.1.309 sent five trivial agents through one workflow on Sonnet, and each
+ran at what its call asked for — `low`, `xhigh`, the session's effort when none
+was passed, `low` for `tagteam:reviewer` whose file then pinned `medium`, and
+`high` for `tagteam:step-helper` whose file pins `low`. The spike had read the
+agent metadata (`.meta.json`), which carries no effort for a workflow agent; the
+effort is on each assistant record of the transcript (`effort` and
+`perTurnEffort`), which is where `scripts/lib/effort-check.mjs` reads it. The
+sub-agents documentation says the same for subagents: a per-invocation effort
+overrides the agent file's, and only `CLAUDE_CODE_EFFORT_LEVEL` beats both. The
+plugin agent type (`tagteam:implementer`) and the label passed to `agent()` are
+both kept, and the label is the agent's description.
 
 **(c) The completion notice wakes an ended turn.** Yes, unaided: in the headless
 run and in the interactive session, the session was woken by the notice with
@@ -71,6 +78,7 @@ workflow must therefore have a name its command does not.
   plugin agent type and label are kept, transcripts are where a cost report can
   find them, and a quiet agent of at least 8 minutes survives.
 - Give the workflows names that differ from their commands.
-- Do not rely on a per-call effort until it is shown to apply.
+- A per-call effort applies and overrides the agent file, so the drivers' printed
+  efforts reach a run's agents; no agent file needs to pin one.
 - Do not import; shell out to a script or inline the helper.
 - Allow for the harness frame before an agent's `Job:` line.

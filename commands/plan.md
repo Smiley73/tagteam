@@ -207,10 +207,9 @@ new run that reads what is on disk, never a resumption.
 **Then end your turn.** The run's completion notice wakes you, and nothing else
 does. Progress shows in Claude Code's workflow view: the phases Draft, Review and
 Specs, each agent under its label, and every line the driver says. Do not repeat
-it. The configured planning efforts reach the explorer, which you send. The agents
-inside the run run at what their agent file pins, or at the session's effort, and
-the configuration's per-role efforts do not reach them; approval's effort report
-shows the difference.
+it. The configured planning efforts reach the explorer, which you send, and the
+agents inside the run alike: each runs at the effort the driver printed for it,
+and approval's effort report shows any difference.
 
 A run ends in one of three ways, in `ending`. Any other result is not finished:
 say so and stop.

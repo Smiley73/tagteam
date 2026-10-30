@@ -311,16 +311,14 @@ beside the `model`, exactly as `ship.mjs` printed them, and a plan's run does th
 same with what each `plan.mjs` step printed, and so does the session for the
 explorer. An effort left off does not fail: the agent
 silently runs at whatever effort the session uses. No role agent's file pins a
-model, so nothing but the call decides it, and outside a workflow run nothing but
-the call decides an effort either. Two plumbing agents pin a fixed pair:
-`tagteam:codex-runner`, `haiku` at `low`, and `tagteam:step-helper`, `sonnet` at
-`low`. Each is passed that pair as printed. The configured Codex model and effort
-belong to the Codex process the runner starts, and are already in the command
-file it is handed. While a per-call effort is not shown to apply inside a
-workflow run, the reviewer, adversary and plan-reviewer files also carry an
-effort, the configured one for the role's first job, and that is the one a
-workflow run uses: the efforts of agents inside a run come from the agent files,
-which pin them, and the configuration's per-role efforts do not reach them.
+model or an effort, so nothing but the call decides either, inside a workflow run
+as outside it: a per-call effort applies there and overrides an agent file's, as
+`docs/workflow-spike-findings.md` records under (b). Two plumbing agents pin a
+fixed pair: `tagteam:codex-runner`, `haiku` at `low`, and `tagteam:step-helper`,
+`sonnet` at `low`. Each is passed that pair as printed. The configured Codex model
+and effort belong to the Codex process the runner starts, and are already in the
+command file it is handed. The one setting that beats a call's effort is
+`CLAUDE_CODE_EFFORT_LEVEL` in the environment, which overrides every effort.
 
 The agent files in `agents/` are written by hand, one per role.
 
