@@ -46,20 +46,56 @@ export function leadsOwnGroup() {
 /**
  * Runs this same command again as the leader of a new process group, on this
  * process's streams, passes it the signals this process gets, and resolves
- * with its exit code.
+ * with its exit code. What a signal reached is held to the same grace period
+ * `endGroup` gives, and what has not gone by then is killed before this resolves:
+ * a command that ignores the signal would otherwise outlive the launcher in no
+ * group a later claim could reach.
  */
 export function relaunchAsLeader() {
   return new Promise((resolve, reject) => {
     const leader = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
       stdio: "inherit", detached: true, env: { ...process.env, [LEADER]: "1" }
     });
+    const reached = new Set();
+    let until = null;
+    let timer = null;
+    const send = (name) => {
+      for (const target of reached) {
+        try { process.kill(target, name); } catch {}
+      }
+    };
+    const kill = () => {
+      clearTimeout(timer);
+      send("SIGKILL");
+    };
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+      // Through the same reach as ending a group: a member that dies of the signal
+      // at once, as a verification does, would otherwise leave behind what it
+      // started in a group of its own, with nobody left to find it.
       process.on(signal, () => {
-        try { process.kill(-leader.pid, signal); } catch {}
+        for (const target of reach(leader.pid)) reached.add(target);
+        for (const target of reached) {
+          try { process.kill(target, signal); } catch {}
+        }
+        if (until === null) {
+          until = Date.now() + GRACE_MS;
+          timer = setTimeout(kill, GRACE_MS);
+        }
       });
     }
-    leader.once("error", reject);
-    leader.once("exit", (code) => resolve(code ?? 1));
+    leader.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    leader.once("exit", async (code) => {
+      // The leader is gone, and what it started may not be: wait for what the
+      // signal reached, out to the grace period, then end what is left.
+      if (until !== null) {
+        while ([...reached].some(alive) && Date.now() < until) await new Promise((done) => setTimeout(done, 50));
+        kill();
+      }
+      resolve(code ?? 1);
+    });
   });
 }
 
@@ -74,7 +110,8 @@ function processes() {
   }
 }
 
-function endGroup(pgid) {
+// The group, and every process below any of its members.
+function reach(pgid) {
   const table = processes();
   const members = table.filter(([, , group]) => group === pgid).map(([pid]) => pid);
   // What a member started in a group of its own, as a verification or a worktree
@@ -90,7 +127,11 @@ function endGroup(pgid) {
       }
     }
   }
-  const targets = [-pgid, ...tree];
+  return [-pgid, ...tree];
+}
+
+function endGroup(pgid) {
+  const targets = reach(pgid);
   const signal = (name) => {
     for (const target of targets) {
       try { process.kill(target, name); } catch {}
