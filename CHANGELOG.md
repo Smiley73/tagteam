@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.14.1
+## Unreleased
 
 - Send the plan drafter back, once, when a dependency in the Deliverables table points at nothing, at its own spec or into a cycle, instead of stopping the run. The drafter is shown the entry and the valid choices; a second such problem later in the same plan stops the run with one line saying what to correct by hand.
 
