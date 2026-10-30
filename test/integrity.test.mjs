@@ -607,9 +607,15 @@ test("no command puts a file at the round store's marker name", async () => {
 // back through prose.
 test("the plan command reviews once, through the plan driver, and never budgets rounds", () => {
   const plan = read("commands", "plan.md");
-  assert.match(plan, /scripts\/plan\.mjs" review --plan/, "plan.md never starts the review through plan.mjs");
-  assert.match(plan, /names `collect`/, "plan.md never folds the review through plan.mjs");
-  assert.match(plan, /names `check`/, "plan.md never checks that the findings were answered");
+  // The review, its collection and the check of the answers are the plan driver's
+  // steps now, followed by the plan-specs run; plan.md only starts that run.
+  assert.match(plan, /scripts\/plan\.mjs" draft --plan/, "plan.md never starts the plan through plan.mjs");
+  assert.match(plan, /no second review round/, "plan.md does not say the plan is reviewed once");
+  const sets = read("scripts", "lib", "plan-sets.mjs");
+  assert.match(sets, /stepCommand\(D, "collect"\)/, "the plan driver never folds the review through collect");
+  assert.match(sets, /stepCommand\(D, "check"\)/, "the plan driver never checks that the findings were answered");
+  const script = read("workflows", "plan-specs.js");
+  assert.match(script, /review: "Review", collect: "Review", check: "Review"/, "the plan-specs run never follows the review, collect and check");
   for (const gone of ["planReviewRounds", "scripts/lib/rounds.mjs", "outcome.json", "Open the round", "next round"]) {
     assert.ok(!plan.includes(gone), `plan.md still carries "${gone}"`);
   }
@@ -921,8 +927,48 @@ test("the plan command and the skill tell the orchestrator how to dispatch, and 
     ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill]
   ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
   assert.deepEqual(problems, [], problems.join("\n"));
-  assert.match(plan, /one message/i);
+  // The agents of a set go out together from the run, not from the main session.
+  assert.match(read("workflows", "plan-specs.js"), /await parallel\(result\.dispatch\.map/, "the plan-specs run never sends a set together");
   assert.match(plan, /scripts\/plan\.mjs" resume --plan/, "plan.md's resume never applies the restart rule");
+});
+
+// The plan command starts one run once the goal is approved and ends its turn after
+// the call; the Workflow stop comes before anything is created. The guard is a
+// function so that its own test can hold it to the plan command as it was.
+function planWorkflowProblems(text) {
+  const flat = text.replace(/\s+/g, " ");
+  const problems = [];
+  if (!/^allowed-tools: .*\bWorkflow, Workflow\(tagteam:plan-specs\)/m.test(text)) problems.push("plan.md does not grant the Workflow tool and tagteam:plan-specs");
+  if (!/Workflow\(\{name: "tagteam:plan-specs"/.test(text)) problems.push("plan.md never starts a run of tagteam:plan-specs");
+  if (!/\*\*Then end your turn\.\*\*/.test(flat)) problems.push("plan.md does not end its turn after the Workflow call");
+  const stop = flat.indexOf("(it needs the Workflow tool), so nothing was started");
+  if (stop === -1) problems.push("plan.md has no Workflow-required stop");
+  for (const created of ["derive a slug", "create `$D/work/`"]) {
+    if (stop !== -1 && flat.indexOf(created) < stop) problems.push(`plan.md places the Workflow-required stop after it says to ${created}`);
+  }
+  return problems;
+}
+
+test("the plan command starts a run of tagteam:plan-specs after the goal gate, ends its turn, and stops without the Workflow tool before creating anything", () => {
+  const plan = read("commands", "plan.md");
+  assert.deepEqual(planWorkflowProblems(plan), []);
+  const flat = plan.replace(/\s+/g, " ");
+  assert.match(flat, /completion notice wakes you/);
+  assert.match(flat, /Never stand in for the run by dispatching agents yourself/);
+  assert.ok(flat.indexOf("## 3 — Goal gate") < flat.indexOf("Workflow({name:"), "the run is started after the goal gate");
+});
+
+test("the Workflow guard fails on a plan command without the grant, without the stop, or with the stop after the work directory is made", () => {
+  const plan = read("commands", "plan.md");
+  const grant = "Workflow, Workflow(tagteam:plan-specs), ";
+  assert.ok(plan.includes(grant), "the plan command's grant is not where the test cuts it");
+  assert.ok(planWorkflowProblems(plan.replace(grant, "")).some((problem) => /does not grant the Workflow tool/.test(problem)));
+  assert.ok(planWorkflowProblems(plan.replace("Workflow(tagteam:plan-specs), ", "")).some((problem) => /does not grant/.test(problem)));
+  assert.ok(planWorkflowProblems(plan.replace(/\(it\s+needs\s+the\s+Workflow\s+tool\),\s+so\s+nothing\s+was\s+started/, "(missing)")).some((problem) => /no Workflow-required stop/.test(problem)));
+  const stop = plan.slice(plan.indexOf("2. Check that `Workflow`"), plan.indexOf("3. `node \"$P/scripts/running-plugin.mjs\""));
+  assert.match(stop, /so\s+nothing\s+was\s+started/, "the stop is not where the test cuts it");
+  const late = plan.replace(stop, "").replace("Seven steps, and none of them loops.", `${stop}\nSeven steps, and none of them loops.`);
+  assert.ok(planWorkflowProblems(late).some((problem) => /places the Workflow-required stop after/.test(problem)), planWorkflowProblems(late).join("\n"));
 });
 
 // The ship command no longer dispatches: one run of the ship-spec workflow does,
@@ -989,12 +1035,14 @@ test("the waiting guard fails on the publish passage ship.md had, and passes the
 // A workflow script cannot import, so each piece of the step helper it needs is
 // pasted into it. They are held equal to the module's text, so a change to one
 // without the other fails here and not mid-run.
-test("the ship-spec script carries the step helper's checksum, schema and prompt exactly as the module does", async () => {
-  const script = read("workflows", "ship-spec.js");
+test("the ship-spec and plan-specs scripts carry the step helper's checksum, schema and prompt exactly as the module does", async () => {
   const helper = await import("../scripts/lib/step-helper.mjs");
-  for (const piece of [helper.checksumOf, helper.stepHelperSchema, helper.stepHelperPrompt]) {
-    const pasted = new RegExp(`^function ${piece.name}\\(.*?\\n\\}$`, "ms").exec(script)?.[0];
-    assert.equal(pasted, piece.toString(), `workflows/ship-spec.js carries ${piece.name} differently from scripts/lib/step-helper.mjs`);
+  for (const file of ["ship-spec.js", "plan-specs.js"]) {
+    const script = read("workflows", file);
+    for (const piece of [helper.checksumOf, helper.stepHelperSchema, helper.stepHelperPrompt]) {
+      const pasted = new RegExp(`^function ${piece.name}\\(.*?\\n\\}$`, "ms").exec(script)?.[0];
+      assert.equal(pasted, piece.toString(), `workflows/${file} carries ${piece.name} differently from scripts/lib/step-helper.mjs`);
+    }
   }
 });
 

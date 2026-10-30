@@ -451,7 +451,8 @@ export async function resumePlanSets({ planDir, runGone = false, runLive = false
       outcome: "waiting",
       say,
       set: { id: set.id, labels: waiting.missing.map((agent) => agent.label), arrive: arriveCommand(dir, set.id) },
-      next: set.record.next
+      next: set.record.next,
+      ...(set.kind === "explore" ? { howToWait: HOW_TO_WAIT } : {})
     };
   }
   // Released: the step that judges the set judges what is on disk, as it does
@@ -463,11 +464,12 @@ export async function resumePlanSets({ planDir, runGone = false, runLive = false
   return { outcome: "released", say, ...(familyOf(released.kind) ? { next: released.record.next } : {}) };
 }
 
-// The instruction that rides along with a dispatch the driver prints, and with a
-// resumed set still out. Claude Code may run the agents in the background
-// whatever the call asks for, so nothing here depends on the message returning
-// only once they have finished; the foreground is asked for because one return
-// is cheaper than one wake-up per agent.
+// The instruction that rides along with the explorer's dispatch, and with the
+// explorer resumed while still out: the one set the main session sends and
+// records itself. Every later set belongs to a `plan-specs` run. Claude Code may
+// run the agent in the background whatever the call asks for, so nothing here
+// depends on the message returning only once it has finished; the foreground is
+// asked for because one return is cheaper than one wake-up per agent.
 export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
   + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed as given when it is not "
   + "null and omitted when it is, `description` as given and `prompt` verbatim, and pass `effort` on every call, exactly as "

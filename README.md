@@ -35,8 +35,9 @@ flowchart LR
 ## Install
 
 Requires Claude Code 2.1.301 or newer with its Workflow tool (`/tagteam:ship`
-runs each spec as a Claude Code workflow, and stops before creating anything
-when the session has no such tool), Git, the
+runs each spec, and `/tagteam:plan` its draft, review and specs, as a Claude Code
+workflow, and each stops before creating anything when the session has no such
+tool), Git, the
 [Codex CLI](https://github.com/openai/codex) 0.153.0 or newer, and an
 authenticated GitHub CLI. An older Codex is refused before a plan or a ship
 starts: every Codex call goes through `codex app-server`, and 0.153.0 is the
@@ -146,6 +147,16 @@ flowchart TD
    `.github/workflows/` files a spec will change are listed per spec, one per
    line, and approved the same way: that spec may then change exactly those
    files and merge into the plan branch without stopping.
+
+The session you started in runs the interview and the goal gate itself. From the
+approved goal to specs that validate, one Claude Code workflow run,
+`tagteam:plan-specs`, runs the draft, the three-reader review, the drafter's answer
+and the spec writers, and the session goes quiet until it ends. Progress is in
+Claude Code's own workflow view, each agent under its name and every line the
+driver says as the driver wrote it. A run ends with the specs validated, with a
+stop and its reason, or with a question for you, such as a finding against the
+goal itself; you answer in the session and a new run carries on from your answer,
+without reviewing anything again.
 
 ### Shipping
 
@@ -386,10 +397,10 @@ flowchart TD
 
 #### Running a ship as workflows
 
-- `/tagteam:ship` needs the Workflow tool. Without it the command says so in one
-  sentence and creates nothing.
+- `/tagteam:ship` and `/tagteam:plan` need the Workflow tool. Without it the
+  command says so in one sentence and creates nothing.
 - In auto mode, Claude Code asks once per workflow name the first time
-  `tagteam:ship-spec` is launched, and remembers the answer.
+  `tagteam:ship-spec` or `tagteam:plan-specs` is launched, and remembers the answer.
 - Recommended: set `subagentPromptCacheTtl` to `"1h"` in your own Claude Code
   settings. `/tagteam:configure` does not write it.
 - Known exposure: a Codex review makes the run wait in a shell call of up to ten
@@ -398,7 +409,8 @@ flowchart TD
   minutes is not known. A run that is cut short ends as a stop, and starting the
   ship again reads what is on disk and carries on.
 - The efforts of agents inside a run come from the agent files, which pin them,
-  and the configuration's per-role efforts do not reach them.
+  and the configuration's per-role efforts do not reach them. The one agent
+  `/tagteam:plan` sends outside a run, the explorer, does get its configured effort.
 
 ### Shipping a plan as one
 
@@ -504,8 +516,9 @@ confirmed, as a report that never holds anything up.
 ## How it is built
 
 The orchestrator is the main Claude Code agent following the command files. In a
-ship it starts one `tagteam:ship-spec` workflow run per spec and ends its turn;
-the run runs `scripts/ship.mjs` once per step, through a small helper agent whose
+ship it starts one `tagteam:ship-spec` workflow run per spec and ends its turn, and
+in a plan, past the goal gate, one `tagteam:plan-specs` run. A run runs
+`scripts/ship.mjs` (`scripts/plan.mjs` in a plan) once per step, through a small helper agent whose
 answers are checksummed so a copy that was altered or cut short is refused. The
 driver runs git, Codex and the other scripts, decides the round, the route and
 every model and effort, and prints the agents to dispatch with their prompts

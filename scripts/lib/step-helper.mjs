@@ -3,8 +3,8 @@
 //
 // A workflow script cannot import (docs/workflow-spike-findings.md), so each of
 // the three exports below is one function that refers to nothing outside its own
-// text: no imports, no module-level names, no Node globals. `workflows/ship-spec.js`
-// pastes the text word for word, and test/step-helper.test.mjs rebuilds each
+// text: no imports, no module-level names, no Node globals. `workflows/ship-spec.js` and
+// `workflows/plan-specs.js` paste the text word for word, and test/step-helper.test.mjs rebuilds each
 // piece from `toString()` alone to prove it stands by itself. Keep it that way:
 // a helper hoisted out of a function is a name the pasted copy does not have.
 //
