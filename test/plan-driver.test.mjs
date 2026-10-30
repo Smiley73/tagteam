@@ -305,6 +305,35 @@ test("a step stops on a missing or off-ladder effort before anything is recorded
   assert.equal(fs.existsSync(setsDir(ws)), false);
 });
 
+test("review stops on an off-ladder Codex effort before any set is recorded", () => {
+  const ws = explored();
+  write(path.join(ws.D, "plan.md"), PLAN);
+  const file = path.join(ws.repo, ".tagteam", "config.json");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  write(file, { ...config, effort: { ...config.effort, codex: "extreme" } });
+  const before = fs.readdirSync(setsDir(ws));
+  const refused = step(ws, "review");
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr.split("\n")[0], /the plan-codex job has the effort "extreme", which is not one of low, medium, high, xhigh, max/);
+  assert.deepEqual(fs.readdirSync(setsDir(ws)), before, "a refused review recorded a set");
+});
+
+test("specs sends the writer of a deliverable that left no spec again, once, and stops when it is still missing", () => {
+  const ws = explored();
+  write(path.join(ws.D, "plan.md"), PLAN);
+  const sent = step(ws, "writers");
+  write(path.join(ws.D, "specs", "01-a.md"), spec("01-a"));
+  arrive(ws, sent);
+  const resend = step(ws, "specs");
+  assert.equal(resend.status, 0, resend.stderr);
+  assert.deepEqual(resend.json.dispatch.map((entry) => entry.description), ["Write spec 01-b again"]);
+  assert.match(fs.readFileSync(path.join(ws.D, "work", "spec-notes", "01-b.md"), "utf8"), /01-b\.md was not written/);
+  arrive(ws, resend);
+  const stopped = step(ws, "specs");
+  assert.equal(stopped.status, 1);
+  assert.match(stopped.stderr.split("\n")[0], /01-b.*still fails.*01-b\.md was not written/);
+});
+
 test("a step from the draft on stops when the goal is not the one the owner approved", () => {
   const ws = explored();
   write(path.join(ws.D, "goal.md"), "# Goal: another goal\n");

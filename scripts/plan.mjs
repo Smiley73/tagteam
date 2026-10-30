@@ -43,7 +43,7 @@ import { validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { arriveCommand } from "./dispatch-set.mjs";
-import { effortRefusal } from "./lib/effort-ladder.mjs";
+import { CODEX_EFFORT_LADDER, effortRefusal } from "./lib/effort-ladder.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
 import {
   CODEX_PLAN_REVIEW,
@@ -597,6 +597,10 @@ function codexEntry(ctx) {
     throw new Error(`the plan-codex job has no ${model ? "effort" : "model"} in the configuration. Nothing was dispatched and no set `
       + "was recorded for it; correct .tagteam/config.json and run this step again.");
   }
+  if (!CODEX_EFFORT_LADDER.includes(effort)) {
+    throw new Error(`the plan-codex job has the effort ${JSON.stringify(effort)}, which is not one of ${CODEX_EFFORT_LADDER.join(", ")}. `
+      + "Nothing was dispatched and no set was recorded for it; correct .tagteam/config.json and run this step again.");
+  }
   const output = path.join(ctx.review, "codex.json");
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
@@ -777,10 +781,18 @@ async function specsStep(options) {
   requireGoal(ctx);
   let order = null;
   let refusal = null;
-  try {
-    order = readSpecs(ctx.D, ctx.config, path.join(SCHEMAS, "spec.schema.json"), { enforceSize: true });
-  } catch (error) {
-    refusal = error;
+  // A deliverable whose writer left no file is a refusal about that deliverable:
+  // readSpecs only sees the files that exist, so it would call the rest valid.
+  const unwritten = readDeliverables(ctx.plan).find((row) => !fs.existsSync(path.join(ctx.D, "specs", `${row.id}.md`)));
+  if (unwritten) {
+    const file = path.join(ctx.D, "specs", `${unwritten.id}.md`);
+    refusal = Object.assign(new Error(`${unwritten.id}.md was not written: there is no spec for the deliverable ${unwritten.id} at ${file}`), { specId: unwritten.id });
+  } else {
+    try {
+      order = readSpecs(ctx.D, ctx.config, path.join(SCHEMAS, "spec.schema.json"), { enforceSize: true });
+    } catch (error) {
+      refusal = error;
+    }
   }
   // Judged either way: a writer whose spec was refused is sent again as a set of
   // its own, which is recorded only once this one is judged.
