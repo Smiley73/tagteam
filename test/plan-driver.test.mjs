@@ -320,6 +320,91 @@ test("writers sends a cut again after the review and a revision came between, an
   assert.match(stopped.stderr.split("\n")[0], /over its 12 KB ceiling, and the drafter's cut did not bring it under/);
 });
 
+// A review judged with nothing found, then a plan the table of which refuses.
+function reviewedWith(plan) {
+  const { ws, collected: judged } = collected({ claude: [], codex: [], adversary: [] });
+  assert.equal(judged.status, 0, judged.stderr);
+  write(path.join(ws.D, "plan.md"), plan);
+  return ws;
+}
+const UNKNOWN = PLAN.replace("| 01-b | b | 01-a |", "| 01-b | b | 01-z |");
+const CYCLE = PLAN.replace("| 1 | 01-a | a | — |", "| 1 | 01-a | a | 2 |");
+const asked = (stopped) => stopped.stderr.split("\n").filter(Boolean);
+const OVER = (plan) => `${plan}\n${"x".repeat(12_100)}\n`;
+
+for (const [name, plan, entry] of [["an entry matching nothing", UNKNOWN, '"01-z"'], ["a cycle", CYCLE, '"01-a"']]) {
+  test(`writers sends the drafter back to correct ${name}, and the corrected plan goes to writers without a review`, () => {
+    const ws = reviewedWith(plan);
+    const sent = step(ws, "writers");
+    assert.equal(sent.status, 0, sent.stderr);
+    assert.deepEqual(sent.json.dispatch.map((entry) => entry.description), ["Correct the plan's dependencies"]);
+    const { prompt } = sent.json.dispatch[0];
+    assert.match(prompt, /^Job: plan-drafter$/m);
+    assert.ok(prompt.includes(entry), `the prompt quotes ${entry}`);
+    assert.match(prompt, /choose one of: 1 \(01-a\), 2 \(01-b\)/);
+    assert.match(prompt, new RegExp(`^Plan to correct: ${ws.D}/plan\\.md$`, "m"));
+    assert.match(sent.json.set.id, /-draft$/);
+    assert.equal(command(recorded(ws, sent).next), "writers");
+
+    write(path.join(ws.D, "plan.md"), PLAN);
+    assert.equal(command(arrive(ws, sent).json.next), "writers", "the arrival names writers, not a review");
+    const onward = step(ws, "writers");
+    assert.equal(onward.status, 0, onward.stderr);
+    assert.deepEqual(onward.json.dispatch.map((entry) => entry.description), ["Write spec 01-a", "Write spec 01-b"]);
+  });
+}
+
+test("writers stops with one line after the drafter was sent back for the dependencies once", () => {
+  const ws = reviewedWith(UNKNOWN);
+  arrive(ws, step(ws, "writers"));
+  const before = fs.readdirSync(setsDir(ws)).length;
+  const stopped = step(ws, "writers");
+  assert.equal(stopped.status, 1);
+  assert.equal(stopped.stdout, "");
+  const [line, ...rest] = asked(stopped);
+  assert.match(line, /^01-b depends on "01-z", .*; choose one of: 1 \(01-a\), 2 \(01-b\)\./);
+  assert.match(line, /already had its one send-back for the dependencies; correct the depends-on cell of .*plan\.md by hand, then run resume\.$/);
+  assert.equal(rest.length, 1, "only the checksum follows the one line");
+  assert.equal(fs.readdirSync(setsDir(ws)).length, before, "nothing was recorded or dispatched");
+});
+
+test("the dependency send-back counts every set on record, not only the latest: a cut between two refusals does not earn a second one", () => {
+  const ws = reviewedWith(UNKNOWN);
+  arrive(ws, step(ws, "writers"));
+  write(path.join(ws.D, "plan.md"), OVER(UNKNOWN));
+  const cut = step(ws, "writers");
+  assert.deepEqual(cut.json.dispatch.map((entry) => entry.description), ["Cut the plan"]);
+  write(path.join(ws.D, "plan.md"), UNKNOWN);
+  arrive(ws, cut);
+  const stopped = step(ws, "writers");
+  assert.equal(stopped.status, 1);
+  assert.match(asked(stopped)[0], /already had its one send-back for the dependencies/);
+});
+
+test("writers stops at once on a table refusal that is not about dependencies, and on a single-writer re-send", () => {
+  const ws = reviewedWith(PLAN.replace("| 01-a |", "| a_one |"));
+  const before = fs.readdirSync(setsDir(ws)).length;
+  const stopped = step(ws, "writers");
+  assert.equal(stopped.status, 1);
+  assert.match(asked(stopped)[0], /names "a_one", which is not an NN-slug spec id/);
+  assert.equal(fs.readdirSync(setsDir(ws)).length, before, "no drafter was sent");
+
+  const note = path.join(ws.D, "note.md");
+  write(note, "Put it right.\n");
+  write(path.join(ws.D, "plan.md"), UNKNOWN);
+  const resend = step(ws, "writers", ["--spec", "01-b", "--note", note]);
+  assert.equal(resend.status, 1);
+  assert.match(asked(resend)[0], /^01-b depends on "01-z"/);
+  assert.doesNotMatch(asked(resend)[0], /send-back/);
+});
+
+test("draft refuses the purpose only writers sends", () => {
+  const ws = explored();
+  const refused = step(ws, "draft", ["--purpose", "dependencies"]);
+  assert.equal(refused.status, 2);
+  assert.match(asked(refused)[0], /--purpose takes one of draft, cut, revise; got "dependencies"/);
+});
+
 for (const [name, reach] of [
   ["review", (ws) => { write(path.join(ws.D, "plan.md"), PLAN); }],
   ["collect", (ws) => {

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Send the plan drafter back, once, when a dependency in the Deliverables table points at nothing, at its own spec or into a cycle, instead of stopping the run. The drafter is shown the entry and the valid choices; a second such problem later in the same plan stops the run with one line saying what to correct by hand.
+
 ## 0.14.0
 
 - Run `/tagteam:ship` and `/tagteam:plan` as Claude Code workflows. A ship runs each spec as one workflow run, and a plan runs from the approved goal to validated specs as one. Progress shows in Claude Code's workflow view, every agent under its name and every line the driver says as the driver wrote it, and the main session takes far fewer turns because it starts a run, goes quiet and is woken when the run ends.

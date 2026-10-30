@@ -52,7 +52,7 @@ function canned(ws, { findings = {}, response = null, killed = [] } = {}) {
   return (call) => {
     const { label } = call.options;
     if (killed.includes(label)) return Promise.reject(new Error("killed"));
-    if (label === "Draft the plan" || label === "Revise the plan") write(path.join(ws.D, "plan.md"), PLAN);
+    if (label === "Draft the plan" || label === "Revise the plan" || label === "Correct the plan's dependencies") write(path.join(ws.D, "plan.md"), PLAN);
     else if (READER_OF[label]) write(path.join(ws.review, `${READER_OF[label]}.json`), review(READER_OF[label], findings[READER_OF[label]] ?? []));
     else if (label === "Answer the plan review") write(path.join(ws.review, "response.json"), response);
     else if (label.startsWith("Write spec ")) write(path.join(ws.D, "specs", `${label.slice(11)}.md`), spec(label.slice(11), label.endsWith("01-b") ? "[01-a]" : "[]"));
@@ -187,6 +187,18 @@ test("a run in the same session under a new stamp releases the review a dead run
   assert.deepEqual(stepsOf(again.commands()), ["resume", "collect", "arrive", "collect", "writers", "arrive", "specs"],
     "the released set's step, then the one reader sent again, then on to the specs; review itself was not run again");
   assert.deepEqual(labelsOf(again.calls), ["Codex plan review", "Write spec 01-a", "Write spec 01-b"]);
+});
+
+test("a plan whose dependency points at nothing is sent back to the drafter in the Specs phase, and the corrected plan reaches the spec writers without a second review", MINUTES, async () => {
+  const ws = staged();
+  write(path.join(ws.D, "plan.md"), PLAN.replace("| 01-b | b | 01-a |", "| 01-b | b | 01-z |"));
+  const run = launch(ws, "run-1", stepCommand(ws.D, "review"), canned(ws));
+  assert.deepEqual(await run.done, { ending: "ready" });
+  assert.deepEqual(labelsOf(run.calls), [...READ_LABELS, "Correct the plan's dependencies", "Write spec 01-a", "Write spec 01-b"]);
+  const sent = agentCalls(run.calls).find((call) => call.options.label === "Correct the plan's dependencies");
+  assert.equal(sent.options.phase, "Specs");
+  assert.match(sent.prompt, /01-b depends on "01-z"/);
+  assert.deepEqual(stepsOf(run.commands()), ["resume", "review", "arrive", "collect", "writers", "arrive", "writers", "arrive", "specs"]);
 });
 
 // --- control flow, with the driver scripted ------------------------------------------
