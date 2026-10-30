@@ -50,7 +50,7 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "redesignEscalation"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
@@ -854,6 +854,36 @@ test("escalationNotices warns at and above fixRounds, not below", async () => {
   assert.deepEqual(notices(2), []);
 });
 
+test("escalationNotices says a rewrite still reaches the raised settings when redesignEscalation is always or ask", async () => {
+  const { escalationNotices } = await import("../scripts/validate-json.mjs");
+  const notices = (after, redesignEscalation, escalation = true) => escalationNotices({
+    ...example,
+    ...(redesignEscalation === undefined ? {} : { redesignEscalation }),
+    limits: { ...example.limits, fixRounds: 3 },
+    escalation: escalation ? { after, models: { ...example.models, lead: "fable" }, effort: example.effort } : null
+  });
+  // Absent and `never` keep the warning, byte for byte.
+  const warning = "warning: escalation.after is 3 and limits.fixRounds is 3, so the fix rounds run out "
+    + "before the escalated ones start and nothing is ever dispatched at the raised settings";
+  assert.deepEqual(notices(3, undefined), [warning]);
+  assert.deepEqual(notices(3, "never"), [warning]);
+  for (const value of ["always", "ask"]) {
+    for (const after of [3, 4]) {
+      const [only, ...rest] = notices(after, value);
+      assert.deepEqual(rest, []);
+      assert.ok(only.startsWith("note:"), `${value}: expected a note, got: ${only}`);
+      assert.ok(only.includes("redesignEscalation") && only.includes(value), `expected the key and value named, got: ${only}`);
+      assert.ok(only.includes("escalation.after") && only.includes("limits.fixRounds"), `expected both keys named, got: ${only}`);
+      assert.ok(only.includes(String(after)) && only.includes("3"), `expected both numbers, got: ${only}`);
+      assert.ok(!only.includes("nothing is ever dispatched"), `the note must not claim nothing is raised, got: ${only}`);
+    }
+    // Below the fix rounds there is nothing to say about them.
+    assert.deepEqual(notices(2, value), []);
+  }
+  // Without escalation no value of the key says anything.
+  for (const value of [undefined, "always", "never", "ask"]) assert.deepEqual(notices(9, value, false), []);
+});
+
 test("escalationNotices warns only when the models and effort are exactly the top-level ones", async () => {
   // Equality is all that is detectable: nothing in this project orders opus,
   // fable and sonnet, so an escalation to a weaker model cannot be told from a
@@ -943,7 +973,16 @@ test("escalationNotices is safe on a document that has not passed shape validati
     { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, effort: example.effort } },
     { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised } },
     { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: [], effort: example.effort } },
-    { ...example, models: "opus", limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised, effort: example.effort } }
+    { ...example, models: "opus", limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised, effort: example.effort } },
+    // A `redesignEscalation` the schema would refuse, beside an `after` that has
+    // run out and maps identical to the top-level ones: each branch that would
+    // otherwise fire is silenced by the one bad field.
+    ...["sometimes", 1, null].map((redesignEscalation) => ({
+      ...example,
+      redesignEscalation,
+      limits: { ...example.limits, fixRounds: 2 },
+      escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } }
+    }))
   ];
   for (const candidate of candidates) {
     assert.deepEqual(escalationNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notices`);
@@ -1187,9 +1226,11 @@ test("a version-8 configuration reports stale rather than invalid", () => {
 
 const VERSION_11_KEYS = ["carry", "autoRedesign", "limits.carried", "limits.followUps"];
 
-// A version-10 file: the example without the four keys version 11 added.
+// A version-10 file: the example without the four keys version 11 added, and
+// without `redesignEscalation`, which a version-12 key does not belong in a
+// version-10 file.
 function versionTen() {
-  const { carry, autoRedesign, ...ten } = example;
+  const { carry, autoRedesign, redesignEscalation, ...ten } = example;
   const { carried, followUps, ...limits } = example.limits;
   return { ...ten, version: 10, limits };
 }
@@ -1259,6 +1300,7 @@ test("the example validates at version 12 with every setting at its safe value",
   // example states today's behaviour".
   assert.equal(example.carry, false);
   assert.equal(example.autoRedesign, false);
+  assert.equal(example.redesignEscalation, "never");
   assert.deepEqual(validateJson(schema, example), []);
   assert.equal(validateFile(versionRepo(), example).status, 0);
 });
