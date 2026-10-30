@@ -50,7 +50,7 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "redesignEscalation"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
@@ -962,6 +962,36 @@ test("escalationNotices warns at and above fixRounds, not below", async () => {
   assert.deepEqual(notices(2), []);
 });
 
+test("escalationNotices says a rewrite still reaches the raised settings when redesignEscalation is always or ask", async () => {
+  const { escalationNotices } = await import("../scripts/validate-json.mjs");
+  const notices = (after, redesignEscalation, escalation = true) => escalationNotices({
+    ...example,
+    ...(redesignEscalation === undefined ? {} : { redesignEscalation }),
+    limits: { ...example.limits, fixRounds: 3 },
+    escalation: escalation ? { after, models: { ...example.models, lead: "fable" }, effort: example.effort } : null
+  });
+  // Absent and `never` keep the warning, byte for byte.
+  const warning = "warning: escalation.after is 3 and limits.fixRounds is 3, so the fix rounds run out "
+    + "before the escalated ones start and nothing is ever dispatched at the raised settings";
+  assert.deepEqual(notices(3, undefined), [warning]);
+  assert.deepEqual(notices(3, "never"), [warning]);
+  for (const value of ["always", "ask"]) {
+    for (const after of [3, 4]) {
+      const [only, ...rest] = notices(after, value);
+      assert.deepEqual(rest, []);
+      assert.ok(only.startsWith("note:"), `${value}: expected a note, got: ${only}`);
+      assert.ok(only.includes("redesignEscalation") && only.includes(value), `expected the key and value named, got: ${only}`);
+      assert.ok(only.includes("escalation.after") && only.includes("limits.fixRounds"), `expected both keys named, got: ${only}`);
+      assert.ok(only.includes(String(after)) && only.includes("3"), `expected both numbers, got: ${only}`);
+      assert.ok(!only.includes("nothing is ever dispatched"), `the note must not claim nothing is raised, got: ${only}`);
+    }
+    // Below the fix rounds there is nothing to say about them.
+    assert.deepEqual(notices(2, value), []);
+  }
+  // Without escalation no value of the key says anything.
+  for (const value of [undefined, "always", "never", "ask"]) assert.deepEqual(notices(9, value, false), []);
+});
+
 test("escalationNotices warns only when the models and effort are exactly the top-level ones", async () => {
   // Equality is all that is detectable: nothing in this project orders opus,
   // fable and sonnet, so an escalation to a weaker model cannot be told from a
@@ -1051,7 +1081,16 @@ test("escalationNotices is safe on a document that has not passed shape validati
     { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, effort: example.effort } },
     { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised } },
     { ...example, limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: [], effort: example.effort } },
-    { ...example, models: "opus", limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised, effort: example.effort } }
+    { ...example, models: "opus", limits: { ...example.limits, fixRounds: 2 }, escalation: { after: 2, models: raised, effort: example.effort } },
+    // A `redesignEscalation` the schema would refuse, beside an `after` that has
+    // run out and maps identical to the top-level ones: each branch that would
+    // otherwise fire is silenced by the one bad field.
+    ...["sometimes", 1, null].map((redesignEscalation) => ({
+      ...example,
+      redesignEscalation,
+      limits: { ...example.limits, fixRounds: 2 },
+      escalation: { after: 2, models: { ...example.models }, effort: { ...example.effort } }
+    }))
   ];
   for (const candidate of candidates) {
     assert.deepEqual(escalationNotices(candidate), [], `${JSON.stringify(candidate)} should produce no notices`);
@@ -1119,8 +1158,9 @@ test("the shipped example states today's behaviour", () => {
 test("the schema declares no default anywhere", () => {
   // The whole refuse-don't-migrate decision rests on this: a default makes a
   // missing key invisible, and the file stops being the whole configuration.
-  // `ciStartWaitSec`, the one key that may be missing, is no exception here: a
-  // script supplies its fallback, and the schema only describes it.
+  // `ciStartWaitSec` and `redesignEscalation`, the keys that may be missing, are
+  // no exception here: a script supplies the fallback, and the schema only
+  // describes it.
   const defaults = [];
   // `reviewers.default` is a property *name*, not the keyword; only the map a
   // `properties` or `$defs` holds may legitimately contain one.
@@ -1294,9 +1334,11 @@ test("a version-8 configuration reports stale rather than invalid", () => {
 
 const VERSION_11_KEYS = ["carry", "autoRedesign", "limits.carried", "limits.followUps"];
 
-// A version-10 file: the example without the four keys version 11 added.
+// A version-10 file: the example without the four keys version 11 added, and
+// without `redesignEscalation`, which a version-12 key does not belong in a
+// version-10 file.
 function versionTen() {
-  const { carry, autoRedesign, ...ten } = example;
+  const { carry, autoRedesign, redesignEscalation, ...ten } = example;
   const { carried, followUps, ...limits } = example.limits;
   return { ...ten, version: 10, limits };
 }
@@ -1366,6 +1408,7 @@ test("the example validates at version 12 with every setting at its safe value",
   // example states today's behaviour".
   assert.equal(example.carry, false);
   assert.equal(example.autoRedesign, false);
+  assert.equal(example.redesignEscalation, "never");
   assert.deepEqual(validateJson(schema, example), []);
   assert.equal(validateFile(versionRepo(), example).status, 0);
 });
@@ -1423,7 +1466,7 @@ test("a version line names one file and exactly one locator: a JSON Pointer or a
   }
 });
 
-// --- the start wait: the one key that may be missing ---
+// --- the start wait: a key that may be missing ---
 
 test("a current file without ciStartWaitSec is valid and current, not stale", async () => {
   // The key was added to version 10 without a version bump so that every
@@ -1452,13 +1495,36 @@ test("ciStartWaitSec is an integer from 0 to 3600", () => {
   }
 });
 
-test("ciStartWaitSec and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("a current file without redesignEscalation, or with any of its three values, is valid and current", async () => {
+  // Added to version 12 as an optional key so that every version-12 file already
+  // written stayed current; the ship reads a missing one as `never`.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const { redesignEscalation, ...without } = example;
+  assert.deepEqual(validateJson(schema, without), []);
+  const dir = versionRepo();
+  for (const config of [without, ...["always", "never", "ask"].map((value) => ({ ...example, redesignEscalation: value }))]) {
+    const result = validateFile(dir, config);
+    assert.equal(result.status, 0, `${JSON.stringify(config.redesignEscalation)}: expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+  }
+});
+
+test("redesignEscalation refuses any other value, naming the key", () => {
+  const dir = versionRepo();
+  for (const bad of ["sometimes", "Always", "", true, false, null, 1]) {
+    const result = validateFile(dir, { ...example, redesignEscalation: bad });
+    assert.equal(result.status, 1, `redesignEscalation: ${JSON.stringify(bad)} must be invalid`);
+    assert.match(result.stderr, /redesignEscalation/, `redesignEscalation: ${JSON.stringify(bad)}: the refusal names the key`);
+  }
+});
+
+test("ciStartWaitSec, redesignEscalation and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
-  // 120 when it is missing, and `autoMerge`, which nothing reads at all. Another
-  // key quietly going optional would be a missing key read as something nobody
-  // wrote down.
+  // 120 when it is missing, `redesignEscalation`, which the ship reads as
+  // `never`, and `autoMerge`, which nothing reads at all. Another key quietly
+  // going optional would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", ...ACCEPTED_AND_IGNORED].sort());
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
   assert.equal(schema.properties.version.const, 12);
 });
 

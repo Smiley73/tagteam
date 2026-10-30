@@ -88,6 +88,8 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 // - `ciStartWaitSec` in the configuration, which was added to version 10
 //   without a bump so the version-10 files written before it existed stayed
 //   current; `scripts/ship.mjs` reads a missing one as 120.
+// - `redesignEscalation` in the configuration, added to version 12 without a
+//   bump for the same reason; the ship reads a missing one as `never`.
 // - `autoMerge` in the configuration, which nothing reads any more and which
 //   stays declared so a file that carries it is not refused for it.
 // - `user_visible` in a spec's front matter, retired and ignored, and declared
@@ -99,6 +101,7 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 // optional root keys.
 const DELIBERATELY_OPTIONAL = [
   { schema: "config.schema.json", property: "ciStartWaitSec" },
+  { schema: "config.schema.json", property: "redesignEscalation" },
   { schema: "config.schema.json", property: "autoMerge" },
   { schema: "spec.schema.json", property: "user_visible" },
   { schema: "spec.schema.json", property: "workflows" }

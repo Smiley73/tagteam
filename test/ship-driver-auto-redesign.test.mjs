@@ -13,9 +13,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { stage, write, outputOf, arriveAll, major } from "./ship-stage.mjs";
-import { driveToRecurrence, capRecordPath, answersIn, recheckWith } from "./ship-driver-shared.mjs";
+import { driveToRecurrence, capRecordPath, answersIn, recheckWith, configure, escalateImplementer, runCommand, RAISED } from "./ship-driver-shared.mjs";
 
 const autoOn = (staged) => {
   const configPath = path.join(staged.repo, ".tagteam", "config.json");
@@ -26,9 +25,9 @@ const autoOn = (staged) => {
 
 // `next` exactly as printed, the way the orchestrator runs it.
 const runNext = (result) => {
-  const ran = spawnSync("/bin/sh", ["-c", result.json.next], { encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1" } });
+  const ran = runCommand(result.json.next);
   assert.equal(ran.status, 0, ran.stderr);
-  return { ...ran, json: JSON.parse(ran.stdout) };
+  return ran;
 };
 
 const AUTO = /The Recurring question is answered redesign automatically, because autoRedesign is on/;
@@ -115,3 +114,22 @@ test("with autoRedesign on, the first same-file question with every fix round sp
   assert.equal(state().fixRoundGrant ?? null, null);
   assert.equal(state().fixRoundsUsed, 2);
 });
+
+// What a rewrite that `autoRedesign` started runs at is redesignEscalation's to
+// say: raised without a question under `ask` and `always`, ordinary under `never`.
+for (const [setting, raised] of [["ask", true], ["always", true], ["never", false]]) {
+  test(`with autoRedesign on and redesignEscalation ${setting}, the redesign next prints ${raised ? "runs raised with no question" : "runs at today's settings"}`, () => {
+    const staged = autoOn(stage());
+    configure(staged, (config) => { escalateImplementer(config); config.redesignEscalation = setting; });
+    const { state, collect } = driveToRecurrence(staged);
+    const redesign = runNext(collect);
+    assert.equal(redesign.json.ask, undefined, "an automatic start is never asked about");
+    const [implementer] = redesign.json.dispatch;
+    assert.deepEqual([implementer.model, implementer.effort], raised ? [RAISED.model, RAISED.effort] : ["sonnet", "high"]);
+    assert.match(redesign.json.say[0], raised
+      ? new RegExp(`${RAISED.model} at ${RAISED.effort} effort \\(raised: escalation is in force\\)\\. Escalation raises this rewrite because redesignEscalation is ${setting === "ask" ? "ask and autoRedesign started it" : "always"}`)
+      : /sonnet at high effort\. Escalation does not raise this rewrite, only fixers and re-checks; this round moved the counter/);
+    assert.equal(state().fixRoundsUsed, 3);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(staged.shipDir, "01-a", "fix-pending.json"), "utf8")).escalated, raised);
+  });
+}

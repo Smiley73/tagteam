@@ -120,6 +120,19 @@ names, internal ids. See *Asking* in the skill.
    many unsettled fix rounds the raised ones take over — at least 1, because the
    ordinary settings always get a fix round — and the raised `models` for the
    three roles and `effort` for the seven jobs.
+
+   When it is on, a follow-up rides in the next call, because only that answer
+   needs it: should a rewrite chosen from the "rewrite this area?" question run
+   at the raised models and effort — `redesignEscalation`. Offer `never` first:
+   a rewrite runs at the ordinary settings, which is today's behaviour and what
+   a missing key means. `always` runs every rewrite at the raised settings at
+   once, whatever the round they named; it is a stronger rewrite and costs more.
+   `ask` puts that choice to the person each time a rewrite is chosen, naming
+   what each answer runs at. A rewrite the run starts itself because
+   `autoRedesign` is on cannot ask, so it runs at the raised settings under
+   `ask` too, as it does under `always`. With escalation off, nothing is asked.
+   It must be answered before question 10, which prices the round they named
+   against `fixRounds` and reads this answer to do it.
 5. `plan` — one set of `models` and `effort` for the whole of `/tagteam:plan`,
    replacing the ones from questions 2 and 3 for every dispatch that command
    makes, so planning can run cheaper, or more expensively, than shipping. Offer
@@ -181,9 +194,14 @@ names, internal ids. See *Asking* in the skill.
     ever reaches the raised settings, so escalation buys nothing; raising
     `fixRounds` above that round is what lets it run at least once; and
     `fixRounds` is also the number that bounds how many paid review rounds this
-    repository can run with nobody watching. Offer both answers and prefer
-    neither, naming the number each one writes. The validator's warning about
-    raised settings nothing reaches is shown after the write either way.
+    repository can run with nobody watching. That is the framing when they
+    answered `never` to `redesignEscalation` in question 4. When they answered
+    `always` or `ask`, put the same contradiction as this instead: only a
+    rewrite reaches the raised settings, and raising `fixRounds` above that
+    round is what lets the fixers and re-checks reach them too. Either way offer
+    both answers and prefer neither, naming the number each one writes. The
+    validator's line about raised settings is shown after the write either way:
+    a `warning:` under `never`, a `note:` under `always` or `ask`.
 
     This is a question, not a default, because it is the only setting that
     decides what the tool spends and how often it hands work back.
@@ -195,6 +213,9 @@ names, internal ids. See *Asking* in the skill.
     up in a review cycle the run answers it with a rewrite itself and carries
     on; any later time in that cycle it asks as before, and publishing with
     what is still open is always a person's answer. It applies whether or not a plan has a branch of its own.
+    When escalation is on and `redesignEscalation` is `always` or `ask`, say
+    that this automatic rewrite runs at the raised settings: that is part of
+    its price.
     Offer off first: the run always asks.
 11. `planBranch` — whether a plan of two or more specs ships as one: its specs
     collect on a branch of its own, each still its own reviewed pull request
@@ -290,8 +311,10 @@ calibrates lenses of its own, and `warning:` lines for each one that replaces a
 brief the plugin ships, for a brief in `.tagteam/lenses/` that the roster does
 not name, for one named after `codex` or `adversary`, which have prompts of their
 own and read no brief, and for one Git is not tracking. It may also print
-`warning:` lines about an escalation that validates and then buys nothing. Show
-those the same way, as the validator wrote them.
+`warning:` lines about an escalation that validates and then buys nothing, and a
+`note:` when `redesignEscalation` is `always` or `ask` and `escalation.after`
+is at or above `limits.fixRounds`, which says only a rewrite reaches the raised
+settings. Show those the same way, as the validator wrote them.
 
 `--reconfigure` re-runs the whole interview with the current values as defaults,
 `limits` and `effort` included — a repository that raised or lowered one is
@@ -300,7 +323,9 @@ protection: a reconfigure that was about lenses must not reset a limit someone
 chose deliberately. The one value not offered back is `autoMerge`, which nothing
 reads any more; see *The key that no longer does anything* below.
 
-`escalation` and `plan` carry forward on the same terms: a key that is `null`
+`redesignEscalation` is offered back with the value the file holds, and a file
+without it is offered `never`, which is what it has been reading as; it is asked
+only when escalation is on. `escalation` and `plan` carry forward on the same terms: a key that is `null`
 today is re-offered as off, and a configured one is offered its own models and
 effort back rather than the question starting from off — plus, for `escalation`
 alone, the round it already names. A reconfigure about something else must not
@@ -341,8 +366,9 @@ Say two things afterwards, because neither is visible from the file:
   refresh commands.
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
-configured them; the only key with a fallback is `ciStartWaitSec`, so
-any other omitted key is an invalid file rather than an unused feature.
+configured them; the only keys with a fallback are `ciStartWaitSec` and
+`redesignEscalation`, so any other omitted key is an invalid file rather than
+an unused feature.
 `autoMerge` is the one key the file may omit without either, because nothing
 reads it — and this command always omits it.
 
@@ -352,6 +378,10 @@ as 120, so the version-10 files written before it existed stayed current — but
 file this command writes is complete. Under `--reconfigure`, and when a version-9
 or version-10 file is carried forward, offer back the value the file holds, or 120
 when it has none.
+
+Always write `redesignEscalation` too, and for the same reason: the answer when
+question 4 asked it, otherwise the value the file already holds, or `never`. A
+file this command writes carries it even though a missing one reads as `never`.
 
 Write `planBranch` and `versionFiles` as question 11 answered them, explicitly:
 there is no fallback for either. Under `--reconfigure` of a current file both are offered back with the values the file already has, so a
@@ -371,7 +401,8 @@ this repository's version, asked about only when that is on. Off and empty,
 nothing about how a plan ships changes. Say what version 11 adds as well, as
 below. Answering every question as before, and leaving the setting off, writes
 the old file with those two keys, version 11's four at their safe values,
-`ciStartWaitSec` added, `autoMerge` left out, version 12, and nothing else different.
+`ciStartWaitSec` added, `redesignEscalation` at `never`, `autoMerge` left out,
+version 12, and nothing else different.
 
 A version-10 configuration is carried forward the same way: every value the
 file holds is offered back as the default, `autoMerge` is still never written,
@@ -380,13 +411,18 @@ and say what version 11 adds — `autoRedesign`, whether the run answers its fir
 plan branch, `carry`, whether a spec out of fix rounds with only carriable
 findings merges into the plan's branch with them disclosed, offered off, with
 `limits.carried` at 5 and `limits.followUps` at 2. Answering every question as
-before writes the old file with those four keys at their safe values, version 12,
-and nothing else different.
+before writes the old file with those four keys at their safe values,
+`redesignEscalation` at `never`, version 12, and nothing else different.
 
 A version-11 configuration is carried forward without an interview. Keep every
 value the file holds, drop `progressBoard` whatever its value, write version 12,
 validate it, and show the file as *Write* says. Tell the person in one sentence
-that the setting was retired and that nothing else changed.
+that the setting was retired and that nothing else changed. This path adds no
+`redesignEscalation`.
+
+A version-12 configuration without `redesignEscalation` is current: it needs no
+reconfigure and behaves as `never`. A `--reconfigure` of it asks the question
+only when escalation is on.
 
 A configuration older than version 9 is not upgraded — each of those versions is
 a different shape, not an extension. Say that the old file is being replaced.

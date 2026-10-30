@@ -140,11 +140,14 @@ export function validateJson(schema, value) {
 // a version-11 file is reported stale, which `/tagteam:configure` carries
 // forward without asking anything.
 //
-// The exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120 when
+// The first exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120 when
 // it is missing. It was added as an optional key so that the version-10 and
 // version-11 files already written stayed current: requiring it would have meant
 // a version bump, and every existing file reported stale for one number. The rule
 // is unchanged for every other key, and `/tagteam:configure` still writes it.
+// `redesignEscalation` is the second such key, for the same reason: the ship
+// reads a missing one as `never`, and requiring it would have reported every
+// version-12 file stale for a setting whose absence changes nothing.
 //
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its
@@ -211,8 +214,11 @@ export function limitNotices(config) {
 //
 // The first is arithmetic: escalated settings take over after `escalation.after`
 // ordinary fix rounds, so an `after` at or above `limits.fixRounds` means the
-// cycle is out of fix rounds before the raised ones start. That is advice and
-// not a refusal because `limits.fixRounds` is a live setting `/tagteam:configure`
+// cycle is out of fix rounds before the raised ones start. Fixers and re-checks
+// then never reach them, and a rewrite still does when `redesignEscalation` is
+// `always` or `ask` — which makes that configuration coherent, so it gets a
+// `note:` saying so instead of the `warning:` that nothing is ever raised. That
+// is advice and not a refusal because `limits.fixRounds` is a live setting `/tagteam:configure`
 // asks about: lowering it must not invalidate a working configuration and stop
 // both `/tagteam:ship` and `/tagteam:plan`. The behaviour it produces is today's,
 // visibly.
@@ -231,8 +237,8 @@ export function limitNotices(config) {
 // `[]`, or with `after: "2"` returns no notices rather than throwing or saying
 // something nonsensical.
 //
-// Every field either warning reads is checked before either is evaluated, and a
-// single malformed one silences both. Gating each branch on only the fields it
+// Every field either notice reads, `redesignEscalation` included, is checked
+// before either is evaluated, and a single malformed one silences both. Gating each branch on only the fields it
 // happens to read would let a document the schema is about to reject — an
 // `after` of `"2"`, a missing `escalation.models` — still collect advice about
 // the half of the block that is well formed, and that advice arrives next to a
@@ -247,9 +253,16 @@ export function escalationNotices(config) {
   const { fixRounds } = limits;
   if (![after, fixRounds].every((value) => Number.isInteger(value) && value >= 1)) return [];
   if (![escalation.models, escalation.effort, config?.models, config?.effort].every(isMap)) return [];
+  const redesign = config.redesignEscalation;
+  if (redesign !== undefined && !["always", "never", "ask"].includes(redesign)) return [];
   const notices = [];
 
-  if (after >= fixRounds) {
+  if (after >= fixRounds && (redesign === "always" || redesign === "ask")) {
+    notices.push(
+      `note: redesignEscalation is ${redesign}, escalation.after is ${after} and limits.fixRounds is ${fixRounds}, `
+      + "so fixers and re-checks never reach the raised settings and only a redesign does"
+    );
+  } else if (after >= fixRounds) {
     notices.push(
       `warning: escalation.after is ${after} and limits.fixRounds is ${fixRounds}, so the fix rounds run out `
       + "before the escalated ones start and nothing is ever dispatched at the raised settings"
