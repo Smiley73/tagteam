@@ -317,6 +317,12 @@ export const SHIP_JOBS = {
 // The repair fixer is in this set like any other fixer. What keeps a CI repair
 // on the ordinary settings is the `resets: FIX_COUNTER` on the repair edge in
 // `budgetedEdge`, and nothing else.
+//
+// This is the only escalation rule by counter. `implement` is not in it: it also
+// runs the first implementation and the pull-request body writer, which must not
+// climb because fix rounds were spent. A redesign reaches `implement` by a second
+// route, `resolveRoles`' third argument, which ignores `after` because a redesign
+// already means the ordinary settings are not converging.
 const ESCALATING_JOBS = new Set(["fix", "recheck-lens", "recheck-adversary", "recheck-codex", "repair-fix"]);
 
 /**
@@ -333,14 +339,19 @@ const ESCALATING_JOBS = new Set(["fix", "recheck-lens", "recheck-adversary", "re
  * so the fixer of fix round N reads N — `>=` would raise the very first fix
  * round at `after: 1`, which is the setting a repository is most likely to
  * choose and the one the minimum of 1 exists to protect.
+ *
+ * `redesign` asks for the resolution of a redesign's implementer: with an
+ * escalation block, `implement` and nothing else resolves from it, at any
+ * counter. The caller decides whether a given redesign escalates; this only
+ * says what it runs at.
  */
-export function resolveRoles(state, config) {
+export function resolveRoles(state, config, redesign = false) {
   const fixRoundsUsed = counterOf(state, FIX_COUNTER);
   const escalation = config?.escalation ?? null;
   const raised = Boolean(escalation) && fixRoundsUsed > escalation.after;
   const jobs = {};
   for (const [job, { role, effort }] of Object.entries(SHIP_JOBS)) {
-    const escalated = raised && ESCALATING_JOBS.has(job);
+    const escalated = (raised && ESCALATING_JOBS.has(job)) || (Boolean(escalation) && redesign && job === "implement");
     const settings = escalated ? escalation : config;
     jobs[job] = {
       model: settings?.models?.[role] ?? null,
@@ -870,7 +881,7 @@ const USAGE = `usage:
   gates.mjs accept   <state.json> <candidateOid> <id,id,...> [--carry <depended-on|independent>]
   gates.mjs pr       <state.json> <number> <url> <headOid>
   gates.mjs evaluate <state.json> <config.json> [approved.json]
-  gates.mjs roles    <state.json> <config.json>
+  gates.mjs roles    <state.json> <config.json> [--redesign]
   gates.mjs adopt-merge <state.json> --repo <repo>
 
   \`state\` needs the configuration for the budgeted edges — entering fixing, and
@@ -911,7 +922,9 @@ const USAGE = `usage:
   \`roles\` prints the model and effort every dispatch of a ship cycle runs at,
   one entry per job, resolved from this spec's fix counter and \`escalation\`,
   plus the brief each lens is calibrated by. It writes nothing. \`scripts/ship.mjs\`
-  reads it immediately before every dispatch it prints.
+  reads it immediately before every dispatch it prints. \`--redesign\` resolves
+  \`implement\` for a redesign: at the \`escalation\` settings whatever the counter,
+  and no other job differently. Any other extra argument is refused.
 `;
 
 // The limits, or a refusal. A configuration without them is a version-6 file:
@@ -955,8 +968,8 @@ async function main() {
     return;
   }
   if (action === "roles") {
-    const [stateFile, configFile] = values;
-    if (!stateFile || !configFile) {
+    const [stateFile, configFile, ...rest] = values;
+    if (!stateFile || !configFile || rest.length > 1 || (rest.length === 1 && rest[0] !== "--redesign")) {
       const error = new Error(USAGE.trimEnd());
       error.exitCode = 2;
       throw error;
@@ -964,7 +977,7 @@ async function main() {
     // Deliberately not through `readLimits`: this resolution needs no limits, and
     // refusing a configuration for a reason unrelated to what was asked would
     // stop a dispatch that had nothing to do with a budget.
-    process.stdout.write(`${JSON.stringify(resolveRoles(readJson(stateFile), readJson(configFile)), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(resolveRoles(readJson(stateFile), readJson(configFile), rest.length === 1), null, 2)}\n`);
     return;
   }
   if (action === "adopt-merge") {

@@ -1011,8 +1011,9 @@ test("the shipped example states today's behaviour", () => {
 test("the schema declares no default anywhere", () => {
   // The whole refuse-don't-migrate decision rests on this: a default makes a
   // missing key invisible, and the file stops being the whole configuration.
-  // `ciStartWaitSec`, the one key that may be missing, is no exception here: a
-  // script supplies its fallback, and the schema only describes it.
+  // `ciStartWaitSec` and `redesignEscalation`, the keys that may be missing, are
+  // no exception here: a script supplies the fallback, and the schema only
+  // describes it.
   const defaults = [];
   // `reviewers.default` is a property *name*, not the keyword; only the map a
   // `properties` or `$defs` holds may legitimately contain one.
@@ -1315,7 +1316,7 @@ test("a version line names one file and exactly one locator: a JSON Pointer or a
   }
 });
 
-// --- the start wait: the one key that may be missing ---
+// --- the start wait: a key that may be missing ---
 
 test("a current file without ciStartWaitSec is valid and current, not stale", async () => {
   // The key was added to version 10 without a version bump so that every
@@ -1344,13 +1345,36 @@ test("ciStartWaitSec is an integer from 0 to 3600", () => {
   }
 });
 
-test("ciStartWaitSec and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("a current file without redesignEscalation, or with any of its three values, is valid and current", async () => {
+  // Added to version 12 as an optional key so that every version-12 file already
+  // written stayed current; the ship reads a missing one as `never`.
+  const { validateJson } = await import("../scripts/validate-json.mjs");
+  const { redesignEscalation, ...without } = example;
+  assert.deepEqual(validateJson(schema, without), []);
+  const dir = versionRepo();
+  for (const config of [without, ...["always", "never", "ask"].map((value) => ({ ...example, redesignEscalation: value }))]) {
+    const result = validateFile(dir, config);
+    assert.equal(result.status, 0, `${JSON.stringify(config.redesignEscalation)}: expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+  }
+});
+
+test("redesignEscalation refuses any other value, naming the key", () => {
+  const dir = versionRepo();
+  for (const bad of ["sometimes", "Always", "", true, false, null, 1]) {
+    const result = validateFile(dir, { ...example, redesignEscalation: bad });
+    assert.equal(result.status, 1, `redesignEscalation: ${JSON.stringify(bad)} must be invalid`);
+    assert.match(result.stderr, /redesignEscalation/, `redesignEscalation: ${JSON.stringify(bad)}: the refusal names the key`);
+  }
+});
+
+test("ciStartWaitSec, redesignEscalation and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
-  // 120 when it is missing, and `autoMerge`, which nothing reads at all. Another
-  // key quietly going optional would be a missing key read as something nobody
-  // wrote down.
+  // 120 when it is missing, `redesignEscalation`, which the ship reads as
+  // `never`, and `autoMerge`, which nothing reads at all. Another key quietly
+  // going optional would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", ...ACCEPTED_AND_IGNORED].sort());
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
   assert.equal(schema.properties.version.const, 12);
 });
 
