@@ -16,6 +16,7 @@ import { isMain } from "./lib/is-main.mjs";
 import { requireNothingOut } from "./lib/plan-sets.mjs";
 
 const SLUG = /^[0-9]{2}-[a-z0-9][a-z0-9-]*$/;
+const WHOLE_NUMBER = /^[1-9][0-9]*$/;
 
 // A plan is an index. Its target is 8 KB and this is the ceiling the run
 // enforces: every plan this plugin has drafted without one grew past its target,
@@ -76,40 +77,77 @@ export function readDeliverables(planPath) {
   if (!header) throw new Error(`the Deliverables section of ${path.basename(resolved)} holds no table`);
   if (rows.length === 0) throw new Error(`the Deliverables table of ${path.basename(resolved)} holds no rows`);
 
-  const column = (row, ...names) => {
+  const columnKey = (row, ...names) => {
     for (const name of names) {
       const key = Object.keys(row).find((candidate) => candidate.includes(name));
-      if (key !== undefined && row[key] !== "") return row[key];
+      if (key !== undefined && row[key] !== "") return key;
     }
-    return "";
+    return undefined;
   };
+  const column = (row, ...names) => row[columnKey(row, ...names)] ?? "";
+  const rowText = (row) => Object.entries(row).map(([key, value]) => `${key}: ${value}`).join(" · ");
 
+  const written = [];
   const deliverables = rows.map((row, index) => {
     const spec = column(row, "spec", "file").replace(/`/g, "").replace(/\.md$/, "").trim();
     if (!SLUG.test(spec)) {
       throw new Error(`row ${index + 1} of the Deliverables table names "${spec}", which is not an NN-slug spec id`);
     }
     const dependsRaw = column(row, "depends", "after");
-    const dependsOn = /^(—|-|none|n\/a)?$/i.test(dependsRaw.trim())
+    written.push(/^(—|-|none|n\/a)?$/i.test(dependsRaw.trim())
       ? []
-      : dependsRaw.split(/[,;]/).map((entry) => entry.replace(/`/g, "").trim()).filter(Boolean);
-    return {
-      id: spec,
-      delivers: column(row, "deliver", "what"),
-      dependsOn,
-      row: Object.entries(row).map(([key, value]) => `${key}: ${value}`).join(" · ")
-    };
+      : dependsRaw.split(/[,;]/).map((entry) => entry.replace(/`/g, "").trim()).filter(Boolean));
+    return { id: spec, delivers: column(row, "deliver", "what"), dependsOn: [], row: rowText(row) };
   });
 
   const ids = new Set(deliverables.map((entry) => entry.id));
   if (ids.size !== deliverables.length) throw new Error("the Deliverables table repeats a spec id");
-  for (const entry of deliverables) {
-    for (const dependency of entry.dependsOn) {
-      if (!ids.has(dependency)) {
-        throw new Error(`${entry.id} depends on ${dependency}, which the Deliverables table does not list`);
-      }
+
+  // Row numbers are the "#" cells, and only when those are unique whole numbers
+  // with no leading zero: "02" reads like a spec prefix, and would quietly point
+  // at another spec than the drafter meant.
+  const numberOf = rows.map((row) => row["#"]);
+  const usable = numberOf.every((cell) => cell !== undefined && WHOLE_NUMBER.test(cell))
+    && new Set(numberOf).size === numberOf.length;
+  const byNumber = new Map(usable ? numberOf.map((cell, index) => [cell, deliverables[index].id]) : []);
+  const numeric = written.flat().some((entry) => /^[0-9]+$/.test(entry));
+  const choices = usable
+    ? numberOf.map((cell, index) => `${cell} (${deliverables[index].id})`)
+    : deliverables.map((entry) => entry.id);
+  const why = numeric && !usable ? ` (row numbers are not accepted: the "#" column is missing, repeated or not whole numbers)` : "";
+  const refuse = (entry, specId, problem) => Object.assign(
+    new Error(`${specId} depends on "${entry}", ${problem}; choose one of: ${choices.join(", ")}${why}`),
+    { dependencyProblem: { entry, specId, choices } }
+  );
+
+  const resolvedNames = written.map((entries, index) => entries.map((entry) => {
+    const name = ids.has(entry) ? entry : byNumber.get(entry);
+    if (name === undefined) throw refuse(entry, deliverables[index].id, "which is neither a spec the Deliverables table lists nor one of its row numbers");
+    return name;
+  }));
+  resolvedNames.forEach((names, index) => {
+    const at = names.indexOf(deliverables[index].id);
+    if (at >= 0) throw refuse(written[index][at], deliverables[index].id, "which is the spec itself");
+  });
+
+  const position = new Map(deliverables.map((entry, index) => [entry.id, index]));
+  const state = new Map();
+  const walk = (index) => {
+    state.set(index, "open");
+    for (const [at, name] of resolvedNames[index].entries()) {
+      const next = position.get(name);
+      if (state.get(next) === "open") throw refuse(written[index][at], deliverables[index].id, `which closes a dependency cycle through ${name}`);
+      if (!state.has(next)) walk(next);
     }
-  }
+    state.set(index, "done");
+  };
+  deliverables.forEach((_, index) => { if (!state.has(index)) walk(index); });
+
+  deliverables.forEach((entry, index) => {
+    entry.dependsOn = resolvedNames[index];
+    if (written[index].every((item, at) => item === resolvedNames[index][at])) return;
+    entry.row = rowText({ ...rows[index], [columnKey(rows[index], "depends", "after")]: resolvedNames[index].join(", ") });
+  });
   return deliverables;
 }
 

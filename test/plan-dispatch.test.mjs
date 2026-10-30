@@ -38,6 +38,7 @@ function expected(model, planner, adversary) {
     ["draft", { purpose: "draft" }, [call("plan-drafter", model, planner, "Draft the plan")]],
     ["draft", { purpose: "cut" }, [call("plan-drafter", model, planner, "Cut the plan")]],
     ["draft", { purpose: "revise" }, [call("plan-drafter", model, planner, "Revise the plan")]],
+    ["draft", { purpose: "dependencies" }, [call("plan-drafter", model, planner, "Correct the plan's dependencies")]],
     ["review", {}, [
       call("plan-reviewer", model, planner, "Plan review: Claude"),
       call("adversary", model, adversary, "Plan review: adversary")
@@ -65,7 +66,7 @@ test("each step prints its calls at its role's model and its job's effort, under
 
 test("every kind of set has a step, and every step's selection is checked", () => {
   assert.deepEqual(Object.keys(PLAN_STEPS).sort(), ["draft", "explore", "response", "response-resend", "review", "review-resend", "spec-writers", "spec-writers-resend"]);
-  assert.deepEqual(Object.keys(DRAFTER_PURPOSES), ["draft", "cut", "revise"]);
+  assert.deepEqual(Object.keys(DRAFTER_PURPOSES), ["draft", "cut", "revise", "dependencies"]);
   for (const [kind, selection, said] of [
     ["draft", {}, /needs --purpose/],
     ["draft", { purpose: "polish" }, /needs --purpose/],

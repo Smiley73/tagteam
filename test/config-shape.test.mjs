@@ -429,8 +429,116 @@ test("a deliverables table that cannot be dispatched from is refused", async () 
   assert.throws(() => readDeliverables(write("## Deliverables\n\n| spec |\n|---|\n| not-a-slug |\n")), /not an NN-slug/);
   assert.throws(
     () => readDeliverables(write("## Deliverables\n\n| spec | depends on |\n|---|---|\n| 01-a | 09-ghost |\n")),
-    /does not list/
+    /neither a spec the Deliverables table lists/
   );
+});
+
+const HEADER = ["#", "spec", "delivers", "depends on"];
+const numbered = (depends) => RECOVERY.map((cells, index) => [...cells.slice(0, 3), depends[index]]);
+
+test("a dependency written as a row number reads the same as the spec name", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const byName = readDeliverables(planWithTable(HEADER, RECOVERY));
+  assert.deepEqual(readDeliverables(planWithTable(HEADER, numbered(["—", "1", "2"]))), byName);
+  const mixed = readDeliverables(planWithTable(HEADER, [
+    ...RECOVERY, ["4", "04-docs", "the page", "1, `02-recovery-api`"]
+  ]));
+  assert.deepEqual(mixed[3].dependsOn, ["01-token-schema", "02-recovery-api"]);
+  assert.equal(mixed[3].row, "#: 4 · spec: 04-docs · delivers: the page · depends on: 01-token-schema, 02-recovery-api");
+});
+
+test("spec names need no usable # column", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const expected = readDeliverables(planWithTable(HEADER, RECOVERY));
+  const repeated = RECOVERY.map((cells, index) => [["1", "1", "2"][index], ...cells.slice(1)]);
+  const freeText = RECOVERY.map((cells, index) => [["first", "second", "third"][index], ...cells.slice(1)]);
+  assert.deepEqual(readDeliverables(planWithTable(HEADER, repeated)).map(({ id, dependsOn }) => ({ id, dependsOn })),
+    expected.map(({ id, dependsOn }) => ({ id, dependsOn })));
+  assert.deepEqual(readDeliverables(planWithTable(HEADER, freeText)).map((entry) => entry.dependsOn),
+    expected.map((entry) => entry.dependsOn));
+  const noColumn = readDeliverables(planWithTable(HEADER.slice(1), RECOVERY.map((cells) => cells.slice(1))));
+  assert.deepEqual(noColumn.map((entry) => entry.dependsOn), expected.map((entry) => entry.dependsOn));
+  assert.equal(noColumn[1].row, "spec: 02-recovery-api · delivers: the endpoint · depends on: 01-token-schema");
+});
+
+test("a dependency that cannot be matched is refused on one line, marked, without an exit code", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const refusal = (header, rows) => {
+    try {
+      readDeliverables(planWithTable(header, rows));
+    } catch (error) {
+      return error;
+    }
+    return assert.fail("expected a refusal");
+  };
+
+  const unmatched = refusal(HEADER, numbered(["—", "9", "2"]));
+  assert.equal(unmatched.message.includes("\n"), false);
+  assert.match(unmatched.message, /^02-recovery-api depends on "9"/);
+  assert.match(unmatched.message, /1 \(01-token-schema\), 2 \(02-recovery-api\), 3 \(03-recovery-ui\)/);
+  assert.deepEqual(unmatched.dependencyProblem, {
+    entry: "9",
+    specId: "02-recovery-api",
+    choices: ["1 (01-token-schema)", "2 (02-recovery-api)", "3 (03-recovery-ui)"]
+  });
+  assert.equal("exitCode" in unmatched, false);
+
+  const repeated = refusal(HEADER, numbered(["—", "1", "2"]).map((cells, index) => [["1", "1", "2"][index], ...cells.slice(1)]));
+  assert.match(repeated.message, /depends on "1".*01-token-schema, 02-recovery-api, 03-recovery-ui.*row numbers are not accepted/);
+  assert.deepEqual(repeated.dependencyProblem.choices, ["01-token-schema", "02-recovery-api", "03-recovery-ui"]);
+
+  const missing = refusal(HEADER.slice(1), numbered(["—", "1", "2"]).map((cells) => cells.slice(1)));
+  assert.match(missing.message, /row numbers are not accepted/);
+  assert.equal(missing.dependencyProblem.entry, "1");
+
+  const leadingZero = refusal(HEADER, [
+    ["1", "01-a", "x", "—"], ["2", "03-c", "y", "02"], ["3", "02-b", "z", "—"]
+  ]);
+  assert.equal(leadingZero.dependencyProblem.entry, "02");
+  assert.equal(leadingZero.dependencyProblem.specId, "03-c");
+  assert.match(leadingZero.message, /neither a spec the Deliverables table lists nor one of its row numbers/);
+  assert.match(leadingZero.message, /1 \(01-a\), 2 \(03-c\), 3 \(02-b\)/);
+
+  const zeroPadded = refusal(HEADER, [["01", "01-a", "x", "—"], ["02", "02-b", "y", "1"]]);
+  assert.match(zeroPadded.message, /row numbers are not accepted/);
+});
+
+test("a self-reference or a cycle is refused in either form, marked", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  const refusal = (rows) => {
+    try {
+      readDeliverables(planWithTable(HEADER, rows));
+    } catch (error) {
+      return error;
+    }
+    return assert.fail("expected a refusal");
+  };
+
+  const byNumber = refusal([["1", "01-a", "x", "1"], ["2", "02-b", "y", "—"]]);
+  assert.deepEqual(byNumber.dependencyProblem.entry, "1");
+  assert.equal(byNumber.dependencyProblem.specId, "01-a");
+  assert.match(byNumber.message, /the spec itself/);
+
+  const byName = refusal([["1", "01-a", "x", "01-a"], ["2", "02-b", "y", "—"]]);
+  assert.equal(byName.dependencyProblem.entry, "01-a");
+  assert.match(byName.message, /the spec itself/);
+
+  const cycle = refusal([["1", "01-a", "x", "02-b"], ["2", "02-b", "y", "1"]]);
+  assert.match(cycle.message, /closes a dependency cycle/);
+  assert.equal(cycle.message.includes("\n"), false);
+  assert.equal(cycle.dependencyProblem.specId, "02-b");
+  assert.equal(cycle.dependencyProblem.entry, "1");
+  assert.equal("exitCode" in cycle, false);
+});
+
+test("the table's other refusals carry no dependency mark", async () => {
+  const { readDeliverables } = await import("../scripts/deliverables.mjs");
+  for (const rows of [[["1", "not-a-slug", "x", "—"]], [["1", "01-a", "x", "—"], ["2", "01-a", "y", "—"]]]) {
+    assert.throws(() => readDeliverables(planWithTable(HEADER, rows)), (error) => {
+      assert.equal("dependencyProblem" in error, false);
+      return /not an NN-slug|repeats a spec id/.test(error.message);
+    });
+  }
 });
 
 // --- from the first real /tagteam:plan run ---

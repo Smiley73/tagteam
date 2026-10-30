@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Send the plan drafter back, once, when a dependency in the Deliverables table points at nothing, at its own spec or into a cycle, instead of stopping the run. The drafter is shown the entry and the valid choices; a second such problem later in the same plan stops the run with one line saying what to correct by hand.
+
 ## 0.14.1
 
 - Choose whether a rewrite of a recurring problem area runs at the raised models and effort of `escalation`. The new `redesignEscalation` setting is `never` (the rewrite runs at the ordinary settings, as before), `always` (every rewrite runs raised at once, whatever `escalation.after` says), or `ask` (you are asked each time you choose a rewrite, and a rewrite `autoRedesign` starts runs raised because it cannot ask). `/tagteam:configure` asks it when you turn escalation on, and the validator now says, instead of warning that nothing is ever raised, that only a rewrite reaches the raised settings when `escalation.after` is at or above `limits.fixRounds`. Existing configurations need nothing: a missing setting reads as `never`.
