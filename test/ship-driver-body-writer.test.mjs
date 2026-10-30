@@ -331,6 +331,68 @@ test("a restart after a revisit goes back through the review, not to publish, ev
   assert.match(later.json.say.join("\n"), /was interrupted while verifying/);
 });
 
+test("a restart with a writer sent after a revisit's own clean settle goes back to publish, not through the review panel again", () => {
+  const staged = stagePlan({ specs: 1 });
+  const sessions = sessionsFor(staged);
+  sessions.transcript("A");
+  const as = (run) => ({ ...staged.env, ...sessions.as("A"), TAGTEAM_RUN_ID: run });
+  const { plan, shipDir } = staged;
+  assert.equal(ship("start", plan, [], as("run-a")).status, 0);
+  driveToPublishable(staged, "01-a", "app.js", A_CHANGE, as("run-a"));
+  const first = ship("publish", plan, ["--spec", "01-a"], as("run-a"));
+  const [writer] = first.json.dispatch;
+  write(bodyFileOf(writer), BODY);
+  write(titleFileOf(writer), "Add subtraction\n");
+  arrive(first, [writer.description], as("run-a"));
+  assert.equal(ship("publish", plan, ["--spec", "01-a"], as("run-a")).status, 0);
+  const statePath = path.join(shipDir, "01-a", "state.json");
+  const state = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "state", statePath, "awaiting-approval"], { encoding: "utf8" }).status, 0);
+  assert.equal(ship("revisit", plan, ["--spec", "01-a"], as("run-a")).status, 0);
+
+  // The revisit's own re-review, clean again: the same commit through the
+  // panel and the re-check to a settle that routes to publish.
+  const run = (sub) => {
+    const result = ship(sub, plan, ["--spec", "01-a"], as("run-a"));
+    assert.equal(result.status, 0, `${sub}: ${result.stderr}`);
+    return result;
+  };
+  run("snapshot");
+  assert.match(run("verify").json.next, /panel/);
+  const panel = run("panel");
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
+  write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel, as("run-a"));
+  run("collect");
+  const recheck = run("recheck");
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", oid));
+  arriveAll(recheck, as("run-a"));
+  const settled = run("settle");
+  assert.equal(settled.json.review, "clean");
+  assert.match(settled.json.next, /publish/);
+  assert.deepEqual([state().state, state().pr?.number], ["verifying", 1], "settled again, with the pull request from before the revisit still standing");
+
+  // The republish sends a writer for the rewritten body, and the run dies
+  // before it is in: the spec is still `verifying`, the pull request is there,
+  // and the pointer names the same candidate the stale one above did.
+  const again = run("publish");
+  assert.ok(again.json.set, again.stdout);
+  assert.equal(state().state, "verifying", "the state moves on only once the pull request is updated");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "body-writer-set.json"), "utf8")).sentWhile, "verifying");
+
+  const later = ship("begin", plan, ["--spec", "01-a"], as("run-b"));
+  assert.equal(later.status, 0, later.stderr);
+  assert.equal(later.json.set, undefined);
+  assert.match(later.json.say.join("\n"), /sent out by an earlier run in this session, which has ended; released it/);
+  assert.match(later.json.next, /publish --plan .* --spec 01-a$/, "a settled candidate goes back to publish, not through the review panel");
+  assert.match(later.json.say.join("\n"), /already has a pull request, and the agent writing its next body was interrupted/);
+  assert.equal(setOf(shipDir, again.json.set.id).closed.reason, "released");
+  const judged = ship("publish", plan, ["--spec", "01-a"], as("run-b"));
+  assert.equal(judged.status, 0, judged.stderr);
+  assert.match(judged.json.dispatch[0].prompt, /Your last attempt was refused/, "the writer left nothing, so publish sends one that is told");
+});
+
 test("with no body file the plan's landing sends the writer, and opens the pull request with the title file's title", () => {
   const staged = stageClean();
   const { plan, env } = staged;
