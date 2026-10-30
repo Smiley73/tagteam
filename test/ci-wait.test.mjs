@@ -73,6 +73,18 @@ test("off by default: running then passing passes, and running to the deadline i
   assert.deepEqual(stalls.reads.map((read) => read.at), [0, 20_000, 40_000, 60_000]);
 });
 
+test("a wait whose starter has gone stops at its next look and returns no result", async () => {
+  // The old loop had no such question: it polled on to the deadline and handed
+  // back a result for the caller that was no longer there to write it.
+  for (const goneAfterReads of [0, 1, 2]) {
+    const h = harness([running]);
+    let looks = 0;
+    const abandoned = () => looks++ >= goneAfterReads * 2;
+    await assert.rejects(run(h, { waitSec: 600, abandoned }), /the command that started this wait has ended/);
+    assert.equal(h.reads.length, goneAfterReads === 0 ? 0 : goneAfterReads, "it read after its starter was gone");
+  }
+});
+
 test("after a rerun, a failed row completed before the rerun moment is still running, and the rerun's own result is the answer", async () => {
   const rerunAt = Date.parse("2026-05-01T12:00:00Z");
   const stale = [{ ...failing[0], completedAt: "2026-05-01T11:59:00Z" }];

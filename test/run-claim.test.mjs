@@ -18,14 +18,14 @@ const alive = (pid) => {
 
 // Started from a shell that exits, as the step helper's nohup does, so that the
 // orphan belongs to init and not to this test: a zombie of ours would read as alive.
-async function orphanOf(shipDir, run) {
+async function orphanOf(shipDir, run, file = "01-a.claim.json") {
   const launcher = spawn("sh", ["-c", "nohup sh -c 'sleep 300 & echo $!; wait' </dev/null & echo $!"], { stdio: ["ignore", "pipe", "ignore"] });
   let out = "";
   launcher.stdout.on("data", (chunk) => { out += chunk; });
   await new Promise((resolve) => launcher.once("exit", resolve));
   await delay(300);
   const [shell, grandchild] = out.trim().split(/\s+/).map(Number);
-  const claim = path.join(shipDir, "steps", "01-a.claim.json");
+  const claim = path.join(shipDir, "steps", file);
   fs.mkdirSync(path.dirname(claim), { recursive: true });
   fs.writeFileSync(claim, JSON.stringify({ run, pid: shell, identity: processIdentity(shell) }));
   return { shell, grandchild, claim };
@@ -57,6 +57,25 @@ test("the same run's next command, and a command with no run, end nothing", asyn
     assert.equal(alive(orphan.grandchild), true);
   } finally {
     for (const pid of [orphan.shell, orphan.grandchild]) {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
+  }
+});
+
+test("a plan-level command of another run ends the earlier run's plan-level command, and a spec's claim is a different one", async () => {
+  const { plan, shipDir } = stage();
+  const orphan = await orphanOf(shipDir, "run-a", "plan.claim.json");
+  const spec = await orphanOf(shipDir, "run-a");
+  try {
+    // `plan-check` stops at once, with no train; the claim comes before that.
+    ship("plan-check", plan, [], { TAGTEAM_RUN_ID: "run-b" });
+    await settles([orphan.shell, orphan.grandchild]);
+    assert.equal(alive(orphan.shell), false, "the plan-level orphan was left running");
+    assert.equal(alive(orphan.grandchild), false);
+    assert.equal(JSON.parse(fs.readFileSync(orphan.claim, "utf8")).run, "run-b");
+    assert.equal(alive(spec.shell), true, "a plan-level command ended a spec's command");
+  } finally {
+    for (const pid of [spec.shell, spec.grandchild]) {
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
   }

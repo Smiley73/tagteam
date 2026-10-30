@@ -7778,9 +7778,11 @@ async function main() {
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
-    if (options.spec && process.env.TAGTEAM_RUN_ID) {
+    if (process.env.TAGTEAM_RUN_ID) {
+      // A spec's commands claim that spec; the plan-level ones claim the plan,
+      // under a name no spec or unit id has (they all hold a hyphen).
       const ctx = context(options, { requireTrain: false });
-      claimSpec(path.join(ctx.shipDir, "steps", `${encodeURIComponent(options.spec)}.claim.json`), process.env.TAGTEAM_RUN_ID);
+      claimSpec(path.join(ctx.shipDir, "steps", `${options.spec ? encodeURIComponent(options.spec) : "plan"}.claim.json`), process.env.TAGTEAM_RUN_ID);
     }
     await run(options);
   } catch (error) {

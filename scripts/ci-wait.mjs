@@ -112,8 +112,14 @@ function unsettledRun(rows) {
   return rows.some((row) => isRunning(row) && runs.includes(runOf(row)));
 }
 
+// A wait outlives the driver that started it when the driver is killed, and
+// nothing then ends it: its result would be written beside whatever a later run
+// has recorded. So it stops, and writes nothing, once its parent is gone.
+const ABANDONED = "the command that started this wait has ended, so its result is not written";
+
 export async function waitForChecks({
-  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay
+  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay,
+  abandoned = () => false
 }) {
   if (waitSec === 0) return { status: "not-run", reason: "CI waiting is disabled (ciWaitSec is 0)", checks: [] };
   const calledAt = now();
@@ -125,8 +131,10 @@ export async function waitForChecks({
   let deadline = starting ? null : calledAt + waitSec * 1000;
   let checks = null;
   while (true) {
+    if (abandoned()) throw new Error(ABANDONED);
     const readAt = now();
     const answered = read(repo, pr, { timeoutMs: Math.max(READ_FLOOR_MS, (deadline ?? startDeadline) - readAt) });
+    if (abandoned()) throw new Error(ABANDONED);
     if (checks === null) {
       const rows = answered ?? [];
       if (starting && !(Array.isArray(rows) && rows.length > 0)) {
@@ -167,7 +175,9 @@ export async function waitForChecks({
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
+    const parent = process.ppid;
     const result = await waitForChecks({
+      abandoned: () => process.ppid !== parent,
       repo: path.resolve(options.repo),
       pr: options.pr,
       waitSec: options.waitSec,
