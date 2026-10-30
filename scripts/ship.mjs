@@ -2977,8 +2977,10 @@ async function begin(options) {
   // with the spec: the next publish sends what it wrote, and nothing else may
   // merge past it. Only a settled candidate gets a writer, so a first publish —
   // the spec still `verifying`, no pull request yet — goes back to publish and
-  // not through the review panel again.
-  const writer = ["verifying", "publishing", "awaiting-approval"].includes(state.state) ? pendingWriter(ctx, id, state) : null;
+  // not through the review panel again. A `verifying` spec that already has a
+  // pull request is a revisit under way, not a first publish: the writer's
+  // pointer is left from before it, and the revisit's re-review is still owed.
+  const writer = ["publishing", "awaiting-approval"].includes(state.state) || (state.state === "verifying" && !state.pr) ? pendingWriter(ctx, id, state) : null;
   if (writer) {
     const restarted = await restartPointed(ctx, id, [{ set: writer.set, step: "publish", dir: setDir(ctx, id, writer.set) }], options);
     say.push(...restarted.say);

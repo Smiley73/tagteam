@@ -301,6 +301,36 @@ test("a restart releases a writer an earlier run left out, and waits on it when 
   assert.ok(trainOf(shipDir).worktree);
 });
 
+test("a restart after a revisit goes back through the review, not to publish, even with a writer pointer from before the revisit still on disk", () => {
+  const staged = stagePlan({ specs: 1 });
+  const sessions = sessionsFor(staged);
+  sessions.transcript("A");
+  const as = (run) => ({ ...staged.env, ...sessions.as("A"), TAGTEAM_RUN_ID: run });
+  const { plan, shipDir } = staged;
+  assert.equal(ship("start", plan, [], as("run-a")).status, 0);
+  driveToPublishable(staged, "01-a", "app.js", A_CHANGE, as("run-a"));
+  const first = ship("publish", plan, ["--spec", "01-a"], as("run-a"));
+  const [writer] = first.json.dispatch;
+  write(bodyFileOf(writer), BODY);
+  write(titleFileOf(writer), "Add subtraction\n");
+  arrive(first, [writer.description], as("run-a"));
+  assert.equal(ship("publish", plan, ["--spec", "01-a"], as("run-a")).status, 0);
+  // A second publish sends a writer, and the spec waits for a person.
+  const again = ship("publish", plan, ["--spec", "01-a"], as("run-a"));
+  assert.ok(again.json.set, again.stdout);
+  const statePath = path.join(shipDir, "01-a", "state.json");
+  assert.equal(spawnSync(process.execPath, [path.join(root, "scripts", "gates.mjs"), "state", statePath, "awaiting-approval"], { encoding: "utf8" }).status, 0);
+  const revisited = ship("revisit", plan, ["--spec", "01-a"], as("run-a"));
+  assert.equal(revisited.status, 0, revisited.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).state, "verifying");
+  assert.ok(fs.existsSync(path.join(shipDir, "01-a", "body-writer-set.json")), "the pointer from before the revisit is still on disk");
+
+  const later = ship("begin", plan, ["--spec", "01-a"], as("run-b"));
+  assert.equal(later.status, 0, later.stderr);
+  assert.match(later.json.next, /snapshot --plan .* --spec 01-a$/, "the revisit's re-review is still owed");
+  assert.match(later.json.say.join("\n"), /was interrupted while verifying/);
+});
+
 test("with no body file the plan's landing sends the writer, and opens the pull request with the title file's title", () => {
   const staged = stageClean();
   const { plan, env } = staged;
