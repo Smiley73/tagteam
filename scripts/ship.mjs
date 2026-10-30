@@ -34,7 +34,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
-import { claimSpec } from "./lib/run-claim.mjs";
+import { claimSpec, leadsOwnGroup, relaunchAsLeader } from "./lib/run-claim.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
 import {
   DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
@@ -7789,6 +7789,13 @@ async function main() {
     if (!run) throw new Stop(USAGE, 2);
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
     if (process.env.TAGTEAM_RUN_ID) {
+      // A run's command works as the leader of its own process group, which is
+      // what the next run's claim ends; the process the step helper started only
+      // waits for it.
+      if (!leadsOwnGroup()) {
+        process.exitCode = await relaunchAsLeader();
+        return;
+      }
       // A spec's commands claim that spec; the plan-level ones claim the plan,
       // under a name no spec or unit id has (they all hold a hyphen).
       const ctx = context(options, { requireTrain: false });
