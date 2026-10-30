@@ -845,8 +845,8 @@ a new commit appears — and every fix round makes one.
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge or Squash for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit, or as one squash commit when the person's recorded answer is Squash |
-| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, with `--rerun-at` a failed check completed before the rerun counts as running, and with `--settle-runs 1` a failure waits for the rest of its Actions run to finish |
-| `verify-run.mjs` | Run matching verify commands against a bound candidate |
+| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, with `--rerun-at` a failed check completed before the rerun counts as running, and with `--settle-runs 1` a failure waits for the rest of its Actions run to finish; with `--parent-pid` the wait stops, writing nothing, once the process that started it is gone |
+| `verify-run.mjs` | Run matching verify commands against a bound candidate; with `--parent-pid` the verification stops, ending the command it is running and writing nothing, once the process that started it is gone |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |

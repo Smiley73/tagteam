@@ -109,7 +109,9 @@ A person who wants to stop waiting on a spec's `checks` stops the run from the
 workflow view; then, on their word, start a run at `finish` for that spec. It
 records that the checks proved nothing, with how long they were waited for, and
 asks the person as for any checks that proved nothing — unless a check had already
-failed, which it records as a failure, as for any check that failed.
+failed, which it records as a failure, as for any check that failed. A command
+of a run on a spec, or on the plan, first ends the command an earlier run left
+going there, so the `checks` of the run that was stopped writes nothing after the wait is ended.
 
 ## When a ship restarts while agents are out
 

@@ -34,6 +34,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import { claimSpec, leadsOwnGroup, relaunchAsLeader } from "./lib/run-claim.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
 import {
   DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
@@ -3640,6 +3641,8 @@ async function verify(options) {
   const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
     "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),
+    // The verification stops, ending its command and writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid),
     // A lockfile-only change matches no `when` in most configurations, which would wait for a person.
     ...(isDependencyId(id) ? ["--select", "all"] : [])
   ], { allow: [1] });
@@ -4615,6 +4618,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
       ...(rerunAt ? ["--rerun-at", rerunAt] : []),
       // Before a rerun is asked for, a failure waits for the rest of its run.
       ...(request === null ? ["--settle-runs", "1"] : []),
+      // The wait stops, writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid),
       "--out", ciPath(ctx, id)
     ], { allow: [1] });
     const outcome = readJson(ciPath(ctx, id));
@@ -4925,7 +4930,9 @@ async function resolveCommit(options) {
 
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -5464,7 +5471,9 @@ async function planCheck(options) {
     // mode for it, so the record says what ran.
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"), "--select", "all",
-      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
@@ -5938,6 +5947,8 @@ function waitPlanChecks(ctx, record, tip, say) {
   const ran = node("ci-wait.mjs", [
     "--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec),
     ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
+    // The wait stops, writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid),
     "--out", out
   ], { allow: [1] });
   const outcome = readJson(out);
@@ -7777,6 +7788,19 @@ async function main() {
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
+    if (process.env.TAGTEAM_RUN_ID) {
+      // A run's command works as the leader of its own process group, which is
+      // what the next run's claim ends; the process the step helper started only
+      // waits for it.
+      if (!leadsOwnGroup()) {
+        process.exitCode = await relaunchAsLeader();
+        return;
+      }
+      // A spec's commands claim that spec; the plan-level ones claim the plan,
+      // under a name no spec or unit id has (they all hold a hyphen).
+      const ctx = context(options, { requireTrain: false });
+      claimSpec(path.join(ctx.shipDir, "steps", `${options.spec ? encodeURIComponent(options.spec) : "plan"}.claim.json`), process.env.TAGTEAM_RUN_ID);
+    }
     await run(options);
   } catch (error) {
     const stop = `${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`;

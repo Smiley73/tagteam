@@ -75,6 +75,10 @@ function parseArgs(argv) {
   if (!options.out) throw new Error("--out is required");
   if (!Number.isFinite(options.waitSec) || options.waitSec < 0) throw new Error("--wait-sec must be a non-negative number");
   if (!Number.isFinite(options.startWaitSec) || options.startWaitSec < 0) throw new Error("--start-wait-sec must be a non-negative number");
+  if (options.parentPid !== undefined) {
+    options.parentPid = Number(options.parentPid);
+    if (!Number.isSafeInteger(options.parentPid) || options.parentPid <= 0) throw new Error("--parent-pid must be a process id");
+  }
   return options;
 }
 
@@ -112,8 +116,17 @@ function unsettledRun(rows) {
   return rows.some((row) => isRunning(row) && runs.includes(runOf(row)));
 }
 
+// A wait outlives the driver that started it when the driver is killed, and
+// nothing then ends it: its result would be written beside whatever a later run
+// has recorded. So it stops, and writes nothing, once its parent is gone. The
+// driver names itself with `--parent-pid`: a wait that asked the OS who its
+// parent was once it was up would be told the reaper's pid when the driver had
+// already died, and would then never see it go.
+const ABANDONED = "the command that started this wait has ended, so its result is not written";
+
 export async function waitForChecks({
-  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay
+  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay,
+  abandoned = () => false
 }) {
   if (waitSec === 0) return { status: "not-run", reason: "CI waiting is disabled (ciWaitSec is 0)", checks: [] };
   const calledAt = now();
@@ -125,8 +138,10 @@ export async function waitForChecks({
   let deadline = starting ? null : calledAt + waitSec * 1000;
   let checks = null;
   while (true) {
+    if (abandoned()) throw new Error(ABANDONED);
     const readAt = now();
     const answered = read(repo, pr, { timeoutMs: Math.max(READ_FLOOR_MS, (deadline ?? startDeadline) - readAt) });
+    if (abandoned()) throw new Error(ABANDONED);
     if (checks === null) {
       const rows = answered ?? [];
       if (starting && !(Array.isArray(rows) && rows.length > 0)) {
@@ -168,6 +183,8 @@ async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
     const result = await waitForChecks({
+      // Named by the driver; a wait nobody named runs to its end.
+      abandoned: options.parentPid === undefined ? () => false : () => process.ppid !== options.parentPid,
       repo: path.resolve(options.repo),
       pr: options.pr,
       waitSec: options.waitSec,
