@@ -607,10 +607,9 @@ test("no command puts a file at the round store's marker name", async () => {
 // back through prose.
 test("the plan command reviews once, through the plan driver, and never budgets rounds", () => {
   const plan = read("commands", "plan.md");
-  assert.match(plan, /scripts\/plan\.mjs" collect/, "plan.md never folds the review through plan.mjs");
-  assert.match(plan, /scripts\/plan\.mjs" check/, "plan.md never checks that the findings were answered");
-  assert.match(plan, /scripts\/plan\.mjs" codex/, "plan.md never prepares the Codex review for the runner");
-  assert.match(plan, /response\.json/, "plan.md never names the drafter's response file");
+  assert.match(plan, /scripts\/plan\.mjs" review --plan/, "plan.md never starts the review through plan.mjs");
+  assert.match(plan, /names `collect`/, "plan.md never folds the review through plan.mjs");
+  assert.match(plan, /names `check`/, "plan.md never checks that the findings were answered");
   for (const gone of ["planReviewRounds", "scripts/lib/rounds.mjs", "outcome.json", "Open the round", "next round"]) {
     assert.ok(!plan.includes(gone), `plan.md still carries "${gone}"`);
   }
@@ -923,8 +922,6 @@ test("the plan command and the skill tell the orchestrator how to dispatch, and 
   ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
   assert.deepEqual(problems, [], problems.join("\n"));
   assert.match(plan, /one message/i);
-  // The plan side records its sets through its own script, in the ship's shape.
-  assert.match(plan, /scripts\/plan\.mjs" record --plan/, "plan.md never records a set");
   assert.match(plan, /scripts\/plan\.mjs" resume --plan/, "plan.md's resume never applies the restart rule");
 });
 

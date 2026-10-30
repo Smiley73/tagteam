@@ -29,8 +29,8 @@ write their own output files; scripts read them and print summaries; the
 orchestrator reads the summaries. Nothing large is ever moved between steps by
 passing it through a model. In a ship, `scripts/ship.mjs` sequences every step
 and prints every dispatch, and one run of the `tagteam:ship-spec` workflow per unit
-executes it while the main agent ends its turn; in a plan, `scripts/plan.mjs` prints
-every Claude call's settings and folds the review.
+executes it while the main agent ends its turn; in a plan, `scripts/plan.mjs` sequences every
+step the same way, prints every dispatch with its prompt and folds the review.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -307,7 +307,7 @@ plugin ships one agent per role — `tagteam:implementer`, `tagteam:fixer`,
 `tagteam:reviewer` and the rest — and the Agent tool takes a `model` and an
 `effort` on every call. The ship's workflow run passes `effort` on every call,
 beside the `model`, exactly as `ship.mjs` printed them, and a plan does the same
-with what `plan.mjs dispatch` printed. An effort left off does not fail: the agent
+with what each `plan.mjs` step printed. An effort left off does not fail: the agent
 silently runs at whatever effort the session uses. No role agent's file pins a
 model, so nothing but the call decides it, and outside a workflow run nothing but
 the call decides an effort either. Two plumbing agents pin a fixed pair:
@@ -325,8 +325,7 @@ The agent files in `agents/` are written by hand, one per role.
 **What each agent ran at is checked afterwards, and only reported.** Every set
 keeps, per agent, the agent, model and effort it was sent at: in a ship, the
 dispatch exactly as `ship.mjs` printed it, the runner's own pair and an
-escalated fixer's raised effort included; in a plan, what `plan.mjs record`
-resolves for the label, never anything the main agent supplies. After each
+escalated fixer's raised effort included; in a plan, what `plan.mjs` resolves for the label when it records the set, never anything the main agent supplies. After each
 spec, `finish`'s `say` names every Claude agent that ran at a different effort
 or model than that — read off the transcripts Claude Code keeps for the set's
 session — and every agent whose run could not be confirmed, with why; a plan's
@@ -361,10 +360,10 @@ notice when they do not.
 
 In a ship, `ship.mjs` prints the dispatch list with the agent, the model, the
 effort and the prompt for each, and the set those agents form; `commands/ship.md`
-says how a run starts and ends. In a plan, `plan.mjs dispatch`
-prints each Claude call's agent, model, effort and label, step by step, and
-refuses by the job's name an effort that is missing or not on the ladder;
-`commands/plan.md` holds each prompt's wording and what each dispatch is given.
+says how a run starts and ends. In a plan, each `plan.mjs` step
+prints each Claude call's agent, model, effort, label and prompt, records the set
+before it prints it, and refuses by the job's name an effort that is missing or
+not on the ladder; `commands/plan.md` says how the main session runs the steps.
 
 ## Codex
 
@@ -391,7 +390,7 @@ nothing from the attempt before it.
 
 **The orchestrator never runs it in the foreground.** The bridge allows itself
 900 seconds and waits out a quota in slices, longer than a single Bash call may
-run. Instead `ship.mjs` and `plan.mjs codex` write the invocation into a command
+run. Instead `ship.mjs` and `plan.mjs review` write the invocation into a command
 file beside the artifact, and the run sends `tagteam:codex-runner` out
 with the reviewers, in the same fan-out. The runner starts the command
 detached, waits for its status file, and returns one line: the exit code and what
@@ -835,7 +834,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers — `next` never prints `accept` or `revisit`, and prints `redesign` only when `autoRedesign` answers the first same-file Recurring question of a cycle with a fix round left — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
-| `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
+| `plan.mjs` | The plan side: `explore`, `draft`, `review`, `collect`, `check`, `writers` and `specs` (the planning steps: each records the set it sends, prints the dispatch with its prompt and names what comes next; `review` also prepares the Codex plan review for the runner, `collect` folds the three readers into a brief once their set is in, `check` confirms every gating finding is answered once the drafter's set is in), `resume` (apply the restart rule to a set still out and name the step to pick up at), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `grant`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |

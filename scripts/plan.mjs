@@ -1,45 +1,40 @@
 #!/usr/bin/env node
-// The plan side's code: which settings each planning dispatch runs at, the one
-// review round aggregated into a brief the drafter answers, and the check that
-// every gating finding was answered.
+// The plan side's driver, the way `ship.mjs` drives a ship: every planning step
+// from the explorer to the spec validation is one subcommand, and each prints
+// what to do next as data — a dispatch with its prompt, a `next` command, an
+// `ask` for the owner, or a stop.
 //
 // A plan is reviewed once. Three readers — a Claude plan reviewer, a Codex plan
-// reviewer and the adversary — read the same draft in parallel; this script
-// folds their findings into one brief with an id per finding; the drafter
-// revises the plan and answers each blocking or major finding by id: applied,
-// rejected with a reason, or handed to the owner because it is about the goal
-// rather than the plan. The rejections and the questions reach the person at
-// approval. Nothing is re-reviewed: across every plan this plugin has ever
-// reviewed, no round of three readers has closed with nothing blocking or major,
-// so a loop that runs until one does is a loop that runs to its budget every
-// time, and the revisions between rounds were what the readers kept finding new
-// things in.
+// reviewer and the adversary — read the same draft in parallel; `collect` folds
+// their findings into one brief with an id per finding; the drafter revises the
+// plan and answers each blocking or major finding by id: applied, rejected with
+// a reason, or handed to the owner because it is about the goal rather than the
+// plan. The rejections and the questions reach the person at approval. Nothing
+// is re-reviewed: across every plan this plugin has ever reviewed, no round of
+// three readers has closed with nothing blocking or major, so a loop that runs
+// until one does is a loop that runs to its budget every time, and the revisions
+// between rounds were what the readers kept finding new things in.
+//
+// Every agent a step sends out is recorded as a set (`lib/plan-sets.mjs`) before
+// the step prints it, and each arrival goes through the same arrival command the
+// ship prints. `collect`, `check` and `specs` refuse, changing nothing, until the
+// set they judge is in: Claude Code may run the agents in the background, and a
+// reader still working looks on disk exactly like one that failed. The refusals
+// in `lib/plan-sets.mjs` stay the authority on order and on each re-send being
+// spent; a step looks at the sets on record and takes the branch they allow.
+//
+// What a Claude call runs at is decided here, not by the model dispatching it: a
+// missing or misspelled effort is refused by the job's name before anything is
+// recorded, with the check the ship driver uses, because the configuration is
+// validated once, at the start, and a plan resumed later re-reads a file that may
+// have been edited since. Each set keeps, per agent, the call it was sent as, and
+// `effort-check` reads those at approval against what each agent actually ran at,
+// as a report that blocks nothing.
 //
 // It exists as code rather than prose for the reason `collect-findings.mjs`
 // does: the orchestrator used to read three findings files whole and write a
 // revision brief by hand, which moved tens of kilobytes through the one context
 // the whole run has to fit in.
-//
-// Every Claude call the plan sends out is printed here too (`dispatch`): agent,
-// model, effort and label, for the step about to be dispatched, keyed on the
-// kind of set it is recorded as. The wording of each prompt stays in
-// `commands/plan.md`; what the call runs at does not, because a model left to
-// compose an agent name and an effort from printed settings sent a share of
-// them out with none. A missing or misspelled effort is refused when the call is
-// printed, by the job's name, with the check the ship driver uses: the
-// configuration is validated once, at the start, and a plan resumed later
-// re-reads a file that may have been edited since.
-//
-// Every agent the plan sends out is recorded as a set (`record`, through
-// `lib/plan-sets.mjs`), each arrival goes through the same arrival command the
-// ship prints, and `collect` and `check` refuse, changing nothing, until the set
-// they judge is in: Claude Code may run the agents in the background, and a
-// reader still working looks on disk exactly like one that failed.
-//
-// `record` also keeps, per agent, the call it was sent as — resolved here from
-// its kind and label, never supplied by the main agent — and `effort-check`
-// reads those at approval against what each agent actually ran at, as a report
-// that blocks nothing.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,25 +44,33 @@ import { isMain } from "./lib/is-main.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { arriveCommand } from "./dispatch-set.mjs";
 import { effortRefusal } from "./lib/effort-ladder.mjs";
+import { checksumOf } from "./lib/step-helper.mjs";
 import {
   CODEX_PLAN_REVIEW,
-  HOW_TO_RECORD,
+  HOW_TO_DISPATCH,
   HOW_TO_WAIT,
-  KINDS,
   NOT_IN_YET,
   PlanSetError,
+  READER_NAMES,
   REFUSED,
   REVISE_LABEL,
   closeJudged,
+  listSets,
+  pickUp,
   recordPlanSet,
   repoFor,
   requireFamilyIn,
+  requireNothingOut,
+  requireRecordable,
+  resendSpent,
   resumePlanSets,
-  setsDir
+  setsDir,
+  stepCommand
 } from "./lib/plan-sets.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { verify as verifyGoal } from "./goal-gate.mjs";
 import { readSpecs } from "./specs.mjs";
+import { PLAN_MAX_BYTES, PLAN_TARGET_BYTES, readDeliverables } from "./deliverables.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMAS = path.resolve(here, "..", "schemas");
@@ -115,8 +118,8 @@ const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effo
 // cut is the same job whether step 4 or step 6 asks for it, so it has one label.
 export const DRAFTER_PURPOSES = { draft: "Draft the plan", cut: "Cut the plan", revise: REVISE_LABEL };
 
-// The review's two Claude readers. Codex, the third, is prepared and printed by
-// `codex`, which a re-send of it runs again.
+// The review's two Claude readers. Codex, the third, is a runner `review` and
+// `collect` prepare and print themselves.
 const CLAUDE_READERS = {
   claude: { base: "plan-reviewer", job: "plan-review", description: "Plan review: Claude" },
   adversary: { base: "adversary", job: "plan-adversary", description: "Plan review: adversary" }
@@ -157,7 +160,7 @@ function selectionProblem(kind, { purpose, readers = [], specs = [] } = {}) {
   }
   if (step.takes === "readers") {
     if (readers.length === 0) return "a review-resend step needs --reader, once per reader re-sent";
-    if (readers.includes("codex")) return "Codex is re-sent by running `plan.mjs codex` again, which prints its runner; --reader takes claude or adversary";
+    if (readers.includes("codex")) return "Codex is re-sent by `collect`, which prepares its runner; --reader takes claude or adversary";
     const unknown = readers.find((reader) => !Object.hasOwn(CLAUDE_READERS, reader));
     if (unknown) return `--reader takes claude or adversary; got ${JSON.stringify(unknown)}`;
     if (new Set(readers).size !== readers.length) return "a review-resend step names the same reader twice";
@@ -299,17 +302,6 @@ export function renderBrief(collection) {
   return lines.join("\n");
 }
 
-export function summaryLines(collection) {
-  const tally = SEVERITY_ORDER.filter((severity) => collection.counts[severity] > 0)
-    .map((severity) => `${collection.counts[severity]} ${severity}`).join(", ") || "nothing found";
-  const lines = [`plan review: ${collection.status} — ${tally} across ${collection.present.length}/${READERS.length} readers`];
-  for (const gap of collection.missing) lines.push(`  MISSING  ${gap.reader}: ${gap.reason}`);
-  for (const finding of collection.findings) {
-    lines.push(`  ${finding.id.padEnd(14)} ${finding.severity.padEnd(8)} ${finding.where}  ${finding.title}`);
-  }
-  return lines;
-}
-
 /**
  * Check the drafter's response against the collection: every gating id answered
  * exactly once, no id nothing raised, every entry on schema.
@@ -317,9 +309,10 @@ export function summaryLines(collection) {
 export function checkResponse({ findings, response, schemaPath = path.join(SCHEMAS, "plan-response.schema.json") }) {
   const schema = readJson(schemaPath);
   const errors = validateJson(schema, response);
-  if (errors.length > 0) return { ok: false, problems: errors.map((error) => `response does not match the schema: ${error}`), applied: [], rejected: [], needsOwner: [] };
+  if (errors.length > 0) {
+    return { ok: false, problems: errors.map((error) => `response does not match the schema: ${error}`), unanswered: [...findings.gating], applied: [], rejected: [], needsOwner: [] };
+  }
   const byId = new Map(findings.findings.map((finding) => [finding.id, finding]));
-  const gating = new Set(findings.gating);
   const seen = new Set();
   const problems = [];
   const applied = [];
@@ -335,101 +328,79 @@ export function checkResponse({ findings, response, schemaPath = path.join(SCHEM
     else if (entry.action === "rejected") rejected.push(record);
     else needsOwner.push(record);
   }
-  for (const id of gating) {
-    if (!seen.has(id)) problems.push(`${id} (${byId.get(id).severity}) was not answered`);
-  }
-  return { ok: problems.length === 0, problems, applied, rejected, needsOwner };
+  const unanswered = findings.gating.filter((id) => !seen.has(id));
+  for (const id of unanswered) problems.push(`${id} (${byId.get(id).severity}) was not answered`);
+  return { ok: problems.length === 0, problems, unanswered, applied, rejected, needsOwner };
 }
 
-const USAGE = `usage:
-  plan.mjs roles    <config.json>
-  plan.mjs dispatch <config.json> --kind <kind> [--purpose ${Object.keys(DRAFTER_PURPOSES).join("|")}]
-                    [--reader claude|adversary]... [--spec <id>]... [--plan <plan-dir>]
-  plan.mjs codex    --plugin <root> --dir <work/review> --goal <goal.md> --plan <plan.md> --cd <repo>
-                    --model <codex model> --effort <codex effort> --max-concurrent <n>
-  plan.mjs record   --plan <plan-dir> --kind <kind> --agent <label> <output> [--agent <label> <output>]...
-  plan.mjs resume   --plan <plan-dir> [--run-gone | --run-live]
-  plan.mjs collect  --dir <work/review>
-  plan.mjs check    --dir <work/review>
-  plan.mjs effort-check --plan <plan-dir>
-  plan.mjs approve  --plan <plan-dir> --config <config.json>
 
-  \`roles\` prints the model and effort of every planning dispatch, with the plan
-  override applied when there is one; the Codex command takes its pair from it.
-  \`dispatch\` prints the Claude calls of one step — agent, model, effort and
-  label — for the kind of set they are recorded as: --purpose chooses what a
-  draft is for, --reader which reader a review-resend re-sends, --spec each spec
-  a spec-writers or spec-writers-resend step writes. It exits 1, printing
-  nothing, when an effort is missing or not on the ladder. \`codex\` writes the
-  Codex plan review as a command for the codex-runner agent and prints the
-  dispatch. \`record\` records
-  the set just dispatched — kind is one of ${KINDS.join(", ")} —
-  and prints the command that records each arrival. \`resume\` applies the
-  restart rule to a set still out; the flags answer the question it asks when no
-  session can be identified. \`collect\` folds the three readers' files into
-  findings.json and brief.md; exit 1 while a reader is missing. \`check\` reads
-  response.json against findings.json; exit 1 while a blocking or major finding
-  is unanswered. \`collect\` and \`check\` exit ${NOT_IN_YET} while their set is not in, and
-  ${REFUSED} when none was recorded, changing nothing either way. \`effort-check\`
-  names, for step 7, every planning agent that ran at a different effort or model
-  than it was sent at and every one that could not be confirmed; it prints
-  nothing to say when all matched, and exits 0 whatever it finds. \`approve\` writes
-  the plan's \`approved.json\` whole, at the moment of Approve: the hashes it
-  computes itself, and the workflow files each spec may change, from the specs as
-  they validate now. It writes nothing when the specs do not validate or the goal
-  is not the one the owner approved.
+// --- the steps ---------------------------------------------------------------
+
+const USAGE = `usage:
+  plan.mjs explore --plan <plan-dir>
+  plan.mjs draft   --plan <plan-dir> [--purpose ${Object.keys(DRAFTER_PURPOSES).join("|")}]
+  plan.mjs review  --plan <plan-dir>
+  plan.mjs collect --plan <plan-dir>
+  plan.mjs check   --plan <plan-dir>
+  plan.mjs writers --plan <plan-dir> [--spec <id> --note <file>]
+  plan.mjs specs   --plan <plan-dir>
+  plan.mjs resume  --plan <plan-dir> [--run-gone | --run-live]
+  plan.mjs effort-check --plan <plan-dir>
+  plan.mjs approve --plan <plan-dir> --config <config.json>
+
+  Each step records the set it sends before it prints it, and prints one JSON
+  object: \`dispatch\` (agent, model, effort, description and prompt of each Agent
+  call), the \`set\` they form, and \`next\`, the command to run once the last one
+  has arrived; or an \`ask\` for the owner with the commands that answer it; or
+  nothing to run, when planning has reached its end. Every object carries a
+  \`checksum\`. A refusal exits non-zero with its reason on stderr, the first line
+  naming the stop, and ends in a \`checksum:\` line.
+
+  \`explore\` sends the explorer with the request in work/request.md. \`draft\` sends
+  the drafter, for the plan (\`draft\`), a cut of it (\`cut\`) or its revision after
+  the owner answered (\`revise\`, refused until work/review/owner-answers.md
+  exists). \`review\` prepares the Codex plan review and sends the three readers.
+  \`collect\` folds the readers' files into findings.json and brief.md, and sends
+  a missing reader again once, or the drafter to answer the brief. \`check\` reads
+  response.json against findings.json, and sends the drafter again once for what
+  it left unanswered, or asks the owner. \`writers\` sends one spec writer per
+  deliverable, or one again with --spec and --note. \`specs\` validates the specs
+  and sends the writer of a refused one again once. \`resume\` applies the
+  restart rule to a set still out and names the step to pick up at. A judging
+  step exits ${NOT_IN_YET} while its set is not in, and ${REFUSED} when the sets on record do not
+  allow it, changing nothing either way. \`effort-check\` names, for step 7, every
+  planning agent that ran at a different effort or model than it was sent at and
+  every one that could not be confirmed; it prints nothing to say when all
+  matched, and exits 0 whatever it finds. \`approve\` writes the plan's
+  \`approved.json\` whole, at the moment of Approve: the hashes it computes itself,
+  and the workflow files each spec may change, from the specs as they validate
+  now. It writes nothing when the specs do not validate or the goal is not the
+  one the owner approved.
 `;
 
-function flags(argv) {
+const STEP_FLAGS = {
+  explore: ["plan"],
+  draft: ["plan", "purpose"],
+  review: ["plan"],
+  collect: ["plan"],
+  check: ["plan"],
+  writers: ["plan", "spec", "note"],
+  specs: ["plan"],
+  "effort-check": ["plan"],
+  approve: ["plan", "config"]
+};
+
+function flags(action, argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
-    if (!key.startsWith("--")) throw new Error(`unexpected argument: ${key}`);
-    const value = argv[++index];
-    if (value === undefined) throw new Error(`${key} requires a value`);
-    options[key.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
-  }
-  return options;
-}
-
-// `record` takes each agent as a pair, `--agent <label> <output>`, so a label
-// with spaces in it needs nothing but the quotes it is copied in.
-function recordFlags(argv) {
-  const options = { agents: [] };
-  for (let index = 0; index < argv.length; index += 1) {
-    const key = argv[index];
-    if (key === "--agent") {
-      const [label, output] = [argv[index + 1], argv[index + 2]];
-      if (label === undefined || output === undefined) throw new PlanSetError(`--agent takes a label and an output\n${USAGE}`);
-      options.agents.push({ label, output });
-      index += 2;
-      continue;
-    }
-    if (key !== "--plan" && key !== "--kind") throw new PlanSetError(`record does not take ${key}\n${USAGE}`);
+    if (!key.startsWith("--")) throw new PlanSetError(`unexpected argument: ${key}\n${USAGE}`);
+    if (!STEP_FLAGS[action].includes(key.slice(2))) throw new PlanSetError(`${action} does not take ${key}\n${USAGE}`);
     const value = argv[++index];
     if (value === undefined) throw new PlanSetError(`${key} requires a value\n${USAGE}`);
     options[key.slice(2)] = value;
   }
-  if (!options.plan || !options.kind) throw new PlanSetError(`record needs --plan and --kind\n${USAGE}`);
-  return options;
-}
-
-// `dispatch` takes the configuration the way `roles` does, then the step: a
-// kind, and the selector that kind takes. --reader and --spec repeat.
-function dispatchFlags(argv) {
-  const [config, ...rest] = argv;
-  if (!config || config.startsWith("--")) throw new Error(`dispatch needs the configuration path first\n${USAGE}`);
-  const options = { config, readers: [], specs: [] };
-  for (let index = 0; index < rest.length; index += 1) {
-    const key = rest[index];
-    const value = rest[++index];
-    if (!["--kind", "--purpose", "--reader", "--spec"].includes(key)) throw new Error(`dispatch does not take ${key}\n${USAGE}`);
-    if (value === undefined) throw new Error(`${key} requires a value\n${USAGE}`);
-    if (key === "--reader") options.readers.push(value);
-    else if (key === "--spec") options.specs.push(value);
-    else options[key.slice(2)] = value;
-  }
-  if (!options.kind) throw new Error(`dispatch needs --kind\n${USAGE}`);
+  if (!options.plan) throw new PlanSetError(`${action} needs --plan\n${USAGE}`);
   return options;
 }
 
@@ -448,11 +419,13 @@ function resumeFlags(argv) {
   return options;
 }
 
-// The review directory is always `$D/work/review`, so the plan directory whose
-// sets `collect` and `check` judge is two levels above it.
-const planDirOf = (reviewDir) => path.resolve(reviewDir, "..", "..");
-
-const print = (payload) => process.stdout.write(`${JSON.stringify({ ok: true, ...payload }, null, 2)}\n`);
+function print(payload) {
+  // Every agent a step sends out is waited on through a set; a dispatch printed
+  // without one would be read from disk while it is still working.
+  if (payload.dispatch?.length && !payload.set) throw new Error("a dispatch was about to be printed without the set it forms");
+  const printed = { ok: true, ...payload };
+  process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
+}
 
 const sha256 = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
@@ -479,32 +452,397 @@ function approvePlan(planDir, config) {
   return { approved: path.join(dir, "approved.json"), ...approved };
 }
 
+// Where a plan keeps what its steps read and write, and the configuration they
+// run on, re-read every step: it is validated once, at the start.
+function contextFor(options) {
+  const D = path.resolve(options.plan);
+  const repo = repoFor(D);
+  const configFile = path.join(repo, ".tagteam", "config.json");
+  let config;
+  try {
+    config = readJson(configFile);
+  } catch (error) {
+    throw new Error(`cannot read the configuration at ${configFile}: ${error.message}`);
+  }
+  const review = path.join(D, "work", "review");
+  return {
+    D, repo, config, review,
+    goal: path.join(D, "goal.md"),
+    plan: path.join(D, "plan.md"),
+    request: path.join(D, "work", "request.md"),
+    exploration: path.join(D, "work", "exploration.md"),
+    findings: path.join(review, "findings.json"),
+    brief: path.join(review, "brief.md"),
+    response: path.join(review, "response.json"),
+    answers: path.join(review, "owner-answers.md"),
+    notes: path.join(D, "work", "spec-notes")
+  };
+}
+
+function requireGoal(ctx) {
+  const goal = verifyGoal(ctx.D);
+  if (!goal.ok) throw new Error(`the goal gate stops this step: ${goal.reason}`);
+}
+
+// A dispatch the step is about to send: the printed call, with its prompt, and
+// the file its agent is told to write.
+function claudeParts(ctx, kind, selection, parts) {
+  return planDispatch(ctx.config, kind, selection)
+    .map((call, index) => ({ call: { ...call, prompt: parts[index].prompt }, output: parts[index].output }));
+}
+
+// Record the set, and only then print it. `next` is the command the last arrival
+// names, so a run that ends its turn here knows where it picks up.
+async function send(ctx, kind, entries, payload) {
+  const sent = await recordPlanSet({
+    planDir: ctx.D, kind, repo: ctx.repo, callForLabel: planCallForLabel,
+    agents: entries.map(({ call, output }) => ({ label: call.description, output }))
+  });
+  return {
+    ...payload,
+    dispatch: entries.map(({ call }) => call),
+    set: { id: sent.id, labels: sent.labels, arrive: arriveCommand(sent.dir, sent.id) },
+    next: sent.record.next,
+    howToDispatch: HOW_TO_DISPATCH
+  };
+}
+
+// --- prompts: each opens with the job, then its inputs and the file to write ---
+
+const inputs = (ctx, ...names) => names.map((name) => ({
+  goal: `Goal: ${ctx.goal}`,
+  plan: `Plan: ${ctx.plan}`,
+  exploration: `Exploration: ${ctx.exploration}`,
+  brief: `Brief: ${ctx.brief}`
+})[name]);
+
+function explorerPrompt(ctx) {
+  let request = "";
+  try { request = fs.readFileSync(ctx.request, "utf8").trim(); } catch {}
+  if (!request) throw new Error(`write the person's request, as they wrote it, to ${ctx.request} first`);
+  return [
+    "Job: explorer",
+    "The request, as the person wrote it:",
+    request,
+    "Describe how the areas this goal touches are built today, which modules own them, what patterns the repository "
+      + "already uses, and where the tests for them live.",
+    `Write your conclusion to: ${ctx.exploration}`,
+    "Return one line."
+  ].join("\n");
+}
+
+function drafterPrompt(ctx, purpose) {
+  return [
+    "Job: plan-drafter",
+    ...(purpose === "cut"
+      ? [`Cut the plan to its ${PLAN_TARGET_BYTES / 1000} KB target, moving anything about how a deliverable is built into that deliverable's spec.`]
+      : purpose === "revise"
+        ? ["Revise the plan against the goal the owner read.",
+          `The owner's answers: ${ctx.answers}`,
+          "If their answer does not change the goal — the reader was wrong, or the point belongs in a spec — the file says so; revise the plan accordingly."]
+        : []),
+    ...inputs(ctx, "goal", "exploration"),
+    ...(purpose === "draft" ? [] : [`Plan to ${purpose === "cut" ? "cut" : "revise"}: ${ctx.plan}`]),
+    `Write ${purpose === "draft" ? "the plan" : `the ${purpose === "cut" ? "cut" : "revised"} plan`} to: ${ctx.plan}`
+  ].join("\n");
+}
+
+function readerPart(ctx, reader) {
+  const output = path.join(ctx.review, `${reader}.json`);
+  const base = reader === "claude" ? "plan-reviewer" : "adversary";
+  return {
+    output,
+    prompt: [
+      `Job: ${base}`,
+      ...(reader === "adversary" ? [`Read ${path.join(PLUGIN, "prompts", "plan-adversary.md")} and follow it.`] : []),
+      ...inputs(ctx, "goal", "plan", "exploration"),
+      `Write your findings to: ${output}`
+    ].join("\n")
+  };
+}
+
+function answerPrompt(ctx, { again = null } = {}) {
+  return [
+    "Job: plan-drafter",
+    ...(again
+      ? [`Your answers to the plan review did not cover every blocking or major finding. Answer again, by id, exactly these: ${again.ids.join(", ")}`,
+        ...again.problems.map((problem) => `Problem with your response: ${problem}`)]
+      : ["Revise the plan for the findings you accept and answer every finding in the brief by id — applied, rejected with a reason, or handed to the owner."]),
+    ...inputs(ctx, "goal", "plan", "exploration", "brief"),
+    `Write your response to: ${ctx.response}`
+  ].join("\n");
+}
+
+function writerPart(ctx, row, note = null) {
+  const spec = path.join(ctx.D, "specs", `${row.id}.md`);
+  return {
+    output: spec,
+    prompt: [
+      "Job: spec-writer",
+      ...(note ? [`Write spec ${row.id} again. Put right what this note says: ${note}`, `Your earlier spec: ${spec}`] : []),
+      ...inputs(ctx, "goal", "plan", "exploration"),
+      `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      `Your row: ${row.row}`,
+      `The default lens set, which your front matter names exceptions to: ${(ctx.config.reviewers?.default ?? []).join(", ")}`,
+      `Write your spec to: ${spec}`
+    ].join("\n")
+  };
+}
+
+// The Codex plan review, prepared for the runner. Its pair is the plan side's
+// own; the runner's call is the runner's, whatever the configuration says.
+function codexEntry(ctx) {
+  const { model, effort } = resolvePlanRoles(ctx.config).jobs["plan-codex"];
+  if (!model || !effort) {
+    throw new Error(`the plan-codex job has no ${model ? "effort" : "model"} in the configuration. Nothing was dispatched and no set `
+      + "was recorded for it; correct .tagteam/config.json and run this step again.");
+  }
+  const output = path.join(ctx.review, "codex.json");
+  const prepared = writeCodexCommand({
+    plugin: PLUGIN,
+    template: "plan-review.md",
+    fences: { GOAL: ctx.goal, PLAN: ctx.plan },
+    schema: "plan-review.schema.json",
+    out: output,
+    model,
+    effort,
+    cd: ctx.repo,
+    slots: path.dirname(ctx.review),
+    maxConcurrent: ctx.config.maxConcurrentCodex
+  });
+  return { call: runnerDispatch({ description: CODEX_PLAN_REVIEW, commandFile: prepared.commandFile, statusFile: prepared.statusFile }), output };
+}
+
+// --- steps --------------------------------------------------------------------
+
+async function explore(options) {
+  const ctx = contextFor(options);
+  requireNothingOut(ctx.D, "explore");
+  const entries = claudeParts(ctx, "explore", {}, [{ prompt: explorerPrompt(ctx), output: ctx.exploration }]);
+  return send(ctx, "explore", entries, { say: ["Sending the explorer."] });
+}
+
+function sendDraft(ctx, purpose, say) {
+  if (purpose === "revise" && !fs.existsSync(ctx.answers)) {
+    throw new PlanSetError(`revise refused: the owner's answers are not at ${ctx.answers}. Write them there — "the goal did not change" `
+      + "when that is the answer — and run this step again.");
+  }
+  const entries = claudeParts(ctx, "draft", { purpose }, [{ prompt: drafterPrompt(ctx, purpose), output: ctx.plan }]);
+  return send(ctx, "draft", entries, { say });
+}
+
+async function draft(options) {
+  const ctx = contextFor(options);
+  const purpose = options.purpose ?? "draft";
+  if (!Object.hasOwn(DRAFTER_PURPOSES, purpose)) throw new PlanSetError(`--purpose takes one of ${Object.keys(DRAFTER_PURPOSES).join(", ")}; got ${JSON.stringify(purpose)}`);
+  requireNothingOut(ctx.D, "draft");
+  requireGoal(ctx);
+  return sendDraft(ctx, purpose, [`Sending the drafter to ${{ draft: "draft the plan", cut: "cut the plan", revise: "revise the plan" }[purpose]}.`]);
+}
+
+function planBytes(ctx) {
+  try {
+    return fs.statSync(ctx.plan).size;
+  } catch {
+    throw new Error(`no plan at ${ctx.plan}`);
+  }
+}
+
+// A cut is sent when the plan is over its ceiling, and never twice in a row.
+const lastDraftWasCut = (ctx) =>
+  listSets(ctx.D).filter((set) => set.kind === "draft").at(-1)?.record.agents[0]?.label === DRAFTER_PURPOSES.cut;
+
+async function review(options) {
+  const ctx = contextFor(options);
+  requireNothingOut(ctx.D, "review");
+  requireGoal(ctx);
+  const say = [];
+  const size = planBytes(ctx);
+  if (size > PLAN_MAX_BYTES) {
+    const sentence = `plan.md is ${size} bytes, over its ${PLAN_MAX_BYTES / 1000} KB ceiling`;
+    if (!lastDraftWasCut(ctx)) return sendDraft(ctx, "cut", [`${sentence}: sending the drafter to cut it before anyone reviews it.`]);
+    say.push(`${sentence} after a cut; reviewing it as it is.`);
+  }
+  const parts = ["claude", "adversary"].map((reader) => readerPart(ctx, reader));
+  const codexOutput = path.join(ctx.review, "codex.json");
+  // Before the Codex command is written: a review already on record has a runner
+  // that may be working from the file this would rewrite.
+  requireRecordable({ planDir: ctx.D, kind: "review", agents: [...parts.map(({ output }) => ({ label: "", output })), { label: "", output: codexOutput }] });
+  const claude = claudeParts(ctx, "review", {}, parts);
+  fs.mkdirSync(ctx.review, { recursive: true });
+  return send(ctx, "review", [...claude, codexEntry(ctx)], { say: [...say, "Sending the plan reviewer, the adversary and Codex."] });
+}
+
+async function collect(options) {
+  const ctx = contextFor(options);
+  const set = requireFamilyIn(ctx.D, "review", "collect");
+  requireGoal(ctx);
+  const collection = collectPlanReview({ dir: ctx.review });
+  const missing = collection.missing.map((gap) => gap.reader);
+  const tally = SEVERITY_ORDER.filter((severity) => collection.counts[severity] > 0)
+    .map((severity) => `${collection.counts[severity]} ${severity}`).join(", ") || "nothing found";
+  const say = [`plan review: ${collection.status} — ${tally} across ${collection.present.length}/${READERS.length} readers`];
+  const payload = { status: collection.status, counts: collection.counts, missing, brief: ctx.brief };
+  let sending = null;
+  if (missing.length > 0 && !resendSpent(ctx.D, "review")) {
+    const readers = READERS.filter((reader) => missing.includes(reader) && reader !== "codex");
+    const claude = readers.length > 0 ? claudeParts(ctx, "review-resend", { readers }, readers.map((reader) => readerPart(ctx, reader))) : [];
+    sending = { kind: "review-resend", entries: [...claude, ...(missing.includes("codex") ? [codexEntry(ctx)] : [])] };
+    say.push(`Sending ${missing.map((reader) => READER_NAMES[reader]).join(" and ")} again, once.`);
+  } else {
+    for (const gap of collection.missing) say.push(`${READER_NAMES[gap.reader]} is still missing (${gap.reason}); carrying on without it, to be said at approval.`);
+    if (collection.gating.length > 0) {
+      sending = { kind: "response", entries: claudeParts(ctx, "response", {}, [{ prompt: answerPrompt(ctx), output: ctx.response }]) };
+      say.push(`Sending the drafter to answer the ${collection.gating.length} blocking or major findings.`);
+    }
+  }
+  fs.writeFileSync(ctx.findings, `${JSON.stringify(collection, null, 2)}\n`);
+  fs.writeFileSync(ctx.brief, renderBrief(collection));
+  await closeJudged(set);
+  if (!sending) return { say, ...payload, next: stepCommand(ctx.D, "writers") };
+  return send(ctx, sending.kind, sending.entries, { say, ...payload });
+}
+
+async function check(options) {
+  const ctx = contextFor(options);
+  const set = requireFamilyIn(ctx.D, "response", "check");
+  requireGoal(ctx);
+  const findings = readJson(ctx.findings);
+  let response = null;
+  let unreadable = "";
+  try { response = readJson(ctx.response); } catch (error) { unreadable = error.message; }
+  const result = response
+    ? checkResponse({ findings, response })
+    : { ok: false, problems: [`no readable response at ${ctx.response}: ${unreadable}`], unanswered: [...findings.gating], applied: [], rejected: [], needsOwner: [] };
+  const say = [`plan response: ${result.ok ? "complete" : "incomplete"} — ${result.applied.length} applied, ${result.rejected.length} rejected, ${result.needsOwner.length} for the owner`];
+  // Judged whatever the response turns out to be: an unreadable one is the
+  // drafter's failure, answered by its one re-send.
+  if (!result.ok) {
+    const ids = result.unanswered.join(", ");
+    if (resendSpent(ctx.D, "response")) {
+      await closeJudged(set);
+      throw new Error(`The drafter still left ${ids || "problems"} unanswered after its one re-send.\n${result.problems.join("\n")}`);
+    }
+    const entries = claudeParts(ctx, "response-resend", {}, [{ prompt: answerPrompt(ctx, { again: { ids: result.unanswered, problems: result.problems } }), output: ctx.response }]);
+    await closeJudged(set);
+    return send(ctx, "response-resend", entries, { say: [...say, `Sending the drafter again, once, for ${ids || "the problems named"}.`], status: "incomplete" });
+  }
+  await closeJudged(set);
+  const rejected = result.rejected.map(({ id, title, note }) => ({ id, title, note }));
+  if (result.needsOwner.length === 0) return { say, status: "complete", rejected, next: stepCommand(ctx.D, "writers") };
+  return {
+    say, status: "complete", rejected,
+    ask: [
+      "The review found what only the owner can settle. Ask now, one AskUserQuestion, in your own words: what the outcome does not "
+        + "settle and what turns on settling it either way. Which reader raised it, and its id, helps nobody answer. Do not decide it yourself.",
+      ...result.needsOwner.map(({ title, note }) => `- ${title}: ${note}`),
+      `Write their answers to ${ctx.answers}, and write "the goal did not change" there when that is the answer. If their answer changes `
+        + `the goal, they edit goal.md or tell you what to write: show them the changed file and run \`node "${path.join(here, "goal-gate.mjs")}" approve "${ctx.D}" "<iso-timestamp>"\` before the revise command.`
+    ].join("\n"),
+    answers: { revise: stepCommand(ctx.D, "draft", " --purpose revise") }
+  };
+}
+
+async function writersStep(options) {
+  const ctx = contextFor(options);
+  if (Boolean(options.spec) !== Boolean(options.note)) throw new PlanSetError(`writers takes --spec and --note together\n${USAGE}`);
+  requireNothingOut(ctx.D, "writers");
+  requireGoal(ctx);
+  if (!options.spec) {
+    const size = planBytes(ctx);
+    if (size > PLAN_MAX_BYTES) {
+      const sentence = `plan.md is ${size} bytes, over its ${PLAN_MAX_BYTES / 1000} KB ceiling`;
+      if (lastDraftWasCut(ctx)) {
+        throw new Error(`${sentence}, and the drafter's cut did not bring it under. Cut it by hand, or move what belongs in a spec out of it, `
+          + "then run resume.");
+      }
+      return sendDraft(ctx, "cut", [`${sentence}: sending the drafter to cut it.`]);
+    }
+  }
+  const rows = readDeliverables(ctx.plan);
+  const chosen = options.spec ? rows.filter((row) => row.id === options.spec) : rows;
+  if (chosen.length === 0) throw new Error(`${options.spec} is not a deliverable of ${ctx.plan}`);
+  if (options.note && !fs.existsSync(options.note)) throw new PlanSetError(`the note ${options.note} does not exist`);
+  const note = options.note ? path.resolve(options.note) : null;
+  const parts = chosen.map((row) => writerPart(ctx, row, note));
+  const kind = note ? "spec-writers-resend" : "spec-writers";
+  const entries = claudeParts(ctx, kind, { specs: chosen.map((row) => row.id) }, parts);
+  const who = chosen.length === 1 ? `the writer of ${chosen[0].id}` : `${chosen.length} spec writers`;
+  return send(ctx, kind, entries, { say: [`Sending ${who}${note ? " again" : ""}.`] });
+}
+
+async function specsStep(options) {
+  const ctx = contextFor(options);
+  const set = requireFamilyIn(ctx.D, "spec-writers", "specs");
+  requireGoal(ctx);
+  let order = null;
+  let refusal = null;
+  try {
+    order = readSpecs(ctx.D, ctx.config, path.join(SCHEMAS, "spec.schema.json"), { enforceSize: true });
+  } catch (error) {
+    refusal = error;
+  }
+  // Judged either way: a writer whose spec was refused is sent again as a set of
+  // its own, which is recorded only once this one is judged.
+  await closeJudged(set);
+  if (refusal) {
+    const id = refusal.specId;
+    if (!id) throw refusal;
+    const latest = listSets(ctx.D).filter((candidate) => candidate.record.agents.some((agent) => agent.output === path.join(ctx.D, "specs", `${id}.md`))).at(-1);
+    if (latest?.kind === "spec-writers-resend") {
+      throw new Error(`The writer of ${id} was sent again and the spec still fails: ${refusal.message}`);
+    }
+    const note = path.join(ctx.notes, `${id}.md`);
+    fs.mkdirSync(ctx.notes, { recursive: true });
+    fs.writeFileSync(note, `${refusal.message}\n`);
+    const row = readDeliverables(ctx.plan).find((candidate) => candidate.id === id);
+    if (!row) throw refusal;
+    const entries = claudeParts(ctx, "spec-writers-resend", { specs: [id] }, [writerPart(ctx, row, note)]);
+    return send(ctx, "spec-writers-resend", entries, { say: [`Spec ${id} was refused: ${refusal.message.split("\n")[0]}`, `Sending the writer of ${id} again, once.`] });
+  }
+  let rejected = [];
+  let missing = [];
+  try {
+    const findings = readJson(ctx.findings);
+    missing = findings.missing.map((gap) => gap.reader);
+    rejected = checkResponse({ findings, response: readJson(ctx.response) }).rejected.map(({ id, title, note }) => ({ id, title, note }));
+  } catch {}
+  return {
+    say: [`All ${order.length} specs validate.`],
+    order: order.map(({ id, dependsOn, reviewers, signOffs, workflows }) => ({ id, dependsOn, reviewers, signOffs, workflows })),
+    rejected,
+    missing
+  };
+}
+
+const STEPS = { explore, draft, review, collect, check, writers: writersStep, specs: specsStep };
+
 async function main() {
   const [action, ...rest] = process.argv.slice(2);
   try {
-    if (action === "record") {
-      const options = recordFlags(rest);
-      const sent = await recordPlanSet({
-        planDir: options.plan, kind: options.kind, agents: options.agents, callForLabel: planCallForLabel
-      });
-      const names = sent.record.agents.map((agent) => agent.name);
-      print({
-        say: [`Recorded set ${sent.id}: waiting on ${names.length === 1 ? names[0] : `all ${names.length}`}.`],
-        set: { id: sent.id, labels: sent.labels, arrive: arriveCommand(sent.dir, sent.id) },
-        next: sent.record.next,
-        howToWait: HOW_TO_RECORD
-      });
+    if (Object.hasOwn(STEPS, action)) {
+      print(await STEPS[action](flags(action, rest)));
       return;
     }
     if (action === "resume") {
       const options = resumeFlags(rest);
       const { outcome, ...payload } = await resumePlanSets({ planDir: options.plan, runGone: options.runGone, runLive: options.runLive });
+      // Nothing out and nothing waiting on a judging step: the sets and the disk
+      // say where to pick up, once there is a goal to build on.
+      if (!payload.next && !payload.ask && !payload.set) {
+        let goal;
+        try { goal = verifyGoal(options.plan); } catch (error) { goal = { ok: false, reason: error.message }; }
+        if (goal.ok) {
+          payload.next = pickUp(options.plan);
+        } else {
+          payload.say = [...payload.say, `There is no step to pick up at: ${goal.reason}.`];
+        }
+      }
       print({ ...payload, ...(outcome === "waiting" ? { howToWait: HOW_TO_WAIT } : {}) });
       return;
     }
     if (action === "effort-check") {
-      const options = flags(rest);
-      if (!options.plan) throw new PlanSetError(`effort-check needs --plan\n${USAGE}`);
+      const options = flags(action, rest);
       // A report for the approval and nothing else: whatever it finds, and
       // whatever goes wrong finding it, it says so and exits 0.
       let repo = null;
@@ -517,92 +855,16 @@ async function main() {
       return;
     }
     if (action === "approve") {
-      const options = flags(rest);
-      if (!options.plan || !options.config) throw new Error(`approve needs --plan and --config\n${USAGE}`);
+      const options = flags(action, rest);
+      if (!options.config) throw new PlanSetError(`approve needs --config\n${USAGE}`);
       print(approvePlan(options.plan, readJson(options.config)));
       return;
     }
-    if (action === "roles") {
-      if (!rest[0]) throw new Error(USAGE);
-      process.stdout.write(`${JSON.stringify(resolvePlanRoles(readJson(rest[0])), null, 2)}\n`);
-      return;
-    }
-    if (action === "dispatch") {
-      const { config, kind, ...selection } = dispatchFlags(rest);
-      print({ kind, dispatch: planDispatch(readJson(config), kind, selection) });
-      return;
-    }
-    if (action === "codex") {
-      const options = flags(rest);
-      for (const required of ["dir", "goal", "plan", "cd", "model", "effort"]) {
-        if (!options[required]) throw new Error(`codex needs --${required}\n${USAGE}`);
-      }
-      const dir = path.resolve(options.dir);
-      const prepared = writeCodexCommand({
-        plugin: options.plugin ?? PLUGIN,
-        template: "plan-review.md",
-        fences: { GOAL: path.resolve(options.goal), PLAN: path.resolve(options.plan) },
-        schema: "plan-review.schema.json",
-        out: path.join(dir, "codex.json"),
-        model: options.model,
-        effort: options.effort,
-        cd: path.resolve(options.cd),
-        slots: path.dirname(dir),
-        maxConcurrent: Number(options.maxConcurrent ?? 3)
-      });
-      process.stdout.write(`${JSON.stringify({
-        ok: true,
-        dispatch: runnerDispatch({ description: CODEX_PLAN_REVIEW, commandFile: prepared.commandFile, statusFile: prepared.statusFile }),
-        statusFile: prepared.statusFile
-      }, null, 2)}\n`);
-      return;
-    }
-    if (action === "collect") {
-      const options = flags(rest);
-      if (!options.dir) throw new Error(`collect needs --dir\n${USAGE}`);
-      const dir = path.resolve(options.dir);
-      // Before anything is read or written: a reader still working and one that
-      // failed leave the same nothing behind, and only the set's record tells
-      // them apart. Once it is in, each reader is judged from disk as before.
-      const set = requireFamilyIn(planDirOf(dir), "review", "collect");
-      const collection = collectPlanReview({ dir });
-      fs.writeFileSync(path.join(dir, "findings.json"), `${JSON.stringify(collection, null, 2)}\n`);
-      fs.writeFileSync(path.join(dir, "brief.md"), renderBrief(collection));
-      await closeJudged(set);
-      process.stdout.write(`${summaryLines(collection).join("\n")}\n`);
-      process.stdout.write(`  brief ${path.join(dir, "brief.md")} (${collection.gating.length} to answer)\n`);
-      if (collection.status === "incomplete") process.exitCode = 1;
-      return;
-    }
-    if (action === "check") {
-      const options = flags(rest);
-      if (!options.dir) throw new Error(`check needs --dir\n${USAGE}`);
-      const dir = path.resolve(options.dir);
-      const set = requireFamilyIn(planDirOf(dir), "response", "check");
-      const findings = readJson(path.join(dir, "findings.json"));
-      // Judged from here on, whatever the response turns out to be: an
-      // unreadable one is the drafter's failure, answered by its one re-send.
-      await closeJudged(set);
-      let response;
-      try {
-        response = readJson(path.join(dir, "response.json"));
-      } catch (error) {
-        throw new Error(`no readable response at ${path.join(dir, "response.json")}: ${error.message}`);
-      }
-      const result = checkResponse({ findings, response });
-      const lines = [`plan response: ${result.ok ? "complete" : "incomplete"} — ${result.applied.length} applied, ${result.rejected.length} rejected, ${result.needsOwner.length} for the owner`];
-      for (const problem of result.problems) lines.push(`  PROBLEM  ${problem}`);
-      for (const entry of result.rejected) lines.push(`  rejected     ${entry.id.padEnd(14)} ${entry.title}\n               ${entry.note}`);
-      for (const entry of result.needsOwner) lines.push(`  needs-owner  ${entry.id.padEnd(14)} ${entry.title}\n               ${entry.note}`);
-      process.stdout.write(`${lines.join("\n")}\n`);
-      if (!result.ok) process.exitCode = 1;
-      return;
-    }
-    process.stderr.write(USAGE);
-    process.exitCode = 2;
+    throw new PlanSetError(USAGE);
   } catch (error) {
-    process.stderr.write(`${error.message}\n`);
+    const stop = `${error.message}\n`;
     process.exitCode = error.exitCode ?? 1;
+    process.stderr.write(`${stop}checksum: ${checksumOf({ exit: process.exitCode, stop: stop.split("\n")[0] })}\n`);
   }
 }
 

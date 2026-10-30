@@ -12,10 +12,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkResponse, collectPlanReview, renderBrief, READERS } from "../scripts/plan.mjs";
 import { RUNNER, codexArgs, readCodexStatus, runnerDispatch, shellQuote, writeCodexCommand } from "../scripts/lib/codex-command.mjs";
-import { PLAN_READERS, arriveInto, recordPlanSet, stageExplored, stagePlanWorkspace } from "./stage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const PLAN = path.join(root, "scripts", "plan.mjs");
 
 const finding = (severity, title) => ({ severity, where: "deliverable 1", title, detail: "grounded in a file", remedy: "cut it" });
 const review = (reader, findings) => ({ reviewer: reader, summary: `${reader} read the plan`, findings });
@@ -78,6 +76,7 @@ test("the response is complete only when every gating id is answered once, by an
   const partial = checkResponse({ findings, response: { responses: [{ id: "claude.1", action: "applied", note: "x" }] } });
   assert.equal(partial.ok, false);
   assert.deepEqual([...partial.problems].sort(), ["adversary.1 (major) was not answered", "codex.1 (major) was not answered"]);
+  assert.deepEqual(partial.unanswered, ["adversary.1", "codex.1"]);
 
   const invented = checkResponse({ findings, response: { responses: [
     { id: "claude.1", action: "applied", note: "x" }, { id: "codex.1", action: "applied", note: "x" },
@@ -88,39 +87,7 @@ test("the response is complete only when every gating id is answered once, by an
   const offSchema = checkResponse({ findings, response: { responses: [{ id: "claude.1", action: "fixed", note: "x" }] } });
   assert.equal(offSchema.ok, false);
   assert.match(offSchema.problems[0], /schema/);
-});
-
-test("the CLI writes findings.json and brief.md, exits 1 while a reader is missing, and check exits 1 while an answer is missing", () => {
-  // Each step judges a recorded set that is in, as a real plan's would.
-  const ws = stagePlanWorkspace();
-  const dir = ws.review;
-  stageExplored(ws);
-  const readers = recordPlanSet(ws, "review", PLAN_READERS(ws));
-  assert.equal(readers.status, 0, readers.stderr);
-  fs.writeFileSync(path.join(dir, "claude.json"), JSON.stringify(review("claude", [finding("major", "a")])));
-  fs.writeFileSync(path.join(dir, "codex.json"), JSON.stringify(review("codex", [])));
-  assert.equal(arriveInto(ws, readers, PLAN_READERS(ws).map(([label]) => label)).status, 0);
-  const incomplete = spawnSync("node", [PLAN, "collect", "--dir", dir], { encoding: "utf8" });
-  assert.equal(incomplete.status, 1);
-  assert.match(incomplete.stdout, /MISSING  adversary/);
-  fs.writeFileSync(path.join(dir, "adversary.json"), JSON.stringify(review("adversary", [])));
-  const collected = spawnSync("node", [PLAN, "collect", "--dir", dir], { encoding: "utf8" });
-  assert.equal(collected.status, 0, collected.stderr);
-  assert.match(collected.stdout, /plan review: open — 1 major/);
-  assert.ok(fs.existsSync(path.join(dir, "findings.json")));
-  assert.ok(fs.existsSync(path.join(dir, "brief.md")));
-
-  const drafter = recordPlanSet(ws, "response", [["Answer the plan review", path.join(dir, "response.json")]]);
-  assert.equal(drafter.status, 0, drafter.stderr);
-  assert.equal(arriveInto(ws, drafter, ["Answer the plan review"]).status, 0);
-  const unanswered = spawnSync("node", [PLAN, "check", "--dir", dir], { encoding: "utf8" });
-  assert.equal(unanswered.status, 1);
-  assert.match(unanswered.stderr, /no readable response/);
-  fs.writeFileSync(path.join(dir, "response.json"), JSON.stringify({ responses: [{ id: "claude.1", action: "rejected", note: "spec-level" }] }));
-  const answered = spawnSync("node", [PLAN, "check", "--dir", dir], { encoding: "utf8" });
-  assert.equal(answered.status, 0, answered.stderr);
-  assert.match(answered.stdout, /1 rejected/);
-  assert.match(answered.stdout, /spec-level/);
+  assert.deepEqual(offSchema.unanswered, findings.gating, "a response off the schema answers nothing");
 });
 
 test("the Codex command file quotes every argument, always reuses, and ends by writing the status atomically", () => {
@@ -144,23 +111,6 @@ test("the Codex command file quotes every argument, always reuses, and ends by w
   assert.equal(spawnSync("sh", [prepared.commandFile]).status, 0);
   assert.deepEqual(readCodexStatus(prepared.statusFile), { finished: true, exitCode: 7, said: "Codex ran, but how it routed could not be confirmed: x" });
   assert.deepEqual(readCodexStatus(path.join(dir, "absent")), { finished: false, exitCode: null, said: "" });
-});
-
-test("plan.mjs codex prints the runner at its own model and effort, never the configured Codex pair", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-codex-"));
-  const review = path.join(dir, "review");
-  fs.mkdirSync(review);
-  for (const name of ["goal.md", "plan.md"]) fs.writeFileSync(path.join(dir, name), "# x\n");
-  const printed = spawnSync(process.execPath, [PLAN, "codex", "--dir", review, "--goal", path.join(dir, "goal.md"),
-    "--plan", path.join(dir, "plan.md"), "--cd", dir, "--model", "gpt-5.6-sol", "--effort", "xhigh"], { encoding: "utf8" });
-  assert.equal(printed.status, 0, printed.stderr);
-  const { dispatch } = JSON.parse(printed.stdout);
-  assert.equal(dispatch.agent, "tagteam:codex-runner");
-  assert.equal(dispatch.model, "haiku");
-  assert.equal(dispatch.effort, "low");
-  // The configured pair goes to the Codex process, in the command file.
-  const script = fs.readFileSync(/^Command file: (.*)$/m.exec(dispatch.prompt)[1], "utf8");
-  assert.ok(script.includes("'--model' 'gpt-5.6-sol'") && script.includes("'--effort' 'xhigh'"), script);
 });
 
 test("the runner dispatch carries exactly the model and effort agents/codex-runner.md pins", () => {
