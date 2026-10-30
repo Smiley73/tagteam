@@ -14,8 +14,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { root, git, stage, stagePlan, ship, write, outputOf, arriveAll, findings, major, quietPath,
-  assertEffort, checkReportOf } from "./ship-stage.mjs";
-import { driveToRecurrence } from "./ship-driver-shared.mjs";
+  assertEffort, checkReportOf, sessionsFor } from "./ship-stage.mjs";
+import { effortCheckLines } from "../scripts/lib/effort-check.mjs";
+import { readSet } from "../scripts/dispatch-set.mjs";
+import { projectDirectoryFor } from "../scripts/usage.mjs";
+import { driveToRecurrence, capRecordPath, configure, escalateImplementer, runCommand, RAISED } from "./ship-driver-shared.mjs";
 
 // --- the Recurring signal and its two person-only answers ---------------------
 
@@ -72,7 +75,7 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
   assert.match(brief, /### Still open\n\n- \*\*major\*\*, raised at round 2 by adversary[\s\S]*- \*\*major\*\*, raised at round 3 by correctness/, "the carried finding is still open beside this round's");
   assert.match(brief, /### Resolved earlier — the pattern\n\n- \*\*major\*\*, raised at round 1 by correctness/);
   assert.match(redesign.json.say[0], /Redesign of app\.js on 01-a: fix round 3 of the 5[\s\S]*sonnet at high effort/);
-  assert.match(redesign.json.say[0], /Escalation never raises an implementer/);
+  assert.match(redesign.json.say[0], /Escalation does not raise this rewrite, only fixers and re-checks\./);
   assert.match(redesign.json.say.join("\n"), /goes to the re-check/);
   assert.equal(state().fixRoundsUsed, 3, "a redesign spends a fix round");
   assert.equal(state().state, "fixing");
@@ -453,4 +456,213 @@ test("a redesign that never touched the requested file resets nothing, and the s
   assert.equal(settle.json.review, "open");
   assert.match(settle.json.signal[0], /^Recurring: 4 rounds of this cycle \(1, 2, 3, 4\) each raised a new blocking or major finding on app\.js/);
   assert.match(settle.json.ask, /in 4 rounds of this cycle/);
+});
+
+// --- redesignEscalation: which settings a rewrite runs at -----------------------
+
+const askedFor = (staged, setting, drive = {}) => {
+  configure(staged, (config) => { escalateImplementer(config); if (setting) config.redesignEscalation = setting; });
+  return driveToRecurrence(staged, drive);
+};
+const specFile = (staged, ...parts) => path.join(staged.shipDir, "01-a", ...parts);
+const answered = (staged) => ["fix-pending.json", "redesign-cycle.json", "redesign-briefs"].filter((name) => fs.existsSync(specFile(staged, name)));
+
+test("under ask, a file name with shell characters survives the answer commands unchanged", () => {
+  const staged = stage();
+  const { run } = askedFor(staged, "ask");
+  const name = "routes/$id's `x`.tsx";
+  const asked = run("redesign", ["--file", `${name},$(printf .changed)`]);
+  for (const answer of Object.values(asked.json.answers)) {
+    const echoed = runCommand(answer.replace(/^node .*? (redesign)/, "node -e 'console.log(JSON.stringify(process.argv.slice(1)))' $1"));
+    assert.equal(echoed.status, 0, echoed.stderr);
+    assert.equal(JSON.parse(echoed.stdout).at(-1), `${name},$(printf .changed)`);
+  }
+});
+
+test("under ask, a person's redesign asks which settings it runs at before spending anything, and the raised answer runs raised", () => {
+  const staged = stage();
+  const { state, run, collect } = askedFor(staged, "ask");
+  const before = state();
+  const asked = run("redesign", ["--file", "lib.js"]);
+  assert.equal(asked.json.dispatch, undefined);
+  assert.match(asked.json.ask, /sonnet at high effort/);
+  assert.match(asked.json.ask, new RegExp(`${RAISED.model} at ${RAISED.effort} effort`));
+  assert.doesNotMatch(asked.json.ask, /\d+\.[a-z-]+\.\d+|\b(blocking|major|minor)\b/, "the question carries no id and no severity");
+  assert.deepEqual(Object.keys(asked.json.answers).sort(), ["escalated", "normal"]);
+  assert.match(asked.json.answers.escalated, / redesign --plan .* --spec 01-a --escalated --file 'lib\.js'$/);
+  assert.match(asked.json.answers.normal, / redesign --plan .* --spec 01-a --normal --file 'lib\.js'$/);
+  assert.ok(!Object.values(asked.json.answers).includes(asked.json.next), "next is neither answer");
+  assert.deepEqual(state(), before, "an unanswered question spends nothing");
+  assert.deepEqual(answered(staged), []);
+  assert.match(collect.json.next, /fix --plan/, "the Recurring question's next is still a fix");
+
+  const raised = runCommand(asked.json.answers.escalated);
+  assert.equal(raised.status, 0, raised.stderr);
+  const [implementer] = raised.json.dispatch;
+  assert.deepEqual([implementer.model, implementer.effort], [RAISED.model, RAISED.effort]);
+  assert.match(implementer.prompt, /^Files to redesign: app\.js, lib\.js$/m, "the answer carries the files the person named");
+  assert.match(raised.json.say[0], new RegExp(`${RAISED.model} at ${RAISED.effort} effort \\(raised: escalation is in force\\)\\. Escalation raises this rewrite because you chose the raised settings`));
+  assert.equal(state().fixRoundsUsed, 3);
+  assert.ok(state().fixRoundsUsed <= 4, "escalation.after is not what raised it");
+  assert.equal(JSON.parse(fs.readFileSync(specFile(staged, "fix-pending.json"), "utf8")).escalated, true);
+  const set = readSet(specFile(staged, "sets", raised.json.set.id), raised.json.set.id);
+  assert.deepEqual(set.agents[0].request, { agent: "tagteam:implementer", model: RAISED.model, effort: RAISED.effort }, "the set keeps the raised request");
+
+  // Nothing after the rewrite moves with it: the re-check and the next fixer run
+  // as they do without redesignEscalation while the counter is within `after`.
+  const worktree = JSON.parse(fs.readFileSync(path.join(staged.shipDir, "train.json"), "utf8")).worktree;
+  fs.writeFileSync(path.join(worktree, "app.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+  write(outputOf(implementer), { status: "complete", summary: "rewrote sub", unfinished: [] });
+  arriveAll(raised);
+  run("snapshot");
+  run("verify");
+  const recheck = run("recheck");
+  assertEffort(recheck.json.dispatch[0], "high", "the fresh adversary after a raised rewrite passes effort.adversary");
+  assertEffort(recheck.json.dispatch[1], "low", "the re-check after a raised rewrite passes effort.recheck");
+  const fourth = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", fourth, [{ ...major("app.js"), title: "sub returns NaN for a missing argument" }]));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: fourth, verdicts: [{ id: "3.correctness.1", resolved: true, evidence: "no truncation" }] });
+  write(outputOf(recheck.json.dispatch[2]), { lens: "adversary", candidate: fourth, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "sign kept" }] });
+  arriveAll(recheck);
+  assert.match(run("settle").json.next, /fix --plan/);
+  const fix = run("fix");
+  assert.equal(state().fixRoundsUsed, 4);
+  assert.deepEqual([fix.json.dispatch[0].model, fix.json.dispatch[0].effort], ["sonnet", "high"], "the fixer while the counter is within after is not raised");
+});
+
+test("under ask, the ordinary answer runs a person's redesign at today's settings", () => {
+  const staged = stage();
+  const { state, run } = askedFor(staged, "ask");
+  const asked = run("redesign");
+  assert.ok(asked.json.ask);
+  const normal = runCommand(asked.json.answers.normal);
+  assert.equal(normal.status, 0, normal.stderr);
+  assert.deepEqual([normal.json.dispatch[0].model, normal.json.dispatch[0].effort], ["sonnet", "high"]);
+  assert.match(normal.json.say[0], /sonnet at high effort\. Escalation does not raise this rewrite because you chose the ordinary settings/);
+  assert.doesNotMatch(normal.json.say[0], /raised: escalation is in force/);
+  assert.equal(state().fixRoundsUsed, 3);
+  assert.equal(JSON.parse(fs.readFileSync(specFile(staged, "fix-pending.json"), "utf8")).escalated, false);
+});
+
+test("the question at the cap asks the same question, spends nothing until answered, and the raised answer takes the round past it", () => {
+  const staged = stage();
+  const { state, run } = askedFor(staged, "ask", { fixRounds: 2 });
+  const record = fs.readFileSync(capRecordPath(staged.shipDir), "utf8");
+  const before = state();
+  const asked = run("redesign");
+  assert.deepEqual(Object.keys(asked.json.answers).sort(), ["escalated", "normal"]);
+  assert.deepEqual(state(), before);
+  assert.equal(state().fixRoundGrant ?? null, null, "no grant is taken by asking");
+  assert.equal(fs.readFileSync(capRecordPath(staged.shipDir), "utf8"), record, "the cap's record is only read");
+  assert.deepEqual(answered(staged), []);
+
+  const raised = runCommand(asked.json.answers.escalated);
+  assert.equal(raised.status, 0, raised.stderr);
+  assert.deepEqual([raised.json.dispatch[0].model, raised.json.dispatch[0].effort], [RAISED.model, RAISED.effort]);
+  assert.match(raised.json.say[0], /the one round past the 2 fix rounds this repository allows/);
+  assert.equal(state().fixRoundsUsed, 3);
+  assert.ok(state().fixRoundGrant, "the grant was taken once it was answered");
+});
+
+test("a choice flag is refused, spending nothing, wherever redesignEscalation does not ask, and the redesign then runs at today's settings", () => {
+  const staged = stage();
+  const { state, run } = askedFor(staged, "never");
+  const refuse = (flag, why) => {
+    const refused = ship("redesign", staged.plan, ["--spec", "01-a", flag]);
+    assert.notEqual(refused.status, 0, flag);
+    assert.match(refused.stderr, why);
+    assert.deepEqual(answered(staged), []);
+    assert.equal(state().fixRoundsUsed, 2);
+  };
+  refuse("--escalated", /redesignEscalation is never here, so every rewrite runs at the ordinary settings/);
+  configure(staged, (config) => { config.redesignEscalation = "always"; });
+  refuse("--normal", /redesignEscalation is always here, so every rewrite already runs at the raised settings/);
+  configure(staged, (config) => { delete config.redesignEscalation; });
+  refuse("--escalated", /redesignEscalation is not set, which reads as never/);
+  const both = ship("redesign", staged.plan, ["--spec", "01-a", "--escalated", "--normal"]);
+  assert.notEqual(both.status, 0);
+  assert.match(both.stderr, /the two answers to one question/);
+
+  // No key at all reads as never: nothing is asked, and nothing is raised.
+  const redesign = run("redesign");
+  assert.equal(redesign.json.ask, undefined);
+  assert.deepEqual([redesign.json.dispatch[0].model, redesign.json.dispatch[0].effort], ["sonnet", "high"]);
+  assert.equal(state().fixRoundsUsed, 3);
+});
+
+test("with escalation off, redesignEscalation always changes nothing, and a choice flag is refused", () => {
+  const staged = stage();
+  configure(staged, (config) => { config.redesignEscalation = "always"; });
+  const { state, run } = driveToRecurrence(staged);
+  const refused = ship("redesign", staged.plan, ["--spec", "01-a", "--escalated"]);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /no escalation, so there are no raised settings to choose/);
+  assert.equal(state().fixRoundsUsed, 2);
+  const redesign = run("redesign");
+  assert.deepEqual([redesign.json.dispatch[0].model, redesign.json.dispatch[0].effort], ["sonnet", "high"]);
+  assert.match(redesign.json.say[0], /Escalation does not raise this rewrite, only fixers and re-checks\./);
+});
+
+// A raised rewrite whose report is refused is sent back at the settings it ran at:
+// off the request its set recorded, and, when none was recorded, off its marker.
+const BAD_REPORT = { status: "complete", summary: "rewrote sub" };
+for (const [name, strip, expected] of [
+  ["from the recorded request", () => {}, [RAISED.model, RAISED.effort]],
+  ["from the marker when no request was recorded", (staged, redesign) => {
+    const file = specFile(staged, "sets", redesign.json.set.id, `${redesign.json.set.id}.json`);
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    for (const agent of record.agents) delete agent.request;
+    fs.writeFileSync(file, JSON.stringify(record, null, 2));
+  }, [RAISED.model, RAISED.effort]],
+  ["as ordinary when an older marker says nothing and no request was recorded", (staged, redesign) => {
+    const file = specFile(staged, "sets", redesign.json.set.id, `${redesign.json.set.id}.json`);
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    for (const agent of record.agents) delete agent.request;
+    fs.writeFileSync(file, JSON.stringify(record, null, 2));
+    const marker = JSON.parse(fs.readFileSync(specFile(staged, "fix-pending.json"), "utf8"));
+    delete marker.escalated;
+    fs.writeFileSync(specFile(staged, "fix-pending.json"), JSON.stringify(marker, null, 2));
+  }, ["sonnet", "high"]]
+]) {
+  test(`a raised rewrite whose report is refused is resent ${name}`, () => {
+    const staged = stage();
+    const sessions = sessionsFor(staged);
+    const env = sessions.as("mine");
+    sessions.transcript("mine");
+    configure(staged, (config) => { escalateImplementer(config); config.redesignEscalation = "always"; });
+    const { worktree, state, app, run } = driveToRecurrence(staged, { env });
+    const redesign = run("redesign");
+    strip(staged, redesign);
+    app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
+    write(outputOf(redesign.json.dispatch[0]), BAD_REPORT);
+    arriveAll(redesign, env);
+    const resent = run("snapshot");
+    const [again] = resent.json.dispatch;
+    assert.equal(again.description, "Resend report for 01-a");
+    assert.deepEqual([again.model, again.effort], expected);
+    assert.equal(readSet(specFile(staged, "sets", resent.json.set.id), resent.json.set.id).agents[0].request.effort, expected[1], "the resend's set keeps what it was sent at");
+    assert.equal(git(worktree, "log", "-1", "--format=%s"), "Redesign 01-a: app.js");
+    assert.equal(state().fixRoundsUsed, 3);
+  });
+}
+
+test("finish's effort report names the raised effort as what a redesign was asked for", () => {
+  const staged = stage();
+  const sessions = sessionsFor(staged);
+  const env = sessions.as("mine");
+  sessions.transcript("mine");
+  configure(staged, (config) => { escalateImplementer(config); config.redesignEscalation = "always"; });
+  const { run } = driveToRecurrence(staged, { env });
+  const redesign = run("redesign");
+  const record = readSet(specFile(staged, "sets", redesign.json.set.id), redesign.json.set.id);
+  const home = path.join(staged.dir, "home");
+  const subagents = path.join(projectDirectoryFor(staged.repo, home), "mine", "subagents");
+  fs.mkdirSync(subagents, { recursive: true });
+  fs.writeFileSync(path.join(subagents, "agent-1.meta.json"), JSON.stringify({ description: record.agents[0].label }));
+  fs.writeFileSync(path.join(subagents, "agent-1.jsonl"), [
+    { timestamp: record.createdAt, message: { role: "user", content: `Write to: ${record.agents[0].output}` } },
+    { timestamp: record.createdAt, message: { role: "assistant", model: "claude-opus-5-5", content: [] }, effort: "high", perTurnEffort: "high" }
+  ].map((line) => JSON.stringify(line)).join("\n"));
+  const lines = effortCheckLines({ side: "ship", root: specFile(staged, "sets"), repo: staged.repo, home });
+  assert.ok(lines.some((line) => line.includes(`Redesign 01-a: app.js asked for ${RAISED.effort} on ${RAISED.model} and ran at high on claude-opus-5-5`)), lines.join("\n"));
 });

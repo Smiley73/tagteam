@@ -86,7 +86,12 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 3600,
-      "description": "How long to wait for a first check to appear on a pull request whose commit has a workflow that runs on pull requests, before stopping for a person. The one key that may be missing: a missing key means 120. Zero turns the start wait off."
+      "description": "How long to wait for a first check to appear on a pull request whose commit has a workflow that runs on pull requests, before stopping for a person. May be missing: a missing key means 120. Zero turns the start wait off."
+    },
+    "redesignEscalation": {
+      "type": "string",
+      "enum": ["always", "never", "ask"],
+      "description": "Whether a redesign of a rewritten area runs the implementer at the `escalation` block's model and effort, whatever `escalation.after` says: `always` does, `never` does not, `ask` leaves it to the person each time. Has no effect while `escalation` is null. May be missing: a missing key behaves as `never`."
     },
     "autoMerge": {
       "type": "boolean",

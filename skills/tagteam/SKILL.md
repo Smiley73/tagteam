@@ -213,6 +213,14 @@ entered in the plan's ledger. With `autoRedesign` on, the first such question in
 round left and the same file failing is not asked: `next` is `redesign`, and
 `say` says it was answered automatically. The loose signal alone, the question
 at the cap and every later question are still a person's, and so is `accept`.
+What a rewrite runs at is `redesignEscalation`'s to say, and only when `escalation` is set: an absent key
+reads as `never`, and with `escalation` null every rewrite runs at the ordinary settings. `always` runs every
+rewrite at the escalation block's implementer model and effort, whatever the fix counter; `never` runs none
+there; `ask` runs a rewrite `autoRedesign` started there, and for one a person chose the `redesign` stops
+before anything is spent and asks one question, whose `answers` are the raised and the ordinary settings —
+the same `redesign` command with `--escalated` or `--normal`, and the same `--file`. The answer decides that
+rewrite only, and a choice flag anywhere `redesignEscalation` is not `ask` is refused. A rewrite still moves
+the fix counter, so later fixers and re-checks escalate past `after` exactly as before.
 With every fix round spent they ask before anything publishes, and the
 question has three answers: `redesign`, which takes one round past
 `limits.fixRounds` — `gates.mjs grant`, taken only when this question was put
@@ -238,10 +246,12 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. Only one key has a
-fallback in a script, so an older configuration is incomplete. It is
+tell the person to run `/tagteam:configure` and stop. Only two keys have a
+fallback in a script, so an older configuration is incomplete. They are
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
-written before it existed stayed current. `autoMerge` is the
+written before it existed stayed current; and `redesignEscalation`, which may be
+missing and reads as `never`, so a version-12 file without it stays current and
+needs no reconfigure. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
 it. Configure carries a version-9 or version-10 file forward: every value it
@@ -270,7 +280,8 @@ the file is written at version 12. Anything older is a different shape and is re
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
 | `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
 | `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when the Recurring question at the cap is answered with `redesign`), `ciRepairs` (repairs of a red pull request), each at least 1; `carried` (the most findings a plan may carry before the ship stops and asks, at least 1 — turning carrying off is `carry`'s job) and `followUps` (how many fix units the whole-plan check may build from the carried findings, at least 0; with 0 every one still real goes into the plan's pull request body). Follow-up units are counted apart from the whole-plan fix units `ciRepairs` counts |
-| `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec |
+| `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec. The raised `models.worker` and `effort.implementer` also reach a redesign's implementer, as `redesignEscalation` says, and reach no other implementer |
+| `redesignEscalation` | `always`, `never` or `ask`. Whether a rewrite chosen from the Recurring question runs at the raised pair, and the raise is immediate: whatever `after` says and whatever the fix counter is. `never` runs it at the ordinary settings; `always` raises every rewrite; `ask` raises one `autoRedesign` started, and puts the choice to the person for one they chose, naming what each answer runs at. An automatic rewrite cannot ask, so it runs raised under `ask` too. May be missing and reads as `never`; configure always writes it. Does nothing while `escalation` is null |
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
 | `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms; its specs merge into `plan/<slug>` without waiting once every gate is satisfied. False: every spec merges straight into `base`, and each waits for a person's approval. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
 | `carry` | True: on a plan branch, a spec whose fix rounds ran out with only findings that may be carried — never a `blocking` one — merges into `plan/<slug>`, and each finding it carries is recorded in the plan's ledger and disclosed under that spec's `## Risk` and in the plan's pull request, which a person still confirms. Never on a spec that merges straight into `base`. False: such a spec stops for a person |

@@ -103,7 +103,10 @@ Every command a run starts at or follows is `ship.mjs` for this plan. `start`,
 that are a person's alone to order are each a run's first command — `finish
 --approve`, `redesign`, `accept`, `revisit`, `plan-adopt`, `plan-land` with
 `--approve`, `--squash` or `--stop`, and `begin` with `--run-gone` or `--run-live`
-— and each below says whose word starts it. None of them is ever a `next`.
+— and each below says whose word starts it. None of them is ever a `next`. The two
+flagged `redesign` commands, with `--escalated` or `--normal`, are a person's answer
+to the question *After `collect` and `settle`* describes: never add either flag on
+your own judgement, and never to a `redesign` that `next` printed.
 
 A person who wants to stop waiting on a spec's `checks` stops the run from the
 workflow view; then, on their word, start a run at `finish` for that spec. It
@@ -274,6 +277,16 @@ fix round is left, and the run follows it. What is yours at each point:
   That includes the loose signal on its own, the question at the cap, and any
   question after the cycle's rewrite.
 
+  With `escalation` set and `redesignEscalation` at `ask`, a `redesign` a person
+  answered stops first with a second `ask`: whether the rewrite runs at the
+  ordinary settings or the raised ones, each named with its model and effort in the
+  text. Nothing is spent until it is answered. Ask it as written, with exactly the
+  two commands `answers` offers, `answers.escalated` and `answers.normal`, and start
+  a run at the one they choose. The answer decides that rewrite only. A `redesign`
+  that `next` printed under `autoRedesign` is never asked this; the driver raises
+  it. With `always`, `never`, the key absent or `escalation` off, no `redesign` asks
+  anything, and the driver says what the rewrite ran at.
+
   *A fix round is still left* — four answers. **Fix it once more** is `next`.
   **Redesign** is
 
@@ -331,6 +344,9 @@ fix round is left, and the run follows it. What is yours at each point:
   or answering the question at the cap with `redesign`, which buys one round past it
   once per cycle. `redesign` and `accept` are answers to a question, and only the
   person answers it, except where the setting answers `redesign` and `next` says so.
+  The same holds for which settings a rewrite runs at: `--escalated` and `--normal`
+  are the person's word on the question that asks, and the driver refuses either
+  one where `redesignEscalation` is not `ask`.
 - **`publish`, `checks` and `repair`** are the run's to follow. The pull request
   body and title are written by an agent the driver sends; you write none of it. A
   body someone wrote by hand is sent with `publish --title "<title>" --body <file>`;
