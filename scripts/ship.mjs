@@ -34,6 +34,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import { claimSpec } from "./lib/run-claim.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
 import {
   DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
@@ -7777,6 +7778,10 @@ async function main() {
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
+    if (options.spec && process.env.TAGTEAM_RUN_ID) {
+      const ctx = context(options, { requireTrain: false });
+      claimSpec(path.join(ctx.shipDir, "steps", `${encodeURIComponent(options.spec)}.claim.json`), process.env.TAGTEAM_RUN_ID);
+    }
     await run(options);
   } catch (error) {
     const stop = `${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`;
