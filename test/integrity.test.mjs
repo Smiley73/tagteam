@@ -309,6 +309,16 @@ test("the configure command asks about every setting version 11 added", () => {
   }
 });
 
+// `redesignEscalation` is optional in the schema, so nothing but the interview
+// keeps it from dropping out: the question that turns escalation on has to ask it.
+test("the configure question that asks about escalation also asks about redesignEscalation", () => {
+  const items = thenAskItems(read("commands", "configure.md")).filter((item) => item.includes("`escalation`"));
+  assert.ok(items.length > 0, "no numbered question in configure.md names escalation");
+  for (const item of items) {
+    assert.ok(item.includes("`redesignEscalation`"), `a numbered question names escalation but not redesignEscalation:\n${item}`);
+  }
+});
+
 // `progressBoard` is retired: configure carries it out of a version-11 file and
 // asks nothing about it.
 test("configure asks no question about progressBoard", () => {

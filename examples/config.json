@@ -64,6 +64,7 @@
     "followUps": 2
   },
   "escalation": null,
+  "redesignEscalation": "never",
   "plan": null,
   "planBranch": false,
   "versionFiles": [],
