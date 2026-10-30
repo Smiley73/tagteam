@@ -162,3 +162,37 @@ test("a run's command leads a process group of its own, and the process that sta
   assert.notEqual(led.pgid, pgid, "the command stayed in this process's group");
   assert.equal(led.marked, false, "what the leader starts would take itself for a leader");
 });
+
+test("a signal to the process that started a run's command ends what the command started in a group of its own", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-run-claim-"));
+  const script = path.join(dir, "command.mjs");
+  fs.writeFileSync(script, [
+    `import { leadsOwnGroup, relaunchAsLeader } from ${JSON.stringify(pathToFileURL(RUN_CLAIM).href)};`,
+    'import { spawn } from "node:child_process";',
+    "if (leadsOwnGroup()) {",
+    '  const detached = spawn("sleep", ["300"], { stdio: "ignore", detached: true });',
+    "  detached.unref();",
+    '  process.stdout.write(detached.pid + "\\n");',
+    "  setInterval(() => {}, 1e9);",
+    "} else {",
+    "  process.exitCode = await relaunchAsLeader();",
+    "}"
+  ].join("\n"));
+  const outer = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "ignore"] });
+  const exited = new Promise((resolve) => outer.once("exit", resolve));
+  const detached = await new Promise((resolve) => {
+    let out = "";
+    outer.stdout.on("data", (chunk) => {
+      out += chunk;
+      if (out.includes("\n")) resolve(Number(out));
+    });
+  });
+  try {
+    outer.kill("SIGTERM");
+    await exited;
+    await settles([detached]);
+    assert.equal(alive(detached), false, "what the command started in a group of its own was left running");
+  } finally {
+    try { process.kill(detached, "SIGKILL"); } catch {}
+  }
+});

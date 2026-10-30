@@ -54,8 +54,13 @@ export function relaunchAsLeader() {
       stdio: "inherit", detached: true, env: { ...process.env, [LEADER]: "1" }
     });
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+      // Through the same reach as ending a group: a member that dies of the signal
+      // at once, as a verification does, would otherwise leave behind what it
+      // started in a group of its own, with nobody left to find it.
       process.on(signal, () => {
-        try { process.kill(-leader.pid, signal); } catch {}
+        for (const target of reach(leader.pid)) {
+          try { process.kill(target, signal); } catch {}
+        }
       });
     }
     leader.once("error", reject);
@@ -74,7 +79,8 @@ function processes() {
   }
 }
 
-function endGroup(pgid) {
+// The group, and every process below any of its members.
+function reach(pgid) {
   const table = processes();
   const members = table.filter(([, , group]) => group === pgid).map(([pid]) => pid);
   // What a member started in a group of its own, as a verification or a worktree
@@ -90,7 +96,11 @@ function endGroup(pgid) {
       }
     }
   }
-  const targets = [-pgid, ...tree];
+  return [-pgid, ...tree];
+}
+
+function endGroup(pgid) {
+  const targets = reach(pgid);
   const signal = (name) => {
     for (const target of targets) {
       try { process.kill(target, name); } catch {}
