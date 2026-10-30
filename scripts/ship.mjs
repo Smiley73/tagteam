@@ -2974,14 +2974,16 @@ async function begin(options) {
   }
   // A writer a bare publish sent for this candidate and a crashed run never
   // saw arrive is released, waited on or judged before anything else is done
-  // with a spec that already has its pull request: the next publish sends what
-  // it wrote, and nothing else may merge past it.
-  const writer = ["publishing", "awaiting-approval"].includes(state.state) ? pendingWriter(ctx, id, state) : null;
+  // with the spec: the next publish sends what it wrote, and nothing else may
+  // merge past it. Only a settled candidate gets a writer, so a first publish —
+  // the spec still `verifying`, no pull request yet — goes back to publish and
+  // not through the review panel again.
+  const writer = ["verifying", "publishing", "awaiting-approval"].includes(state.state) ? pendingWriter(ctx, id, state) : null;
   if (writer) {
     const restarted = await restartPointed(ctx, id, [{ set: writer.set, step: "publish", dir: setDir(ctx, id, writer.set) }], options);
     say.push(...restarted.say);
     return emit(heldByRestart(ctx, id, state, restarted, say)
-      ?? { say: [...say, `${id} already has a pull request, and the agent writing its next body was interrupted; publish judges what it left.`], next: nextCommand(ctx, "publish", id) });
+      ?? { say: [...say, `${id} ${state.pr ? "already has a pull request, and" : "is settled, and"} the agent writing its next body was interrupted; publish judges what it left.`], next: nextCommand(ctx, "publish", id) });
   }
   // A wait for checks is taken up again, not ended: ending it is a person's
   // call, and finish is what ends it.

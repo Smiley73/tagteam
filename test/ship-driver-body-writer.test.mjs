@@ -283,7 +283,8 @@ test("a restart releases a writer an earlier run left out, and waits on it when 
   assert.equal(later.status, 0, later.stderr);
   assert.equal(later.json.set, undefined);
   assert.match(later.json.say.join("\n"), /sent out by an earlier run in this session, which has ended; released it/);
-  assert.match(later.json.next, /snapshot --plan/, "today's route");
+  assert.match(later.json.next, /publish --plan .* --spec 01-a$/, "a settled candidate goes back to publish, not through the review panel");
+  assert.match(later.json.say.join("\n"), /is settled, and the agent writing its next body was interrupted/);
   assert.deepEqual([setOf(shipDir, set).closed.reason, setOf(shipDir, set).closed.because, setOf(shipDir, set).closed.run], ["released", "different-run", "run-b"]);
 
   // A set that recorded no run is waited on by any run, however it is named.
