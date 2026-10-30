@@ -196,3 +196,39 @@ test("a signal to the process that started a run's command ends what the command
     try { process.kill(detached, "SIGKILL"); } catch {}
   }
 });
+
+test("a signal to the process that started a run's command also ends what the command started in a group of its own and that ignores the signal", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-run-claim-"));
+  const script = path.join(dir, "command.mjs");
+  fs.writeFileSync(script, [
+    `import { leadsOwnGroup, relaunchAsLeader } from ${JSON.stringify(pathToFileURL(RUN_CLAIM).href)};`,
+    'import { spawn } from "node:child_process";',
+    "if (leadsOwnGroup()) {",
+    "  const stubborn = \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\";",
+    '  const detached = spawn(process.execPath, ["-e", stubborn], { stdio: "ignore", detached: true });',
+    "  detached.unref();",
+    '  process.stdout.write(detached.pid + "\\n");',
+    "  setInterval(() => {}, 1e9);",
+    "} else {",
+    "  process.exitCode = await relaunchAsLeader();",
+    "}"
+  ].join("\n"));
+  const outer = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "ignore"] });
+  const exited = new Promise((resolve) => outer.once("exit", resolve));
+  const detached = await new Promise((resolve) => {
+    let out = "";
+    outer.stdout.on("data", (chunk) => {
+      out += chunk;
+      if (out.includes("\n")) resolve(Number(out));
+    });
+  });
+  try {
+    // Give the command time to install its handler before the signal.
+    await delay(500);
+    outer.kill("SIGTERM");
+    await exited;
+    assert.equal(alive(detached), false, "the launcher returned while a command that ignores the signal was still running");
+  } finally {
+    try { process.kill(detached, "SIGKILL"); } catch {}
+  }
+});
