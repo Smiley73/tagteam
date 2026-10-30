@@ -60,7 +60,7 @@ const familyOf = (kind) => Object.keys(FAMILY).find((family) => FAMILY[family].i
 // The step that judges each family, for a refusal that has to name it.
 const JUDGED_BY = { review: "collect", response: "check", "spec-writers": "specs" };
 
-const DRAFTER_KINDS = new Set(["draft", "response", "response-resend"]);
+export const DRAFTER_KINDS = new Set(["draft", "response", "response-resend"]);
 const READERS = ["claude", "codex", "adversary"];
 export const READER_NAMES = { claude: "the plan reviewer", codex: "Codex", adversary: "the adversary" };
 

@@ -72,7 +72,7 @@ test("every kind of set has a step, and every step's selection is checked", () =
     ["explore", { specs: ["01-a"] }, /does not take --spec/],
     ["review", { readers: ["claude"] }, /does not take --reader/],
     ["review-resend", {}, /needs --reader/],
-    ["review-resend", { readers: ["codex"] }, /Codex is re-sent by `collect`/],
+    ["review-resend", { readers: ["codex"] }, /--reader takes claude or adversary; got "codex"/],
     ["spec-writers", {}, /needs --spec/],
     ["spec-writers", { specs: ["01-a", "01-a"] }, /same spec twice/],
     ["spec-writers", { specs: ["Write spec 01-a"] }, /NN-slug/],

@@ -208,6 +208,58 @@ test("check stops naming the id when a gating finding is still unanswered after 
   assert.equal(stopped.stdout, "");
 });
 
+for (const [how, rewrite] of [["only the ids it was asked for", false], ["the whole file again", true]]) {
+  test(`a drafter that answers some findings and then ${how} is checked against both answers, and approval shows the rejection and the missing reader`, () => {
+    const { ws, collected: first } = collected({ claude: [finding("blocking", "a")], adversary: [finding("major", "b")] });
+    arrive(ws, first);
+    const sent = step(ws, "collect");
+    assert.match(sent.json.set.id, /-response$/);
+    const rejection = { id: "claude.1", action: "rejected", note: "the plan already says so" };
+    const applied = { id: "adversary.1", action: "applied", note: "done" };
+    write(path.join(ws.review, "response.json"), { responses: [rejection] });
+    arrive(ws, sent);
+
+    const resend = step(ws, "check");
+    assert.equal(resend.status, 0, resend.stderr);
+    assert.match(resend.json.set.id, /-response-resend$/);
+    assert.match(resend.json.dispatch[0].prompt, /^Your answers to the plan review did not cover .*: adversary\.1$/m);
+    write(path.join(ws.review, "response.json"), { responses: rewrite ? [rejection, applied] : [applied] });
+    arrive(ws, resend);
+
+    const done = step(ws, "check");
+    assert.equal(done.status, 0, done.stderr);
+    assert.equal(done.json.status, "complete");
+    assert.equal(command(done.json.next), "writers");
+    assert.equal(done.json.ask, undefined);
+    const rejected = [{ id: "claude.1", title: "a", note: "the plan already says so" }];
+    assert.deepEqual(done.json.rejected, rejected);
+
+    const writers = step(ws, "writers");
+    write(path.join(ws.D, "specs", "01-a.md"), spec("01-a"));
+    write(path.join(ws.D, "specs", "01-b.md"), spec("01-b", "[01-a]"));
+    arrive(ws, writers);
+    const specs = step(ws, "specs");
+    assert.equal(specs.status, 0, specs.stderr);
+    assert.deepEqual(specs.json.rejected, rejected);
+    assert.deepEqual(specs.json.missing, ["codex"]);
+  });
+}
+
+test("specs stops when a blocking or major finding of the review was never answered", () => {
+  const { ws, collected: sent } = collected({ claude: [finding("major", "a")], codex: [], adversary: [] });
+  arrive(ws, sent);
+  arrive(ws, step(ws, "check"));
+  assert.equal(step(ws, "check").status, 1, "check stopped on the unanswered finding");
+  const writers = step(ws, "writers");
+  assert.equal(writers.status, 0, writers.stderr);
+  write(path.join(ws.D, "specs", "01-a.md"), spec("01-a"));
+  write(path.join(ws.D, "specs", "01-b.md"), spec("01-b", "[01-a]"));
+  arrive(ws, writers);
+  const stopped = step(ws, "specs");
+  assert.equal(stopped.status, 1);
+  assert.match(stopped.stderr.split("\n")[0], /answers to the plan review are not complete: claude\.1 \(major\) was not answered/);
+});
+
 test("a changed next does not match the checksum a step printed", () => {
   const ws = explored();
   const draft = step(ws, "draft");
@@ -242,6 +294,64 @@ test("writers on a plan over 12,000 bytes sends a cut when the last draft was no
   assert.equal(stopped.status, 1);
   assert.match(stopped.stderr.split("\n")[0], /plan\.md is 12\d{3} bytes, over its 12 KB ceiling/);
 });
+
+test("writers sends a cut again after the review and a revision came between, and stops only on a second cut in a row", () => {
+  const ws = explored();
+  write(path.join(ws.D, "plan.md"), `${PLAN}\n${"x".repeat(12_100)}\n`);
+  const cut = step(ws, "review");
+  arrive(ws, cut);
+  const ahead = step(ws, "review");
+  write(path.join(ws.review, "claude.json"), review("claude", [finding("major", "a")]));
+  write(path.join(ws.review, "codex.json"), review("codex"));
+  write(path.join(ws.review, "adversary.json"), review("adversary"));
+  arrive(ws, ahead);
+  const sent = step(ws, "collect");
+  write(path.join(ws.review, "response.json"), { responses: [{ id: "claude.1", action: "applied", note: "done" }] });
+  arrive(ws, sent);
+  const done = step(ws, "check");
+  assert.equal(command(done.json.next), "writers");
+
+  const again = step(ws, "writers");
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual(again.json.dispatch.map((entry) => entry.description), ["Cut the plan"]);
+  arrive(ws, again);
+  const stopped = step(ws, "writers");
+  assert.equal(stopped.status, 1);
+  assert.match(stopped.stderr.split("\n")[0], /over its 12 KB ceiling, and the drafter's cut did not bring it under/);
+});
+
+for (const [name, reach] of [
+  ["review", (ws) => { write(path.join(ws.D, "plan.md"), PLAN); }],
+  ["collect", (ws) => {
+    write(path.join(ws.D, "plan.md"), PLAN);
+    const sent = step(ws, "review");
+    for (const reader of ["claude", "codex", "adversary"]) write(path.join(ws.review, `${reader}.json`), review(reader));
+    arrive(ws, sent);
+  }],
+  ["check", (ws) => {
+    write(path.join(ws.D, "plan.md"), PLAN);
+    const sent = step(ws, "review");
+    for (const reader of ["claude", "codex", "adversary"]) write(path.join(ws.review, `${reader}.json`), review(reader, reader === "claude" ? [finding("major", "a")] : []));
+    arrive(ws, sent);
+    arrive(ws, step(ws, "collect"));
+  }],
+  ["writers", (ws) => { write(path.join(ws.D, "plan.md"), PLAN); }],
+  ["specs", (ws) => {
+    write(path.join(ws.D, "plan.md"), PLAN);
+    arrive(ws, step(ws, "writers"));
+  }]
+]) {
+  test(`${name} stops before it records anything when the goal is not the one the owner approved`, () => {
+    const ws = explored();
+    reach(ws);
+    const before = fs.readdirSync(setsDir(ws));
+    write(path.join(ws.D, "goal.md"), "# Goal: another goal\n");
+    const stopped = step(ws, name);
+    assert.equal(stopped.status, 1);
+    assert.match(stopped.stderr.split("\n")[0], /goal\.md has changed since it was approved/);
+    assert.deepEqual(fs.readdirSync(setsDir(ws)), before, "a refused step recorded a set");
+  });
+}
 
 test("specs sends the writer of a spec over 18 KB again, then stops on the same spec once its re-send failed", () => {
   const ws = explored();

@@ -47,6 +47,7 @@ import { CODEX_EFFORT_LADDER, effortRefusal } from "./lib/effort-ladder.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
 import {
   CODEX_PLAN_REVIEW,
+  DRAFTER_KINDS,
   HOW_TO_DISPATCH,
   HOW_TO_WAIT,
   NOT_IN_YET,
@@ -160,7 +161,6 @@ function selectionProblem(kind, { purpose, readers = [], specs = [] } = {}) {
   }
   if (step.takes === "readers") {
     if (readers.length === 0) return "a review-resend step needs --reader, once per reader re-sent";
-    if (readers.includes("codex")) return "Codex is re-sent by `collect`, which prepares its runner; --reader takes claude or adversary";
     const unknown = readers.find((reader) => !Object.hasOwn(CLAUDE_READERS, reader));
     if (unknown) return `--reader takes claude or adversary; got ${JSON.stringify(unknown)}`;
     if (new Set(readers).size !== readers.length) return "a review-resend step names the same reader twice";
@@ -304,16 +304,18 @@ export function renderBrief(collection) {
 
 /**
  * Check the drafter's response against the collection: every gating id answered
- * exactly once, no id nothing raised, every entry on schema.
+ * exactly once, no id nothing raised, every entry on schema. `accepted` holds the
+ * entries that count, which is what a re-send keeps.
  */
 export function checkResponse({ findings, response, schemaPath = path.join(SCHEMAS, "plan-response.schema.json") }) {
   const schema = readJson(schemaPath);
   const errors = validateJson(schema, response);
   if (errors.length > 0) {
-    return { ok: false, problems: errors.map((error) => `response does not match the schema: ${error}`), unanswered: [...findings.gating], applied: [], rejected: [], needsOwner: [] };
+    return { ok: false, problems: errors.map((error) => `response does not match the schema: ${error}`), unanswered: [...findings.gating], accepted: [], applied: [], rejected: [], needsOwner: [] };
   }
   const byId = new Map(findings.findings.map((finding) => [finding.id, finding]));
   const seen = new Set();
+  const accepted = [];
   const problems = [];
   const applied = [];
   const rejected = [];
@@ -322,6 +324,7 @@ export function checkResponse({ findings, response, schemaPath = path.join(SCHEM
     if (!byId.has(entry.id)) { problems.push(`${entry.id} answers a finding nobody raised`); continue; }
     if (seen.has(entry.id)) { problems.push(`${entry.id} is answered twice`); continue; }
     seen.add(entry.id);
+    accepted.push(entry);
     const finding = byId.get(entry.id);
     const record = { id: entry.id, severity: finding.severity, where: finding.where, title: finding.title, note: entry.note };
     if (entry.action === "applied") applied.push(record);
@@ -330,7 +333,7 @@ export function checkResponse({ findings, response, schemaPath = path.join(SCHEM
   }
   const unanswered = findings.gating.filter((id) => !seen.has(id));
   for (const id of unanswered) problems.push(`${id} (${byId.get(id).severity}) was not answered`);
-  return { ok: problems.length === 0, problems, unanswered, applied, rejected, needsOwner };
+  return { ok: problems.length === 0, problems, unanswered, accepted, applied, rejected, needsOwner };
 }
 
 
@@ -420,9 +423,6 @@ function resumeFlags(argv) {
 }
 
 function print(payload) {
-  // Every agent a step sends out is waited on through a set; a dispatch printed
-  // without one would be read from disk while it is still working.
-  if (payload.dispatch?.length && !payload.set) throw new Error("a dispatch was about to be printed without the set it forms");
   const printed = { ok: true, ...payload };
   process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
 }
@@ -474,6 +474,7 @@ function contextFor(options) {
     findings: path.join(review, "findings.json"),
     brief: path.join(review, "brief.md"),
     response: path.join(review, "response.json"),
+    earlier: path.join(review, "response-earlier.json"),
     answers: path.join(review, "owner-answers.md"),
     notes: path.join(D, "work", "spec-notes")
   };
@@ -482,6 +483,44 @@ function contextFor(options) {
 function requireGoal(ctx) {
   const goal = verifyGoal(ctx.D);
   if (!goal.ok) throw new Error(`the goal gate stops this step: ${goal.reason}`);
+}
+
+// The drafter's answers, whole. The re-send is asked only for the ids the first
+// answer missed, so `check` keeps the entries that counted in `earlier` before it
+// sends it, and the two are merged here by id, the re-send winning. Nothing
+// depends on the drafter carrying its earlier entries over.
+function readResponse(ctx) {
+  const load = (file) => {
+    try { return [readJson(file), ""]; } catch (error) { return [null, error.message]; }
+  };
+  const [now, unreadable] = load(ctx.response);
+  const [earlier] = load(ctx.earlier);
+  if (!Array.isArray(earlier?.responses)) return { response: now, unreadable };
+  if (!Array.isArray(now?.responses)) return { response: now ?? earlier, unreadable };
+  const rewritten = new Set(now.responses.map((entry) => entry?.id));
+  return { response: { ...now, responses: [...earlier.responses.filter((entry) => !rewritten.has(entry.id)), ...now.responses] }, unreadable: "" };
+}
+
+function judgeResponse(ctx, findings) {
+  const { response, unreadable } = readResponse(ctx);
+  if (response) return checkResponse({ findings, response });
+  return { ok: false, problems: [`no readable response at ${ctx.response}: ${unreadable}`], unanswered: [...findings.gating], accepted: [], applied: [], rejected: [], needsOwner: [] };
+}
+
+const rejectedOf = (result) => result.rejected.map(({ id, title, note }) => ({ id, title, note }));
+
+// What approval is shown beside the specs: the findings the drafter rejected, with
+// its reasons, and the readers that never reported. A review whose gating
+// findings are not all answered has nothing to show, so it stops here rather than
+// show an approval that leaves them out.
+function approvalFacts(ctx) {
+  if (!fs.existsSync(ctx.findings)) return { rejected: [], missing: [] };
+  const findings = readJson(ctx.findings);
+  const missing = findings.missing.map((gap) => gap.reader);
+  if (findings.gating.length === 0) return { rejected: [], missing };
+  const result = judgeResponse(ctx, findings);
+  if (!result.ok) throw new Error(`The drafter's answers to the plan review are not complete: ${result.problems.join("; ")}\nRun \`check\` again before approval.`);
+  return { rejected: rejectedOf(result), missing };
 }
 
 // A dispatch the step is about to send: the printed call, with its prompt, and
@@ -547,13 +586,14 @@ function drafterPrompt(ctx, purpose) {
   ].join("\n");
 }
 
+const readerFile = (ctx, reader) => path.join(ctx.review, `${reader}.json`);
+
 function readerPart(ctx, reader) {
-  const output = path.join(ctx.review, `${reader}.json`);
-  const base = reader === "claude" ? "plan-reviewer" : "adversary";
+  const output = readerFile(ctx, reader);
   return {
     output,
     prompt: [
-      `Job: ${base}`,
+      `Job: ${CLAUDE_READERS[reader].base}`,
       ...(reader === "adversary" ? [`Read ${path.join(PLUGIN, "prompts", "plan-adversary.md")} and follow it.`] : []),
       ...inputs(ctx, "goal", "plan", "exploration"),
       `Write your findings to: ${output}`
@@ -566,6 +606,7 @@ function answerPrompt(ctx, { again = null } = {}) {
     "Job: plan-drafter",
     ...(again
       ? [`Your answers to the plan review did not cover every blocking or major finding. Answer again, by id, exactly these: ${again.ids.join(", ")}`,
+        "Your earlier entries for the other findings are kept; this file needs an entry for each id above, and any entry you write for another id replaces the earlier one.",
         ...again.problems.map((problem) => `Problem with your response: ${problem}`)]
       : ["Revise the plan for the findings you accept and answer every finding in the brief by id — applied, rejected with a reason, or handed to the owner."]),
     ...inputs(ctx, "goal", "plan", "exploration", "brief"),
@@ -601,7 +642,7 @@ function codexEntry(ctx) {
     throw new Error(`the plan-codex job has the effort ${JSON.stringify(effort)}, which is not one of ${CODEX_EFFORT_LADDER.join(", ")}. `
       + "Nothing was dispatched and no set was recorded for it; correct .tagteam/config.json and run this step again.");
   }
-  const output = path.join(ctx.review, "codex.json");
+  const output = readerFile(ctx, "codex");
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
     template: "plan-review.md",
@@ -652,26 +693,30 @@ function planBytes(ctx) {
   }
 }
 
-// A cut is sent when the plan is over its ceiling, and never twice in a row.
-const lastDraftWasCut = (ctx) =>
-  listSets(ctx.D).filter((set) => set.kind === "draft").at(-1)?.record.agents[0]?.label === DRAFTER_PURPOSES.cut;
+// A plan over its ceiling is cut, and never twice in a row: it was just cut when
+// the drafter's latest work, of any kind, was a cut. Null when the plan fits.
+function overCeiling(ctx) {
+  const size = planBytes(ctx);
+  if (size <= PLAN_MAX_BYTES) return null;
+  const latest = listSets(ctx.D).filter((set) => DRAFTER_KINDS.has(set.kind)).at(-1);
+  return {
+    sentence: `plan.md is ${size} bytes, over its ${PLAN_MAX_BYTES / 1000} KB ceiling`,
+    cut: latest?.record.agents[0]?.label !== DRAFTER_PURPOSES.cut
+  };
+}
 
 async function review(options) {
   const ctx = contextFor(options);
   requireNothingOut(ctx.D, "review");
   requireGoal(ctx);
   const say = [];
-  const size = planBytes(ctx);
-  if (size > PLAN_MAX_BYTES) {
-    const sentence = `plan.md is ${size} bytes, over its ${PLAN_MAX_BYTES / 1000} KB ceiling`;
-    if (!lastDraftWasCut(ctx)) return sendDraft(ctx, "cut", [`${sentence}: sending the drafter to cut it before anyone reviews it.`]);
-    say.push(`${sentence} after a cut; reviewing it as it is.`);
-  }
+  const over = overCeiling(ctx);
+  if (over?.cut) return sendDraft(ctx, "cut", [`${over.sentence}: sending the drafter to cut it before anyone reviews it.`]);
+  if (over) say.push(`${over.sentence} after a cut; reviewing it as it is.`);
   const parts = ["claude", "adversary"].map((reader) => readerPart(ctx, reader));
-  const codexOutput = path.join(ctx.review, "codex.json");
   // Before the Codex command is written: a review already on record has a runner
   // that may be working from the file this would rewrite.
-  requireRecordable({ planDir: ctx.D, kind: "review", agents: [...parts.map(({ output }) => ({ label: "", output })), { label: "", output: codexOutput }] });
+  requireRecordable({ planDir: ctx.D, kind: "review", agents: [...parts.map(({ output }) => ({ label: "", output })), { label: "", output: readerFile(ctx, "codex") }] });
   const claude = claudeParts(ctx, "review", {}, parts);
   fs.mkdirSync(ctx.review, { recursive: true });
   return send(ctx, "review", [...claude, codexEntry(ctx)], { say: [...say, "Sending the plan reviewer, the adversary and Codex."] });
@@ -712,12 +757,7 @@ async function check(options) {
   const set = requireFamilyIn(ctx.D, "response", "check");
   requireGoal(ctx);
   const findings = readJson(ctx.findings);
-  let response = null;
-  let unreadable = "";
-  try { response = readJson(ctx.response); } catch (error) { unreadable = error.message; }
-  const result = response
-    ? checkResponse({ findings, response })
-    : { ok: false, problems: [`no readable response at ${ctx.response}: ${unreadable}`], unanswered: [...findings.gating], applied: [], rejected: [], needsOwner: [] };
+  const result = judgeResponse(ctx, findings);
   const say = [`plan response: ${result.ok ? "complete" : "incomplete"} — ${result.applied.length} applied, ${result.rejected.length} rejected, ${result.needsOwner.length} for the owner`];
   // Judged whatever the response turns out to be: an unreadable one is the
   // drafter's failure, answered by its one re-send.
@@ -728,11 +768,12 @@ async function check(options) {
       throw new Error(`The drafter still left ${ids || "problems"} unanswered after its one re-send.\n${result.problems.join("\n")}`);
     }
     const entries = claudeParts(ctx, "response-resend", {}, [{ prompt: answerPrompt(ctx, { again: { ids: result.unanswered, problems: result.problems } }), output: ctx.response }]);
+    fs.writeFileSync(ctx.earlier, `${JSON.stringify({ responses: result.accepted })}\n`);
     await closeJudged(set);
     return send(ctx, "response-resend", entries, { say: [...say, `Sending the drafter again, once, for ${ids || "the problems named"}.`], status: "incomplete" });
   }
   await closeJudged(set);
-  const rejected = result.rejected.map(({ id, title, note }) => ({ id, title, note }));
+  const rejected = rejectedOf(result);
   if (result.needsOwner.length === 0) return { say, status: "complete", rejected, next: stepCommand(ctx.D, "writers") };
   return {
     say, status: "complete", rejected,
@@ -752,16 +793,11 @@ async function writersStep(options) {
   if (Boolean(options.spec) !== Boolean(options.note)) throw new PlanSetError(`writers takes --spec and --note together\n${USAGE}`);
   requireNothingOut(ctx.D, "writers");
   requireGoal(ctx);
-  if (!options.spec) {
-    const size = planBytes(ctx);
-    if (size > PLAN_MAX_BYTES) {
-      const sentence = `plan.md is ${size} bytes, over its ${PLAN_MAX_BYTES / 1000} KB ceiling`;
-      if (lastDraftWasCut(ctx)) {
-        throw new Error(`${sentence}, and the drafter's cut did not bring it under. Cut it by hand, or move what belongs in a spec out of it, `
-          + "then run resume.");
-      }
-      return sendDraft(ctx, "cut", [`${sentence}: sending the drafter to cut it.`]);
-    }
+  const over = options.spec ? null : overCeiling(ctx);
+  if (over?.cut) return sendDraft(ctx, "cut", [`${over.sentence}: sending the drafter to cut it.`]);
+  if (over) {
+    throw new Error(`${over.sentence}, and the drafter's cut did not bring it under. Cut it by hand, or move what belongs in a spec out of it, `
+      + "then run resume.");
   }
   const rows = readDeliverables(ctx.plan);
   const chosen = options.spec ? rows.filter((row) => row.id === options.spec) : rows;
@@ -812,18 +848,10 @@ async function specsStep(options) {
     const entries = claudeParts(ctx, "spec-writers-resend", { specs: [id] }, [writerPart(ctx, row, note)]);
     return send(ctx, "spec-writers-resend", entries, { say: [`Spec ${id} was refused: ${refusal.message.split("\n")[0]}`, `Sending the writer of ${id} again, once.`] });
   }
-  let rejected = [];
-  let missing = [];
-  try {
-    const findings = readJson(ctx.findings);
-    missing = findings.missing.map((gap) => gap.reader);
-    rejected = checkResponse({ findings, response: readJson(ctx.response) }).rejected.map(({ id, title, note }) => ({ id, title, note }));
-  } catch {}
   return {
     say: [`All ${order.length} specs validate.`],
     order: order.map(({ id, dependsOn, reviewers, signOffs, workflows }) => ({ id, dependsOn, reviewers, signOffs, workflows })),
-    rejected,
-    missing
+    ...approvalFacts(ctx)
   };
 }
 

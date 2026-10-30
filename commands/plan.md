@@ -91,8 +91,9 @@ only thing that wakes you, and waiting costs no turns.
 
    - **Nothing open**: run `next`. It is the step that judges a set that came
      in and was never judged, or the step to pick up at, worked out from the
-     sets on record. With no `next`, the goal is not approved yet: carry on
-     from the interview.
+     sets on record, and before the goal exists that is the explorer's step
+     whenever its exploration is not on disk. With no `next`, the exploration is
+     in and the goal is not approved yet: carry on from the interview.
    - **`set` with `howToWait`**: those agents were sent out from this same
      session and may still be working. Dispatch nothing; end your turn and
      record each finished notice as *Waiting* says.

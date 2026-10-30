@@ -283,6 +283,8 @@ test("the drafter answering the brief gets one re-send after check, and a second
   const done = check(ws);
   assert.equal(done.status, 0, done.stderr);
   assert.equal(done.json.status, "complete");
+  assert.match(done.json.next, /plan\.mjs" writers --plan/);
+  assert.equal(done.json.ask, undefined);
   const again = recordPlanSet(ws, "response-resend", [["Answer the plan review a third time", response]]);
   assert.equal(again.status, 2);
   assert.match(again.stderr, /one re-send/);
