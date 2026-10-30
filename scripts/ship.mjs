@@ -2974,14 +2974,25 @@ async function begin(options) {
   }
   // A writer a bare publish sent for this candidate and a crashed run never
   // saw arrive is released, waited on or judged before anything else is done
-  // with a spec that already has its pull request: the next publish sends what
-  // it wrote, and nothing else may merge past it.
-  const writer = ["publishing", "awaiting-approval"].includes(state.state) ? pendingWriter(ctx, id, state) : null;
+  // with the spec: the next publish sends what it wrote, and nothing else may
+  // merge past it. Only a settled candidate gets a writer, so a spec still
+  // `verifying` — its first publish, or a republish after a revisit, a fix or
+  // a repair settled it again, which leaves it `verifying` until the pull
+  // request is updated — goes back to publish and not through the review
+  // panel again. Whether a pull request exists cannot tell that writer from
+  // one left on disk from before a revisit, whose re-review is still owed:
+  // both name this candidate. The state the writer was sent from can. A
+  // writer goes out while `verifying` only from a publish a settle routed to,
+  // so that one is judged; one sent while `publishing` or `awaiting-approval`
+  // predates the revisit that made the spec `verifying`, and the restart
+  // below releases it.
+  const pointer = pendingWriter(ctx, id, state);
+  const writer = pointer && (["publishing", "awaiting-approval"].includes(state.state) || (state.state === "verifying" && pointer.sentWhile === "verifying")) ? pointer : null;
   if (writer) {
     const restarted = await restartPointed(ctx, id, [{ set: writer.set, step: "publish", dir: setDir(ctx, id, writer.set) }], options);
     say.push(...restarted.say);
     return emit(heldByRestart(ctx, id, state, restarted, say)
-      ?? { say: [...say, `${id} already has a pull request, and the agent writing its next body was interrupted; publish judges what it left.`], next: nextCommand(ctx, "publish", id) });
+      ?? { say: [...say, `${id} ${state.pr ? "already has a pull request, and" : "is settled, and"} the agent writing its next body was interrupted; publish judges what it left.`], next: nextCommand(ctx, "publish", id) });
   }
   // A wait for checks is taken up again, not ended: ending it is a person's
   // call, and finish is what ends it.
@@ -4492,7 +4503,9 @@ async function sendBodyWriter(ctx, id, state, { problems = [], resent = false } 
     kind: resent ? "pr-body-resend" : "pr-body", agents: [{ dispatch, job, name: "the pull request body writer" }],
     step: "publish", closing: "Publishing now."
   });
-  writeJson(bodyWriterPath(ctx, id), { set: sent.id, candidate: state.candidateOid, resent, label: dispatch.description, at: new Date().toISOString() });
+  // `sentWhile` is the spec's state as the writer went out, which is what tells
+  // `begin` whether a pointer still belongs to the spec as it finds it.
+  writeJson(bodyWriterPath(ctx, id), { set: sent.id, candidate: state.candidateOid, resent, label: dispatch.description, at: new Date().toISOString(), sentWhile: state.state });
   emit({
     say: [`${resent ? "The writer's body or title could not be used, so a fresh writer is sent" : "An agent writes the pull request body and title"}: implementer ${settings(job)}. `
       + "Publish sends what it writes once it is in."],
