@@ -175,6 +175,8 @@ const writeJson = (file, value) => {
 };
 const exists = (file) => fs.existsSync(file);
 const q = (value) => JSON.stringify(String(value));
+// A word a shell reads back as exactly these characters: single quotes keep $, backticks, backslashes and newlines literal.
+const shq = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
 // --- the train and its paths -----------------------------------------------
 
@@ -4013,7 +4015,7 @@ async function redesign(options) {
     ? choice ?? (autoRedesigns(ctx, state, { signals, used: redesignUsed(ctx, id, state) }) ? "auto" : "ask")
     : setting === "always" ? "always" : null;
   if (why === "ask") {
-    const withFiles = options.file ? ` --file ${q(options.file)}` : "";
+    const withFiles = options.file ? ` --file ${shq(options.file)}` : "";
     const answer = (flag) => nextCommand(ctx, "redesign", id, ` ${flag}${withFiles}`);
     const at = (job) => `${job.model} at ${job.effort} effort`;
     return emit({

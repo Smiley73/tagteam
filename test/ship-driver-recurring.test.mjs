@@ -467,6 +467,18 @@ const askedFor = (staged, setting, drive = {}) => {
 const specFile = (staged, ...parts) => path.join(staged.shipDir, "01-a", ...parts);
 const answered = (staged) => ["fix-pending.json", "redesign-cycle.json", "redesign-briefs"].filter((name) => fs.existsSync(specFile(staged, name)));
 
+test("under ask, a file name with shell characters survives the answer commands unchanged", () => {
+  const staged = stage();
+  const { run } = askedFor(staged, "ask");
+  const name = "routes/$id's `x`.tsx";
+  const asked = run("redesign", ["--file", `${name},$(printf .changed)`]);
+  for (const answer of Object.values(asked.json.answers)) {
+    const echoed = runCommand(answer.replace(/^node .*? (redesign)/, "node -e 'console.log(JSON.stringify(process.argv.slice(1)))' $1"));
+    assert.equal(echoed.status, 0, echoed.stderr);
+    assert.equal(JSON.parse(echoed.stdout).at(-1), `${name},$(printf .changed)`);
+  }
+});
+
 test("under ask, a person's redesign asks which settings it runs at before spending anything, and the raised answer runs raised", () => {
   const staged = stage();
   const { state, run, collect } = askedFor(staged, "ask");
@@ -477,8 +489,8 @@ test("under ask, a person's redesign asks which settings it runs at before spend
   assert.match(asked.json.ask, new RegExp(`${RAISED.model} at ${RAISED.effort} effort`));
   assert.doesNotMatch(asked.json.ask, /\d+\.[a-z-]+\.\d+|\b(blocking|major|minor)\b/, "the question carries no id and no severity");
   assert.deepEqual(Object.keys(asked.json.answers).sort(), ["escalated", "normal"]);
-  assert.match(asked.json.answers.escalated, / redesign --plan .* --spec 01-a --escalated --file "lib\.js"$/);
-  assert.match(asked.json.answers.normal, / redesign --plan .* --spec 01-a --normal --file "lib\.js"$/);
+  assert.match(asked.json.answers.escalated, / redesign --plan .* --spec 01-a --escalated --file 'lib\.js'$/);
+  assert.match(asked.json.answers.normal, / redesign --plan .* --spec 01-a --normal --file 'lib\.js'$/);
   assert.ok(!Object.values(asked.json.answers).includes(asked.json.next), "next is neither answer");
   assert.deepEqual(state(), before, "an unanswered question spends nothing");
   assert.deepEqual(answered(staged), []);
