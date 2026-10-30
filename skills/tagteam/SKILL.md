@@ -28,8 +28,9 @@ directly through Bash and dispatches subagents only for model work. Subagents
 write their own output files; scripts read them and print summaries; the
 orchestrator reads the summaries. Nothing large is ever moved between steps by
 passing it through a model. In a ship, `scripts/ship.mjs` sequences every step
-and prints every dispatch; in a plan, `scripts/plan.mjs` prints every Claude
-call's settings and folds the review.
+and prints every dispatch, and one run of the `tagteam:ship-spec` workflow per unit
+executes it while the main agent ends its turn; in a plan, `scripts/plan.mjs` prints
+every Claude call's settings and folds the review.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -304,9 +305,9 @@ what falls between them, and nothing about a repository brief reaches it.
 **One agent per role; the model and the effort are both arguments.** The
 plugin ships one agent per role — `tagteam:implementer`, `tagteam:fixer`,
 `tagteam:reviewer` and the rest — and the Agent tool takes a `model` and an
-`effort` on every call. A ship passes `effort` on every call, beside the
-`model`, exactly as `ship.mjs` printed them, and a plan does the same with what
-`plan.mjs dispatch` printed. An effort left off does not fail: the agent
+`effort` on every call. The ship's workflow run passes `effort` on every call,
+beside the `model`, exactly as `ship.mjs` printed them, and a plan does the same
+with what `plan.mjs dispatch` printed. An effort left off does not fail: the agent
 silently runs at whatever effort the session uses. No role agent's file pins a
 model, so nothing but the call decides it, and outside a workflow run nothing but
 the call decides an effort either. Two plumbing agents pin a fixed pair:
@@ -316,7 +317,8 @@ belong to the Codex process the runner starts, and are already in the command
 file it is handed. While a per-call effort is not shown to apply inside a
 workflow run, the reviewer, adversary and plan-reviewer files also carry an
 effort, the configured one for the role's first job, and that is the one a
-workflow run uses.
+workflow run uses: the efforts of agents inside a run come from the agent files,
+which pin them, and the configuration's per-role efforts do not reach them.
 
 The agent files in `agents/` are written by hand, one per role.
 
@@ -334,33 +336,32 @@ re-sends or changes an exit code because of it, and when everything matched it
 says nothing. A set recorded before requests were kept is reported as not
 confirmed, never as a mismatch.
 
-**In a ship, a fan-out is one message, and the run judges it from its own record
-of who has reported.** A plan dispatches as `commands/plan.md` says. In a ship,
-every dispatch is a set — a review panel is one
-message holding one reviewer per lens plus the Codex runner, and the
-implementer, a fixer, a redesign implementer or a repair is a set of one. Each
-Agent call asks for `run_in_background: false` where the call allows it, because
-one return is cheaper than one wake-up per agent, and nothing depends on getting
-it: Claude Code may run the agents in the background whatever the call asks for,
-so a message cannot be relied on to return only once all of them have finished.
-Each agent's label is its `description`, the name Claude Code repeats in the
-notice it posts when that agent finishes. The orchestrator records every arrival
-with `set.arrive` — once with every label when they come back together, or one
-quick call per finished notice when they do not — and relays the one line it
-prints. The step that judges the set refuses, changing nothing, until every
-label is in, so an agent still working is never read as one that failed or
-changed nothing. There is no watcher and nothing to poll for, and a wake-up that
-is not the last arrival runs that one call and nothing else.
+**In a ship, a fan-out is one set, and the run judges it from its own record of
+who has reported.** In a ship, every dispatch is a set — a review panel is one
+fan-out holding one reviewer per lens plus the Codex runner, and the implementer,
+a fixer, a redesign implementer or a repair is a set of one. The `tagteam:ship-spec`
+workflow launches every entry of a set at once as an agent of the entry's type,
+model, effort, label and prompt, as `ship.mjs` printed them, and records the
+arrivals once they have all settled with the one `set.arrive` command, each label
+in double quotes. The step that judges the set refuses, changing nothing, until
+every label is in, so an agent still working is never read as one that failed or
+changed nothing. The main agent starts a run, ends its turn, and is woken by the
+run's completion notice; it never sleeps, polls or watches, because a turn that
+exists only to wait is the single most expensive thing an orchestrator can do. The
+one this replaced spent a third of its turns, and up to two thirds of its tokens,
+running `true` while it waited.
 
-That is because waiting is what an orchestrator must never pay for. The one
-this replaced spent a third of its turns, and up to two thirds of its tokens,
-running `true` while it waited; every one of those turns re-read a context of
-several hundred thousand tokens. A turn that exists only to wait is the single
-most expensive thing an orchestrator can do, and there is never a reason for one.
+A plan dispatches as `commands/plan.md` says: each Agent call there asks for
+`run_in_background: false` where the call allows it, because one return is cheaper
+than one wake-up per agent, and nothing depends on getting it. Each agent's label
+is its `description`, the name Claude Code repeats in the notice it posts when that
+agent finishes, and the orchestrator records every arrival with `set.arrive` — once
+with every label when they come back together, or one quick call per finished
+notice when they do not.
 
 In a ship, `ship.mjs` prints the dispatch list with the agent, the model, the
-effort and the prompt for each, the set those agents form, and the instruction
-for both; `commands/ship.md` says the rest. In a plan, `plan.mjs dispatch`
+effort and the prompt for each, and the set those agents form; `commands/ship.md`
+says how a run starts and ends. In a plan, `plan.mjs dispatch`
 prints each Claude call's agent, model, effort and label, step by step, and
 refuses by the job's name an effort that is missing or not on the ladder;
 `commands/plan.md` holds each prompt's wording and what each dispatch is given.
@@ -391,8 +392,8 @@ nothing from the attempt before it.
 **The orchestrator never runs it in the foreground.** The bridge allows itself
 900 seconds and waits out a quota in slices, longer than a single Bash call may
 run. Instead `ship.mjs` and `plan.mjs codex` write the invocation into a command
-file beside the artifact, and the orchestrator sends `tagteam:codex-runner` out
-with the reviewers, in the same message. The runner starts the command
+file beside the artifact, and the run sends `tagteam:codex-runner` out
+with the reviewers, in the same fan-out. The runner starts the command
 detached, waits for its status file, and returns one line: the exit code and what
 the bridge said last — its routing report, or why it failed. A non-zero exit is
 a Codex call that wrote no artifact; `collect` and `settle` report the lens as

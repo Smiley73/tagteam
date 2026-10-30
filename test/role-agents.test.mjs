@@ -136,8 +136,11 @@ test("both drivers compose a bare agent name in one helper", () => {
   }
 });
 
+// The ship's run starts the step helper itself, so the command that starts the
+// run grants it beside every agent the driver can print.
 test("each command grants exactly the agents its driver can print, once each, and every grant has an agent file", () => {
-  for (const [command, printable] of [["commands/ship.md", shipPrintable()], ["commands/plan.md", planPrintable()]]) {
+  const shipGrants = new Set([...shipPrintable(), "step-helper"]);
+  for (const [command, printable] of [["commands/ship.md", shipGrants], ["commands/plan.md", planPrintable()]]) {
     const granted = grants(command);
     assert.deepEqual(granted, [...new Set(granted)], `${command} grants an agent twice`);
     assert.deepEqual([...granted].sort(), [...printable].sort(), `${command}: the grants differ from the agents its driver can print`);
@@ -145,6 +148,16 @@ test("each command grants exactly the agents its driver can print, once each, an
       assert.ok(fs.existsSync(path.join(root, "agents", `${name}.md`)),
         `${command} grants Agent(tagteam:${name}), which no agent file provides`);
     }
+  }
+});
+
+// ship.md and the README say the same about effort inside a run as the findings
+// do: when a per-call effort is not shown to apply there, it is the agent files
+// that pin it, and the configuration's per-role efforts do not reach those agents.
+test("ship.md and the README say that configured efforts do not reach a run's agents exactly when a per-call effort is not shown to apply", () => {
+  for (const file of ["commands/ship.md", "README.md"]) {
+    const says = /per-role efforts do not reach them/.test(read(file).replace(/\s+/g, " "));
+    assert.equal(says, !effortApplies(), `${file} ${says ? "says" : "does not say"} that the per-role efforts do not reach a run's agents`);
   }
 });
 

@@ -1077,47 +1077,15 @@ function reportResendDispatch(ctx, spec, { pending, state, oid, request, problem
   };
 }
 
-// The one instruction that rides along with every dispatch list, stated here
-// rather than in prose so it cannot drift. Every dispatch is a set — a review
-// panel, a re-check, or the one implementer, fixer, redesign implementer or
-// repair whose work `snapshot` reads — and the step that judges it works from the
-// run's own record of who has arrived, kept by `dispatch-set.mjs`. Claude Code may
-// run the agents in the background whatever the call asks for, so nothing here
-// depends on the message returning only once they have finished. The foreground
-// is still asked for, because one return is cheaper than one wake-up per agent.
-export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
-  + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed as given when it is not "
-  + "null and omitted when it is, `description` as given and `prompt` verbatim, and pass `effort` on every call, exactly as "
-  + "given: left off, the agent silently runs at the session's effort instead of the one chosen for it. The agents form a set, "
-  + "and the run judges their work "
-  + "only once every one of them has been recorded as arrived. Each agent's label is its `description`, exactly as Claude Code "
-  + "names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in double "
-  + "quotes; relay the line it prints. If the message returns with every agent finished, run `set.arrive` once with every "
-  + "label. If it returns before they have finished, end your turn; on each finished notice run `set.arrive` with that one "
-  + "label and nothing else. When an arrival says the set is complete it prints `next`: run it. If you are unsure whether you "
-  + "recorded one, record it again: a repeat is refused and changes nothing. Never sleep, never poll, never watch, never "
-  + "schedule a wake-up.";
-
-// A set already sent out by an earlier run in this session and not all in.
-export const HOW_TO_WAIT = "A set is still out, and nothing is to be dispatched. End your turn. On each finished notice for one "
-  + "of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the line it "
-  + "prints. When an arrival says the set is complete it prints `next`: run it. A label recorded twice is refused and changes "
-  + "nothing. Never sleep, never poll, never watch, never schedule a wake-up.";
-
 function nextCommand(ctx, sub, id, extra = "") {
   return `node ${q(path.join(SCRIPTS, "ship.mjs"))} ${sub} --plan ${q(ctx.plan)}${id ? ` --spec ${id}` : ""}${extra}`;
-}
-
-function instructionFor(payload) {
-  if (payload.dispatch?.length) return { howToDispatch: HOW_TO_DISPATCH };
-  return payload.set ? { howToWait: HOW_TO_WAIT } : {};
 }
 
 function emit(payload) {
   // Every agent this driver sends out is waited on through a set; a dispatch
   // printed without one would be read from disk while it is still working.
   if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
-  const printed = { ok: true, ...payload, ...instructionFor(payload) };
+  const printed = { ok: true, ...payload };
   process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
 }
 
