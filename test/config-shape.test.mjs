@@ -492,10 +492,11 @@ test("a dependency that cannot be matched is refused on one line, marked, withou
   assert.equal(missing.dependencyProblem.entry, "1");
 
   const leadingZero = refusal(HEADER, [
-    ["1", "01-a", "x", "—"], ["2", "03-c", "y", "—"], ["3", "02-b", "z", "02"]
+    ["1", "01-a", "x", "—"], ["2", "03-c", "y", "02"], ["3", "02-b", "z", "—"]
   ]);
   assert.equal(leadingZero.dependencyProblem.entry, "02");
-  assert.equal(leadingZero.dependencyProblem.specId, "02-b");
+  assert.equal(leadingZero.dependencyProblem.specId, "03-c");
+  assert.match(leadingZero.message, /neither a spec the Deliverables table lists nor one of its row numbers/);
   assert.match(leadingZero.message, /1 \(01-a\), 2 \(03-c\), 3 \(02-b\)/);
 
   const zeroPadded = refusal(HEADER, [["01", "01-a", "x", "—"], ["02", "02-b", "y", "1"]]);
