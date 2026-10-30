@@ -236,6 +236,12 @@ test("a specs step with nothing after it is the only way to ready; any other ste
   assert.match(bare.result.reason, /named no next command and asked nothing/);
 });
 
+test("a resume that finds no step to pick up at stops with the driver's own reason, not the generic one", async () => {
+  const line = "There is no step to pick up at: goal.md changed after it was approved.";
+  const { result } = await scripted(cmd("resume"), () => ({ say: ["Nothing is out.", line] }));
+  assert.deepEqual(result, { ending: "stopped", reason: line });
+});
+
 test("every question the driver asks ends the run as needs you, the restart question included, and the run answers none", async () => {
   const restart = { ask: "Is that earlier run gone?", answers: { gone: cmd("resume", " --run-gone"), live: cmd("resume", " --run-live") } };
   const { result, commands } = await scripted(cmd("draft"), () => restart);

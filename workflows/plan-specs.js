@@ -137,6 +137,8 @@ const SESSION_ONLY = ["explore", "effort-check", "approve"];
 const HELPER = "tagteam:step-helper";
 const RUNNER = "tagteam:codex-runner";
 const UNCONFIRMED = "how it routed could not be confirmed";
+// The line the driver's resume ends on when no step can be picked up, as scripts/plan.mjs writes it.
+const NO_STEP = "There is no step to pick up at: ";
 
 const stopped = (reason) => ({ ending: "stopped", reason });
 
@@ -287,6 +289,10 @@ for (;;) {
   if (result.next === null) {
     if (name === "resume" && start !== null) { next = start; start = null; continue; }
     if (name === "specs") return { ending: "ready" };
+    // A resume that found no step to pick up at says why on its last line, and the
+    // goal gate's own reason is the one the person needs, not a generic one.
+    const noStep = name === "resume" ? result.say.at(-1) : undefined;
+    if (noStep !== undefined && noStep.startsWith(NO_STEP)) return stopped(noStep);
     return stopped("The step named no next command and asked nothing, so the run ended there.");
   }
   next = result.next;
