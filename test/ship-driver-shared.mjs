@@ -140,6 +140,31 @@ export function pushToBase(repo, name, contents) {
   return git(repo, "rev-parse", "HEAD");
 }
 
+// A staged repository's configuration, changed in place: the driver reads it
+// afresh on every step.
+export function configure({ repo }, change) {
+  const file = path.join(repo, ".tagteam", "config.json");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  change(config);
+  fs.writeFileSync(file, JSON.stringify(config, null, 2));
+}
+
+// Escalation that raises the implementer to a model and effort no other job
+// shares, so a dispatch's pair says which settings it ran at. `after` sits above
+// the counter a redesign reaches here, so only the redesign's own route raises it.
+export const RAISED = { model: "opus", effort: "max" };
+export function escalateImplementer(config, after = 4) {
+  config.escalation = { after, models: { ...config.models, worker: RAISED.model }, effort: { ...config.effort, implementer: RAISED.effort } };
+}
+
+// A command exactly as a step printed it, the way the orchestrator runs it.
+export function runCommand(command) {
+  const ran = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "" } });
+  let json = null;
+  try { json = JSON.parse(ran.stdout); } catch {}
+  return { ...ran, json };
+}
+
 // The record the question at the cap leaves, and the answers a question offers,
 // read off the commands it names.
 export const capRecordPath = (shipDir) => path.join(shipDir, "01-a", "asked-at-cap.json");
