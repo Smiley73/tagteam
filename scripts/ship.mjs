@@ -3641,6 +3641,8 @@ async function verify(options) {
   const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
     "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),
+    // The verification stops, ending its command and writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid),
     // A lockfile-only change matches no `when` in most configurations, which would wait for a person.
     ...(isDependencyId(id) ? ["--select", "all"] : [])
   ], { allow: [1] });
@@ -4928,7 +4930,9 @@ async function resolveCommit(options) {
 
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -5467,7 +5471,9 @@ async function planCheck(options) {
     // mode for it, so the record says what ran.
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"), "--select", "all",
-      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);

@@ -15,7 +15,18 @@ function killGroup(child, signal) {
   } catch {}
 }
 
-async function runCommand(command, cwd, timeoutSec, logPath) {
+// A verification outlives the driver that started it when the driver is killed,
+// and nothing then ends it: its command goes on changing the worktree beside
+// whatever a later run does there, and its result is written beside that run's.
+// So it stops, ending the command it is running and writing nothing, once its
+// parent is gone. The driver names itself with `--parent-pid`, as it does for
+// ci-wait.mjs: a verification that asked the OS who its parent was once it was
+// up would be told the reaper's pid when the driver had already died.
+const ABANDONED = "the command that started this verification has ended, so the command it was running is stopped and its result is not written";
+// How often a running command's starter is looked for.
+const WATCH_MS = 1_000;
+
+async function runCommand(command, cwd, timeoutSec, logPath, { abandoned, watch }) {
   // Opened before the child starts, so a log path a round already records stops
   // the run rather than being discovered after the command has had its effect.
   const output = createRoundStream(logPath);
@@ -28,18 +39,29 @@ async function runCommand(command, cwd, timeoutSec, logPath) {
   child.stdout.pipe(output, { end: false });
   child.stderr.pipe(output, { end: false });
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
+  let gone = false;
+  const end = () => {
     killGroup(child, "SIGTERM");
     setTimeout(() => killGroup(child, "SIGKILL"), 2_000).unref();
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    end();
   }, timeoutSec * 1000);
+  const watcher = setInterval(() => {
+    if (gone || !abandoned()) return;
+    gone = true;
+    end();
+  }, watch);
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
   }).finally(() => {
     clearTimeout(timer);
+    clearInterval(watcher);
     output.end();
   });
+  if (gone) throw new Error(ABANDONED);
   return { command, exitCode, timedOut, status: !timedOut && exitCode === 0 ? "passed" : "failed", logPath };
 }
 
@@ -51,7 +73,7 @@ async function runCommand(command, cwd, timeoutSec, logPath) {
 // pass.
 export const SELECTIONS = ["when", "all"];
 
-export async function verify({ config, candidate, worktree, outDir, select = "when" }) {
+export async function verify({ config, candidate, worktree, outDir, select = "when", abandoned = () => false, watch = WATCH_MS }) {
   if (!SELECTIONS.includes(select)) throw new Error(`--select is ${SELECTIONS.join(" or ")}, not ${JSON.stringify(select)}`);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const every = select === "all";
@@ -62,9 +84,10 @@ export async function verify({ config, candidate, worktree, outDir, select = "wh
   if (applicable.length === 0) return done({ status: "not-applicable", commands: [] });
   const results = [];
   for (let index = 0; index < applicable.length; index += 1) {
+    if (abandoned()) throw new Error(ABANDONED);
     const entry = applicable[index];
     const logPath = path.join(outDir, `${index + 1}.log`);
-    const result = await runCommand(entry.command, worktree, entry.timeoutSec, logPath);
+    const result = await runCommand(entry.command, worktree, entry.timeoutSec, logPath, { abandoned, watch });
     results.push(result);
     if (result.status === "failed") return done({ status: "failed", commands: results });
   }
@@ -89,7 +112,14 @@ async function main() {
       candidateOid: args["candidate-oid"],
       candidateHash: args["candidate-hash"]
     });
+    let parentPid;
+    if (args["parent-pid"] !== undefined) {
+      parentPid = Number(args["parent-pid"]);
+      if (!Number.isSafeInteger(parentPid) || parentPid <= 0) throw new Error("--parent-pid must be a process id");
+    }
     const result = await verify({
+      // Named by the driver; a verification nobody named runs to its end.
+      abandoned: parentPid === undefined ? () => false : () => process.ppid !== parentPid,
       config: JSON.parse(fs.readFileSync(args.config, "utf8")),
       candidate,
       worktree: path.resolve(args.worktree),

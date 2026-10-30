@@ -379,7 +379,9 @@ export function checkLanding({
       "--worktree", worktree, "--config", configPath, "--candidate", candidatePath,
       ...(select ? ["--select", select] : []),
       "--base", baseOid, "--candidate-oid", candidateOid,
-      "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this process dies under it.
+      "--parent-pid", String(process.pid)
     ], { encoding: "utf8", shell: false, maxBuffer: 64 * 1024 * 1024 });
     // `verify-run.mjs` exits 1 both for a command that failed and for a refusal
     // before anything ran, and the difference is whether it wrote its result.
