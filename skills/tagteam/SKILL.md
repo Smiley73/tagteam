@@ -28,8 +28,10 @@ directly through Bash and dispatches subagents only for model work. Subagents
 write their own output files; scripts read them and print summaries; the
 orchestrator reads the summaries. Nothing large is ever moved between steps by
 passing it through a model. In a ship, `scripts/ship.mjs` sequences every step
-and prints every dispatch; in a plan, `scripts/plan.mjs` prints every Claude
-call's settings and folds the review.
+and prints every dispatch, and one run of the `tagteam:ship-spec` workflow per unit
+executes it while the main agent ends its turn; in a plan, `scripts/plan.mjs` sequences every
+step the same way, prints every dispatch with its prompt and folds the review, and after the goal gate
+one run of the `tagteam:plan-specs` workflow executes it.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -87,8 +89,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    its checks, the landing check, the version lines and the
                    merge of the base the ship made — each for the one tip it is
                    about — the person's Merge for a tip, a Stop, and the merge),
-                   pr-body.md (the body the orchestrator writes for the plan as
-                   a whole), pr-body.sent.md (that body with the line saying
+                   pr-body.md (the body an agent writes for the plan as
+                   a whole), pr-title.txt, pr-facts.json and body-writer-set.json (its
+                   title, the facts it writes from, and the set that is
+                   waiting on it), pr-body.sent.md (that body with the line saying
                    what the plan lands as, which the ship adds under
                    ## Summary, and the ledger under ## Risk), ci-<tip>.json, checks/<tip>/ (the landing check's
                    evidence, one directory per base) and snapshots/. Never a
@@ -147,6 +151,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     report-resend.json  that agent was sent: the round, the commit and the
                  files kept; written once, so a round is resent only once   ignored
     pr-body.md  ci.json  usage.json                                          ignored
+    pr-title.txt  pr-facts.json  body-writer-set.json  the title an agent writes for
+                 the body, the facts it writes from, and the set publish
+                 waits on                                                     ignored
     pr-body.sent.md  the body as sent: pr-body.md with the driver's own lines
                  under ## Risk — on a plan branch each finding it would carry
                  into the plan branch open, and each failure that passed when
@@ -227,15 +234,14 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 11, validated by
+`.tagteam/config.json`, version 12, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. Only two keys have a
-fallback in a script, so an older configuration is incomplete. They are
-`ciStartWaitSec` and `progressBoard`: either may be missing, a missing
-`ciStartWaitSec` reads as 120 and a missing `progressBoard` as on, so the files
-written before they existed stayed current. `autoMerge` is the
+tell the person to run `/tagteam:configure` and stop. Only one key has a
+fallback in a script, so an older configuration is incomplete. It is
+`ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
+written before it existed stayed current. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
 it. Configure carries a version-9 or version-10 file forward: every value it
@@ -243,7 +249,9 @@ holds but `autoMerge` is offered back, and the keys it lacks are asked about —
 version 10's `planBranch` and `versionFiles`, and version 11's `carry`,
 `autoRedesign`, `limits.carried` and `limits.followUps`, each offered at its
 safe value: off, empty, off, off, 5 and 2. At those values nothing about how a
-plan ships changes. Anything older is a different shape and is replaced.
+plan ships changes. A version-11 file is carried forward without asking anything:
+every value stays, `progressBoard`, which nothing reads any more, is dropped, and
+the file is written at version 12. Anything older is a different shape and is replaced.
 
 | Key | Meaning |
 |---|---|
@@ -257,7 +265,6 @@ plan ships changes. Anything older is a different shape and is replaced.
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
 | `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |
-| `progressBoard` | On by default, and a missing key reads as on. On, ship and plan runs show a table of the current step's agents as `running` or `done` under one line of plan progress, at a little more output per step. Off, nothing extra is printed |
 | `autoMerge` | Accepted and ignored, in either value: nothing reads it, and the validator prints a `note:` saying so. `planBranch` replaced it as the setting that lets specs merge without waiting; a spec that merges straight into `base` always waits for a person. Configure no longer writes it |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
@@ -299,23 +306,26 @@ what falls between them, and nothing about a repository brief reaches it.
 **One agent per role; the model and the effort are both arguments.** The
 plugin ships one agent per role — `tagteam:implementer`, `tagteam:fixer`,
 `tagteam:reviewer` and the rest — and the Agent tool takes a `model` and an
-`effort` on every call. A ship passes `effort` on every call, beside the
-`model`, exactly as `ship.mjs` printed them, and a plan does the same with what
-`plan.mjs dispatch` printed. An effort left off does not fail: the agent
+`effort` on every call. The ship's workflow run passes `effort` on every call,
+beside the `model`, exactly as `ship.mjs` printed them, and a plan's run does the
+same with what each `plan.mjs` step printed, and so does the session for the
+explorer. An effort left off does not fail: the agent
 silently runs at whatever effort the session uses. No role agent's file pins a
-model or an effort, so nothing but the call decides either. The one exception is
-`tagteam:codex-runner`, whose file pins its own fixed pair, `haiku` at `low` —
-what that plumbing agent runs at, which no configuration reaches; it is passed
-that pair as printed. The configured Codex model and effort belong to the Codex
-process it starts, and are already in the command file it is handed.
+model or an effort, so nothing but the call decides either, inside a workflow run
+as outside it: a per-call effort applies there and overrides an agent file's, as
+`docs/workflow-spike-findings.md` records under (b). Two plumbing agents pin a
+fixed pair: `tagteam:codex-runner`, `haiku` at `low`, and `tagteam:step-helper`,
+`sonnet` at `low`. Each is passed that pair as printed. The configured Codex model
+and effort belong to the Codex process the runner starts, and are already in the
+command file it is handed. The one setting that beats a call's effort is
+`CLAUDE_CODE_EFFORT_LEVEL` in the environment, which overrides every effort.
 
 The agent files in `agents/` are written by hand, one per role.
 
 **What each agent ran at is checked afterwards, and only reported.** Every set
 keeps, per agent, the agent, model and effort it was sent at: in a ship, the
 dispatch exactly as `ship.mjs` printed it, the runner's own pair and an
-escalated fixer's raised effort included; in a plan, what `plan.mjs record`
-resolves for the label, never anything the main agent supplies. After each
+escalated fixer's raised effort included; in a plan, what `plan.mjs` resolves for the label when it records the set, never anything the main agent supplies. After each
 spec, `finish`'s `say` names every Claude agent that ran at a different effort
 or model than that — read off the transcripts Claude Code keeps for the set's
 session — and every agent whose run could not be confirmed, with why; a plan's
@@ -325,36 +335,36 @@ re-sends or changes an exit code because of it, and when everything matched it
 says nothing. A set recorded before requests were kept is reported as not
 confirmed, never as a mismatch.
 
-**In a ship, a fan-out is one message, and the run judges it from its own record
-of who has reported.** A plan dispatches as `commands/plan.md` says. In a ship,
-every dispatch is a set — a review panel is one
-message holding one reviewer per lens plus the Codex runner, and the
-implementer, a fixer, a redesign implementer or a repair is a set of one. Each
-Agent call asks for `run_in_background: false` where the call allows it, because
-one return is cheaper than one wake-up per agent, and nothing depends on getting
-it: Claude Code may run the agents in the background whatever the call asks for,
-so a message cannot be relied on to return only once all of them have finished.
-Each agent's label is its `description`, the name Claude Code repeats in the
-notice it posts when that agent finishes. The orchestrator records every arrival
-with `set.arrive` — once with every label when they come back together, or one
-quick call per finished notice when they do not — and relays the one line it
-prints, with the `board` exactly as printed when there is one. The step that judges the set refuses, changing nothing, until every
-label is in, so an agent still working is never read as one that failed or
-changed nothing. There is no watcher and nothing to poll for, and a wake-up that
-is not the last arrival runs that one call and nothing else.
+**In a ship, a fan-out is one set, and the run judges it from its own record of
+who has reported.** In a ship, every dispatch is a set — a review panel is one
+fan-out holding one reviewer per lens plus the Codex runner, and the implementer,
+a fixer, a redesign implementer or a repair is a set of one. The `tagteam:ship-spec`
+workflow launches every entry of a set at once as an agent of the entry's type,
+model, effort, label and prompt, as `ship.mjs` printed them, and records the
+arrivals once they have all settled with the one `set.arrive` command, each label
+in double quotes. The step that judges the set refuses, changing nothing, until
+every label is in, so an agent still working is never read as one that failed or
+changed nothing. The main agent starts a run, ends its turn, and is woken by the
+run's completion notice; it never sleeps, polls or watches, because a turn that
+exists only to wait is the single most expensive thing an orchestrator can do. The
+one this replaced spent a third of its turns, and up to two thirds of its tokens,
+running `true` while it waited.
 
-That is because waiting is what an orchestrator must never pay for. The one
-this replaced spent a third of its turns, and up to two thirds of its tokens,
-running `true` while it waited; every one of those turns re-read a context of
-several hundred thousand tokens. A turn that exists only to wait is the single
-most expensive thing an orchestrator can do, and there is never a reason for one.
+In a plan, the session sends the explorer and nothing else: its Agent call asks
+for `run_in_background: false` where the call allows it, because one return is
+cheaper than one wake-up, and nothing depends on getting it. The label is the
+call's `description`, the name Claude Code repeats in the notice it posts when the
+agent finishes, and the session records the arrival with `set.arrive`. Everything
+after the goal gate is one run of the `tagteam:plan-specs` workflow, which sends
+each step's agents together and records their arrivals as a ship's run does.
 
 In a ship, `ship.mjs` prints the dispatch list with the agent, the model, the
-effort and the prompt for each, the set those agents form, and the instruction
-for both; `commands/ship.md` says the rest. In a plan, `plan.mjs dispatch`
-prints each Claude call's agent, model, effort and label, step by step, and
-refuses by the job's name an effort that is missing or not on the ladder;
-`commands/plan.md` holds each prompt's wording and what each dispatch is given.
+effort and the prompt for each, and the set those agents form; `commands/ship.md`
+says how a run starts and ends. In a plan, each `plan.mjs` step
+prints each Claude call's agent, model, effort, label and prompt, records the set
+before it prints it, and refuses by the job's name an effort that is missing or
+not on the ladder; `commands/plan.md` says how the main session runs the steps up
+to the goal gate, and how it starts and reads a run after it.
 
 ## Codex
 
@@ -381,9 +391,9 @@ nothing from the attempt before it.
 
 **The orchestrator never runs it in the foreground.** The bridge allows itself
 900 seconds and waits out a quota in slices, longer than a single Bash call may
-run. Instead `ship.mjs` and `plan.mjs codex` write the invocation into a command
-file beside the artifact, and the orchestrator sends `tagteam:codex-runner` out
-with the reviewers, in the same message. The runner starts the command
+run. Instead `ship.mjs` and `plan.mjs review` write the invocation into a command
+file beside the artifact, and the run sends `tagteam:codex-runner` out
+with the reviewers, in the same fan-out. The runner starts the command
 detached, waits for its status file, and returns one line: the exit code and what
 the bridge said last — its routing report, or why it failed. A non-zero exit is
 a Codex call that wrote no artifact; `collect` and `settle` report the lens as
@@ -825,7 +835,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers — `next` never prints `accept` or `revisit`, and prints `redesign` only when `autoRedesign` answers the first same-file Recurring question of a cycle with a fix round left — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
-| `plan.mjs` | The plan side: `roles` (the Codex command's model and effort), `dispatch` (each Claude call of a step: agent, model, effort and label), `codex` (prepare the Codex plan review for the runner), `record` (record a dispatched set and print its arrival command), `resume` (apply the restart rule to a set still out), `collect` (fold the three readers into a brief, once their set is in), `check` (every gating finding answered, once the drafter's set is in), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
+| `plan.mjs` | The plan side: `explore`, `draft`, `review`, `collect`, `check`, `writers` and `specs` (the planning steps: each records the set it sends, prints the dispatch with its prompt and names what comes next; `review` also prepares the Codex plan review for the runner, `collect` folds the three readers into a brief once their set is in, `check` confirms every gating finding is answered once the drafter's set is in), `resume` (apply the restart rule to a set still out and name the step to pick up at; `--owed` names only a judging step a set still owes, which is how every run of `tagteam:plan-specs` opens), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `grant`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |
@@ -833,8 +843,8 @@ a new commit appears — and every fix round makes one.
 | `recheck.mjs` | Settle a round's findings, and any carried in, into `recheck.json` and `still-open.json`; `--print` re-renders a settled one |
 | `record-round-report.mjs` | Validate the report the round's agent wrote and record it into the round |
 | `merge.mjs` | Re-evaluate the gates, then merge at the reviewed commit from `state.json`, onto the reviewed base or one a landing check cleared for that commit. With `--plan-ship`, the plan's own pull request: only on a person's Merge or Squash for the tip, with a clean whole-plan result, a landing check of the tip that passed against the base it reads, and each version line one increase over that base's — all under the primary checkout's lock, as a merge commit, or as one squash commit when the person's recorded answer is Squash |
-| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, with `--rerun-at` a failed check completed before the rerun counts as running, and with `--settle-runs 1` a failure waits for the rest of its Actions run to finish |
-| `verify-run.mjs` | Run matching verify commands against a bound candidate |
+| `ci-wait.mjs` | Poll checks, return one classified line; checks still running at the deadline are not-run and marked as still running, with `--rerun-at` a failed check completed before the rerun counts as running, and with `--settle-runs 1` a failure waits for the rest of its Actions run to finish; with `--parent-pid` the wait stops, writing nothing, once the process that started it is gone |
+| `verify-run.mjs` | Run matching verify commands against a bound candidate; with `--parent-pid` the verification stops, ending the command it is running and writing nothing, once the process that started it is gone |
 | `snapshot-candidate.mjs` | Write `review.diff`, `review.diff.d/`, changed paths, candidate record |
 | `worktree-setup.mjs` | Copy ignored files, run setup commands |
 | `guard-staged.mjs` | Refuse a commit that stages a copied ignored file |
@@ -929,7 +939,7 @@ fixer. None of them is a reason to answer one way rather than the other.
 Names they own are theirs and belong in the question — a file they wrote, a
 command they configured, a branch, the product's own words for its own parts. A
 key in their own configuration is one of these: `ciWaitSec`, `ciStartWaitSec`,
-`progressBoard`, `limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
+`limits.fixRounds`, `effort.reviewer`, `escalation` and `plan` are settings they set and will later
 edit in `.tagteam/config.json`. A lens name is one too. So say what the setting
 or the lens does *and* name it wherever they might go looking for it afterwards.
 

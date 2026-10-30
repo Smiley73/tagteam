@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { approve as approveGoal } from "../scripts/goal-gate.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 
@@ -24,7 +25,8 @@ const root = path.resolve(import.meta.dirname, "..");
 // two that can disagree.
 export function stagePlugin(into) {
   fs.mkdirSync(into, { recursive: true });
-  for (const dir of [".claude-plugin", "agents", "commands", "prompts", "schemas", "scripts", "skills"]) {
+  for (const dir of [".claude-plugin", "agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"]) {
+    if (!fs.existsSync(path.join(root, dir))) continue;
     fs.cpSync(path.join(root, dir), path.join(into, dir), { recursive: true });
   }
 }
@@ -53,7 +55,7 @@ export function stagePlan() {
   return { planDir, configPath };
 }
 
-// --- the plan side's sets, driven the way the main agent drives them ---------
+// --- the plan side's sets, recorded in whatever order a suite needs ------------
 
 const SESSION_VARIABLES = ["TAGTEAM_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"];
 
@@ -69,6 +71,9 @@ export function stagePlanWorkspace() {
   for (const dir of ["work/review", "specs"]) fs.mkdirSync(path.join(D, dir), { recursive: true });
   fs.mkdirSync(path.join(repo, ".tagteam"), { recursive: true });
   fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), fs.readFileSync(path.join(root, "examples", "config.json"), "utf8"));
+  // The goal the owner approved, which every step from the draft on verifies.
+  fs.writeFileSync(path.join(D, "goal.md"), "# Goal: a goal\n");
+  approveGoal(D, { at: "2026-01-01T00:00:00Z" });
   return { home, repo, D, review: path.join(D, "work", "review") };
 }
 
@@ -79,11 +84,12 @@ export function stageTranscript(ws, session) {
   fs.writeFileSync(path.join(projectDir, `${session}.jsonl`), "");
 }
 
-export function planEnv(ws, session = null) {
+export function planEnv(ws, session = null, extra = {}) {
   const env = { ...process.env, HOME: ws.home };
   for (const name of SESSION_VARIABLES) delete env[name];
+  delete env.TAGTEAM_RUN_ID;
   if (session) env.TAGTEAM_SESSION_ID = session;
-  return env;
+  return { ...env, ...extra };
 }
 
 function ran(result) {
@@ -92,13 +98,13 @@ function ran(result) {
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, json };
 }
 
-export function runScript(ws, script, args, session = null) {
-  return ran(spawnSync(process.execPath, [path.join(root, "scripts", script), ...args], { encoding: "utf8", env: planEnv(ws, session) }));
+export function runScript(ws, script, args, session = null, extra = {}) {
+  return ran(spawnSync(process.execPath, [path.join(root, "scripts", script), ...args], { encoding: "utf8", env: planEnv(ws, session, extra) }));
 }
 
-// `agents` is `[label, output]` pairs, as the main agent passes them.
-export function recordPlanSet(ws, kind, agents, session = null) {
-  return runScript(ws, "plan.mjs", ["record", "--plan", ws.D, "--kind", kind, ...agents.flatMap((pair) => ["--agent", ...pair])], session);
+// `agents` is `[label, output]` pairs, as the driver records them.
+export function recordPlanSet(ws, kind, agents, session = null, extra = {}) {
+  return runScript(ws, "../test/plan-record.mjs", [ws.D, kind, JSON.stringify(agents.map(([label, output]) => ({ label, output })))], session, extra);
 }
 
 // The arrival command a payload printed, run exactly as printed, with the labels

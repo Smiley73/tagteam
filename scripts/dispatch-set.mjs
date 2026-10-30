@@ -29,26 +29,21 @@
 // refused by name together with the labels still out, so the main agent can
 // correct itself in the same turn instead of a set blocking forever.
 //
-// **The board is decided by the sender.** Whether a set shows a progress board,
-// and its header line, are chosen when the set goes out and kept with it. An
-// arrival only combines that header with the recorded names and arrivals, so it
-// still reads this set's record and nothing else, and a record with no board gets
-// no board.
-//
 // A caller chooses the directory. It must not be a `rounds/<n>/` directory:
 // re-entering a round empties it, and the round store refuses rewrites there,
 // while a set's record is rewritten on every arrival.
 //
 // There is deliberately no timeout and no override. A set whose finished notice
 // never comes stays open, and a restart from the same session keeps waiting on
-// it; a restart from another session, or a person's yes when no session can be
-// identified, is the way out (see `restart`).
+// it; a restart from another session, from a later run of the same session, or a
+// person's yes when no session can be identified, is the way out (see `restart`).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireLock } from "./lib/locks.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { checksumOf } from "./lib/step-helper.mjs";
 import { projectDirectoryFor, resolveSession } from "./usage.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -142,19 +137,6 @@ function split(record) {
   return { arrived, missing };
 }
 
-/**
- * The progress board of anything shaped like a record: the stored header, a blank
- * line, and a table with one row per agent, `running` or `done` by its arrivals.
- * Returns nothing when there is no board data; a missing `arrivals` is nobody in.
- */
-export function renderBoard(record) {
-  if (!record?.board) return undefined;
-  const { arrived } = split({ agents: record.agents, arrivals: record.arrivals ?? [] });
-  const done = new Set(arrived.map((agent) => agent.label));
-  const rows = record.agents.map((agent) => `| ${agent.name.replaceAll("|", "\\|")} | ${done.has(agent.label) ? "done" : "running"} |`);
-  return [record.board.header, "", "| Agent | State |", "|---|---|", ...rows].join("\n");
-}
-
 // "a", "a and b", "a, b and c".
 function listOf(words) {
   if (words.length <= 1) return words.join("");
@@ -198,6 +180,26 @@ export function identifySession(repo, { env = process.env, home = env?.HOME || o
   }
 }
 
+// --- run --------------------------------------------------------------------
+
+/**
+ * The run this process executes inside, from `TAGTEAM_RUN_ID`, or null when
+ * there is none: unset or empty is the main session's own commands. A workflow's
+ * agents all carry the main session's id, so a set records its run as well, and
+ * a restart can tell a set left by an earlier run from one a live run is still
+ * waiting on. A value that is set but cannot be a set id is refused rather than
+ * read as "no run": a mistyped id would otherwise fall back to waiting on a set
+ * nobody is working on.
+ */
+function runOf(env) {
+  const run = env?.TAGTEAM_RUN_ID;
+  if (run === undefined || run === "") return null;
+  if (!SET_ID.test(run)) {
+    refuse(`TAGTEAM_RUN_ID ${q(run)} must start with a letter or digit and hold only letters, digits, dots, dashes and underscores`, 2);
+  }
+  return run;
+}
+
 // --- the command line the main agent runs -----------------------------------
 
 /**
@@ -238,11 +240,10 @@ function requestOf(entry, id) {
  * `{ label, name?, output, request? }`, where `name` is how the person is told
  * about it and defaults to the label, and `request` is the agent, model and
  * effort it was sent at, stored as given and read by nothing in this module.
- * `board`, when given, is `{ header }`, the one line the progress board opens with.
  * Set ids are written once: a re-send or a later attempt is a new set, so a late
  * notice from an old set can never land in a new one that reuses its labels.
  */
-export async function recordSet({ dir, id, agents, next, closing, board, repo, env = process.env, home } = {}) {
+export async function recordSet({ dir, id, agents, next, closing, repo, env = process.env, home } = {}) {
   recordPath(dir, id);
   if (!Array.isArray(agents) || agents.length === 0) refuse(`set ${id} names no agents; a set is what was sent out, so it has at least one`);
   const entries = agents.map((entry, index) => {
@@ -262,10 +263,8 @@ export async function recordSet({ dir, id, agents, next, closing, board, repo, e
   if (!nonEmpty(next)) refuse(`set ${id} needs the command to run once it is in`);
   if (!nonEmpty(closing)) refuse(`set ${id} needs the phrase that closes its completion line`);
   if (!nonEmpty(repo)) refuse(`set ${id} needs the repository, to identify the session sending it out`);
-  if (board !== undefined && !(board && typeof board === "object" && nonEmpty(board.header) && !/[\r\n]/.test(board.header))) {
-    refuse(`set ${id} has a board that is not {header} with a non-empty one-line header`);
-  }
   const session = identifySession(repo, { env, home });
+  const run = runOf(env);
   return withSetLock(dir, id, (file) => {
     if (fs.existsSync(file)) {
       refuse(`set ${id} already exists in ${path.dirname(file)}; set ids are written once, so a re-send or a later attempt is a new set`);
@@ -275,9 +274,9 @@ export async function recordSet({ dir, id, agents, next, closing, board, repo, e
       id,
       createdAt: new Date().toISOString(),
       session,
+      run,
       next,
       closing,
-      ...(board ? { board: { header: board.header } } : {}),
       agents: entries,
       arrivals: [],
       closed: null
@@ -292,7 +291,7 @@ export async function recordSet({ dir, id, agents, next, closing, board, repo, e
 /**
  * Record one or more arrivals. Every label is checked before any is recorded,
  * so a refusal changes nothing. Returns `{ complete, say }`, with `next` once
- * the set is complete, and `board` when the set was recorded with one.
+ * the set is complete.
  */
 export async function arrive({ dir, id, labels } = {}) {
   if (!Array.isArray(labels) || labels.length === 0) refuse(`name at least one label arriving into set ${id}`, 2);
@@ -325,16 +324,15 @@ export async function arrive({ dir, id, labels } = {}) {
 
     const total = record.agents.length;
     const count = record.arrivals.length;
-    const board = renderBoard(record);
     if (count < total) {
       const byLabel = new Map(record.agents.map((agent) => [agent.label, agent]));
       const names = namesOf(labels.map((label) => byLabel.get(label)));
-      return { complete: false, say: `${sentence(names)} ${labels.length === 1 ? "is" : "are"} in (${count} of ${total})`, ...(board ? { board } : {}) };
+      return { complete: false, say: `${sentence(names)} ${labels.length === 1 ? "is" : "are"} in (${count} of ${total})` };
     }
     const say = total === 1
       ? `${sentence(record.agents[0].name)} is in. ${record.closing}`
       : `All ${total} are in. ${record.closing}`;
-    return { complete: true, say, next: record.next, ...(board ? { board } : {}) };
+    return { complete: true, say, next: record.next };
   });
 }
 
@@ -421,15 +419,19 @@ export async function closeSet({ dir, id } = {}) {
  *
  * - Both sessions identified and different: the earlier run is gone, so the set
  *   is released and what is on disk decides.
- * - Both identified and the same: the agents may still be working; the set stays
- *   open and is reported in `waiting`.
+ * - Both identified and the same, and both runs identified and different: a
+ *   run in this session starts only after the earlier one's agents have ended,
+ *   finished or crashed, so the set is released.
+ * - Both identified and the same, and either run unknown or both the same: the
+ *   agents may still be working; the set stays open and is reported in `waiting`.
  * - Either side unidentified: without `confirmed`, nothing changes and
  *   `question` asks the person whether the earlier run is gone; with it, the set
  *   is released.
  *
- * Only two positive, differing identifications count as different sessions.
- * Reading a live run as gone would mark working agents as failed and spend
- * their one re-send, so a null on either side is always the person's call.
+ * Only two positive, differing identifications count as different sessions, or
+ * as different runs. Reading a live run as gone would mark working agents as
+ * failed and spend their one re-send, so a null on either side is always the
+ * person's call, and a run unknown on either side changes nothing.
  */
 export async function restart({ dir, repo, confirmed = false, env = process.env, home } = {}) {
   if (!nonEmpty(dir)) refuse("restart needs the directory sets are kept in", 2);
@@ -454,13 +456,14 @@ export async function restart({ dir, repo, confirmed = false, env = process.env,
   }
 
   const current = identifySession(repo, { env, home });
+  const run = runOf(env);
   const release = (id, because) => withSetLock(root, id, (file) => {
     const record = requireSet(root, id);
     const { arrived, missing } = split(record);
     // Re-read under the lock: an arrival or a judging step may have got there
     // between the listing and now.
     if (record.closed || missing.length === 0) return;
-    record.closed = { reason: "released", at: new Date().toISOString(), because, session: current };
+    record.closed = { reason: "released", at: new Date().toISOString(), because, session: current, run };
     writeJsonAtomic(file, record);
     result.released.push({ set: id, because, arrived, missing });
   });
@@ -468,6 +471,7 @@ export async function restart({ dir, repo, confirmed = false, env = process.env,
     const { missing } = split(record);
     if (record.session && current) {
       if (record.session !== current) await release(record.id, "different-session");
+      else if (record.run && run && record.run !== run) await release(record.id, "different-run");
       else result.waiting.push({ set: record.id, missing });
     } else if (confirmed) {
       await release(record.id, "confirmed");
@@ -480,7 +484,9 @@ export async function restart({ dir, repo, confirmed = false, env = process.env,
   for (const { set, because, missing } of result.released) {
     lines.push(because === "confirmed"
       ? `Released set ${set} on your word that the earlier run is gone; what is on disk decides for ${namesOf(missing)}.`
-      : `Set ${set} was sent out from another session, which is gone; released it, so what is on disk decides for ${namesOf(missing)}.`);
+      : because === "different-run"
+        ? `Set ${set} was sent out by an earlier run in this session, which has ended; released it, so what is on disk decides for ${namesOf(missing)}.`
+        : `Set ${set} was sent out from another session, which is gone; released it, so what is on disk decides for ${namesOf(missing)}.`);
   }
   for (const { set, missing } of result.waiting) {
     lines.push(`Set ${set} was sent out from this session and is still waiting on ${namesOf(missing)}.`);
@@ -553,8 +559,8 @@ function readAgents(file) {
 
 const COMMANDS = {
   async arrive({ dir, set }, labels) {
-    const { say, next, board } = await arrive({ dir, id: set, labels });
-    return { say, ...(next ? { next } : {}), ...(board ? { board } : {}) };
+    const { say, next } = await arrive({ dir, id: set, labels });
+    return { say, ...(next ? { next } : {}) };
   },
   status: ({ dir, set }) => status({ dir, id: set }),
   ready({ dir, set }) {
@@ -574,10 +580,12 @@ async function main() {
   try {
     const { sub, options, labels } = parseArgs(process.argv.slice(2));
     const payload = await COMMANDS[sub](options, labels);
-    process.stdout.write(`${JSON.stringify({ ok: true, ...payload }, null, 2)}\n`);
+    const printed = { ok: true, ...payload };
+    process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
   } catch (error) {
-    process.stderr.write(`${error.message}\n`);
+    const stop = `${error.message}\n`;
     process.exitCode = error.exitCode ?? 1;
+    process.stderr.write(`${stop}checksum: ${checksumOf({ exit: process.exitCode, stop: stop.split("\n")[0] })}\n`);
   }
 }
 

@@ -19,11 +19,11 @@ import {
   readSet,
   readiness,
   recordSet,
-  renderBoard,
   restart,
   status
 } from "../scripts/dispatch-set.mjs";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
+import { checksumOf } from "../scripts/lib/step-helper.mjs";
 
 const SCRIPT = path.join(import.meta.dirname, "..", "scripts", "dispatch-set.mjs");
 
@@ -75,7 +75,11 @@ function childEnv(home) {
 
 function cli(ws, args) {
   const result = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", env: childEnv(ws.home) });
-  return { ...result, json: result.status === 0 ? JSON.parse(result.stdout) : null };
+  if (result.status !== 0) return { ...result, json: null };
+  // Every payload ends with the checksum of what it carries; the tests below read the rest.
+  const { checksum, ...json } = JSON.parse(result.stdout);
+  assert.equal(checksum, checksumOf(json), `${args[0]} printed a wrong or missing checksum`);
+  return { ...result, json };
 }
 
 // --- arrivals -----------------------------------------------------------------
@@ -483,59 +487,21 @@ test("a label that begins with dashes can still be recorded after --", () => {
   assert.equal(result.json.say, "--odd is in (1 of 2)");
 });
 
-// --- the progress board ---------------------------------------------------------
+// --- a record written when sets carried a progress board ------------------------
 
-const HEADER = "Spec 2 of 5 · 1 merged · queued: 04-c, 05-d";
-const BOARD_AGENTS = [PANEL[0], PANEL[1], { ...PANEL[4], name: "Codex" }];
-const table = (...states) => [
-  HEADER, "", "| Agent | State |", "|---|---|",
-  ...BOARD_AGENTS.map((agent, index) => `| ${agent.name} | ${states[index]} |`)
-].join("\n");
-
-const boardSet = (ws, id = "board-1") => recordSet({
-  dir: ws.dir, id, agents: BOARD_AGENTS, next: "node ship.mjs collect --spec 01", closing: "Judging the review now.",
-  board: { header: HEADER }, repo: ws.repo, env: envFor(ws.home)
-});
-
-test("an arrival into a set with a board returns it with states from the arrivals alone, and the last one shows every row done", async () => {
+test("a record with the board 0.13.x wrote still arrives label by label and completes, printing no board", async () => {
   const ws = workspace();
-  await boardSet(ws);
-  const first = await arrive({ dir: ws.dir, id: "board-1", labels: ["Review security"] });
-  assert.deepEqual(first, { complete: false, say: "The security reviewer is in (1 of 3)", board: table("running", "done", "running") });
+  await panel(ws, { agents: PANEL.slice(0, 3) });
+  const old = JSON.parse(snapshot(ws, "panel-1"));
+  fs.writeFileSync(recordFile(ws), JSON.stringify({ ...old, board: { header: "Spec 2 of 5 · 1 merged · queued: 04-c, 05-d" } }));
 
-  const last = await arrive({ dir: ws.dir, id: "board-1", labels: ["Review correctness", "Codex"] });
-  assert.deepEqual(last, {
-    complete: true, say: "All 3 are in. Judging the review now.", next: "node ship.mjs collect --spec 01", board: table("done", "done", "done")
+  const first = cli(ws, ["arrive", "--dir", ws.dir, "--set", "panel-1", "Review security"]);
+  assert.deepEqual(first.json, { ok: true, say: "The security reviewer is in (1 of 3)" });
+  const last = cli(ws, ["arrive", "--dir", ws.dir, "--set", "panel-1", "Review correctness", "Review tests"]);
+  assert.deepEqual(last.json, {
+    ok: true, say: "All 3 are in. Judging the review now.", next: "node ship.mjs collect --spec 01"
   });
-});
-
-test("the command line prints the board after say and next, and only for a set recorded with one", async () => {
-  const ws = workspace();
-  await boardSet(ws);
-  const first = cli(ws, ["arrive", "--dir", ws.dir, "--set", "board-1", "Codex"]);
-  assert.deepEqual(first.json, { ok: true, say: "Codex is in (1 of 3)", board: table("running", "running", "done") });
-  const last = cli(ws, ["arrive", "--dir", ws.dir, "--set", "board-1", "Review security", "Review correctness"]);
-  assert.deepEqual(Object.keys(last.json), ["ok", "say", "next", "board"]);
-  assert.equal(last.json.board, table("done", "done", "done"));
-});
-
-test("the renderer takes a record-shaped object that was never written, and returns nothing without a board", () => {
-  const agents = [{ label: "a", name: "the first | reviewer" }, { label: "b", name: "Codex" }];
-  assert.equal(
-    renderBoard({ board: { header: "H" }, agents }),
-    "H\n\n| Agent | State |\n|---|---|\n| the first \\| reviewer | running |\n| Codex | running |"
-  );
-  assert.equal(renderBoard({ agents, arrivals: [] }), undefined);
-});
-
-test("a board whose header is empty or spans lines is refused, leaving no record", async () => {
-  const ws = workspace();
-  for (const board of [{ header: "" }, { header: "one\ntwo" }, {}, null, "Spec 1"]) {
-    await assert.rejects(recordSet({
-      dir: ws.dir, id: "bad", agents: BOARD_AGENTS, next: "n", closing: "Done.", board, repo: ws.repo, env: envFor(ws.home)
-    }), /board/);
-    assert.equal(readSet(ws.dir, "bad"), null);
-  }
+  assert.equal(readiness({ dir: ws.dir, id: "panel-1" }).answer, "in");
 });
 
 // --- parallel arrivals ----------------------------------------------------------

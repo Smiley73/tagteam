@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
+import { NOT_IN_YET } from "../scripts/ship.mjs";
 import { root, git, ship, write, outputOf, resultOf, arriveAll, findings, major, stagePlan, onOrigin, pullsOf, trainOf, setTrainRoute, shipThrough,
   A_CHANGE, B_CHANGE, UNRELATED, commitToMain, unitDirIn, unitStateOf, checkRoundIn,
   stageMerged as buildMerged, reviewWholePlan, shipUnit, mergeBaseIn, assertEffort, sessionsFor,
@@ -324,7 +324,6 @@ test("a rerun on a tip with a decided check dispatches nothing, and a rerun whil
   assert.equal(again.status, 0, again.stderr);
   assert.equal(again.json.dispatch, undefined, "a rerun sent the reviewer out again");
   assert.deepEqual(again.json.set.labels, [label]);
-  assert.equal(again.json.howToWait, HOW_TO_WAIT);
   assert.match(again.json.next, /plan-collect/);
   assert.equal(checksIn(shipDir), 1, "a rerun made a second check of the same tip");
   const early = ship("plan-collect", plan, [], env);

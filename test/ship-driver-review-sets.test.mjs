@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { HOW_TO_DISPATCH, HOW_TO_WAIT, NOT_IN_YET } from "../scripts/ship.mjs";
+import { NOT_IN_YET } from "../scripts/ship.mjs";
 import { root, git, stage, ship, write, outputOf, arrive, arriveAll, findings, major, quietPath,
   resultOf, assertEffort, sessionsFor, checkReportOf } from "./ship-stage.mjs";
 import { driveToRecurrence, driveToReadyAndWaiting, pushToBase } from "./ship-driver-shared.mjs";
@@ -128,7 +128,6 @@ test("a reader that fails at collect is re-sent as its own set, waited on, and a
   assert.equal(resend.status, 0, resend.stderr);
   assert.deepEqual(labelsOf(resend), ["Codex review of 01-a"]);
   assert.equal(resultOf(resend.json.dispatch[0]), resultOf(codex), "into the file it failed to write");
-  assert.equal(resend.json.howToDispatch, HOW_TO_DISPATCH);
   assert.equal(setRecord(shipDir, panel.json.set.id).closed.reason, "judged", "the panel's set is judged and closed");
   const late = arrive(panel, ["Codex review of 01-a"]);
   assert.notEqual(late.status, 0, "a late notice from the panel's set lands nowhere");
@@ -335,7 +334,6 @@ test("a ship restarted from the same session while its panel is out keeps waitin
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.match(resumed.json.next, /collect --plan .* --spec 01-a$/, "next is the judging step");
   assert.deepEqual(resumed.json.set.labels, [quality, codex]);
-  assert.equal(resumed.json.howToWait, HOW_TO_WAIT);
   assert.equal(resumed.json.dispatch, undefined, "nothing is sent out a second time");
   assert.match(resumed.json.say.join("\n"), /still waiting on the code-quality reviewer and Codex/);
   assert.ok(fs.existsSync(resultOf(byLabel(panel, correctness))), "findings already written survive");
@@ -619,7 +617,6 @@ test("a ship restarted from the same session while its fixer is out keeps waitin
   assert.equal(resumed.json.ask, undefined);
   assert.equal(resumed.json.dispatch, undefined, "no second fixer");
   assert.deepEqual(resumed.json.set.labels, ["Fix 01-a"]);
-  assert.equal(resumed.json.howToWait, HOW_TO_WAIT);
   assert.match(resumed.json.next, /snapshot --plan .* --spec 01-a$/);
   assert.match(resumed.json.say.join("\n"), /interrupted while fixing, and Fix 01-a has not reported yet; nothing was committed/);
   assert.ok(fs.existsSync(path.join(shipDir, "01-a", "fix-pending.json")));
@@ -749,38 +746,25 @@ test("snapshot refuses only an open set: a commit nobody dispatched, the rerun a
   assert.equal(git(olderTree, "log", "-1", "--format=%s"), "Address review findings on 01-a");
 });
 
-test("every dispatch carries the one instruction and its set: the arrival step, the foreground asked for and never depended on", () => {
+test("every dispatch carries its set: the arrival step, and no instruction to the session", () => {
   const staged = stage();
   const { plan } = staged;
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
-  assert.equal(begin.json.howToDispatch, HOW_TO_DISPATCH);
   assert.match(begin.json.set.arrive, /dispatch-set\.mjs" arrive --dir ".*" --set "implement-[^"]+"$/, "the set is named; only the label is left to append");
 
   const other = stage();
   const { panel, oid } = toPanel(other);
-  assert.equal(panel.json.howToDispatch, HOW_TO_DISPATCH);
   assert.match(panel.json.set.arrive, /--set "panel-r1-[^"]+"$/);
   for (const dispatch of panel.json.dispatch) report(dispatch, oid, dispatch.description === "Review 01-a: correctness" ? [major("app.js")] : []);
   arriveAll(panel);
   ship("collect", other.plan, ["--spec", "01-a"]);
   const fix = ship("fix", other.plan, ["--spec", "01-a"]);
-  assert.equal(fix.json.howToDispatch, HOW_TO_DISPATCH, "a single agent gets the same instruction as a panel");
   assert.match(fix.json.set.arrive, /--set "fix-r1-[^"]+"$/);
-
-  assert.match(HOW_TO_DISPATCH, /run_in_background: false where the call allows it/);
-  assert.match(HOW_TO_DISPATCH, /set\.arrive/);
-  assert.match(HOW_TO_DISPATCH, /relay the line it prints/);
-  assert.match(HOW_TO_DISPATCH, /end your turn/);
-  assert.match(HOW_TO_DISPATCH, /prints `next`: run it/);
-  assert.match(HOW_TO_DISPATCH, /Never sleep, never poll, never watch, never schedule a wake-up/);
-  assert.doesNotMatch(HOW_TO_DISPATCH, /returns when all of them have finished/);
-  assert.doesNotMatch(HOW_TO_DISPATCH, /Never background/i);
-  // The Agent tool sets an effort only when told to, so this is an instruction
-  // to pass it, never a description of the field.
-  assert.match(HOW_TO_DISPATCH, /subagent_type set to `agent`/);
-  assert.match(HOW_TO_DISPATCH, /`model` passed as given/);
-  assert.match(HOW_TO_DISPATCH, /pass `effort` on every call, exactly as given/);
+  for (const step of [begin, panel, fix]) {
+    assert.equal(step.json.howToDispatch, undefined);
+    assert.equal(step.json.howToWait, undefined);
+  }
 });
 
 // The configuration is validated at `start` only; every later step re-reads it

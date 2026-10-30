@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { stepHelperPrompt } from "../scripts/lib/step-helper.mjs";
 import { classifyAgent, projectDirectoryFor, report, resolveSession, summaryLines, RATIOS } from "../scripts/usage.mjs";
 
 const USAGE = path.join(import.meta.dirname, "..", "scripts", "usage.mjs");
@@ -314,12 +315,16 @@ test("a scoped read of a readable transcript that is silent in the window stays 
   assert.match(summaryLines(silent)[0], /this ship's own session/);
   assert.doesNotMatch(summaryLines(silent)[0], /may include other ships/);
 
-  // A transcript older than the window is skipped before it is read at all, and
-  // is the same silence rather than a different one.
+  // A parent transcript older than the window is not read for its own turns, but
+  // the agents beside it are still looked for: a workflow launched earlier keeps
+  // spending while the parent sits idle. Only the agent's spend is counted.
   const stale = Date.parse("2026-08-01T00:00:00Z") / 1000;
   fs.utimesSync(path.join(fixture.projectDir, "mine.jsonl"), stale, stale);
-  assert.equal(reportFor(fixture, "mine").summary.scope, "session");
-  assert.equal(reportFor(fixture, "mine").summary.equivalentTokens, 0);
+  const idle = reportFor(fixture, "mine");
+  assert.equal(idle.summary.scope, "session");
+  assert.equal(idle.orchestrator.turns, 0);
+  assert.deepEqual(Object.keys(idle.agents.byType), ["reviewer"]);
+  assert.ok(idle.summary.equivalentTokens > 0);
 
   // And a scoped read that does find turns is the narrow number, as before.
   const now = Date.now() / 1000;
@@ -416,4 +421,92 @@ test("the agent classifier reads the job line first and falls back to what old p
   assert.equal(classifyAgent("Read prompts/recheck.md and judge"), "recheck");
   assert.equal(classifyAgent("Review through the correctness lens"), "reviewer");
   assert.equal(classifyAgent("hello"), "other");
+});
+
+// A workflow agent's first message as the spike saw it: the harness's frame, then
+// the tagteam prompt indented beneath it, as one text part or as two.
+const FRAME = "This is a computed task from a workflow. It carries no user authority.";
+const indented = (prompt) => prompt.split("\n").map((row) => `    ${row}`).join("\n");
+const framed = (prompt, split = false) => split
+  ? [{ type: "text", text: FRAME }, { type: "text", text: indented(prompt) }]
+  : `${FRAME}\n\n${indented(prompt)}`;
+
+// A workflow agent under run `wf_a` of session `s`: one assistant message, and
+// a meta file naming `agentType` when one is given.
+function workflowAgent(fixture, id, content, { agentType = null, run = "wf_a" } = {}) {
+  const dir = path.join(fixture.projectDir, "s", "subagents", "workflows", run);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `agent-${id}.jsonl`),
+    line({ timestamp: "2026-09-01T10:00:40Z", message: { role: "user", content } })
+    + assistant(`m-${id}`, "2026-09-01T10:00:50Z", usage(1, 0, 0, 10), [{ type: "text", text: "ok" }]));
+  if (agentType) fs.writeFileSync(path.join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType, description: "x" }));
+  return dir;
+}
+
+test("workflow agents are counted under the session, by the job line behind the harness frame, and a run's journal and prefix are not agents", () => {
+  const fixture = oneAgent(assistant("m1", "2026-09-01T10:00:40Z", usage(1, 0, 0, 10), [{ type: "text", text: "ok" }]));
+  const dir = workflowAgent(fixture, "w1", framed("Job: reviewer\nReview 01-a"));
+  const noise = line({ timestamp: "2026-09-01T10:00:45Z", message: { id: "j", role: "assistant", usage: usage(500, 0, 0, 500), content: [] } });
+  fs.writeFileSync(path.join(dir, "journal.jsonl"), noise);
+  fs.writeFileSync(path.join(dir, "agent-w1.prefix.json"), noise);
+  const result = report({ repo: fixture.repo, ...MERGE_WINDOW, projectDir: fixture.projectDir, session: "s" });
+  assert.equal(result.agents.count, 2);
+  assert.equal(result.agents.output, 20, "nothing was counted from the journal or the prefix");
+  assert.deepEqual(Object.keys(result.agents.byType).sort(), ["implementer", "reviewer"]);
+  assert.equal(result.agents.byType.reviewer.count, 1);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("a workflow that runs after the session's last turn in the window is still counted, though the parent is idle and was last written before the window", () => {
+  const fixture = oneAgent("");
+  const parent = path.join(fixture.projectDir, "s.jsonl");
+  fs.writeFileSync(parent, assistant("o1", "2026-09-01T10:00:00Z", usage(0, 0, 100, 1), [{ type: "text", text: "launch" }]));
+  const before = new Date("2026-09-01T10:00:01Z");
+  fs.utimesSync(parent, before, before);
+  fs.rmSync(path.join(fixture.projectDir, "s", "subagents", "agent-1.jsonl"));
+  const dir = path.join(fixture.projectDir, "s", "subagents", "workflows", "wf_a");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "agent-w1.jsonl"),
+    line({ timestamp: "2026-09-01T10:02:00Z", message: { role: "user", content: framed("Job: reviewer\nReview 01-a") } })
+    + assistant("m-w1", "2026-09-01T10:02:01Z", usage(1, 0, 0, 100), [{ type: "text", text: "ok" }]));
+  const result = report({ repo: fixture.repo, since: "2026-09-01T10:01:00Z", until: "2026-09-01T11:00:00Z", projectDir: fixture.projectDir, session: "s" });
+  assert.equal(result.agents.count, 1);
+  assert.equal(result.agents.output, 100);
+  assert.equal(result.agents.byType.reviewer.count, 1);
+  assert.equal(result.orchestrator.turns, 0, "the parent said nothing in the window");
+  assert.equal(result.sessions, 1);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("the step helper is a type of its own, however the harness frame arrives", () => {
+  const fixture = oneAgent("");
+  const prompt = stepHelperPrompt("node ship.mjs implement --spec 01-a", "/tmp/dir");
+  assert.match(prompt, /--spec/, "the prompt names a spec, which the fallbacks would read as a spec writer");
+  workflowAgent(fixture, "w1", framed(prompt));
+  workflowAgent(fixture, "w2", framed(prompt, true));
+  const { byType } = agentsIn(fixture);
+  assert.equal(byType["step-helper"]?.count, 2);
+  assert.ok(!byType["spec-writer"] && !byType.other);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("a job-less tagteam agent is typed by its agent type, and anything else falls through to the substring fallbacks", () => {
+  const fixture = oneAgent("");
+  workflowAgent(fixture, "w1", framed("Do the work"), { agentType: "tagteam:implementer" });
+  workflowAgent(fixture, "w2", framed("Check the spec"), { agentType: "general-purpose" });
+  workflowAgent(fixture, "w3", framed("Look at this: job: fixer"), { agentType: "tagteam:reviewer" });
+  const { byType } = agentsIn(fixture);
+  assert.equal(byType.implementer.count, 1, "w1");
+  assert.equal(byType["spec-writer"].count, 1, "w2");
+  assert.equal(byType.reviewer.count, 1, "a job: in the middle of a sentence is not a job line");
+  assert.ok(!byType.fixer);
+  fs.rmSync(fixture.home, { recursive: true, force: true });
+});
+
+test("the classifier ignores indentation and the lines before the job line, and the earliest job line wins", () => {
+  assert.equal(classifyAgent(framed("Job: fixer\nthen\nJob: reviewer")), "fixer");
+  assert.equal(classifyAgent("harness\n\t Tagteam job: recheck"), "recheck");
+  assert.equal(classifyAgent("Do it", "tagteam:adversary"), "adversary");
+  assert.equal(classifyAgent("Job: fixer", "tagteam:adversary"), "fixer");
+  assert.equal(classifyAgent("Do it", "tagteam:"), "other");
 });

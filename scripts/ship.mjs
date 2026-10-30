@@ -28,11 +28,14 @@
 // guard — the round store, the state machine, the gates — so the invariants their
 // tests prove hold here by construction.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isMain } from "./lib/is-main.mjs";
+import { claimSpec, leadsOwnGroup, relaunchAsLeader } from "./lib/run-claim.mjs";
+import { checksumOf } from "./lib/step-helper.mjs";
 import {
   DEPENDENCY_ID, alreadyUpgraded, auditAll, auditLines, chosenUpgrades, declineKey, decideUpgrades, dependencyDocument, dependencyDocumentPath,
   dependencyUnitDir, disclosureLines, isDependencyId, makeUpgrade, openQuestions, questionText, readAudit, readDeclines,
@@ -78,7 +81,7 @@ import { effortRefusal } from "./lib/effort-ladder.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { projectDirectoryFor, resolveSession, transcriptFor } from "./usage.mjs";
 import { codexSpend, codexUsageLine, recordCodexUsage } from "./codex-usage.mjs";
-import { arriveCommand, closeSet, readSet, readiness, recordSet, renderBoard, restart } from "./dispatch-set.mjs";
+import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
@@ -573,9 +576,9 @@ function pullRequestRecord(ctx, id, state) {
   return { path: file, error: null, body: view.body ?? "" };
 }
 
-// The body the orchestrator writes for `publish`. It is the one file about a
-// candidate that the orchestrator changes between two steps, and the one a
-// finding about the pull request is answered by.
+// The body `publish` sends, which the body writer writes. It is the one file
+// about a candidate that changes between two steps, and the one a finding about
+// the pull request is answered by.
 const prBodyPath = (ctx, id) => path.join(specDir(ctx, id), "pr-body.md");
 
 // What a reading dispatch gets about the pull request, and what the person is
@@ -599,15 +602,22 @@ function pullRequestLines(ctx, id, state) {
   } else if (record.error) {
     say.push(`Pull request #${state.pr.number} could not be read (${record.error}); the readers judge the diff alone.`);
   }
-  const draft = prBodyPath(ctx, id);
-  if (exists(draft)) {
-    const text = composeBody(fs.readFileSync(draft, "utf8"), riskLines(ctx, id));
-    if (record.body === null || text.trim() !== record.body.trim()) {
-      lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
-      say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
-    }
+  const draft = unsentDraft(ctx, id, record);
+  if (draft) {
+    lines.push(`Pull request body about to be published, which replaces the live body at the next publish: ${draft} — a finding about the pull request is judged against this too, and is resolved when this body says what the finding asked for`);
+    say.push(`The readers also get ${draft}, the body about to be published${record.body === null ? "" : ", since it differs from the live one"}.`);
   }
   return { lines, say };
+}
+
+// The file at `pr-body.md` while it is a body not yet sent: it is there and
+// either no pull request exists or it differs from the live body as it would be
+// sent. One sent already stays on disk, and is not a draft of anything.
+function unsentDraft(ctx, id, record) {
+  const draft = prBodyPath(ctx, id);
+  if (!exists(draft)) return null;
+  const text = composeBody(fs.readFileSync(draft, "utf8"), riskLines(ctx, id));
+  return record.body === null || text.trim() !== record.body.trim() ? draft : null;
 }
 
 // What the orchestrator is told about findings no fixer can reach, wherever
@@ -1068,48 +1078,16 @@ function reportResendDispatch(ctx, spec, { pending, state, oid, request, problem
   };
 }
 
-// The one instruction that rides along with every dispatch list, stated here
-// rather than in prose so it cannot drift. Every dispatch is a set — a review
-// panel, a re-check, or the one implementer, fixer, redesign implementer or
-// repair whose work `snapshot` reads — and the step that judges it works from the
-// run's own record of who has arrived, kept by `dispatch-set.mjs`. Claude Code may
-// run the agents in the background whatever the call asks for, so nothing here
-// depends on the message returning only once they have finished. The foreground
-// is still asked for, because one return is cheaper than one wake-up per agent.
-export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
-  + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed as given when it is not "
-  + "null and omitted when it is, `description` as given and `prompt` verbatim, and pass `effort` on every call, exactly as "
-  + "given: left off, the agent silently runs at the session's effort instead of the one chosen for it. The agents form a set, "
-  + "and the run judges their work "
-  + "only once every one of them has been recorded as arrived. Each agent's label is its `description`, exactly as Claude Code "
-  + "names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in double "
-  + "quotes; relay the line it prints. If the message returns with every agent finished, run `set.arrive` once with every "
-  + "label. If it returns before they have finished, end your turn; on each finished notice run `set.arrive` with that one "
-  + "label and nothing else. When an arrival says the set is complete it prints `next`: run it. If you are unsure whether you "
-  + "recorded one, record it again: a repeat is refused and changes nothing. Never sleep, never poll, never watch, never "
-  + "schedule a wake-up.";
-
-// A set already sent out by an earlier run in this session and not all in.
-export const HOW_TO_WAIT = "A set is still out, and nothing is to be dispatched. End your turn. On each finished notice for one "
-  + "of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the line it "
-  + "prints. When an arrival says the set is complete it prints `next`: run it. A label recorded twice is refused and changes "
-  + "nothing. Never sleep, never poll, never watch, never schedule a wake-up.";
-
 function nextCommand(ctx, sub, id, extra = "") {
   return `node ${q(path.join(SCRIPTS, "ship.mjs"))} ${sub} --plan ${q(ctx.plan)}${id ? ` --spec ${id}` : ""}${extra}`;
-}
-
-function instructionFor(payload) {
-  if (payload.dispatch?.length) return { howToDispatch: HOW_TO_DISPATCH };
-  return payload.set ? { howToWait: HOW_TO_WAIT } : {};
 }
 
 function emit(payload) {
   // Every agent this driver sends out is waited on through a set; a dispatch
   // printed without one would be read from disk while it is still working.
   if (payload.dispatch?.length && !payload.set) throw new Stop("a dispatch was about to be printed without the set it forms");
-  const board = payload.set?.[BOARD];
-  process.stdout.write(`${JSON.stringify({ ok: true, ...payload, ...(board ? { board } : {}), ...instructionFor(payload) }, null, 2)}\n`);
+  const printed = { ok: true, ...payload };
+  process.stdout.write(`${JSON.stringify({ ...printed, checksum: checksumOf(printed) }, null, 2)}\n`);
 }
 
 // --- dispatched sets ---------------------------------------------------------
@@ -1157,7 +1135,7 @@ const stampNow = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\.
 // command file, which sits beside the artifact it produces. A repair's report
 // line carries a note after the path, which is not part of it.
 function expectedOutput(dispatch) {
-  const written = /^Write your (?:findings|verdicts|report|fix report) to: (.*?)(?: — .*)?$/m.exec(dispatch.prompt);
+  const written = /^Write your (?:findings|verdicts|report|fix report|pull request body) to: (.*?)(?: — .*)?$/m.exec(dispatch.prompt);
   if (written) return written[1].trim();
   const runner = /^Command file: (.*)\.cmd\.sh$/m.exec(dispatch.prompt);
   if (runner) return runner[1].trim();
@@ -1187,30 +1165,14 @@ async function sendSet(ctx, id, { kind, round = null, agents, step, closing = "J
   // Each entry keeps the agent, model and effort exactly as printed — an
   // escalated fixer's raised pair, the runner's own — because `finish` compares
   // what ran against this and must never work the request out again later.
-  const recorded = await recordSet({
+  await recordSet({
     dir, id: set, repo: ctx.repo, next: nextCommand(ctx, step, id), closing,
-    ...(ctx.config.progressBoard === false ? {} : { board: { header: boardHeader(ctx, id, kind) } }),
     agents: agents.map(({ dispatch, name }) => ({
       label: dispatch.description, name, output: expectedOutput(dispatch),
       request: { agent: dispatch.agent ?? null, model: dispatch.model ?? null, effort: dispatch.effort ?? null }
     }))
   });
-  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description), board: renderBoard(recorded) };
-}
-
-// The line a set's progress board opens with, built as the set goes out and
-// never updated: which unit is in progress out of how many, how many have
-// merged, and which have not started. A set of no unit (`id` null) names its
-// step where a unit would go. The count includes the fix units a whole-plan
-// check has made, which is why it can grow near the end.
-function boardHeader(ctx, id, kind) {
-  const units = [...(dependencyEntered(ctx) ? [DEPENDENCY_ID] : []), ...specsInOrder(ctx).map((spec) => spec.id), ...madeUnitIds(ctx).ids];
-  const merged = units.filter((unit) => stateOf(ctx, unit) === "merged").length;
-  const queued = units.filter((unit) => unit !== id && [null, "pending"].includes(stateOf(ctx, unit)));
-  const where = id === null
-    ? `${kind.startsWith("whole-plan") ? "The whole-plan check" : "Resolving the merge that lands the plan"}, ${units.length} units`
-    : `${isFixUnitId(id) || isDependencyId(id) ? "Unit" : "Spec"} ${id}, ${units.indexOf(id) + 1} of ${units.length}`;
-  return `${where} · ${merged} merged · ${queued.length ? `queued: ${queued.join(", ")}` : "nothing queued"}`;
+  return { id: set, dir, labels: agents.map(({ dispatch }) => dispatch.description) };
 }
 
 /**
@@ -1227,10 +1189,7 @@ async function sendForSnapshot(ctx, id, { kind, round = null, dispatch, job }) {
 
 // What a payload carries about its set: the labels, and the arrival command with
 // the set already named, so only the label is left to append.
-// A freshly sent set's board rides on it under a key `JSON.stringify` skips, and
-// `emit` prints it beside the set.
-const BOARD = Symbol("board");
-const setPayload = ({ id, dir, labels, board }) => ({ id, labels, arrive: arriveCommand(dir, id), ...(board ? { [BOARD]: board } : {}) });
+const setPayload = ({ id, dir, labels }) => ({ id, labels, arrive: arriveCommand(dir, id) });
 
 /**
  * Refuse, changing nothing, unless `set` is in. A set released by a restart is
@@ -3013,6 +2972,28 @@ async function begin(options) {
     emit({ say, ask: `${id} is recorded as failed. Say what it set out to deliver and what stopped it, and ask before doing anything with it. To retry from scratch: \`gates.mjs state ... pending\` by hand, then rerun begin.`, state: state.state });
     return;
   }
+  // A writer a bare publish sent for this candidate and a crashed run never
+  // saw arrive is released, waited on or judged before anything else is done
+  // with the spec: the next publish sends what it wrote, and nothing else may
+  // merge past it. Only a settled candidate gets a writer, so a spec still
+  // `verifying` — its first publish, or a republish after a revisit, a fix or
+  // a repair settled it again, which leaves it `verifying` until the pull
+  // request is updated — goes back to publish and not through the review
+  // panel again. Whether a pull request exists cannot tell that writer from
+  // one left on disk from before a revisit, whose re-review is still owed:
+  // both name this candidate. The state the writer was sent from can. A
+  // writer goes out while `verifying` only from a publish a settle routed to,
+  // so that one is judged; one sent while `publishing` or `awaiting-approval`
+  // predates the revisit that made the spec `verifying`, and the restart
+  // below releases it.
+  const pointer = pendingWriter(ctx, id, state);
+  const writer = pointer && (["publishing", "awaiting-approval"].includes(state.state) || (state.state === "verifying" && pointer.sentWhile === "verifying")) ? pointer : null;
+  if (writer) {
+    const restarted = await restartPointed(ctx, id, [{ set: writer.set, step: "publish", dir: setDir(ctx, id, writer.set) }], options);
+    say.push(...restarted.say);
+    return emit(heldByRestart(ctx, id, state, restarted, say)
+      ?? { say: [...say, `${id} ${state.pr ? "already has a pull request, and" : "is settled, and"} the agent writing its next body was interrupted; publish judges what it left.`], next: nextCommand(ctx, "publish", id) });
+  }
   // A wait for checks is taken up again, not ended: ending it is a person's
   // call, and finish is what ends it.
   const waiting = state.state === "publishing" && state.pr?.number ? readJson(ciPath(ctx, id), null) : null;
@@ -3030,20 +3011,8 @@ async function begin(options) {
     // still working as one that changed nothing. See `setsOnRestart`.
     const restarted = await setsOnRestart(ctx, id, state, options);
     say.push(...restarted.say);
-    if (restarted.ask) {
-      return emit({ say, ask: restarted.ask, answers: restarted.answers, state: state.state });
-    }
-    if (restarted.waiting) {
-      const { set, step, missing, dir } = restarted.waiting;
-      const why = step === "snapshot"
-        ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was committed, and snapshot takes its work once it has.`
-        : `the review it sent out is still running; nothing was rebuilt, and ${step} judges it once the rest are in.`;
-      return emit({
-        say: [...say, `${id} was interrupted while ${state.state}, and ${why}`],
-        set: { id: set, labels: missing.map((agent) => agent.label), arrive: arriveCommand(dir, set) },
-        next: nextCommand(ctx, step, id)
-      });
-    }
+    const held = heldByRestart(ctx, id, state, restarted, say);
+    if (held) return emit(held);
     return emit({
       say: [...say, `${id} was interrupted while ${state.state}; resuming from whatever is committed on ${branch}.`],
       next: nextCommand(ctx, "snapshot", id)
@@ -3062,10 +3031,43 @@ async function begin(options) {
   emit({ say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) });
 }
 
+// What `begin` gives back while the restart rule leaves a set to the person or
+// to the agents still working on it; null when nothing is held.
+function heldByRestart(ctx, id, state, restarted, say) {
+  if (restarted.ask) return { say, ask: restarted.ask, answers: restarted.answers, state: state.state };
+  if (!restarted.waiting) return null;
+  const { set, step, missing, dir } = restarted.waiting;
+  const why = step === "snapshot"
+    ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was committed, and snapshot takes its work once it has.`
+    : step === "publish"
+      ? `${listOf(missing.map((agent) => agent.name))} has not reported yet; nothing was published, and publish sends what it writes once it has.`
+      : `the review it sent out is still running; nothing was rebuilt, and ${step} judges it once the rest are in.`;
+  return {
+    say: [...say, `${id} was interrupted while ${state.state}, and ${why}`],
+    set: { id: set, labels: missing.map((agent) => agent.label), arrive: arriveCommand(dir, set) },
+    next: nextCommand(ctx, step, id)
+  };
+}
+
 // The configured worktree.setup commands, which bring what the worktree has
 // installed up to the lockfile it holds; null when they succeed, otherwise why not.
+// What the commands print is kept off this driver's own streams: stderr's first
+// line is the one a stop's checksum covers, so it can never be a setup command's
+// output. A failure carries that output beneath its reason instead.
 async function bringUpToLockfile(ctx) {
-  try { await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", 2, 2] }); return null; } catch (error) { return error.message; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-setup-"));
+  const log = path.join(dir, "output");
+  const fd = fs.openSync(log, "w", 0o600);
+  try {
+    await runSetupCommands({ worktree: ctx.worktree, config: ctx.config, stdio: ["ignore", fd, fd] });
+    return null;
+  } catch (error) {
+    const output = fs.readFileSync(log, "utf8").trim();
+    return output ? `${error.message}\n${output}` : error.message;
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // The dependency unit's `begin`, in place of an implementer: the ship makes the
@@ -3167,7 +3169,8 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
 /**
  * The restart rule, applied to the sets a resumed spec's judging steps point
  * at: `settle`'s set, then `collect`'s, each only when it was sent out for the
- * candidate the spec is on, then the single agent `snapshot` would read. A set
+ * candidate the spec is on, then the single agent `snapshot` would read, then
+ * the pull request body's writer, which `publish` judges. A set
  * the restart closes is judged from disk by today's route; one sent out from
  * this same session is waited on; and when no session can be identified the
  * person is asked once, and only their yes (`--run-gone`) closes it —
@@ -3189,6 +3192,8 @@ async function setsOnRestart(ctx, id, state, options) {
   if (collected && collected.candidate === state.candidateOid && collected.set) pointed.push({ set: collected.set, step: "collect" });
   const single = readJson(snapshotSetPath(ctx, id), null);
   if (single?.set) pointed.push({ set: single.set, step: "snapshot" });
+  const writer = pendingWriter(ctx, id, state);
+  if (writer) pointed.push({ set: writer.set, step: "publish" });
   return restartPointed(ctx, id, pointed.map((entry) => ({ ...entry, dir: setDir(ctx, id, entry.set) })), options);
 }
 
@@ -3647,6 +3652,8 @@ async function verify(options) {
   const run = (name) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
     "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),
+    // The verification stops, ending its command and writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid),
     // A lockfile-only change matches no `when` in most configurations, which would wait for a person.
     ...(isDependencyId(id) ? ["--select", "all"] : [])
   ], { allow: [1] });
@@ -4374,23 +4381,188 @@ function ciStartLimit(ctx, commit) {
   return workflows.found ? { seconds, files: workflows.files } : off;
 }
 
-function publish(options) {
+// --- the pull request body writer ------------------------------------------
+
+// A step that has to put a body and title on a pull request sends one agent of
+// the implementer role to write them, so the main session writes no prose and
+// the cost report still files the agent under `implementer`. The agent is told
+// where the facts are, in a file the driver wrote from what it already
+// computes, and where to put its two files; the step that sent it judges them
+// once its arrival is recorded.
+const bodyWriterPath = (ctx, id) => path.join(specDir(ctx, id), "body-writer-set.json");
+const prTitlePath = (ctx, id) => path.join(specDir(ctx, id), "pr-title.txt");
+const prFactsPath = (ctx, id) => path.join(specDir(ctx, id), "pr-facts.json");
+
+function bodyWriterDispatch(ctx, job, { description, subject, facts, body, title, problems }) {
+  return {
+    ...agent("implementer", job),
+    description,
+    prompt: [
+      `Job: implementer`,
+      `This is a pull request body to write, not a spec to implement: read ${path.join(PLUGIN, "prompts", "pull-request-body.md")} and follow it.`,
+      subject,
+      `Facts (written for you by the driver): ${facts}`,
+      ...(problems.length > 0 ? [`Your last attempt was refused, so write both files again. What was wrong: ${problems.join("; ")}`] : []),
+      `Write your pull request body to: ${body}`,
+      `Write your title to: ${title}`
+    ].join("\n")
+  };
+}
+
+const titleOf = (file) => (exists(file) ? fs.readFileSync(file, "utf8").trim() : null);
+
+// What a writer's two files are held to, as a list of what is wrong with them.
+// A body is usable when it was written after the writer was sent and says
+// something — a body from before is the one sent last time, or a draft, and
+// would pass for the writer's own — and a title when it follows the title rule.
+function writerProblems(bodyFile, titleFile, sentAt) {
+  const problems = [];
+  const fresh = exists(bodyFile) && fs.statSync(bodyFile).mtimeMs >= Date.parse(sentAt);
+  if (!fresh || fs.readFileSync(bodyFile, "utf8").trim() === "") problems.push(`the body ${bodyFile} is missing, empty, or was not written since you were sent`);
+  const title = titleOf(titleFile);
+  if (title === null) problems.push(`the title ${titleFile} is missing`);
+  else if (!TITLE.test(title)) problems.push(`the title ${JSON.stringify(title)} must be at most 70 characters of letters, digits, spaces and . _ : -`);
+  return problems;
+}
+
+// The latest fixer tables' not-addressed rows, once each, while they judged this
+// candidate — less those the driver's own Risk lines already say, with the
+// row's recommendation (`pendingLines`), since a finding is said once in a body.
+function notAddressedRows(ctx, id, state) {
+  const saved = readJson(fixOutcomesPath(ctx, id), null);
+  const said = new Set((planStanding(ctx, id, state)?.entries ?? []).map((entry) => entry.finding));
+  const missed = saved?.candidate === state.candidateOid
+    ? saved.tables.flatMap((table) => table.rows).filter((row) => !row.addressed && !said.has(row.id)) : [];
+  return [...new Map(missed.map((row) => [row.id, row])).values()];
+}
+
+// The budgets that ran out on this candidate, as the body rules mean it: a cap
+// reached with the thing the budget pays for still wrong, so that raising the
+// setting is what would let the spec try again. A counter at its cap alone is
+// not that. A spec whose last fix round left the review clean has nothing a
+// person would raise the limit for, and a repaired commit has had no checks run
+// on it yet. So each budget is said only where the step that owns it refuses:
+// the fix budget where `fix` would — a finding a fixer could take is still open
+// on this candidate, no goal conflict stands (`fix` routes on that before it
+// looks at the budget, and more rounds do not settle it), and the rounds are at
+// the cap, the comparison `fix` makes — and the repair budget where `repair`
+// would: the checks are red on this candidate, or it fails on the base, and the
+// repairs are at the cap.
+function spentBudgets(ctx, id, state) {
+  const { limits } = ctx.config;
+  const spent = [];
+  const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
+  const forFixer = (review?.open ?? []).some((finding) => !isPullRequestFinding(finding));
+  if (forFixer && !exists(goalConflictPath(ctx, id)) && (state.fixRoundsUsed ?? 0) >= limits.fixRounds) {
+    spent.push(`limits.fixRounds: every one of the ${limits.fixRounds} fix rounds it allows was used`
+      + (redesignUsed(ctx, id, state) ? ", and the cycle's one fresh rewrite of the area was tried and did not settle it" : ""));
+  }
+  const checks = readJson(ciPath(ctx, id), null);
+  const red = (checks?.candidateOid === state.candidateOid && checks.status === "failed") || landingFailure(state) !== null;
+  if (red && (state.ciRepairsUsed ?? 0) >= limits.ciRepairs) {
+    spent.push(`limits.ciRepairs: every one of the ${limits.ciRepairs} repairs it allows was used`);
+  }
+  return spent;
+}
+
+// What `prompts/pull-request-body.md` sends a writer to take from the run, each
+// from the function that produces it.
+function bodyWriterFacts(ctx, id, state) {
+  const spent = spentBudgets(ctx, id, state);
+  const live = pullRequestRecord(ctx, id, state);
+  return {
+    unit: isDependencyId(id) ? "the dependency unit" : isFixUnitId(id) ? "a whole-plan fix unit" : "a spec",
+    id,
+    settled: settledLines(ctx, id, state),
+    notAddressed: notAddressedRows(ctx, id, state),
+    spent,
+    driverRiskLines: riskLines(ctx, id),
+    livePullRequest: live.path,
+    ...(live.error ? { livePullRequestError: live.error } : {}),
+    draft: unsentDraft(ctx, id, live)
+  };
+}
+
+// The writer set `publish` sent for this candidate and has not consumed — on
+// disk, so that a pointer left by a set that is gone is not waited on.
+function pendingWriter(ctx, id, state) {
+  const pointer = readJson(bodyWriterPath(ctx, id), null);
+  return pointer?.set && pointer.candidate === state.candidateOid && readSet(setDir(ctx, id, pointer.set), pointer.set) ? pointer : null;
+}
+
+async function sendBodyWriter(ctx, id, state, { problems = [], resent = false } = {}) {
+  const job = roles(ctx, id).jobs.implement;
+  writeJson(prFactsPath(ctx, id), bodyWriterFacts(ctx, id, state));
+  fs.rmSync(prTitlePath(ctx, id), { force: true });
+  const dispatch = bodyWriterDispatch(ctx, job, {
+    description: `Write the pull request body for ${id}${resent ? " again" : ""}`,
+    subject: `Spec: ${specById(ctx, id).path}`,
+    facts: prFactsPath(ctx, id), body: prBodyPath(ctx, id), title: prTitlePath(ctx, id), problems
+  });
+  const sent = await sendSet(ctx, id, {
+    kind: resent ? "pr-body-resend" : "pr-body", agents: [{ dispatch, job, name: "the pull request body writer" }],
+    step: "publish", closing: "Publishing now."
+  });
+  // `sentWhile` is the spec's state as the writer went out, which is what tells
+  // `begin` whether a pointer still belongs to the spec as it finds it.
+  writeJson(bodyWriterPath(ctx, id), { set: sent.id, candidate: state.candidateOid, resent, label: dispatch.description, at: new Date().toISOString(), sentWhile: state.state });
+  emit({
+    say: [`${resent ? "The writer's body or title could not be used, so a fresh writer is sent" : "An agent writes the pull request body and title"}: implementer ${settings(job)}. `
+      + "Publish sends what it writes once it is in."],
+    dispatch: [dispatch], set: setPayload(sent), next: nextCommand(ctx, "publish", id)
+  });
+}
+
+/**
+ * The body and title a bare `publish` sends: the writer's files once it is in,
+ * or null after sending a writer. `publish` closes the writer's set once it has
+ * sent them, so a push that fails is rerun on the same files. Unusable files
+ * send one fresh writer told what was wrong; a second unusable pair is a stop
+ * with no writer left pointed at, so the next `publish` starts again.
+ */
+async function writtenBody(ctx, id, state, pointer) {
+  if (!pointer) {
+    await sendBodyWriter(ctx, id, state);
+    return null;
+  }
+  const problems = writerProblems(prBodyPath(ctx, id), prTitlePath(ctx, id), pointer.at);
+  if (problems.length === 0) return { title: titleOf(prTitlePath(ctx, id)), body: prBodyPath(ctx, id) };
+  await closeReviewSet(ctx, id, pointer.set);
+  if (!pointer.resent) {
+    await sendBodyWriter(ctx, id, state, { problems, resent: true });
+    return null;
+  }
+  fs.rmSync(bodyWriterPath(ctx, id), { force: true });
+  throw new Stop(`The pull request body for ${id} is still unusable after a writer was sent back for it once, so nothing was pushed: ${problems.join("; ")}. `
+    + "You decide: run publish again for a new writer, or send a body and title of your own with publish --title <title> --body <file>.");
+}
+
+async function publish(options) {
   const ctx = context(options);
   const id = options.spec;
   const state = readState(ctx, id);
-  if (!options.title || !options.body) throw new Stop("publish needs --title <text> and --body <file>");
-  if (!/^[A-Za-z0-9 ._:-]{1,70}$/.test(options.title)) throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -");
-  if (!exists(options.body)) throw new Stop(`the body file ${options.body} does not exist`);
+  let { title, body } = options;
+  const byHand = title !== undefined || body !== undefined;
+  if (byHand && (!title || !body)) throw new Stop("publish needs --title <text> and --body <file> together, or neither, to have a writer write them");
+  const pending = pendingWriter(ctx, id, state);
+  if (!byHand) {
+    if (pending) requireSetIn(ctx, id, pending.set, "publish");
+    const written = await writtenBody(ctx, id, state, pending);
+    if (!written) return;
+    ({ title, body } = written);
+  }
+  if (!TITLE.test(title)) throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -");
+  if (!exists(body)) throw new Stop(`the body file ${body} does not exist`);
   const say = [];
   const republish = Boolean(state.pr);
-  const sent = composeSent(ctx, id, fs.readFileSync(options.body, "utf8"));
+  const sent = composeSent(ctx, id, fs.readFileSync(body, "utf8"));
   git(ctx.worktree, ["push", ...(republish ? ["--force-with-lease"] : ["-u"]), "origin", state.branch]);
   if (!republish) {
     // Where this spec's state says it lands, which `begin` set from the train's
     // route: the plan branch on a plan route, the configured base otherwise.
-    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", options.title, "--body-file", sent]);
+    gh(ctx.repo, ["pr", "create", "--base", state.base, "--head", state.branch, "--title", title, "--body-file", sent]);
   } else {
-    const edited = gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", options.title, "--body-file", sent], { allowFailure: true });
+    const edited = gh(ctx.repo, ["pr", "edit", String(state.pr.number), "--title", title, "--body-file", sent], { allowFailure: true });
     if (edited.status !== 0) say.push(`Pull request #${state.pr.number}'s title and body could not be updated (${(edited.stderr || edited.stdout || "").trim().split("\n")[0]}); it keeps the ones it had.`);
   }
   const view = JSON.parse(gh(ctx.repo, ["pr", "view", state.branch, "--json", "number,url,headRefOid"]).stdout);
@@ -4398,16 +4570,15 @@ function publish(options) {
   node("gates.mjs", ["pr", statePath(ctx, id), String(view.number), view.url, view.headRefOid]);
   if (readState(ctx, id).state !== "publishing") transition(ctx, id, "publishing");
   say.push(`Pull request #${view.number}: ${view.url}`);
-  // The latest tables' not-addressed rows, once each, while they judged this
-  // candidate — less those the driver's own Risk lines already say, with the
-  // row's recommendation (`pendingLines`), since a finding is said once in a body.
-  const saved = readJson(fixOutcomesPath(ctx, id), null);
-  const said = new Set((planStanding(ctx, id, readState(ctx, id))?.entries ?? []).map((entry) => entry.finding));
-  const missed = saved?.candidate === state.candidateOid
-    ? saved.tables.flatMap((table) => table.rows).filter((row) => !row.addressed && !said.has(row.id)) : [];
-  const handed = missed.length > 0 ? { notAddressed: [...new Map(missed.map((row) => [row.id, row])).values()] } : {};
-  if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...handed, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
-  emit({ say, pr: view, ...handed, next: nextCommand(ctx, "finish", id) });
+  // Consumed by any publish that went through, a body sent by hand included, so
+  // the next bare one sends a fresh writer rather than reading these again. A
+  // writer still out when a person publishes by hand has nothing left to judge,
+  // and is not closed: only a restart closes a set with an agent out.
+  if (pending && readiness({ dir: setDir(ctx, id, pending.set), id: pending.set }).answer !== "refused") await closeReviewSet(ctx, id, pending.set);
+  fs.rmSync(bodyWriterPath(ctx, id), { force: true });
+  fs.rmSync(prTitlePath(ctx, id), { force: true });
+  if (ctx.config.ciWaitSec > 0) return emit({ say, pr: view, ...waitSpecChecks(ctx, id, readState(ctx, id), say) });
+  emit({ say, pr: view, next: nextCommand(ctx, "finish", id) });
 }
 
 // `publish`'s wait for checks still running when `ciWaitSec` ran out, taken up
@@ -4460,6 +4631,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
       ...(rerunAt ? ["--rerun-at", rerunAt] : []),
       // Before a rerun is asked for, a failure waits for the rest of its run.
       ...(request === null ? ["--settle-runs", "1"] : []),
+      // The wait stops, writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid),
       "--out", ciPath(ctx, id)
     ], { allow: [1] });
     const outcome = readJson(ciPath(ctx, id));
@@ -4770,7 +4943,9 @@ async function resolveCommit(options) {
 
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
-      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -5309,7 +5484,9 @@ async function planCheck(options) {
     // mode for it, so the record says what ran.
     const verified = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"), "--select", "all",
-      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json")
+      "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
+      // The verification stops, ending its command and writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
@@ -5533,7 +5710,7 @@ function ledgerFacts(entries, records) {
   });
 }
 
-// What the orchestrator writes the plan's pull request body from: the shape,
+// What the plan's body writer writes the plan's pull request body from: the shape,
 // what lands, and where each spec's own body is, whose `## Risk` is what carries
 // over — one disclosed when a fix budget ran out. What the ledger holds the ship
 // says itself, and `ledger.entries` says where each entry ended up. The budgets
@@ -5624,45 +5801,106 @@ function sentBody(ctx, text, tip) {
   return { text: composed, file };
 }
 
+// The plan's body is written by the same kind of agent a spec's is, and its
+// files sit beside the landing record: the landing record itself is written only
+// once the plan pull request is open, and a writer being out must not make the
+// landing look begun.
+const planWriterPath = (ctx) => path.join(landingRoot(ctx.shipDir), "body-writer-set.json");
+const planTitlePath = (ctx) => path.join(landingRoot(ctx.shipDir), "pr-title.txt");
+const planFactsPath = (ctx) => path.join(landingRoot(ctx.shipDir), "pr-facts.json");
+
+async function sendPlanBodyWriter(ctx, facts, say, { why, problems = [], resent = false }) {
+  const job = resolveJobs(ctx).jobs.implement;
+  writeJson(planFactsPath(ctx), facts);
+  fs.rmSync(planTitlePath(ctx), { force: true });
+  const dispatch = bodyWriterDispatch(ctx, job, {
+    description: `Write the plan's pull request body${resent ? " again" : ""}`,
+    subject: `Plan: ${path.join(ctx.plan, "plan.md")}`,
+    facts: planFactsPath(ctx), body: facts.path, title: planTitlePath(ctx), problems
+  });
+  const sent = await sendSet(ctx, null, {
+    kind: resent ? "plan-body-resend" : "plan-body", agents: [{ dispatch, job, name: "the plan's pull request body writer" }],
+    step: "plan-land", closing: "Opening the plan's pull request now.", home: landingRoot(ctx.shipDir)
+  });
+  writeJson(planWriterPath(ctx), { set: sent.id, resent, label: dispatch.description, at: new Date().toISOString() });
+  return {
+    say: [...say, `${why} An agent writes it: implementer ${settings(job)}. Plan-land opens the pull request with what it writes once it is in.`],
+    dispatch: [dispatch], set: setPayload(sent), next: nextCommand(ctx, "plan-land", null)
+  };
+}
+
+/**
+ * The plan's body writer, when one was sent: waited for, released by the restart
+ * rule when an earlier run left it, or judged. Returns the payload to give back
+ * while there is one, and null once its files are usable, which are then on disk
+ * for the rest of the step to send. Unusable files send one fresh writer; a
+ * second unusable pair is a stop.
+ */
+async function judgePlanBodyWriter(ctx, facts, options, say) {
+  const pointer = readJson(planWriterPath(ctx), null);
+  const dir = pointer?.set ? setDir(ctx, null, pointer.set, landingRoot(ctx.shipDir)) : null;
+  if (!dir || !readSet(dir, pointer.set)) return null;
+  if (readiness({ dir, id: pointer.set }).answer === "refused") {
+    const restarted = await restartPointed(ctx, null, [{ set: pointer.set, step: "plan-land", dir }], options,
+      (flag) => nextCommand(ctx, "plan-land", null, flag));
+    say.push(...restarted.say);
+    if (restarted.ask) return { say, ask: restarted.ask, answers: restarted.answers };
+    if (restarted.waiting) {
+      const { set, missing, dir: at } = restarted.waiting;
+      say.push(`${listOf(missing.map((entry) => entry.name))} has not reported yet; nothing was opened, and plan-land takes what it writes once it has.`);
+      return { say, set: { id: set, labels: missing.map((entry) => entry.label), arrive: arriveCommand(at, set) }, next: nextCommand(ctx, "plan-land", null) };
+    }
+  }
+  const problems = writerProblems(facts.path, planTitlePath(ctx), pointer.at);
+  await closeSet({ dir, id: pointer.set });
+  fs.rmSync(planWriterPath(ctx), { force: true });
+  if (problems.length === 0) return null;
+  if (pointer.resent) {
+    throw new Stop(`The plan's pull request body is still unusable after a writer was sent back for it once, so nothing was opened: ${problems.join("; ")}. `
+      + `You decide: run ${nextCommand(ctx, "plan-land", null, " --title <title>")} to open it with the body that is there and a title of your own, `
+      + `or remove ${facts.path} to have a new writer write it.`);
+  }
+  return sendPlanBodyWriter(ctx, facts, say, { why: "The plan's pull request body could not be used.", problems, resent: true });
+}
+
 /**
  * The plan pull request, opened or brought up to date for `tip`: head
- * `plan/<slug>`, base the one the train recorded. Its body is the file the
- * orchestrator writes beside the landing record; until it exists the step says
- * so and nothing is opened. A head that is not the tip is a stop.
+ * `plan/<slug>`, base the one the train recorded. Its body is written by an agent
+ * sent for it: until the file exists the step sends one and nothing is opened. A
+ * head that is not the tip is a stop.
  */
-function openPlanPullRequest(ctx, record, tip, options, say) {
+async function openPlanPullRequest(ctx, record, tip, options, say) {
   const route = routeOf(ctx);
   if (options.title !== undefined && !TITLE.test(options.title)) {
     throw new Stop("the title must be at most 70 characters of letters, digits, spaces and . _ : -", 2);
   }
   const file = planBodyPath(ctx.shipDir);
   const facts = bodyFacts(ctx, file);
-  if (!exists(file)) {
-    return {
-      say: [...say, `The plan's pull request into ${route.base} opens next, and its body is needed first: write ${file} in the `
-        + "Summary / What you can now do / Risk shape, for the plan as a whole, then run next."],
-      body: facts, next: nextCommand(ctx, "plan-land", null)
-    };
+  const waiting = await judgePlanBodyWriter(ctx, facts, options, say);
+  if (waiting) return waiting;
+  if (!exists(file) || fs.readFileSync(file, "utf8").trim() === "") {
+    return sendPlanBodyWriter(ctx, facts, say, { why: `The plan's pull request into ${route.base} opens next, and its body is needed first.` });
   }
   // A body written before a later check moved a ledger entry or spent a budget
   // says what is no longer so, and the ship's own lines under Risk do not say
-  // where an entry ended up: it is asked for again, once for each such change.
-  // What it is asked from is recorded first, so the run after sends whatever
+  // where an entry ended up: it is written again, once for each such change.
+  // What it is written from is recorded first, so the run after sends whatever
   // the file then holds, rewritten or not.
   const disclosed = disclosedOf(facts);
   const changed = record.bodyFacts ? disclosureChanges(record.bodyFacts, disclosed) : [];
   if (changed.length > 0) {
     record.bodyFacts = disclosed;
     saveLanding(ctx, record);
-    return {
-      say: [...say, `The plan's pull request body at ${file} was written before a later check changed what it answers for: `
-        + `${listOf(changed)}. Write it again from body, in the same Summary / What you can now do / Risk shape, then run next.`],
-      body: facts, next: nextCommand(ctx, "plan-land", null)
-    };
+    return sendPlanBodyWriter(ctx, facts, say, {
+      why: `The plan's pull request body at ${file} was written before a later check changed what it answers for: ${listOf(changed)}.`
+    });
   }
   const sent = sentBody(ctx, fs.readFileSync(file, "utf8"), tip);
   const hash = createHash("sha256").update(sent.text).digest("hex");
-  const title = options.title ?? record.title ?? defaultTitle(ctx);
+  // The writer's title counts only if it passes the rule a person's own title is held to:
+  // one refused twice is left on disk, and must not be what the pull request opens with.
+  const written = titleOf(planTitlePath(ctx));
+  const title = options.title ?? (written && TITLE.test(written) ? written : null) ?? record.title ?? defaultTitle(ctx);
   let view = record.pr?.number ? viewPlanPr(ctx, record.pr.number) : viewPlanPr(ctx, route.branch, { allowMissing: true });
   if (view && (view.state !== "OPEN" || view.baseRefName !== route.base)) view = null;
   if (!view) {
@@ -5690,6 +5928,7 @@ function openPlanPullRequest(ctx, record, tip, options, say) {
   record.bodyFacts = disclosed;
   record.title = title;
   saveLanding(ctx, record);
+  fs.rmSync(planTitlePath(ctx), { force: true });
   return null;
 }
 
@@ -5721,6 +5960,8 @@ function waitPlanChecks(ctx, record, tip, say) {
   const ran = node("ci-wait.mjs", [
     "--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec),
     ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
+    // The wait stops, writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid),
     "--out", out
   ], { allow: [1] });
   const outcome = readJson(out);
@@ -6651,8 +6892,8 @@ async function landingStep(ctx, record, options, say) {
   const moved = await finalTipStep(ctx, record, tip, options, say);
   if (moved) return moved;
   // 3. The plan pull request, at the tip.
-  const body = openPlanPullRequest(ctx, record, tip, options, say);
-  if (body) return body;
+  const held = await openPlanPullRequest(ctx, record, tip, options, say);
+  if (held) return held;
   // 4. Its checks.
   const ci = waitPlanChecks(ctx, record, tip, say);
   if (ci.status === "failed") {
@@ -7229,10 +7470,7 @@ async function finish(options) {
   if (state.state === "publishing") transition(ctx, id, "awaiting-approval");
   const reasons = [...verdict.blockers, ...verdict.approvals];
   spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, reasons.join(", ") || "a goal conflict"], { stdio: "ignore" });
-  const round = currentRound(ctx, id, state);
-  const open = round && exists(path.join(round.dir, "recheck.json"))
-    ? node("recheck.mjs", ["--print", path.join(round.dir, "recheck.json")], { allow: [1] }).stdout.trim().split("\n")
-    : [];
+  const open = settledLines(ctx, id, state);
   // What the readers ruled on each item, where the settled review recorded it.
   const review = state.gates?.review?.candidateOid === state.candidateOid ? state.gates.review : null;
   const rulings = new Map((review?.accounting?.items ?? []).map((item) => [item.id, item.ruling]));
@@ -7262,6 +7500,16 @@ async function finish(options) {
     reasons, blockers: verdict.blockers, approvals: verdict.approvals, pullRequest: state.pr, openFindings: open, unaccounted: reports,
     next: followingCommand(ctx, id)
   });
+}
+
+// What `settle` printed about the round it settled — each finding still open
+// and each item an agent left undone with the readers' ruling — read again from
+// the round's record.
+function settledLines(ctx, id, state) {
+  const round = currentRound(ctx, id, state);
+  return round && exists(path.join(round.dir, "recheck.json"))
+    ? node("recheck.mjs", ["--print", path.join(round.dir, "recheck.json")], { allow: [1] }).stdout.trim().split("\n")
+    : [];
 }
 
 function nextSpecAfter(ctx, id) {
@@ -7486,7 +7734,9 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       publishing as it is is next
   recheck --spec <id>                 dispatch the adversary and the re-checks
   settle  --spec <id>                 settle the round; decides fix or publish
-  publish --spec <id> --title <t> --body <file>
+  publish --spec <id> [--title <t> --body <file>]
+                                      open the pull request, or bring it up to date. Without a title and body an agent is sent to write
+                                      them and publish sends what it writes; with them, sends the ones given
   checks  --spec <id>                 wait on for checks still running when publish's wait ran out; finish ends the wait
   repair  --spec <id>                 spend a CI repair and dispatch the fixer
   revisit --spec <id>                 from awaiting-approval: the reviewed commit through the cycle again, spending nothing
@@ -7551,10 +7801,24 @@ async function main() {
     const run = SUBCOMMANDS[sub];
     if (!run) throw new Stop(USAGE, 2);
     if (!PLAN_LEVEL.has(sub) && !SPEC_WHEN_ANY.has(sub) && !options.spec) throw Stop.beneath(`${sub} needs --spec <id>`, USAGE, 2);
+    if (process.env.TAGTEAM_RUN_ID) {
+      // A run's command works as the leader of its own process group, which is
+      // what the next run's claim ends; the process the step helper started only
+      // waits for it.
+      if (!leadsOwnGroup()) {
+        process.exitCode = await relaunchAsLeader();
+        return;
+      }
+      // A spec's commands claim that spec; the plan-level ones claim the plan,
+      // under a name no spec or unit id has (they all hold a hyphen).
+      const ctx = context(options, { requireTrain: false });
+      claimSpec(path.join(ctx.shipDir, "steps", `${options.spec ? encodeURIComponent(options.spec) : "plan"}.claim.json`), process.env.TAGTEAM_RUN_ID);
+    }
     await run(options);
   } catch (error) {
-    process.stderr.write(`${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`);
+    const stop = `${leadOf(error, sub, options.spec)}${error?.message ?? error}\n`;
     process.exitCode = error?.exitCode ?? 1;
+    process.stderr.write(`${stop}checksum: ${checksumOf({ exit: process.exitCode, stop: stop.split("\n")[0] })}\n`);
   }
 }
 

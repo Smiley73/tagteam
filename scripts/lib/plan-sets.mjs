@@ -3,11 +3,10 @@
 // barriers that keep every step that reads an agent's output from running
 // before that agent has reported.
 //
-// The plan side has no driver. The main agent dispatches what `commands/plan.md`
-// tells it to and then records the set itself, naming each agent by the label it
-// gave the dispatch and the file it told that agent to write. So the record has
-// to make a skipped or wrong record fail loudly: every consuming step requires a
-// recorded set that is in, never merely the absence of an open one.
+// `plan.mjs` records each set before it prints the dispatch, naming each agent by
+// its label and the file it is told to write. Every consuming step requires a
+// recorded set that is in, never merely the absence of an open one: a reader
+// still working and one that failed look the same on disk.
 //
 // Every set lives in `$D/work/sets/`, one record per set, with an id of the form
 // `<seq>-<kind>`: the sequence orders them, and the kind says which step judges
@@ -25,7 +24,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { arriveCommand, closeSet, readSet, readiness, recordSet, renderBoard, restart } from "../dispatch-set.mjs";
+import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "../dispatch-set.mjs";
 import { runnerDispatch } from "./codex-command.mjs";
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -59,11 +58,11 @@ const FAMILY = {
 const familyOf = (kind) => Object.keys(FAMILY).find((family) => FAMILY[family].includes(kind)) ?? null;
 
 // The step that judges each family, for a refusal that has to name it.
-const JUDGED_BY = { review: "collect", response: "check", "spec-writers": "specs.mjs" };
+const JUDGED_BY = { review: "collect", response: "check", "spec-writers": "specs" };
 
-const DRAFTER_KINDS = new Set(["draft", "response", "response-resend"]);
+export const DRAFTER_KINDS = new Set(["draft", "response", "response-resend"]);
 const READERS = ["claude", "codex", "adversary"];
-const READER_NAMES = { claude: "the plan reviewer", codex: "Codex", adversary: "the adversary" };
+export const READER_NAMES = { claude: "the plan reviewer", codex: "Codex", adversary: "the adversary" };
 
 const SET_FILE = /^(\d{3,})-([a-z-]+)\.json$/;
 
@@ -126,9 +125,9 @@ export function requireNothingOut(planDir, step) {
 }
 
 const RECORD_HINT = {
-  review: "dispatch the three readers of step 5 again and record them as a `review` set",
-  response: "dispatch the drafter to answer the brief again and record it as a `response` set",
-  "spec-writers": "dispatch the spec writers of step 6 again and record them as a `spec-writers` set"
+  review: "run the `review` step",
+  response: "run `collect`, which sends the drafter to answer the brief",
+  "spec-writers": "run the `writers` step"
 };
 
 /**
@@ -141,7 +140,7 @@ export function requireFamilyIn(planDir, family, step) {
   const latest = sets.filter((set) => FAMILY[family].includes(set.kind)).at(-1);
   if (!latest) {
     refuse(`${step} refused: no ${family} set was recorded in ${path.resolve(planDir)}, so nothing says its agents have `
-      + `reported. Nothing was read and nothing changed. To go on, ${RECORD_HINT[family]} (plan.mjs record), and run ${step} `
+      + `reported. Nothing was read and nothing changed. To go on, ${RECORD_HINT[family]}, and run ${step} `
       + "once the last arrival names it.");
   }
   if (latest.state === "out") refuse(`${step} refused. ${stillOut(latest, step)}`, NOT_IN_YET);
@@ -165,37 +164,9 @@ function nameFor(kind, subject) {
 }
 const subjectOf = (output) => path.basename(output).replace(/\.(json|md)$/, "");
 
-// --- the progress board -------------------------------------------------------
-
 // The label the drafter's revision after the owner answered goes out under. It is
 // what tells that draft apart from the others when only the label is known.
 export const REVISE_LABEL = "Revise the plan";
-
-const STEP_TITLES = { 1: "Orienting on the repository", 4: "Drafting the plan", 5: "Reviewing the plan", 6: "Writing the specs" };
-
-// Where a set falls in the plan's seven steps. A draft is used in three of
-// them: the revision is step 5, and a cut is step 4 until a review is on record
-// and step 6 after.
-function boardHeader(kind, labels, sets) {
-  let step;
-  if (kind === "explore") step = 1;
-  else if (kind === "draft") step = labels.includes(REVISE_LABEL) ? 5 : sets.some((set) => set.kind === "review") ? 6 : 4;
-  else step = familyOf(kind) === "spec-writers" ? 6 : 5;
-  return `${STEP_TITLES[step]}, step ${step} of 7`;
-}
-
-const boardOn = (config) => config != null && config.progressBoard !== false;
-
-/**
- * The board of a set going out, every agent `running`, or nothing when the
- * setting is off. `subjects` is one entry per agent, as `nameFor` takes it.
- */
-export function sentBoard({ config, planDir, kind, labels, subjects }) {
-  if (!boardOn(config)) return undefined;
-  const board = { header: boardHeader(kind, labels, listSets(planDir)) };
-  const agents = subjects.map((subject) => ({ label: subject, name: nameFor(kind, subject) }));
-  return renderBoard({ board, agents });
-}
 
 // Each kind's agents write files the run knows in advance. A record that names
 // any other file was copied wrong, and is refused before it is written.
@@ -230,41 +201,51 @@ function checkOutputs(kind, planDir, agents) {
   return undefined;
 }
 
-function nextFor(kind, planDir, repo) {
+/** The command that runs one of the plan driver's steps over `planDir`. */
+export const stepCommand = (planDir, step, flags = "") =>
+  `node ${q(path.join(SCRIPTS, "plan.mjs"))} ${step} --plan ${q(path.resolve(planDir))}${flags}`;
+
+function nextFor(kind, planDir) {
   const D = path.resolve(planDir);
-  const script = (name) => `node ${q(path.join(SCRIPTS, name))}`;
-  const verify = `${script("goal-gate.mjs")} verify ${q(D)}`;
-  const review = path.join(D, "work", "review");
   switch (kind) {
     case "explore":
       return { next: `head -n 30 ${q(path.join(D, "work", "exploration.md"))}`, closing: "Read its opening, then start the interview." };
     case "draft":
-      // A draft after the review has been collected is a revision, read next by
-      // the deliverables; one before it is the draft the review reads.
-      return fs.existsSync(path.join(review, "findings.json"))
-        ? { next: `${verify} && ${script("deliverables.mjs")} ${q(path.join(D, "plan.md"))}`, closing: "Listing the deliverables now." }
-        : { next: verify, closing: "Verifying the goal, then preparing the review." };
+      // A draft after the review has been collected is a revision or a cut, read
+      // next by the spec writers; one before it is the draft the review reads.
+      return fs.existsSync(path.join(D, "work", "review", "findings.json"))
+        ? { next: stepCommand(D, "writers"), closing: "Listing the deliverables now." }
+        : { next: stepCommand(D, "review"), closing: "Preparing the review." };
     case "review":
     case "review-resend":
-      return { next: `${script("plan.mjs")} collect --dir ${q(review)}`, closing: "Judging the review now." };
+      return { next: stepCommand(D, "collect"), closing: "Judging the review now." };
     case "response":
     case "response-resend":
-      return { next: `${script("plan.mjs")} check --dir ${q(review)}`, closing: "Checking the answers now." };
+      return { next: stepCommand(D, "check"), closing: "Checking the answers now." };
     default:
-      return {
-        next: `${script("specs.mjs")} ${q(D)} ${q(path.join(repo, ".tagteam", "config.json"))} --enforce-size`,
-        closing: "Validating the specs now."
-      };
+      return { next: stepCommand(D, "specs"), closing: "Validating the specs now." };
   }
+}
+
+// The sets recorded after the latest set of `kind`, or null when there is none.
+const setsAfter = (sets, kind) => {
+  const index = sets.findLastIndex((set) => set.kind === kind);
+  return index === -1 ? null : sets.slice(index + 1);
+};
+
+/** Whether a review's, or a response's, one re-send is already on record. */
+export function resendSpent(planDir, family) {
+  const [first, resend] = FAMILY[family];
+  return setsAfter(listSets(planDir), first)?.some((set) => set.kind === resend) ?? false;
 }
 
 function refuseOrder(kind, sets) {
   const out = sets.find((set) => set.state === "out");
   if (out) {
     refuse(`nothing was recorded: set ${out.id} is still waiting on ${namesOf(out.missing)} (${labelsOf(out.missing)}), and `
-      + "one set is out at a time. The agents you just sent out wait until it is in: record each finished notice for it "
+      + "one set is out at a time. Record each finished notice for it "
       + `with ${arriveCommand(out.dir, out.id)} followed by its label in double quotes, run what the last arrival names, `
-      + "then record this set again.");
+      + "then run this step again.");
   }
   const unjudged = sets.find((set) => set.state === "in" && familyOf(set.kind));
   if (unjudged) {
@@ -273,12 +254,9 @@ function refuseOrder(kind, sets) {
   }
   if (DRAFTER_KINDS.has(kind) && !sets.some((set) => set.kind === "explore")) {
     refuse("nothing was recorded: no explore set is on record, and the drafter reads what the explorer wrote. "
-      + "Dispatch the explorer of step 1 again and record it as an `explore` set.");
+      + "Run the `explore` step first.");
   }
-  const after = (family) => {
-    const index = sets.findLastIndex((set) => set.kind === family);
-    return index === -1 ? null : sets.slice(index + 1);
-  };
+  const after = (family) => setsAfter(sets, family);
   // The plan is reviewed once and the brief answered once; each has one re-send
   // of its own kind. A second `review` or `response` set would start the count
   // over, so it is refused here rather than left to the kind the record names.
@@ -287,7 +265,7 @@ function refuseOrder(kind, sets) {
     refuse("nothing was recorded: the plan is reviewed once, and a review set is already on record. "
       + (spent
         ? "This review has had its one re-send. A reader still missing is carried to approval and said at step 7."
-        : "A reader collect named as missing is re-sent alone, under the same label, as a `review-resend` set."));
+        : "A reader collect named as missing is re-sent alone, as a `review-resend` set."));
   }
   if (kind === "review-resend") {
     const since = after("review");
@@ -318,9 +296,9 @@ function refuseOrder(kind, sets) {
 
 // What each agent of a plan set was asked to run at, attached by the script
 // rather than supplied by the main agent. A Claude label resolves through
-// `callForLabel`, which `plan.mjs` passes in: it is the function `plan.mjs
-// dispatch` prints from, and it is passed rather than imported because
-// `plan.mjs` imports this module. The Codex plan review's runner carries the
+// `callForLabel`, which `plan.mjs` passes in: it is the function its dispatches
+// are built from, and it is passed rather than imported because `plan.mjs`
+// imports this module. The Codex plan review's runner carries the
 // runner's own fixed call, never the configured Codex pair, which belongs to the
 // process it starts. A label nothing resolves, or a configuration that cannot be
 // read, leaves the entry without a request — the approval report then says it
@@ -344,21 +322,31 @@ function requestsFor(kind, entries, config, callForLabel) {
 }
 
 /**
- * Record a set the main agent has just dispatched. `agents` is `{label,
+ * Every refusal `recordPlanSet` would make, without writing anything: for a step
+ * that has work to do before it records and must not do it for a set the record
+ * would refuse.
+ */
+export function requireRecordable({ planDir, kind, agents }) {
+  if (!KINDS.includes(kind)) refuse(`--kind must be one of ${KINDS.join(", ")}; got ${q(kind)}`);
+  if (!Array.isArray(agents) || agents.length === 0) refuse(`a ${kind} set names at least one agent`);
+  const entries = agents.map(({ label, output }) => ({ label, output: path.resolve(output) }));
+  checkOutputs(kind, planDir, entries);
+  const sets = listSets(planDir);
+  refuseOrder(kind, sets);
+  return { entries, sets };
+}
+
+/**
+ * Record a set the driver is about to print. `agents` is `{label,
  * output}` in dispatch order; the name each is announced by follows from its
  * kind and output, and the request each was sent at from its kind and label,
  * through `callForLabel(config, kind, label)`. Every refusal comes before
  * anything is written.
  */
 export async function recordPlanSet({ planDir, kind, agents, repo, env = process.env, callForLabel = null }) {
-  if (!KINDS.includes(kind)) refuse(`--kind must be one of ${KINDS.join(", ")}; got ${q(kind)}`);
-  if (!Array.isArray(agents) || agents.length === 0) refuse(`a ${kind} set names at least one agent: --agent <label> <output>`);
-  const entries = agents.map(({ label, output }) => ({ label, output: path.resolve(output) }));
-  checkOutputs(kind, planDir, entries);
-  const sets = listSets(planDir);
-  refuseOrder(kind, sets);
+  const { entries, sets } = requireRecordable({ planDir, kind, agents });
   repo ??= repoFor(planDir);
-  const { next, closing } = nextFor(kind, planDir, repo);
+  const { next, closing } = nextFor(kind, planDir);
   let config = null;
   try {
     config = JSON.parse(fs.readFileSync(path.join(repo, ".tagteam", "config.json"), "utf8"));
@@ -375,7 +363,6 @@ export async function recordPlanSet({ planDir, kind, agents, repo, env = process
   }
   const record = await recordSet({
     dir, id, repo, env, next, closing,
-    ...(boardOn(config) ? { board: { header: boardHeader(kind, entries.map((entry) => entry.label), sets) } } : {}),
     agents: entries.map((entry, index) => ({
       ...entry, name: nameFor(kind, subjectOf(entry.output)), ...(requests[index] ? { request: requests[index] } : {})
     }))
@@ -385,11 +372,33 @@ export async function recordPlanSet({ planDir, kind, agents, repo, env = process
 
 // --- resuming ---------------------------------------------------------------
 
-/**
- * The restart rule, applied to every set in the plan directory still waiting on
- * an agent. `runGone` is the person's yes to the question it asks when no
- * session can be identified, and `runLive` their no.
- */
+// Where to pick up when nothing is out and nothing waits on a judging step, read
+// off the latest set on record and what is on disk. A judged review or response
+// names its step again: both are safe to run twice, and a stop between judging
+// and sending the next set would otherwise be walked past.
+export function pickUp(planDir) {
+  const D = path.resolve(planDir);
+  const latest = listSets(D).at(-1);
+  const exists = (...parts) => fs.existsSync(path.join(D, ...parts));
+  const reviewed = exists("work", "review", "findings.json");
+  const draftNext = () => stepCommand(D, reviewed ? "writers" : "review");
+  if (!latest) return stepCommand(D, "explore");
+  switch (latest.kind) {
+    case "explore":
+      return exists("work", "exploration.md") ? stepCommand(D, "draft", " --purpose draft") : stepCommand(D, "explore");
+    case "draft":
+      return exists("plan.md") ? draftNext() : stepCommand(D, "draft", " --purpose draft");
+    case "review":
+    case "review-resend":
+      return stepCommand(D, "collect");
+    case "response":
+    case "response-resend":
+      return stepCommand(D, "check");
+    default:
+      return stepCommand(D, "specs");
+  }
+}
+
 // Nothing is out. A set that came in and was never judged still has its step to
 // run: every output it names may be on disk, so picking up at the first missing
 // output would walk past the step that validates them.
@@ -402,9 +411,14 @@ function nothingOut(sets) {
       next: unjudged.record.next
     };
   }
-  return { outcome: "nothing-open", say: ["No set is still waiting on anyone; pick up at the first step whose output is missing."] };
+  return { outcome: "nothing-open", say: ["No set is still waiting on anyone."] };
 }
 
+/**
+ * The restart rule, applied to every set in the plan directory still waiting on
+ * an agent. `runGone` is the person's yes to the question it asks when no
+ * session can be identified, and `runLive` their no.
+ */
 export async function resumePlanSets({ planDir, runGone = false, runLive = false, repo, env = process.env }) {
   const dir = setsDir(planDir);
   const before = listSets(planDir);
@@ -437,28 +451,37 @@ export async function resumePlanSets({ planDir, runGone = false, runLive = false
       outcome: "waiting",
       say,
       set: { id: set.id, labels: waiting.missing.map((agent) => agent.label), arrive: arriveCommand(dir, set.id) },
-      next: set.record.next
+      next: set.record.next,
+      ...(set.kind === "explore" ? { howToWait: HOW_TO_WAIT } : {})
     };
   }
   // Released: the step that judges the set judges what is on disk, as it does
   // for an agent that reported and left nothing usable. The explorer and a draft
-  // have no such step, so the first step whose output is missing is where to go.
-  // Nothing released means the last notice was recorded between the listing and
+  // have no such step; `pickUp` reads the disk for them. Nothing released means the last notice was recorded between the listing and
   // the restart, and nothing is open any more.
   if (outcome.released.length === 0) return nothingOut(listSets(planDir));
   const released = byId.get(outcome.released.at(-1).set);
-  if (familyOf(released.kind)) return { outcome: "released", say, next: released.record.next };
-  say.push("Pick up at the first step whose output is missing.");
-  return { outcome: "released", say };
+  return { outcome: "released", say, ...(familyOf(released.kind) ? { next: released.record.next } : {}) };
 }
 
-// The instruction that rides along with a recorded set, and with a resumed one
-// still out: the same rule the ship driver prints, in the plan side's words.
-export const HOW_TO_RECORD = "The set is recorded. If the dispatch message returned with every agent finished, run "
-  + "`set.arrive` once with every label appended, each in double quotes. Otherwise end your turn; on each finished notice for "
-  + "one of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the line "
-  + "it prints. When an arrival says the set is complete it prints `next`: run it. A label recorded twice is refused and "
-  + "changes nothing. Never sleep, never poll, never watch, never schedule a wake-up.";
+// The instruction that rides along with the explorer's dispatch, and with the
+// explorer resumed while still out: the one set the main session sends and
+// records itself. Every later set belongs to a `plan-specs` run. Claude Code may
+// run the agent in the background whatever the call asks for, so nothing here
+// depends on the message returning only once it has finished; the foreground is
+// asked for because one return is cheaper than one wake-up per agent.
+export const HOW_TO_DISPATCH = "Put every entry of `dispatch` into ONE message, each as an Agent call with "
+  + "run_in_background: false where the call allows it, subagent_type set to `agent`, `model` passed as given when it is not "
+  + "null and omitted when it is, `description` as given and `prompt` verbatim, and pass `effort` on every call, exactly as "
+  + "given: left off, the agent silently runs at the session's effort instead of the one chosen for it. The agents form a set, "
+  + "and the run judges their work "
+  + "only once every one of them has been recorded as arrived. Each agent's label is its `description`, exactly as Claude Code "
+  + "names it when that agent finishes. An arrival is recorded by running `set.arrive` with the label appended in double "
+  + "quotes; relay the line it prints. If the message returns with every agent finished, run `set.arrive` once with every "
+  + "label. If it returns before they have finished, end your turn; on each finished notice run `set.arrive` with that one "
+  + "label and nothing else. When an arrival says the set is complete it prints `next`: run it. If you are unsure whether you "
+  + "recorded one, record it again: a repeat is refused and changes nothing. Never sleep, never poll, never watch, never "
+  + "schedule a wake-up.";
 
 export const HOW_TO_WAIT = "A set is still out, and nothing is to be dispatched. End your turn. On each finished notice for one "
   + "of `set.labels`, run `set.arrive` with that one label appended in double quotes and nothing else, and relay the line it "

@@ -1,20 +1,18 @@
-// The plan's Claude calls, printed by the plan driver.
+// The plan's Claude calls, resolved by the plan driver.
 //
 // The main agent used to build each planning agent's name by hand from the
 // effort `plan.mjs roles` printed, and an effort composed by hand is an effort
-// that can be left off. Now `plan.mjs dispatch` prints agent, model, effort and
-// label for each step, refuses a missing or off-ladder effort by the job's name,
-// and is the one place a recorded label resolves back to the call it was.
+// that can be left off. Now each driver step prints agent, model, effort and
+// label for each call, from `planDispatch`, which refuses a missing or off-ladder
+// effort by the job's name and is the one place a recorded label resolves back
+// to the call it was.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { DRAFTER_PURPOSES, PLAN_STEPS, planCallForLabel, planCalls, planDispatch } from "../scripts/plan.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const PLAN = path.join(root, "scripts", "plan.mjs");
 const example = JSON.parse(fs.readFileSync(path.join(root, "examples", "config.json"), "utf8"));
 
 // The planner and the adversary at different efforts, and the plan override
@@ -31,53 +29,36 @@ const overridden = {
   plan: { models: { ...base.models, lead: "sonnet" }, effort: { ...base.effort, planner: "low", adversary: "max" } }
 };
 
-function configFile(config) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-plan-dispatch-"));
-  const file = path.join(dir, "config.json");
-  fs.writeFileSync(file, JSON.stringify(config, null, 2));
-  return file;
-}
-
-function dispatch(config, ...args) {
-  const result = spawnSync(process.execPath, [PLAN, "dispatch", configFile(config), ...args], { encoding: "utf8" });
-  let json = null;
-  try { json = JSON.parse(result.stdout); } catch { /* refused or broken: stdout is checked as text */ }
-  return { ...result, json };
-}
-
 const call = (base, model, effort, description) => ({ agent: `tagteam:${base}`, model, effort, description });
 
-// Every step, its selector, and the calls it prints at `planner`/`adversary`.
+// Every step, its selection, and the calls it prints at `planner`/`adversary`.
 function expected(model, planner, adversary) {
   return [
-    [["--kind", "explore"], [call("explorer", model, planner, "Explore the repository")]],
-    [["--kind", "draft", "--purpose", "draft"], [call("plan-drafter", model, planner, "Draft the plan")]],
-    [["--kind", "draft", "--purpose", "cut"], [call("plan-drafter", model, planner, "Cut the plan")]],
-    [["--kind", "draft", "--purpose", "revise"], [call("plan-drafter", model, planner, "Revise the plan")]],
-    [["--kind", "review"], [
+    ["explore", {}, [call("explorer", model, planner, "Explore the repository")]],
+    ["draft", { purpose: "draft" }, [call("plan-drafter", model, planner, "Draft the plan")]],
+    ["draft", { purpose: "cut" }, [call("plan-drafter", model, planner, "Cut the plan")]],
+    ["draft", { purpose: "revise" }, [call("plan-drafter", model, planner, "Revise the plan")]],
+    ["review", {}, [
       call("plan-reviewer", model, planner, "Plan review: Claude"),
       call("adversary", model, adversary, "Plan review: adversary")
     ]],
-    [["--kind", "review-resend", "--reader", "claude"], [call("plan-reviewer", model, planner, "Plan review: Claude")]],
-    [["--kind", "review-resend", "--reader", "adversary"], [call("adversary", model, adversary, "Plan review: adversary")]],
-    [["--kind", "response"], [call("plan-drafter", model, planner, "Answer the plan review")]],
-    [["--kind", "response-resend"], [call("plan-drafter", model, planner, "Answer the plan review again")]],
-    [["--kind", "spec-writers", "--spec", "03-c", "--spec", "01-a", "--spec", "02-b"], [
+    ["review-resend", { readers: ["claude"] }, [call("plan-reviewer", model, planner, "Plan review: Claude")]],
+    ["review-resend", { readers: ["adversary"] }, [call("adversary", model, adversary, "Plan review: adversary")]],
+    ["response", {}, [call("plan-drafter", model, planner, "Answer the plan review")]],
+    ["response-resend", {}, [call("plan-drafter", model, planner, "Answer the plan review again")]],
+    ["spec-writers", { specs: ["03-c", "01-a", "02-b"] }, [
       call("spec-writer", model, planner, "Write spec 03-c"),
       call("spec-writer", model, planner, "Write spec 01-a"),
       call("spec-writer", model, planner, "Write spec 02-b")
     ]],
-    [["--kind", "spec-writers-resend", "--spec", "02-b"], [call("spec-writer", model, planner, "Write spec 02-b again")]]
+    ["spec-writers-resend", { specs: ["02-b"] }, [call("spec-writer", model, planner, "Write spec 02-b again")]]
   ];
 }
 
-test("each step prints its calls at its role's model and its job's effort, under the label plan.md records", () => {
+test("each step prints its calls at its role's model and its job's effort, under the label it is recorded with", () => {
   for (const [config, settings] of [[base, ["opus", "medium", "xhigh"]], [overridden, ["sonnet", "low", "max"]]]) {
-    for (const [args, calls] of expected(...settings)) {
-      const printed = dispatch(config, ...args);
-      assert.equal(printed.status, 0, `${args.join(" ")}: ${printed.stderr}`);
-      assert.equal(printed.json.kind, args[1]);
-      assert.deepEqual(printed.json.dispatch, calls, `${config.plan ? "override" : "base"}: ${args.join(" ")}`);
+    for (const [kind, selection, calls] of expected(...settings)) {
+      assert.deepEqual(planDispatch(config, kind, selection), calls, `${config.plan ? "override" : "base"}: ${kind} ${JSON.stringify(selection)}`);
     }
   }
 });
@@ -85,52 +66,44 @@ test("each step prints its calls at its role's model and its job's effort, under
 test("every kind of set has a step, and every step's selection is checked", () => {
   assert.deepEqual(Object.keys(PLAN_STEPS).sort(), ["draft", "explore", "response", "response-resend", "review", "review-resend", "spec-writers", "spec-writers-resend"]);
   assert.deepEqual(Object.keys(DRAFTER_PURPOSES), ["draft", "cut", "revise"]);
-  for (const [args, said] of [
-    [["--kind", "draft"], /needs --purpose/],
-    [["--kind", "draft", "--purpose", "polish"], /needs --purpose/],
-    [["--kind", "explore", "--spec", "01-a"], /does not take --spec/],
-    [["--kind", "review", "--reader", "claude"], /does not take --reader/],
-    [["--kind", "review-resend"], /needs --reader/],
-    [["--kind", "review-resend", "--reader", "codex"], /plan\.mjs codex/],
-    [["--kind", "spec-writers"], /needs --spec/],
-    [["--kind", "spec-writers", "--spec", "01-a", "--spec", "01-a"], /same spec twice/],
-    [["--kind", "spec-writers", "--spec", "Write spec 01-a"], /NN-slug/],
-    [["--kind", "plan"], /--kind must be one of/],
-    [[], /needs --kind/]
+  for (const [kind, selection, said] of [
+    ["draft", {}, /needs --purpose/],
+    ["draft", { purpose: "polish" }, /needs --purpose/],
+    ["explore", { specs: ["01-a"] }, /does not take --spec/],
+    ["review", { readers: ["claude"] }, /does not take --reader/],
+    ["review-resend", {}, /needs --reader/],
+    ["review-resend", { readers: ["codex"] }, /--reader takes claude or adversary; got "codex"/],
+    ["spec-writers", {}, /needs --spec/],
+    ["spec-writers", { specs: ["01-a", "01-a"] }, /same spec twice/],
+    ["spec-writers", { specs: ["Write spec 01-a"] }, /NN-slug/],
+    ["plan", {}, /--kind must be one of/]
   ]) {
-    const printed = dispatch(base, ...args);
-    assert.equal(printed.status, 1, args.join(" "));
-    assert.match(printed.stderr, said, args.join(" "));
-    assert.equal(printed.stdout, "", `${args.join(" ")}: nothing is printed`);
+    assert.throws(() => planDispatch(base, kind, selection), said, `${kind} ${JSON.stringify(selection)}`);
   }
 });
 
-test("an effort missing or off the ladder is refused by the job's name, and nothing is printed", () => {
+test("an effort missing or off the ladder is refused by the job's name, and nothing is returned", () => {
   const without = structuredClone(base);
   delete without.effort.adversary;
   const offLadder = { ...base, effort: { ...base.effort, planner: "extreme" } };
   const overrideOff = structuredClone(overridden);
   overrideOff.plan.effort.adversary = "huge";
-  for (const [config, args, job, found] of [
-    // The adversary's key gone: the review prints neither reader, so half a review never goes out.
-    [without, ["--kind", "review"], "plan-adversary", /has no effort/],
-    [without, ["--kind", "review-resend", "--reader", "adversary"], "plan-adversary", /has no effort/],
+  for (const [config, kind, selection, job, found] of [
+    // The adversary's key gone: the review sends neither reader, so half a review never goes out.
+    [without, "review", {}, "plan-adversary", /has no effort/],
+    [without, "review-resend", { readers: ["adversary"] }, "plan-adversary", /has no effort/],
     // A word that is not on the ladder is not null, and is refused all the same.
-    [offLadder, ["--kind", "explore"], "explore", /has the effort "extreme"/],
-    [offLadder, ["--kind", "draft", "--purpose", "draft"], "draft", /has the effort "extreme"/],
-    [offLadder, ["--kind", "spec-writers", "--spec", "01-a"], "spec-write", /has the effort "extreme"/],
-    [offLadder, ["--kind", "review"], "plan-review", /has the effort "extreme"/],
+    [offLadder, "explore", {}, "explore", /has the effort "extreme"/],
+    [offLadder, "draft", { purpose: "draft" }, "draft", /has the effort "extreme"/],
+    [offLadder, "spec-writers", { specs: ["01-a"] }, "spec-write", /has the effort "extreme"/],
+    [offLadder, "review", {}, "plan-review", /has the effort "extreme"/],
     // The override is what is checked when it is in force.
-    [overrideOff, ["--kind", "review"], "plan-adversary", /has the effort "huge"/]
+    [overrideOff, "review", {}, "plan-adversary", /has the effort "huge"/]
   ]) {
-    const printed = dispatch(config, ...args);
-    assert.equal(printed.status, 1, `${args.join(" ")}: ${printed.stdout}`);
-    assert.match(printed.stderr, new RegExp(`the ${job} job's dispatch`), `${args.join(" ")}: the refusal names the job`);
-    assert.match(printed.stderr, found, args.join(" "));
-    assert.equal(printed.stdout, "", `${args.join(" ")}: nothing is printed, so nothing can be dispatched`);
+    assert.throws(() => planDispatch(config, kind, selection), new RegExp(`the ${job} job's dispatch[^]*${found.source}`), `${kind}: names ${job}`);
   }
   // The adversary's refusal does not take the planner's jobs with it.
-  assert.equal(dispatch(without, "--kind", "review-resend", "--reader", "claude").status, 0);
+  assert.equal(planDispatch(without, "review-resend", { readers: ["claude"] }).length, 1);
   assert.throws(() => planDispatch(without, "review"), /the plan-adversary job's dispatch "Plan review: adversary" has no effort/);
 });
 
@@ -162,29 +135,19 @@ test("every label a step prints resolves back to exactly that call, and no other
   assert.equal(planCallForLabel(base, "review-resend", "Plan review: adversary").effort, "xhigh");
 });
 
-test("plan.md points every Claude dispatch at the command and composes no name or effort by hand", () => {
+test("plan.md runs every planning step through the driver and composes no name or effort by hand", () => {
   const plan = fs.readFileSync(path.join(root, "commands", "plan.md"), "utf8");
   const flat = plan.replace(/\s+/g, " ");
-  assert.match(plan, /scripts\/plan\.mjs" dispatch "\$R\/\.tagteam\/config\.json" --kind/, "plan.md never runs the dispatch command");
-  for (const step of ["--kind explore", "--kind draft --purpose draft", "--kind draft --purpose cut", "--kind draft --purpose revise",
-    "--kind review", "--kind review-resend --reader claude", "--kind response", "--kind response-resend",
-    "--kind spec-writers", "--kind spec-writers-resend --spec <id>"]) {
-    assert.ok(flat.includes(step), `plan.md never prints the calls of ${step}`);
+  // The review and the steps after it belong to the plan-specs run, which follows
+  // the driver's `next`; plan.md starts that run at the draft or at a re-send.
+  for (const step of ["plan.mjs\" explore --plan", "plan.mjs\" draft --plan", "plan.mjs\" writers --plan", "--spec <id> --note <file>"]) {
+    assert.ok(flat.includes(step), `plan.md never runs ${step}`);
   }
-  // Every label the command prints is the one plan.md tells the main agent to record.
-  for (const kind of Object.keys(PLAN_STEPS)) {
-    const selection = { draft: { purpose: "cut" }, "review-resend": { readers: ["claude", "adversary"] }, "spec-writers": { specs: ["01-a"] }, "spec-writers-resend": { specs: ["01-a"] } }[kind] ?? {};
-    const purposes = kind === "draft" ? Object.keys(DRAFTER_PURPOSES).map((purpose) => ({ purpose })) : [selection];
-    for (const chosen of purposes) {
-      for (const printed of planCalls(base, kind, chosen)) {
-        const label = printed.description.replace("01-a", "<id>");
-        assert.ok(flat.includes(`\`${label}\``), `plan.md never names the label ${label}`);
-      }
-    }
-  }
+  const script = fs.readFileSync(path.join(root, "workflows", "plan-specs.js"), "utf8");
+  assert.match(script, /review: "Review"/, "the plan-specs run never runs the review step");
   // A per-effort placeholder anywhere is `role-agents.test.mjs`'s scan.
-  for (const gone of ["carried by the agent's name"]) {
-    assert.ok(!plan.includes(gone), `plan.md still composes an agent name from an effort: ${gone}`);
+  for (const gone of ["carried by the agent's name", "plan.mjs\" dispatch", "plan.mjs\" record", "plan.mjs\" roles", "plan.mjs\" codex"]) {
+    assert.ok(!plan.includes(gone), `plan.md still carries: ${gone}`);
   }
   assert.match(flat, /pass `effort` on every call, exactly as printed/);
   assert.match(flat, /`model` passed when it is not null/);

@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { waitForChecks } from "../scripts/ci-wait.mjs";
 
@@ -71,6 +72,18 @@ test("off by default: running then passing passes, and running to the deadline i
   assert.deepEqual(result.checks, running);
   assert.equal(stalls.elapsed(), 60_000, "the running budget did not count from the call");
   assert.deepEqual(stalls.reads.map((read) => read.at), [0, 20_000, 40_000, 60_000]);
+});
+
+test("a wait whose starter has gone stops at its next look and returns no result", async () => {
+  // The old loop had no such question: it polled on to the deadline and handed
+  // back a result for the caller that was no longer there to write it.
+  for (const goneAfterReads of [0, 1, 2]) {
+    const h = harness([running]);
+    let looks = 0;
+    const abandoned = () => looks++ >= goneAfterReads * 2;
+    await assert.rejects(run(h, { waitSec: 600, abandoned }), /the command that started this wait has ended/);
+    assert.equal(h.reads.length, goneAfterReads === 0 ? 0 : goneAfterReads, "it read after its starter was gone");
+  }
 });
 
 test("after a rerun, a failed row completed before the rerun moment is still running, and the rerun's own result is the answer", async () => {
@@ -231,6 +244,33 @@ test("a gh that never answers cannot hold the call past its bound", () => {
   // startWaitSec + waitSec, the five-second floor on a read, and room for node.
   assert.ok(result.seconds < 0.4 + 0.4 + 5 + 3, `took ${result.seconds}s`);
   assert.equal(JSON.parse(fs.readFileSync(staged.out, "utf8")).status, "not-started");
+});
+
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+test("a wait whose starter died before it was up stops at its first look and writes nothing", async () => {
+  // Started from a shell that exits at once, as a driver killed right after
+  // spawning it would, so the starter is gone — and the parent the OS reports is
+  // already the reaper — before the poller is up. A poller that asked the OS for
+  // its parent then took the reaper for its starter, read on to the deadline and
+  // wrote the result; one told its starter's pid sees it gone. The gh answers
+  // after a pause, so a look after a read also finds the shell gone.
+  const staged = stage(`setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(running))}), 300);`);
+  const stderr = path.join(staged.dir, "stderr.txt");
+  const poller = [process.execPath, CI_WAIT, "--pr", "7", "--out", staged.out, "--repo", staged.dir, "--wait-sec", "3"].map((part) => JSON.stringify(part)).join(" ");
+  const launcher = spawn("sh", ["-c", `${poller} --parent-pid $$ </dev/null >/dev/null 2>${JSON.stringify(stderr)} & echo $!`], {
+    stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, PATH: staged.PATH }
+  });
+  let out = "";
+  launcher.stdout.on("data", (chunk) => { out += chunk; });
+  await new Promise((resolve) => launcher.once("close", resolve));
+  const pid = Number(out.trim());
+  for (let waited = 0; waited < 100 && alive(pid); waited += 1) await delay(100);
+  assert.equal(alive(pid), false, "the poller is still running");
+  assert.equal(fs.existsSync(staged.out), false, "a wait whose starter had gone wrote its result");
+  assert.match(fs.readFileSync(stderr, "utf8"), /the command that started this wait has ended/);
 });
 
 test("a gh that fails with nothing on stdout waits out the start limit and stops as not-started", () => {

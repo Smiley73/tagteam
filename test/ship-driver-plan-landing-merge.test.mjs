@@ -17,7 +17,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { root, git, ship, write, outputOf, arriveAll, findings, major, resultOf, onOrigin, ghCalls,
   pullsOf, trainOf, B_CHANGE, MAIN_ADD, BOTH_ADD, UNRELATED, commitToMain, recordOf, conflictedLine,
-  resolvedReport, unitDirIn, checkRoundIn, reviewWholePlan, shipUnit } from "./ship-stage.mjs";
+  resolvedReport, unitDirIn, checkRoundIn, reviewWholePlan, shipUnit, bodyWriterOf, bodyFileOf, factsFileOf, answerBodyWriter } from "./ship-stage.mjs";
 import { landingRecordOf, planPullOf, PLAN_BODY, stageClean, toDialog, shipCommitOnPlan, RED_CHECK,
   GREEN_CHECK } from "./ship-plan-landing-shared.mjs";
 
@@ -39,12 +39,16 @@ test("autoMerge: true never merges the plan: a clean tip gets the dialog and not
 
   const asked = ship("plan-land", plan, [], env);
   assert.equal(asked.status, 0, asked.stderr);
-  assert.ok(String(asked.json.body?.path).endsWith(path.join(".tagteam", "ships", "demo", "plan-landing", "pr-body.md")),
-    `the plan's body is not asked for, or not outside the worktree and the spec directories: ${asked.json.body?.path}`);
-  assert.deepEqual(asked.json.body.shape, ["## Summary", "## What you can now do", "## Risk"]);
-  assert.deepEqual(asked.json.body.lands.map((entry) => entry.id), ["01-a", "02-b"]);
+  const writer = bodyWriterOf(asked);
+  assert.ok(writer, `the plan's body is not written by an agent sent for it: ${asked.stdout}`);
+  assert.ok(bodyFileOf(writer).endsWith(path.join(".tagteam", "ships", "demo", "plan-landing", "pr-body.md")),
+    `the plan's body is not outside the worktree and the spec directories: ${bodyFileOf(writer)}`);
+  const facts = JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8"));
+  assert.deepEqual(facts.shape, ["## Summary", "## What you can now do", "## Risk"]);
+  assert.deepEqual(facts.lands.map((entry) => entry.id), ["01-a", "02-b"]);
   assert.equal(planPullOf(env), null, "the plan's pull request opened without a body");
 
+  answerBodyWriter(asked, PLAN_BODY);
   const dialog = toDialog(staged);
   assert.ok(dialog.json.ask, "no dialog");
   assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));

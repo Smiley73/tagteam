@@ -15,7 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, write, onOrigin, ghCalls, trainOf, signWith, isolatedGit } from "./ship-stage.mjs";
+import { git, ship, write, onOrigin, ghCalls, trainOf, signWith, isolatedGit, answerBodyWriter } from "./ship-stage.mjs";
 import { landingRecordOf, planPullOf, PLAN_BODY, stageClean, toDialog } from "./ship-plan-landing-shared.mjs";
 
 const RULES = "repos/{owner}/{repo}/rules/branches/main";
@@ -221,8 +221,7 @@ test("with no signature rule, plan-land reads the base's rules once and nothing 
   const staged = stageClean();
   const { dir, plan, env } = staged;
   const asked = ship("plan-land", plan, [], env);
-  assert.ok(asked.json.body, asked.stdout);
-  write(asked.json.body.path, PLAN_BODY);
+  answerBodyWriter(asked, PLAN_BODY);
   freshLog(env);
   const dialog = ship("plan-land", plan, [], env);
   assert.equal(dialog.status, 0, dialog.stderr);

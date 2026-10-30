@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 12,
   "base": "main",
   "branchPrefix": "tagteam/",
   "conventionsPath": "CONTRIBUTING.md",
@@ -45,7 +45,6 @@
   ],
   "ciWaitSec": 1800,
   "ciStartWaitSec": 120,
-  "progressBoard": true,
   "worktree": {
     "setup": ["npm ci"],
     "copyUntracked": [],

@@ -112,9 +112,13 @@ function assertStopOpensPlainly({ status, stderr, json }) {
   }
 }
 
+// No run unless the test names one. A run that executes this suite carries its
+// own TAGTEAM_RUN_ID, and inherited it would be recorded on every set a test
+// sends, so a restart a test means as "no run" would release, or wait on, the
+// wrong set. Empty is how the driver reads "no run"; a run given in `env` wins.
 export function ship(sub, plan, extra = [], env = {}) {
   const result = spawnSync(process.execPath, [SHIP, sub, "--plan", plan, ...extra], {
-    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", ...env }
+    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...env }
   });
   let json = null;
   try { json = JSON.parse(result.stdout); } catch {}
@@ -132,6 +136,23 @@ export const write = (file, value) => {
 // exactly where the real one would. A repair's line carries a note after the
 // path, which is not part of it.
 export const outputOf = (dispatch) => /Write your (?:findings|verdicts|report|fix report) to: (.*?)(?: — .*)?$/m.exec(dispatch.prompt)[1].trim();
+
+// The pull request body writer a step sent, if it sent one, and the body and
+// title files it was told to write.
+export const bodyWriterOf = (result) => result.json?.dispatch?.find((entry) => /^Write your pull request body to: /m.test(entry.prompt));
+export const bodyFileOf = (dispatch) => /^Write your pull request body to: (.*)$/m.exec(dispatch.prompt)[1].trim();
+export const factsFileOf = (dispatch) => /^Facts \(written for you by the driver\): (.*)$/m.exec(dispatch.prompt)[1].trim();
+export const titleFileOf = (dispatch) => /^Write your title to: (.*)$/m.exec(dispatch.prompt)[1].trim();
+
+// The writer stood in for: its body and title written where it was told to
+// write them, and its arrival recorded. Returns the arrival.
+export function answerBodyWriter(result, body, title = "Land the work", env = {}) {
+  const writer = bodyWriterOf(result);
+  assert.ok(writer, `no pull request body writer was sent: ${result.stderr || result.stdout}`);
+  write(bodyFileOf(writer), body);
+  if (title !== null) write(titleFileOf(writer), `${title}\n`);
+  return arriveAll(result, env);
+}
 
 // Runs the command a dispatch tells its agent to check its report with, against
 // the report given, at the path the dispatch names for it. The file is removed

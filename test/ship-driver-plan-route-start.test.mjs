@@ -153,8 +153,9 @@ test("on a plan route a spec whose state was frozen user-visible merges at finis
 test("an older plan whose spec still carries user_visible: true starts and begins exactly as one without it", () => {
   // Stands for a plan approved while the mark existed. Everything `start` says
   // and `begin` dispatches and writes is compared whole, once what differs
-  // between any two staged repositories — their directory, commits, set ids and
-  // clock — is taken out, so the old value cannot ride along anywhere.
+  // between any two staged repositories — their directory, commits, set ids,
+  // clock and the checksum that covers them — is taken out, so the old value
+  // cannot ride along anywhere.
   const run = (retired) => {
     const staged = stagePlan();
     const { dir, repo, plan, shipDir, env } = staged;
@@ -173,7 +174,8 @@ test("an older plan whose spec still carries user_visible: true starts and begin
     const same = (text) => text.split(fs.realpathSync(dir)).join("<dir>").split(dir).join("<dir>")
       .replace(/\b[0-9a-f]{40}\b|\b[0-9a-f]{12}\b/g, "<oid>")
       .replace(/\d{8}T\d{6}Z-[0-9a-f]+/g, "<set>")
-      .replace(/\d{4}-\d\d-\d\dT[0-9:.]+Z/g, "<at>");
+      .replace(/\d{4}-\d\d-\d\dT[0-9:.]+Z/g, "<at>")
+      .replace(/("checksum":")[0-9a-f]+/, "$1<sum>");
     const seen = { specs: started.json.specs, start: same(JSON.stringify(started.json)), begin: same(JSON.stringify(begun.json)), state: same(state) };
     fs.rmSync(dir, { recursive: true, force: true });
     return seen;

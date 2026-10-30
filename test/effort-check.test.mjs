@@ -20,15 +20,18 @@ const iso = (minutes) => new Date(T0 + minutes * 60_000).toISOString();
 function workspace(session = "S") {
   const ws = stagePlanWorkspace();
   stageTranscript(ws, session);
-  const subagents = path.join(projectDirectoryFor(ws.repo, ws.home), session, "subagents");
-  fs.mkdirSync(subagents, { recursive: true });
+  const base = path.join(projectDirectoryFor(ws.repo, ws.home), session, "subagents");
+  fs.mkdirSync(base, { recursive: true });
   let count = 0;
   // One agent's transcript: its label, when it started, what it was told, and
   // one assistant record per `records` entry. `jsonl: null` writes no jsonl at
-  // all, and a string writes exactly that.
-  const agent = ({ label, start, prompt = "", records = [], jsonl }) => {
+  // all, and a string writes exactly that. `run` puts the agent in a workflow
+  // run's directory instead of beside the direct subagents.
+  const agent = ({ label, start, prompt = "", records = [], jsonl, run = null }) => {
     count += 1;
     const id = `a${count}`;
+    const subagents = run ? path.join(base, "workflows", run) : base;
+    fs.mkdirSync(subagents, { recursive: true });
     fs.writeFileSync(path.join(subagents, `agent-${id}.meta.json`), JSON.stringify({ agentType: "tagteam:fixer", description: label, model: "opus", effort: "high" }));
     const file = path.join(subagents, `agent-${id}.jsonl`);
     if (jsonl === null) return file;
@@ -265,4 +268,24 @@ test("the approval's effort check names a mismatch and exits 0, and says nothing
   const quiet = runScript(ws, "plan.mjs", ["effort-check", "--plan", ws.D], "S");
   assert.equal(quiet.status, 0, quiet.stderr);
   assert.deepEqual(quiet.json.say, []);
+});
+
+test("an agent that ran inside a workflow joins like a direct one, and the same-label rules apply across both locations", () => {
+  const { agent, check } = workspace();
+  agent({ label: "Fix 01-a", start: 1, prompt: "Write your fix report to: /x/fix.json", records: [ran("high")], run: "wf_a" });
+  agent({ label: "Review 01-a: tests", start: 1, prompt: "Write your findings to: /x/tests.json", records: [ran("low")], run: "wf_a" });
+  agent({ label: "Implement 01-a", start: 1, prompt: "Write your report to: /x/report.json", records: [{ model: "claude-opus-5-5" }], run: "wf_a" });
+  agent({ label: "Review 01-a: lens", start: 1, prompt: "Write your findings to: /x/lens.json", records: [ran("low")] });
+  agent({ label: "Review 01-a: lens", start: 2, prompt: "Write your findings to: /x/lens.json, not /x/lens-2.json", records: [ran("low")], run: "wf_b" });
+  const results = check("ship", [set("fix-1", 0, [
+    entry("Fix 01-a", "/x/fix.json", "high"),
+    entry("Review 01-a: tests", "/x/tests.json", "high"),
+    entry("Implement 01-a", "/x/report.json", "high"),
+    entry("Review 01-a: lens", "/x/lens.json", "low")
+  ], [["Fix 01-a", 10], ["Review 01-a: tests", 10], ["Implement 01-a", 10], ["Review 01-a: lens", 10]])]);
+  assert.deepEqual(outcomes(results), ["matched", "mismatched", "not-confirmed", "not-confirmed"]);
+  assert.match(results[2].reason, /transcript records no effort/);
+  assert.match(results[3].reason, /more than one transcript/);
+  const narrowed = check("ship", [set("fix-2", 0, [entry("Review 01-a: lens", "/x/lens-2.json", "low")], [["Review 01-a: lens", 10]])]);
+  assert.deepEqual(outcomes(narrowed), ["matched"], "the output narrows a pair that spans a run directory");
 });

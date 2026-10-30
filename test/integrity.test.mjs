@@ -302,13 +302,38 @@ test("the configure command asks about both of the settings a person can only ge
 
 // Version 11's settings are required so that nobody ships before seeing them,
 // which only holds if configure puts each one to the person by name.
-// `progressBoard` is optional, and is asked all the same: configure always
-// writes it, and a dropped question would leave the person no way to learn it.
 test("the configure command asks about every setting version 11 added", () => {
   const items = thenAskItems(read("commands", "configure.md"));
-  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps", "progressBoard"]) {
+  for (const key of ["carry", "autoRedesign", "limits.carried", "limits.followUps"]) {
     assert.ok(items.some((item) => item.includes(`\`${key}\``)), `no numbered question in configure.md asks about ${key}`);
   }
+});
+
+// `progressBoard` is retired: configure carries it out of a version-11 file and
+// asks nothing about it.
+test("configure asks no question about progressBoard", () => {
+  const asking = thenAskItems(read("commands", "configure.md")).filter((item) => item.includes("`progressBoard`"));
+  assert.deepEqual(asking, [], `a numbered question in configure.md names progressBoard:\n${asking.join("\n")}`);
+});
+
+// No command prints a progress board any more, so none may tell the main session
+// to show one. The key is named `progressBoard`, which is not the word.
+const boardMentions = (name, text) => text.split("\n").flatMap((line, index) =>
+  /\bboard\b/i.test(line) ? [`${name}:${index + 1} mentions a board: ${line.trim()}`] : []);
+
+test("no command file mentions a board", () => {
+  const problems = commandFiles.flatMap((file) => boardMentions(`commands/${file}`, read("commands", file)));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the board guard fails on the wording commands had and passes the key's name", () => {
+  const shipBullet = "- **`board`** — present only when the progress board is on, with a `dispatch`\n"
+    + "  and on an arrival. Show it to the person exactly as printed, as Markdown,\n"
+    + "  before you put the dispatch into one message.";
+  assert.equal(boardMentions("commands/ship.md", shipBullet).length, 1);
+  assert.equal(boardMentions("commands/plan.md", "Show the board to the person.").length, 1);
+  assert.equal(boardMentions("commands/plan.md", "SHOW THE BOARD").length, 1);
+  assert.deepEqual(boardMentions("commands/configure.md", "Drop `progressBoard` from the file. A keyboard, a dashboard."), []);
 });
 
 // `autoMerge` does nothing, so no question may ask about it, and a configuration
@@ -582,10 +607,15 @@ test("no command puts a file at the round store's marker name", async () => {
 // back through prose.
 test("the plan command reviews once, through the plan driver, and never budgets rounds", () => {
   const plan = read("commands", "plan.md");
-  assert.match(plan, /scripts\/plan\.mjs" collect/, "plan.md never folds the review through plan.mjs");
-  assert.match(plan, /scripts\/plan\.mjs" check/, "plan.md never checks that the findings were answered");
-  assert.match(plan, /scripts\/plan\.mjs" codex/, "plan.md never prepares the Codex review for the runner");
-  assert.match(plan, /response\.json/, "plan.md never names the drafter's response file");
+  // The review, its collection and the check of the answers are the plan driver's
+  // steps now, followed by the plan-specs run; plan.md only starts that run.
+  assert.match(plan, /scripts\/plan\.mjs" draft --plan/, "plan.md never starts the plan through plan.mjs");
+  assert.match(plan, /no second review round/, "plan.md does not say the plan is reviewed once");
+  const sets = read("scripts", "lib", "plan-sets.mjs");
+  assert.match(sets, /stepCommand\(D, "collect"\)/, "the plan driver never folds the review through collect");
+  assert.match(sets, /stepCommand\(D, "check"\)/, "the plan driver never checks that the findings were answered");
+  const script = read("workflows", "plan-specs.js");
+  assert.match(script, /review: "Review", collect: "Review", check: "Review"/, "the plan-specs run never follows the review, collect and check");
   for (const gone of ["planReviewRounds", "scripts/lib/rounds.mjs", "outcome.json", "Open the round", "next round"]) {
     assert.ok(!plan.includes(gone), `plan.md still carries "${gone}"`);
   }
@@ -782,7 +812,7 @@ test("commands/status.md documents every reason drift can be unknown", () => {
 
 test("the compared set is exactly the directories the plugin reaches into", async () => {
   const { EXECUTED_ROOTS } = await import("../scripts/running-plugin.mjs");
-  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills"]);
+  assert.deepEqual(EXECUTED_ROOTS, ["agents", "commands", "prompts", "schemas", "scripts", "skills", "workflows"]);
   const unclassified = [];
   for (const { file, text } of [...commands, { file: "SKILL.md", text: skill }]) {
     for (const [, dir] of text.matchAll(/(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$P)\/([A-Za-z0-9._-]+)\//g)) {
@@ -891,18 +921,129 @@ function dispatchRuleProblems(name, text) {
   return problems;
 }
 
-test("both commands tell the orchestrator how to dispatch, and it is the driver's rule", () => {
-  const ship = read("commands", "ship.md");
+test("the plan command and the skill tell the orchestrator how to dispatch, and it is the driver's rule", () => {
   const plan = read("commands", "plan.md");
   const problems = [
-    ["commands/ship.md", ship], ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill], ["scripts/ship.mjs", shipDriver]
+    ["commands/plan.md", plan], ["skills/tagteam/SKILL.md", skill]
   ].flatMap(([name, text]) => dispatchRuleProblems(name, text));
   assert.deepEqual(problems, [], problems.join("\n"));
-  assert.match(ship, /one message/i);
-  assert.match(plan, /one message/i);
-  // The plan side records its sets through its own script, in the ship's shape.
-  assert.match(plan, /scripts\/plan\.mjs" record --plan/, "plan.md never records a set");
+  // The agents of a set go out together from the run, not from the main session.
+  assert.match(read("workflows", "plan-specs.js"), /await parallel\(result\.dispatch\.map/, "the plan-specs run never sends a set together");
   assert.match(plan, /scripts\/plan\.mjs" resume --plan/, "plan.md's resume never applies the restart rule");
+});
+
+// The plan command starts one run once the goal is approved and ends its turn after
+// the call; the Workflow stop comes before anything is created. The guard is a
+// function so that its own test can hold it to the plan command as it was.
+function planWorkflowProblems(text) {
+  const flat = text.replace(/\s+/g, " ");
+  const problems = [];
+  if (!/^allowed-tools: .*\bWorkflow, Workflow\(tagteam:plan-specs\)/m.test(text)) problems.push("plan.md does not grant the Workflow tool and tagteam:plan-specs");
+  if (!/Workflow\(\{name: "tagteam:plan-specs"/.test(text)) problems.push("plan.md never starts a run of tagteam:plan-specs");
+  if (!/\*\*Then end your turn\.\*\*/.test(flat)) problems.push("plan.md does not end its turn after the Workflow call");
+  const stop = flat.indexOf("(it needs the Workflow tool), so nothing was started");
+  if (stop === -1) problems.push("plan.md has no Workflow-required stop");
+  for (const created of ["derive a slug", "create `$D/work/`"]) {
+    if (stop !== -1 && flat.indexOf(created) < stop) problems.push(`plan.md places the Workflow-required stop after it says to ${created}`);
+  }
+  return problems;
+}
+
+test("the plan command starts a run of tagteam:plan-specs after the goal gate, ends its turn, and stops without the Workflow tool before creating anything", () => {
+  const plan = read("commands", "plan.md");
+  assert.deepEqual(planWorkflowProblems(plan), []);
+  const flat = plan.replace(/\s+/g, " ");
+  assert.match(flat, /completion notice wakes you/);
+  assert.match(flat, /Never stand in for the run by dispatching agents yourself/);
+  assert.ok(flat.indexOf("## 3 — Goal gate") < flat.indexOf("Workflow({name:"), "the run is started after the goal gate");
+});
+
+test("the Workflow guard fails on a plan command without the grant, without the stop, or with the stop after the work directory is made", () => {
+  const plan = read("commands", "plan.md");
+  const grant = "Workflow, Workflow(tagteam:plan-specs), ";
+  assert.ok(plan.includes(grant), "the plan command's grant is not where the test cuts it");
+  assert.ok(planWorkflowProblems(plan.replace(grant, "")).some((problem) => /does not grant the Workflow tool/.test(problem)));
+  assert.ok(planWorkflowProblems(plan.replace("Workflow(tagteam:plan-specs), ", "")).some((problem) => /does not grant/.test(problem)));
+  assert.ok(planWorkflowProblems(plan.replace(/\(it\s+needs\s+the\s+Workflow\s+tool\),\s+so\s+nothing\s+was\s+started/, "(missing)")).some((problem) => /no Workflow-required stop/.test(problem)));
+  const stop = plan.slice(plan.indexOf("2. Check that `Workflow`"), plan.indexOf("3. `node \"$P/scripts/running-plugin.mjs\""));
+  assert.match(stop, /so\s+nothing\s+was\s+started/, "the stop is not where the test cuts it");
+  const late = plan.replace(stop, "").replace("Seven steps, and none of them loops.", `${stop}\nSeven steps, and none of them loops.`);
+  assert.ok(planWorkflowProblems(late).some((problem) => /places the Workflow-required stop after/.test(problem)), planWorkflowProblems(late).join("\n"));
+});
+
+// The ship command no longer dispatches: one run of the ship-spec workflow does,
+// and the session starts it, ends its turn, and is woken by its completion notice.
+test("the ship command starts a run of tagteam:ship-spec, ends its turn after the call, and stops without the Workflow tool", () => {
+  const ship = read("commands", "ship.md");
+  const flat = ship.replace(/\s+/g, " ");
+  assert.match(ship, /Workflow\(\{name: "tagteam:ship-spec"/);
+  assert.match(ship, /^allowed-tools: .*\bWorkflow, Workflow\(tagteam:ship-spec\)/m);
+  assert.match(flat, /\*\*Then end your turn\.\*\*/);
+  assert.match(flat, /completion notice wakes you/);
+  assert.match(ship, /^## The Workflow tool is required$/m);
+  assert.match(flat, /\(it needs the Workflow tool\), so nothing was started/);
+  assert.match(flat, /Never stand in for the run by dispatching agents yourself/);
+  assert.doesNotMatch(flat, /Agent call|set\.arrive|run_in_background/, "the session records no arrival and makes no Agent call");
+});
+
+// A turn that exists only to wait is the most expensive thing the main session
+// can do. Every command file is held to saying "end your turn" and nothing else
+// about waiting: no shell sleep, no wait loop, no background Bash call, and no
+// instruction to poll, watch or schedule a wake-up. A sentence that forbids one
+// is the rule itself and passes.
+function waitingProblems(name, text) {
+  const flat = text.replace(/\s+/g, " ");
+  const problems = [];
+  if (/\bsleep\s+\d/.test(flat)) problems.push(`${name} runs a shell sleep`);
+  if (/until \[|while true/.test(flat)) problems.push(`${name} describes a wait loop`);
+  if (/run_in_background: true/.test(flat)) problems.push(`${name} runs a command in the background`);
+  for (const sentence of flat.split(/(?<=[.!?])\s+/)) {
+    if (/\b(?:sleep|poll(?:s|ing)?|watch(?:es|ing)?|wake-?ups?|schedul\w+)\b/i.test(sentence)
+      && !/\b(?:never|not|no|nothing|without|neither|nor|don't)\b/i.test(sentence)) {
+      problems.push(`${name} tells the session to wait some way other than ending its turn: ${sentence.slice(0, 100)}`);
+    }
+  }
+  return problems;
+}
+
+test("no command file sleeps, loops, polls or runs a command in the background to wait", () => {
+  const problems = commands.flatMap((entry) => waitingProblems(`commands/${entry.file}`, entry.text));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the waiting guard fails on the publish passage ship.md had, and passes the rule that forbids waiting", () => {
+  const publish = "  `publish` waits for the pull request's checks before it returns, and that can\n"
+    + "  take a long time: up to `ciStartWaitSec` for a first check to appear when the\n"
+    + "  commit has a workflow that runs on pull requests, then up to `ciWaitSec` for\n"
+    + "  the checks to finish, plus a few seconds — far past the limit of a foreground\n"
+    + "  Bash call. So run this one command as a background Bash call\n"
+    + "  (`run_in_background: true`), end your turn, and act on its output when its\n"
+    + "  completion notice arrives, exactly as if it had returned in the foreground.\n"
+    + "  Nothing in between: its own completion notice is what wakes you. When it\n"
+    + "  says `Waiting up to …s for checks to start`, relay that line. A spec's repair\n"
+    + "  and its revisit both come back through `publish`, and wait the same way.\n";
+  assert.ok(waitingProblems("ship.md", publish).some((problem) => /in the background/.test(problem)), "the publish passage");
+  assert.ok(waitingProblems("ship.md", "Wait with `sleep 30` between calls.").some((problem) => /shell sleep/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "until [ -f \"$f\" ]; do :; done").some((problem) => /wait loop/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "while true; do check; done").some((problem) => /wait loop/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "Poll the status every minute until the run is in.").some((problem) => /other than ending its turn/.test(problem)));
+  assert.ok(waitingProblems("ship.md", "Schedule a wake-up for the agent.").some((problem) => /other than ending its turn/.test(problem)));
+  assert.deepEqual(waitingProblems("ship.md", "Never sleep, poll, watch or schedule a wake-up for a run: its completion notice is what wakes you."), []);
+  assert.deepEqual(waitingProblems("ship.md", "Then end your turn. Never run a command only to pass the time."), []);
+});
+
+// A workflow script cannot import, so each piece of the step helper it needs is
+// pasted into it. They are held equal to the module's text, so a change to one
+// without the other fails here and not mid-run.
+test("the ship-spec and plan-specs scripts carry the step helper's checksum, schema and prompt exactly as the module does", async () => {
+  const helper = await import("../scripts/lib/step-helper.mjs");
+  for (const file of ["ship-spec.js", "plan-specs.js"]) {
+    const script = read("workflows", file);
+    for (const piece of [helper.checksumOf, helper.stepHelperSchema, helper.stepHelperPrompt]) {
+      const pasted = new RegExp(`^function ${piece.name}\\(.*?\\n\\}$`, "ms").exec(script)?.[0];
+      assert.equal(pasted, piece.toString(), `workflows/${file} carries ${piece.name} differently from scripts/lib/step-helper.mjs`);
+    }
+  }
 });
 
 test("the dispatch guard fails on the plan command as it read before it had sets", () => {
@@ -1302,4 +1443,33 @@ test("no stop is built with a caught error's or a child's text in it", () => {
   ]) {
     assert.ok(!bareStopCalls(fine).some(({ text }) => CARRIES_RAW_TEXT(text)), `the guard flags ${fine}`);
   }
+});
+
+// A workflow script named like a command shadows that command. Only the scripts
+// directly inside `workflows/` load, so those are the ones read. "Workflow" here
+// is a Claude Code workflow script, not a GitHub Actions file.
+function shadowedCommands(scripts, commandNames) {
+  return scripts.flatMap(({ file, text }) => {
+    const names = [file.replace(/\.js$/, ""), /\bname:\s*["']([^"']+)["']/.exec(text)?.[1]].filter(Boolean);
+    return names.filter((name) => commandNames.includes(name)).map((name) => `workflows/${file} is named ${name}, which shadows the ${name} command`);
+  });
+}
+
+test("no workflow script carries the name of a command", () => {
+  const dir = path.join(root, "workflows");
+  const scripts = fs.existsSync(dir)
+    ? fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
+      .map((entry) => ({ file: entry.name, text: read("workflows", entry.name) }))
+    : [];
+  const problems = shadowedCommands(scripts, commandFiles.map((file) => file.replace(/\.md$/, "")));
+  assert.deepEqual(problems, [], problems.join("\n"));
+
+  const names = ["ship", "plan", "status"];
+  assert.ok(commandFiles.includes("ship.md"), "the commands this guard compares against include ship");
+  assert.equal(shadowedCommands([{ file: "ship.js", text: 'export const meta = { name: "other" };' }], names).length, 1, "a script named ship");
+  assert.equal(shadowedCommands([{ file: "other.js", text: 'export const meta = {\n  name: "plan",\n};' }], names).length, 1, "a meta named plan");
+  assert.deepEqual(shadowedCommands([
+    { file: "ship-spec.js", text: 'export const meta = { name: "ship-spec" };' },
+    { file: "plan-specs.js", text: 'export const meta = { name: "plan-specs" };' }
+  ], names), []);
 });
