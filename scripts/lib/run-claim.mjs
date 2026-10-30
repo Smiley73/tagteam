@@ -72,6 +72,10 @@ export function claimSpec(file, run) {
   try {
     const earlier = JSON.parse(fs.readFileSync(file, "utf8"));
     const same = earlier.run === run;
+    // A driver that has already died cannot be ended, and the checks poller it
+    // left behind was handed to the system's reaper, where nothing here can find
+    // it; that poller stops on its own once the driver it was started by is
+    // gone (ci-wait.mjs, `--parent-pid`).
     if (!same && Number.isSafeInteger(earlier.pid) && earlier.pid !== process.pid && alive(earlier.pid)
       && earlier.identity && earlier.identity === processIdentity(earlier.pid)) {
       endProcess(earlier.pid);

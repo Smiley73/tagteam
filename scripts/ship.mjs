@@ -4616,6 +4616,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
       ...(rerunAt ? ["--rerun-at", rerunAt] : []),
       // Before a rerun is asked for, a failure waits for the rest of its run.
       ...(request === null ? ["--settle-runs", "1"] : []),
+      // The wait stops, writing nothing, if this driver dies under it.
+      "--parent-pid", String(process.pid),
       "--out", ciPath(ctx, id)
     ], { allow: [1] });
     const outcome = readJson(ciPath(ctx, id));
@@ -5939,6 +5941,8 @@ function waitPlanChecks(ctx, record, tip, say) {
   const ran = node("ci-wait.mjs", [
     "--repo", ctx.repo, "--pr", String(record.pr.number), "--wait-sec", String(ctx.config.ciWaitSec),
     ...(start.seconds > 0 ? ["--start-wait-sec", String(start.seconds)] : []),
+    // The wait stops, writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid),
     "--out", out
   ], { allow: [1] });
   const outcome = readJson(out);

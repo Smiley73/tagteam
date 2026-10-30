@@ -75,6 +75,10 @@ function parseArgs(argv) {
   if (!options.out) throw new Error("--out is required");
   if (!Number.isFinite(options.waitSec) || options.waitSec < 0) throw new Error("--wait-sec must be a non-negative number");
   if (!Number.isFinite(options.startWaitSec) || options.startWaitSec < 0) throw new Error("--start-wait-sec must be a non-negative number");
+  if (options.parentPid !== undefined) {
+    options.parentPid = Number(options.parentPid);
+    if (!Number.isSafeInteger(options.parentPid) || options.parentPid <= 0) throw new Error("--parent-pid must be a process id");
+  }
   return options;
 }
 
@@ -114,7 +118,10 @@ function unsettledRun(rows) {
 
 // A wait outlives the driver that started it when the driver is killed, and
 // nothing then ends it: its result would be written beside whatever a later run
-// has recorded. So it stops, and writes nothing, once its parent is gone.
+// has recorded. So it stops, and writes nothing, once its parent is gone. The
+// driver names itself with `--parent-pid`: a wait that asked the OS who its
+// parent was once it was up would be told the reaper's pid when the driver had
+// already died, and would then never see it go.
 const ABANDONED = "the command that started this wait has ended, so its result is not written";
 
 export async function waitForChecks({
@@ -175,9 +182,9 @@ export async function waitForChecks({
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
-    const parent = process.ppid;
     const result = await waitForChecks({
-      abandoned: () => process.ppid !== parent,
+      // Named by the driver; a wait nobody named runs to its end.
+      abandoned: options.parentPid === undefined ? () => false : () => process.ppid !== options.parentPid,
       repo: path.resolve(options.repo),
       pr: options.pr,
       waitSec: options.waitSec,
