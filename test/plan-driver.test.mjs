@@ -8,7 +8,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { readSet } from "../scripts/dispatch-set.mjs";
 import { checksumOf } from "../scripts/lib/step-helper.mjs";
-import { arriveInto, planEnv, runScript, stagePlanWorkspace } from "./stage.mjs";
+import { arriveInto, planEnv, runScript, stagePlanWorkspace, stageTranscript } from "./stage.mjs";
 
 const write = (file, value) => fs.writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
 const setsDir = (ws) => path.join(ws.D, "work", "sets");
@@ -353,8 +353,37 @@ test("resume names the step to pick up at, worked out from the sets on record", 
   assert.equal(command(step(reviewed, "resume").json.next), "collect", "a judged review names collect again, which is safe to run twice");
   const bare = stagePlanWorkspace();
   assert.equal(command(step(bare, "resume").json.next), "explore");
+  // The explorer runs before the goal exists, so it is named whether or not the goal is approved.
   fs.rmSync(path.join(bare.D, "work", "goal-approved"));
   const unapproved = step(bare, "resume");
-  assert.equal(unapproved.json.next, undefined);
-  assert.match(unapproved.json.say.join("\n"), /the goal has not been approved yet/);
+  assert.equal(command(unapproved.json.next), "explore");
+  assert.doesNotMatch(unapproved.json.say.join("\n"), /no step to pick up at/);
+});
+
+test("a resume that lost the explorer before the goal was approved sends it again, not the session on to the interview", () => {
+  // Every spec writer and the drafter read exploration.md, so a relaunch must
+  // not walk past the one step that writes it just because the goal is not there
+  // yet. Only once the exploration is on disk is the interview where to carry on.
+  const ws = stagePlanWorkspace();
+  fs.rmSync(path.join(ws.D, "work", "goal-approved"));
+  stageTranscript(ws, "first");
+  stageTranscript(ws, "second");
+  write(path.join(ws.D, "work", "request.md"), "Make the recovery flow friendlier.\n");
+  const sent = step(ws, "explore", [], "first");
+  assert.equal(sent.status, 0, sent.stderr);
+  // The session that sent it is gone, and the explorer wrote nothing.
+  const released = step(ws, "resume", [], "second");
+  assert.equal(released.status, 0, released.stderr);
+  assert.match(released.json.say.join("\n"), /another session, which is gone/);
+  assert.equal(command(released.json.next), "explore");
+  assert.doesNotMatch(released.json.say.join("\n"), /no step to pick up at/);
+  assert.equal(fs.existsSync(path.join(ws.D, "work", "exploration.md")), false);
+
+  const again = step(ws, "explore", [], "second");
+  assert.equal(again.status, 0, again.stderr);
+  write(path.join(ws.D, "work", "exploration.md"), "# Exploration\n");
+  arrive(ws, again);
+  const interview = step(ws, "resume", [], "second");
+  assert.equal(interview.json.next, undefined);
+  assert.match(interview.json.say.join("\n"), /the goal has not been approved yet/);
 });

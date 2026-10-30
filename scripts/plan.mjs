@@ -840,12 +840,15 @@ async function main() {
       const options = resumeFlags(rest);
       const { outcome, ...payload } = await resumePlanSets({ planDir: options.plan, runGone: options.runGone, runLive: options.runLive });
       // Nothing out and nothing waiting on a judging step: the sets and the disk
-      // say where to pick up, once there is a goal to build on.
+      // say where to pick up. The explorer runs before there is a goal to
+      // approve, so it is named without one; every step after it needs the goal
+      // to verify first, and without that the interview is where to carry on.
       if (!payload.next && !payload.ask && !payload.set) {
+        const step = pickUp(options.plan);
         let goal;
         try { goal = verifyGoal(options.plan); } catch (error) { goal = { ok: false, reason: error.message }; }
-        if (goal.ok) {
-          payload.next = pickUp(options.plan);
+        if (goal.ok || step === stepCommand(options.plan, "explore")) {
+          payload.next = step;
         } else {
           payload.say = [...payload.say, `There is no step to pick up at: ${goal.reason}.`];
         }
