@@ -30,7 +30,8 @@ orchestrator reads the summaries. Nothing large is ever moved between steps by
 passing it through a model. In a ship, `scripts/ship.mjs` sequences every step
 and prints every dispatch, and one run of the `tagteam:ship-spec` workflow per unit
 executes it while the main agent ends its turn; in a plan, `scripts/plan.mjs` sequences every
-step the same way, prints every dispatch with its prompt and folds the review.
+step the same way, prints every dispatch with its prompt and folds the review, and after the goal gate
+one run of the `tagteam:plan-specs` workflow executes it.
 
 Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
 
@@ -306,8 +307,9 @@ what falls between them, and nothing about a repository brief reaches it.
 plugin ships one agent per role — `tagteam:implementer`, `tagteam:fixer`,
 `tagteam:reviewer` and the rest — and the Agent tool takes a `model` and an
 `effort` on every call. The ship's workflow run passes `effort` on every call,
-beside the `model`, exactly as `ship.mjs` printed them, and a plan does the same
-with what each `plan.mjs` step printed. An effort left off does not fail: the agent
+beside the `model`, exactly as `ship.mjs` printed them, and a plan's run does the
+same with what each `plan.mjs` step printed, and so does the session for the
+explorer. An effort left off does not fail: the agent
 silently runs at whatever effort the session uses. No role agent's file pins a
 model, so nothing but the call decides it, and outside a workflow run nothing but
 the call decides an effort either. Two plumbing agents pin a fixed pair:
@@ -350,20 +352,21 @@ exists only to wait is the single most expensive thing an orchestrator can do. T
 one this replaced spent a third of its turns, and up to two thirds of its tokens,
 running `true` while it waited.
 
-A plan dispatches as `commands/plan.md` says: each Agent call there asks for
-`run_in_background: false` where the call allows it, because one return is cheaper
-than one wake-up per agent, and nothing depends on getting it. Each agent's label
-is its `description`, the name Claude Code repeats in the notice it posts when that
-agent finishes, and the orchestrator records every arrival with `set.arrive` — once
-with every label when they come back together, or one quick call per finished
-notice when they do not.
+In a plan, the session sends the explorer and nothing else: its Agent call asks
+for `run_in_background: false` where the call allows it, because one return is
+cheaper than one wake-up, and nothing depends on getting it. The label is the
+call's `description`, the name Claude Code repeats in the notice it posts when the
+agent finishes, and the session records the arrival with `set.arrive`. Everything
+after the goal gate is one run of the `tagteam:plan-specs` workflow, which sends
+each step's agents together and records their arrivals as a ship's run does.
 
 In a ship, `ship.mjs` prints the dispatch list with the agent, the model, the
 effort and the prompt for each, and the set those agents form; `commands/ship.md`
 says how a run starts and ends. In a plan, each `plan.mjs` step
 prints each Claude call's agent, model, effort, label and prompt, records the set
 before it prints it, and refuses by the job's name an effort that is missing or
-not on the ladder; `commands/plan.md` says how the main session runs the steps.
+not on the ladder; `commands/plan.md` says how the main session runs the steps up
+to the goal gate, and how it starts and reads a run after it.
 
 ## Codex
 
@@ -834,7 +837,7 @@ a new commit appears — and every fix round makes one.
 | Script | Does |
 |---|---|
 | `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers — `next` never prints `accept` or `revisit`, and prints `redesign` only when `autoRedesign` answers the first same-file Recurring question of a cycle with a fix round left — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
-| `plan.mjs` | The plan side: `explore`, `draft`, `review`, `collect`, `check`, `writers` and `specs` (the planning steps: each records the set it sends, prints the dispatch with its prompt and names what comes next; `review` also prepares the Codex plan review for the runner, `collect` folds the three readers into a brief once their set is in, `check` confirms every gating finding is answered once the drafter's set is in), `resume` (apply the restart rule to a set still out and name the step to pick up at), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
+| `plan.mjs` | The plan side: `explore`, `draft`, `review`, `collect`, `check`, `writers` and `specs` (the planning steps: each records the set it sends, prints the dispatch with its prompt and names what comes next; `review` also prepares the Codex plan review for the runner, `collect` folds the three readers into a brief once their set is in, `check` confirms every gating finding is answered once the drafter's set is in), `resume` (apply the restart rule to a set still out and name the step to pick up at; `--owed` names only a judging step a set still owes, which is how every run of `tagteam:plan-specs` opens), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |
 | `gates.mjs` | Per-spec state file; `init`, `state`, `round`, `grant`, `bind`, `record`, `evaluate`, `roles`, `adopt-merge` |

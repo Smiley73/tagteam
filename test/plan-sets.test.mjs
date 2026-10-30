@@ -371,12 +371,22 @@ test("a restart from the same session keeps waiting on the reader still out, and
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.match(resumed.json.say.join("\n"), /sent out from this session and is still waiting on Codex/);
   assert.deepEqual(resumed.json.set.labels, ["Codex plan review"]);
-  assert.match(resumed.json.howToWait, /End your turn/);
+  assert.equal(resumed.json.howToWait, undefined, "a plan-specs run waits on nothing: only the explorer's set is waited on by the session");
   assert.match(resumed.json.next, /plan\.mjs" collect/);
   assert.equal(stateOf(ws, readers), "open");
   assert.equal(collect(ws, "same").status, 5);
   // And the wait it describes is the real one: the last arrival names collect.
   assert.match(arriveInto(ws, resumed, ["Codex plan review"]).json.next, /plan\.mjs" collect/);
+});
+
+test("the explorer's set, which the session itself waits on, is resumed with how to wait for it", () => {
+  const ws = stagePlanWorkspace();
+  stageTranscript(ws, "same");
+  const explore = recordPlanSet(ws, "explore", [["Explore the repository", path.join(ws.D, "work", "exploration.md")]], "same");
+  assert.equal(explore.status, 0, explore.stderr);
+  const resumed = resume(ws, "same");
+  assert.deepEqual(resumed.json.set.labels, ["Explore the repository"]);
+  assert.match(resumed.json.howToWait, /End your turn/);
 });
 
 test("a later run in the same session releases the review an earlier run left out, and keeps waiting when either run is unknown or both are the same", () => {

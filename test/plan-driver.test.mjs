@@ -470,6 +470,29 @@ test("resume names the step to pick up at, worked out from the sets on record", 
   assert.doesNotMatch(unapproved.json.say.join("\n"), /no step to pick up at/);
 });
 
+test("resume --owed names a judging step a set still owes and never the step to pick up at, and only the explorer's dispatch says how to make the call", () => {
+  const ws = stagePlanWorkspace();
+  write(path.join(ws.D, "work", "request.md"), "Make the recovery flow friendlier.\n");
+  const explore = step(ws, "explore");
+  assert.match(explore.json.howToDispatch, /run_in_background: false/);
+  write(path.join(ws.D, "work", "exploration.md"), "# Exploration\n");
+  arrive(ws, explore);
+  assert.equal(step(ws, "resume", ["--owed"]).json.next, undefined, "the explorer owes no judging step");
+  assert.match(step(ws, "resume").json.next, / draft --plan /, "without --owed the step to pick up at is named");
+
+  const draft = step(ws, "draft");
+  assert.equal(draft.json.howToDispatch, undefined, "a step the main session does not dispatch carries no instruction for it");
+  write(path.join(ws.D, "plan.md"), PLAN);
+  arrive(ws, draft);
+  const reviewed = step(ws, "review");
+  for (const reader of ["claude", "codex", "adversary"]) write(path.join(ws.review, `${reader}.json`), review(reader));
+  arrive(ws, reviewed);
+  assert.equal(command(step(ws, "resume", ["--owed"]).json.next), "collect", "a review that is in and unjudged is owed its step");
+  step(ws, "collect");
+  assert.equal(step(ws, "resume", ["--owed"]).json.next, undefined, "a judged review owes nothing");
+  assert.equal(command(step(ws, "resume").json.next), "collect");
+});
+
 test("a resume that lost the explorer before the goal was approved sends it again, not the session on to the interview", () => {
   // Every spec writer and the drafter read exploration.md, so a relaunch must
   // not walk past the one step that writes it just because the goal is not there

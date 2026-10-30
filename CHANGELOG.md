@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.0
+
+- Run `/tagteam:ship` and `/tagteam:plan` as Claude Code workflows. A ship runs each spec as one workflow run, and a plan runs from the approved goal to validated specs as one. Progress shows in Claude Code's workflow view, every agent under its name and every line the driver says as the driver wrote it, and the main session takes far fewer turns because it starts a run, goes quiet and is woken when the run ends.
+- Require the Workflow tool. Without it `/tagteam:ship` and `/tagteam:plan` say so in one sentence and create nothing; if `/config` shows a "Dynamic workflows" row, enabling it and restarting Claude Code lets the next session run them.
+- End every run as done, stopped with the first line of the reason, or waiting on a question only you can answer. After you answer, a new run carries on from your answer: a plan revised after a finding against the goal is not reviewed again, and a ship or plan relaunched after a crash or a stop picks up from what is on disk.
+- In auto mode, Claude Code asks once per workflow name, `tagteam:ship-spec` and `tagteam:plan-specs`, the first time each is launched, and remembers the answer.
+- Remove the progress board and the `progressBoard` setting. Runs print only the driver's own plain-language updates, and a configuration that still sets `progressBoard` is refused with a message naming it.
+- Run `/tagteam:configure` once after upgrading. It carries the configuration to version 12 without asking anything new, and until then `/tagteam:plan` and `/tagteam:ship` stop before doing any work.
+- Write the pull request text for a spec, and for the plan's own pull request, with a dedicated writer agent working from facts the ship prepares. An unusable text is sent back once with what was wrong, and a second one stops with nothing pushed.
+- Count the agents that ran inside a workflow in the cost report and in the report of which agents ran at another effort or model than they were sent at, and report the step helper as its own kind of agent rather than as a spec writer.
+- Recommend setting `subagentPromptCacheTtl` to `"1h"` in your own Claude Code settings. `/tagteam:configure` does not write it.
+- The configured per-role efforts do not reach the agents inside a run: Claude Code was not shown to apply an effort passed on a call there, so those agents run at the effort their agent file pins, or at the session's, and the effort report shows any difference. The explorer that `/tagteam:plan` sends itself does get its configured effort.
+
 ## 0.13.6
 
 - Remove the throwaway `/tagteam:workflow-spike` command and its workflow script. While it was installed, `/tagteam:ship` started the throwaway workflow instead of a ship, because a plugin's workflow shadows the command of the same name; `/tagteam:ship` works again. What the spike found is in `docs/workflow-spike-findings.md`.

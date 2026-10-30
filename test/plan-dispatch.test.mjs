@@ -138,10 +138,13 @@ test("every label a step prints resolves back to exactly that call, and no other
 test("plan.md runs every planning step through the driver and composes no name or effort by hand", () => {
   const plan = fs.readFileSync(path.join(root, "commands", "plan.md"), "utf8");
   const flat = plan.replace(/\s+/g, " ");
-  for (const step of ["plan.mjs\" explore --plan", "plan.mjs\" draft --plan", "plan.mjs\" review --plan",
-    "plan.mjs\" writers --plan", "--spec <id> --note <file>"]) {
+  // The review and the steps after it belong to the plan-specs run, which follows
+  // the driver's `next`; plan.md starts that run at the draft or at a re-send.
+  for (const step of ["plan.mjs\" explore --plan", "plan.mjs\" draft --plan", "plan.mjs\" writers --plan", "--spec <id> --note <file>"]) {
     assert.ok(flat.includes(step), `plan.md never runs ${step}`);
   }
+  const script = fs.readFileSync(path.join(root, "workflows", "plan-specs.js"), "utf8");
+  assert.match(script, /review: "Review"/, "the plan-specs run never runs the review step");
   // A per-effort placeholder anywhere is `role-agents.test.mjs`'s scan.
   for (const gone of ["carried by the agent's name", "plan.mjs\" dispatch", "plan.mjs\" record", "plan.mjs\" roles", "plan.mjs\" codex"]) {
     assert.ok(!plan.includes(gone), `plan.md still carries: ${gone}`);

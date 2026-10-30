@@ -49,7 +49,6 @@ import {
   CODEX_PLAN_REVIEW,
   DRAFTER_KINDS,
   HOW_TO_DISPATCH,
-  HOW_TO_WAIT,
   NOT_IN_YET,
   PlanSetError,
   READER_NAMES,
@@ -347,7 +346,7 @@ const USAGE = `usage:
   plan.mjs check   --plan <plan-dir>
   plan.mjs writers --plan <plan-dir> [--spec <id> --note <file>]
   plan.mjs specs   --plan <plan-dir>
-  plan.mjs resume  --plan <plan-dir> [--run-gone | --run-live]
+  plan.mjs resume  --plan <plan-dir> [--owed] [--run-gone | --run-live]
   plan.mjs effort-check --plan <plan-dir>
   plan.mjs approve --plan <plan-dir> --config <config.json>
 
@@ -369,7 +368,9 @@ const USAGE = `usage:
   it left unanswered, or asks the owner. \`writers\` sends one spec writer per
   deliverable, or one again with --spec and --note. \`specs\` validates the specs
   and sends the writer of a refused one again once. \`resume\` applies the
-  restart rule to a set still out and names the step to pick up at. A judging
+  restart rule to a set still out and names the step to pick up at; with --owed it
+  names only a judging step that a set leaving the restart still owes, and no
+  step to pick up at. A judging
   step exits ${NOT_IN_YET} while its set is not in, and ${REFUSED} when the sets on record do not
   allow it, changing nothing either way. \`effort-check\` names, for step 7, every
   planning agent that ran at a different effort or model than it was sent at and
@@ -413,6 +414,7 @@ function resumeFlags(argv) {
     const key = argv[index];
     if (key === "--run-gone") { options.runGone = true; continue; }
     if (key === "--run-live") { options.runLive = true; continue; }
+    if (key === "--owed") { options.owed = true; continue; }
     if (key !== "--plan") throw new PlanSetError(`resume does not take ${key}\n${USAGE}`);
     options.plan = argv[++index];
     if (options.plan === undefined) throw new PlanSetError(`--plan requires a value\n${USAGE}`);
@@ -542,7 +544,7 @@ async function send(ctx, kind, entries, payload) {
     dispatch: entries.map(({ call }) => call),
     set: { id: sent.id, labels: sent.labels, arrive: arriveCommand(sent.dir, sent.id) },
     next: sent.record.next,
-    howToDispatch: HOW_TO_DISPATCH
+    ...(kind === "explore" ? { howToDispatch: HOW_TO_DISPATCH } : {})
   };
 }
 
@@ -871,7 +873,7 @@ async function main() {
       // say where to pick up. The explorer runs before there is a goal to
       // approve, so it is named without one; every step after it needs the goal
       // to verify first, and without that the interview is where to carry on.
-      if (!payload.next && !payload.ask && !payload.set) {
+      if (!options.owed && !payload.next && !payload.ask && !payload.set) {
         const step = pickUp(options.plan);
         let goal;
         try { goal = verifyGoal(options.plan); } catch (error) { goal = { ok: false, reason: error.message }; }
@@ -881,7 +883,7 @@ async function main() {
           payload.say = [...payload.say, `There is no step to pick up at: ${goal.reason}.`];
         }
       }
-      print({ ...payload, ...(outcome === "waiting" ? { howToWait: HOW_TO_WAIT } : {}) });
+      print(payload);
       return;
     }
     if (action === "effort-check") {
