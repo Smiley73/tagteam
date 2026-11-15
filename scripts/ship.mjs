@@ -1661,7 +1661,7 @@ const TIDY_DISTANCE = 5;
 // The lines of each file the change from `from` to `to` touched, in the new
 // file: a hunk's own lines, or for a pure deletion the two it sat between.
 function changedRanges(ctx, from, to) {
-  const diff = git(ctx.worktree, ["-c", "core.quotePath=false", "diff", "-U0", "--no-renames", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to]).stdout;
+  const diff = git(ctx.worktree, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "-U0", "--no-renames", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to]).stdout;
   const ranges = new Map();
   let spans = null;
   for (const line of diff.split("\n")) {

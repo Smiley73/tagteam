@@ -283,18 +283,23 @@ test("a major next to what the tidy deleted throws the tidy away: back on the ea
   assert.equal(publish.json.ask, undefined);
 });
 
-test("a repository that configures git to print no a/ b/ prefixes still has a major next to the tidy's deletion throw it away", () => {
-  const cycle = begun();
-  collected(cycle, { economy: [DELETION] });
-  const earlier = cycle.state().candidateOid;
-  git(cycle.worktree, "config", "diff.noprefix", "true");
-  tidied(cycle);
-  cycle.run("snapshot");
-  const { settle } = reread(cycle, { raise: [{ ...major("app.js"), line: 3 }] });
-  assert.match(settle.json.say.join("\n"), /on what the tidy changed\. The tidy is thrown away/);
-  assert.equal(cycle.state().candidateOid, earlier);
-  assert.equal(cycle.json("tidy.json").outcome, "thrown-away");
-});
+for (const [what, setting, value] of [
+  ["print no a/ b/ prefixes", "diff.noprefix", "true"],
+  ["hand its diffs to an external program", "diff.external", "echo"]
+]) {
+  test(`a repository that configures git to ${what} still has a major next to the tidy's deletion throw it away`, () => {
+    const cycle = begun();
+    collected(cycle, { economy: [DELETION] });
+    const earlier = cycle.state().candidateOid;
+    git(cycle.worktree, "config", setting, value);
+    tidied(cycle);
+    cycle.run("snapshot");
+    const { settle } = reread(cycle, { raise: [{ ...major("app.js"), line: 3 }] });
+    assert.match(settle.json.say.join("\n"), /on what the tidy changed\. The tidy is thrown away/);
+    assert.equal(cycle.state().candidateOid, earlier);
+    assert.equal(cycle.json("tidy.json").outcome, "thrown-away");
+  });
+}
 
 test("what a thrown-away tidy's settle left open is not carried into a later round: the carry is the earlier candidate's", () => {
   const { cycle } = tidiedAndRead([{ ...major("app.js"), line: 3 }]);
