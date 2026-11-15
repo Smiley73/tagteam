@@ -20,6 +20,11 @@ counted as no verdict at all, and that finding stays open. An id looks like
 `2.codex.1`, and the leading number is part of it — it says which review round
 raised the finding, and shortening it to `codex.1` binds the verdict to nothing.
 
+The repository's conventions document (`none` when there is no such document).
+Open it only where a finding turns on a convention:
+
+{{CONVENTIONS}}
+
 The change as it now stands:
 
 {{DIFF}}

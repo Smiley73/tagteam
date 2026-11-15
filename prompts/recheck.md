@@ -14,6 +14,9 @@ says which review round raised the finding. Tidying it to `correctness.1`
 returns a verdict that binds to nothing, and the finding you judged resolved
 stays open.
 
+If your dispatch names a conventions document, consult it only where a finding
+you are judging, or the fixer's reason for declining it, turns on a convention.
+
 Then read the new change. It is on disk twice: whole, at the `review.diff` path
 you are given, and one file at a time in `review.diff.d/` beside it, where
 `index.txt` maps each piece to its path. Read the pieces for the files your

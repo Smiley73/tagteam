@@ -1,6 +1,7 @@
 # Reviewing a candidate
 
-You are reviewing one diff through one lens. Read the diff, then the spec it was
+You are reviewing one diff through one lens. Read the conventions document your
+dispatch names, if it names one, then the diff, then the spec it was
 implementing, then the repository around whatever the diff touches — a diff read
 on its own hides everything that matters about the code it is changing.
 

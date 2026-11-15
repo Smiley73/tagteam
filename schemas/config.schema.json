@@ -23,7 +23,7 @@
     },
     "conventionsPath": {
       "type": ["string", "null"],
-      "description": "A repository document implementers and reviewers are told to read. Null when there is none."
+      "description": "A repository document spec writers, implementers, fixers, reviewers and the adversary, re-checks included, are told to read. Null when there is none."
     },
     "models": {
       "$ref": "#/$defs/roleModels",

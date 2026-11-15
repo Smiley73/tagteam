@@ -357,6 +357,12 @@ const record = (ctx, id, gate, oid, file) => node("gates.mjs", ["record", stateP
 const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effort: job.effort });
 const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ? " (raised: escalation is in force)" : ""}`;
 
+// Where the repository's conventions document is: the primary checkout's copy,
+// not the worktree's, so that every agent of a run reads the same file. `none`
+// when the configuration names no document.
+const conventionsPath = (ctx) => (ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none");
+const conventionsLine = (ctx) => `Conventions document: ${conventionsPath(ctx)}`;
+
 // What the repository itself runs to call a candidate good, handed to the agents
 // that write code so they can run it before reporting rather than finding out at
 // the verify gate. The `when` is shown as configured and is read against the
@@ -392,7 +398,7 @@ function implementerDispatch(ctx, spec, job) {
       `Job: implementer`,
       `Spec: ${spec.path}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
-      `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      conventionsLine(ctx),
       verifyLine(ctx),
       validateLine(ctx, implementReportPath(ctx, spec.id), "implement-report.schema.json"),
       `Write your report to: ${implementReportPath(ctx, spec.id)}`
@@ -416,7 +422,7 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
       `Files to redesign: ${files.join(", ")}`,
       `Spec: ${spec.path}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
-      `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
+      conventionsLine(ctx),
       verifyLine(ctx),
       validateLine(ctx, implementReportPath(ctx, spec.id), "implement-report.schema.json"),
       `Write your report to: ${implementReportPath(ctx, spec.id)}`
@@ -463,6 +469,7 @@ function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) 
       `Lens brief (read this first, after prompts/review.md): ${brief}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       `Spec: ${target.specPath}`,
+      conventionsLine(ctx),
       ...(target.items ? [`Unfinished items to rule on: ${target.items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
@@ -479,7 +486,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { reuse = true } = {
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
     template: "review.md",
-    vars: { CANDIDATE: oid, LENSES: lenses.join(", ") },
+    vars: { CANDIDATE: oid, LENSES: lenses.join(", "), CONVENTIONS: conventionsPath(ctx) },
     fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff"), ITEMS: target.items },
     schema: "findings.schema.json",
     out: path.join(dir, "findings", "codex.json"),
@@ -504,6 +511,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
       `Spec: ${spec.path}`,
       `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       `The candidate's worktree (copy it to check a test, never edit it): ${ctx.worktree}`,
+      conventionsLine(ctx),
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
@@ -525,6 +533,7 @@ function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRe
       `Findings to judge, with their ids (judge every id in every file listed): ${inputs.join(" and ")}`,
       `New diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
       ...(lens === "adversary" ? [`The post-fix worktree (copy it to repeat a check, never edit it): ${ctx.worktree}`] : []),
+      conventionsLine(ctx),
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
       ...pullRequest,
       `Post-fix commit (set candidate to exactly this): ${oid}`,
@@ -545,7 +554,7 @@ function codexRecheckDispatch(ctx, spec, round, oid, input, job, { declinedRepor
   const prepared = writeCodexCommand({
     plugin: PLUGIN,
     ...request,
-    vars: { CANDIDATE: oid },
+    vars: { CANDIDATE: oid, CONVENTIONS: conventionsPath(ctx) },
     schema: "recheck.schema.json",
     out: path.join(outDir ?? path.join(dir, "recheck"), "codex.json"),
     model: job.model,
@@ -1008,6 +1017,7 @@ function fixerDispatch(ctx, spec, recordPath, job) {
       `Spec this change implements (to read, not to work from): ${spec.path}`,
       `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      conventionsLine(ctx),
       verifyLine(ctx),
       validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
       `Write your fix report to: ${fixReportPath(ctx, spec.id)}`
@@ -1040,6 +1050,7 @@ function repairDispatch(ctx, spec, state, job) {
         `What failed and its log: ${landing.resultPath ?? landing.dir}. Read it before changing anything; the commands `
           + "there are this repository's own, and they ran against the merged tree.",
         `Worktree (work only beneath this path): ${ctx.worktree}`,
+        conventionsLine(ctx),
         validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
         `Write your fix report to: ${fixReportPath(ctx, spec.id)} — outcomes is an empty array, and the repair is described in summary.`
       ].join("\n")
@@ -1053,6 +1064,7 @@ function repairDispatch(ctx, spec, state, job) {
       `This is a CI repair: no findings, a failing check. Its record is ${path.join(specDir(ctx, spec.id), "ci.json")}.`,
       `Pull request #${state.pr?.number ?? "?"} on branch ${state.branch}: read the failed check's log with gh (for example \`gh pr checks ${state.pr?.number ?? ""}\` and \`gh run view --log-failed\`) before changing anything.`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      conventionsLine(ctx),
       verifyLine(ctx),
       validateLine(ctx, fixReportPath(ctx, spec.id), "fix-report.schema.json"),
       `Write your fix report to: ${fixReportPath(ctx, spec.id)} — outcomes is an empty array, and the repair is described in summary.`
@@ -1087,6 +1099,7 @@ function reportResendDispatch(ctx, spec, { pending, state, oid, request, problem
       `Commit range of the work: ${pending?.candidate ?? ctx.baseOid}..${oid}`,
       ...brief,
       `Worktree (read only): ${ctx.worktree}`,
+      conventionsLine(ctx),
       `Why the report you were sent back for was refused:\n${problems.join("\n")}`,
       kept.length > 0 ? `The refused report is kept at ${kept.join(", ")}; the report path is empty.` : "Nothing was written at the report path.",
       validateLine(ctx, implementer ? implementReportPath(ctx, spec.id) : fixReportPath(ctx, spec.id), `${implementer ? "implement" : "fix"}-report.schema.json`),
@@ -2304,6 +2317,7 @@ function resolverDispatch(ctx, record, attempt, job, previous) {
       `Brief (what the reviewers are told this change is): ${resolveBriefPath(ctx, record.n)}`,
       ...previousLines(previous),
       `Worktree (work only beneath this path): ${ctx.worktree}`,
+      conventionsLine(ctx),
       "Your fix report: outcomes is an empty array, the resolution is described in summary, and status is complete only if "
         + "every path above is resolved. Without a complete report the merge is not pushed.",
       `Write your fix report to: ${resolverReportPath(ctx, record.n)}`
