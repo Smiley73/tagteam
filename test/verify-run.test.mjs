@@ -50,6 +50,29 @@ test("the default still skips a command whose when matches nothing, and its resu
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("keeping going runs every command after a failure, and only names the commands to run under the log numbers they have in a full run", async () => {
+  const { dir, config, candidate } = staged();
+  const marker = path.join(dir, "after.txt");
+  const failing = { verify: [
+    { command: "false", when: { globs: [], keywords: [] }, timeoutSec: 30 },
+    { command: `printf x >> ${JSON.stringify(marker)}`, when: { globs: [], keywords: [] }, timeoutSec: 30 },
+    { command: "false", when: { globs: [], keywords: [] }, timeoutSec: 30 }
+  ] };
+  const stopped = await verify({ config: failing, candidate, worktree: dir, outDir: path.join(dir, "stop") });
+  assert.deepEqual(Object.keys(stopped), ["status", "commands"], "the default result carries something new");
+  assert.equal(stopped.commands.length, 1);
+  assert.equal(fs.existsSync(marker), false, "the default ran a command after the first failure");
+  const all = await verify({ config: failing, candidate, worktree: dir, outDir: path.join(dir, "all"), keepGoing: true });
+  assert.equal(all.status, "failed");
+  assert.deepEqual(all.commands.map((entry) => entry.status), ["failed", "passed", "failed"]);
+  const some = await verify({ config: failing, candidate, worktree: dir, outDir: path.join(dir, "some"), keepGoing: true, only: [3] });
+  assert.equal(some.status, "failed");
+  assert.deepEqual(some.only, [3]);
+  assert.deepEqual(some.commands.map((entry) => path.basename(entry.logPath)), ["3.log"]);
+  await assert.rejects(verify({ config: failing, candidate, worktree: dir, outDir: path.join(dir, "bad"), only: [4] }), /--only names positions 1 to 3/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("the everything mode stops at the first failure, and nothing configured is not-applicable, never passed", async () => {
   const { dir, marker, config, candidate } = staged();
   const failing = { verify: [{ command: "false", when: { globs: ["nothing/**"], keywords: [] }, timeoutSec: 30 }, ...config.verify] };

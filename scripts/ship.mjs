@@ -659,14 +659,16 @@ function pullRequestFindingsLine(ctx, id, findings) {
 // A failure run once more on the same commit — a verify command, the landing
 // check's verify, failed checks on the pull request — leaves one record in its
 // round's `retries/`, written once and kept through re-entry: the kind, the
-// commit (and the base, for a landing check), what failed first, where both
-// attempts' evidence is, and what the second attempt gave. "Once" is read from
-// these records, so neither a revisit nor a later publish of the same commit
-// buys a second go.
+// commit (and the base, for a landing check, or the position of the command, for
+// a verify), what failed first, where both attempts' evidence is, and what the
+// second attempt gave. "Once" is read from these records, so neither a revisit
+// nor a later publish of the same commit buys a second go. A verify command's
+// record is its own; one from before that was one per candidate has no position
+// and stands for the command it names.
 const retriesOf = (dir) => path.join(dir, ROUND_RETRIES);
 
 function writeRetry(dir, record) {
-  const name = `${record.kind}-${short(record.candidate)}${record.base ? `-${short(record.base)}` : ""}.json`;
+  const name = `${record.kind}-${short(record.candidate)}${record.base ? `-${short(record.base)}` : ""}${record.index ? `-command-${record.index}` : ""}.json`;
   writeRoundFile(path.join(retriesOf(dir), name), `${JSON.stringify({ ...record, at: new Date().toISOString() }, null, 2)}\n`);
 }
 
@@ -1745,9 +1747,7 @@ function throwAwayTidy(ctx, id, state, plan, review) {
   markRound(roundDir(ctx, id, plan.round), { thrownAway: true });
   if (state.state !== "reviewing") transition(ctx, id, "reviewing");
   node("gates.mjs", ["bind", statePath(ctx, id), tidy.candidate, ctx.baseOid, path.join(earlier, "candidate.json")]);
-  // The result `verify` recorded: the retry's, when it ran one.
-  const retry = path.join(earlier, "verify-retry.json");
-  record(ctx, id, "verify", tidy.candidate, exists(retry) ? retry : path.join(earlier, "verify.json"));
+  record(ctx, id, "verify", tidy.candidate, path.join(earlier, "verify-result.json"));
   record(ctx, id, "report", tidy.candidate, path.join(earlier, ROUND_REPORT));
   writeJson(fixersPath(ctx, id), readJson(fixersPath(ctx, id), []).filter((fixer) => fixer.brief !== tidy.brief));
   writeJson(tidyPath(ctx, id), { ...tidy, outcome: "thrown-away", why: `the fresh pass raised ${raised.map((finding) => finding.id).join(", ")} on what it changed` });
@@ -3985,43 +3985,72 @@ async function verify(options) {
       throw Stop.beneath(`${id} was not verified, because the worktree could not be brought up to the lockfile this round commits. Look at the worktree at ${ctx.worktree}, then run verify again.`, broken);
     }
   }
-  const run = (name) => node("verify-run.mjs", [
+  const run = (name, ...more) => node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
     "--base", state.baseOid, "--candidate-oid", state.candidateOid, "--out-dir", path.join(dir, name), "--out", path.join(dir, `${name}.json`),
     // The verification stops, ending its command and writing nothing, if this driver dies under it.
-    "--parent-pid", String(process.pid),
+    "--parent-pid", String(process.pid), "--keep-going", "true",
     // A lockfile-only change matches no `when` in most configurations, which would wait for a person.
-    ...(isDependencyId(id) ? ["--select", "all"] : [])
+    ...(isDependencyId(id) ? ["--select", "all"] : []),
+    ...more
   ], { allow: [1] });
   run("verify");
   const first = readJson(path.join(dir, "verify.json"));
-  // A failure is run once more on the same commit, beside the first so that its
-  // evidence stays, and the second result is the gate. Run again in this round
-  // the step finds the second result already there; after a re-entry the record
-  // says this commit has had its second run, and the first result stands.
+  // Every command that failed is run once more on the same commit, beside the
+  // first so that its evidence stays, unless that command has had its second
+  // run already. Run again in this round the step finds the second result
+  // already there; after a re-entry the records say which commands have had
+  // theirs, and the first result stands for those.
   const again = path.join(dir, "verify-retry.json");
-  const retried = retryOf(ctx, id, "verify", state.candidateOid);
-  const retry = first.status === "failed" && (exists(again) || !retried);
-  if (retry && !exists(again)) run("verify-retry");
-  const outcome = retry ? readJson(again) : first;
-  if (retry && !retried) {
+  const earlier = retryRecords(ctx, id);
+  // Whether the command at `position` (from 1) of the applicable list has had its second run on this commit.
+  const hadSecond = (position) => earlier.some((record) => record.kind === "verify" && record.candidate === state.candidateOid
+    && (record.index === undefined ? record.failed === first.commands[position - 1].command : record.index === position));
+  const due = exists(again) ? [] : first.commands.flatMap((command, at) => (command.status === "failed" && !hadSecond(at + 1) ? [at + 1] : []));
+  if (due.length > 0) {
+    run("verify-retry", "--only", due.join(","));
+    // A second run that never finished leaves its log directory and no result; that is not a second run, and no result is settled on it.
+    if (!exists(again)) {
+      throw Stop.beneath(`${id} was not verified: the second run of a command that failed did not finish, and left no result. Remove ${path.join(dir, "verify-retry")} and run verify again.`, "");
+    }
+  }
+  const second = exists(again) ? readJson(again) : null;
+  // A retry written before commands were retried one by one ran the whole selection and has no `only`; its commands line up with the first run's by position.
+  const legacy = second !== null && second.only === undefined;
+  const secondRuns = new Map(legacy
+    ? second.commands.flatMap((result, at) => (first.commands[at]?.status === "failed" ? [[at + 1, result]] : []))
+    : (second?.only ?? []).map((position, at) => [position, second.commands[at]]));
+  const commands = (legacy ? second.commands : first.commands).map((command, at) => {
+    const runs = (legacy && !secondRuns.has(at + 1) ? [command] : [first.commands[at], ...(secondRuns.has(at + 1) ? [secondRuns.get(at + 1)] : [])])
+      .map(({ status, exitCode, timedOut, logPath }) => ({ status, exitCode, timedOut, logPath }));
+    return { command: command.command, status: runs.at(-1).status, runs };
+  });
+  const outcome = {
+    status: first.status === "not-applicable" ? first.status : commands.some((command) => command.status === "failed") ? "failed" : "passed",
+    ...(first.select ? { select: first.select } : {}),
+    commands
+  };
+  const settled = path.join(dir, "verify-result.json");
+  if (!exists(settled)) writeRoundFile(settled, `${JSON.stringify(outcome, null, 2)}\n`);
+  for (const [position, result] of secondRuns) {
+    if (hadSecond(position)) continue;
     writeRetry(dir, {
-      kind: "verify", candidate: state.candidateOid, failed: firstFailed(first)?.command ?? null,
-      first: path.join(dir, "verify.json"), second: again, result: outcome.status
+      kind: "verify", candidate: state.candidateOid, index: position, failed: first.commands[position - 1].command,
+      first: path.join(dir, "verify.json"), second: again, result: result.status
     });
   }
-  record(ctx, id, "verify", state.candidateOid, retry ? again : path.join(dir, "verify.json"));
+  record(ctx, id, "verify", state.candidateOid, settled);
   const say = [`Verification: ${outcome.status}${outcome.status === "not-applicable" ? " — nothing matched, which is not a pass and waits for a person" : ""}.`];
-  const lines = (result, attempt = "") => (result.commands ?? []).map((command) => `  ${attempt}${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
-  if (retry) {
-    say.push("The first run failed, and it was run once more on the same commit:", ...lines(first, "first run, "), ...lines(outcome, "second run, "));
-    if (outcome.status === "passed") {
-      say.push("It passed the second time; the pull request says so under Risk.");
-      resendBody(ctx, id, state, say);
-    }
-  } else {
-    if (first.status === "failed" && retried) say.push("Not run once more: this commit has already had its second run after a failure.");
-    say.push(...lines(outcome));
+  if (secondRuns.size > 0) say.push("A command that failed was run once more on the same commit:");
+  for (const [at, command] of commands.entries()) {
+    const [firstRun, secondRun] = command.runs;
+    const timedOut = (run) => (run.timedOut ? " (timed out)" : "");
+    if (secondRun) say.push(`  first run, ${firstRun.status}: ${command.command}${timedOut(firstRun)}`, `  second run, ${secondRun.status}: ${command.command}${timedOut(secondRun)}`);
+    else say.push(`  ${firstRun.status}: ${command.command}${timedOut(firstRun)}${firstRun.status === "failed" && hadSecond(at + 1) ? " — not run again: this commit has already had its second run of it after a failure" : ""}`);
+  }
+  if (commands.some((command) => command.runs[1]?.status === "passed")) {
+    say.push("A command that failed passed the second time; the pull request says so under Risk.");
+    resendBody(ctx, id, state, say);
   }
   // Which review this candidate gets. The first fix of a cycle skips the panel:
   // the round before it collected the panel's findings and nothing has settled
