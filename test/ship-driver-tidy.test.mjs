@@ -395,6 +395,30 @@ test("a snapshot run again after it decided against the tidy says the same, thou
   assert.match(again.json.next, /recheck/);
 });
 
+test("a snapshot run again after the tidy's round and report were recorded keeps the tidy, though tidy.json and the marker are as they were before", () => {
+  const cycle = begun();
+  collected(cycle, { economy: [DELETION] });
+  const earlier = cycle.state().candidateOid;
+  tidied(cycle);
+  const pendingFile = path.join(cycle.spec, "fix-pending.json");
+  const pending = fs.readFileSync(pendingFile, "utf8");
+  const before = fs.readFileSync(path.join(cycle.spec, "tidy.json"), "utf8");
+  cycle.run("snapshot");
+  const tidy = cycle.state().candidateOid;
+  assert.notEqual(tidy, earlier);
+  fs.writeFileSync(pendingFile, pending);
+  fs.writeFileSync(path.join(cycle.spec, "tidy.json"), before);
+  const again = cycle.run("snapshot");
+  assert.equal(cycle.json("tidy.json").outcome, "kept");
+  assert.equal(cycle.json("tidy.json").tidyRound, 2);
+  assert.equal(cycle.head(), tidy, "the tidy commit is not put back");
+  assert.equal(cycle.state().candidateOid, tidy);
+  assert.deepEqual(cycle.rounds(), ["1", "2"]);
+  assert.equal(fs.existsSync(pendingFile), false);
+  assert.doesNotMatch(again.json.say.join("\n"), /not kept/);
+  assert.match(again.json.next, /recheck/);
+});
+
 test("a tidy fixer that commits its own change has its tests run all the same, and is kept or put back like any other", () => {
   const runs = path.join(os.tmpdir(), `tagteam-tidy-committed-${process.pid}`);
   fs.rmSync(runs, { force: true });
