@@ -104,14 +104,20 @@ async function main() {
     // altered the snapshot between writing and verifying, and nothing relays
     // now. The OID binding is what still matters — verification proves a
     // specific commit works, not "whatever is on disk".
-    if (!args.base || !args["candidate-oid"]) {
-      throw new Error("--base and --candidate-oid are required");
+    // Every command runs whatever the change, so a tree no commit describes yet
+    // may be verified without a candidate, and is: it is a tidy's, before it is
+    // committed.
+    let candidate = { changedPaths: [], addedLines: [] };
+    if (args.select !== "all" || args.candidate !== undefined) {
+      if (!args.base || !args["candidate-oid"]) {
+        throw new Error("--base and --candidate-oid are required");
+      }
+      candidate = validateCandidateSnapshot(args.candidate, {
+        baseOid: args.base,
+        candidateOid: args["candidate-oid"],
+        candidateHash: args["candidate-hash"]
+      });
     }
-    const candidate = validateCandidateSnapshot(args.candidate, {
-      baseOid: args.base,
-      candidateOid: args["candidate-oid"],
-      candidateHash: args["candidate-hash"]
-    });
     let parentPid;
     if (args["parent-pid"] !== undefined) {
       parentPid = Number(args["parent-pid"]);

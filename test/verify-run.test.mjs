@@ -82,6 +82,21 @@ function lingering(dir) {
   return { command, pidFile, pidOf, settles, up };
 }
 
+test("the command line verifies a tree no commit describes yet in the everything mode, and in no other", () => {
+  const { dir, marker, config } = staged();
+  const configPath = path.join(dir, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  const run = (...extra) => spawnSync(process.execPath, [VERIFY_RUN, "--worktree", dir, "--config", configPath, "--out-dir", path.join(dir, "out"), "--out", path.join(dir, "result.json"), ...extra], { encoding: "utf8" });
+  const refused = run();
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /--base and --candidate-oid are required/);
+  const every = run("--select", "all");
+  assert.equal(every.status, 0, every.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8")).select, "all");
+  assert.equal(fs.readFileSync(marker, "utf8"), "x", "every command ran, whatever its when");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a verification whose starter has gone ends the command it is running and returns no result", async () => {
   // The old run had no such question: the command ran to its end, or to its
   // timeout, and the result was handed back for a caller no longer there to

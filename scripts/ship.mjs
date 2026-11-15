@@ -1569,11 +1569,12 @@ const routeAfterCollect = (ctx, id, round) =>
   (readJson(path.join(roundDir(ctx, id, round), "review.json")).status === "open" ? "fix" : "recheck");
 
 // The deletions this round would hand a tidy: those its panel handed over, when
-// the review is complete, nothing blocking or major about the code is open in it
-// or carried into it, the spec has had no tidy, and its tests — which are what
-// could show the deletion broke something — passed on this candidate and exist.
+// nothing blocking or major about the code is open in it or carried into it, the
+// spec has had no tidy, and its tests — which are what could show the deletion
+// broke something — passed on this candidate and exist. `collect` asks only of a
+// complete review.
 function tidyDeletions(ctx, id, state, round, review) {
-  if (review.status === "incomplete" || exists(tidyPath(ctx, id))) return [];
+  if (exists(tidyPath(ctx, id))) return [];
   const verified = state.gates?.verify?.candidateOid === state.candidateOid && state.gates.verify.status === "passed";
   if (!verified || (ctx.config.verify ?? []).length === 0) return [];
   const carry = carryFrom(ctx, id, round.round);
@@ -1613,20 +1614,51 @@ function tidyReportProblem(ctx, id) {
   }
 }
 
+// What a tidy that is not kept is said to have come to, for each deletion it was
+// handed that the fixer did not decline.
+const TIDY_NOT_KEPT = {
+  "changed-nothing": "not made: the fixer changed nothing",
+  "tests-failed": "thrown away: the tests failed",
+  "report-unusable": "thrown away: its report cannot be used"
+};
+
 // What stands between a tidy's change and a commit: its tests, run once on the
 // tree as the fixer left it, and a usable report. Null when neither does.
-async function tidyRefusal(ctx, id) {
-  const result = await verifyEverything(ctx, path.join(tidyDir(ctx, id), "verify"));
-  writeJson(path.join(tidyDir(ctx, id), "verify.json"), result);
+//
+// The tests run in verify-run, told this driver's pid, so that they are ended
+// with nothing written if the driver dies under them: run in this process, the
+// watcher that would end them dies with it. Their result is `tidy/verify.json`,
+// and a result already there is the one that stands: a tidy is judged on its
+// first run, and a snapshot that was interrupted after the tests ran must not
+// give a failed one a second go.
+function tidyRefusal(ctx, id) {
+  const file = path.join(tidyDir(ctx, id), "verify.json");
+  if (!exists(file)) {
+    const run = node("verify-run.mjs", [
+      "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all",
+      "--out-dir", path.join(tidyDir(ctx, id), "verify"), "--out", file, "--parent-pid", String(process.pid)
+    ], { allow: [1] });
+    if (!exists(file)) throw Stop.raw((run.stderr || run.stdout || "").trim(), "the tidy's tests could not run");
+  }
+  const result = readJson(file);
   if (result.status !== "passed") {
     const failed = firstFailed(result);
     return {
-      outcome: "tests-failed", otherwise: "thrown away: the tests failed",
+      outcome: "tests-failed",
       why: failed ? `\`${failed.command}\` ${failed.timedOut ? "timed out" : "failed"} after the deletion, and its output is at ${failed.logPath}` : `the tests did not pass (${result.status})`
     };
   }
   const problem = tidyReportProblem(ctx, id);
-  return problem ? { outcome: "report-unusable", why: problem, otherwise: "thrown away: its report cannot be used" } : null;
+  return problem ? { outcome: "report-unusable", why: problem } : null;
+}
+
+// What became of the fixer's work: null when it is to be kept, otherwise why not.
+// Said once. A snapshot that is run again after this one decided against the tidy
+// says the same, whatever the tree and the report look like by then.
+function judgeTidy(ctx, id, changed) {
+  const tidy = readJson(tidyPath(ctx, id));
+  if (Object.hasOwn(TIDY_NOT_KEPT, tidy.outcome)) return tidy;
+  return changed ? tidyRefusal(ctx, id) : { outcome: "changed-nothing", why: "the fixer changed nothing" };
 }
 
 /**
@@ -1634,22 +1666,23 @@ async function tidyRefusal(ctx, id) {
  * it, and the tree put back exactly at the candidate it started from. The spec
  * goes on from there as if the step had not run — no round was made, no fix
  * round spent, and nothing is sent because of it. `fix-declined.json` is not
- * written: it would send what the fixer declined to another re-check.
+ * written: it would send what the fixer declined to another re-check. The
+ * decision is recorded first, so each step after it can be run again.
  */
-function dropTidy(ctx, id, state, pending, { outcome, why, otherwise = "not made: the fixer changed nothing" }) {
+function dropTidy(ctx, id, state, pending, { outcome, why }) {
   const reportFile = fixReportPath(ctx, id);
-  const report = readJson(reportFile, null);
+  const tidy = readJson(tidyPath(ctx, id));
+  const kept = tidy.reportKept ?? (exists(reportFile) ? path.join(specDir(ctx, id), "declined", `tidy-round-${pending.round}-${stampNow()}.json`) : null);
+  writeJson(tidyPath(ctx, id), { ...tidy, outcome, why, reportKept: kept });
   const say = [`The tidy is not kept: ${why}.`];
-  if (exists(reportFile)) {
-    const kept = path.join(specDir(ctx, id), "declined", `tidy-round-${pending.round}-${stampNow()}.json`);
+  if (kept && exists(reportFile)) {
     fs.mkdirSync(path.dirname(kept), { recursive: true, mode: 0o700 });
     fs.renameSync(reportFile, kept);
-    say.push(`The fixer's report is kept at ${kept}.`);
   }
+  if (kept) say.push(`The fixer's report is kept at ${kept}.`);
   putBack(ctx.worktree, pending.candidate, state.branch);
-  writeJson(tidyPath(ctx, id), { ...readJson(tidyPath(ctx, id)), outcome, why });
-  fs.unlinkSync(fixPendingPath(ctx, id));
-  say.push(...tidyLines(pending.record, report, otherwise),
+  fs.rmSync(fixPendingPath(ctx, id), { force: true });
+  say.push(...tidyLines(pending.record, readJson(kept ?? reportFile, null), TIDY_NOT_KEPT[outcome]),
     `The tree is back at ${short(pending.candidate)}; no round was made and no fix round was spent, and the spec goes on as if the tidy had not run.`);
   return { say, next: nextCommand(ctx, routeAfterCollect(ctx, id, pending.round), id) };
 }
@@ -1659,7 +1692,8 @@ function dropTidy(ctx, id, state, pending, { outcome, why, otherwise = "not made
 const TIDY_DISTANCE = 5;
 
 // The lines of each file the change from `from` to `to` touched, in the new
-// file: a hunk's own lines, or for a pure deletion the two it sat between.
+// file: a hunk's own lines, or for a pure deletion the two it sat between (git
+// numbers a deletion's hunk by the line before the gap).
 function changedRanges(ctx, from, to) {
   const diff = git(ctx.worktree, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "-U0", "--no-renames", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to]).stdout;
   const ranges = new Map();
@@ -1672,7 +1706,10 @@ function changedRanges(ctx, from, to) {
       continue;
     }
     const hunk = /^@@ -\S+ \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (hunk && spans) spans.push([Number(hunk[1]), Number(hunk[1]) + Math.max(hunk[2] === undefined ? 1 : Number(hunk[2]), 1) - 1]);
+    if (hunk && spans) {
+      const [start, count] = [Number(hunk[1]), hunk[2] === undefined ? 1 : Number(hunk[2])];
+      spans.push([start, count === 0 ? start + 1 : start + count - 1]);
+    }
   }
   return ranges;
 }
@@ -3712,12 +3749,19 @@ async function snapshot(options) {
       + `again (${nextCommand(ctx, "snapshot", id)}), which then reads the report; or stop the train (run ${nextCommand(ctx, "end", null)}).`);
   }
 
+  // What came back from a tidy is judged before anything else is: a fixer that
+  // changed nothing, or committed its own work, or whose work fails the tests or
+  // whose report cannot be used, is put back as one that did not run.
+  if (tidying) {
+    const refused = judgeTidy(ctx, id, dirty || head !== pending.candidate);
+    if (refused) return done(dropTidy(ctx, id, state, pending, refused));
+  }
+
   // A fixer that changed nothing does not make a round. Its report is carried
   // by this output, then moved aside so no later round adopts it as its own.
   // "Changed nothing" means HEAD is still the commit the fixer was dispatched
   // from — the marker's candidate, not the state's; `fixPendingPath` says why.
   if (pending && !dirty && head === pending.candidate) {
-    if (tidying) return done(dropTidy(ctx, id, state, pending, { outcome: "changed-nothing", why: "the fixer changed nothing" }));
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
     // A redesign implementer that changed nothing. Its report is new when no
     // round already records it — the first round's implementer wrote to the
@@ -3808,11 +3852,6 @@ async function snapshot(options) {
     return done({ say, next: nextCommand(ctx, "recheck", id) });
   }
 
-  if (tidying && dirty) {
-    const refused = await tidyRefusal(ctx, id);
-    if (refused) return done(dropTidy(ctx, id, state, pending, refused));
-  }
-
   if (dirty) {
     const message = options.message
       ?? (tidying ? `Tidy ${id}: remove surplus code`
@@ -3900,10 +3939,11 @@ async function snapshot(options) {
     const report = fixerReport(path.join(dir, "report.json"));
     if (goalConflicts(report, pending.record).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
   }
+  // Before the marker goes, so that a snapshot interrupted between them is still a tidy's.
+  if (tidying) writeJson(tidyPath(ctx, id), { ...readJson(tidyPath(ctx, id)), outcome: "kept", tidyRound: round, tidyCandidate: oid });
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
   fs.rmSync(reportResendPath(ctx, id), { force: true });
 
-  if (tidying) writeJson(tidyPath(ctx, id), { ...readJson(tidyPath(ctx, id)), outcome: "kept", tidyRound: round, tidyCandidate: oid });
   say.push(tidying
     ? `Candidate ${oid.slice(0, 12)} is round ${round}, the tidy of round ${pending.round}${allocation.reentered ? " (re-entered)" : ""}: its tests ran once and passed before it was committed, and no fix round was spent (${allocation.spent} of ${allocation.limit} in this cycle).`
     : allocation.granted

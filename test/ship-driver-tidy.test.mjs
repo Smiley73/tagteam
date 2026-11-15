@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "../scripts/lib/rounds.mjs";
 import { markRound } from "../scripts/lib/round-store.mjs";
 import { reconcileBudgets } from "../scripts/gates.mjs";
@@ -27,7 +27,7 @@ const FAILS_ON_TIDY = "node -e \"process.exit(require('fs').readFileSync('app.js
 
 // A staged plan whose spec is reviewed by correctness and economy, begun and
 // verified at round 1. `verify` replaces the repository's verify commands.
-function begun({ verify = null, workflow = false } = {}) {
+function begun({ verify = null, workflow = false, source = A_CHANGE } = {}) {
   const staged = stagePlan({ specs: 1 });
   const { plan, shipDir, env, configPath, repo } = staged;
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -56,7 +56,7 @@ function begun({ verify = null, workflow = false } = {}) {
   };
   if (workflow) return cycle;
   const begin = ship("begin", plan, ["--spec", ID], env);
-  write(path.join(worktree, "app.js"), A_CHANGE);
+  write(path.join(worktree, "app.js"), source);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
   arriveAll(begin);
   run("snapshot");
@@ -351,6 +351,140 @@ test("a major on a file the tidy did not touch, or far from what it changed, goe
   }
 });
 
+// A tidy the driver is run again for, and one the fixer committed itself.
+const appendsTo = (file) => `node -e 'require("fs").appendFileSync(${JSON.stringify(file)}, "x")'`;
+const committed = (cycle, content) => () => {
+  write(path.join(cycle.worktree, "app.js"), content);
+  git(cycle.worktree, "add", "-A");
+  git(cycle.worktree, "-c", "user.name=fixer", "-c", "user.email=fixer@example.com", "commit", "-m", "the fixer's own commit");
+};
+
+test("a snapshot run again after the tidy's tests were recorded does not run them again: the recorded failure stands", () => {
+  const runs = path.join(os.tmpdir(), `tagteam-tidy-reuse-${process.pid}`);
+  fs.rmSync(runs, { force: true });
+  const cycle = begun({ verify: appendsTo(runs) });
+  collected(cycle, { economy: [DELETION] });
+  const earlier = cycle.state().candidateOid;
+  tidied(cycle);
+  write(path.join(cycle.spec, "tidy", "verify.json"), {
+    status: "failed", commands: [{ command: "the recorded command", exitCode: 1, timedOut: false, status: "failed", logPath: "/recorded/1.log" }]
+  });
+  const snapshot = cycle.run("snapshot");
+  assert.equal(fs.readFileSync(runs, "utf8"), "x", "only round 1's verify ran the command");
+  assert.match(snapshot.json.say.join("\n"), /`the recorded command` failed after the deletion/);
+  assert.equal(cycle.json("tidy.json").outcome, "tests-failed");
+  assert.deepEqual(cycle.rounds(), ["1"]);
+  assert.equal(cycle.head(), earlier);
+});
+
+test("a snapshot run again after it decided against the tidy says the same, though the tree and the report are gone", () => {
+  const cycle = begun({ verify: FAILS_ON_TIDY });
+  collected(cycle, { economy: [DELETION] });
+  const earlier = cycle.state().candidateOid;
+  tidied(cycle, { edit: () => write(path.join(cycle.worktree, "app.js"), `${TIDIED}// tidy\n`) });
+  const pendingFile = path.join(cycle.spec, "fix-pending.json");
+  const pending = fs.readFileSync(pendingFile, "utf8");
+  cycle.run("snapshot");
+  assert.equal(cycle.json("tidy.json").outcome, "tests-failed");
+  fs.writeFileSync(pendingFile, pending);
+  const again = cycle.run("snapshot");
+  assert.equal(cycle.json("tidy.json").outcome, "tests-failed", "the tree is clean at the earlier candidate, which is not a fixer that changed nothing");
+  assert.match(again.json.say.join("\n"), /The tidy is not kept: `.*` failed after the deletion/);
+  assert.equal(fs.existsSync(pendingFile), false);
+  assert.equal(cycle.head(), earlier);
+  assert.match(again.json.next, /recheck/);
+});
+
+test("a tidy fixer that commits its own change has its tests run all the same, and is kept or put back like any other", () => {
+  const runs = path.join(os.tmpdir(), `tagteam-tidy-committed-${process.pid}`);
+  fs.rmSync(runs, { force: true });
+  const kept = begun({ verify: appendsTo(runs) });
+  collected(kept, { economy: [DELETION] });
+  tidied(kept, { edit: committed(kept, TIDIED) });
+  const snapshot = kept.run("snapshot");
+  assert.equal(fs.readFileSync(runs, "utf8"), "xx", "the tests ran on the fixer's commit");
+  assert.deepEqual(kept.rounds(), ["1", "2"]);
+  assert.equal(kept.json("tidy.json").outcome, "kept");
+  assert.equal(kept.state().gates.verify.status, "passed");
+  assert.equal(kept.state().gates.verify.candidateOid, kept.state().candidateOid);
+  assert.match(snapshot.json.next, /recheck/);
+
+  const failing = begun({ verify: FAILS_ON_TIDY });
+  collected(failing, { economy: [DELETION] });
+  const earlier = failing.state().candidateOid;
+  tidied(failing, { edit: committed(failing, `${TIDIED}// tidy\n`) });
+  failing.run("snapshot");
+  assert.deepEqual(failing.rounds(), ["1"]);
+  assert.equal(failing.json("tidy.json").outcome, "tests-failed");
+  assert.equal(failing.head(), earlier, "the fixer's commit is put back");
+  assert.equal(failing.clean(), true);
+});
+
+test("a tidy whose tests are running when the driver dies has them ended, and what they would write later is never written", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-tidy-orphan-"));
+  const started = path.join(dir, "started");
+  const late = path.join(dir, "late");
+  const command = `node -e "const fs=require('fs');if(!fs.readFileSync('app.js','utf8').includes('// tidy'))process.exit(0);`
+    + `fs.writeFileSync('${started}',String(process.pid));setTimeout(()=>fs.writeFileSync('${late}','x'),8000)"`;
+  const cycle = begun({ verify: command });
+  collected(cycle, { economy: [DELETION] });
+  tidied(cycle, { edit: () => write(path.join(cycle.worktree, "app.js"), `${TIDIED}// tidy\n`) });
+  const driver = spawn(process.execPath, [path.join(root, "scripts", "ship.mjs"), "snapshot", "--plan", cycle.plan, "--spec", ID], {
+    env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...cycle.env }, stdio: "ignore"
+  });
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const wait = async (until, tries) => { for (let waited = 0; waited < tries && !until(); waited += 1) await new Promise((resolve) => setTimeout(resolve, 100)); };
+  let pid = null;
+  try {
+    await wait(() => fs.existsSync(started), 300);
+    pid = Number(fs.readFileSync(started, "utf8"));
+    driver.kill("SIGKILL");
+    await wait(() => !alive(pid), 50);
+    assert.equal(alive(pid), false, "the test command was left running after the driver that ran it was killed");
+    assert.equal(fs.existsSync(late), false);
+  } finally {
+    driver.kill("SIGKILL");
+    if (pid) try { process.kill(pid, "SIGKILL"); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The tidy deletes line 30 of 40: its hunk sits between new lines 29 and 30, so a finding is on it from line 24 to line 35.
+const LINES = Array.from({ length: 40 }, (_, index) => `export const v${index + 1} = ${index + 1};\n`);
+for (const [what, line, thrown] of [
+  ["five lines after the line after the gap", 35, true],
+  ["six lines after it", 36, false],
+  ["five lines before the line before the gap", 24, true],
+  ["six lines before it", 23, false],
+  ["no line, on a file the tidy changed", null, true]
+]) {
+  test(`a major ${what} (${line === null ? "no line" : `line ${line}`}) ${thrown ? "throws the tidy away" : "leaves it standing"}`, () => {
+    const cycle = begun({ source: LINES.join("") });
+    collected(cycle, { economy: [{ ...DELETION, line: 30 }] });
+    tidied(cycle, { edit: () => write(path.join(cycle.worktree, "app.js"), LINES.filter((_, index) => index !== 29).join("")) });
+    cycle.run("snapshot");
+    const { settle } = reread(cycle, { raise: [{ ...major("app.js"), line }] });
+    assert.equal(cycle.json("tidy.json").outcome, thrown ? "thrown-away" : "kept", settle.stdout);
+  });
+}
+
+test("a thrown-away tidy gives the earlier candidate back the verify result its retry gave, not the first run's failure", () => {
+  const counter = path.join(os.tmpdir(), `tagteam-tidy-retry-${process.pid}`);
+  fs.rmSync(counter, { force: true });
+  const cycle = begun({ verify: `node -e "const fs=require('fs');if(fs.existsSync('${counter}'))process.exit(0);fs.writeFileSync('${counter}','x');process.exit(1)"` });
+  const earlier = cycle.state().candidateOid;
+  assert.ok(fs.existsSync(path.join(cycle.round(1), "verify-retry.json")), "round 1's first run failed and was run again");
+  assert.equal(cycle.json("rounds", "1", "verify.json").status, "failed");
+  assert.equal(cycle.state().gates.verify.status, "passed");
+  collected(cycle, { economy: [DELETION] });
+  tidied(cycle);
+  cycle.run("snapshot");
+  reread(cycle, { raise: [{ ...major("app.js"), line: 3 }] });
+  assert.equal(cycle.json("tidy.json").outcome, "thrown-away");
+  assert.equal(cycle.state().gates.verify.candidateOid, earlier);
+  assert.equal(cycle.state().gates.verify.status, "passed");
+});
+
 // --- the pull request -----------------------------------------------------------------
 
 test("a round whose only gating finding is about the pull request still tidies; the finding is judged against the body and the adversary reads the tidied commit", () => {
@@ -380,7 +514,7 @@ test("a round whose only gating finding is about the pull request still tidies; 
   assert.deepEqual(JSON.parse(fs.readFileSync(judged, "utf8")).findings.map((entry) => entry.id), ["1.correctness.1"]);
 });
 
-test("no tidy is offered while something about the code gates, without verify commands, or once the spec has had one", () => {
+test("no tidy is offered while something about the code gates, without verify commands, once the spec has had one, or with its tests not passed", () => {
   const gating = begun();
   assert.match(collected(gating, { correctness: [major("app.js")], economy: [DELETION] }).json.next, / fix /);
 
@@ -389,6 +523,10 @@ test("no tidy is offered while something about the code gates, without verify co
   fs.writeFileSync(untested.configPath, JSON.stringify({ ...config, verify: [] }, null, 2));
   assert.match(collected(untested, { economy: [DELETION] }).json.next, / recheck /, "nothing could show the deletion broke the tests");
 
+  const failing = begun({ verify: "exit 1" });
+  assert.equal(failing.state().gates.verify.status, "failed");
+  assert.doesNotMatch(collected(failing, { economy: [DELETION] }).json.next, / tidy /, "the candidate's own tests did not pass");
+
   const used = begun();
   collected(used, { economy: [DELETION] });
   tidied(used, { edit: () => {}, report: null });
@@ -396,6 +534,32 @@ test("no tidy is offered while something about the code gates, without verify co
   const again = ship("tidy", used.plan, ["--spec", ID], used.env);
   assert.notEqual(again.status, 0);
   assert.match(again.stderr, /has had its tidy already/);
+});
+
+test("no tidy is offered on a panel round that carries a blocking or major code finding in from an earlier settle", () => {
+  const cycle = begun();
+  collected(cycle, {});
+  const { settle } = reread(cycle, { raise: [major("other.js")] });
+  assert.match(settle.json.next, / fix /);
+  assert.ok(fs.existsSync(path.join(cycle.round(1), "still-open.json")), "round 1's settle left the major open");
+  const fix = cycle.run("fix");
+  fs.appendFileSync(path.join(cycle.worktree, "app.js"), "// repaired\n");
+  write(outputOf(fix.json.dispatch[0]), REPORT([{ id: "1.adversary.1", outcome: "wont-fix", note: "left" }]));
+  arriveAll(fix);
+  cycle.run("snapshot");
+  cycle.run("verify");
+  const panel = cycle.run("panel");
+  const oid = cycle.state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, oid, lens === "economy" ? [DELETION] : []));
+  }
+  write(path.join(cycle.round(2), "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
+  const collect = cycle.run("collect");
+  assert.ok(fs.existsSync(path.join(cycle.round(2), "deletions.json")), "this panel handed a deletion over");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(cycle.round(2), "review.json"), "utf8")).open.length, 0, "nothing is open in the round itself");
+  assert.match(collect.json.next, / recheck /);
 });
 
 // --- budget and churn -------------------------------------------------------------------
