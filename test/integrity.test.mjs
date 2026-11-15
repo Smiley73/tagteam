@@ -489,7 +489,7 @@ test("every dispatching step of the driver reads the resolver, and the driver na
   for (const [, job] of shipDriver.matchAll(/jobs\.([a-z]+)\b/g)) {
     assert.ok(emitted.has(job), `ship.mjs dispatches roles job ${job}, which gates.mjs roles does not emit`);
   }
-  for (const step of ["begin", "panel", "fix", "redesign", "recheck", "repair"]) {
+  for (const step of ["begin", "panel", "fix", "tidy", "redesign", "recheck", "repair"]) {
     assert.match(driverFunction(step), /roles\(ctx, id[,)]/, `${step} dispatches without reading the resolver`);
   }
   // The plan-level dispatches have no spec state for `roles` to read, and go

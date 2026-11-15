@@ -184,6 +184,7 @@ flowchart TD
     codexr["Codex cross-review"]
     open{"Anything blocking or major open?"}
     fixer["Fix — a fixer gets the blocking and major findings, plus any surplus deletions that gate nothing"]
+    tidy["Tidy — once per spec: one fixer gets only the surplus deletions; its tests run once, and no fix round is spent"]
     redesign["Redesign — a fresh implementer rewrites the area from a brief of everything raised on it"]
     route{"Which review does the fixed commit get?"}
     adv["Adversary — reads the final diff fresh"]
@@ -213,6 +214,9 @@ flowchart TD
     route -->|"after the first fix of a cycle"| recheck
     route -->|"after a second or later fix round, or a CI repair:<br>the whole panel again, against a diff no lens has read"| lenses
     route -->|"after a second or later fix round, or a CI repair"| codexr
+    open -->|"no gating finding about the code, but surplus<br>deletions were handed over, and the spec has had no tidy"| tidy
+    tidy -->|"tests pass: a round of its own, with no verify. Otherwise the tree<br>is put back and the spec goes on as if the tidy had not run"| adv
+    tidy --> recheck
     open -->|"no — or this panel is a re-run, whose own findings<br>nothing fixes until the re-check below settles them"| adv
     open -->|"no, or this panel is a re-run"| recheck
     adv --> settle
@@ -303,6 +307,17 @@ the economy brief this plugin ships. It may make them or decline them: they
 never gate, never spend a fix round and never stop the spec, and a run says
 which were made and which were not. They appear in the table but are not
 described under Risk.
+
+When a panel round hands over such deletions and nothing about the code is
+blocking or major, one fixer is sent for them alone, once per spec, before the
+adversary's fresh pass; the spec's tests must have passed on the commit it starts
+from. The tests run on what the fixer left. If they pass, the result is a round of
+its own, marked as the tidy, which spends no fix round and is not verified again;
+if they fail, the fixer changed nothing or its report cannot be used, the tree is
+put back exactly as it was and the spec goes on as if the tidy had not run. If the
+fresh pass then raises something blocking or major on what the tidy changed, the
+tidy is thrown away and the earlier commit is re-checked again with its own
+verify and report as they were.
 
 The fixer reads the spec and the plan's goal as well as the findings, and can
 answer that the right repair would go against the goal because the spec

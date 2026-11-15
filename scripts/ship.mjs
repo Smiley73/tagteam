@@ -51,17 +51,17 @@ import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
   restoreWorktree
 } from "./lib/landing.mjs";
-import { isPullRequestFinding } from "./collect-findings.mjs";
+import { findingRound, isPullRequestFinding } from "./collect-findings.mjs";
 import { awaitedByUnmerged, carryEligible, carryRefusal, onPlanBranch, recommendation } from "./lib/carry.mjs";
 import { enterMerge, entriesOf, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
-import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, writeRoundFile } from "./lib/round-store.mjs";
+import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, markRound, writeRoundFile } from "./lib/round-store.mjs";
 import {
   RECORD, RESOLVE_DIR, attemptsLeft, hasMarkers, listResolveRounds, markerSizes, nextRoundNumber, parentsProblem, resolveBrief,
   versionStep, writeRecord
 } from "./lib/resolve.mjs";
-import { recordedIn } from "./record-round-report.mjs";
+import { ReportRefused, recordRoundReport, recordedIn } from "./record-round-report.mjs";
 import { itemId, itemsOfReport } from "./lib/rulings.mjs";
 import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
@@ -320,9 +320,13 @@ function collectionRound(ctx, id, round) {
 }
 
 // The most recent round strictly below `round` that recorded what it left open,
-// when it left anything open — the carry `recheck.mjs` requires.
+// when it left anything open — the carry `recheck.mjs` requires. A tidy round
+// that was thrown away is passed over: what it recorded is about a commit that is
+// no longer the candidate.
 function carryFrom(ctx, id, round) {
+  const dropped = new Set(listRounds(roundsRoot(ctx, id)).filter((entry) => entry.thrownAway).map((entry) => entry.round));
   for (let number = round - 1; number >= 1; number -= 1) {
+    if (dropped.has(number)) continue;
     const file = path.join(roundDir(ctx, id, number), "still-open.json");
     if (!exists(file)) continue;
     const record = readJson(file, { findings: [] });
@@ -1542,6 +1546,178 @@ function deletionLine({ round, rows }) {
   const said = (row) => (row.outcome ? `${row.id} (the fixer said ${row.outcome}${row.note ? `: ${clip(row.note, 80)}` : ""})` : `${row.id} (no outcome reported)`);
   return `The fixer sent at round ${round} was also handed ${handed.length} deletion(s) the economy reviewer asked for; none of them gates. `
     + `${handed.length - unmade.length} made${unmade.length > 0 ? `; declined or not made: ${unmade.map(said).join(", ")}` : ""}.`;
+}
+
+// --- the tidy ---------------------------------------------------------------
+
+// The tidy: one fixer sent with the deletions a panel round handed over and
+// nothing else, before the adversary's fresh pass, when nothing about the code
+// gates. `tidy.json` is written before it is sent and is never removed, so a spec
+// has one — across a restart and across CI repair cycles alike. It names the
+// round and the candidate the tidy started from and the brief it was sent, and
+// then what became of it: `outcome` is `kept`, `thrown-away`, `changed-nothing`,
+// `tests-failed` or `report-unusable`, and a kept tidy also names the round and
+// the commit it made. Its test run and the log of it are kept beside it, under
+// `tidy/`, since a failed one makes no round to keep them in.
+const tidyPath = (ctx, id) => path.join(specDir(ctx, id), "tidy.json");
+const tidyDir = (ctx, id) => path.join(specDir(ctx, id), "tidy");
+
+// Where the run goes once the round's panel is judged and nothing more is asked
+// of a fixer: to a fixer when the review is open, which is only ever about the
+// pull request here, and to the re-check otherwise.
+const routeAfterCollect = (ctx, id, round) =>
+  (readJson(path.join(roundDir(ctx, id, round), "review.json")).status === "open" ? "fix" : "recheck");
+
+// The deletions this round would hand a tidy: those its panel handed over, when
+// the review is complete, nothing blocking or major about the code is open in it
+// or carried into it, the spec has had no tidy, and its tests — which are what
+// could show the deletion broke something — passed on this candidate and exist.
+function tidyDeletions(ctx, id, state, round, review) {
+  if (review.status === "incomplete" || exists(tidyPath(ctx, id))) return [];
+  const verified = state.gates?.verify?.candidateOid === state.candidateOid && state.gates.verify.status === "passed";
+  if (!verified || (ctx.config.verify ?? []).length === 0) return [];
+  const carry = carryFrom(ctx, id, round.round);
+  const open = [...(review.open ?? []), ...(carry ? readJson(carry.file, { findings: [] }).findings ?? [] : [])];
+  if (open.some((finding) => !isPullRequestFinding(finding))) return [];
+  return readJson(path.join(round.dir, "deletions.json"), { findings: [] }).findings ?? [];
+}
+
+// What became of each deletion a tidy was handed, one line each. A fixer that
+// declined one says why; `otherwise` is what every other one came to.
+function tidyLines(brief, report, otherwise) {
+  const said = new Map((report?.outcomes ?? []).map((entry) => [entry.id, entry]));
+  return deletionsOf(brief).map((finding) => {
+    const entry = said.get(finding.id);
+    const declined = entry && !["fixed", "fixed-differently"].includes(entry.outcome);
+    return `  ${finding.id}: ${declined ? `declined — the fixer said ${entry.outcome}${entry.note ? `: ${clip(entry.note, 120)}` : ""}` : otherwise}`;
+  });
+}
+
+// Whether the tidy fixer's report is one the round can record as its own, and
+// complete: asked of the recorder itself, into a place that is no round, before
+// anything is committed, because a tidy is not sent back for a report, and a
+// candidate whose report is not complete cannot be left behind without waiting
+// for a person on every candidate after it.
+function tidyReportProblem(ctx, id) {
+  const scratch = path.join(roundsRoot(ctx, id), ".tidy-report");
+  try {
+    const recorded = recordRoundReport({ dir: specDir(ctx, id), out: path.join(scratch, "report.json"), schemaDir: path.join(PLUGIN, "schemas"), absence: "refuse" });
+    return recorded.status === "complete" ? null : "its report says work was left undone";
+  } catch (error) {
+    if (error instanceof ReportRefused) return error.problems.join("; ");
+    throw error;
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+// What stands between a tidy's change and a commit: its tests, run once on the
+// tree as the fixer left it, and a usable report. Null when neither does.
+async function tidyRefusal(ctx, id) {
+  const result = await verifyEverything(ctx, path.join(tidyDir(ctx, id), "verify"));
+  writeJson(path.join(tidyDir(ctx, id), "verify.json"), result);
+  if (result.status !== "passed") {
+    const failed = firstFailed(result);
+    return {
+      outcome: "tests-failed", otherwise: "thrown away: the tests failed",
+      why: failed ? `\`${failed.command}\` ${failed.timedOut ? "timed out" : "failed"} after the deletion, and its output is at ${failed.logPath}` : `the tests did not pass (${result.status})`
+    };
+  }
+  const problem = tidyReportProblem(ctx, id);
+  return problem ? { outcome: "report-unusable", why: problem, otherwise: "thrown away: its report cannot be used" } : null;
+}
+
+/**
+ * A tidy that is not kept: its report moved aside, so that no later round adopts
+ * it, and the tree put back exactly at the candidate it started from. The spec
+ * goes on from there as if the step had not run — no round was made, no fix
+ * round spent, and nothing is sent because of it. `fix-declined.json` is not
+ * written: it would send what the fixer declined to another re-check.
+ */
+function dropTidy(ctx, id, state, pending, { outcome, why, otherwise = "not made: the fixer changed nothing" }) {
+  const reportFile = fixReportPath(ctx, id);
+  const report = readJson(reportFile, null);
+  const say = [`The tidy is not kept: ${why}.`];
+  if (exists(reportFile)) {
+    const kept = path.join(specDir(ctx, id), "declined", `tidy-round-${pending.round}-${stampNow()}.json`);
+    fs.mkdirSync(path.dirname(kept), { recursive: true, mode: 0o700 });
+    fs.renameSync(reportFile, kept);
+    say.push(`The fixer's report is kept at ${kept}.`);
+  }
+  putBack(ctx.worktree, pending.candidate, state.branch);
+  writeJson(tidyPath(ctx, id), { ...readJson(tidyPath(ctx, id)), outcome, why });
+  fs.unlinkSync(fixPendingPath(ctx, id));
+  say.push(...tidyLines(pending.record, report, otherwise),
+    `The tree is back at ${short(pending.candidate)}; no round was made and no fix round was spent, and the spec goes on as if the tidy had not run.`);
+  return { say, next: nextCommand(ctx, routeAfterCollect(ctx, id, pending.round), id) };
+}
+
+// How far from a hunk a finding may be and still be about it: the distance the
+// goal's evidence measured. A deletion leaves no line of its own in the new file.
+const TIDY_DISTANCE = 5;
+
+// The lines of each file the change from `from` to `to` touched, in the new
+// file: a hunk's own lines, or for a pure deletion the two it sat between.
+function changedRanges(ctx, from, to) {
+  const diff = git(ctx.worktree, ["-c", "core.quotePath=false", "diff", "-U0", "--no-renames", "--no-color", from, to]).stdout;
+  const ranges = new Map();
+  let spans = null;
+  for (const line of diff.split("\n")) {
+    const header = /^diff --git a\/.* b\/(.*)$/.exec(line);
+    if (header) {
+      spans = [];
+      ranges.set(header[1], spans);
+      continue;
+    }
+    const hunk = /^@@ -\S+ \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (hunk && spans) spans.push([Number(hunk[1]), Number(hunk[1]) + Math.max(hunk[2] === undefined ? 1 : Number(hunk[2]), 1) - 1]);
+  }
+  return ranges;
+}
+
+// A finding is on what the tidy changed when its file is one the tidy changed and
+// it names no line or a line near a hunk; a finding with no file is elsewhere.
+function onTidy(finding, ranges) {
+  const spans = ranges.get(String(finding.file ?? "").replace(/^\.\//, ""));
+  return spans !== undefined && (finding.line == null
+    || spans.some(([first, last]) => finding.line >= first - TIDY_DISTANCE && finding.line <= last + TIDY_DISTANCE));
+}
+
+/**
+ * The settle of a kept tidy round, when its fresh pass raised a blocking or major
+ * finding on what the tidy changed: the tidy is thrown away. The round is marked,
+ * the tree and the state go back to the earlier candidate, which owns its round
+ * already and so is bound again without a snapshot — a snapshot would empty it —
+ * and its verify and report gates are recorded again from that round's own files.
+ * Null when nothing the fresh pass raised is on the tidy.
+ */
+function throwAwayTidy(ctx, id, state, plan, review) {
+  const tidy = readJson(tidyPath(ctx, id), null);
+  if (tidy?.outcome !== "kept" || tidy.tidyRound !== plan.round || tidy.tidyCandidate !== state.candidateOid) return null;
+  const ranges = changedRanges(ctx, tidy.candidate, tidy.tidyCandidate);
+  const raised = (review.open ?? []).filter((finding) => finding.lens === "adversary" && findingRound(finding.id) === plan.round && onTidy(finding, ranges));
+  if (raised.length === 0) return null;
+  const earlier = roundDir(ctx, id, tidy.round);
+  const report = fixerReport(path.join(roundDir(ctx, id, plan.round), ROUND_REPORT));
+  putBack(ctx.worktree, tidy.candidate, state.branch);
+  markRound(roundDir(ctx, id, plan.round), { thrownAway: true });
+  if (state.state !== "reviewing") transition(ctx, id, "reviewing");
+  node("gates.mjs", ["bind", statePath(ctx, id), tidy.candidate, ctx.baseOid, path.join(earlier, "candidate.json")]);
+  // The result `verify` recorded: the retry's, when it ran one.
+  const retry = path.join(earlier, "verify-retry.json");
+  record(ctx, id, "verify", tidy.candidate, exists(retry) ? retry : path.join(earlier, "verify.json"));
+  record(ctx, id, "report", tidy.candidate, path.join(earlier, ROUND_REPORT));
+  writeJson(fixersPath(ctx, id), readJson(fixersPath(ctx, id), []).filter((fixer) => fixer.brief !== tidy.brief));
+  writeJson(tidyPath(ctx, id), { ...tidy, outcome: "thrown-away", why: `the fresh pass raised ${raised.map((finding) => finding.id).join(", ")} on what it changed` });
+  const named = raised.map((finding) => `${finding.id} (${finding.severity}, ${finding.file}${finding.line == null ? "" : `:${finding.line}`}: ${clip(finding.title, 80)})`);
+  return {
+    say: [
+      `The fresh pass on the tidied candidate raised ${named.join("; ")}, on what the tidy changed. The tidy is thrown away: the tree and the spec are back at ${short(tidy.candidate)}, with its own verify and report recorded again, and no fix round was spent.`,
+      ...tidyLines(tidy.brief, report, "thrown away: the fresh pass raised a finding on what it changed"),
+      `${short(tidy.candidate)} is re-checked once more, as it would have been had the tidy not run.`
+    ],
+    next: nextCommand(ctx, routeAfterCollect(ctx, id, tidy.round), id)
+  };
 }
 
 const saveTables = (ctx, id, { round, candidate }, tables) =>
@@ -3131,6 +3307,19 @@ function heldByRestart(ctx, id, state, restarted, say) {
   };
 }
 
+// The worktree exactly at `oid`, with nothing untracked left in it: on `branch`
+// when it is on one, detached otherwise.
+function putBack(wt, oid, branch = null) {
+  git(wt, branch ? ["checkout", "--force", "-B", branch, oid] : ["checkout", "--force", "--detach", oid]);
+  git(wt, ["clean", "-fdq"]);
+}
+
+// Every configured verify command, whatever its `when`, on the tree as it is: what
+// a change is run through before any commit or round exists for it.
+const verifyEverything = (ctx, outDir) => verifyCommands({
+  config: ctx.config, candidate: { changedPaths: [], addedLines: [] }, worktree: ctx.worktree, select: "all", outDir
+});
+
 // The configured worktree.setup commands, which bring what the worktree has
 // installed up to the lockfile it holds; null when they succeed, otherwise why not.
 // What the commands print is kept off this driver's own streams: stderr's first
@@ -3168,7 +3357,7 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   const wt = ctx.worktree;
   const lands = ctx.train.route?.branch ?? ctx.config.base;
   const byKey = new Map(audit.findings.map((finding) => [finding.key, finding]));
-  const onBase = () => { git(wt, ["checkout", "--force", "--detach", baseOid]); git(wt, ["clean", "-fdq"]); };
+  const onBase = () => putBack(wt, baseOid);
   const made = (keys) => {
     onBase();
     const result = { made: [], out: [] };
@@ -3186,10 +3375,7 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
     const brought = tried.out.length > 0 ? tried.out[0].reason : await bringUpToLockfile(ctx);
     let trial = { keys: name, status: "failed", command: "the worktree setup commands", logPath: null, why: brought };
     if (brought === null) {
-      const result = await verifyCommands({
-        config: ctx.config, candidate: { changedPaths: [], addedLines: [] }, worktree: wt, select: "all",
-        outDir: path.join(dependencyUnitDir(ctx.shipDir), "trials", `${unit.trials.length + 1}-${stampNow()}`)
-      });
+      const result = await verifyEverything(ctx, path.join(dependencyUnitDir(ctx.shipDir), "trials", `${unit.trials.length + 1}-${stampNow()}`));
       const failed = (result.commands ?? []).find((command) => command.status === "failed");
       trial = { keys: name, status: result.status === "failed" ? "failed" : "passed", command: failed?.command ?? null, logPath: failed?.logPath ?? null };
     }
@@ -3508,6 +3694,9 @@ async function snapshot(options) {
   // seen, and every fix round after it was refused at the snapshot that would
   // have landed its work.
   const outOfBand = dirty && !pending && state.state !== "implementing";
+  // A tidy's fixer: judged before anything is committed, and either kept as a round
+  // of its own that spends no fix round, or put back exactly as it found the tree.
+  const tidying = pending?.from === "tidy";
 
   // A resend was asked to write the report and nothing else. Its marker is only
   // about the commit the round was bound to, so it is checked before anything is
@@ -3526,6 +3715,7 @@ async function snapshot(options) {
   // "Changed nothing" means HEAD is still the commit the fixer was dispatched
   // from — the marker's candidate, not the state's; `fixPendingPath` says why.
   if (pending && !dirty && head === pending.candidate) {
+    if (tidying) return done(dropTidy(ctx, id, state, pending, { outcome: "changed-nothing", why: "the fixer changed nothing" }));
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
     // A redesign implementer that changed nothing. Its report is new when no
     // round already records it — the first round's implementer wrote to the
@@ -3616,9 +3806,15 @@ async function snapshot(options) {
     return done({ say, next: nextCommand(ctx, "recheck", id) });
   }
 
+  if (tidying && dirty) {
+    const refused = await tidyRefusal(ctx, id);
+    if (refused) return done(dropTidy(ctx, id, state, pending, refused));
+  }
+
   if (dirty) {
     const message = options.message
-      ?? (pending?.from === "repair" ? `Repair CI for ${id}`
+      ?? (tidying ? `Tidy ${id}: remove surplus code`
+        : pending?.from === "repair" ? `Repair CI for ${id}`
         : pending?.from === "redesign" ? `Redesign ${id}: ${(pending.files ?? []).join(", ")}`
           : pending ? `Address review findings on ${id}` : outOfBand ? `Amend ${id}` : isDependencyId(id) ? "Upgrade vulnerable dependencies" : `Implement ${id}`);
     git(ctx.worktree, ["add", "-A"]);
@@ -3644,7 +3840,7 @@ async function snapshot(options) {
   // they find this time, and `settle` would publish a finding nobody accepted.
   fs.rmSync(acceptedPath(ctx, id), { force: true });
 
-  const allocation = lastJson(node("gates.mjs", ["round", statePath(ctx, id), roundsRoot(ctx, id), oid, ctx.configPath]).stdout);
+  const allocation = lastJson(node("gates.mjs", ["round", statePath(ctx, id), roundsRoot(ctx, id), oid, ctx.configPath, ...(tidying ? ["--tidy"] : [])]).stdout);
   const round = allocation.round;
   const dir = roundDir(ctx, id, round);
   node("snapshot-candidate.mjs", [
@@ -3667,6 +3863,12 @@ async function snapshot(options) {
     writeRoundFile(path.join(dir, ROUND_REDESIGN), `${JSON.stringify(redesigned, null, 2)}\n`);
   }
   node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "candidate.json")]);
+  // The tidy's tests ran once, on the tree before it was committed, and that run
+  // is this round's verify: `verify` does not run on it.
+  if (tidying) {
+    writeRoundFile(path.join(dir, "verify.json"), fs.readFileSync(path.join(tidyDir(ctx, id), "verify.json")));
+    record(ctx, id, "verify", oid, path.join(dir, "verify.json"));
+  }
   // A round an agent was dispatched for is not recorded as having no report: it
   // is refused, and the agent sent back for it.
   const dispatched = Boolean(pending) || state.state === "implementing";
@@ -3691,7 +3893,7 @@ async function snapshot(options) {
   }
   record(ctx, id, "report", oid, path.join(dir, "report.json"));
   let conflict = null;
-  if (["panel", "settle"].includes(pending?.from)) {
+  if (["panel", "settle", "tidy"].includes(pending?.from)) {
     noteFixer(ctx, id, pending, path.join(dir, "report.json"));
     const report = fixerReport(path.join(dir, "report.json"));
     if (goalConflicts(report, pending.record).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
@@ -3699,7 +3901,10 @@ async function snapshot(options) {
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
   fs.rmSync(reportResendPath(ctx, id), { force: true });
 
-  say.push(allocation.granted
+  if (tidying) writeJson(tidyPath(ctx, id), { ...readJson(tidyPath(ctx, id)), outcome: "kept", tidyRound: round, tidyCandidate: oid });
+  say.push(tidying
+    ? `Candidate ${oid.slice(0, 12)} is round ${round}, the tidy of round ${pending.round}${allocation.reentered ? " (re-entered)" : ""}: its tests ran once and passed before it was committed, and no fix round was spent (${allocation.spent} of ${allocation.limit} in this cycle).`
+    : allocation.granted
     ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by your answer to the question at the cap. No round is left after it in this cycle.`
     : `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}; ${allocation.spent} of ${allocation.limit} fix rounds spent in this cycle.`);
   if (outOfBand) {
@@ -3713,6 +3918,10 @@ async function snapshot(options) {
   }
   say.push(...recorded.stdout.trim().split("\n"));
   if (conflict) say.push(`${goalConflictLine(ctx, id, state, conflict)} It changed the code all the same, so this commit is reviewed like any other.`);
+  if (tidying) {
+    say.push(...tidyLines(pending.record, fixerReport(path.join(dir, ROUND_REPORT)), "made, by the fixer's word; the economy reviewer's re-check judges it"));
+    return done({ say, round, candidate: oid, next: nextCommand(ctx, routeAfterCollect(ctx, id, pending.round), id) });
+  }
   await done({ say, round, candidate: oid, next: nextCommand(ctx, "verify", id) });
 }
 
@@ -3893,9 +4102,44 @@ async function collect(options) {
   say.push(...churn.signal);
   if (churn.note) say.push(churn.note);
   if (churn.auto) say.push(AUTO_REDESIGN);
+  // Nothing about the code gates, so the fixer is sent the deletions alone, once,
+  // before the fresh pass reads the code.
+  const deletions = tidyDeletions(ctx, id, state, round, review);
+  if (deletions.length > 0) {
+    say.push(`${deletions.length} deletion(s) the economy reviewer asked for are handed over and nothing about the code gates: one tidy fixer is sent for them before the fresh pass. No fix round is spent on it.`);
+  }
   emit({
     say, review: review.status, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}),
-    next: nextCommand(ctx, churn.auto ? "redesign" : review.status === "open" ? "fix" : "recheck", id)
+    next: nextCommand(ctx, churn.auto ? "redesign" : deletions.length > 0 ? "tidy" : routeAfterCollect(ctx, id, round.round), id)
+  });
+}
+
+// The tidy: see `tidyPath`. It takes no edge of the state machine and spends no
+// round, so the spec stays in `reviewing`; `snapshot` judges what comes back.
+async function tidy(options) {
+  const ctx = context(options);
+  const id = options.spec;
+  const spec = specById(ctx, id);
+  const state = readState(ctx, id);
+  refuseWhileWaiting(id, state, "tidy");
+  const round = currentRound(ctx, id, state);
+  if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
+  if (exists(tidyPath(ctx, id))) throw new Stop(`${id} has had its tidy already: a spec gets one, and snapshot judges what it did`);
+  const deletions = readJson(path.join(round.dir, "deletions.json"), { findings: [] }).findings ?? [];
+  if (deletions.length === 0) throw new Stop(`round ${round.round} of ${id} handed over no deletions, so there is nothing to tidy`);
+  const job = roles(ctx, id).jobs.fix;
+  const brief = path.join(round.dir, "to-tidy.json");
+  writeJson(brief, { candidate: state.candidateOid, findings: deletions });
+  const at = new Date().toISOString();
+  writeJson(tidyPath(ctx, id), { round: round.round, candidate: state.candidateOid, brief, outcome: null, at });
+  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: "tidy", record: brief, at });
+  const dispatch = fixerDispatch(ctx, spec, brief, job);
+  const set = await sendForSnapshot(ctx, id, { kind: "tidy", round: round.round, dispatch, job });
+  emit({
+    say: [`Tidy: one fixer (${settings(job)}) is handed the ${deletions.length} deletion(s) the economy reviewer asked for, from ${brief}, and nothing else. No fix round is spent, and the spec stays in review.`],
+    dispatch: [dispatch],
+    set,
+    next: nextCommand(ctx, "snapshot", id)
   });
 }
 
@@ -3908,7 +4152,10 @@ async function fix(options) {
   const round = currentRound(ctx, id, state);
   if (!round) throw new Stop(`${id} has no round for ${state.candidateOid}`);
   const settled = exists(path.join(round.dir, "recheck.json"));
-  const recordPath = settled ? path.join(round.dir, "still-open.json") : path.join(round.dir, "to-fix.json");
+  // A tidy round stands in for the round it tidied until it is settled, and that
+  // round holds the findings an unsettled tidy round has none of.
+  const home = round.tidy && !settled ? roundDir(ctx, id, collectionRound(ctx, id, round.round)) : round.dir;
+  const recordPath = settled ? path.join(round.dir, "still-open.json") : path.join(home, "to-fix.json");
   // What is open, split by who can answer it. A finding about the pull request
   // is answered by a body, not by a fixer — see `isPullRequestFinding` — so it
   // never reaches the fixer's brief, and a round with nothing else open spends
@@ -3928,12 +4175,13 @@ async function fix(options) {
     // Not yet judged by anyone but the panel that raised them. The re-check
     // asks the raising lenses to judge the body — the draft, once it is
     // written — with no fixer and no fresh adversary pass in between: nothing
-    // about the code changed. The marker is what tells `recheck` and `settle`
+    // about the code changed. Unless a kept tidy changed it, which `tidied` says:
+    // then the fresh pass runs. The marker is what tells `recheck` and `settle`
     // that this round's own findings are being asked about.
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
     writeJson(fixDeclinedPath(ctx, id), {
       kind: "pull-request", round: round.round, candidate: state.candidateOid, from: "panel",
-      record: recordPath, report: null, attempt: `pull-request-${stamp}`, at: new Date().toISOString()
+      record: recordPath, report: null, attempt: `pull-request-${stamp}`, ...(round.tidy ? { tidied: true } : {}), at: new Date().toISOString()
     });
     return emit({ say: [...prSay, "Nothing open is for a fixer, so no fix round is spent. Write the body now, then run next: the readers that raised these judge it."], next: nextCommand(ctx, "recheck", id) });
   }
@@ -4220,8 +4468,10 @@ async function recheck(options) {
   }
   // No fixer ran at all: what was open is about the pull request, and the body
   // is what the readers judge. The adversary's fresh pass is skipped — the diff
-  // it would read is the one it read when these findings were raised.
-  const aboutPr = declined?.kind === "pull-request";
+  // it would read is the one it read when these findings were raised. A kept
+  // tidy changed it, so there the pass runs, and the body is judged all the same.
+  const prMarker = declined?.kind === "pull-request";
+  const aboutPr = prMarker && !round.tidy;
 
   // Which findings each reader must judge: this round's panel findings when a
   // fixer has changed the diff since they were raised — or declined them without
@@ -4246,7 +4496,7 @@ async function recheck(options) {
   const pr = pullRequestLines(ctx, id, state);
   // What the readers are told about the fixer, kept so that `settle` can tell a
   // re-sent reader exactly the same; see `declinedContext`.
-  const given = { declined: declined ? { kind: declined.kind ?? "declined", report: declined.report ?? null } : null };
+  const given = { declined: declined ? { kind: declined.kind ?? "declined", report: declined.report ?? null, ...(declined.tidied ? { tidied: true } : {}) } : null };
   // Where this re-check's evidence goes. The round's own `recheck/` and
   // `findings/adversary.json` are the first re-check's, and once settled they
   // are sealed; a decline's re-check writes beside them, under its attempt.
@@ -4293,7 +4543,7 @@ async function recheck(options) {
     ? `Fresh adversary pass on round ${round.round} (${settings(resolved.jobs["adversary-fresh"])})`
     : `No fresh adversary pass on round ${round.round}: nothing about the code changed, and what is open is about the pull request.`];
   if (inputs.size > 0) {
-    const because = aboutPr ? "; they are about the pull request, and are judged against its body"
+    const because = prMarker ? "; they are about the pull request, and are judged against its body"
       : declined ? "; the fixer declined them without changing the code, so they are judged against its reasons"
         : fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged";
     say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${because}).`);
@@ -4309,11 +4559,12 @@ async function recheck(options) {
 function declinedContext(declined) {
   const aboutPr = declined?.kind === "pull-request";
   const lines = aboutPr
-    ? ["No fixer ran: these findings are about the pull request, which no fixer can reach, and nothing about the code changed. Judge each against the pull request body you are given — the one about to be published, where there is one — and against the code as it stands; resolved means the body now says what the finding asked for, or that you withdraw it"]
+    ? [`${declined.tidied ? "No fixer was sent for these: they are about the pull request, which no fixer can reach, and the code changed only by a tidy that removed surplus code."
+      : "No fixer ran: these findings are about the pull request, which no fixer can reach, and nothing about the code changed."} Judge each against the pull request body you are given — the one about to be published, where there is one — and against the code as it stands; resolved means the body now says what the finding asked for, or that you withdraw it`]
     : declined?.report
       ? [`The fixer changed nothing: it declined these findings, and its reasons are at ${declined.report}. There is no new code to read — judge each finding against the code as it stands and against those reasons; resolved means you withdraw it`]
       : declined ? ["The fixer changed nothing and wrote no report. There is no new code to read — judge each finding against the code as it stands; resolved means you withdraw it"] : [];
-  const fresh = declined
+  const fresh = declined && !declined.tidied
     ? [`The fixer changed nothing since this diff was last read: it declined what was open${declined.report ? `, with its reasons at ${declined.report}` : ""}. Raise again only what still stands`]
     : [];
   return { lines, fresh };
@@ -4423,6 +4674,9 @@ async function settle(options) {
   if (failed.length > 0) {
     say.push(`${listOf(failed.map((reader) => reader.name))} produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended.`);
   }
+  // A kept tidy is judged here, by what the fresh pass raised on what it changed.
+  const thrown = failed.length === 0 ? throwAwayTidy(ctx, id, state, plan, settledReview) : null;
+  if (thrown) return emit({ say: [...say, ...thrown.say], next: thrown.next });
   record(ctx, id, "review", state.candidateOid, path.join(dir, "recheck.json"));
   // Already there after a revisit, whose re-check reaches here without a fixer
   // or a panel in between.
@@ -7830,7 +8084,7 @@ async function end(options) {
 // --- entry -----------------------------------------------------------------
 
 const SUBCOMMANDS = {
-  start, dependencies, begin, snapshot, verify, panel, collect, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
+  start, dependencies, begin, snapshot, verify, panel, collect, tidy, fix, redesign, accept, recheck, settle, publish, checks, repair, revisit, finish, end,
   "resolve-commit": resolveCommit, "resolve-collect": resolveCollect, "plan-check": planCheck, "plan-collect": planCollect,
   "plan-land": planLand, "plan-adopt": planAdopt
 };
@@ -7853,7 +8107,9 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
   snapshot --spec <id> [--message m]  commit, allocate the round, snapshot, bind, record the report
   verify  --spec <id>                 run the verify commands against the candidate
   panel   --spec <id>                 dispatch every lens plus Codex
-  collect --spec <id>                 collect the panel; decides fix or recheck
+  collect --spec <id>                 collect the panel; decides tidy, fix or recheck
+  tidy    --spec <id>                 once per spec, when only deletions are left to make: one fixer, handed those and nothing
+                                      else, before the fresh pass; spends no fix round
   fix     --spec <id>                 spend a fix round and dispatch the fixer
   redesign --spec <id> [--file a,b] [--escalated | --normal]
                                       a person's answer to the Recurring question — asked once when the same file keeps failing,

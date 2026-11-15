@@ -218,7 +218,14 @@ finding and changes nothing makes no round and skips `verify`, but not `recheck`
 the lenses that raised what it declined read its reasons and either withdraw the
 finding or keep it open. A fix sent for something blocking or major is also
 handed the economy reviewer's minor and nit deletions, which it may make or
-decline; the run says which, and none of them gates or spends a round.
+decline; the run says which, and none of them gates or spends a round. When a
+panel round hands over deletions and nothing about the code gates, `collect`
+prints `tidy` instead, once per spec: one fixer is handed those deletions and
+nothing else, the tests run on what it left, and a passing result is a round of
+its own that skips `verify`, spends no fix round and goes on to `recheck`. A tidy
+that changes nothing, fails the tests or writes no usable report is put back as if
+it had not run, and one whose fresh adversary pass raises a blocking or major
+finding on what it changed is thrown away, with the run saying which.
 
 A fixer may answer that the right repair for a finding would go against the
 plan's goal, because the spec conflicts with it there; that stops the spec at

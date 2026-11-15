@@ -180,10 +180,15 @@ test("findings only about the pull request spend no round and send no fixer, del
   assert.equal(prOnly.state().fixRoundsUsed, 0);
   assert.equal(fs.existsSync(path.join(prOnly.shipDir, ID, "fix-pending.json")), false);
 
+  // Nothing gates, so a tidy is sent for the deletion; one that changes nothing leaves the adversary alone to read the round.
   const clean = begun();
   const collect = collected(clean, { economy: [DELETION] });
   assert.equal(collect.json.review, "clean");
-  assert.match(collect.json.next, /recheck/);
+  assert.match(collect.json.next, / tidy /);
+  const tidy = clean.run("tidy");
+  write(outputOf(tidy.json.dispatch[0]), { outcomes: [{ id: DELETION_ID, outcome: "wont-fix", note: "exported" }], notes: "", status: "complete", summary: "left it", unfinished: [] });
+  arriveAll(tidy);
+  assert.match(clean.run("snapshot").json.next, /recheck/);
   const recheck = clean.run("recheck");
   assert.deepEqual(recheck.json.dispatch.map((entry) => entry.description), [`Adversary on ${ID}`], "the clean route sends the adversary alone");
   assert.equal(clean.state().fixRoundsUsed, 0);

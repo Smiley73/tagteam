@@ -7,6 +7,12 @@
 // configuration, and gets back the directory to work in or a refusal naming the
 // limit.
 //
+// **A tidy round is not a fix round.** The round's own record says so (`tidy`),
+// and everything here that counts rounds against a budget leaves it out: it
+// takes the next number like any other, and is allocated even where the scope's
+// budget is spent. `thrownAway` is the mark a tidy round gets when it is dropped
+// after it was written.
+//
 // **The scope, and the exempt rounds.** A scope is the collection a budget is
 // counted over; rounds outside it are invisible to it. The first round of a ship
 // attempt is the implementation, not a fix, so the ship passes `exempt: 1`. That
@@ -88,7 +94,7 @@ function requireCount(name, value, minimum) {
  * direction: an unknown round that counted for nothing would hand back budget.
  *
  * A missing root is no rounds rather than an error; the first allocation into a
- * root creates it.
+ * root creates it. `tidy` and `thrownAway` are there only on a round marked so.
  */
 export function listRounds(root) {
   const resolved = path.resolve(root);
@@ -110,7 +116,10 @@ export function listRounds(root) {
       // no scope. It is re-enterable by its owner, and for counting it is
       // treated like an unreadable one: in every scope.
       const scope = candidate !== null && typeof record.scope === "string" && record.scope !== "" ? record.scope : null;
-      return { round: Number(entry.name), dir, candidate, scope };
+      return {
+        round: Number(entry.name), dir, candidate, scope,
+        ...(record?.tidy === true ? { tidy: true } : {}), ...(record?.thrownAway === true ? { thrownAway: true } : {})
+      };
     })
     .sort((left, right) => left.round - right.round);
 }
@@ -118,7 +127,7 @@ export function listRounds(root) {
 // Rounds with no scope of their own count everywhere; see `listRounds`.
 const inScope = (rounds, scope) => rounds.filter((entry) => entry.scope === null || entry.scope === scope);
 
-const spentIn = (rounds, scope, exempt) => Math.max(0, inScope(rounds, scope).length - exempt);
+const spentIn = (rounds, scope, exempt) => Math.max(0, inScope(rounds, scope).filter((entry) => !entry.tidy).length - exempt);
 
 const allocation = (round, dir, reentered, scope, spent, limit, limitName) => ({
   round,
@@ -136,7 +145,7 @@ const allocation = (round, dir, reentered, scope, spent, limit, limitName) => ({
 // writer took the number out from under the claim, which means every fact this
 // decision rested on is out of date and the decision is made again rather than
 // carried forward with a bigger number.
-function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
+function decideRound(resolved, { candidate, scope, limit, limitName, exempt, tidy }) {
   const rounds = listRounds(resolved);
 
   // Re-entry is restricted to the scope being allocated. A candidate that owns a
@@ -156,7 +165,7 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
   }
 
   const spent = spentIn(rounds, scope, exempt);
-  if (spent >= limit) throw new RoundBudgetExhausted({ scope, limitName, limit, spent });
+  if (spent >= limit && !tidy) throw new RoundBudgetExhausted({ scope, limitName, limit, spent });
 
   // Claimed the way `locks.mjs` claims a lock: the directory is built complete,
   // with its record already inside it, under a name no scan looks at, and then
@@ -169,7 +178,7 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
   // not: renaming onto an *empty* directory succeeds and replaces it. This
   // module never leaves an empty numbered directory behind, so the only way to
   // meet one is a hand-made or half-deleted round, and skipping it is right.
-  const record = `${JSON.stringify({ owner: candidate, scope }, null, 2)}\n`;
+  const record = `${JSON.stringify({ owner: candidate, scope, ...(tidy ? { tidy: true } : {}) }, null, 2)}\n`;
   let number = rounds.reduce((highest, entry) => Math.max(highest, entry.round), 0) + 1;
   while (fs.existsSync(path.join(resolved, String(number)))) number += 1;
   const pending = path.join(resolved, `.pending-${process.pid}-${randomUUID()}`);
@@ -183,7 +192,7 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
     return null;
   }
   const dir = path.join(resolved, String(number));
-  return allocation(number, dir, false, scope, spentIn([...rounds, { scope }], scope, exempt), limit, limitName);
+  return allocation(number, dir, false, scope, spentIn([...rounds, { scope, tidy }], scope, exempt), limit, limitName);
 }
 
 /**
@@ -206,7 +215,7 @@ function decideRound(resolved, { candidate, scope, limit, limitName, exempt }) {
  * a round that was never allowed.
  */
 export async function allocateRound(root, options = {}) {
-  const { candidate, scope, limit, limitName, exempt } = options;
+  const { candidate, scope, limit, limitName, exempt, tidy = false } = options;
   requireText("candidate", candidate);
   requireText("scope", scope);
   requireText("limitName", limitName);
@@ -218,7 +227,7 @@ export async function allocateRound(root, options = {}) {
   const lock = await acquireLock(resolved, ALLOCATION_LOCK, { label: `round allocation in ${resolved}` });
   try {
     while (true) {
-      const allocated = decideRound(resolved, { candidate, scope, limit, limitName, exempt });
+      const allocated = decideRound(resolved, { candidate, scope, limit, limitName, exempt, tidy });
       if (allocated) return allocated;
     }
   } finally {
