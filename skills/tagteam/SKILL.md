@@ -108,7 +108,8 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    landing check and a person's accept on the plan branch,
                    each bound to the current candidate                       ignored
     landing.json   what the last landing check found, as it was recorded    ignored
-    rounds/<n>/  round.json (the commit that owns this round), review.diff,
+    rounds/<n>/  round.json (the commit that owns this round; a tidy round also
+                 says tidy, and thrownAway once it is dropped), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
                  recheck/, verify/, candidate.json, review.json, recheck.json,
                  to-fix.json, deletions.json (the economy reviewer's minor and
@@ -129,7 +130,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  to-fix.code.json / still-open.code.json (the fixer's brief when
                  a finding about the pull request was kept out of it, or when
                  deletions were added to it), deletions-handed.json (the
-                 deletions the economy reader re-checks)                       ignored
+                 deletions the economy reader re-checks), to-tidy.json (the
+                 tidy fixer's brief: the round's deletions and nothing else)    ignored
+    tidy.json    the spec's one tidy: the round and candidate it started from,
+                 its brief, and what came of it; tidy/ holds its test run   ignored
     implement-report.json  fix-report.json  what the round's agent said about its
                  own work, written outside every round and recorded into one  ignored
     fix-pending.json  fix-declined.json  recheck-plan.json  the driver's notes
@@ -849,7 +853,7 @@ a new commit appears — and every fix round makes one.
 
 | Script | Does |
 |---|---|
-| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers — `next` never prints `accept` or `revisit`, and prints `redesign` only when `autoRedesign` answers the first same-file Recurring question of a cycle with a fix round left — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
+| `ship.mjs` | The ship driver: `start`, `begin`, `snapshot`, `verify`, `panel`, `collect`, `tidy`, `fix`, `redesign`, `accept`, `recheck`, `settle`, `publish`, `checks`, `repair`, `revisit`, `finish`, `end`. Sequences the scripts below and prints every dispatch; `redesign`, `accept` and `revisit` are a person's answers — `next` never prints `accept` or `revisit`, and prints `redesign` only when `autoRedesign` answers the first same-file Recurring question of a cycle with a fix round left — `redesign` once per cycle, the only way to a round past `limits.fixRounds`, and `accept` only while a fix round is left |
 | `plan.mjs` | The plan side: `explore`, `draft`, `review`, `collect`, `check`, `writers` and `specs` (the planning steps: each records the set it sends, prints the dispatch with its prompt and names what comes next; `review` also prepares the Codex plan review for the runner, `collect` folds the three readers into a brief once their set is in, `check` confirms every gating finding is answered once the drafter's set is in), `resume` (apply the restart rule to a set still out and name the step to pick up at; `--owed` names only a judging step a set still owes, which is how every run of `tagteam:plan-specs` opens), `effort-check` (at approval, the planning agents that ran at another effort or model than they were sent at, or could not be confirmed; always exits 0) |
 | `codex.mjs` | Compose a request, run one Codex turn over `codex app-server`, validate against a schema, record what Codex reported it ran as |
 | `codex-preflight.mjs` | `version` (refuse a Codex below the floor, on the binary the bridge will run) and `probe` (one real call through the same client, for `/tagteam:configure`) |

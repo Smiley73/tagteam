@@ -49,31 +49,47 @@ const GATING = new Set(["blocking", "major"]);
 // so a finding that appears in both records is one finding. A finding with no
 // file names no area, and says nothing about recurrence on one file; the loose
 // signal reads them all the same (`fileless`), since a round that raised one
-// still raised something.
-function raisedAt(dir, round, { fileless = false } = {}) {
+// still raised something. A round's `numbers` are the round numbers its findings
+// may carry: its own, and a kept tidy's, which is read as part of it.
+function raisedAt({ dirs, numbers, round }, { fileless = false } = {}) {
   const found = new Map();
-  for (const name of ["review.json", "recheck.json"]) {
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
-    } catch {
-      continue;
-    }
-    for (const finding of parsed?.open ?? []) {
-      if (!GATING.has(finding?.severity) || findingRound(finding?.id) !== round || (!fileless && !finding?.file)) continue;
-      found.set(finding.id, {
-        id: finding.id, round, lens: finding.lens ?? null, ...(finding.scope === undefined ? {} : { scope: finding.scope }),
-        file: finding.file || null, title: finding.title ?? ""
-      });
+  for (const dir of dirs) {
+    for (const name of ["review.json", "recheck.json"]) {
+      let parsed;
+      try {
+        parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+      } catch {
+        continue;
+      }
+      for (const finding of parsed?.open ?? []) {
+        if (!GATING.has(finding?.severity) || !numbers.includes(findingRound(finding?.id)) || (!fileless && !finding?.file)) continue;
+        found.set(finding.id, {
+          id: finding.id, round, lens: finding.lens ?? null, ...(finding.scope === undefined ? {} : { scope: finding.scope }),
+          file: finding.file || null, title: finding.title ?? ""
+        });
+      }
     }
   }
   return [...found.values()];
 }
 
 // The rounds a count covers: `scope`'s own at or below `round`. A round with no
-// scope of its own counts in every scope, as it does for the budget.
-const roundsInScope = (roundsRoot, scope, round) => listRounds(roundsRoot).filter((entry) =>
-  entry.round <= round && (scope === null || entry.scope === null || entry.scope === scope));
+// scope of its own counts in every scope, as it does for the budget. A tidy round
+// is not one of them: what its fresh pass raised counts at the round it tidied,
+// because without the tidy that pass would have run there, so a kept tidy's
+// directory is read with the round before it. A tidy that was thrown away counts
+// for nothing, since its pass is run again at that round.
+function roundsInScope(roundsRoot, scope, round) {
+  const all = listRounds(roundsRoot).filter((entry) =>
+    entry.round <= round && (scope === null || entry.scope === null || entry.scope === scope));
+  const counted = all.filter((entry) => !entry.tidy).map((entry) => {
+    const tidied = all.find((other, index) => other.tidy && !other.thrownAway && all[index - 1] === entry);
+    return { ...entry, dirs: [entry.dir, ...(tidied ? [tidied.dir] : [])], numbers: [entry.round, ...(tidied ? [tidied.round] : [])] };
+  });
+  // A count taken at a tidy round is the count at the round it tidied.
+  const at = all.find((entry) => entry.round === round)?.tidy ? counted.at(-1)?.round ?? round : round;
+  return { rounds: counted, round: at };
+}
 
 // The round each file's count restarts at: its highest redesign among `rounds`.
 // Read over every round before any finding is counted, because `listRounds` is
@@ -114,13 +130,13 @@ export function redesignedAt(dir) {
  * a body answers it, not a rewrite, and a signal on that file would offer a
  * redesign of code nothing asked to change. The loose signal still counts it.
  */
-export function churnSignal(roundsRoot, { scope = null, round, threshold = CHURN_ROUNDS } = {}) {
-  if (!Number.isInteger(round) || round < 1) return [];
-  const rounds = roundsInScope(roundsRoot, scope, round);
+export function churnSignal(roundsRoot, { scope = null, round: asked, threshold = CHURN_ROUNDS } = {}) {
+  if (!Number.isInteger(asked) || asked < 1) return [];
+  const { rounds, round } = roundsInScope(roundsRoot, scope, asked);
   const resetAt = resetsIn(rounds);
   const byFile = new Map();
   for (const entry of rounds) {
-    for (const finding of raisedAt(entry.dir, entry.round)) {
+    for (const finding of raisedAt(entry)) {
       if (isPullRequestFinding(finding) || discounted(resetAt, finding)) continue;
       if (!byFile.has(finding.file)) byFile.set(finding.file, []);
       byFile.get(finding.file).push(finding);
@@ -163,14 +179,14 @@ export function churnLines(signals) {
  * rewrite could change — the findings' files in the order they first arrived,
  * without the pull request's and without the findings that name no file.
  */
-export function looseSignal(roundsRoot, { scope = null, round, threshold = CHURN_ROUNDS } = {}) {
-  if (!Number.isInteger(round) || round < 1) return null;
-  const rounds = roundsInScope(roundsRoot, scope, round);
+export function looseSignal(roundsRoot, { scope = null, round: asked, threshold = CHURN_ROUNDS } = {}) {
+  if (!Number.isInteger(asked) || asked < 1) return null;
+  const { rounds, round } = roundsInScope(roundsRoot, scope, asked);
   if (rounds.at(-1)?.round !== round) return null;
   const resetAt = resetsIn(rounds);
   const run = [];
   for (const entry of [...rounds].reverse()) {
-    const raised = raisedAt(entry.dir, entry.round, { fileless: true }).filter((finding) => !discounted(resetAt, finding));
+    const raised = raisedAt(entry, { fileless: true }).filter((finding) => !discounted(resetAt, finding));
     if (raised.length === 0) break;
     run.unshift({ round: entry.round, raised });
   }
