@@ -685,10 +685,6 @@ function retryRecords(ctx, id) {
 const retryOf = (ctx, id, kind, candidate, base = null) =>
   retryRecords(ctx, id).find((record) => record.kind === kind && record.candidate === candidate && (record.base ?? null) === base) ?? null;
 
-// Whether the verify command at `index` (from 1) of the applicable list has had its second run on this commit.
-const verifyRetried = (records, candidate, index, command) => records.some((record) => record.kind === "verify" && record.candidate === candidate
-  && (record.index === undefined ? record.failed === command : record.index === index));
-
 const firstFailed = (verify) => (verify?.commands ?? []).find((command) => command.status === "failed") ?? null;
 
 /**
@@ -4007,15 +4003,26 @@ async function verify(options) {
   // theirs, and the first result stands for those.
   const again = path.join(dir, "verify-retry.json");
   const earlier = retryRecords(ctx, id);
-  const hadSecond = (position) => verifyRetried(earlier, state.candidateOid, position, first.commands[position - 1].command);
+  // Whether the command at `position` (from 1) of the applicable list has had its second run on this commit.
+  const hadSecond = (position) => earlier.some((record) => record.kind === "verify" && record.candidate === state.candidateOid
+    && (record.index === undefined ? record.failed === first.commands[position - 1].command : record.index === position));
   const due = exists(again) ? [] : first.commands.flatMap((command, at) => (command.status === "failed" && !hadSecond(at + 1) ? [at + 1] : []));
-  if (due.length > 0) run("verify-retry", "--only", due.join(","));
+  if (due.length > 0) {
+    run("verify-retry", "--only", due.join(","));
+    // A second run that never finished leaves its log directory and no result; that is not a second run, and no result is settled on it.
+    if (!exists(again)) {
+      throw Stop.beneath(`${id} was not verified: the second run of a command that failed did not finish, and left no result. Remove ${path.join(dir, "verify-retry")} and run verify again.`, "");
+    }
+  }
   const second = exists(again) ? readJson(again) : null;
-  const secondRuns = new Map((second?.only ?? []).map((position, at) => [position, second.commands[at]]));
-  const runsOf = (command, at) => [command, ...(secondRuns.has(at + 1) ? [secondRuns.get(at + 1)] : [])]
-    .map(({ status, exitCode, timedOut, logPath }) => ({ status, exitCode, timedOut, logPath }));
-  const commands = first.commands.map((command, at) => {
-    const runs = runsOf(command, at);
+  // A retry written before commands were retried one by one ran the whole selection and has no `only`; its commands line up with the first run's by position.
+  const legacy = second !== null && second.only === undefined;
+  const secondRuns = new Map(legacy
+    ? second.commands.flatMap((result, at) => (first.commands[at]?.status === "failed" ? [[at + 1, result]] : []))
+    : (second?.only ?? []).map((position, at) => [position, second.commands[at]]));
+  const commands = (legacy ? second.commands : first.commands).map((command, at) => {
+    const runs = (legacy && !secondRuns.has(at + 1) ? [command] : [first.commands[at], ...(secondRuns.has(at + 1) ? [secondRuns.get(at + 1)] : [])])
+      .map(({ status, exitCode, timedOut, logPath }) => ({ status, exitCode, timedOut, logPath }));
     return { command: command.command, status: runs.at(-1).status, runs };
   });
   const outcome = {
@@ -4035,11 +4042,11 @@ async function verify(options) {
   record(ctx, id, "verify", state.candidateOid, settled);
   const say = [`Verification: ${outcome.status}${outcome.status === "not-applicable" ? " — nothing matched, which is not a pass and waits for a person" : ""}.`];
   if (secondRuns.size > 0) say.push("A command that failed was run once more on the same commit:");
-  for (const command of commands) {
+  for (const [at, command] of commands.entries()) {
     const [firstRun, secondRun] = command.runs;
     const timedOut = (run) => (run.timedOut ? " (timed out)" : "");
     if (secondRun) say.push(`  first run, ${firstRun.status}: ${command.command}${timedOut(firstRun)}`, `  second run, ${secondRun.status}: ${command.command}${timedOut(secondRun)}`);
-    else say.push(`  ${firstRun.status}: ${command.command}${timedOut(firstRun)}${firstRun.status === "failed" ? " — not run again: this commit has already had its second run of it after a failure" : ""}`);
+    else say.push(`  ${firstRun.status}: ${command.command}${timedOut(firstRun)}${firstRun.status === "failed" && hadSecond(at + 1) ? " — not run again: this commit has already had its second run of it after a failure" : ""}`);
   }
   if (commands.some((command) => command.runs[1]?.status === "passed")) {
     say.push("A command that failed passed the second time; the pull request says so under Risk.");

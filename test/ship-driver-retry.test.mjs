@@ -109,19 +109,14 @@ test("a disclosure a person edits out of the pull request on GitHub is sent agai
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function beginAndSnapshot(staged) {
-  const { plan, shipDir, env } = staged;
+test("a verify command that fails both times records failed beside a command that passed once, and neither is run again when verify runs again", () => {
+  const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"; exit 1`, `echo ran >> "${dir}/y-count"`)(config) });
+  const { dir, plan, shipDir, env } = staged;
   const begin = ship("begin", plan, ["--spec", "01-a"], env);
   write(path.join(JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree, "app.js"), A_CHANGE);
   write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
   arriveAll(begin);
   assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).status, 0);
-}
-
-test("a verify command that fails both times records failed beside a command that passed once, and neither is run again when verify runs again", () => {
-  const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"; exit 1`, `echo ran >> "${dir}/y-count"`)(config) });
-  const { dir, plan, shipDir, env } = staged;
-  beginAndSnapshot(staged);
   const verified = ship("verify", plan, ["--spec", "01-a"], env);
   assert.equal(verified.status, 0, verified.stderr);
   assert.equal(verified.json.verify, "failed");
@@ -143,6 +138,46 @@ test("a verify command that fails both times records failed beside a command tha
   assert.equal(ranIn(path.join(dir, "x-count")), 2, "verify ran the failing command a third time");
   assert.equal(ranIn(path.join(dir, "y-count")), 1, "verify ran the passing command again");
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A round at the point `verify` finds it: snapshotted, with the first run's result and log in place and nothing run for real.
+function plantedFirstRun(staged, command) {
+  const { plan, shipDir, env } = staged;
+  const begin = ship("begin", plan, ["--spec", "01-a"], env);
+  write(path.join(JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree, "app.js"), A_CHANGE);
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  arriveAll(begin);
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).status, 0);
+  const round = path.join(shipDir, "01-a", "rounds", "1");
+  const result = (status) => ({ command, status, exitCode: status === "passed" ? 0 : 1, timedOut: false, logPath: path.join(round, "verify", "1.log") });
+  write(path.join(round, "verify", "1.log"), "");
+  write(path.join(round, "verify.json"), JSON.stringify({ status: "failed", commands: [result("failed")] }));
+  return { round, result };
+}
+
+test("a round whose second run was written before commands were retried one by one reads as the pass it was", () => {
+  const command = "exit 1";
+  const staged = stageWith({ change: verifyWith(command) });
+  const { round, result } = plantedFirstRun(staged, command);
+  write(path.join(round, "verify-retry.json"), JSON.stringify({ status: "passed", commands: [{ ...result("passed"), logPath: path.join(round, "verify-retry", "1.log") }] }));
+  const verified = ship("verify", staged.plan, ["--spec", "01-a"], staged.env);
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(verified.json.verify, "passed", "a retry from before the change was read as a failure");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(round, "verify-result.json"), "utf8")).commands.map((entry) => [entry.status, entry.runs.map((run) => run.status)]), [["passed", ["failed", "passed"]]]);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a second run that was interrupted before it wrote a result settles nothing and names what to remove", () => {
+  const command = "exit 1";
+  const staged = stageWith({ change: verifyWith(command) });
+  const { round } = plantedFirstRun(staged, command);
+  write(path.join(round, "verify-retry", "1.log"), "");
+  const verified = ship("verify", staged.plan, ["--spec", "01-a"], staged.env);
+  assert.notEqual(verified.status, 0, verified.stdout);
+  assert.match(verified.stderr + verified.stdout, /verify-retry/);
+  assert.ok(!fs.existsSync(path.join(round, "verify-result.json")), "an interrupted second run was settled as a failure");
+  assert.deepEqual(retriesIn(staged.shipDir), [], "an interrupted second run was recorded as having happened");
+  fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
 test("two verify commands that each fail once and pass when run again are each run twice, recorded, and each said under Risk", () => {
