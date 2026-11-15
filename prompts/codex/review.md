@@ -6,7 +6,7 @@ see theirs and are not confined to one of them.
 <!-- No lens brief is interpolated into this prompt, and none should be. Being
 unlensed is what this pass is for, so the briefs under prompts/lenses/ and the
 ones a repository writes under .tagteam/lenses/ are both deliberately absent
-here. The only substitutions are CANDIDATE, LENSES, SPEC, DIFF and ITEMS. -->
+here. The only substitutions are CANDIDATE, LENSES, CONVENTIONS, SPEC, DIFF and ITEMS. -->
 
 
 Return only JSON matching the schema you were given. Set `lens` to "codex" and
@@ -32,6 +32,12 @@ Its `## Sign-offs`, where it has one, names what a person approved with the
 plan: that the change does what it lists is not a finding; how it does it still
 is. A change of that kind that the repository's conventions say to ask about
 first and the list leaves out is.
+
+The repository's conventions document, which says how code here is written and
+what to ask about first (`none` when the repository has no such document); read
+it before you judge the change:
+
+{{CONVENTIONS}}
 
 The change:
 

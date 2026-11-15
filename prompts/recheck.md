@@ -14,6 +14,9 @@ says which review round raised the finding. Tidying it to `correctness.1`
 returns a verdict that binds to nothing, and the finding you judged resolved
 stays open.
 
+If your dispatch names a conventions document, consult it only where a finding
+you are judging, or the fixer's reason for declining it, turns on a convention.
+
 Then read the new change. It is on disk twice: whole, at the `review.diff` path
 you are given, and one file at a time in `review.diff.d/` beside it, where
 `index.txt` maps each piece to its path. Read the pieces for the files your
@@ -79,6 +82,18 @@ code you happen to notice — that is a different review, and this is not it.
 
 **Narrower scope, not less input.** You are looking only at your own findings.
 You are not looking at less of the diff.
+
+## Deletions
+
+Your input may also hold entries marked `"deletion": true`: surplus you named,
+which the fixer was handed to remove although nothing gates on it. Give each one
+a verdict by id, like every other. `resolved: true` means the code the entry
+names is gone, and nothing took its place beyond what its `fix` allowed — a call
+to a definition that already exists, where a duplicate stood. `resolved: false`
+means it is still there, or more than that was put in its place; say what is
+there now. Your verdict on a deletion never gates: it opens no finding, keeps no
+change from merging and spends no round, so judge only whether the surplus is
+gone.
 
 ## Unfinished items
 

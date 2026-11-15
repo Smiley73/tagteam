@@ -25,7 +25,7 @@ export const meta = {
     { title: "Snapshot and verify", detail: "the candidate is committed and every verify command runs" },
     { title: "Review", detail: "the panel, Codex included, and the judging of what it wrote" },
     { title: "Re-check", detail: "the adversary's fresh pass and each reader's re-check" },
-    { title: "Fix", detail: "a fixer or a CI repair works the findings or the red check" },
+    { title: "Fix", detail: "a fixer, the one tidy or a CI repair works the findings, the surplus deletions or the red check" },
     { title: "Publish", detail: "the pull request is written and opened" },
     { title: "Checks", detail: "the pull request's checks are waited for" },
     { title: "Land", detail: "the merge, the whole-plan check and the landing of the plan" }
@@ -138,7 +138,7 @@ const PHASE_OF = {
   snapshot: "Snapshot and verify", verify: "Snapshot and verify", "resolve-commit": "Snapshot and verify",
   panel: "Review", collect: "Review", "resolve-collect": "Review", revisit: "Review",
   recheck: "Re-check", settle: "Re-check",
-  fix: "Fix", repair: "Fix",
+  fix: "Fix", tidy: "Fix", repair: "Fix",
   publish: "Publish", accept: "Publish",
   checks: "Checks",
   finish: "Land", "plan-check": "Land", "plan-collect": "Land", "plan-land": "Land", "plan-adopt": "Land"

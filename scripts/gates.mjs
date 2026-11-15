@@ -498,7 +498,7 @@ export function reconcileBudgets(state, rounds) {
   // Rounds with no scope of their own count in every scope, exactly as they do
   // when a budget is allocated.
   const current = repairScope(repairs);
-  const inCurrent = (rounds ?? []).filter((entry) => (entry.scope ?? current) === current).length;
+  const inCurrent = (rounds ?? []).filter((entry) => !entry.tidy && (entry.scope ?? current) === current).length;
   const fixesOnDisk = Math.max(0, inCurrent - EXEMPT_ROUNDS_PER_SCOPE);
   // Read even when it is about to be replaced, so a malformed counter is still
   // refused rather than silently overwritten.
@@ -873,7 +873,7 @@ const USAGE = `usage:
   gates.mjs init     <state.json> <spec-id> <slug> <branch> <base> <lens,lens,...> --repo <repo> [--force]
   gates.mjs plan-route <state.json> [<plan-branch>]
   gates.mjs state    <state.json> <next-state> [config.json]
-  gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json>
+  gates.mjs round    <state.json> <rounds-root> <candidateOid> <config.json> [--tidy]
   gates.mjs grant    <state.json> <rounds-root> <config.json>
   gates.mjs bind    <state.json> <candidateOid> <baseOid> [changed-paths.json|candidate.json]
   gates.mjs record   <state.json> <review|verify|ci|report|human> <candidateOid> <value.json>
@@ -996,8 +996,10 @@ async function main() {
     // half-done: a run that reconciled and then died would have raised the
     // counters without the round they account for, and one that allocated
     // without reconciling would work from counters a resumed attempt had reset.
-    const [stateFile, roundsRoot, candidate, configFile] = values;
-    if (!stateFile || !roundsRoot || !candidate || !configFile) {
+    const [stateFile, roundsRoot, candidate, configFile, ...flags] = values;
+    // A tidy round is allocated past the cap and counts against nothing.
+    const tidy = flags.includes("--tidy");
+    if (!stateFile || !roundsRoot || !candidate || !configFile || flags.some((flag) => flag !== "--tidy")) {
       const error = new Error(USAGE.trimEnd());
       error.exitCode = 2;
       throw error;
@@ -1026,7 +1028,8 @@ async function main() {
         scope,
         limit: cap,
         limitName: "limits.fixRounds",
-        exempt: EXEMPT_ROUNDS_PER_SCOPE
+        exempt: EXEMPT_ROUNDS_PER_SCOPE,
+        tidy
       });
     } catch (error) {
       // The allocator counts rounds on disk and the `fixing` edge counts the
@@ -1059,7 +1062,7 @@ async function main() {
     // count in its scope, less the implementation. Worked out from disk rather
     // than from `spent`, because a re-entered round need not be the newest — the
     // implementation re-entered after the grant was spent is not the grant's.
-    const ordinal = onDisk.filter((entry) => entry.scope === null || entry.scope === round.scope)
+    const ordinal = onDisk.filter((entry) => !entry.tidy && (entry.scope === null || entry.scope === round.scope))
       .findIndex((entry) => entry.round === round.round) + 1 - EXEMPT_ROUNDS_PER_SCOPE;
     process.stdout.write(`${JSON.stringify({
       ok: true, spec: settled.state.spec, state: settled.state.state, reconciled: [...changed, ...settled.changed], ...round,

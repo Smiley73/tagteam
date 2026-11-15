@@ -275,7 +275,7 @@ test("each subcommand runs in the phase of the ship.md step it belongs to", asyn
     "Snapshot and verify": ["snapshot", "verify", "resolve-commit"],
     Review: ["panel", "collect", "resolve-collect", "revisit"],
     "Re-check": ["recheck", "settle"],
-    Fix: ["fix", "repair"],
+    Fix: ["fix", "tidy", "repair"],
     Publish: ["publish", "accept"],
     Checks: ["checks"],
     Land: ["finish", "plan-check", "plan-collect", "plan-land", "plan-adopt"]

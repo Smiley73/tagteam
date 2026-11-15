@@ -68,10 +68,12 @@ export function redesignFiles(signals, explicit, loose = null) {
 }
 
 // The rounds a history covers: the cycle's own, at or below `round`. A round
-// with no scope of its own counts in every scope, as it does for the budget.
+// with no scope of its own counts in every scope, as it does for the budget. A
+// tidy round that was thrown away is not one: it is about a commit that is no
+// longer the candidate.
 function roundsInScope(roundsRoot, scope, round) {
   return listRounds(roundsRoot).filter((entry) =>
-    entry.round <= round && (scope === null || entry.scope === null || entry.scope === scope));
+    !entry.thrownAway && entry.round <= round && (scope === null || entry.scope === null || entry.scope === scope));
 }
 
 // Which finding ids are open at `round`. A settled round says so itself in

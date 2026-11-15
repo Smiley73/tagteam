@@ -489,7 +489,7 @@ test("every dispatching step of the driver reads the resolver, and the driver na
   for (const [, job] of shipDriver.matchAll(/jobs\.([a-z]+)\b/g)) {
     assert.ok(emitted.has(job), `ship.mjs dispatches roles job ${job}, which gates.mjs roles does not emit`);
   }
-  for (const step of ["begin", "panel", "fix", "redesign", "recheck", "repair"]) {
+  for (const step of ["begin", "panel", "fix", "tidy", "redesign", "recheck", "repair"]) {
     assert.match(driverFunction(step), /roles\(ctx, id[,)]/, `${step} dispatches without reading the resolver`);
   }
   // The plan-level dispatches have no spec state for `roles` to read, and go
@@ -509,6 +509,58 @@ test("every reporting dispatch the driver prints names the path its agent must w
   assert.doesNotMatch(shipDriver, /-report-\$\{|report-\$ROUND/, "a reporting path carries the round it was dispatched out of");
   for (const fn of ["implementerDispatch", "redesignDispatch", "fixerDispatch", "repairDispatch"]) {
     assert.match(driverFunction(fn), /Write your (?:fix )?report to:/, `${fn} does not tell its agent where to write its report`);
+  }
+});
+
+// Every agent that reads or writes the change is told where the repository's
+// conventions document is, through the one line `conventionsLine` builds. A
+// builder added later without it fails here. The body writer writes a pull
+// request's text from facts the driver prepared, and reads no code.
+test("every dispatch builder that writes a Job line names the conventions document", () => {
+  const builders = [...shipDriver.matchAll(/\nfunction (\w+)\(/g)].map(([, name]) => name)
+    .filter((name) => driverFunction(name).includes("`Job: ") && name !== "bodyWriterDispatch");
+  for (const expected of ["implementerDispatch", "redesignDispatch", "fixerDispatch", "repairDispatch", "resolverDispatch",
+    "reportResendDispatch", "reviewerDispatch", "adversaryDispatch", "recheckDispatch"]) {
+    assert.ok(builders.includes(expected), `${expected} is no longer found as a builder that writes a Job line`);
+  }
+  for (const name of builders) assert.match(driverFunction(name), /\bconventionsLine\(ctx\)/, `${name} never tells its agent where the conventions document is`);
+  for (const name of ["codexReviewDispatch", "codexRecheckDispatch"]) {
+    assert.match(driverFunction(name), /CONVENTIONS: conventionsPath\(ctx\)/, `${name} never tells Codex where the conventions document is`);
+  }
+  // Both branches of a repair are builders of their own.
+  assert.equal(driverFunction("repairDispatch").match(/conventionsLine\(ctx\)/g).length, 2, "a branch of repairDispatch lacks the line");
+});
+
+// What a builder passes, read off its source: the names in the `vars` and
+// `fences` objects after the point the template is named. composePrompt refuses
+// a section the template names and nobody supplies, and one supplied and never
+// used, so a template that composes is one the builder's names match exactly.
+test("each ship codex template composes with exactly the variables and fences its builder passes", async () => {
+  const { composePrompt } = await import("../scripts/codex.mjs");
+  const objectNames = (text, key) => {
+    const at = text.search(new RegExp(`\\b${key}: \\{`));
+    assert.ok(at > -1, `no ${key} object after the template is named`);
+    return [...text.slice(at, text.indexOf("}", at)).matchAll(/\b([A-Z][A-Z0-9_]*):/g)].map(([, name]) => name);
+  };
+  const review = driverFunction("codexReviewDispatch");
+  const recheck = driverFunction("codexRecheckDispatch");
+  const requests = {
+    "review.md": { names: review.slice(review.indexOf('template: "review.md"')), vars: review },
+    "recheck.md": { names: recheck.slice(recheck.indexOf('template: "recheck.md"')), vars: recheck },
+    "recheck-declined.md": { names: recheck.slice(recheck.indexOf('template: "recheck-declined.md"')), vars: recheck }
+  };
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-compose-"));
+  const fence = path.join(scratch, "section.txt");
+  fs.writeFileSync(fence, "text\n");
+  for (const [template, { names, vars }] of Object.entries(requests)) {
+    const fenced = objectNames(names, "fences");
+    const supplied = objectNames(vars, "vars");
+    assert.ok(supplied.includes("CONVENTIONS"), `the builder for ${template} never supplies CONVENTIONS`);
+    assert.doesNotThrow(() => composePrompt({
+      template: path.join(root, "prompts", "codex", template),
+      fences: fenced.map((name) => ({ name, file: fence, json: false })),
+      vars: supplied.map((name) => ({ name, text: "value" }))
+    }), `${template} does not compose with ${[...supplied, ...fenced].join(", ")}`);
   }
 });
 

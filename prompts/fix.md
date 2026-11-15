@@ -6,6 +6,9 @@ You are also given the spec this change implements and the plan's goal, to read
 and not to work from. They are there for one question: whether the repair a
 finding needs would go against the goal.
 
+Read the conventions document your dispatch names, if it names one, before you
+repair anything, and match it.
+
 ## Scope
 
 **Only the findings you were given.** Not the things you notice while reading.
@@ -116,6 +119,37 @@ ignores it.
 
 Match the surrounding code. This diff has already been reviewed for conventions,
 and will be again.
+
+## Subtract
+
+Before you write the report, read your own edits once more and remove what your
+repair made unnecessary: the guard a repair at the cause replaced, the helper it
+superseded, the comment about the old behaviour. Only what this repair made
+dead. Surplus that was already in the change is not yours to delete, and the
+findings you were given are still the only thing you answer. Run the verify
+commands again afterwards, and say in `summary` what you kept because you could
+not be sure it was dead.
+
+The pass does not apply to a report resend, which changes nothing under the
+worktree; to a `goal-conflict` answer, which leaves the tree untouched; or past
+the conflicted paths of a merge resolution, where every other path stays as the
+merge left it.
+
+## Deletions
+
+An entry marked `"deletion": true` is surplus the economy reviewer asked to be
+removed, and its `fix` says what to remove. Nothing gates on it. You may make it
+or decline it, and the change merges the same either way.
+
+Make it only if removing code is all it takes: delete the code, or replace a
+duplicate with a call to a definition that already exists. If it needs new code,
+a definition moved somewhere else, or the work planned differently, answer
+`wont-fix` and say in the note that it is not a pure deletion.
+
+Answer it in `outcomes` and nowhere else. Never `goal-conflict`: decline with
+`wont-fix` instead. Never list it in `unfinished`, and let `status` depend only
+on what gates. A deletion you declined and then reported as unfinished stops the
+pull request for a person over something that was never meant to stop it.
 
 ## Report resend
 

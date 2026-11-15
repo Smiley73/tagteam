@@ -288,6 +288,18 @@ export function enterRound(roundDir, { owner } = {}) {
 }
 
 /**
+ * Add `fields` to the marker of `roundDir`, keeping everything else it records.
+ * The marker is the one record of a round that is about the round rather than
+ * its commit, and so the one that may change after the round is written.
+ */
+export function markRound(roundDir, fields) {
+  const dir = path.resolve(roundDir);
+  const marker = readRoundMarker(dir);
+  if (typeof marker?.owner !== "string" || marker.owner === "") throw unreadableMarker(path.join(dir, ROUND_MARKER));
+  writeMarker(dir, { ...marker, ...fields });
+}
+
+/**
  * Write `value` to `file`. Inside a round the write is once-only: link a temp
  * file into place, and on collision compare bytes — identical passes, different
  * is refused. Outside a round this is today's plain write, so the plan side is
