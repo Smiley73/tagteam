@@ -39,6 +39,9 @@ function save(shipDir, known) {
 /** Whether `command`, as a verify result records it, failed with the change and also on the base. */
 export const failsWithout = (command) => command?.status === "failed" && command.base?.status === "failed";
 
+/** The commands of a verify result that fail with the change and on the base, backticked and comma-joined. */
+export const failsWithoutNames = (verify) => (verify?.commands ?? []).filter(failsWithout).map((command) => `\`${command.command}\``).join(", ");
+
 /**
  * The gate status of a result whose commands are final: `passed` when none
  * failed, `fails-without-change` when every one that failed also fails on the

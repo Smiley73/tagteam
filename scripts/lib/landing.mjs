@@ -47,7 +47,7 @@ import { writeRoundFile } from "./round-store.mjs";
 // that would drift silently if this file re-derived them. The import direction
 // is unusual for `lib/`, and it is cheaper than the drift.
 import { parseNameStatus } from "../snapshot-candidate.mjs";
-import { FAILS_WITHOUT_CHANGE, failsWithout } from "./verify-base.mjs";
+import { FAILS_WITHOUT_CHANGE, failsWithoutNames } from "./verify-base.mjs";
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -193,7 +193,7 @@ export function landingMessage(outcome, { spec, base, repair } = {}) {
   const moved = `origin/${base} moved from ${from} to ${to} since this candidate was reviewed`;
   if (outcome.status === "passed") {
     const verified = outcome.verify?.status === FAILS_WITHOUT_CHANGE
-      ? `re-verified against the new base: ${(outcome.verify.commands ?? []).filter(failsWithout).map((command) => `\`${command.command}\``).join(", ")} fails there as well as on the `
+      ? `re-verified against the new base: ${failsWithoutNames(outcome.verify)} fails there as well as on the `
         + "merge, as it does without the change, and nothing else fails, so it is disclosed and not held against the change"
       : `re-verified against the new base (${outcome.verify?.status ?? "not-applicable"})`;
     return `${moved}; the reviewed change merges into it cleanly, lands as the same change, and was ${verified} before merging. `

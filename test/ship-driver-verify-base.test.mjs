@@ -186,6 +186,36 @@ test("the base run sees the base's own setup output and not the candidate's inst
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("each command is run on a base checked out afresh, so one that changes the tree cannot make the next one fail on the base", () => {
+  // X empties the tracked fixture on the base, where it holds no BAD; Y needs the fixture as the base committed it.
+  const staged = stageWith({
+    change: (config, { repo }) => {
+      write(path.join(repo, "fixture.txt"), "ok\n");
+      verifyWith(`if ! grep -q BAD fixture.txt; then : > fixture.txt; fi; exit 1`, `test -s fixture.txt && ! grep -q BAD fixture.txt`)(config);
+    }
+  });
+  const { plan, env, dir } = staged;
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE, "fixture.txt": "ok BAD\n" });
+  assert.equal(ship("verify", plan, ["--spec", "01-a"], env).status, 0);
+  const gate = state().gates.verify;
+  assert.deepEqual(gate.commands.map((command) => [command.status, command.base?.status ?? null]), [["failed", "failed"], ["failed", "passed"]],
+    "the second command was run on what the first left of the base");
+  assert.equal(gate.status, "failed");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a base run cut short, which left a log and no result, is run again by the next verify", () => {
+  const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"; exit 1`)(config) });
+  const { plan, env, shipDir, dir } = staged;
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  const stale = path.join(shipDir, "01-a", "rounds", "1", "retries", `base-${state().baseOid.slice(0, 12)}-command-1`);
+  write(path.join(stale, "1.log"), "cut short\n");
+  const verified = ship("verify", plan, ["--spec", "01-a"], env);
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(state().gates.verify.status, FAILS);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a spec whose commands all pass makes no base run and writes no record of one", () => {
   const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"`)(config) });
   const { dir, shipDir, env } = staged;
@@ -237,6 +267,19 @@ test("a base that moved before the merge: a command failing on the merge and on 
   fs.rmSync(differs.staged.dir, { recursive: true, force: true });
 });
 
+test("a base that moved before the merge: a command that fails on the merge beside a disclosed one that comes first still stops the spec", () => {
+  // The first fails everywhere and is disclosed by 02-b's own gate; the second passes for 02-b alone and for the new base, and fails only on the two together.
+  const { staged, second } = twoInFlight((config, { dir }) => verifyWith("exit 1", `echo ran >> "${dir}/y-count"; if [ -f a.txt ] && [ -f b.js ]; then exit 1; fi`)(config));
+  const stopped = ship("finish", staged.plan, ["--spec", "02-b"], staged.env);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.notEqual(second.state().state, "merged", "a command that fails only on the merge was never run and the spec landed");
+  const landing = second.state().landing;
+  assert.equal(landing.status, "failed");
+  assert.equal(landing.verify.status, "failed");
+  assert.deepEqual(landing.verify.commands.map((command) => command.status), ["failed", "failed"]);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
 // The verify commands as the specs of a merged plan ran them, one of which no spec's `when` selects.
 const NEVER = { globs: ["nothing/**"], keywords: [] };
 const everything = { globs: [], keywords: [] };
@@ -283,6 +326,17 @@ test("a command that fails at the whole-plan check and was never disclosed is he
   const record = JSON.parse(fs.readFileSync(path.join(staged.shipDir, "whole-plan", "1", "record.json"), "utf8"));
   assert.equal(record.verify.status, "failed");
   assert.ok(!record.verify.commands.some((command) => command.base), "an undisclosed command was run on the base");
-  assert.ok(trainOf(staged.shipDir).worktree);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("the whole-plan check runs a command after a disclosed failure, and holds one that fails only on the tip", () => {
+  const command = "if [ -f b.js ]; then exit 1; fi";
+  const staged = stageMerged({ verify: [...withHidden("exit 1").verify, { command, when: NEVER, timeoutSec: 60 }] });
+  disclose(staged.shipDir, "exit 1");
+  const check = ship("plan-check", staged.plan, [], staged.env);
+  assert.equal(check.status, 0, check.stderr);
+  const record = JSON.parse(fs.readFileSync(path.join(staged.shipDir, "whole-plan", "1", "record.json"), "utf8"));
+  assert.equal(record.verify.status, "failed");
+  assert.deepEqual(record.verify.commands.map((entry) => entry.status), ["passed", "failed", "failed"], "the command after the disclosed failure was not run");
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });

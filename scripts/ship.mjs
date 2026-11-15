@@ -89,7 +89,7 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
-  FAILS_WITHOUT_CHANGE, anyDisclosed, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, isDisclosed, saveBaseRun,
+  FAILS_WITHOUT_CHANGE, anyDisclosed, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, isDisclosed, saveBaseRun,
   verifyStatus
 } from "./lib/verify-base.mjs";
 import {
@@ -3422,9 +3422,11 @@ async function bringUpToLockfile(ctx) {
 
 // What each of `commands` does on the commit `oid`, the base of what failed them:
 // taken from the plan's record of that command on that commit when there is one,
-// and otherwise run there, once, each by itself through verify-run. `dir` is where
-// the runs' logs and results go beneath the round or check they belong to, and
-// `back` is where the worktree goes afterwards, on `branch` when one is named.
+// and otherwise run there, once, each by itself through verify-run, on the base
+// checked out and set up afresh for each, so that what one command does to the tree
+// is not what the next one runs on. `dir` is where the runs' logs and results go
+// beneath the round or check they belong to, and `back` is where the worktree goes
+// afterwards, on `branch` when one is named.
 //
 // Checking the base out leaves behind what the candidate installed, which git does
 // not track and `clean` does not remove, so a command run on it could meet the
@@ -3444,11 +3446,13 @@ async function runOnBase(ctx, { oid, commands, dir, back }) {
     else due.push(command);
   }
   if (due.length === 0) return found;
-  putBack(ctx.worktree, oid);
-  const broken = await bringUpToLockfile(ctx);
   let failure = null;
   try {
-    for (const command of due) found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir) : { status: "could-not-run", oid, reason: broken });
+    for (const command of due) {
+      putBack(ctx.worktree, oid);
+      const broken = await bringUpToLockfile(ctx);
+      found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir) : { status: "could-not-run", oid, reason: broken });
+    }
   } catch (error) {
     failure = error;
   }
@@ -3468,6 +3472,8 @@ function commandOnBase(ctx, oid, command, dir) {
   const name = `base-${short(oid)}-command-${position}`;
   const file = path.join(dir, `${name}.json`);
   if (!exists(file)) {
+    // A log with no result is a run that was cut short and recorded nothing, and verify-run will not write over it.
+    fs.rmSync(path.join(dir, name), { recursive: true, force: true });
     const run = node("verify-run.mjs", [
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all", "--only", String(position),
       "--out-dir", path.join(dir, name), "--out", file, "--parent-pid", String(process.pid)
@@ -6629,20 +6635,18 @@ function landingSnapshot(ctx, tip, mergeBase) {
   return path.join(dir, "candidate.json");
 }
 
-const failedList = (landing) => (landing.verify?.commands ?? []).filter(failsWithout).map((command) => `\`${command.command}\``).join(", ");
-
 // What a landing result is, in a person's terms, naming the tip and the base.
 function landingLine(route, landing) {
   const at = `${route.branch} at ${short(landing.tip)}`;
   const base = `${route.base} at ${short(landing.baseOid)}`;
   if (landing.on === "whole-plan") {
     return `${base} has not moved past where ${at} last met it, so the landing check is the whole-plan check's own run of every `
-      + `verify command on this tip: ${{ passed: "passed", [FAILS_WITHOUT_CHANGE]: `${failedList(landing)} fails there and where the plan began, as disclosed, and nothing else fails` }[landing.verify?.status] ?? "nothing to run, which is not a failure"}.`;
+      + `verify command on this tip: ${{ passed: "passed", [FAILS_WITHOUT_CHANGE]: `${failsWithoutNames(landing.verify)} fails there and where the plan began, as disclosed, and nothing else fails` }[landing.verify?.status] ?? "nothing to run, which is not a failure"}.`;
   }
   const moved = `${route.base} moved to ${short(landing.baseOid)} since ${at} last met it at ${short(landing.mergeBase)}`;
   if (landing.status === "passed") {
     return `${moved}; the plan merges into it cleanly, lands as the same change, and ${landing.verify?.status === FAILS_WITHOUT_CHANGE
-      ? `${failedList(landing)} fails on the merged result and on ${base} too, as a spec disclosed, and nothing else fails`
+      ? `${failsWithoutNames(landing.verify)} fails on the merged result and on ${base} too, as a spec disclosed, and nothing else fails`
       : "every verify command passes on the merged result"}.`;
   }
   if (landing.status === "conflict") return `${moved}, and the plan no longer merges into it cleanly (${(landing.conflicts ?? []).join(", ")}).`;
