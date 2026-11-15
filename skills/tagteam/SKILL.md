@@ -117,8 +117,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  still-open.json, still-open/, report.json,
                  redesign.json (which files this round's commit was a redesign
                  of; kept on re-entry like the report),
-                 verify-retry.json and verify-retry/ (a failed verify run once
-                 more on the same commit, beside the first),
+                 verify-retry.json and verify-retry/ (the commands that failed,
+                 and only those, run once more on the same commit, beside the
+                 first), verify-result.json (the one result the gate records:
+                 each command's final status and every run's evidence),
                  retries/ (one record per failure run once more — a verify
                  command, the landing check's verify, or checks rerun on the
                  pull request: what failed, both attempts' evidence and the
