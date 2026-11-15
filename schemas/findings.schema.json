@@ -31,7 +31,7 @@
           "severity": {
             "type": "string",
             "enum": ["blocking", "major", "minor", "nit"],
-            "description": "blocking: must not merge. major: must not merge without a decision. minor and nit: recorded, never gating."
+            "description": "blocking: must not merge. major: must not merge without a decision. minor and nit: recorded, never gating; a minor or nit deletion from the surplus lens may be handed to a fixer already sent for a blocking or major finding."
           },
           "scope": {
             "type": "string",

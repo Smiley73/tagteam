@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Hand the economy reviewer's minor and nit deletions to the fixer already sent for something blocking or major. The fixer may make them or decline them: they never gate, spend a fix round, stop the spec or reach the pull request's Risk, and the run says which were made and which were not. Only the economy brief this plugin ships qualifies; a repository's own `economy.md` keeps its findings as they were.
 - Tell every agent of a ship where the repository's conventions document is, not only the implementer: fixers, reviewers, the adversary, the re-checks and Codex are given its path, or `none`, and read it where it bears on their work. A fixer also reads its own edits once more before reporting and removes what its repair made unnecessary.
 - Send the plan drafter back, once, when a dependency in the Deliverables table points at nothing, at its own spec or into a cycle, instead of stopping the run. The drafter is shown the entry and the valid choices; a second such problem later in the same plan stops the run with one line saying what to correct by hand.
 

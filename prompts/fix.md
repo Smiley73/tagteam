@@ -135,6 +135,22 @@ worktree; to a `goal-conflict` answer, which leaves the tree untouched; or past
 the conflicted paths of a merge resolution, where every other path stays as the
 merge left it.
 
+## Deletions
+
+An entry marked `"deletion": true` is surplus the economy reviewer asked to be
+removed, and its `fix` says what to remove. Nothing gates on it. You may make it
+or decline it, and the change merges the same either way.
+
+Make it only if removing code is all it takes: delete the code, or replace a
+duplicate with a call to a definition that already exists. If it needs new code,
+a definition moved somewhere else, or the work planned differently, answer
+`wont-fix` and say in the note that it is not a pure deletion.
+
+Answer it in `outcomes` and nowhere else. Never `goal-conflict`: decline with
+`wont-fix` instead. Never list it in `unfinished`, and let `status` depend only
+on what gates. A deletion you declined and then reported as unfinished stops the
+pull request for a person over something that was never meant to stop it.
+
 ## Report resend
 
 A dispatch may say it is a report resend. The work is already committed: an

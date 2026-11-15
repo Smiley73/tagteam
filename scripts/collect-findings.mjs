@@ -25,6 +25,8 @@ const GATING = new Set(["blocking", "major"]);
 // The one name this deriver writes a review under. An `--out` inside the round
 // has to be this file; see `writeDerived`.
 const DERIVED_REVIEW = "review.json";
+// The deletions a collection handed over, beside `to-fix.json`; see `isDeletion`.
+const DELETIONS_LIST = "deletions.json";
 
 function parseArgs(argv) {
   const options = { expect: [] };
@@ -155,7 +157,16 @@ export function roundDirectoryFor(dir, round, option = "--dir") {
   return roundDir;
 }
 
-export function collect({ dir, candidate, expect, schemaPath, round, items = null }) {
+/**
+ * A surplus deletion the shipped economy brief wrote: `minor` or `nit`, from the
+ * lens the driver names, about the code and with a `fix` that says what to
+ * remove. Only the driver knows that lens's brief is the plugin's own and not a
+ * repository's replacement, so a collection run with no lens names none.
+ */
+const isDeletion = (finding, lens, deletionLens) => lens === deletionLens && !GATING.has(finding.severity)
+  && finding.scope === "code" && !isPullRequestFinding(finding) && finding.fix !== null;
+
+export function collect({ dir, candidate, expect, schemaPath, round, items = null, deletionLens = null }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   const present = [];
   const missing = [];
@@ -199,7 +210,10 @@ export function collect({ dir, candidate, expect, schemaPath, round, items = nul
     if (wasFilled) filled.push({ lens, field: "rulings" });
     readers.push({ reader: lens, bound: bindRulings(parsed.rulings, ids) });
     parsed.findings.forEach((finding, index) => {
-      findings.push({ ...finding, id: findingId(round, lens, index), lens, file: finding.file, source: file });
+      findings.push({
+        ...finding, id: findingId(round, lens, index), lens, file: finding.file, source: file,
+        ...(isDeletion(finding, lens, deletionLens) ? { deletion: true } : {})
+      });
     });
   }
 
@@ -267,27 +281,50 @@ function summaryLines(result) {
  * "resolved" came back unverifiable. The reviewer now copies ids out of its
  * input. Nothing is reconstructed, which is the only version of this that holds.
  *
- * The cross-lens list is the fixer's whole scope. The fixer used to be handed
- * the collector's own output, which carries every finding at every severity — so
- * a round with two open findings and five nits got seven repairs, and five of
- * them were changes nothing gated on, made to a diff four reviewers were about
- * to re-read. Severity decides what merges; it has to decide what gets touched,
- * or it decides nothing. Minor and nit are recorded and reported, never repaired
- * unasked.
+ * The cross-lens list is what gates, and so what a fixer is sent for. The fixer
+ * used to be handed the collector's own output, which carries every finding at
+ * every severity — so a round with two open findings and five nits got seven
+ * repairs, and five of them were changes nothing gated on, made to a diff four
+ * reviewers were about to re-read. Severity decides what gates, and only that.
+ * Minor and nit are recorded and reported, and never gate. The one thing handed
+ * over without gating is a deletion the shipped economy brief wrote, which the
+ * driver adds to a fixer's brief beside this list, from `deletions.json`; see
+ * `isDeletion`.
  *
  * `evidence` rides along when a finding has one — a settled finding's evidence
  * is the reviewer saying what is *still* wrong, which is the most useful
  * sentence the next fixer can be given. A finding straight out of a review has
  * none, so the collector's payloads are byte-identical to what they always were.
  */
+const withEvidence = (entry, finding) => (finding.evidence ? { ...entry, evidence: finding.evidence } : entry);
+// Absent rather than null on a finding recorded before `scope` existed, so
+// `isPullRequestFinding` still routes it by the rule it was written under.
+const withScope = (finding) => (finding.scope === undefined ? {} : { scope: finding.scope });
+
+// The cross-lens list's shape, for every list written beside a round's findings.
+const listOf = (candidate, findings) => ({
+  candidate,
+  findings: findings.map((finding) => withEvidence(
+    {
+      id: finding.id,
+      lens: finding.lens,
+      severity: finding.severity,
+      ...withScope(finding),
+      file: finding.file,
+      line: finding.line,
+      title: finding.title,
+      detail: finding.detail,
+      fix: finding.fix,
+      ...(finding.deletion ? { deletion: true } : {})
+    },
+    finding
+  ))
+});
+
 export function writeOpenViews(dir, { candidate, open, list, perLens }) {
   const target = path.resolve(dir);
   const perLensDir = path.join(target, perLens);
   fs.mkdirSync(perLensDir, { recursive: true, mode: 0o700 });
-  const withEvidence = (entry, finding) => (finding.evidence ? { ...entry, evidence: finding.evidence } : entry);
-  // Absent rather than null on a finding recorded before `scope` existed, so
-  // `isPullRequestFinding` still routes it by the rule it was written under.
-  const withScope = (finding) => (finding.scope === undefined ? {} : { scope: finding.scope });
   const written = [];
   for (const lens of [...new Set(open.map((finding) => finding.lens))]) {
     const file = path.join(perLensDir, `${lens}.json`);
@@ -317,30 +354,14 @@ export function writeOpenViews(dir, { candidate, open, list, perLens }) {
   // orchestrator back to a source that has more in it than its reader may touch,
   // and an empty list is the correct brief for a round with nothing open.
   const listPath = path.join(target, list);
-  const payload = {
-    candidate,
-    findings: open.map((finding) => withEvidence(
-      {
-        id: finding.id,
-        lens: finding.lens,
-        severity: finding.severity,
-        ...withScope(finding),
-        file: finding.file,
-        line: finding.line,
-        title: finding.title,
-        detail: finding.detail,
-        fix: finding.fix
-      },
-      finding
-    ))
-  };
+  const payload = listOf(candidate, open);
   writeRoundFile(listPath, `${JSON.stringify(payload, null, 2)}\n`);
 
   return { perLens: written, list: { file: listPath, count: payload.findings.length } };
 }
 
 // Everything the collector derives goes out through here — `review.json`,
-// `to-fix.json` and `open/` — because the deriver is the one caller allowed to
+// `to-fix.json`, `deletions.json` and `open/` — because the deriver is the one caller allowed to
 // replace what it derived: a lens
 // that produced no usable evidence is re-dispatched into the same round and this
 // runs again over a strictly larger set of findings files, so its outputs must
@@ -392,9 +413,16 @@ function writeDerived(dir, out, result) {
     fs.rmSync(outPath, { force: true });
   }
   fs.rmSync(path.join(roundDir, "to-fix.json"), { force: true });
+  fs.rmSync(path.join(roundDir, DELETIONS_LIST), { force: true });
   fs.rmSync(path.join(roundDir, "open"), { recursive: true, force: true });
 
   writeRoundFile(outPath, `${JSON.stringify(result, null, 2)}\n`);
+  // Beside `to-fix.json` and never in it: every reader of that file takes what is
+  // in it for what gates. Absent when the round has none.
+  const deletions = result.findings.filter((finding) => finding.deletion);
+  if (deletions.length > 0) {
+    writeRoundFile(path.join(roundDir, DELETIONS_LIST), `${JSON.stringify(listOf(result.candidate, deletions), null, 2)}\n`);
+  }
   return writeOpenViews(roundDir, {
     candidate: result.candidate,
     open: result.open,

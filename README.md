@@ -183,7 +183,7 @@ flowchart TD
     lenses["One reviewer per lens"]
     codexr["Codex cross-review"]
     open{"Anything blocking or major open?"}
-    fixer["Fix — a fixer gets the blocking and major findings, nothing else"]
+    fixer["Fix — a fixer gets the blocking and major findings, plus any surplus deletions that gate nothing"]
     redesign["Redesign — a fresh implementer rewrites the area from a brief of everything raised on it"]
     route{"Which review does the fixed commit get?"}
     adv["Adversary — reads the final diff fresh"]
@@ -296,6 +296,13 @@ severity, file and title, what the fixer said it did, whether the re-check found
 it addressed, and a recommendation worked out by code rather than by a model —
 re-plan, needs a person, carry, or accept. Whatever is not addressed in a spec's
 last table is described under Risk in its pull request.
+
+When a fixer is sent for something blocking or major, it is also handed the
+minor and nit deletions the economy reviewer asked for, if the repository uses
+the economy brief this plugin ships. It may make them or decline them: they
+never gate, never spend a fix round and never stop the spec, and a run says
+which were made and which were not. They appear in the table but are not
+described under Risk.
 
 The fixer reads the spec and the plan's goal as well as the findings, and can
 answer that the right repair would go against the goal because the spec

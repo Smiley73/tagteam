@@ -111,7 +111,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     rounds/<n>/  round.json (the commit that owns this round), review.diff,
                  review.diff.d/ (the same change one file at a time), findings/,
                  recheck/, verify/, candidate.json, review.json, recheck.json,
-                 to-fix.json, open/, still-open.json, still-open/, report.json,
+                 to-fix.json, deletions.json (the economy reviewer's minor and
+                 nit deletions, beside to-fix.json and never in it), open/,
+                 still-open.json, still-open/, report.json,
                  redesign.json (which files this round's commit was a redesign
                  of; kept on re-entry like the report),
                  verify-retry.json and verify-retry/ (a failed verify run once
@@ -125,7 +127,9 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  commit was checked against: verify.json and verify/, plus
                  reviewed.diff and landing.diff when the two differed),
                  to-fix.code.json / still-open.code.json (the fixer's brief when
-                 a finding about the pull request was kept out of it)          ignored
+                 a finding about the pull request was kept out of it, or when
+                 deletions were added to it), deletions-handed.json (the
+                 deletions the economy reader re-checks)                       ignored
     implement-report.json  fix-report.json  what the round's agent said about its
                  own work, written outside every round and recorded into one  ignored
     fix-pending.json  fix-declined.json  recheck-plan.json  the driver's notes

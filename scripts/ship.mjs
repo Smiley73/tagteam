@@ -44,6 +44,7 @@ import {
 import { runSetupCommands } from "./worktree-setup.mjs";
 import { verify as verifyCommands } from "./verify-run.mjs";
 import { listRounds } from "./lib/rounds.mjs";
+import { REPO_LENS_DIR } from "./lib/lenses.mjs";
 import { reviewOpenLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
@@ -1398,12 +1399,42 @@ function fixerReport(file) {
   return doc && Object.hasOwn(doc, "kind") ? doc.report : doc;
 }
 
-const goalConflicts = (report) => (report?.outcomes ?? []).filter((entry) => entry.outcome === "goal-conflict");
+// The lens whose minor and nit findings go to a fixer as deletions, without
+// gating — when the brief it ran through is the plugin's own. A repository may
+// replace it with `.tagteam/lenses/economy.md` and its findings still arrive
+// under this name, so the brief frozen into the spec's state decides.
+const DELETION_LENS = "economy";
+
+function deletionLensOf(ctx, state) {
+  const brief = state.briefs?.[DELETION_LENS];
+  return brief && path.dirname(path.resolve(brief)) !== path.resolve(ctx.repo, REPO_LENS_DIR) ? DELETION_LENS : null;
+}
+
+// The entries of a fixer's brief that are deletions: the ones `fix` added beside
+// what gates. Whatever became of one, it is not a goal conflict, an unfinished
+// part or a finding the pull request names.
+const deletionsOf = (brief) => (readJson(brief, { findings: [] }).findings ?? []).filter((finding) => finding.deletion === true);
+
+// The deletions the fixer whose commit is `round` was handed, while no settle
+// has judged its work. A fixer that changed nothing kept its report apart from
+// any round, so it has none here: its deletions are declined, and no re-check is
+// sent for them.
+function handedDeletions(ctx, id, round) {
+  const report = path.resolve(round.dir, ROUND_REPORT);
+  return readJson(fixersPath(ctx, id), [])
+    .filter((fixer) => fixer.judgedBy === null && fixer.report && path.resolve(fixer.report) === report)
+    .flatMap((fixer) => deletionsOf(fixer.brief));
+}
+
+const goalConflicts = (report, brief) => {
+  const deleted = new Set(deletionsOf(brief).map((finding) => finding.id));
+  return (report?.outcomes ?? []).filter((entry) => entry.outcome === "goal-conflict" && !deleted.has(entry.id));
+};
 
 function writeGoalConflict(ctx, id, pending, report, kept) {
   const conflict = {
     round: pending.round, candidate: pending.candidate, report: kept,
-    conflicts: goalConflicts(report).map(({ id: finding, note }) => ({ id: finding, note })), at: new Date().toISOString()
+    conflicts: goalConflicts(report, pending.record).map(({ id: finding, note }) => ({ id: finding, note })), at: new Date().toISOString()
   };
   writeJson(goalConflictPath(ctx, id), conflict);
   return conflict;
@@ -1422,18 +1453,21 @@ function goalConflictLine(ctx, id, state, conflict) {
  * not — or null when nothing has judged the fixer's work yet and every row is
  * open.
  */
-function tableOf(ctx, id, fixer, open) {
+function tableOf(ctx, id, fixer, open, made = new Set()) {
   const report = fixerReport(fixer.report);
   const said = new Map((report?.outcomes ?? []).map((entry) => [entry.id, entry]));
-  const goalConflict = goalConflicts(report).length > 0;
+  const goalConflict = goalConflicts(report, fixer.brief).length > 0;
   const facts = carryFacts(ctx, id);
   const rows = (readJson(fixer.brief, { findings: [] }).findings ?? []).map((finding) => {
-    const addressed = open !== null && !open.has(finding.id);
-    const eligible = carryEligible(finding, facts);
+    // A deletion is addressed only by the re-check's word that it was made, and
+    // it carries no advice: nothing about merging depends on it.
+    const deletion = finding.deletion === true;
+    const addressed = deletion ? made.has(finding.id) : open !== null && !open.has(finding.id);
     return {
       id: finding.id, severity: finding.severity, scope: finding.scope ?? null, file: finding.file ?? null, title: finding.title ?? "",
       outcome: said.get(finding.id)?.outcome ?? null, note: said.get(finding.id)?.note ?? null, addressed,
-      recommendation: recommendation(finding, { addressed, goalConflict, eligible, carry: ctx.config.carry === true })
+      ...(deletion ? { deletion: true, recommendation: null }
+        : { recommendation: recommendation(finding, { addressed, goalConflict, eligible: carryEligible(finding, facts), carry: ctx.config.carry === true }) })
     };
   });
   return { round: fixer.round, rows, summary: report?.summary ?? null };
@@ -1488,12 +1522,26 @@ function tableLines({ round, rows, summary, heading = `The fixer sent at round $
   ]);
   const widths = header.map((name, column) => Math.max(name.length, ...cells.map((cell) => cell[column].length)));
   const line = (cell) => `  ${cell.map((value, column) => value.padEnd(widths[column])).join("  ").trimEnd()}`;
-  const missed = rows.filter((row) => !row.addressed);
+  const missed = rows.filter((row) => !row.addressed && !row.deletion);
+  const unmade = rows.filter((row) => !row.addressed && row.deletion);
   return [
     `${heading} was handed ${rows.length} finding(s):`, line(header), ...cells.map(line),
-    missed.length > 0 ? `  Not addressed: ${missed.map((row) => `${row.id} (${row.recommendation})`).join(", ")}.` : "  Every one is addressed.",
+    missed.length > 0 ? `  Not addressed: ${missed.map((row) => `${row.id} (${row.recommendation})`).join(", ")}.`
+      : unmade.length > 0 ? "  Every finding that gates is addressed." : "  Every one is addressed.",
     ...(summary ? [`  The fixer: ${summary}`] : [])
   ];
+}
+
+// What became of the deletions a fixer was handed, in the driver's own words:
+// how many were made, and which were declined or not made, with the fixer's note
+// where it wrote one. Null for a fixer handed none.
+function deletionLine({ round, rows }) {
+  const handed = rows.filter((row) => row.deletion);
+  if (handed.length === 0) return null;
+  const unmade = handed.filter((row) => !row.addressed);
+  const said = (row) => (row.outcome ? `${row.id} (the fixer said ${row.outcome}${row.note ? `: ${clip(row.note, 80)}` : ""})` : `${row.id} (no outcome reported)`);
+  return `The fixer sent at round ${round} was also handed ${handed.length} deletion(s) the economy reviewer asked for; none of them gates. `
+    + `${handed.length - unmade.length} made${unmade.length > 0 ? `; declined or not made: ${unmade.map(said).join(", ")}` : ""}.`;
 }
 
 const saveTables = (ctx, id, { round, candidate }, tables) =>
@@ -1503,16 +1551,17 @@ const saveTables = (ctx, id, { round, candidate }, tables) =>
  * The tables `settle` owes: one per fixer sent since the previous settle, oldest
  * first, judged against what this settle left open, and saved as the latest.
  */
-function settleTables(ctx, id, plan, open) {
+function settleTables(ctx, id, plan, open, deletions = []) {
   const key = `${plan.round}:${plan.candidate}:${plan.at}`;
   const fixers = readJson(fixersPath(ctx, id), []);
   const owed = fixers.filter((fixer) => fixer.judgedBy === null || fixer.judgedBy === key);
   if (owed.length === 0) return [];
   const ids = new Set(open.map((finding) => finding.id));
-  const tables = owed.map((fixer) => tableOf(ctx, id, fixer, ids));
+  const made = new Set(deletions.filter((entry) => entry.resolved).map((entry) => entry.id));
+  const tables = owed.map((fixer) => tableOf(ctx, id, fixer, ids, made));
   writeJson(fixersPath(ctx, id), fixers.map((fixer) => (owed.includes(fixer) ? { ...fixer, judgedBy: key } : fixer)));
   saveTables(ctx, id, plan, tables);
-  return tables.flatMap(tableLines);
+  return tables.flatMap((table) => [...tableLines(table), ...[deletionLine(table)].filter(Boolean)]);
 }
 
 // --- the route ---------------------------------------------------------------
@@ -3537,13 +3586,13 @@ async function snapshot(options) {
     // A conflict between the spec and the goal is no lens's to re-judge and no
     // further round's to fix: the spec goes on to publish and stops at finish,
     // where its review — never recorded for this commit, or open — blocks it.
-    if (goalConflicts(report).length > 0) {
+    if (goalConflicts(report, pending.record).length > 0) {
       const conflict = writeGoalConflict(ctx, id, pending, report, kept);
       fs.unlinkSync(fixPendingPath(ctx, id));
       transition(ctx, id, "verifying");
       const table = tableOf(ctx, id, { round: pending.round, brief: pending.record, report: kept }, null);
       saveTables(ctx, id, pending, [table]);
-      say.push(...tableLines(table), goalConflictLine(ctx, id, state, conflict));
+      say.push(...tableLines(table), ...[deletionLine(table)].filter(Boolean), goalConflictLine(ctx, id, state, conflict));
       return done({ say, next: nextCommand(ctx, "publish", id) });
     }
     noteFixer(ctx, id, pending, kept);
@@ -3645,7 +3694,7 @@ async function snapshot(options) {
   if (["panel", "settle"].includes(pending?.from)) {
     noteFixer(ctx, id, pending, path.join(dir, "report.json"));
     const report = fixerReport(path.join(dir, "report.json"));
-    if (goalConflicts(report).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
+    if (goalConflicts(report, pending.record).length > 0) conflict = writeGoalConflict(ctx, id, pending, report, path.join(dir, "report.json"));
   }
   if (pending) fs.unlinkSync(fixPendingPath(ctx, id));
   fs.rmSync(reportResendPath(ctx, id), { force: true });
@@ -3799,7 +3848,8 @@ async function collect(options) {
   const items = writeItems(ctx, id, state, round.round);
   const result = node("collect-findings.mjs", [
     "--dir", path.join(round.dir, "findings"), "--candidate", state.candidateOid, "--expect", expect.join(","),
-    "--round", String(round.round), "--out", path.join(round.dir, "review.json"), "--items", items
+    "--round", String(round.round), "--out", path.join(round.dir, "review.json"), "--items", items,
+    ...(deletionLensOf(ctx, state) ? ["--deletion-lens", DELETION_LENS] : [])
   ], { allow: [1] });
   const review = readJson(path.join(round.dir, "review.json"));
   const say = result.stdout.trim().split("\n");
@@ -3926,10 +3976,15 @@ async function fix(options) {
   const job = resolved.jobs.fix;
   // The fixer's brief is the record itself unless something in it is not the
   // fixer's, in which case it is the record with those taken out, beside it.
+  // Deletions go only with a fix taken straight from a fresh collection, and
+  // only when something that gates is in it; they are added beside what gates
+  // and change nothing about the round. A settled round hands over none: the
+  // panel names again whatever surplus is left, under new ids.
+  const deletions = settled || forFixer.length === 0 ? [] : readJson(path.join(round.dir, "deletions.json"), { findings: [] }).findings ?? [];
   let briefPath = recordPath;
-  if (aboutPr.length > 0) {
+  if (aboutPr.length > 0 || deletions.length > 0) {
     briefPath = path.join(round.dir, settled ? "still-open.code.json" : "to-fix.code.json");
-    writeJson(briefPath, { ...record, findings: forFixer });
+    writeJson(briefPath, { ...record, findings: [...forFixer, ...deletions] });
   }
   writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", record: briefPath, at: new Date().toISOString() });
   fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
@@ -3939,7 +3994,7 @@ async function fix(options) {
   const dispatch = fixerDispatch(ctx, spec, briefPath, job);
   const set = await sendForSnapshot(ctx, id, { kind: "fix", round: round.round, dispatch, job });
   emit({
-    say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets only the blocking and major findings about the code, from ${briefPath}.`, ...prSay],
+    say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets the blocking and major findings about the code${deletions.length > 0 ? `, and ${deletions.length} deletion(s) the economy reviewer asked for, which it may decline and which change nothing about merging` : ""}, from ${briefPath}.`, ...prSay],
     dispatch: [dispatch],
     set,
     next: nextCommand(ctx, "snapshot", id)
@@ -4179,6 +4234,14 @@ async function recheck(options) {
   if (carry && carry.count > 0) {
     for (const lens of [...state.reviewers, "codex", "adversary"]) addInput(lens, path.join(roundDir(ctx, id, carry.round), "still-open", `${lens}.json`));
   }
+  // The deletions the fixer was handed go to the lens that raised them, to be
+  // judged once beside whatever else it re-checks. Their verdicts never gate.
+  const handed = handedDeletions(ctx, id, round);
+  const handedFile = path.join(round.dir, "deletions-handed.json");
+  if (handed.length > 0) {
+    writeJson(handedFile, { candidate: state.candidateOid, findings: handed });
+    addInput(DELETION_LENS, handedFile);
+  }
 
   const pr = pullRequestLines(ctx, id, state);
   // What the readers are told about the fixer, kept so that `settle` can tell a
@@ -4223,7 +4286,7 @@ async function recheck(options) {
   writeJson(recheckPlanPath(ctx, id), {
     round: round.round, candidate: state.candidateOid, collectionRound: collected, carry: carry?.count > 0 ? carry.file : null,
     declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
-    lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, items, resend: null, at: new Date().toISOString()
+    deletions: handed.length > 0 ? handedFile : null, lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, items, resend: null, at: new Date().toISOString()
   });
   const dispatch = agents.map((entry) => entry.dispatch);
   const say = [adversaryFile
@@ -4235,6 +4298,7 @@ async function recheck(options) {
         : fixedSince ? "" : "; nothing was fixed since this round's panel, so only carried findings are judged";
     say.push(`Re-checks by ${[...inputs.keys()].join(", ")} of what they raised (${settings(resolved.jobs["recheck-lens"])}${because}).`);
   } else say.push("Nothing to re-check: no earlier finding is open and no fixer has run since the panel.");
+  if (handed.length > 0) say.push(`The ${DELETION_LENS} reviewer also judges the ${handed.length} deletion(s) the fixer was handed; what it says about them never gates.`);
   say.push(...pr.say);
   emit({ say, dispatch, ...(sent ? { set: setPayload(sent) } : {}), next: nextCommand(ctx, "settle", id) });
 }
@@ -4331,6 +4395,7 @@ async function settle(options) {
   // A plan written before readers ruled names no items, and settles with no
   // accounting, which clears nothing.
   if (plan.items) args.push("--items", plan.items);
+  if (plan.deletions) args.push("--deletions", plan.deletions);
   const result = node("recheck.mjs", args, { allow: [1] });
   const settledReview = readJson(path.join(dir, "recheck.json"));
   const say = result.stdout.trim().split("\n");
@@ -4363,7 +4428,7 @@ async function settle(options) {
   // or a panel in between.
   if (state.state !== "verifying") transition(ctx, id, "verifying");
   const open = settledReview.open ?? [];
-  say.push(...settleTables(ctx, id, plan, open));
+  say.push(...settleTables(ctx, id, plan, open, settledReview.deletions ?? []));
   const openForFixer = open.some((finding) => !isPullRequestFinding(finding));
   const churn = churnAsk(ctx, id, state, plan.round, { openForFixer, atCollect: false, honour: true });
   const signal = churn.signal;
@@ -4500,7 +4565,7 @@ function notAddressedRows(ctx, id, state) {
   const saved = readJson(fixOutcomesPath(ctx, id), null);
   const said = new Set((planStanding(ctx, id, state)?.entries ?? []).map((entry) => entry.finding));
   const missed = saved?.candidate === state.candidateOid
-    ? saved.tables.flatMap((table) => table.rows).filter((row) => !row.addressed && !said.has(row.id)) : [];
+    ? saved.tables.flatMap((table) => table.rows).filter((row) => !row.addressed && !row.deletion && !said.has(row.id)) : [];
   return [...new Map(missed.map((row) => [row.id, row])).values()];
 }
 

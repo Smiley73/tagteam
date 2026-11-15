@@ -196,6 +196,48 @@ test("every finding resolved by its own reviewer clears the review", () => {
   assert.equal(result.open.length, 0);
 });
 
+test("a deletion is cleared only by the lens that raised it, never gates, and never makes the review incomplete or open", () => {
+  const handed = [
+    { id: "1.economy.1", lens: "economy", severity: "minor", file: "src/a.ts", title: "unused helper" },
+    { id: "1.economy.2", lens: "economy", severity: "nit", file: "src/a.ts", title: "dead branch" },
+    { id: "1.correctness.9", lens: "correctness", severity: "minor", file: "src/a.ts", title: "dead parameter" }
+  ];
+  const own = { ...review, open: [review.open[0]] };
+  const judged = (verdicts) => dir({
+    "correctness.json": verdictFile("correctness", [{ id: "1.correctness.1", resolved: true, evidence: "fixed" },
+      { id: "1.economy.2", resolved: true, evidence: "correctness has no say over this" }]),
+    ...(verdicts ? { "economy.json": verdictFile("economy", verdicts) } : {})
+  });
+  const settled = settle({
+    review: own, dir: judged([{ id: "1.economy.1", resolved: true, evidence: "gone" }, { id: "1.economy.2", resolved: false, evidence: "still there" },
+      { id: "1.correctness.9", resolved: true, evidence: "economy has no say over correctness's deletion" }]),
+    candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, deletions: handed, ...adversary([])
+  });
+  assert.deepEqual(settled.deletions.map((entry) => [entry.id, entry.resolved]), [["1.economy.1", true], ["1.economy.2", false], ["1.correctness.9", false]]);
+  assert.equal(settled.status, "clean");
+  assert.deepEqual([settled.open, settled.findings.map((entry) => entry.id), settled.expected], [[], ["1.correctness.1"], ["correctness", "adversary"]],
+    "a deletion is in neither the open nor the settled findings, and its lens is not an expected reader");
+  assert.doesNotMatch(summaryLines(settled).join("\n"), /economy|OPEN|not gating/);
+
+  // The reader that owes nothing else writes nothing usable: the deletions are unjudged, and that is all.
+  for (const unreadable of [false, true]) {
+    const target = judged(null);
+    if (unreadable) fs.writeFileSync(path.join(target, "economy.json"), "{not json");
+    const silent = settle({ review: own, dir: target, candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, deletions: handed, ...adversary([]) });
+    assert.equal(silent.status, "clean");
+    assert.deepEqual(silent.missing, []);
+    assert.deepEqual(silent.deletions.map((entry) => entry.resolved), [false, false, false]);
+  }
+
+  // The same reader asked about a finding that gates is incomplete without a file, as it always was.
+  const gating = settle({
+    review: { ...review, open: [{ id: "1.economy.3", lens: "economy", title: "big surplus", severity: "major" }] },
+    dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2, deletions: handed, ...adversary([])
+  });
+  assert.equal(gating.status, "incomplete");
+  assert.deepEqual(gating.missing.map((gap) => gap.lens), ["economy"]);
+});
+
 // A finding raised at the round being settled is not put to its lens: no fixer
 // has seen it. Unless one has, and declined it — then the lens is asked, and a
 // resolved verdict is the lens withdrawing what it raised.
@@ -437,6 +479,51 @@ test("the fixer's brief holds the gating findings only, across every lens", asyn
   // only reader that can act on it.
   assert.equal(toFix.findings[1].fix, "guard the read");
   assert.match(result.stdout, /fix .*to-fix\.json \(2 finding\(s\)\)/);
+});
+
+test("only a minor or nit from the named lens, about the code and with a fix, is handed over as a deletion, and nothing else about the round changes", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const deletion = (overrides = {}) => finding({ severity: "minor", title: "unused helper", fix: "delete the helper", ...overrides });
+  const files = {
+    "economy.json": lensFile("economy", [
+      deletion(),
+      deletion({ title: "no fix", fix: null }),
+      deletion({ title: "about the body", scope: "pull-request", file: null }),
+      deletion({ title: "a nit", severity: "nit" }),
+      deletion({ title: "gates", severity: "major" })
+    ]),
+    "correctness.json": lensFile("correctness", [deletion({ title: "other lens" })]),
+    "codex.json": lensFile("codex", [deletion({ title: "from codex" })]),
+    "adversary.json": lensFile("adversary", [deletion({ title: "from the adversary" })])
+  };
+  const run = (extra) => {
+    const { dir: roundDir, findings, out } = round(files);
+    const result = spawnSync("node", [
+      path.join(root, "scripts", "collect-findings.mjs"),
+      "--dir", findings, "--candidate", OID, "--expect", "economy,correctness,codex,adversary", "--round", "1", "--out", out, ...extra
+    ], { encoding: "utf8" });
+    const read = (name) => JSON.parse(fs.readFileSync(path.join(roundDir, name), "utf8"));
+    return { result, review: read("review.json"), toFix: read("to-fix.json"), roundDir };
+  };
+
+  const named = run(["--deletion-lens", "economy"]);
+  const deletions = JSON.parse(fs.readFileSync(path.join(named.roundDir, "deletions.json"), "utf8"));
+  assert.deepEqual(deletions.findings.map((entry) => [entry.id, entry.deletion, entry.fix]), [
+    ["1.economy.1", true, "delete the helper"], ["1.economy.4", true, "delete the helper"]
+  ], "the minor and the nit that qualify, and nothing from another lens");
+  assert.deepEqual(named.review.findings.filter((entry) => entry.deletion).map((entry) => entry.id), ["1.economy.1", "1.economy.4"],
+    "marked in the review beside the severity they keep");
+  assert.equal(named.review.findings.find((entry) => entry.id === "1.economy.1").severity, "minor");
+
+  const plain = run([]);
+  assert.equal(fs.existsSync(path.join(plain.roundDir, "deletions.json")), false, "without the flag nothing qualifies");
+  assert.equal(plain.review.findings.some((entry) => "deletion" in entry), false);
+  for (const [left, right] of [[named.review.status, plain.review.status], [named.toFix, plain.toFix],
+    [named.review.open.map((entry) => entry.id), plain.review.open.map((entry) => entry.id)]]) {
+    assert.deepEqual(left, right, "what gates, the status and to-fix.json are what they are without it");
+  }
+  assert.equal(named.review.status, "open");
+  assert.deepEqual(named.toFix.findings.map((entry) => entry.id), ["1.economy.5"]);
 });
 
 test("a clean round still writes the fixer's brief, empty", async () => {
