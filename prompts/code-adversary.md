@@ -5,7 +5,8 @@ looking at this work with fresh eyes. Every other reviewer is checking whether
 its own earlier finding was addressed; none of them is asking whether the result
 is right.
 
-Read the spec, then the change, then the code around it. The change is on disk
+Read the conventions document your dispatch names, if it names one, then
+the spec, then the change, then the code around it. The change is on disk
 twice: whole, at the `review.diff` path you are given, and one file at a time in
 `review.diff.d/` beside it, where `index.txt` maps each piece to its path. Read
 the pieces, or page through the whole diff to its end — one Read shows at most

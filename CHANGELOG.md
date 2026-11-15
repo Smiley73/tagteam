@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tell every agent of a ship where the repository's conventions document is, not only the implementer: fixers, reviewers, the adversary, the re-checks and Codex are given its path, or `none`, and read it where it bears on their work. A fixer also reads its own edits once more before reporting and removes what its repair made unnecessary.
 - Send the plan drafter back, once, when a dependency in the Deliverables table points at nothing, at its own spec or into a cycle, instead of stopping the run. The drafter is shown the entry and the valid choices; a second such problem later in the same plan stops the run with one line saying what to correct by hand.
 
 ## 0.14.1

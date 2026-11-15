@@ -3,8 +3,8 @@
 Does this read as if it were already part of the repository, and is what a
 reader is told about it still true?
 
-Read the project's conventions document if there is one, then read the files
-around the change. Look for: a pattern reimplemented where a shared helper
+Read the conventions document your dispatch names, if it names one, then read
+the files around the change. Look for: a pattern reimplemented where a shared helper
 exists; naming that departs from the module's own; an error raised or logged
 differently from its neighbours; a new dependency where the repository
 already solves this; configuration hardcoded where the project has a settings
