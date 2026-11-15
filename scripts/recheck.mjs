@@ -67,19 +67,19 @@ function parseArgs(argv) {
  * and a round that quietly starts from an empty carry has dropped exactly the
  * work the next round existed to finish.
  */
-function carriedFindings(file) {
+function carriedFindings(file, what = "carried record") {
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (error) {
-    throw new Error(`the carried record at ${file} is unreadable (${error.message}); nothing was settled`);
+    throw new Error(`the ${what} at ${file} is unreadable (${error.message}); nothing was settled`);
   }
   if (!Array.isArray(parsed?.findings)) {
-    throw new Error(`the carried record at ${file} holds no findings list; nothing was settled`);
+    throw new Error(`the ${what} at ${file} holds no findings list; nothing was settled`);
   }
   for (const entry of parsed.findings) {
     if (typeof entry?.id !== "string" || typeof entry?.lens !== "string") {
-      throw new Error(`the carried record at ${file} holds an entry with no id or no lens, which no lens `
+      throw new Error(`the ${what} at ${file} holds an entry with no id or no lens, which no lens `
         + "can be asked to judge; nothing was settled");
     }
   }
@@ -291,7 +291,7 @@ function clearDerived(roundDir, out, candidate) {
 
 export function settle({
   review, dir, candidate, schemaPath, round, reviewRound = round, carried = [], carriedRound = null,
-  adversary = null, adversarySchemaPath = null, declined = false, items = null
+  adversary = null, adversarySchemaPath = null, declined = false, items = null, deletions = []
 }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   // Everything the adversary contributes is re-derived from its own file on
@@ -378,28 +378,35 @@ export function settle({
     return read.parsed;
   };
 
-  for (const lens of lenses) {
+  // One lens's verdict file, or why it is not usable. Read the same way for the
+  // findings a lens must judge and for the deletions it was handed.
+  const readVerdicts = (lens) => {
     const file = path.join(path.resolve(dir), `${lens}.json`);
-    let parsed;
+    let read;
     try {
-      parsed = readRulings(lens, JSON.parse(fs.readFileSync(file, "utf8")));
+      read = fillRulings(JSON.parse(fs.readFileSync(file, "utf8")));
     } catch (error) {
-      unusable.push({ lens, file, reason: fs.existsSync(file) ? `unreadable (${error.message})` : "no file was written" });
-      continue;
+      return { problem: { lens, file, reason: fs.existsSync(file) ? `unreadable (${error.message})` : "no file was written" } };
     }
+    const { parsed, filled: wasFilled } = read;
+    const refuse = (reason) => ({ problem: { lens, file, reason }, filled: wasFilled });
     const errors = validateJson(schema, parsed);
-    if (errors.length > 0) {
-      unusable.push({ lens, file, reason: `does not match the recheck schema: ${errors.slice(0, 3).join("; ")}` });
-      continue;
-    }
+    if (errors.length > 0) return refuse(`does not match the recheck schema: ${errors.slice(0, 3).join("; ")}`);
     if (parsed.candidate !== candidate) {
-      unusable.push({ lens, file, reason: `judged ${parsed.candidate.slice(0, 12)}, not the fixed candidate ${candidate.slice(0, 12)}` });
+      return refuse(`judged ${parsed.candidate.slice(0, 12)}, not the fixed candidate ${candidate.slice(0, 12)}`);
+    }
+    if (parsed.lens !== lens) return refuse(`holds verdicts by "${parsed.lens}", not by ${lens}`);
+    return { parsed, filled: wasFilled };
+  };
+
+  for (const lens of lenses) {
+    const read = readVerdicts(lens);
+    if (read.filled) filled.push({ lens, field: "rulings" });
+    if (read.problem) {
+      unusable.push(read.problem);
       continue;
     }
-    if (parsed.lens !== lens) {
-      unusable.push({ lens, file, reason: `holds verdicts by "${parsed.lens}", not by ${lens}` });
-      continue;
-    }
+    const { parsed } = read;
     // A lens may only clear findings it raised. Otherwise one reviewer can
     // resolve another's work by returning its ids. Carried findings are no
     // different: the round in the id says who raised it, not who may clear it.
@@ -408,6 +415,21 @@ export function settle({
       if (ownIds.has(verdict.id)) verdicts.set(verdict.id, verdict);
     }
     ruled.set(lens, bindRulings(parsed.rulings, itemIds));
+  }
+
+  // The deletions the fixer was handed beside what gates, judged by the lens
+  // that raised each and by no other. A lens whose file is unusable has judged
+  // none of them, and that is all it costs: a deletion never gates, so it is
+  // neither a missing lens nor an open finding, and it is judged once — it is
+  // not carried into `still-open.json`.
+  const deletionVerdicts = new Map();
+  for (const lens of new Set(deletions.map((entry) => entry.lens))) {
+    const read = readVerdicts(lens);
+    if (read.problem) continue;
+    const ownIds = new Set(deletions.filter((entry) => entry.lens === lens).map((entry) => entry.id));
+    for (const verdict of read.parsed.verdicts) {
+      if (ownIds.has(verdict.id)) deletionVerdicts.set(verdict.id, verdict);
+    }
   }
 
   // A finding that got no verdict keeps whatever a reviewer last said about it.
@@ -581,6 +603,15 @@ export function settle({
     counts,
     open,
     findings: [...settled, ...fresh, ...recorded],
+    // Kept apart from `open` and `findings`, which everything that reads a
+    // settled review takes for what gates or what is to be named.
+    ...(deletions.length > 0 ? {
+      deletions: deletions.map((entry) => ({
+        id: entry.id, lens: entry.lens, severity: entry.severity, file: entry.file ?? null, title: entry.title,
+        resolved: deletionVerdicts.get(entry.id)?.resolved === true,
+        evidence: deletionVerdicts.get(entry.id)?.evidence ?? PLACEHOLDER_EVIDENCE.noVerdict
+      }))
+    } : {}),
     ...(filled.length > 0 ? { filled } : {}),
     // Recorded with the review gate, so the `evaluate` that `merge.mjs` re-runs
     // reads the same accounting `finish` did.
@@ -703,7 +734,8 @@ async function main() {
       adversary: options.adversary ?? null,
       adversarySchemaPath: path.resolve(here, "..", "schemas", "findings.schema.json"),
       declined,
-      items: options.items ? readItems(path.resolve(options.items), options.candidate) : null
+      items: options.items ? readItems(path.resolve(options.items), options.candidate) : null,
+      deletions: options.deletions ? carriedFindings(options.deletions, "deletions record") : []
     });
     // Everything below is this run's own derivation, so the previous one is
     // cleared first — see `clearDerived`. Nothing is removed until the round's

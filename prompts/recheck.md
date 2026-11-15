@@ -83,6 +83,18 @@ code you happen to notice — that is a different review, and this is not it.
 **Narrower scope, not less input.** You are looking only at your own findings.
 You are not looking at less of the diff.
 
+## Deletions
+
+Your input may also hold entries marked `"deletion": true`: surplus you named,
+which the fixer was handed to remove although nothing gates on it. Give each one
+a verdict by id, like every other. `resolved: true` means the code the entry
+names is gone, and nothing took its place beyond what its `fix` allowed — a call
+to a definition that already exists, where a duplicate stood. `resolved: false`
+means it is still there, or more than that was put in its place; say what is
+there now. Your verdict on a deletion never gates: it opens no finding, keeps no
+change from merging and spends no round, so judge only whether the surplus is
+gone.
+
 ## Unfinished items
 
 Your dispatch may also name an unfinished items file: what the agents that

@@ -67,8 +67,11 @@ Severity:
   `## Done when` names; a change far past the size its spec expected because of
   surplus a fixer can delete, from the lens that reads for surplus, with the
   parts that account for it named.
-- `minor` / `nit` — recorded, never gating, never fixed automatically. A missing
-  test for anything the spec did not make a condition of being done is minor.
+- `minor` / `nit` — recorded and never gating. A missing test for anything the
+  spec did not make a condition of being done is minor. The one thing done with
+  them unasked is a deletion from the lens that reads for surplus, with a `fix`
+  naming what to remove: it may be handed to a fixer already sent for something
+  that gates, which makes it or declines it, and it is never a reason to send one.
 
 A finding whose only remedy is re-planning — this diff should have been two
 specs, or the work should have been planned differently — is `minor` at most. No

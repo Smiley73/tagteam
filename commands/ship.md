@@ -216,7 +216,9 @@ adversary's fresh pass and each reader's re-check of what it raised), `settle`,
 when CI is red and a repair is left, and `finish`. A fixer that declines every
 finding and changes nothing makes no round and skips `verify`, but not `recheck`:
 the lenses that raised what it declined read its reasons and either withdraw the
-finding or keep it open.
+finding or keep it open. A fix sent for something blocking or major is also
+handed the economy reviewer's minor and nit deletions, which it may make or
+decline; the run says which, and none of them gates or spends a round.
 
 A fixer may answer that the right repair for a finding would go against the
 plan's goal, because the spec conflicts with it there; that stops the spec at
