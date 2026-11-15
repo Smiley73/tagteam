@@ -1654,10 +1654,13 @@ function tidyRefusal(ctx, id) {
 
 // What became of the fixer's work: null when it is to be kept, otherwise why not.
 // Said once. A snapshot that is run again after this one decided against the tidy
-// says the same, whatever the tree and the report look like by then.
-function judgeTidy(ctx, id, changed) {
+// says the same, whatever the tree and the report look like by then. One run again
+// after it kept the tidy — a round allocated for HEAD — keeps it: the report is
+// already recorded in that round, which `tidyReportProblem` would refuse.
+function judgeTidy(ctx, id, changed, head) {
   const tidy = readJson(tidyPath(ctx, id));
   if (Object.hasOwn(TIDY_NOT_KEPT, tidy.outcome)) return tidy;
+  if (listRounds(roundsRoot(ctx, id)).some((entry) => entry.tidy && !entry.thrownAway && entry.candidate === head)) return null;
   return changed ? tidyRefusal(ctx, id) : { outcome: "changed-nothing", why: "the fixer changed nothing" };
 }
 
@@ -3753,7 +3756,7 @@ async function snapshot(options) {
   // changed nothing, or committed its own work, or whose work fails the tests or
   // whose report cannot be used, is put back as one that did not run.
   if (tidying) {
-    const refused = judgeTidy(ctx, id, dirty || head !== pending.candidate);
+    const refused = judgeTidy(ctx, id, dirty || head !== pending.candidate, head);
     if (refused) return done(dropTidy(ctx, id, state, pending, refused));
   }
 
