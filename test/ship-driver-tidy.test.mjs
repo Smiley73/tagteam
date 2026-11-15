@@ -194,7 +194,9 @@ test("through the ship-spec workflow, a clean round with one economy deletion ti
 for (const [what, options, outcome] of [
   ["a test command that fails after the deletion", { verify: FAILS_ON_TIDY, edit: (cycle) => fs.writeFileSync(path.join(cycle.worktree, "app.js"), `${TIDIED}// tidy\n`) }, "tests-failed"],
   ["a fixer that changes nothing", { edit: () => {}, report: REPORT([{ id: DELETION_ID, outcome: "wont-fix", note: "the helper is exported" }], { summary: "left it" }) }, "changed-nothing"],
-  ["a report the round cannot use", { report: { outcomes: [] } }, "report-unusable"]
+  ["a report the round cannot use", { report: { outcomes: [] } }, "report-unusable"],
+  ["a report whose outcomes are not a list", { report: REPORT({}) }, "report-unusable"],
+  ["a report whose outcomes hold a null", { report: REPORT([null]) }, "report-unusable"]
 ]) {
   test(`${what} leaves no round, the worktree clean at the earlier candidate, the report moved aside, and a re-check by the adversary alone`, () => {
     const cycle = begun({ verify: options.verify });
@@ -279,6 +281,19 @@ test("a major next to what the tidy deleted throws the tidy away: back on the ea
   assert.equal(cycle.state().gates.review.candidateOid, earlier);
   const publish = cycle.run("publish");
   assert.equal(publish.json.ask, undefined);
+});
+
+test("a repository that configures git to print no a/ b/ prefixes still has a major next to the tidy's deletion throw it away", () => {
+  const cycle = begun();
+  collected(cycle, { economy: [DELETION] });
+  const earlier = cycle.state().candidateOid;
+  git(cycle.worktree, "config", "diff.noprefix", "true");
+  tidied(cycle);
+  cycle.run("snapshot");
+  const { settle } = reread(cycle, { raise: [{ ...major("app.js"), line: 3 }] });
+  assert.match(settle.json.say.join("\n"), /on what the tidy changed\. The tidy is thrown away/);
+  assert.equal(cycle.state().candidateOid, earlier);
+  assert.equal(cycle.json("tidy.json").outcome, "thrown-away");
 });
 
 test("what a thrown-away tidy's settle left open is not carried into a later round: the carry is the earlier candidate's", () => {

@@ -1585,11 +1585,13 @@ function tidyDeletions(ctx, id, state, round, review) {
 // What became of each deletion a tidy was handed, one line each. A fixer that
 // declined one says why; `otherwise` is what every other one came to.
 function tidyLines(brief, report, otherwise) {
-  const said = new Map((report?.outcomes ?? []).map((entry) => [entry.id, entry]));
+  // A refused report is read too, so its outcomes may be anything at all.
+  const outcomes = Array.isArray(report?.outcomes) ? report.outcomes : [];
+  const said = new Map(outcomes.filter((entry) => entry !== null && typeof entry === "object").map((entry) => [entry.id, entry]));
   return deletionsOf(brief).map((finding) => {
     const entry = said.get(finding.id);
     const declined = entry && !["fixed", "fixed-differently"].includes(entry.outcome);
-    return `  ${finding.id}: ${declined ? `declined — the fixer said ${entry.outcome}${entry.note ? `: ${clip(entry.note, 120)}` : ""}` : otherwise}`;
+    return `  ${finding.id}: ${declined ? `declined — the fixer said ${entry.outcome}${typeof entry.note === "string" && entry.note ? `: ${clip(entry.note, 120)}` : ""}` : otherwise}`;
   });
 }
 
@@ -1659,7 +1661,7 @@ const TIDY_DISTANCE = 5;
 // The lines of each file the change from `from` to `to` touched, in the new
 // file: a hunk's own lines, or for a pure deletion the two it sat between.
 function changedRanges(ctx, from, to) {
-  const diff = git(ctx.worktree, ["-c", "core.quotePath=false", "diff", "-U0", "--no-renames", "--no-color", from, to]).stdout;
+  const diff = git(ctx.worktree, ["-c", "core.quotePath=false", "diff", "-U0", "--no-renames", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to]).stdout;
   const ranges = new Map();
   let spans = null;
   for (const line of diff.split("\n")) {
