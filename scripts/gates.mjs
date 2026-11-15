@@ -14,6 +14,7 @@ import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mj
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { onPlanBranch } from "./lib/carry.mjs";
+import { FAILS_WITHOUT_CHANGE } from "./lib/verify-base.mjs";
 import { isFixUnitId } from "./lib/whole-plan.mjs";
 import { normalizeRepoPath } from "./lib/matcher.mjs";
 import { isWorkflowPath } from "./lib/workflows.mjs";
@@ -766,9 +767,19 @@ export function evaluate(state, config, approvedWorkflows = null) {
   if (!review) blockers.push("review-not-recorded");
   else if (review.status !== "clean" && !reviewOpenLifts(state, config)) blockers.push(`review-${review.status}`);
 
-  // (b) Verification and CI.
+  // Where this lands. Nothing reaches the base without a person, and a plan
+  // branch is the one target where the plan's own pull request is that person's
+  // look. So a candidate merges with nobody asked only when its state confirms
+  // that its pull request merges into this plan's own plan branch — see
+  // `onPlanBranch` — and anything else waits.
+  const planBranch = onPlanBranch(state, config);
+
+  // (b) Verification and CI. A command that fails on the base as well as on the
+  // change is disclosed and merges into a plan branch; straight to the base it
+  // is a blocker, which nothing but putting it right there clears.
   if (!verify) blockers.push("verification-not-recorded");
   else if (verify.status === "failed") blockers.push("verification-failed");
+  else if (verify.status === FAILS_WITHOUT_CHANGE && !planBranch) blockers.push("verification-fails-without-change");
   if (ci?.status === "failed") blockers.push("continuous-integration-failed");
   // A repository that waits for checks must actually have them looked at. An
   // unrecorded CI gate means the step was skipped, which is the same class of
@@ -783,12 +794,7 @@ export function evaluate(state, config, approvedWorkflows = null) {
     else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
-  // (a) Where this lands. Nothing reaches the base without a person, and a plan
-  // branch is the one target where the plan's own pull request is that person's
-  // look. So a candidate merges with nobody asked only when its state confirms
-  // that its pull request merges into this plan's own plan branch — see
-  // `onPlanBranch` — and anything else waits.
-  const planBranch = onPlanBranch(state, config);
+  // (a) Where this lands: see `planBranch` above.
   if (!planBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth. Judged from
@@ -819,7 +825,7 @@ export function evaluate(state, config, approvedWorkflows = null) {
   //
   // On a plan branch the readers can decide instead, and only there. They rule
   // on every item left undone, and the settled review records the accounting;
-  // it stands for a person only with the review clean, verify passed, CI passed
+  // it stands for a person only with the review clean, verify passed (or failing on the base too), CI passed
   // or not waited for, and every item of the current candidate and of every
   // earlier unaccounted one ruled environmental or out-of-scope by every reader
   // that was given it. A missing report, or one that names nothing, has no item
@@ -831,7 +837,7 @@ export function evaluate(state, config, approvedWorkflows = null) {
     const cleared = planBranch
       && (report?.status === "complete" || report?.status === "unfinished")
       && review?.status === "clean"
-      && verify?.status === "passed"
+      && (verify?.status === "passed" || verify?.status === FAILS_WITHOUT_CHANGE)
       && (ci?.status === "passed" || !(config?.ciWaitSec > 0))
       && Array.isArray(accounting?.items) && accounting.items.length > 0
       && accounting.items.every((item) => item.ruling === "environmental" || item.ruling === "out-of-scope")

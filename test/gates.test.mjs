@@ -635,6 +635,21 @@ test("on a plan branch, every item ruled acceptable with every gate passing clea
   assert.equal(evaluate({ ...ruled(), gates: { ...ruled().gates, ci: null } }, CONFIG).ready, true);
 });
 
+test("a command that fails on the base too is no blocker on a plan branch, is its own blocker straight to the base, and clears an unfinished account only on the plan branch", () => {
+  const disclosed = (state) => recordGate(state, "verify", A, { status: "fails-without-change" });
+  const onPlan = evaluate(disclosed(reviewed()), CONFIG);
+  assert.deepEqual([onPlan.blockers, onPlan.approvals, onPlan.ready], [[], [], true]);
+
+  const onBase = evaluate(disclosed(straight()), CONFIG);
+  assert.deepEqual(onBase.blockers, ["verification-fails-without-change"]);
+  assert.equal(onBase.ready, false);
+  const approved = evaluate(recordGate(disclosed(straight()), "human", A, { approved: true }), CONFIG);
+  assert.equal(approved.ready, false, "a person approved away a command that fails on the base");
+
+  assert.deepEqual(evaluate(disclosed(ruled()), CONFIG).approvals, [], "the rulings did not clear the account beside a disclosed command");
+  assert.ok(evaluate(recordGate(ruled(), "verify", A, { status: "failed" }), CONFIG).approvals.includes("work-not-accounted-for"));
+});
+
 // --- regressions from the Codex review of this rewrite ---
 
 test("a round that found something reaches publishing through fixing", () => {

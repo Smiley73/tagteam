@@ -110,7 +110,8 @@ test("a disclosure a person edits out of the pull request on GitHub is sent agai
 });
 
 test("a verify command that fails both times records failed beside a command that passed once, and neither is run again when verify runs again", () => {
-  const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"; exit 1`, `echo ran >> "${dir}/y-count"`)(config) });
+  // x fails on the candidate only, which has `sub`: failing on its base too would be disclosed, not failed.
+  const staged = stageWith({ change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"; if grep -q sub app.js; then exit 1; fi`, `echo ran >> "${dir}/y-count"`)(config) });
   const { dir, plan, shipDir, env } = staged;
   const begin = ship("begin", plan, ["--spec", "01-a"], env);
   write(path.join(JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree, "app.js"), A_CHANGE);
@@ -122,7 +123,7 @@ test("a verify command that fails both times records failed beside a command tha
   assert.equal(verified.json.verify, "failed");
   assert.match(verified.json.say.join("\n"), /first run, failed: [^\n]*x-count[^\n]*\n[^\n]*second run, failed: [^\n]*x-count/, "the say does not name both attempts");
   assert.doesNotMatch(verified.json.say.join("\n"), /Risk/);
-  assert.equal(ranIn(path.join(dir, "x-count")), 2);
+  assert.equal(ranIn(path.join(dir, "x-count")), 3, "x did not run twice on the candidate and once on its base");
   assert.equal(ranIn(path.join(dir, "y-count")), 1, "the command after the failing one did not run on the first pass, or ran again");
   const state = JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
   assert.equal(state.gates.verify.status, "failed");
@@ -135,7 +136,7 @@ test("a verify command that fails both times records failed beside a command tha
   const rerun = ship("verify", plan, ["--spec", "01-a"], env);
   assert.equal(rerun.status, 0, rerun.stderr);
   assert.equal(rerun.json.verify, "failed");
-  assert.equal(ranIn(path.join(dir, "x-count")), 2, "verify ran the failing command a third time");
+  assert.equal(ranIn(path.join(dir, "x-count")), 3, "verify ran the failing command again");
   assert.equal(ranIn(path.join(dir, "y-count")), 1, "verify ran the passing command again");
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -212,7 +213,8 @@ test("verify commands that all pass are each run once, and leave no second run a
 
 test("on a revisit a command whose second run was spent is not given another, and a command failing for the first time is", () => {
   const touch = (dir, name) => fs.writeFileSync(path.join(dir, name), "");
-  const x = (dir) => `echo ran >> "${dir}/x-count"; if [ -f "${dir}/x-break" ]; then exit 1; fi; if [ -f "${dir}/x-mark" ]; then exit 0; fi; touch "${dir}/x-mark"; exit 1`;
+  // x-break breaks x on the candidate only, which has `sub`.
+  const x = (dir) => `echo ran >> "${dir}/x-count"; if [ -f "${dir}/x-break" ] && grep -q sub app.js; then exit 1; fi; if [ -f "${dir}/x-mark" ]; then exit 0; fi; touch "${dir}/x-mark"; exit 1`;
   const y = (dir) => `echo ran >> "${dir}/y-count"; if [ -f "${dir}/y-break" ] && [ ! -f "${dir}/y-healed" ]; then touch "${dir}/y-healed"; exit 1; fi`;
   const staged = stageWith({ change: (config, { dir }) => verifyWith(x(dir), y(dir))(config) });
   const { dir, plan, shipDir, env } = staged;
@@ -229,7 +231,7 @@ test("on a revisit a command whose second run was spent is not given another, an
   const again = ship("verify", plan, ["--spec", "01-a"], env);
   assert.equal(again.status, 0, again.stderr);
   assert.equal(again.json.verify, "failed");
-  assert.equal(ranIn(path.join(dir, "x-count")), 3, "the revisit gave x a second run again");
+  assert.equal(ranIn(path.join(dir, "x-count")), 4, "the revisit did not run x once on the candidate and once on its base, or gave it a second run again");
   assert.equal(ranIn(path.join(dir, "y-count")), 3, "y was not given its second run");
   const said = again.json.say.join("\n");
   assert.match(said, /second run, passed: [^\n]*y-count/);

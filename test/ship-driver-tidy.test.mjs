@@ -26,14 +26,15 @@ const MADE = [{ id: DELETION_ID, outcome: "fixed", note: "deleted the helper" }]
 const FAILS_ON_TIDY = "node -e \"process.exit(require('fs').readFileSync('app.js','utf8').includes('// tidy') ? 1 : 0)\"";
 
 // A staged plan whose spec is reviewed by correctness and economy, begun and
-// verified at round 1. `verify` replaces the repository's verify commands.
+// verified at round 1. `verify`, a command or a list of them, replaces the
+// repository's verify commands.
 function begun({ verify = null, workflow = false, source = A_CHANGE } = {}) {
   const staged = stagePlan({ specs: 1 });
   const { plan, shipDir, env, configPath, repo } = staged;
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.limits = { ...config.limits, fixRounds: 2 };
   config.reviewers = { ...config.reviewers, default: ["correctness", "economy"] };
-  if (verify) config.verify = [{ command: verify, when: { globs: [], keywords: [] }, timeoutSec: 60 }];
+  if (verify) config.verify = [verify].flat().map((command) => ({ command, when: { globs: [], keywords: [] }, timeoutSec: 60 }));
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   git(repo, "add", "-A");
   git(repo, "commit", "-m", "reviewers");
@@ -377,6 +378,33 @@ test("a snapshot run again after the tidy's tests were recorded does not run the
   assert.equal(cycle.head(), earlier);
 });
 
+// A command that fails on the candidate and on the base it started from is disclosed
+// by the spec's gate, and the tidy's tests may fail on it without being refused.
+test("a tidy whose tests fail only on a command the spec disclosed as failing on its base is kept, with that result as its verify", () => {
+  const cycle = begun({ verify: "exit 1" });
+  assert.equal(cycle.state().gates.verify.status, "fails-without-change");
+  assert.match(collected(cycle, { economy: [DELETION] }).json.next, / tidy /, "a spec whose only failure is on its base is not offered the tidy");
+  tidied(cycle);
+  const snapshot = cycle.run("snapshot");
+  assert.deepEqual(cycle.rounds(), ["1", "2"], snapshot.stdout);
+  assert.equal(cycle.json("tidy.json").outcome, "kept");
+  const gate = cycle.state().gates.verify;
+  assert.deepEqual([gate.candidateOid, gate.status, gate.commands[0].base.status], [cycle.state().candidateOid, "fails-without-change", "failed"]);
+  const known = JSON.parse(fs.readFileSync(path.join(cycle.shipDir, "known-failures.json"), "utf8"));
+  assert.ok(known.failing.some((entry) => entry.candidate === cycle.state().candidateOid), "the tidied candidate's disclosure is not on record");
+});
+
+test("a tidy is refused when a command the spec never disclosed fails beside one it did", () => {
+  const cycle = begun({ verify: ["exit 1", FAILS_ON_TIDY] });
+  assert.equal(cycle.state().gates.verify.status, "fails-without-change");
+  collected(cycle, { economy: [DELETION] });
+  tidied(cycle, { edit: () => write(path.join(cycle.worktree, "app.js"), `${TIDIED}// tidy\n`) });
+  cycle.run("snapshot");
+  assert.deepEqual(cycle.rounds(), ["1"]);
+  assert.equal(cycle.json("tidy.json").outcome, "tests-failed");
+  assert.match(cycle.json("tidy.json").why, /process\.exit\(require/);
+});
+
 test("a snapshot run again after it decided against the tidy says the same, though the tree and the report are gone", () => {
   const cycle = begun({ verify: FAILS_ON_TIDY });
   collected(cycle, { economy: [DELETION] });
@@ -547,7 +575,7 @@ test("no tidy is offered while something about the code gates, without verify co
   fs.writeFileSync(untested.configPath, JSON.stringify({ ...config, verify: [] }, null, 2));
   assert.match(collected(untested, { economy: [DELETION] }).json.next, / recheck /, "nothing could show the deletion broke the tests");
 
-  const failing = begun({ verify: "exit 1" });
+  const failing = begun({ verify: "if grep -q sub app.js; then exit 1; fi" });
   assert.equal(failing.state().gates.verify.status, "failed");
   assert.doesNotMatch(collected(failing, { economy: [DELETION] }).json.next, / tidy /, "the candidate's own tests did not pass");
 

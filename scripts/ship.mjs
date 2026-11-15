@@ -89,6 +89,10 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
+  FAILS_WITHOUT_CHANGE, anyDisclosed, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, isDisclosed, saveBaseRun,
+  verifyStatus
+} from "./lib/verify-base.mjs";
+import {
   clearDecision, clearIncrease, confirmPending, decideRoute, decisionOf, increaseOf as declaredIncreaseOfRoute, isPlanRoute, judgeTip,
   landingBranch, recordAdoption, recordIncrease, recordMerge, recordPending, versionFilesOf, withIncrease, writeRoute
 } from "./lib/plan-route.mjs";
@@ -667,6 +671,11 @@ function pullRequestFindingsLine(ctx, id, findings) {
 // and stands for the command it names.
 const retriesOf = (dir) => path.join(dir, ROUND_RETRIES);
 
+// The one result `verify` records as a round's verify gate, with every command's
+// runs and, for one that failed, what it did on the base. Whatever records that
+// gate again from an earlier round reads this file.
+const VERIFY_RESULT = "verify-result.json";
+
 function writeRetry(dir, record) {
   const name = `${record.kind}-${short(record.candidate)}${record.base ? `-${short(record.base)}` : ""}${record.index ? `-command-${record.index}` : ""}.json`;
   writeRoundFile(path.join(retriesOf(dir), name), `${JSON.stringify({ ...record, at: new Date().toISOString() }, null, 2)}\n`);
@@ -691,13 +700,23 @@ const firstFailed = (verify) => (verify?.commands ?? []).find((command) => comma
  * The lines the driver itself writes under `## Risk` in this spec's pull
  * request: the one place that decides what they are. One per finding the spec
  * would carry into the plan branch open if it merged now, one per failure
- * that passed when it was run again on the same commit, and — for the dependency
+ * that passed when it was run again on the same commit, one per command that
+ * fails without the change too, and — for the dependency
  * unit — one per upgrade it did not make.
  */
 function riskLines(ctx, id) {
   const state = readState(ctx, id);
-  return [...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base), ...(isDependencyId(id) ? disclosureLines(readAudit(ctx.shipDir)) : [])];
+  return [
+    ...pendingLines(ctx, id, state), ...retryLines(ctx, id, state.base), ...failsWithoutLines(ctx, id, state),
+    ...(isDependencyId(id) ? disclosureLines(readAudit(ctx.shipDir)) : [])
+  ];
 }
+
+// One line for each command the current candidate's gate found failing on the
+// base too. The current candidate only: a command that failed without the change
+// on an earlier candidate may pass on this one.
+const failsWithoutLines = (ctx, id, state) =>
+  disclosedFor(ctx.shipDir, id, state.candidateOid).map((name) => failsWithoutLine({ name, candidate: state.candidateOid, base: state.baseOid }));
 
 /**
  * The line for each finding this spec would carry into the plan branch open if
@@ -823,7 +842,7 @@ const enteredLines = (count) =>
 function enterLedger(ctx, id, state) {
   const standing = planStanding(ctx, id, state);
   if (!standing) return 0;
-  return enterMerge(ctx.shipDir, id, { entries: standing.entries, retries: retryLines(ctx, id, state.base) });
+  return enterMerge(ctx.shipDir, id, { entries: standing.entries, retries: [...retryLines(ctx, id, state.base), ...failsWithoutLines(ctx, id, state)] });
 }
 
 const NOTHING_KNOWN = /^nothing(?: else)?(?: is)? known\.?$/i;
@@ -1573,11 +1592,12 @@ const routeAfterCollect = (ctx, id, round) =>
 // The deletions this round would hand a tidy: those its panel handed over, when
 // nothing blocking or major about the code is open in it or carried into it, the
 // spec has had no tidy, and its tests — which are what could show the deletion
-// broke something — passed on this candidate and exist. `collect` asks only of a
+// broke something — passed on this candidate, or failed only where they fail on
+// the base too, and exist. `collect` asks only of a
 // complete review.
 function tidyDeletions(ctx, id, state, round, review) {
   if (exists(tidyPath(ctx, id))) return [];
-  const verified = state.gates?.verify?.candidateOid === state.candidateOid && state.gates.verify.status === "passed";
+  const verified = state.gates?.verify?.candidateOid === state.candidateOid && ["passed", FAILS_WITHOUT_CHANGE].includes(state.gates.verify.status);
   if (!verified || (ctx.config.verify ?? []).length === 0) return [];
   const carry = carryFrom(ctx, id, round.round);
   const open = [...(review.open ?? []), ...(carry ? readJson(carry.file, { findings: [] }).findings ?? [] : [])];
@@ -1636,15 +1656,17 @@ const TIDY_NOT_KEPT = {
 function tidyRefusal(ctx, id) {
   const file = path.join(tidyDir(ctx, id), "verify.json");
   if (!exists(file)) {
+    // Every command runs when the spec disclosed one as failing without its change, so that all that fail are known.
+    const known = disclosedFor(ctx.shipDir, id, readJson(tidyPath(ctx, id)).candidate).length > 0;
     const run = node("verify-run.mjs", [
-      "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all",
+      "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all", ...(known ? ["--keep-going", "true"] : []),
       "--out-dir", path.join(tidyDir(ctx, id), "verify"), "--out", file, "--parent-pid", String(process.pid)
     ], { allow: [1] });
     if (!exists(file)) throw Stop.raw((run.stderr || run.stdout || "").trim(), "the tidy's tests could not run");
   }
-  const result = readJson(file);
-  if (result.status !== "passed") {
-    const failed = firstFailed(result);
+  const result = tidyResult(ctx, id);
+  if (!["passed", FAILS_WITHOUT_CHANGE].includes(result.status)) {
+    const failed = result.commands.find((command) => command.status === "failed" && !failsWithout(command));
     return {
       outcome: "tests-failed",
       why: failed ? `\`${failed.command}\` ${failed.timedOut ? "timed out" : "failed"} after the deletion, and its output is at ${failed.logPath}` : `the tests did not pass (${result.status})`
@@ -1652,6 +1674,21 @@ function tidyRefusal(ctx, id) {
   }
   const problem = tidyReportProblem(ctx, id);
   return problem ? { outcome: "report-unusable", why: problem } : null;
+}
+
+// The tidy's test run as the gate records it. A command that failed and that the
+// spec disclosed as failing on its base carries what that base's recorded run
+// found, which costs no run: it is the base the spec's own gate used.
+function tidyResult(ctx, id) {
+  const result = readJson(path.join(tidyDir(ctx, id), "verify.json"));
+  const { candidate } = readJson(tidyPath(ctx, id));
+  const { baseOid } = readState(ctx, id);
+  const disclosed = disclosedFor(ctx.shipDir, id, candidate);
+  const commands = (result.commands ?? []).map((command) => {
+    const known = command.status === "failed" && disclosed.includes(command.command) ? baseRunOf(ctx.shipDir, baseOid, command.command) : null;
+    return known ? { ...command, base: baseFact(known) } : command;
+  });
+  return { ...result, status: result.status === "failed" ? verifyStatus(commands) : result.status, commands };
 }
 
 // What became of the fixer's work: null when it is to be kept, otherwise why not.
@@ -1747,7 +1784,7 @@ function throwAwayTidy(ctx, id, state, plan, review) {
   markRound(roundDir(ctx, id, plan.round), { thrownAway: true });
   if (state.state !== "reviewing") transition(ctx, id, "reviewing");
   node("gates.mjs", ["bind", statePath(ctx, id), tidy.candidate, ctx.baseOid, path.join(earlier, "candidate.json")]);
-  record(ctx, id, "verify", tidy.candidate, path.join(earlier, "verify-result.json"));
+  record(ctx, id, "verify", tidy.candidate, path.join(earlier, VERIFY_RESULT));
   record(ctx, id, "report", tidy.candidate, path.join(earlier, ROUND_REPORT));
   writeJson(fixersPath(ctx, id), readJson(fixersPath(ctx, id), []).filter((fixer) => fixer.brief !== tidy.brief));
   writeJson(tidyPath(ctx, id), { ...tidy, outcome: "thrown-away", why: `the fresh pass raised ${raised.map((finding) => finding.id).join(", ")} on what it changed` });
@@ -3383,6 +3420,79 @@ async function bringUpToLockfile(ctx) {
   }
 }
 
+// What each of `commands` does on the commit `oid`, the base of what failed them:
+// taken from the plan's record of that command on that commit when there is one,
+// and otherwise run there, once, each by itself through verify-run. `dir` is where
+// the runs' logs and results go beneath the round or check they belong to, and
+// `back` is where the worktree goes afterwards, on `branch` when one is named.
+//
+// Checking the base out leaves behind what the candidate installed, which git does
+// not track and `clean` does not remove, so a command run on it could meet the
+// candidate's install and pass off the candidate's failure as an old one. The
+// configured setup therefore runs on the base first, and again once the worktree
+// is back, so that what follows meets the candidate exactly as it was. A base
+// whose setup fails proves nothing: its commands are `could-not-run`, neither
+// failed nor passed. With no setup configured only the checkout and the clean
+// happen, which is the one gap left; removing the install too would make the base
+// fail for the wrong reason.
+async function runOnBase(ctx, { oid, commands, dir, back }) {
+  const found = new Map();
+  const due = [];
+  for (const command of new Set(commands)) {
+    const known = baseRunOf(ctx.shipDir, oid, command);
+    if (known) found.set(command, baseFact(known));
+    else due.push(command);
+  }
+  if (due.length === 0) return found;
+  putBack(ctx.worktree, oid);
+  const broken = await bringUpToLockfile(ctx);
+  let failure = null;
+  try {
+    for (const command of due) found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir) : { status: "could-not-run", oid, reason: broken });
+  } catch (error) {
+    failure = error;
+  }
+  putBack(ctx.worktree, back.oid, back.branch);
+  const restored = await bringUpToLockfile(ctx);
+  if (restored !== null) {
+    throw Stop.beneath(`A verify command was run on ${short(oid)}, and the worktree could not be put back on ${short(back.oid)} afterwards, so nothing was settled. `
+      + `Look at the worktree at ${ctx.worktree}, then run the step again.`, restored);
+  }
+  if (failure) throw failure;
+  return found;
+}
+
+function commandOnBase(ctx, oid, command, dir) {
+  const position = (ctx.config.verify ?? []).findIndex((entry) => entry.command === command) + 1;
+  if (position === 0) return { status: "could-not-run", oid, reason: "the command is no longer one this repository configures" };
+  const name = `base-${short(oid)}-command-${position}`;
+  const file = path.join(dir, `${name}.json`);
+  if (!exists(file)) {
+    const run = node("verify-run.mjs", [
+      "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all", "--only", String(position),
+      "--out-dir", path.join(dir, name), "--out", file, "--parent-pid", String(process.pid)
+    ], { allow: [1] });
+    if (!exists(file)) throw Stop.raw((run.stderr || run.stdout || "").trim(), `a verify command could not be run on ${short(oid)}`);
+  }
+  const [result] = readJson(file).commands;
+  const run = { base: oid, command, status: result.status, logPath: result.logPath, result: file, timedOut: result.timedOut };
+  saveBaseRun(ctx.shipDir, run);
+  return baseFact(run);
+}
+
+// What a verify result says about a command's run on its base.
+const baseFact = (run) => ({ status: run.status, oid: run.base, logPath: run.logPath, result: run.result, timedOut: run.timedOut });
+
+// The disclosure a result with this status makes in the plan's record: each
+// command that failed on the candidate and on the base.
+function discloseResult(ctx, id, candidate, baseOid, result) {
+  if (result.status !== FAILS_WITHOUT_CHANGE) return;
+  discloseFailing(ctx.shipDir, {
+    spec: id, candidate, base: baseOid,
+    commands: result.commands.filter(failsWithout).map((command) => ({ command: command.command, logPath: (command.runs?.at(-1) ?? command).logPath, baseLogPath: command.base.logPath }))
+  });
+}
+
 // The dependency unit's `begin`, in place of an implementer: the ship makes the
 // upgrades itself, from the base each time, and keeps those verify allows (see
 // `decideUpgrades`). Every trial is recorded as it ends and reused by a rerun on
@@ -3910,7 +4020,9 @@ async function snapshot(options) {
   // The tidy's tests ran once, on the tree before it was committed, and that run
   // is this round's verify: `verify` does not run on it.
   if (tidying) {
-    writeRoundFile(path.join(dir, "verify.json"), fs.readFileSync(path.join(tidyDir(ctx, id), "verify.json")));
+    const result = tidyResult(ctx, id);
+    writeRoundFile(path.join(dir, "verify.json"), `${JSON.stringify(result, null, 2)}\n`);
+    discloseResult(ctx, id, oid, ctx.baseOid, result);
     record(ctx, id, "verify", oid, path.join(dir, "verify.json"));
   }
   // A round an agent was dispatched for is not recorded as having no report: it
@@ -4025,12 +4137,22 @@ async function verify(options) {
       .map(({ status, exitCode, timedOut, logPath }) => ({ status, exitCode, timedOut, logPath }));
     return { command: command.command, status: runs.at(-1).status, runs };
   });
+  // A command that failed both its runs is run once on the commit the change
+  // started from, unless this gate was settled already: its result then holds
+  // what was found, and a base run that could not be made is not tried again here.
+  const settled = path.join(dir, VERIFY_RESULT);
+  const bases = exists(settled)
+    ? new Map(readJson(settled).commands.filter((command) => command.base).map((command) => [command.command, command.base]))
+    : await runOnBase(ctx, {
+      oid: state.baseOid, commands: commands.filter((command) => command.status === "failed").map((command) => command.command),
+      dir: retriesOf(dir), back: { oid: state.candidateOid, branch: state.branch }
+    });
+  const judged = commands.map((command) => (command.status === "failed" && bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command));
   const outcome = {
-    status: first.status === "not-applicable" ? first.status : commands.some((command) => command.status === "failed") ? "failed" : "passed",
+    status: first.status === "not-applicable" ? first.status : verifyStatus(judged),
     ...(first.select ? { select: first.select } : {}),
-    commands
+    commands: judged
   };
-  const settled = path.join(dir, "verify-result.json");
   if (!exists(settled)) writeRoundFile(settled, `${JSON.stringify(outcome, null, 2)}\n`);
   for (const [position, result] of secondRuns) {
     if (hadSecond(position)) continue;
@@ -4039,17 +4161,29 @@ async function verify(options) {
       first: path.join(dir, "verify.json"), second: again, result: result.status
     });
   }
+  discloseResult(ctx, id, state.candidateOid, state.baseOid, outcome);
   record(ctx, id, "verify", state.candidateOid, settled);
   const say = [`Verification: ${outcome.status}${outcome.status === "not-applicable" ? " — nothing matched, which is not a pass and waits for a person" : ""}.`];
   if (secondRuns.size > 0) say.push("A command that failed was run once more on the same commit:");
-  for (const [at, command] of commands.entries()) {
+  for (const [at, command] of judged.entries()) {
     const [firstRun, secondRun] = command.runs;
     const timedOut = (run) => (run.timedOut ? " (timed out)" : "");
     if (secondRun) say.push(`  first run, ${firstRun.status}: ${command.command}${timedOut(firstRun)}`, `  second run, ${secondRun.status}: ${command.command}${timedOut(secondRun)}`);
     else say.push(`  ${firstRun.status}: ${command.command}${timedOut(firstRun)}${firstRun.status === "failed" && hadSecond(at + 1) ? " — not run again: this commit has already had its second run of it after a failure" : ""}`);
   }
+  for (const command of judged.filter((entry) => entry.base)) {
+    const { base } = command;
+    say.push(`  on ${state.base} as this change started from it (${short(state.baseOid)}), ${base.status}: ${command.command}${base.timedOut ? " (timed out)" : ""}`
+      + `${base.reason ? ` — ${base.reason.split("\n")[0]}` : ""}`);
+  }
   if (commands.some((command) => command.runs[1]?.status === "passed")) {
     say.push("A command that failed passed the second time; the pull request says so under Risk.");
+    resendBody(ctx, id, state, say);
+  }
+  if (outcome.status === FAILS_WITHOUT_CHANGE) {
+    say.push(onPlanBranch(state, ctx.config)
+      ? "Every command that failed also fails on the base without this change, so the gate is satisfied and the pull request says so under Risk, with the plan's pull request to follow."
+      : "Every command that failed also fails on the base without this change. Off a plan branch that still stops the spec, and no approval merges it: the command has to be put right on the base itself.");
     resendBody(ctx, id, state, say);
   }
   // Which review this candidate gets. The first fix of a cycle skips the panel:
@@ -5726,7 +5860,7 @@ function ensureUnitDocument(ctx, record, id) {
     }))
     : unitFindings(ctx, record);
   const failedVerify = record.verify?.status === "failed"
-    ? (record.verify.commands ?? []).find((command) => command.status === "failed") ?? { command: "a verify command", logPath: record.verify.result }
+    ? (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command)) ?? { command: "a verify command", logPath: record.verify.result }
     : null;
   const failedChecks = record.ci?.status === "failed" ? { pr: record.ci.pr, names: record.ci.failed ?? [], result: record.ci.result } : null;
   const text = unitDocument({
@@ -5745,7 +5879,7 @@ function ensureUnitDocument(ctx, record, id) {
 function foundLine(ctx, record) {
   const parts = [];
   if (record.verify?.status === "failed") {
-    const failed = (record.verify.commands ?? []).find((command) => command.status === "failed");
+    const failed = (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command));
     parts.push(`${failed ? `\`${failed.command}\`` : "a verify command"} failed on the plan's tip${failed?.timedOut ? " (timed out)" : ""} — its log is ${failed?.logPath ?? record.verify.result}`);
   }
   if (record.review?.status === "open") {
@@ -5771,6 +5905,13 @@ function closeCheck(ctx, record, status, reason, say) {
   return decidedPayload(ctx, record, say);
 }
 
+// How a clean whole-plan check says what verify did, by the status it recorded.
+const VERIFY_SAID = {
+  passed: "passed",
+  [FAILS_WITHOUT_CHANGE]: "failed only on commands that fail where the plan began too, which were disclosed and are not held against the plan",
+  "not-applicable": "had nothing to run, which is recorded as that and not as a pass"
+};
+
 // What a decided check prints, whether it was decided now or is being reused for
 // its tip: on clean, what follows the check on this route; on a fix unit, that
 // unit's `begin`; on a stop, `ask` and `end`, with the work left on the branch.
@@ -5784,7 +5925,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   if (record.status === "clean") {
     const minor = Object.entries(record.review?.counts ?? {}).filter(([severity]) => severity === "minor" || severity === "nit")
       .reduce((sum, [, count]) => sum + count, 0);
-    say.push(`The whole-plan check of ${at} is clean: verify ${record.verify.status === "passed" ? "passed" : "had nothing to run, which is recorded as that and not as a pass"}, `
+    say.push(`The whole-plan check of ${at} is clean: verify ${VERIFY_SAID[record.verify.status]}, `
       + `and the reviewer found nothing blocking or major${minor > 0 ? ` (${minor} minor or nit finding(s) recorded in ${record.review.findings}, and nothing fixed for them)` : ""}. `
       + `Its record is ${where}.`);
     if (ledger) say.push(ledger);
@@ -5947,28 +6088,43 @@ async function planCheck(options) {
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"), "--select", "all",
       "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
-      "--parent-pid", String(process.pid)
+      "--parent-pid", String(process.pid),
+      // Every command runs when a spec disclosed one as failing without its change, so that all that fail are known.
+      ...(anyDisclosed(ctx.shipDir) ? ["--keep-going", "true"] : [])
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
     }
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip]);
     const outcome = readJson(path.join(dir, "verify.json"));
+    // A command that failed and that a spec disclosed is run on the merge base,
+    // where the plan began: it is the plan's own failure unless it fails there too.
+    const disclosed = (outcome.commands ?? []).filter((command) => command.status === "failed" && isDisclosed(ctx.shipDir, command.command));
+    const bases = disclosed.length > 0
+      ? await runOnBase(ctx, { oid: record.mergeBase, commands: disclosed.map((command) => command.command), dir: path.join(dir, "verify-base"), back: { oid: tip, branch: null } })
+      : new Map();
+    const commands = (outcome.commands ?? []).map((command) => (bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command));
     record.verify = {
-      tip, status: outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
-      commands: (outcome.commands ?? []).map(({ command, status, timedOut, logPath }) => ({ command, status, timedOut, logPath }))
+      tip, status: outcome.status === "failed" ? verifyStatus(commands) : outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
+      commands: commands.map(({ command, status, timedOut, logPath, base }) => ({ command, status, timedOut, logPath, ...(base ? { base } : {}) }))
     };
     record.phase = "verified";
     saveCheck(ctx.shipDir, record);
   }
   say.push(`Verification of the plan's tip, every command: ${record.verify.status}${record.verify.status === "not-applicable" ? " — none is configured, which is recorded as that and not as a pass" : ""}.`);
-  for (const command of record.verify.commands ?? []) say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+  for (const command of record.verify.commands ?? []) {
+    say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`
+      + `${command.base ? ` — on ${short(record.mergeBase)}, where the plan began, it ${command.base.status === "failed" ? "fails too" : command.base.status === "passed" ? "passes" : "could not be run"}` : ""}`);
+  }
+  if (record.verify.status === FAILS_WITHOUT_CHANGE) {
+    say.push("Every command that failed was disclosed by a spec as failing without its change, and fails where the plan began too, so it does not make the plan not clean.");
+  }
 
   // The ship's version commit and nothing else, over a tip whose check is clean:
   // that check's review speaks for this tip too, and names the tip it read. Only
   // verify ran again, here, on this tip; the landing check runs on it as well.
   // A verify that did not pass gets the reviewer like any other tip.
-  if (record.carry && record.verify?.tip === tip && ["passed", "not-applicable"].includes(record.verify.status)) {
+  if (record.carry && record.verify?.tip === tip && ["passed", "not-applicable", FAILS_WITHOUT_CHANGE].includes(record.verify.status)) {
     const clean = records.find((entry) => entry.n === record.carry.check);
     record.review = {
       lens: WHOLE_PLAN_LENS, tip: record.carry.from, status: "clean", set: null, resendSet: null,
@@ -6207,7 +6363,7 @@ function bodyFacts(ctx, file) {
     ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {}),
     ...(carried ? {
       ledger: {
-        riskLines: "the ship adds under ## Risk itself every finding a spec carried into the plan branch open, and every failure that passed when run again",
+        riskLines: "the ship adds under ## Risk itself every finding a spec carried into the plan branch open, every failure that passed when run again, and every verify command that fails with and without a change",
         entries
       }
     } : {})
@@ -6473,16 +6629,22 @@ function landingSnapshot(ctx, tip, mergeBase) {
   return path.join(dir, "candidate.json");
 }
 
+const failedList = (landing) => (landing.verify?.commands ?? []).filter(failsWithout).map((command) => `\`${command.command}\``).join(", ");
+
 // What a landing result is, in a person's terms, naming the tip and the base.
 function landingLine(route, landing) {
   const at = `${route.branch} at ${short(landing.tip)}`;
   const base = `${route.base} at ${short(landing.baseOid)}`;
   if (landing.on === "whole-plan") {
     return `${base} has not moved past where ${at} last met it, so the landing check is the whole-plan check's own run of every `
-      + `verify command on this tip: ${landing.verify?.status === "passed" ? "passed" : "nothing to run, which is not a failure"}.`;
+      + `verify command on this tip: ${{ passed: "passed", [FAILS_WITHOUT_CHANGE]: `${failedList(landing)} fails there and where the plan began, as disclosed, and nothing else fails` }[landing.verify?.status] ?? "nothing to run, which is not a failure"}.`;
   }
   const moved = `${route.base} moved to ${short(landing.baseOid)} since ${at} last met it at ${short(landing.mergeBase)}`;
-  if (landing.status === "passed") return `${moved}; the plan merges into it cleanly, lands as the same change, and every verify command passes on the merged result.`;
+  if (landing.status === "passed") {
+    return `${moved}; the plan merges into it cleanly, lands as the same change, and ${landing.verify?.status === FAILS_WITHOUT_CHANGE
+      ? `${failedList(landing)} fails on the merged result and on ${base} too, as a spec disclosed, and nothing else fails`
+      : "every verify command passes on the merged result"}.`;
+  }
   if (landing.status === "conflict") return `${moved}, and the plan no longer merges into it cleanly (${(landing.conflicts ?? []).join(", ")}).`;
   if (landing.status === "differs") {
     return `${moved}. The plan still merges cleanly, but what would land on ${base} is not the plan's change — part of it is `
@@ -6516,7 +6678,8 @@ async function planLandingCheck(ctx, record, tip, check, say) {
   if (mergeBase === baseOid) {
     landing = {
       tip, baseOid, mergeBase, status: "passed", on: "whole-plan", check: check.n,
-      verify: { status: check.verify.status }, resultPath: check.verify.result, conflicts: null, dir: null
+      verify: { status: check.verify.status, ...(check.verify.status === FAILS_WITHOUT_CHANGE ? { commands: check.verify.commands } : {}) },
+      resultPath: check.verify.result, conflicts: null, dir: null
     };
   } else {
     if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") {
@@ -6535,12 +6698,18 @@ async function planLandingCheck(ctx, record, tip, check, say) {
       outcome = checkLanding({
         repo: ctx.repo, worktree: ctx.worktree, branch: null, config: ctx.config, configPath: ctx.configPath,
         baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
-        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all"
+        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: anyDisclosed(ctx.shipDir)
       });
     } catch (error) { throw Stop.raw(error.message, "the check of the landing failed"); }
+    if (outcome.status === "failed") {
+      outcome = await acceptDisclosed(ctx, outcome, { disclosed: (command) => isDisclosed(ctx.shipDir, command), back: { oid: tip, branch: null } });
+    }
     landing = {
       tip, baseOid, mergeBase, status: outcome.status, conflicts: outcome.conflicts ?? null,
-      verify: outcome.verify ? { status: outcome.verify.status, commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath }) => ({ command, status, timedOut, logPath })) } : null,
+      verify: outcome.verify ? {
+        status: outcome.verify.status,
+        commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath, base }) => ({ command, status, timedOut, logPath, ...(base ? { base } : {}) }))
+      } : null,
       resultPath: outcome.resultPath ?? null, dir: outcome.dir ?? null, mergedCommit: outcome.mergedCommit ?? null
     };
   }
@@ -6916,7 +7085,7 @@ function resultLines(route, record, results) {
   const lines = [];
   const { wholePlan, ci, landing, version } = results;
   lines.push(wholePlan.status === "passed"
-    ? `the whole-plan check of ${at} is clean (check ${wholePlan.check}: every verify command ${wholePlan.verify === "passed" ? "passed" : "had nothing to run"}, and its reviewer found nothing blocking or major)`
+    ? `the whole-plan check of ${at} is clean (check ${wholePlan.check}: every verify command ${VERIFY_SAID[wholePlan.verify]}, and its reviewer found nothing blocking or major)`
     : wholePlan.status === "failed"
       ? `the whole-plan check of ${at} is ${wholePlan.outcome}, not clean (check ${wholePlan.check})`
       : `no whole-plan check has run on ${at} — not run`);
@@ -7515,6 +7684,8 @@ const REASONS = {
   "review-incomplete": "a reviewer produced no usable evidence, which is not the same as finding nothing",
   "verification-not-recorded": "the verify commands never ran against this commit",
   "verification-failed": "a verify command failed",
+  "verification-fails-without-change": "a verify command also fails without this change, on the base it started from; on a plan branch that is disclosed "
+    + "and the spec merges, but this one merges straight into the base, where it is not",
   "continuous-integration-failed": "a check on the pull request failed",
   "continuous-integration-not-recorded": "this repository waits for checks and none were recorded",
   "continuous-integration-inconclusive": "the checks proved nothing either way",
@@ -7539,10 +7710,11 @@ const CLEARS = {
   "review-incomplete": "revisit — the reader that wrote nothing usable reads again",
   "verification-not-recorded": "revisit — the verify commands run again",
   "verification-failed": "revisit once what fails is put right",
+  "verification-fails-without-change": "putting the command right on the base branch itself, and a new commit on top of that",
   "continuous-integration-failed": "repair",
   "continuous-integration-not-recorded": "revisit — publish records the checks again",
   "work-not-accounted-for": "on a plan branch, once every reader rules each item left undone as something the agent could not do where it ran "
-    + "or something this change does not owe, and the review is clean, verify passed and the checks passed or were not waited for"
+    + "or something this change does not owe, and the review is clean, verify passed or fails only where it fails on the base too, and the checks passed or were not waited for"
 };
 
 const sentence = (reason) => REASONS[reason] ?? reason;
@@ -7714,12 +7886,14 @@ async function landingCheck(ctx, id, state, say) {
       + `${state.candidateOid.slice(0, 12)} to verify the merged change against; nothing was merged`);
   }
   const borrowed = borrowWorktree(ctx, id, state);
+  // The commands this candidate disclosed as failing without its change, which all of them have to be run for to be told apart.
+  const disclosed = disclosedFor(ctx.shipDir, id, state.candidateOid);
   const check = () => checkLanding({
     repo: ctx.repo, worktree: ctx.worktree, branch: borrowed,
     config: ctx.config, configPath: ctx.configPath,
     baseOid: state.baseOid, newBaseOid: baseOid, candidateOid: state.candidateOid,
     candidatePath: path.join(round.dir, "candidate.json"),
-    landingDir: path.join(round.dir, "landing"), select: isDependencyId(id) ? "all" : null
+    landingDir: path.join(round.dir, "landing"), select: isDependencyId(id) ? "all" : null, keepGoing: disclosed.length > 0
   });
   let outcome = check();
   // A verify that fails on the merge is run once more on the same merge, in an
@@ -7733,6 +7907,10 @@ async function landingCheck(ctx, id, state, say) {
     });
     say.push(`Merged onto ${state.base} at ${short(baseOid)}, a verify command failed, and it was run once more on the same merge: `
       + `${outcome.status === "passed" ? "it passed, and the pull request says so under Risk" : "it failed again"}.`);
+  }
+  if (outcome.status === "failed") {
+    const tip = git(ctx.worktree, ["rev-parse", `refs/heads/${borrowed}`]).stdout.trim();
+    outcome = await acceptDisclosed(ctx, outcome, { disclosed: (command) => disclosed.includes(command), back: { oid: tip, branch: borrowed } });
   }
   const record = {
     status: outcome.status,
@@ -7755,6 +7933,22 @@ async function landingCheck(ctx, id, state, say) {
     return null;
   }
   return { stop: message, landing: record };
+}
+
+// A landing verify that failed only on commands that were disclosed as failing
+// without the change, each of which also fails on the base the change would land
+// on, is not the change's failure: it is `passed`, the only record `merge.mjs`
+// lets through, with each command's own facts kept in it and a status that says
+// what was accepted. The base run is made after the failure was run twice, and a
+// command that passes on the base, or one that was never disclosed, leaves the
+// outcome as it was.
+async function acceptDisclosed(ctx, outcome, { disclosed, back }) {
+  const failed = (outcome.verify?.commands ?? []).filter((command) => command.status === "failed");
+  if (failed.length === 0 || !failed.every((command) => disclosed(command.command))) return outcome;
+  const bases = await runOnBase(ctx, { oid: outcome.baseOid, commands: failed.map((command) => command.command), dir: path.join(outcome.dir, "verify-base"), back });
+  const commands = outcome.verify.commands.map((command) => (command.status === "failed" ? { ...command, base: bases.get(command.command) } : command));
+  const status = verifyStatus(commands);
+  return status === FAILS_WITHOUT_CHANGE ? { ...outcome, status: "passed", verify: { ...outcome.verify, status, commands } } : outcome;
 }
 
 // The merge, with the check in front of it. `merge.mjs` refuses a base it was
