@@ -332,7 +332,8 @@ fix round is left, and the run follows it. What is yours at each point:
   **Redesign** is the same `redesign` command: it takes one round past
   `limits.fixRounds`, which only this answer grants, and it is the cycle's only
   rewrite — if the rewrite still fails, the spec publishes with what is open
-  disclosed and the person merges it by hand. **Publish it as it is** is `next`:
+  disclosed and the person merges it by hand, unless `mergeWithOpenFindings` is on
+  (see below). **Publish it as it is** is `next`:
   `fix` refuses on the spent budget and the spec goes on to publish with what is
   open disclosed, exactly as it does at the cap without a question. `accept` is
   not an answer here and refuses. **Stop the train** is `end`. The question is
@@ -342,7 +343,10 @@ fix round is left, and the run follows it. What is yours at each point:
 
   When every fix round is spent and this cycle has had its rewrite, or no file
   is left to rewrite, there is no `ask`: the driver says why nothing is asked and
-  that the spec publishes with what is open disclosed, and the run goes on.
+  that the spec publishes with what is open disclosed, and the run goes on. With
+  `mergeWithOpenFindings` on, a spec on a plan branch is not asked about this at
+  all, and the driver's words say it merges at `finish` with what is open
+  disclosed; never tell the person they decide or that they merge it by hand.
 
 - **Never dispatch a fixer of your own, and never start a run at `redesign` or
   `accept` on your own judgement.** Start one at `redesign` only when a person
@@ -463,7 +467,8 @@ who wants it; the behaviour is the explanation. This is also how the stop reads
 when the person answered the question at the cap with "publish as it is", and
 when the cycle's rewrite — at the cap or before it — was tried and still left
 something open: the fix rounds are spent, what is open is disclosed, and the
-merge is theirs to make by hand.
+merge is theirs to make by hand. With `mergeWithOpenFindings` on, a spec on a plan
+branch does not stop for this: it merges at `finish` as below.
 
 When a fixer answered that a repair would go against the goal, `ask` leads with
 that: which findings, where the spec and the goal disagree, the recommendation
@@ -493,6 +498,19 @@ When carrying would take the plan past `limits.carried`, nothing is carried and
 `limits.carried` and starting a run at `finish` again, merging it by hand on GitHub
 — what is open then enters the ledger as merged by hand — leaving it open, or
 stopping the train.
+
+With `mergeWithOpenFindings` on, a spec on a plan branch whose fix rounds for this
+cycle are spent, and whose open review is the only thing blocking it, merges into
+the plan branch at `finish` with what is open disclosed — whether or not `carry` is
+on, whether or not a rewrite ran, and even for a `major` finding in the code of a
+spec that an unmerged spec depends on. Each open code finding enters the ledger as
+carried and counts toward `limits.carried`; findings about the pull request or the
+commit history enter as disclosed and do not. All are listed under Risk in the spec's
+pull request and in the plan's. It still stops for a `blocking` finding, for
+`limits.carried` (the same `ask` as above), for a whole-plan fix, for a spec that
+merges straight into the base, and for anything other than its review. When the
+driver's words say the spec merges at `finish`, pass that on; do not say the person
+decides or merges it by hand.
 
 ## Commits pushed to the plan branch
 

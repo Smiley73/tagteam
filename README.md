@@ -400,6 +400,16 @@ still to merge depends on, or for anything that goes straight to the base. When
 carrying one more spec would take the plan past `limits.carried`, the run stops
 and asks you instead.
 
+`mergeWithOpenFindings` (`.tagteam/config.json`; off unless you turn it on, and
+only on a plan branch) goes further: a spec whose fix rounds have run out merges
+into the plan branch with what is open disclosed, whatever `carry` says, and nobody
+is asked about it. That includes a major finding in code another spec still to
+merge depends on, so only `limits.carried` and the plan's final pull request, which
+you confirm, stand between those findings and the base. A blocking finding, a
+whole-plan fix, a spec that goes straight to the base and anything other than its
+review still stop it, and reaching `limits.carried` stops and asks you as it does
+with carrying.
+
 The missing evidence matters more than it sounds: an absent or malformed findings
 file yields an empty finding set, and an empty finding set otherwise reads as a
 clean review.

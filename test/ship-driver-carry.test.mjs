@@ -8,18 +8,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { git, ship, write, outputOf, arriveAll, findings, major, stagePlan, pullsOf } from "./ship-stage.mjs";
-import { enterMerge, entriesOf, readLedger } from "../scripts/lib/ledger.mjs";
+import { enterMerge, entriesOf, planLines, readLedger } from "../scripts/lib/ledger.mjs";
 
 const ABOUT_PR = { severity: "major", scope: "pull-request", file: null, line: null, title: "the body does not say sub was added", detail: "a reader cannot tell", fix: null };
 
 // A two-spec plan on a plan branch, with carrying as given and one fix round. 02-b
 // depends on 01-a unless `standalone`.
-function stageCarry({ carry = true, standalone = true, carried = 5 } = {}) {
-  const staged = stagePlan();
+function stageCarry({ carry = true, standalone = true, carried = 5, setting = false, specs = 2 } = {}) {
+  const staged = stagePlan({ specs });
   const config = JSON.parse(fs.readFileSync(staged.configPath, "utf8"));
   Object.assign(config, { carry, limits: { ...config.limits, fixRounds: 1, carried } });
+  if (setting) config.mergeWithOpenFindings = true;
   fs.writeFileSync(staged.configPath, JSON.stringify(config, null, 2));
-  if (standalone) fs.writeFileSync(path.join(staged.plan, "specs", "02-b.md"), "---\nid: 02-b\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\nb works.\n");
+  if (standalone && specs === 2) fs.writeFileSync(path.join(staged.plan, "specs", "02-b.md"), "---\nid: 02-b\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\nb works.\n");
   git(staged.repo, "add", "-A");
   git(staged.repo, "commit", "-m", "carrying set");
   git(staged.repo, "push", "origin", "main");
@@ -27,10 +28,13 @@ function stageCarry({ carry = true, standalone = true, carried = 5 } = {}) {
 }
 
 // 01-a from begin to its first collect, the correctness lens raising `raised`.
+// `said` collects everything every step told the person.
 function driveToCollect({ plan, shipDir, env }, raised) {
+  const said = [];
   const run = (sub, extra = []) => {
     const result = ship(sub, plan, ["--spec", "01-a", ...extra], env);
     assert.equal(result.status, 0, `${sub}: ${result.stderr}`);
+    said.push(...(result.json?.say ?? []), ...(result.json?.ask ? [result.json.ask] : []));
     return result;
   };
   const state = () => JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8"));
@@ -51,14 +55,14 @@ function driveToCollect({ plan, shipDir, env }, raised) {
   write(path.join(shipDir, "01-a", "rounds", "1", "findings", "codex.json"), findings("codex", oid));
   arriveAll(panel, env);
   assert.equal(run("collect").json.review, "open");
-  return { run, state, worktree };
+  return { run, state, worktree, said };
 }
 
 // One major code finding, one fix round spent on it, and the re-check leaving it
 // open: `fix` then finds the budget spent and sends the spec on to publish. With
 // `workflow`, the fixer also adds a workflow, which waits for a person's approval.
-function driveToSpent(staged, { workflow = false } = {}) {
-  const driven = driveToCollect(staged, [major("app.js")]);
+function driveToSpent(staged, { workflow = false, raised = major("app.js") } = {}) {
+  const driven = driveToCollect(staged, [raised]);
   const { run, state, worktree } = driven;
   const fix = run("fix");
   fs.appendFileSync(path.join(worktree, "app.js"), "// still adds\n");
@@ -253,3 +257,54 @@ test("with carrying off, a spent plan-branch spec stops on its open finding as i
   assert.equal(state().accept, null);
   assert.equal(fs.existsSync(ledgerFile(staged.shipDir)), false);
 });
+
+// `mergeWithOpenFindings` does the whole of carrying on a plan branch by itself:
+// `carry` stays off here, and nothing is asked or said to be a person's to decide.
+const NEVER_SAID = /a person decides|by hand|yours to/;
+
+test("with mergeWithOpenFindings on and carry off, a spent spec a later spec builds on merges at finish with its major finding carried", () => {
+  const staged = stageCarry({ carry: false, standalone: false, setting: true });
+  const { run, state, spent, said } = driveToSpent(staged);
+  assert.match(spent.json.say.join("\n"), /The spec still publishes\. mergeWithOpenFindings is on, so at finish the 1 finding\(s\) open are carried into plan\/demo/);
+
+  const finished = run("finish");
+  assert.equal(state().state, "merged", finished.stdout);
+  assert.equal(finished.json.ask, undefined);
+  assert.match(finished.json.say.join("\n"), /Carried 1 open finding\(s\) into plan\/demo with it, as mergeWithOpenFindings allows: the plan has carried 1 of the 5/);
+  const ledger = readLedger(staged.shipDir);
+  assert.deepEqual(ledger.entries.map((entry) => [entry.id, entry.reason]), [["01-a:1.correctness.1", "carried"]]);
+  assert.match(pullsOf(staged.env)[0].body, /## Risk[\s\S]*\n- 1\.correctness\.1 \(major\): wrong — the ship carried it open/);
+  assert.match(planLines(ledger).join("\n"), /1\.correctness\.1 \(major\): wrong — the ship carried it open/);
+  assert.doesNotMatch([...said, ...finished.json.say].join("\n"), NEVER_SAID);
+});
+
+test("with mergeWithOpenFindings on, a spec at limits.carried stops naming the cap and merges nothing", () => {
+  const staged = stageCarry({ carry: false, standalone: false, setting: true });
+  const other = { severity: "minor", scope: "code", file: "b.js", title: "terse", detail: "says little" };
+  const carried = [1, 2, 3, 4, 5].map((n) => ({ ...other, id: `1.correctness.${n}` }));
+  enterMerge(staged.shipDir, "00-z", { entries: entriesOf("00-z", "d".repeat(40), carried, new Set(), new Set(carried.map((f) => f.id))), retries: [] });
+  const before = fs.readFileSync(ledgerFile(staged.shipDir), "utf8");
+  const { run, state } = driveToSpent(staged);
+
+  const stopped = run("finish");
+  assert.equal(state().state, "awaiting-approval", stopped.stdout);
+  assert.match(stopped.json.ask, /Carrying its 1 open finding\(s\) into plan\/demo would take the plan past limits\.carried, which is 5 — 5 finding\(s\) are carried so far/);
+  assert.equal(pullsOf(staged.env)[0].state, "OPEN");
+  assert.equal(state().accept, null);
+  assert.equal(fs.readFileSync(ledgerFile(staged.shipDir), "utf8"), before);
+});
+
+const BLOCKING = { ...major("app.js"), severity: "blocking" };
+
+for (const [route, specs, raised] of [["plan branch", 2, BLOCKING], ["base", 1, BLOCKING], ["base", 1, major("app.js")]]) {
+  test(`with mergeWithOpenFindings on, a spent spec on the ${route} with a ${raised.severity} finding open stops as it always did`, () => {
+    const staged = stageCarry({ carry: false, standalone: false, setting: true, specs });
+    const { run, state } = driveToSpent(staged, { raised });
+    const finished = run("finish");
+    assert.deepEqual(finished.json.blockers, ["review-open"], finished.stdout);
+    assert.equal(state().state, "awaiting-approval");
+    assert.equal(state().accept, null);
+    assert.equal(pullsOf(staged.env)[0].state, "OPEN");
+    assert.equal(fs.existsSync(ledgerFile(staged.shipDir)), false);
+  });
+}
