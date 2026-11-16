@@ -60,6 +60,16 @@
 //   "text.format.schema","code":"invalid_json_schema"},"status":400}`. It is the
 //   same shape as an unusable model, and both come back as `turn-failed` with
 //   that text intact.
+// - **An oversized request.** A turn whose input is longer than 1,048,576
+//   characters is refused by `turn/start` itself, on codex-cli
+//   0.169.0-alpha.11.1: a JSON-RPC error, code -32602, message "Input exceeds the
+//   maximum length of 1048576 characters.", and no turn, no `error` notification
+//   and no model run. It is a `turn-failed` at stage `turn/start`, as a refused
+//   handshake and a refused `thread/start` are at theirs.
+// - **A read outside the working directory.** A thread opened in a directory
+//   under `.tagteam/worktrees/` read a file under `.tagteam/ships/`, a sibling
+//   outside it, with its shell in the read-only sandbox, and returned the nonce
+//   the file held (the `reads-outside-cd` capture).
 // - **A configuration error.** A malformed `config.toml` in a throwaway
 //   `CODEX_HOME` does not stop the server: it logs "Invalid configuration; using
 //   defaults." on stderr, answers `initialize`, sends a `configWarning`
@@ -97,7 +107,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { QUOTA_KINDS } from "../quota-backoff.mjs";
+import { QUOTA_KINDS, REFUSAL_KINDS } from "../quota-backoff.mjs";
 
 // The oldest Codex whose thread reports the model and the effort it ran at, which
 // is the last thing this client depends on to arrive.
@@ -432,8 +442,8 @@ const CODEX_EFFORTS = codexEfforts();
 const TURN_STATUSES = ["completed", "failed", "interrupted"];
 const TURN_ERROR_FIELDS = (prefix) => [
   { field: `${prefix}.message` },
-  // The typed kind, and the quota kinds failure recognition compares it with.
-  { field: `${prefix}.codexErrorInfo`, values: [...QUOTA_KINDS] },
+  // The typed kind, and the quota and refusal kinds failure recognition compares it with.
+  { field: `${prefix}.codexErrorInfo`, values: [...QUOTA_KINDS, ...REFUSAL_KINDS] },
   { field: `${prefix}.codexErrorInfo.*.httpStatusCode` },
   { field: `${prefix}.additionalDetails` }
 ];

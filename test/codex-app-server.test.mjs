@@ -14,7 +14,7 @@ import {
   CODEX_MINIMUM, KILL_AFTER_MS, codexIsAtLeast, parseCodexVersion, runAppServerTurn
 } from "../scripts/lib/codex-app-server.mjs";
 import {
-  ALLOW_LIST, FIXTURE_DIR, fixtureProblems, scrubTranscript, thisMachine
+  ALLOW_LIST, FIXTURE_DIR, OUTSIDE_NONCE, fixtureProblems, scrubTranscript, thisMachine
 } from "./codex-capture.mjs";
 
 const FAKE = path.join(import.meta.dirname, "fake-codex-app-server.mjs");
@@ -136,6 +136,8 @@ test("each capture comes back as its own outcome and none as another", async () 
     "configuration-error-startup": "configuration-error",
     "unusable-model": "turn-failed",
     "refused-schema": "turn-failed",
+    "oversized-request": "turn-failed",
+    "reads-outside-cd": "completed",
     "killed-mid-turn": "server-exited",
     "exits-mid-turn": "server-exited",
     "server-request-mid-turn": "completed",
@@ -182,6 +184,26 @@ test("an unusable model and a refused schema keep Codex's raw message intact", a
     "a model that does not exist is echoed back as given, which is Codex's record and no more");
   const refused = (await call("refused-schema")).outcome;
   assert.match(refused.message, /invalid_json_schema/);
+});
+
+// Where Codex's refusal of too long an input arrived is what the bridge reads it
+// from: not a turn that failed, a `turn/start` that was answered with an error.
+test("an oversized request is refused at turn/start, with Codex's sentence and no turn", async () => {
+  const { outcome } = await call("oversized-request");
+  assert.equal(outcome.outcome, "turn-failed");
+  assert.equal(outcome.stage, "turn/start");
+  assert.equal(outcome.reason, "Codex refused to start the turn");
+  assert.equal(outcome.message, "Input exceeds the maximum length of 1048576 characters.");
+});
+
+// The ship's on-disk request has Codex read the round's diff, which sits beside
+// the worktree it is opened in and not under it.
+test("Codex returned a nonce held only in a file outside its working directory", async () => {
+  const capture = fixture("reads-outside-cd");
+  assert.equal(capture.synthetic, false);
+  const { outcome } = await call("reads-outside-cd");
+  assert.equal(outcome.outcome, "completed");
+  assert.deepEqual(JSON.parse(outcome.message), { nonce: OUTSIDE_NONCE });
 });
 
 test("a server killed mid-turn is reported with the stage and the signal", async () => {
@@ -486,7 +508,7 @@ test("every fixture passes the scrub check", () => {
 test("every capture the spec names is a real one, and every synthetic fixture says so", () => {
   const real = [
     "success", "success-agents-md", "success-rate-limits", "max-effort", "configuration-error-thread-start", "configuration-error-startup",
-    "unusable-model", "refused-schema", "killed-mid-turn", "interrupted", "token-usage"
+    "unusable-model", "refused-schema", "killed-mid-turn", "interrupted", "token-usage", "oversized-request", "reads-outside-cd"
   ];
   for (const name of real) assert.equal(fixture(name).synthetic, false, `${name} is not a real capture`);
   const synthetic = [

@@ -43,6 +43,20 @@ import {
 import { NOT_REPORTED, SPEND_KEY, spendHistory } from "./codex-usage.mjs";
 
 const SCHEMA_ATTEMPTS = 2;
+// What the bridge says on, and what the driver reads off the runner's status
+// file, when a request was refused as a request: by Codex, or by this file before
+// anything was sent. Nothing else exits with it.
+export const REFUSAL_EXIT_CODE = 3;
+// Codex refuses a turn whose input is longer than this many characters, at
+// `turn/start`, before the model runs: "Input exceeds the maximum length of
+// 1048576 characters." (the `oversized-request` capture). The request that cost
+// retivo `13-pages-comments` 84 minutes was 1,356,880.
+export const CODEX_INPUT_LIMIT = 1_048_576;
+const SCHEMA_RETRY_NOTE = "\n\nYour previous response did not produce JSON matching the required schema. Return only a complete schema-valid response.";
+// The schema retry sends the request with its note appended, so a request that
+// fits only without the note would be refused on its second attempt. Bytes are
+// never fewer than characters, so counting them cannot send a refusal either.
+export const REQUEST_LIMIT = CODEX_INPUT_LIMIT - SCHEMA_RETRY_NOTE.length;
 // A call that never started Codex has nothing to report about how Codex routed:
 // a --reuse hit and a --dry-run both answer without starting anything.
 const NOT_RUN = { ran: false, observed: null, observedReason: null };
@@ -457,6 +471,14 @@ export function configurationErrorMessage(outcome, cleared = "") {
     + `What Codex said: ${String(outcome.message ?? "").slice(-1000)}`;
 }
 
+// A refused request is terminal under its own exit code, which is how the driver
+// tells it from every other way a call ends.
+function refusal(message) {
+  const error = cleared(message);
+  error.exitCode = REFUSAL_EXIT_CODE;
+  return error;
+}
+
 // What an attempt that produced no answer was, for the sentence that ends the
 // schema retries.
 function endedWithout(outcome) {
@@ -663,6 +685,14 @@ async function dispatch(options, artifact, requestPath, spend) {
       return { result: stub.value, reused: false, artifact, promptPath, bytes, sections, routing };
     }
 
+    // A request Codex would refuse is not sent to find out.
+    if (bytes > REQUEST_LIMIT) {
+      throw refusal(
+        `The request to Codex was refused before it was sent: composed it is ${bytes} bytes, over the ${REQUEST_LIMIT} Codex accepts as input. `
+        + `Nothing was sent. ${clear()}`
+      );
+    }
+
     let amendedPrompt = prompt;
     let invalidAttempts = 0;
     while (invalidAttempts < SCHEMA_ATTEMPTS) {
@@ -800,9 +830,18 @@ async function dispatch(options, artifact, requestPath, spend) {
         // A quota wait is not a failed attempt.
         continue;
       }
+      // The same request is refused on every attempt, and the retry's note only
+      // makes it longer, so this ends the call as the configuration error does.
+      if (classification.kind === "refusal") {
+        throw refusal(
+          `Codex refused the request (${bytes} bytes composed), so it was not sent again: the same request is refused every time. `
+          + `${clear()} `
+          + `What Codex said: ${said.slice(-1000)}`
+        );
+      }
       invalidAttempts += 1;
       if (invalidAttempts < SCHEMA_ATTEMPTS) {
-        amendedPrompt = `${prompt}\n\nYour previous response did not produce JSON matching the required schema. Return only a complete schema-valid response.`;
+        amendedPrompt = `${prompt}${SCHEMA_RETRY_NOTE}`;
       } else {
         // Terminal too, and the one that a fresh workspace hides: the attempt
         // files are gone, but an earlier dispatch's artifact and sidecar are
@@ -830,7 +869,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify({ ok: true, reused, artifact, promptPath, bytes, sections, routing, result })}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
+    process.exitCode = error.exitCode ?? 1;
   }
 }
 
