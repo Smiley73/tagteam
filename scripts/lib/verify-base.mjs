@@ -84,10 +84,10 @@ export const disclosedFor = (shipDir, spec, candidate) =>
 
 /**
  * The line under `## Risk` for something that fails with and without a change:
- * `what` and `name` say what, and the two commits are the change and what it
+ * `what` and `name` say what, `step` where inside it, and the two commits are the change and what it
  * started from.
  */
-export function failsWithoutLine({ name, candidate, base, what = "The verify command" }) {
-  return `- ${what} \`${name}\` fails with and without this change: it fails on the change (${String(candidate).slice(0, 12)}) `
+export function failsWithoutLine({ name, candidate, base, what = "The verify command", step = null }) {
+  return `- ${what} \`${name}\`${step ? ` at step \`${step}\`` : ""} fails with and without this change: it fails on the change (${String(candidate).slice(0, 12)}) `
     + `and on the commit the change started from (${String(base).slice(0, 12)}). A new failure inside it would not be noticed.`;
 }
