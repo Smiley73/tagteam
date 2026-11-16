@@ -467,6 +467,14 @@ const REFUSED_SCHEMA = {
   required: ["ok"],
   additionalProperties: false
 };
+// The size of the request that was refused in retivo `13-pages-comments`, the
+// one that cost a spec 84 minutes: 1,356,880 characters against a limit of
+// 1,048,576.
+const OVERSIZED_CHARS = 1_356_880;
+const NONCE_SCHEMA = { type: "object", properties: { nonce: { type: "string" } }, required: ["nonce"], additionalProperties: false };
+// Held only in a file outside the thread's working directory, so that returning
+// it proves the file was read. It is not secret, and it is not in the request.
+export const OUTSIDE_NONCE = "tagteam-outside-cd-7f3a91c2e4b6";
 
 export const SCENARIOS = {
   "success": {
@@ -503,6 +511,15 @@ export const SCENARIOS = {
     description: "An output schema with a property missing from required: turn/start accepts it, then the API refuses it and the turn fails.",
     schema: REFUSED_SCHEMA
   },
+  "oversized-request": {
+    description: `A request of ${OVERSIZED_CHARS} characters, past the most Codex accepts as input: how Codex refuses it, and at which step.`,
+    prompt: `${OK_PROMPT}\n${"Padding that asks nothing. ".repeat(OVERSIZED_CHARS / 20)}`.slice(0, OVERSIZED_CHARS)
+  },
+  "reads-outside-cd": {
+    description: "A thread whose working directory is a worktree under .tagteam/worktrees, asked to read a file under .tagteam/ships/<slug>/<spec>/rounds/<n>/, a sibling directory outside the working directory, and return the nonce it holds.",
+    schema: NONCE_SCHEMA,
+    outsideCd: true
+  },
   "killed-mid-turn": {
     description: "The server sent SIGKILL a few seconds into a turn: no turn/completed, and an exit by signal.",
     prompt: LONG_PROMPT, schema: ESSAY_SCHEMA, effort: "high", killAfterMs: 4_000
@@ -516,9 +533,9 @@ export const SCENARIOS = {
 const WAIT_MS = 180_000;
 
 /** Run one scenario against a real Codex and return its raw transcript. */
-export async function converse(settings, { codexBin, model, repo, env }) {
+export async function converse(settings, { codexBin, model, repo, env, cwd = repo }) {
   const transcript = [];
-  const child = spawn(codexBin, ["app-server"], { cwd: repo, env, shell: false, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(codexBin, ["app-server"], { cwd, env, shell: false, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   const waiters = [];
   let exited = false;
   let buffer = "";
@@ -565,7 +582,7 @@ export async function converse(settings, { codexBin, model, repo, env }) {
     const initialized = await request("initialize", initializeParams());
     if (!initialized?.result) break conversation;
     send({ method: "initialized", params: {} });
-    const thread = await request("thread/start", threadStartParams({ cwd: repo, model: settings.model ?? model, effort }));
+    const thread = await request("thread/start", threadStartParams({ cwd, model: settings.model ?? model, effort }));
     if (!thread?.result) break conversation;
     const threadId = thread.result.thread.id;
     const completed = waitFor((message) => message.method === "turn/completed");
@@ -597,12 +614,23 @@ export async function converse(settings, { codexBin, model, repo, env }) {
 }
 
 async function captureScenario(name, { codexBin, model, capturedOn }) {
-  const settings = SCENARIOS[name];
+  const settings = { ...SCENARIOS[name] };
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-capture-")));
   const repo = path.join(scratch, "repo");
   fs.mkdirSync(repo);
   if (settings.agentsMd) {
     fs.writeFileSync(path.join(repo, "AGENTS.md"), "# Conventions\n\nWhen asked for JSON, answer exactly what is asked.\n");
+  }
+  // The ship's layout: Codex is opened in the worktree, and the round it is
+  // asked to read sits beside it under `.tagteam/ships`, outside that directory.
+  let cwd = repo;
+  if (settings.outsideCd) {
+    cwd = path.join(repo, ".tagteam", "worktrees", "demo");
+    const round = path.join(repo, ".tagteam", "ships", "demo", "01-demo", "rounds", "1");
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(round, { recursive: true });
+    fs.writeFileSync(path.join(round, "nonce.txt"), `${OUTSIDE_NONCE}\n`);
+    settings.prompt = `Using the shell, read the file ${path.join(round, "nonce.txt")} and answer with its single line of text in the nonce field.`;
   }
   const env = { ...process.env };
   let codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -616,7 +644,7 @@ async function captureScenario(name, { codexBin, model, capturedOn }) {
     env.CODEX_HOME = codexHome;
   }
   try {
-    const transcript = await converse(settings, { codexBin, model, repo, env });
+    const transcript = await converse(settings, { codexBin, model, repo, env, cwd });
     const fixture = scrubTranscript(transcript, { scenario: name, description: settings.description, capturedOn, repo, codexHome });
     const problems = fixtureProblems(fixture);
     if (problems.length > 0) {

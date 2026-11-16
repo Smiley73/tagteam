@@ -1,0 +1,155 @@
+{
+  "synthetic": false,
+  "capturedOn": "codex-cli 0.169.0-alpha.11.1",
+  "scenario": "reads-outside-cd",
+  "description": "A thread whose working directory is a worktree under .tagteam/worktrees, asked to read a file under .tagteam/ships/<slug>/<spec>/rounds/<n>/, a sibling directory outside the working directory, and return the nonce it holds.",
+  "steps": [
+    {
+      "on": "initialize",
+      "send": [
+        {
+          "result": {}
+        }
+      ]
+    },
+    {
+      "on": "thread/start",
+      "send": [
+        {
+          "result": {
+            "approvalPolicy": "never",
+            "sandbox": {
+              "type": "readOnly",
+              "networkAccess": false
+            },
+            "instructionSources": [
+              "/codex-home/AGENTS.md"
+            ],
+            "thread": {
+              "id": "thread-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "turn/start",
+      "send": [
+        {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params": {
+            "threadId": "thread-1",
+            "tokenUsage": {
+              "total": {
+                "inputTokens": 19687,
+                "cachedInputTokens": 0,
+                "outputTokens": 184,
+                "reasoningOutputTokens": 10,
+                "totalTokens": 19871
+              },
+              "last": {
+                "inputTokens": 19687,
+                "cachedInputTokens": 0,
+                "outputTokens": 184,
+                "reasoningOutputTokens": 10,
+                "totalTokens": 19871
+              }
+            }
+          }
+        },
+        {
+          "method": "account/rateLimits/updated",
+          "params": {
+            "rateLimits": {
+              "primary": {
+                "usedPercent": 30,
+                "resetsAt": 4102444800
+              },
+              "secondary": {
+                "usedPercent": 17,
+                "resetsAt": 4102444800
+              },
+              "rateLimitReachedType": null
+            }
+          }
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params": {
+            "threadId": "thread-1",
+            "tokenUsage": {
+              "total": {
+                "inputTokens": 39631,
+                "cachedInputTokens": 19712,
+                "outputTokens": 216,
+                "reasoningOutputTokens": 10,
+                "totalTokens": 39847
+              },
+              "last": {
+                "inputTokens": 19944,
+                "cachedInputTokens": 19712,
+                "outputTokens": 32,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 19976
+              }
+            }
+          }
+        },
+        {
+          "method": "account/rateLimits/updated",
+          "params": {
+            "rateLimits": {
+              "primary": {
+                "usedPercent": 31,
+                "resetsAt": 4102444800
+              },
+              "secondary": {
+                "usedPercent": 17,
+                "resetsAt": 4102444800
+              },
+              "rateLimitReachedType": null
+            }
+          }
+        },
+        {
+          "method": "turn/completed",
+          "params": {
+            "turn": {
+              "id": "turn-1",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "text": "{\"nonce\":\"tagteam-outside-cd-7f3a91c2e4b6\"}",
+                  "phase": "final_answer"
+                }
+              ],
+              "error": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "on": "thread/read",
+      "send": [
+        {
+          "result": {
+            "thread": {
+              "model": "gpt-5.6-sol",
+              "reasoningEffort": "low",
+              "cliVersion": "0.169.0-alpha.11.1"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

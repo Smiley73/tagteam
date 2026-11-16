@@ -100,6 +100,20 @@ export function readCodexStatus(statusFile) {
 }
 
 /**
+ * How the call last prepared for `out` ended, and whether its request pasted the
+ * diff: the status file as `readCodexStatus` reads it, and `pastedDiff` from the
+ * command file beside it. Read before `writeCodexCommand` removes the status
+ * file, which is the only moment there is anything to read.
+ */
+export function previousCodexCall(out) {
+  const resolved = path.resolve(out);
+  let script = "";
+  try { script = fs.readFileSync(`${resolved}.cmd.sh`, "utf8"); } catch {}
+  // Each argument is quoted on its own in the script, so a fenced diff reads so.
+  return { ...readCodexStatus(`${resolved}.status`), pastedDiff: script.includes("'--fence' 'DIFF=") };
+}
+
+/**
  * What the runner agent itself runs at — the pair `agents/codex-runner.md` pins,
  * and a test holds the two together. Not the configured Codex model and effort:
  * those belong to the Codex process the runner launches, and are already in the

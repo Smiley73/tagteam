@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { ensureGitignore } from "../scripts/ensure-gitignore.mjs";
 import { acquireSlot } from "../scripts/lib/locks.mjs";
 import { initializeParams } from "../scripts/lib/codex-app-server.mjs";
+import { REFUSAL_EXIT_CODE, REQUEST_LIMIT, composePrompt } from "../scripts/codex.mjs";
 import { changedFixture } from "./codex-capture.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -412,13 +413,57 @@ test("an advisory warning refuses nothing, however much it sounds like an unusab
   assert.match(result.stderr, /after 2 attempts/, "a warning was reported as a provider failure");
 });
 
-test("a schema the API refuses takes the two-attempt path, quoting Codex", () => {
+// A refused request is the same request on every attempt, and the retry's note
+// only makes it longer, so it ends the call on the first one.
+function assertRefused(space, result, why) {
+  assert.equal(result.status, REFUSAL_EXIT_CODE, `${why}: ${result.stderr}`);
+  assert.match(result.stderr, /\brefused\b/, `${why} is not said to be a refusal`);
+  assert.doesNotMatch(result.stderr, /after 2 attempts/, `${why} was reported as a schema failure`);
+  assertCleared(space, result, why);
+}
+
+test("a schema the API refuses is a refused request: one attempt, the refusal exit code, quoting Codex", () => {
   const space = workspace();
+  withEarlierArtifact(space);
   const result = run(space, { fixture: "refused-schema" });
-  assert.equal(result.status, 1);
-  assert.equal(starts(space.dir).length, 2, "an unrecognised failure was not retried");
-  assert.match(result.stderr, /did not produce a valid artifact after 2 attempts: the turn ended failed\./);
+  assert.equal(starts(space.dir).length, 1, "a refused request was sent again");
+  assert.equal(requests(space.dir, "turn/start").length, 1);
+  assertRefused(space, result, "a refused schema");
+  assert.match(result.stderr, /\(\d+ bytes composed\)/, "the composed size is not given");
   assert.match(result.stderr, /What Codex said: .*invalid_json_schema/, "the failure carries nothing of what the provider said");
+  assert.ok(result.stderr.indexOf("What Codex said") > result.stderr.indexOf("refused"), "Codex is not quoted last");
+});
+
+test("Codex's own refusal of an oversized request, as captured, ends the call on the first attempt", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const result = run(space, { fixture: "oversized-request" });
+  assert.equal(requests(space.dir, "turn/start").length, 1, "a request Codex refused as too long was sent again");
+  assertRefused(space, result, "a refusal of turn/start");
+  assert.match(result.stderr, /What Codex said: Input exceeds the maximum length of 1048576 characters\./);
+});
+
+test("a request composed over what Codex accepts is never sent, and ends as a refusal", () => {
+  const space = workspace();
+  withEarlierArtifact(space);
+  const base = composePrompt({
+    template: path.join(space.dir, "template.md"), vars: [{ name: "NAME", text: "widget" }],
+    fences: [{ name: "DIFF", file: path.join(space.dir, "payload.diff"), json: false }]
+  }).bytes;
+  const payload = path.join(space.dir, "payload.diff");
+  // The largest request that is sent, to the byte.
+  const original = fs.readFileSync(payload, "utf8");
+  fs.writeFileSync(payload, "x".repeat(REQUEST_LIMIT - base + original.trimEnd().length));
+  const fits = run(space);
+  assert.equal(fits.status, 0, `a request exactly at the limit was refused: ${fits.stderr}`);
+  assert.equal(requests(space.dir, "turn/start").length, 1);
+  fs.rmSync(path.join(space.dir, "received.jsonl"));
+
+  fs.writeFileSync(payload, "x".repeat(REQUEST_LIMIT - base + original.trimEnd().length + 1));
+  const over = run(space);
+  assertRefused(space, over, "a request one byte over the limit");
+  assert.deepEqual(received(space.dir), [], "something reached Codex, not even a server start was to happen");
+  assert.match(over.stderr, new RegExp(`composed it is ${REQUEST_LIMIT + 1} bytes`));
 });
 
 test("a server that exits mid-turn takes the two-attempt path, quoting what it said", () => {
@@ -516,14 +561,15 @@ const retriedFirst = (description, error) => () => changedFixture("refused-schem
   fixture.steps.find((step) => step.on === "turn/start").send.splice(1, 0, { method: "error", params: { error, willRetry: true } });
 });
 
-test("an error Codex will retry is not the failure: a typed usage limit there leaves a refused schema two attempts", () => {
+test("an error Codex will retry is not the failure: a typed usage limit there leaves a refused schema a refusal, not a quota", () => {
   const space = workspace();
   const fixture = retriedFirst("a typed usage limit Codex will retry, before the refusal.",
     { message: NEUTRAL, codexErrorInfo: "usageLimitExceeded", additionalDetails: null })();
   const result = run(space, { fixture, spawnOptions: { timeout: 60_000 } });
-  assert.equal(result.status, 1);
-  assert.equal(starts(space.dir).length, 2, "an error Codex was retrying was read as the turn's failure");
-  assert.match(result.stderr, /did not produce a valid artifact after 2 attempts: the turn ended failed\./);
+  assert.equal(result.status, REFUSAL_EXIT_CODE);
+  assert.equal(starts(space.dir).length, 1);
+  assert.match(result.stderr, /\brefused\b/);
+  assert.doesNotMatch(result.stderr, /quota/, "an error Codex was retrying was read as the turn's failure");
 });
 
 test("an error Codex will retry still has its words read, as before the first pass", () => {
