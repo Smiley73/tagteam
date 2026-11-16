@@ -220,6 +220,43 @@ test("a driver killed while the candidate's install was being put back has settl
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a spec resumed after a driver was killed while the candidate's install was being put back is verified on the candidate's install, not the base's", () => {
+  // The fixture of the test above, with a command that passes on the base's install alone: the change broke it.
+  const staged = stageWith({
+    change: (config, { repo, dir }) => {
+      write(path.join(repo, "marker.txt"), "base\n");
+      fs.appendFileSync(path.join(repo, ".gitignore"), "installed.txt\n");
+      config.worktree.setup = [`if [ -f "${dir}/armed" ] && [ -n "$(git branch --show-current)" ]; then rm "${dir}/armed"; kill -9 $PPID; exit 1; fi; cp marker.txt installed.txt`];
+      verifyWith(`cat installed.txt >> "${dir}/seen"; grep -q base installed.txt`)(config);
+    }
+  });
+  const { dir, plan, shipDir, env } = staged;
+  const { worktree, state } = snapshotted(staged, { "app.js": A_CHANGE, "marker.txt": "candidate\n" },
+    (tree) => fs.writeFileSync(path.join(tree, "installed.txt"), "candidate\n"));
+  fs.writeFileSync(path.join(dir, "armed"), "");
+  const killed = spawnSync(process.execPath, [path.join(root, "scripts", "ship.mjs"), "verify", "--plan", plan, "--spec", "01-a"], {
+    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...env, TMPDIR: dir }
+  });
+  assert.equal(killed.signal, "SIGKILL", killed.stderr);
+  assert.equal(fs.readFileSync(path.join(worktree, "installed.txt"), "utf8"), "base\n", "the driver was not killed with the base's install still in the worktree");
+
+  // The way a new run takes the spec up again: through snapshot, which empties the round, so verify runs its commands afresh.
+  const begun = ship("begin", plan, ["--spec", "01-a"], env);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(fs.readFileSync(path.join(worktree, "installed.txt"), "utf8"), "candidate\n", "begin left the base's install in the worktree");
+  assert.ok(!fs.existsSync(path.join(shipDir, "base-run.json")), "the note of a base run was left behind once the worktree was back");
+  assert.equal(ship("snapshot", plan, ["--spec", "01-a"], env).status, 0);
+  const verified = ship("verify", plan, ["--spec", "01-a"], env);
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.deepEqual(heads(`${dir}/seen`), ["candidate", "candidate", "base", "candidate", "candidate"], "the candidate was run on the base's install, or the base a second time");
+  const gate = state().gates.verify;
+  assert.deepEqual(gate.commands.map((command) => [command.status, command.base?.status ?? null]), [["failed", "passed"]]);
+  assert.equal(gate.status, "failed", "a command the change broke passed on the base's install and the gate with it");
+  assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), state().candidateOid);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("each command is run on a base checked out afresh, so one that changes the tree cannot make the next one fail on the base", () => {
   // X empties the tracked fixture on the base, where it holds no BAD; Y needs the fixture as the base committed it.
   const staged = stageWith({

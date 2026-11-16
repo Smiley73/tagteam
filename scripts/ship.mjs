@@ -3238,6 +3238,7 @@ async function dependencies(options) {
 
 async function begin(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   const id = options.spec;
   const spec = specById(ctx, id);
   const say = [];
@@ -3447,12 +3448,10 @@ async function bringUpToLockfile(ctx) {
 // happen, which is the one gap left; removing the install too would make the base
 // fail for the wrong reason.
 //
-// A run enters the plan's record only once the worktree is back and set up. The
-// record is what lets a later call leave the worktree where it is, so a run in it
-// while the worktree was still away would let a step cut short there settle on
-// the base's install the next time it ran. Cut short before that, the next call
-// goes to the base again and puts the worktree back as this one would have, and
-// takes a result already beneath its `dir` in place of a second run.
+// Where the worktree goes back to is written down before it leaves, and
+// `backFromBase` is what brings it back, here and after a driver that died while
+// it was away. A run cut short after its result was written and before it was
+// recorded is not made again: the next call takes the result beneath its `dir`.
 async function runOnBase(ctx, { oid, commands, dir, back }) {
   const found = new Map();
   const due = [];
@@ -3462,30 +3461,50 @@ async function runOnBase(ctx, { oid, commands, dir, back }) {
     else due.push(command);
   }
   if (due.length === 0) return found;
-  const ran = [];
   let failure = null;
+  writeJson(awayPath(ctx), { oid, back });
   try {
     for (const command of due) {
       putBack(ctx.worktree, oid);
       const broken = await bringUpToLockfile(ctx);
-      found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir, ran) : { status: "could-not-run", oid, reason: broken });
+      found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir) : { status: "could-not-run", oid, reason: broken });
     }
   } catch (error) {
     failure = error;
   }
-  putBack(ctx.worktree, back.oid, back.branch);
-  const restored = await bringUpToLockfile(ctx);
-  if (restored !== null) {
-    throw Stop.beneath(`A verify command was run on ${short(oid)}, and the worktree could not be put back on ${short(back.oid)} afterwards, so nothing was settled. `
-      + `Look at the worktree at ${ctx.worktree}, then run the step again.`, restored);
-  }
-  for (const run of ran) saveBaseRun(ctx.shipDir, run);
+  await backFromBase(ctx);
   if (failure) throw failure;
   return found;
 }
 
-// `command` run on `oid`, which the worktree is at: what it found, with the run added to `ran` for `runOnBase` to record.
-function commandOnBase(ctx, oid, command, dir, ran) {
+// The note a base run leaves while it has the worktree away: the commit it took
+// it to and where it goes back to.
+const awayPath = (ctx) => path.join(ctx.shipDir, "base-run.json");
+
+// The worktree back from a base run and set up again, when a note says one has
+// it away: where `runOnBase` ends, and where `begin` and every step that makes a
+// base run starts. A driver that died while the worktree was away, or before the
+// setup that follows its return had finished, left the base's install in it, and
+// a round emptied on re-entry runs its commands again: on that install a failure
+// the change caused could pass. So the note outlives the driver, and goes only
+// once the setup has succeeded. A worktree that is gone holds no install, and
+// the next one is set up as it is made.
+async function backFromBase(ctx) {
+  const away = readJson(awayPath(ctx), null);
+  if (!away) return;
+  if (exists(ctx.worktree)) {
+    putBack(ctx.worktree, away.back.oid, away.back.branch);
+    const restored = await bringUpToLockfile(ctx);
+    if (restored !== null) {
+      throw Stop.beneath(`A verify command was run on ${short(away.oid)}, and the worktree could not be put back on ${short(away.back.oid)} afterwards, so nothing was settled. `
+        + `Look at the worktree at ${ctx.worktree}, then run the step again.`, restored);
+    }
+  }
+  fs.rmSync(awayPath(ctx), { force: true });
+}
+
+// `command` run on `oid`, which the worktree is at: what it found, recorded for the plan.
+function commandOnBase(ctx, oid, command, dir) {
   const position = (ctx.config.verify ?? []).findIndex((entry) => entry.command === command) + 1;
   if (position === 0) return { status: "could-not-run", oid, reason: "the command is no longer one this repository configures" };
   const name = `base-${short(oid)}-command-${position}`;
@@ -3501,7 +3520,7 @@ function commandOnBase(ctx, oid, command, dir, ran) {
   }
   const [result] = readJson(file).commands;
   const run = { base: oid, command, status: result.status, logPath: result.logPath, result: file, timedOut: result.timedOut };
-  ran.push(run);
+  saveBaseRun(ctx.shipDir, run);
   return baseFact(run);
 }
 
@@ -4109,6 +4128,7 @@ async function snapshot(options) {
 
 async function verify(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   const id = options.spec;
   const state = readState(ctx, id);
   const round = currentRound(ctx, id, state);
@@ -6023,6 +6043,7 @@ async function reviewStillOut(ctx, record, options, say) {
 
 async function planCheck(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   const route = routeOf(ctx);
   if (!isPlanRoute(route)) {
     throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no plan branch for a whole-plan check to read; nothing was done`);
@@ -7564,6 +7585,7 @@ async function landingStep(ctx, record, options, say) {
 
 async function planLand(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   if (!isPlanRoute(routeOf(ctx))) {
     throw new Stop(`this train ships each spec straight to ${ctx.config.base}, so there is no plan pull request to open or land; nothing was done`);
   }
@@ -8049,6 +8071,7 @@ function endChecksWait(ctx, id, state, say) {
 
 async function finish(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   const id = options.spec;
   let state = readState(ctx, id);
   const say = [];

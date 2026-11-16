@@ -112,6 +112,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    and failing, the commands each spec's candidate disclosed
                    as failing with and without its change, which the spec's own
                    later checks and agents look up                           ignored
+  base-run.json    there while a base run has the worktree away: the commit it
+                   is on and where it goes back to. After a run cut short, begin
+                   and the steps that make base runs put it back, and set it
+                   up, before anything else                                  ignored
   <spec-id>/
     state.json     the state machine, the reviewed commit, the gates, the
                    landing check and a person's accept on the plan branch,
