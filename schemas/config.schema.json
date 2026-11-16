@@ -202,6 +202,10 @@
       "type": "boolean",
       "description": "When true, the first time in a review cycle that the same file keeps failing, the ship answers `redesign` without asking, which spends one more fix round. Any later time it asks a person, and `accept` is always a person's answer. False always asks."
     },
+    "mergeWithOpenFindings": {
+      "type": "boolean",
+      "description": "When true, a spec that merges into its plan's own branch never stops on the Recurring question or on the question at the cap: while a fix round is left it keeps fixing, and at the cap the cycle's one rewrite, if unused, takes the one round past the limit without being asked. Off a plan branch it changes nothing. Missing reads as false."
+    },
     "versionFiles": {
       "type": "array",
       "description": "The lines that carry this repository's version, each a repository-relative file and one place in it — a JSON Pointer into a JSON file, or a line pattern with exactly one capture group — where one file may appear more than once, and an empty list means a ship never makes a version increase.",

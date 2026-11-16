@@ -566,9 +566,9 @@ test("each ship codex template composes with exactly the variables and fences it
 
 // The two answers to the Recurring question are a person's, like `revisit`:
 // `next` never prints `accept` or `revisit`, and prints `redesign` only where
-// `churnAsk` says `autoRedesign` answered the question. A redesign is budgeted
-// like a fix and dispatched after the edge, and its question carries none of
-// the run's vocabulary.
+// `churnAsk` says `autoRedesign` or `mergeWithOpenFindings` answered the
+// question. A redesign is budgeted like a fix and dispatched after the edge,
+// and its question carries none of the run's vocabulary.
 test("redesign and accept are person-only doors, budgeted before dispatch, and the ask names no severity", () => {
   const nexts = [...shipDriver.matchAll(/nextCommand\(ctx,[^)]*\)/g)].map(([call]) => call);
   for (const door of ["accept", "revisit"]) {
@@ -582,7 +582,7 @@ test("redesign and accept are person-only doors, budgeted before dispatch, and t
       assert.ok(redesign.includes(`const answer = (flag) => ${call};`), "a redesign answer command is built outside the question");
       continue;
     }
-    assert.match(call, /^nextCommand\(ctx, churn\.auto \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
+    assert.match(call, /^nextCommand\(ctx, churn\.auto( \|\| churn\.setting)? \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
   }
   const churn = driverFunction("churnAsk");
   assert.equal(churn.split("result.auto = true").length - 1, 1, "churnAsk answers redesign in one place");

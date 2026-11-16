@@ -1055,6 +1055,11 @@ function liveAt(ctx, id, state, round) {
 //   what is open disclosed, and the spent branch of `fix` routes it there as it
 //   always has.
 //
+// Where `mergesWithOpenFindings` holds nothing is ever asked: a fix round left
+// keeps fixing, and at the cap, where the question would have been, `setting`
+// says the setting grants the rewrite — the caller prints `redesign` as `next`,
+// and no `capAskPath` record is written. `autoRedesign` is not consulted.
+//
 // An absent counter reads as zero, as `counterOf` in gates.mjs reads it.
 function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = false }) {
   const { scope, signals, loose, live, files, lines } = liveAt(ctx, id, state, round);
@@ -1064,7 +1069,9 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   const limit = ctx.config.limits.fixRounds;
   const used = redesignUsed(ctx, id, state);
   const rewritable = files.length > 0;
+  const bySetting = mergesWithOpenFindings(ctx, state);
   if (spent < limit) {
+    if (bySetting) return result;
     if (autoRedesigns(ctx, state, { signals, used })) {
       result.auto = true;
       return result;
@@ -1078,6 +1085,10 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
       : spent > limit
         ? `Every fix round is spent and no round past the ${limit} is left, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.`
         : "Every fix round is spent and none of what keeps arriving is in a file a rewrite could change, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.";
+    return result;
+  }
+  if (bySetting) {
+    result.setting = true;
     return result;
   }
   const { ids } = openAt(ctx, id, round);
@@ -1101,10 +1112,19 @@ function autoRedesigns(ctx, state, { signals, used }) {
   return Boolean(ctx.config.autoRedesign) && (state.fixRoundsUsed ?? 0) < ctx.config.limits.fixRounds && !used && signals.length > 0;
 }
 
+// Whether `mergeWithOpenFindings` applies to this spec: the one place the
+// setting is checked, and it holds only on a plan branch. `churnAsk` asks it to
+// decide whether to ask at all, and `redesign` to take the setting in place of
+// a person's answer at the cap.
+function mergesWithOpenFindings(ctx, state) {
+  return Boolean(ctx.config.mergeWithOpenFindings) && onPlanBranch(state, ctx.config);
+}
+
 // Why a rewrite runs at the settings it does, by what decided it.
 const REWRITE_WHY = {
   always: "Escalation raises this rewrite because redesignEscalation is always in this repository's configuration",
   auto: "Escalation raises this rewrite because redesignEscalation is ask and autoRedesign started it",
+  setting: "Escalation raises this rewrite because redesignEscalation is ask and mergeWithOpenFindings started it",
   raised: "Escalation raises this rewrite because you chose the raised settings",
   ordinary: "Escalation does not raise this rewrite because you chose the ordinary settings, so only fixers and re-checks are raised",
   never: "Escalation does not raise this rewrite, only fixers and re-checks"
@@ -1112,6 +1132,9 @@ const REWRITE_WHY = {
 
 const AUTO_REDESIGN = "The Recurring question is answered redesign automatically, because autoRedesign is on in this repository's configuration: "
   + "a fresh implementer rewrites the area on a fix round this cycle still has. If the rewrite does not settle it, a person is asked.";
+
+const SETTING_REDESIGN = "The question at the cap is answered redesign, because mergeWithOpenFindings is on in this repository's configuration: "
+  + "every fix round is spent, so a fresh implementer rewrites the area on the one round past the cap, which the setting grants. Nothing is asked.";
 
 // A spec that stopped for a person stays exactly as it stopped until a person
 // says otherwise. Two doors lead out of waiting — `repair` for a red check and
@@ -4058,7 +4081,7 @@ async function snapshot(options) {
       const spent = state.fixRoundsUsed ?? 0;
       const limit = ctx.config.limits.fixRounds;
       if (spent > limit) {
-        say.push(`The one round past the ${limit} fix rounds this repository allows, which your answer granted, is gone; what was open is still open, and the spec publishes with it disclosed in the pull request — merging it is yours to do by hand on GitHub.`);
+        say.push(`The one round past the ${limit} fix rounds this repository allows, which ${mergesWithOpenFindings(ctx, state) ? "mergeWithOpenFindings" : "your answer"} granted, is gone; what was open is still open, and the spec publishes with it disclosed in the pull request — merging it is yours to do by hand on GitHub.`);
       } else if (churn.ask) {
         say.push("The fix round it spent is gone; what was open is still open, and the question stands — without the redesign answer, since this cycle's one rewrite has been used.");
       } else if (spent >= limit) {
@@ -4216,7 +4239,7 @@ async function snapshot(options) {
   say.push(tidying
     ? `Candidate ${oid.slice(0, 12)} is round ${round}, the tidy of round ${pending.round}${allocation.reentered ? " (re-entered)" : ""}: its tests ran once and passed before it was committed, and no fix round was spent (${allocation.spent} of ${allocation.limit} in this cycle).`
     : allocation.granted
-    ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by your answer to the question at the cap. No round is left after it in this cycle.`
+    ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by ${mergesWithOpenFindings(ctx, state) ? "mergeWithOpenFindings in this repository's configuration" : "your answer to the question at the cap"}. No round is left after it in this cycle.`
     : `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}; ${allocation.spent} of ${allocation.limit} fix rounds spent in this cycle.`);
   if (outOfBand) {
     say.push(`This commit was not dispatched by fix: nothing in this run asked for it. It is a fix round of this cycle all the same and is counted as one — ${allocation.remaining} of ${allocation.limit} left.`);
@@ -4476,6 +4499,7 @@ async function collect(options) {
   say.push(...churn.signal);
   if (churn.note) say.push(churn.note);
   if (churn.auto) say.push(AUTO_REDESIGN);
+  if (churn.setting) say.push(SETTING_REDESIGN);
   // Nothing about the code gates, so the fixer is sent the deletions alone, once,
   // before the fresh pass reads the code.
   const deletions = tidyDeletions(ctx, id, state, round, review);
@@ -4484,7 +4508,7 @@ async function collect(options) {
   }
   emit({
     say, review: review.status, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}),
-    next: nextCommand(ctx, churn.auto ? "redesign" : deletions.length > 0 ? "tidy" : routeAfterCollect(ctx, id, round.round), id)
+    next: nextCommand(ctx, churn.auto || churn.setting ? "redesign" : deletions.length > 0 ? "tidy" : routeAfterCollect(ctx, id, round.round), id)
   });
 }
 
@@ -4633,7 +4657,8 @@ async function fix(options) {
 // In budget it spends a fix round exactly as `fix` does. At the
 // cap it spends the one round past the limit, through the grant `gates.mjs
 // grant` records, and only when the question at the cap was put for this round,
-// candidate and cycle — see `capAskPath`. Either way it uses up the cycle's one
+// candidate and cycle — see `capAskPath` — or where `mergesWithOpenFindings`
+// stands in for that answer. Either way it uses up the cycle's one
 // rewrite — see `redesignCyclePath` — and the churn count for the files the
 // rewrite changes restarts at the round that snapshots it.
 // The route the rewrite takes is unchanged: chosen at collect, its round's
@@ -4644,10 +4669,11 @@ async function fix(options) {
 //
 // What the rewrite runs at is `redesignEscalation`'s to say, read as `never` when
 // the key is absent or escalation is off: `always` raises every rewrite, `never`
-// none, and `ask` raises one `autoRedesign` started and asks about one a person
-// chose. The question is put after every refusal and before anything is written
-// or spent, so an unanswered one leaves the spec exactly as it found it; its
-// answers are this command again with `--escalated` or `--normal`.
+// none, and `ask` raises one `autoRedesign` or `mergeWithOpenFindings` started
+// and asks about one a person chose. The question is put after every refusal
+// and before anything is written or spent, so an unanswered one leaves the spec
+// exactly as it found it; its answers are this command again with `--escalated`
+// or `--normal`.
 async function redesign(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -4684,9 +4710,10 @@ async function redesign(options) {
   const spent = state.fixRoundsUsed ?? 0;
   const limit = ctx.config.limits.fixRounds;
   const pastCap = spent >= limit;
+  const bySetting = mergesWithOpenFindings(ctx, state);
   if (pastCap) {
     const asked = readJson(capAskPath(ctx, id), null);
-    if (!asked || asked.round !== round.round || asked.candidate !== state.candidateOid || asked.scope !== scope) {
+    if (!bySetting && (!asked || asked.round !== round.round || asked.candidate !== state.candidateOid || asked.scope !== scope)) {
       return spentRoute([`No fix round is left for this cycle (${spent} of the ${limit} this repository allows are spent), and a redesign past the limit is a person's answer to the question at the cap, which was not put for this round. The spec still publishes and a person decides.`]);
     }
     if (spent > limit || redesignUsed(ctx, id, state)) {
@@ -4707,7 +4734,7 @@ async function redesign(options) {
     throw new Stop(`A rewrite's settings are chosen only where redesignEscalation is ask, and ${decides}. Nothing was spent.`);
   }
   const why = setting === "ask"
-    ? choice ?? (autoRedesigns(ctx, state, { signals, used: redesignUsed(ctx, id, state) }) ? "auto" : "ask")
+    ? choice ?? (bySetting ? "setting" : autoRedesigns(ctx, state, { signals, used: redesignUsed(ctx, id, state) }) ? "auto" : "ask")
     : setting === "always" ? "always" : null;
   if (why === "ask") {
     const withFiles = options.file ? ` --file ${shq(options.file)}` : "";
@@ -4723,7 +4750,7 @@ async function redesign(options) {
       next: nextCommand(ctx, "end", null)
     });
   }
-  const escalated = ["always", "auto", "raised"].includes(why);
+  const escalated = ["always", "auto", "setting", "raised"].includes(why);
   const history = fileHistory(roundsRoot(ctx, id), { files, scope, round: round.round, declinedDir: path.join(specDir(ctx, id), "declined") });
   const reportPath = path.join(specDir(ctx, id), "implement-report.json");
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -4755,7 +4782,7 @@ async function redesign(options) {
   const route = collected && !settled ? "recheck" : "panel";
   const escalation = ctx.config.escalation;
   const which = pastCap
-    ? `the one round past the ${limit} fix rounds this repository allows, granted by your answer to the question at the cap`
+    ? `the one round past the ${limit} fix rounds this repository allows, granted by ${bySetting ? "mergeWithOpenFindings in this repository's configuration" : "your answer to the question at the cap"}`
     : `fix round ${budget.ordinal} of the ${budget.limit} this repository allows`;
   const say = [
     `Redesign of ${files.join(", ")} on ${id}: ${which}, spent on a fresh implementer ${settings(job)}. `
@@ -5131,11 +5158,13 @@ async function settle(options) {
       say.push(churn.note);
     } else if (churn.auto) {
       say.push(AUTO_REDESIGN);
+    } else if (churn.setting) {
+      say.push(SETTING_REDESIGN);
     } else {
       say.push("Something blocking or major is still open, so another fix round follows if the budget allows one.");
       if (broken.length > 0) say.push(`${brokenNames(broken)} also broke on this change, and the fixer is handed ${broken.length === 1 ? "it" : "them"} too.`);
     }
-    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, churn.auto ? "redesign" : "fix", id) });
+    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, churn.auto || churn.setting ? "redesign" : "fix", id) });
   }
   if (broken.length > 0) return toFixer();
   emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
