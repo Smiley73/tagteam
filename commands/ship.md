@@ -210,8 +210,8 @@ begins once they have merged it.
 The driver walks each spec through: `begin` (branch, implementer), `snapshot`
 (commit, allocate the round, snapshot, record the report), `verify`, `panel`
 (every lens plus Codex), `collect`, then `fix` and back to `snapshot` when
-something blocking or major is open and a fix round is left, `recheck` (the
-adversary's fresh pass and each reader's re-check of what it raised), `settle`,
+something blocking or major is open, or a test command the change broke is
+failing, and a fix round is left, `recheck` (the adversary's fresh pass and each reader's re-check of what it raised), `settle`,
 `publish`, `checks` while the pull request's checks are still running, `repair`
 when CI is red and a repair is left, and `finish`. A fixer that declines every
 finding and changes nothing makes no round and skips `verify`, but not `recheck`:
