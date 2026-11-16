@@ -50,7 +50,7 @@ const CONSUMED = [
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
   ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
-  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "redesignEscalation"]],
+  ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "redesignEscalation", "mergeWithOpenFindings"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
 ];
@@ -1335,10 +1335,10 @@ test("a version-8 configuration reports stale rather than invalid", () => {
 const VERSION_11_KEYS = ["carry", "autoRedesign", "limits.carried", "limits.followUps"];
 
 // A version-10 file: the example without the four keys version 11 added, and
-// without `redesignEscalation`, which a version-12 key does not belong in a
-// version-10 file.
+// without `redesignEscalation` and `mergeWithOpenFindings`, which a version-12
+// key does not belong in a version-10 file.
 function versionTen() {
-  const { carry, autoRedesign, redesignEscalation, ...ten } = example;
+  const { carry, autoRedesign, redesignEscalation, mergeWithOpenFindings, ...ten } = example;
   const { carried, followUps, ...limits } = example.limits;
   return { ...ten, version: 10, limits };
 }
@@ -1409,6 +1409,7 @@ test("the example validates at version 12 with every setting at its safe value",
   assert.equal(example.carry, false);
   assert.equal(example.autoRedesign, false);
   assert.equal(example.redesignEscalation, "never");
+  assert.equal(example.mergeWithOpenFindings, false);
   assert.deepEqual(validateJson(schema, example), []);
   assert.equal(validateFile(versionRepo(), example).status, 0);
 });
@@ -1509,6 +1510,21 @@ test("a current file without redesignEscalation, or with any of its three values
   }
 });
 
+test("a current file without mergeWithOpenFindings, or with true or false, is valid and current; anything else is refused naming the key", () => {
+  const dir = versionRepo();
+  const { mergeWithOpenFindings, ...without } = example;
+  for (const config of [without, ...[true, false].map((value) => ({ ...example, mergeWithOpenFindings: value }))]) {
+    const result = validateFile(dir, config);
+    assert.equal(result.status, 0, `${JSON.stringify(config.mergeWithOpenFindings)}: expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+  }
+  for (const bad of ["true", 1, null]) {
+    const result = validateFile(dir, { ...example, mergeWithOpenFindings: bad });
+    assert.equal(result.status, 1, `mergeWithOpenFindings: ${JSON.stringify(bad)} must be invalid`);
+    assert.match(result.stderr, /mergeWithOpenFindings/);
+  }
+});
+
 test("redesignEscalation refuses any other value, naming the key", () => {
   const dir = versionRepo();
   for (const bad of ["sometimes", "Always", "", true, false, null, 1]) {
@@ -1518,13 +1534,14 @@ test("redesignEscalation refuses any other value, naming the key", () => {
   }
 });
 
-test("ciStartWaitSec, redesignEscalation and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("ciStartWaitSec, redesignEscalation, mergeWithOpenFindings and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
   // 120 when it is missing, `redesignEscalation`, which the ship reads as
-  // `never`, and `autoMerge`, which nothing reads at all. Another key quietly
+  // `never`, `mergeWithOpenFindings`, which it reads as false, and `autoMerge`,
+  // which nothing reads at all. Another key quietly
   // going optional would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "mergeWithOpenFindings", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
   assert.equal(schema.properties.version.const, 12);
 });
 

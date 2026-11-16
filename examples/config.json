@@ -69,5 +69,6 @@
   "planBranch": false,
   "versionFiles": [],
   "carry": false,
-  "autoRedesign": false
+  "autoRedesign": false,
+  "mergeWithOpenFindings": false
 }
