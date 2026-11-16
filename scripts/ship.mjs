@@ -3437,6 +3437,13 @@ async function bringUpToLockfile(ctx) {
 // failed nor passed. With no setup configured only the checkout and the clean
 // happen, which is the one gap left; removing the install too would make the base
 // fail for the wrong reason.
+//
+// A run enters the plan's record only once the worktree is back and set up. The
+// record is what lets a later call leave the worktree where it is, so a run in it
+// while the worktree was still away would let a step cut short there settle on
+// the base's install the next time it ran. Cut short before that, the next call
+// goes to the base again and puts the worktree back as this one would have, and
+// takes a result already beneath its `dir` in place of a second run.
 async function runOnBase(ctx, { oid, commands, dir, back }) {
   const found = new Map();
   const due = [];
@@ -3446,12 +3453,13 @@ async function runOnBase(ctx, { oid, commands, dir, back }) {
     else due.push(command);
   }
   if (due.length === 0) return found;
+  const ran = [];
   let failure = null;
   try {
     for (const command of due) {
       putBack(ctx.worktree, oid);
       const broken = await bringUpToLockfile(ctx);
-      found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir) : { status: "could-not-run", oid, reason: broken });
+      found.set(command, broken === null ? commandOnBase(ctx, oid, command, dir, ran) : { status: "could-not-run", oid, reason: broken });
     }
   } catch (error) {
     failure = error;
@@ -3462,11 +3470,13 @@ async function runOnBase(ctx, { oid, commands, dir, back }) {
     throw Stop.beneath(`A verify command was run on ${short(oid)}, and the worktree could not be put back on ${short(back.oid)} afterwards, so nothing was settled. `
       + `Look at the worktree at ${ctx.worktree}, then run the step again.`, restored);
   }
+  for (const run of ran) saveBaseRun(ctx.shipDir, run);
   if (failure) throw failure;
   return found;
 }
 
-function commandOnBase(ctx, oid, command, dir) {
+// `command` run on `oid`, which the worktree is at: what it found, with the run added to `ran` for `runOnBase` to record.
+function commandOnBase(ctx, oid, command, dir, ran) {
   const position = (ctx.config.verify ?? []).findIndex((entry) => entry.command === command) + 1;
   if (position === 0) return { status: "could-not-run", oid, reason: "the command is no longer one this repository configures" };
   const name = `base-${short(oid)}-command-${position}`;
@@ -3482,7 +3492,7 @@ function commandOnBase(ctx, oid, command, dir) {
   }
   const [result] = readJson(file).commands;
   const run = { base: oid, command, status: result.status, logPath: result.logPath, result: file, timedOut: result.timedOut };
-  saveBaseRun(ctx.shipDir, run);
+  ran.push(run);
   return baseFact(run);
 }
 

@@ -10,7 +10,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged } from "./ship-stage.mjs";
+import { spawnSync } from "node:child_process";
+import { git, root, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged } from "./ship-stage.mjs";
 import { readKnown } from "../scripts/lib/verify-base.mjs";
 import { readLedger } from "../scripts/lib/ledger.mjs";
 
@@ -183,6 +184,37 @@ test("the base run sees the base's own setup output and not the candidate's inst
   assert.equal(git(worktree, "rev-parse", "HEAD"), state().candidateOid);
   assert.equal(git(worktree, "status", "--porcelain"), "", "the worktree has uncommitted changes");
   assert.equal(fs.readFileSync(path.join(worktree, "installed.txt"), "utf8"), "candidate\n", "the worktree does not hold the candidate's setup output");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a driver killed while the candidate's install was being put back has settled nothing, and the next verify puts the install back without a second base run", () => {
+  // The fixture of the test above, with a setup that, once armed, kills the driver that runs it on a branch: the base is checked out detached, so that is the candidate being put back.
+  const staged = stageWith({
+    change: (config, { repo, dir }) => {
+      write(path.join(repo, "marker.txt"), "base\n");
+      fs.appendFileSync(path.join(repo, ".gitignore"), "installed.txt\n");
+      config.worktree.setup = [`if [ -f "${dir}/armed" ] && [ -n "$(git branch --show-current)" ]; then rm "${dir}/armed"; kill -9 $PPID; exit 1; fi; cp marker.txt installed.txt`];
+      verifyWith(`cat installed.txt >> "${dir}/seen"; exit 1`)(config);
+    }
+  });
+  const { dir, plan, env } = staged;
+  const { worktree, state } = snapshotted(staged, { "app.js": A_CHANGE, "marker.txt": "candidate\n" },
+    (tree) => fs.writeFileSync(path.join(tree, "installed.txt"), "candidate\n"));
+  fs.writeFileSync(path.join(dir, "armed"), "");
+  // Not through `ship`, which takes a driver that ended without a word for a stop that opens badly. A killed driver leaves its setup's scratch directory behind, so that goes beneath `dir`.
+  const killed = spawnSync(process.execPath, [path.join(root, "scripts", "ship.mjs"), "verify", "--plan", plan, "--spec", "01-a"], {
+    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...env, TMPDIR: dir }
+  });
+  assert.equal(killed.signal, "SIGKILL", killed.stderr);
+  assert.equal(fs.readFileSync(path.join(worktree, "installed.txt"), "utf8"), "base\n", "the driver was not killed with the base's install still in the worktree");
+
+  const verified = ship("verify", plan, ["--spec", "01-a"], env);
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(state().gates.verify.status, FAILS);
+  assert.deepEqual(heads(`${dir}/seen`), ["candidate", "candidate", "base"], "the command was run on the base a second time");
+  assert.equal(git(worktree, "branch", "--show-current"), "tagteam/demo/01-a");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), state().candidateOid);
+  assert.equal(fs.readFileSync(path.join(worktree, "installed.txt"), "utf8"), "candidate\n", "the gate was settled with the base's install left in the worktree");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
