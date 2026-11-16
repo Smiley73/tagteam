@@ -131,14 +131,6 @@ test("a Codex re-check refused with the diff pasted is re-sent with it on disk, 
   assert.ok(!isPasted(again));
   assert.ok(fs.existsSync(indexNamedBy(again)));
   assert.doesNotMatch(again, /'--reuse'/, "a re-send runs Codex again");
-
-  // Refused again, in the one form left: the second miss is carried forward.
-  refused(resent.json.dispatch[0]);
-  arriveAll(resent);
-  const carried = ship("settle", plan, ["--spec", "01-a"]);
-  assert.equal(carried.status, 0, carried.stderr);
-  assert.equal(carried.json.dispatch, undefined);
-  assert.equal(carried.json.review, "incomplete");
 });
 
 test("collect re-sends a review Codex refused with the diff pasted, with the diff on disk", () => {

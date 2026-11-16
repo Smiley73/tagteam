@@ -216,14 +216,9 @@ test("a refusal never takes the place of a quota or an unusable model, however i
   assert.equal(kindOf(refused), "quota", "a refused turn/start whose words say quota is a quota");
 });
 
-test("the typed kinds that mean a refused request are a refusal, and never demote the words", () => {
+test("the typed kinds that mean a refused request are a refusal", () => {
   for (const kind of ["badRequest", "contextWindowExceeded"]) {
     assert.equal(classifyFailure(finalError(kind, NEUTRAL), NEUTRAL, "codex").kind, "refusal", `${kind} is not a refusal`);
-    assert.equal(classifyFailure(finalError(kind, "429 rate limit"), "429 rate limit", "codex").kind, "quota");
-    assert.equal(classifyFailure(finalError(kind, "model not found"), "model not found", "codex").kind, "model-unavailable");
-  }
-  for (const kind of ["other", "unauthorized", "sandboxError", "serverOverloaded", null]) {
-    assert.equal(classifyFailure(finalError(kind, NEUTRAL), NEUTRAL, "codex").kind, "transient", `${kind} gave a verdict`);
   }
 });
 

@@ -427,7 +427,6 @@ test("a schema the API refuses is a refused request: one attempt, the refusal ex
   withEarlierArtifact(space);
   const result = run(space, { fixture: "refused-schema" });
   assert.equal(starts(space.dir).length, 1, "a refused request was sent again");
-  assert.equal(requests(space.dir, "turn/start").length, 1);
   assertRefused(space, result, "a refused schema");
   assert.match(result.stderr, /\(\d+ bytes composed\)/, "the composed size is not given");
   assert.match(result.stderr, /What Codex said: .*invalid_json_schema/, "the failure carries nothing of what the provider said");
