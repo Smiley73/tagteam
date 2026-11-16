@@ -89,7 +89,7 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
-  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failedOnBase, failsWithout, failsWithoutLine, failsWithoutNames, saveBaseRun,
+  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, latestRuns, saveBaseRun,
   verifyStatus
 } from "./lib/verify-base.mjs";
 import {
@@ -392,19 +392,21 @@ function verifyLine(ctx) {
     }).join("\n");
 }
 
-// What this ship's base checks found failing: by command, the latest run that
-// failed on a spec's base commit, with the spec it was the base of. A run is
+// What this ship's base checks found failing: by command, its latest run on the
+// base of any unit of the ship — a spec, the dependency unit or a whole-plan fix
+// unit — when that run failed there, with the unit it was the base of. A run is
 // recorded only once a command has failed twice on a candidate, so a failed one
-// is a command that fails without the change too.
+// is a command that fails without the change too, and a later one that passed
+// is a command the change broke.
 function failingWithoutChange(ctx) {
-  const failed = failedOnBase(ctx.shipDir);
-  if (failed.length === 0) return new Map();
-  const specOf = new Map();
-  for (const { id } of specsInOrder(ctx)) {
+  const unitOf = new Map();
+  for (const { id } of unitsInOrder(ctx)) {
     const base = exists(statePath(ctx, id)) ? readState(ctx, id).baseOid : null;
-    if (base && !specOf.has(base)) specOf.set(base, id);
+    if (base && !unitOf.has(base)) unitOf.set(base, id);
   }
-  return new Map(failed.filter((run) => specOf.has(run.base)).map((run) => [run.command, { ...run, spec: specOf.get(run.base) }]));
+  return new Map([...latestRuns(ctx.shipDir, unitOf)]
+    .filter(([, run]) => run.status === "failed")
+    .map(([command, run]) => [command, { ...run, spec: unitOf.get(run.base) }]));
 }
 
 // The check an agent runs on its own report before it returns, so that a report

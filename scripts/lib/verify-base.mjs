@@ -58,8 +58,9 @@ export function verifyStatus(commands) {
 export const baseRunOf = (shipDir, base, command) =>
   readKnown(shipDir).runs.find((run) => run.base === base && run.command === command) ?? null;
 
-/** The runs of a command on a base that failed there, in the order they were made. */
-export const failedOnBase = (shipDir) => readKnown(shipDir).runs.filter((run) => run.status === "failed");
+/** Each command's latest run, in the order they were made, on any of `bases`, whatever its status. */
+export const latestRuns = (shipDir, bases) =>
+  new Map(readKnown(shipDir).runs.filter((run) => bases.has(run.base)).map((run) => [run.command, run]));
 
 /** Record a result of `command` on `base` — `{base, command, status, logPath, result, timedOut}` — once. */
 export function saveBaseRun(shipDir, run) {

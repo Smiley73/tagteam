@@ -2,13 +2,11 @@
 // `ship()`: a command that failed twice on a candidate and also on the base it
 // started from is marked as failing without the change, with the spec, the base
 // and the base run's log, in every dispatch that lists verify commands afterwards.
-//
-// A suite of its own for time alone, as `ship-driver-spec-cycle.test.mjs` says.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, write, findings, major, driveToPublishable, stagePlan, outputOf, arriveAll, A_CHANGE } from "./ship-stage.mjs";
+import { git, ship, write, findings, major, driveToPublishable, stagePlan, outputOf, arriveAll, A_CHANGE, B_CHANGE } from "./ship-stage.mjs";
 import { readKnown } from "../scripts/lib/verify-base.mjs";
 
 const BODY = "## Summary\nSubtracts.\n\n## What you can now do\nSubtract two numbers.\n\n## Risk\n\nNothing known.\n";
@@ -75,6 +73,40 @@ test("the next spec's implementer is told that a command failed without the chan
   assert.equal(begin.status, 0, begin.stderr);
   assert.deepEqual(verifyLines(begin.json.dispatch[0].prompt),
     [`- ${OLD} (timeout 60s; runs when always) — ${NOTE}: it failed on 01-a's base at ${shortOf(first().baseOid)}, and that run's log is ${base.logPath}`]);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a command that passed on a later spec's base is not marked from an earlier spec's failed run", () => {
+  const staged = stageWith([OLD]);
+  const { plan, shipDir, env } = staged;
+  const { state: first } = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  assert.equal(ship("publish", plan, ["--spec", "01-a", "--title", "Ship 01-a", "--body", staged.body], env).status, 0);
+  assert.equal(ship("finish", plan, ["--spec", "01-a"], env).status, 0);
+  const begin = ship("begin", plan, ["--spec", "02-b"], env);
+  assert.equal(begin.status, 0, begin.stderr);
+  write(path.join(JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree, "b.js"), B_CHANGE);
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "wrote b.js", unfinished: [] });
+  arriveAll(begin);
+  assert.equal(ship("snapshot", plan, ["--spec", "02-b"], env).status, 0);
+  const second = () => JSON.parse(fs.readFileSync(path.join(shipDir, "02-b", "state.json"), "utf8"));
+  assert.notEqual(second().baseOid, first().baseOid);
+  // 02-b's base is where the earlier failure was repaired, so the command passes there.
+  const known = readKnown(shipDir);
+  known.runs.push({ base: second().baseOid, command: OLD, status: "passed", logPath: path.join(shipDir, "later.log"), at: new Date().toISOString() });
+  fs.writeFileSync(path.join(shipDir, "known-failures.json"), JSON.stringify(known));
+  ship("verify", plan, ["--spec", "02-b"], env);
+  assert.deepEqual(second().gates.verify.commands.map((command) => [command.status, command.base?.status]), [["failed", "passed"]]);
+  const panel = ship("panel", plan, ["--spec", "02-b"], env);
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, second().candidateOid, lens === "correctness" ? [major("b.js")] : []));
+  }
+  write(path.join(shipDir, "02-b", "rounds", "1", "findings", "codex.json"), findings("codex", second().candidateOid));
+  arriveAll(panel);
+  ship("collect", plan, ["--spec", "02-b"], env);
+  const fix = ship("fix", plan, ["--spec", "02-b"], env);
+  assert.equal(fix.json.dispatch?.[0]?.agent, "tagteam:fixer", fix.stdout);
+  assert.deepEqual(verifyLines(fix.json.dispatch[0].prompt), [`- ${OLD} (timeout 60s; runs when always)`]);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
