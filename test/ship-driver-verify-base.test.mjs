@@ -314,6 +314,26 @@ test("a base that moved before the merge: a command that fails on the merge besi
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
+test("a base that moved before the merge: a command that fails on the merge once, beside a disclosed one accepted there, is said under Risk when the spec merges", () => {
+  // The first fails everywhere and is disclosed by 02-b's own gate; the second fails the first time the two specs are together, and passes from then on.
+  const { staged, second } = twoInFlight((config, { dir }) =>
+    verifyWith("exit 1", `if [ -f a.txt ] && [ -f b.js ] && [ ! -f "${dir}/y-flaked" ]; then touch "${dir}/y-flaked"; exit 1; fi`)(config));
+  const { dir, plan, shipDir, env } = staged;
+  const landed = ship("finish", plan, ["--spec", "02-b"], env);
+  assert.equal(landed.status, 0, landed.stderr);
+  assert.equal(second.state().state, "merged", landed.stdout);
+  assert.ok(fs.existsSync(`${dir}/y-flaked`), "the second command never failed on the merge");
+  const landing = second.state().landing;
+  assert.equal(landing.verify.status, FAILS);
+  assert.deepEqual(landing.verify.commands.map((command) => [command.status, command.base?.status ?? null]), [["failed", "failed"], ["passed", null]]);
+  const line = /(?:^|\n)- The verify command `[^`]*y-flaked[^`]*` failed on this change merged onto \S+ as it stood at [0-9a-f]{12}, then passed when run again on the same merge \(commit [0-9a-f]{12}\)\./;
+  assert.match(pullsOf(env).find((pull) => pull.title === "Ship 02-b").body, line, "the spec merged and its pull request does not say the command failed once on the merge");
+  assert.match(readLedger(shipDir).retries.filter((retry) => retry.spec === "02-b").map((retry) => retry.line).join("\n"), line,
+    "the plan's ledger does not say the command failed once on the merge");
+  assert.match(landed.json.say.join("\n"), /it failed again, except `[^`]*y-flaked[^`]*`, which passed this time/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // The verify commands as the specs of a merged plan ran them, one of which no spec's `when` selects.
 const NEVER = { globs: ["nothing/**"], keywords: [] };
 const everything = { globs: [], keywords: [] };

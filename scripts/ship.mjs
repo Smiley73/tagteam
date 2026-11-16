@@ -668,7 +668,9 @@ function pullRequestFindingsLine(ctx, id, findings) {
 // second attempt gave. "Once" is read from these records, so neither a revisit
 // nor a later publish of the same commit buys a second go. A verify command's
 // record is its own; one from before that was one per candidate has no position
-// and stands for the command it names.
+// and stands for the command it names. A landing check's record is one for the
+// whole run, and names each command that failed the first attempt and passed
+// the second.
 const retriesOf = (dir) => path.join(dir, ROUND_RETRIES);
 
 // The one result `verify` records as a round's verify gate, with every command's
@@ -738,16 +740,20 @@ function pendingLines(ctx, id, state) {
 }
 
 function retryLines(ctx, id, base) {
-  return retryRecords(ctx, id).filter((record) => record.result === "passed").map((record) => {
-    if (record.kind === "ci") {
-      return `- ${record.failed.length > 1 ? "The checks" : "The check"} ${record.failed.map((name) => `\`${name}\``).join(", ")} `
-        + `failed on this pull request, then passed when rerun on the same commit (${short(record.candidate)}).`;
-    }
+  return retryRecords(ctx, id).flatMap((record) => {
     if (record.kind === "landing") {
-      return `- The verify command \`${record.failed}\` failed on this change merged onto ${base} as it stood at ${short(record.base)}, `
-        + `then passed when run again on the same merge (commit ${short(record.candidate)}).`;
+      // One line for each command the record says passed its second run. A record from before it
+      // said which names one command, which passed when the whole run did.
+      const passed = record.passed ?? (record.result === "passed" ? [record.failed] : []);
+      return passed.map((name) => `- The verify command \`${name}\` failed on this change merged onto ${base} as it stood at ${short(record.base)}, `
+        + `then passed when run again on the same merge (commit ${short(record.candidate)}).`);
     }
-    return `- The verify command \`${record.failed}\` failed, then passed when run again on the same commit (${short(record.candidate)}).`;
+    if (record.result !== "passed") return [];
+    if (record.kind === "ci") {
+      return [`- ${record.failed.length > 1 ? "The checks" : "The check"} ${record.failed.map((name) => `\`${name}\``).join(", ")} `
+        + `failed on this pull request, then passed when rerun on the same commit (${short(record.candidate)}).`];
+    }
+    return [`- The verify command \`${record.failed}\` failed, then passed when run again on the same commit (${short(record.candidate)}).`];
   });
 }
 
@@ -7919,12 +7925,19 @@ async function landingCheck(ctx, id, state, say) {
   if (outcome.status === "failed" && !retryOf(ctx, id, "landing", state.candidateOid, baseOid)) {
     const first = outcome;
     outcome = check();
+    // Each command that failed the first time and passed the second, by its place in the run. The record names them
+    // whatever the second run came to as a whole: what still fails in it can be accepted below, and the spec then merges.
+    const passed = (first.verify?.commands ?? []).flatMap((command, at) =>
+      (command.status === "failed" && outcome.verify?.commands?.[at]?.status === "passed" ? [command.command] : []));
     writeRetry(round.dir, {
-      kind: "landing", candidate: state.candidateOid, base: baseOid, failed: firstFailed(first.verify)?.command ?? null,
+      kind: "landing", candidate: state.candidateOid, base: baseOid, failed: firstFailed(first.verify)?.command ?? null, passed,
       first: first.resultPath, second: outcome.resultPath ?? outcome.dir ?? null, result: outcome.status
     });
+    const again = passed.length > 0
+      ? `it failed again, except ${passed.map((command) => `\`${command}\``).join(", ")}, which passed this time and goes under Risk in the pull request`
+      : "it failed again";
     say.push(`Merged onto ${state.base} at ${short(baseOid)}, a verify command failed, and it was run once more on the same merge: `
-      + `${outcome.status === "passed" ? "it passed, and the pull request says so under Risk" : "it failed again"}.`);
+      + `${outcome.status === "passed" ? "it passed, and the pull request says so under Risk" : again}.`);
   }
   if (outcome.status === "failed") {
     const tip = git(ctx.worktree, ["rev-parse", `refs/heads/${borrowed}`]).stdout.trim();
