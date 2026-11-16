@@ -1042,12 +1042,9 @@ function refuseWhileWaiting(id, state, step) {
     + "Run revisit to look at the reviewed commit again — it spends no fix round and no CI repair — or repair when a check is red.");
 }
 
-// The verify commands this candidate's change broke, with the log of the run
-// that failed each: a command that failed both its runs and passed on the commit
-// the change started from. One that also fails there, or whose base run could
-// not be made, is not the change's to fix. Empty once no fix round is left,
-// where the spec publishes and stops at finish as it always has. Read by the
-// route and by the brief, so that neither can disagree about what was broken.
+// The verify commands this candidate's change broke (failed both runs, passed on
+// the commit the change started from), each with the log of its failing run.
+// Empty once no fix round is left, so the spec publishes and stops at finish as before.
 function brokenByChange(ctx, state) {
   if ((state.fixRoundsUsed ?? 0) >= ctx.config.limits.fixRounds) return [];
   const verify = state.gates?.verify?.candidateOid === state.candidateOid ? state.gates.verify : null;
@@ -1057,6 +1054,7 @@ function brokenByChange(ctx, state) {
 }
 
 const brokenNames = (broken) => listOf(broken.map(({ command }) => `\`${command}\``));
+const brokenFixRoundLine = (broken) => `${brokenNames(broken)} fail${broken.length === 1 ? "s" : ""} on this change and pass${broken.length === 1 ? "es" : ""} on the code before it, so a fix round follows.`;
 
 function fixerDispatch(ctx, spec, recordPath, job, broken = []) {
   return {
@@ -4710,6 +4708,10 @@ function accept(options) {
   const disclosed = `Accepted as it is at round ${round.round}: what is open is disclosed in the pull request under Risk.`;
   const byHand = `${disclosed} It will not merge unattended and finish cannot approve past an open finding, so merging it is yours to do on GitHub — or revisit once a reader withdraws what it found.`;
   if (settled) {
+    // Publishing would only reach `verification-failed` at finish, as settle's own
+    // exits know: a command this change broke is for a fixer first.
+    const broken = brokenByChange(ctx, state);
+    if (broken.length > 0) return emit({ say: [`Accepted as it is at round ${round.round}. ${brokenFixRoundLine(broken)}`], accepted: [...ids], next: nextCommand(ctx, "fix", id) });
     const onPlan = acceptOnPlanBranch(ctx, id, [...ids]);
     transition(ctx, id, "verifying");
     const say = [onPlan?.merges ? `${disclosed} ${onPlan.line}` : [byHand, onPlan?.line].filter(Boolean).join(" ")];
@@ -4974,7 +4976,7 @@ async function settle(options) {
   const broken = brokenByChange(ctx, state);
   const toFixer = () => {
     transition(ctx, id, "reviewing");
-    say.push(`${brokenNames(broken)} fail${broken.length === 1 ? "s" : ""} on this change and pass${broken.length === 1 ? "es" : ""} on the code before it, so a fix round follows.`);
+    say.push(brokenFixRoundLine(broken));
     return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "fix", id) });
   };
   if (open.length > 0) {

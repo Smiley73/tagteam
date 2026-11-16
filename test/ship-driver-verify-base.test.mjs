@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, root, ship, write, findings, major, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged, commitToMain, UNRELATED } from "./ship-stage.mjs";
+import { driveToRecurrence } from "./ship-driver-shared.mjs";
 import { landingRecordOf, toDialog } from "./ship-plan-landing-shared.mjs";
 import { readKnown } from "../scripts/lib/verify-base.mjs";
 import { enterMerge, failingInPlan, readLedger } from "../scripts/lib/ledger.mjs";
@@ -99,13 +100,6 @@ function settledClean(run, state) {
   for (const dispatch of recheck.json.dispatch) write(outputOf(dispatch), findings("adversary", state().candidateOid));
   arriveAll(recheck);
   return run("settle");
-}
-
-// What a fixer sent for `fix` does: puts `FIXED` in app.js and reports no findings answered.
-function fixerLands(fix, worktree) {
-  write(path.join(worktree, "app.js"), FIXED);
-  write(outputOf(fix.json.dispatch[0]), { outcomes: [], notes: "", status: "complete", summary: "made the command pass", unfinished: [] });
-  arriveAll(fix);
 }
 
 test("on a plan branch a command that fails with and without the change is disclosed in the spec's pull request and the plan's ledger, and merges", () => {
@@ -530,7 +524,9 @@ test("a clean review and a command the change broke send a fixer for the command
   assert.match(fix.json.dispatch[0].prompt, new RegExp(`^Test commands this change broke, each with the log of its failing run: ${BROKEN} \\(${log}\\)$`, "m"));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-pending.json"), "utf8")).broken, [{ command: BROKEN, logPath: log }]);
 
-  fixerLands(fix, worktree);
+  write(path.join(worktree, "app.js"), FIXED);
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [], notes: "", status: "complete", summary: "made the command pass", unfinished: [] });
+  arriveAll(fix);
   run("snapshot");
   const verified = run("verify");
   assert.equal(verified.json.verify, "passed", verified.stdout);
@@ -617,5 +613,96 @@ test("a command the change broke with every fix round spent sends no fixer and s
   assert.equal(publish(staged).status, 0);
   const finished = ship("finish", staged.plan, ["--spec", "01-a"], staged.env);
   assert.deepEqual(finished.json.blockers, ["verification-failed"]);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("settle sends a fixer for a command the change broke when only pull request findings are still open after the re-check", () => {
+  const staged = stageBroken();
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  const log = state().gates.verify.commands[0].runs.at(-1).logPath;
+  assert.equal(collected(staged, run, state, [NOTHING]).json.review, "open");
+
+  // The re-check, with no fixer between: the pull request finding stays open.
+  const recheck = run("recheck");
+  const oid = state().candidateOid;
+  for (const dispatch of recheck.json.dispatch) {
+    write(outputOf(dispatch), dispatch.description === "Adversary on 01-a" ? findings("adversary", oid)
+      : { lens: /^Lens: (.*)$/m.exec(dispatch.prompt)[1], candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still silent" }] });
+  }
+  arriveAll(recheck);
+  const settled = run("settle");
+  assert.deepEqual(state().gates.review.open.map((finding) => finding.id), ["1.correctness.1"]);
+  assert.match(settled.json.next, /ship\.mjs" fix /, settled.stdout);
+  assert.ok(settled.json.say.some((line) => line.includes(`\`${BROKEN}\` fails on this change and passes on the code before it`)), settled.stdout);
+  assert.ok(!settled.json.say.some((line) => /pull request alone|no fix round is spent/i.test(line)), "the pull-request-only exit was taken");
+
+  const fix = run("fix");
+  assert.equal(fix.json.dispatch?.length, 1, fix.stdout);
+  assert.match(fix.json.dispatch[0].prompt, new RegExp(`^Test commands this change broke, each with the log of its failing run: ${BROKEN} \\(${log}\\)$`, "m"));
+  assert.equal(state().fixRoundsUsed, 1);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("settle sends a fixer for a command the change broke when a person's accept covers what is open, and says no merge into the plan branch", () => {
+  const staged = stageBroken();
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  assert.equal(collected(staged, run, state, [major("app.js")]).json.review, "open");
+  write(path.join(staged.shipDir, "01-a", "accepted.json"), { round: 1, candidate: state().candidateOid, ids: ["1.correctness.1"], at: new Date().toISOString() });
+
+  const recheck = run("recheck");
+  const oid = state().candidateOid;
+  for (const dispatch of recheck.json.dispatch) {
+    write(outputOf(dispatch), dispatch.description === "Adversary on 01-a" ? findings("adversary", oid)
+      : { lens: /^Lens: (.*)$/m.exec(dispatch.prompt)[1], candidate: oid, verdicts: [{ id: "1.correctness.1", resolved: false, evidence: "still wrong" }] });
+  }
+  arriveAll(recheck);
+  const settled = run("settle");
+  assert.deepEqual(state().gates.review.open.map((finding) => finding.id), ["1.correctness.1"]);
+  assert.match(settled.json.next, /ship\.mjs" fix /, settled.stdout);
+  assert.equal(settled.json.accepted, undefined, "settle published the candidate as decided");
+  assert.ok(settled.json.say.some((line) => line.includes(`\`${BROKEN}\` fails on this change`)), settled.stdout);
+  assert.ok(!settled.json.say.some((line) => /merges into plan\/demo|Publishing as it is/.test(line)), settled.stdout);
+  assert.equal(state().accept ?? null, null, "an accept was recorded for the plan branch");
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("an accept given at the question settle asks goes to a fixer for a command the change broke, not to publish", () => {
+  const staged = stagePlan();
+  const { repo, shipDir } = staged;
+  const configPath = path.join(repo, ".tagteam", "config.json");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  verifyWith(BROKEN)(config);
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  const { state, app, run } = driveToRecurrence(staged, { env: staged.env });
+  assert.deepEqual(state().gates.verify.commands.map((command) => [command.status, command.base?.status]), [["failed", "passed"]]);
+  const fix = run("fix");
+  app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => Number(a - b);\n");
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [{ id: "3.correctness.1", outcome: "fixed", note: "no truncation" }], notes: "", status: "complete", summary: "fixed", unfinished: [] });
+  arriveAll(fix);
+  run("snapshot");
+  run("verify");
+  const recheck = run("recheck");
+  const fourth = state().candidateOid;
+  write(outputOf(recheck.json.dispatch[0]), findings("adversary", fourth, [{ ...major("app.js"), title: "sub coerces strings silently" }]));
+  write(outputOf(recheck.json.dispatch[1]), { lens: "correctness", candidate: fourth, verdicts: [{ id: "3.correctness.1", resolved: true, evidence: "fixed" }] });
+  write(outputOf(recheck.json.dispatch[2]), { lens: "adversary", candidate: fourth, verdicts: [{ id: "2.adversary.1", resolved: true, evidence: "sign kept" }] });
+  arriveAll(recheck);
+  const settled = run("settle");
+  assert.match(settled.json.ask, /app\.js has drawn a new finding serious enough to stop a merge in 4 rounds/);
+  assert.equal(state().state, "reviewing");
+  assert.equal(state().fixRoundsUsed, 3);
+
+  const accepted = run("accept");
+  assert.match(accepted.json.next, /ship\.mjs" fix /, accepted.stdout);
+  assert.ok(accepted.json.say.some((line) => line.includes(`\`${BROKEN}\` fails on this change and passes on the code before it`)), accepted.stdout);
+  assert.equal(state().state, "reviewing", "accept moved a spec that still has a fix to make on towards publishing");
+  assert.equal(state().accept ?? null, null);
+  const sent = run("fix");
+  assert.equal(sent.json.dispatch?.length, 1, sent.stdout);
+  assert.equal(state().fixRoundsUsed, 4);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
