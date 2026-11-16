@@ -87,7 +87,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
-import { classifyChecks, isFailed, judgedStatus, runOf } from "./lib/ci-state.mjs";
+import { classifyChecks, isFailed, isRunning, judgedStatus, runOf } from "./lib/ci-state.mjs";
 import {
   FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, latestRuns, saveBaseRun,
   verifyStatus
@@ -5328,12 +5328,15 @@ function rerunRequest(ctx, id, candidate) {
  * once, when the rest of its workflow run has finished — GitHub refuses a rerun
  * of a run still going — then waited for again without a start wait; what that
  * gives is the result, and a failure after it goes to `repair` as any failure does.
+ * Except on a plan branch, where a failure whose every failing check was already
+ * red is not the result while another check is still running: those are waited
+ * for as well.
  */
 function waitSpecChecks(ctx, id, state, say, began = null) {
   const pr = state.pr.number;
   const since = began ?? new Date().toISOString();
   let request = rerunRequest(ctx, id, state.candidateOid);
-  const wait = (startSeconds = 0) => {
+  const wait = (startSeconds = 0, { settleAll = false } = {}) => {
     // A rerun that was refused never ran, so no failed row is waiting on it.
     const rerunAt = request && retryOf(ctx, id, "ci", state.candidateOid)?.result !== "refused" ? request.requestedAt : null;
     const ran = node("ci-wait.mjs", [
@@ -5342,6 +5345,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
       ...(rerunAt ? ["--rerun-at", rerunAt] : []),
       // Before a rerun is asked for, a failure waits for the rest of its run.
       ...(request === null ? ["--settle-runs", "1"] : []),
+      // A failure that is not the result waits for every check still running.
+      ...(settleAll ? ["--settle-all", "1"] : []),
       // The wait stops, writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
       "--out", ciPath(ctx, id)
@@ -5363,6 +5368,16 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
   if (outcome.status === "failed" && request === null) {
     request = requestRerun(ctx, id, state, outcome, say);
     if (request && !request.refused) outcome = wait();
+  }
+  // A failure ends the wait while other checks are still running, since it decides
+  // the result whatever they give. Not where every failing check was already red:
+  // the gates then read the result as what the others gave, so they are waited
+  // for before anything is recorded. Nothing is read unless a check is still
+  // running; this comparison only decides whether to wait, and whatever is
+  // recorded is compared then.
+  if (outcome.status === "failed" && outcome.checks.some(isRunning) && judgedCi(ctx, state, comparedChecks(ctx, state, outcome)) === "running") {
+    say.push(`Every failing check is already red on the commit this change started from (${short(state.baseOid)}), so the failure is not the result while other checks are still running: waiting for them.`);
+    outcome = wait(0, { settleAll: true });
   }
   if (outcome.stillRunning) {
     writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
@@ -5472,6 +5487,12 @@ function compareCheck(ctx, baseOid, row) {
   return { baseOid, verdict: baseStep === step ? "already-red" : "other-step", step, baseStep };
 }
 
+// A failed `outcome` on a plan branch with each failing check compared; any
+// other outcome as it is, with nothing read.
+const comparedChecks = (ctx, state, outcome) => (outcome.status === "failed" && state.baseOid && onPlanBranch(state, ctx.config)
+  ? { ...outcome, checks: outcome.checks.map((row) => (isFailed(row) ? { ...row, comparison: compareCheck(ctx, state.baseOid, row) } : row)) }
+  : outcome);
+
 // A decided result for this commit's checks, recorded: `ci.json`, the retry
 // record once a rerun has an answer, a re-send of the body when the rerun turned
 // the failure into a pass, and the `ci` gate. On a plan branch a failure is
@@ -5483,10 +5504,7 @@ function compareCheck(ctx, baseOid, row) {
 // record, and a later wait on this commit that sees the rerun decided still
 // records it and says a pass under Risk.
 function recordChecks(ctx, id, state, outcome, since, say, { ended = false } = {}) {
-  const compared = outcome.status === "failed" && state.baseOid && onPlanBranch(state, ctx.config)
-    ? { ...outcome, checks: outcome.checks.map((row) => (isFailed(row) ? { ...row, comparison: compareCheck(ctx, state.baseOid, row) } : row)) }
-    : outcome;
-  const recorded = { ...compared, candidateOid: state.candidateOid, waitBegan: since };
+  const recorded = { ...comparedChecks(ctx, state, outcome), candidateOid: state.candidateOid, waitBegan: since };
   writeJson(ciPath(ctx, id), recorded);
   const request = rerunRequest(ctx, id, state.candidateOid);
   if (request && !ended && !retryOf(ctx, id, "ci", state.candidateOid)) {

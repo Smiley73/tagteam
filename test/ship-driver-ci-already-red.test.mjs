@@ -29,8 +29,8 @@ const baseRun = (id, conclusion = "failure", completedAt = "2020-01-01T00:00:00Z
   id, status: "completed", conclusion, completed_at: completedAt, details_url: actions(77, id)
 });
 
-function stageWith({ planBranch = true } = {}) {
-  const staged = stagePlan({ planBranch, specs: 2, ciWaitSec: 30 });
+function stageWith({ planBranch = true, ciWaitSec = 30 } = {}) {
+  const staged = stagePlan({ planBranch, specs: 2, ciWaitSec });
   const { plan, env } = staged;
   fs.writeFileSync(staged.body, BODY);
   assert.equal(ship("start", plan, [], env).status, 0);
@@ -78,6 +78,27 @@ test("a check red at the same step on the start commit spends no repair, merges 
   assert.equal(state().state, "merged", finished.stdout);
   assert.deepEqual([pullsOf(env)[0].base, pullsOf(env)[0].state], ["plan/demo", "MERGED"]);
   assert.match(readLedger(shipDir).retries.map((entry) => entry.line).join("\n"), line, "the plan's ledger does not say the check fails without the change");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an already red check beside one still running after the rerun records nothing until that one is decided, then merges", () => {
+  const staged = stageWith({ ciWaitSec: 1 });
+  const { dir, plan, env } = staged;
+  const e2e = { name: "e2e", state: "PENDING", bucket: "pending", link: actions(200, 999) };
+  const { state, result } = published(staged, [TEST, e2e], SAME);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.json.next, /checks --plan .* --spec 01-a$/, "the failure was the result while `e2e` was still running");
+  assert.equal(state().gates.ci ?? null, null, "a result was recorded with a check still running");
+  assert.match(result.json.say.join("\n"), /so the failure is not the result while other checks are still running: waiting for them\./);
+  assert.doesNotMatch(pullsOf(env)[0].body, /fails with and without/);
+
+  const decided = ship("checks", plan, ["--spec", "01-a"], { ...env, GH_STUB_CHECKS_AFTER_RERUN: LATER(TEST, { ...e2e, state: "SUCCESS", bucket: "pass" }) });
+  assert.equal(decided.status, 0, decided.stderr);
+  assert.match(decided.json.next, /finish --plan .* --spec 01-a$/);
+  assert.match(pullsOf(env)[0].body, /- The check `test` at step `Run tests` fails with and without this change/);
+  const finished = ship("finish", plan, ["--spec", "01-a"], env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(state().state, "merged", finished.stdout);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
