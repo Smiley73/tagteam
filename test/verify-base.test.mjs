@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithoutLine, isDisclosed, saveBaseRun, verifyStatus
+  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithoutLine, saveBaseRun, verifyStatus
 } from "../scripts/lib/verify-base.mjs";
 
 const passed = { command: "a", status: "passed" };
@@ -33,15 +33,13 @@ test("a base run is found by its commit and its command, and by nothing else", (
   fs.rmSync(shipDir, { recursive: true, force: true });
 });
 
-test("a disclosure is bound to the spec and the candidate, and looked up by command across the plan", () => {
+test("a disclosure is bound to the spec and the candidate", () => {
   const shipDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-known-"));
   discloseFailing(shipDir, { spec: "01-a", candidate: "c1", base: "b1", commands: [{ command: "cmd", logPath: "/l", baseLogPath: "/bl" }] });
   discloseFailing(shipDir, { spec: "01-a", candidate: "c1", base: "b1", commands: [{ command: "cmd", logPath: "/l", baseLogPath: "/bl" }] });
   assert.deepEqual(disclosedFor(shipDir, "01-a", "c1"), ["cmd"], "the same disclosure was written twice");
   assert.deepEqual(disclosedFor(shipDir, "01-a", "c2"), [], "a later candidate inherited the disclosure");
   assert.deepEqual(disclosedFor(shipDir, "02-b", "c1"), []);
-  assert.equal(isDisclosed(shipDir, "cmd"), true);
-  assert.equal(isDisclosed(shipDir, "other"), false);
   fs.rmSync(shipDir, { recursive: true, force: true });
 });
 

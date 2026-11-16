@@ -53,7 +53,7 @@ import {
 } from "./lib/landing.mjs";
 import { findingRound, isPullRequestFinding } from "./collect-findings.mjs";
 import { awaitedByUnmerged, carryEligible, carryRefusal, onPlanBranch, recommendation } from "./lib/carry.mjs";
-import { enterMerge, entriesOf, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
+import { enterMerge, entriesOf, failingInPlan, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, markRound, writeRoundFile } from "./lib/round-store.mjs";
@@ -89,7 +89,7 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
-  FAILS_WITHOUT_CHANGE, anyDisclosed, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, isDisclosed, saveBaseRun,
+  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, saveBaseRun,
   verifyStatus
 } from "./lib/verify-base.mjs";
 import {
@@ -842,7 +842,10 @@ const enteredLines = (count) =>
 function enterLedger(ctx, id, state) {
   const standing = planStanding(ctx, id, state);
   if (!standing) return 0;
-  return enterMerge(ctx.shipDir, id, { entries: standing.entries, retries: [...retryLines(ctx, id, state.base), ...failsWithoutLines(ctx, id, state)] });
+  return enterMerge(ctx.shipDir, id, {
+    entries: standing.entries, retries: [...retryLines(ctx, id, state.base), ...failsWithoutLines(ctx, id, state)],
+    failing: disclosedFor(ctx.shipDir, id, state.candidateOid)
+  });
 }
 
 const NOTHING_KNOWN = /^nothing(?: else)?(?: is)? known\.?$/i;
@@ -6106,7 +6109,7 @@ async function planCheck(options) {
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
       // Every command runs when a spec disclosed one as failing without its change, so that all that fail are known.
-      ...(anyDisclosed(ctx.shipDir) ? ["--keep-going", "true"] : [])
+      ...(failingInPlan(ctx.shipDir).size > 0 ? ["--keep-going", "true"] : [])
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
@@ -6115,7 +6118,8 @@ async function planCheck(options) {
     const outcome = readJson(path.join(dir, "verify.json"));
     // A command that failed and that a spec disclosed is run on the merge base,
     // where the plan began: it is the plan's own failure unless it fails there too.
-    const disclosed = (outcome.commands ?? []).filter((command) => command.status === "failed" && isDisclosed(ctx.shipDir, command.command));
+    const stated = failingInPlan(ctx.shipDir);
+    const disclosed = (outcome.commands ?? []).filter((command) => command.status === "failed" && stated.has(command.command));
     const bases = disclosed.length > 0
       ? await runOnBase(ctx, { oid: record.mergeBase, commands: disclosed.map((command) => command.command), dir: path.join(dir, "verify-base"), back: { oid: tip, branch: null } })
       : new Map();
@@ -6712,11 +6716,11 @@ async function planLandingCheck(ctx, record, tip, check, say) {
       outcome = checkLanding({
         repo: ctx.repo, worktree: ctx.worktree, branch: null, config: ctx.config, configPath: ctx.configPath,
         baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
-        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: anyDisclosed(ctx.shipDir)
+        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: failingInPlan(ctx.shipDir).size > 0
       });
     } catch (error) { throw Stop.raw(error.message, "the check of the landing failed"); }
     if (outcome.status === "failed") {
-      outcome = await acceptDisclosed(ctx, outcome, { disclosed: (command) => isDisclosed(ctx.shipDir, command), back: { oid: tip, branch: null } });
+      outcome = await acceptDisclosed(ctx, outcome, { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: tip, branch: null } });
     }
     landing = {
       tip, baseOid, mergeBase, status: outcome.status, conflicts: outcome.conflicts ?? null,

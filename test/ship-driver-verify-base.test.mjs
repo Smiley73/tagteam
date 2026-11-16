@@ -11,9 +11,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { git, root, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged } from "./ship-stage.mjs";
+import { git, root, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged, commitToMain, UNRELATED } from "./ship-stage.mjs";
+import { landingRecordOf, toDialog } from "./ship-plan-landing-shared.mjs";
 import { readKnown } from "../scripts/lib/verify-base.mjs";
-import { readLedger } from "../scripts/lib/ledger.mjs";
+import { enterMerge, failingInPlan, readLedger } from "../scripts/lib/ledger.mjs";
 
 const BODY = "## Summary\nSubtracts.\n\n## What you can now do\nSubtract two numbers.\n\n## Risk\n\nNothing known.\n";
 const FAILS = "fails-without-change";
@@ -85,6 +86,7 @@ test("on a plan branch a command that fails with and without the change is discl
   assert.equal(finished.status, 0, finished.stderr);
   assert.equal(state().state, "merged", finished.stdout);
   assert.match(readLedger(shipDir).retries.map((retry) => retry.line).join("\n"), line, "the plan's ledger does not say the command fails without the change");
+  assert.deepEqual([...failingInPlan(shipDir)], [gate.commands[0].command], "the plan's ledger does not name the command as failing without the change");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -318,10 +320,11 @@ const everything = { globs: [], keywords: [] };
 const withHidden = (hidden) => ({
   verify: [{ command: "exit 0", when: everything, timeoutSec: 60 }, { command: hidden, when: NEVER, timeoutSec: 60 }]
 });
-// A spec that disclosed the command, written the way the gate writes it.
-const disclose = (shipDir, command) => {
+// A spec that disclosed the command and merged, written the way the gate and the merge write it.
+const disclose = (shipDir, command, { merged = true } = {}) => {
   const known = readKnown(shipDir);
   write(path.join(shipDir, "known-failures.json"), { ...known, failing: [{ spec: "01-a", candidate: "c".repeat(40), base: "b".repeat(40), command, logPath: null, baseLogPath: null }] });
+  if (merged) enterMerge(shipDir, "01-a", { entries: [], retries: [`- The verify command \`${command}\` fails with and without this change.`], failing: [command] });
 };
 
 test("the whole-plan check runs a disclosed command on the plan's merge base: failing there too is clean, passing there is not", () => {
@@ -351,6 +354,17 @@ test("the whole-plan check runs a disclosed command on the plan's merge base: fa
   fs.rmSync(brokenHere.dir, { recursive: true, force: true });
 });
 
+test("a command a candidate disclosed and that never merged is not one the whole-plan check accepts, though it fails where the plan began too", () => {
+  const staged = stageMerged(withHidden("exit 1"));
+  disclose(staged.shipDir, "exit 1", { merged: false });
+  const check = ship("plan-check", staged.plan, [], staged.env);
+  assert.equal(check.status, 0, check.stderr);
+  const record = JSON.parse(fs.readFileSync(path.join(staged.shipDir, "whole-plan", "1", "record.json"), "utf8"));
+  assert.equal(record.verify.status, "failed");
+  assert.ok(!record.verify.commands.some((command) => command.base), "a disclosure no merged spec states was run on the base");
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
 test("a command that fails at the whole-plan check and was never disclosed is held against the plan as before", () => {
   const staged = stageMerged(withHidden("exit 1"));
   const check = ship("plan-check", staged.plan, [], staged.env);
@@ -370,5 +384,21 @@ test("the whole-plan check runs a command after a disclosed failure, and holds o
   const record = JSON.parse(fs.readFileSync(path.join(staged.shipDir, "whole-plan", "1", "record.json"), "utf8"));
   assert.equal(record.verify.status, "failed");
   assert.deepEqual(record.verify.commands.map((entry) => entry.status), ["passed", "failed", "failed"], "the command after the disclosed failure was not run");
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("the plan's landing check on a base that moved accepts a disclosed command that fails on the new base too, and keeps what it found", () => {
+  const staged = stageMerged(withHidden("exit 1"));
+  disclose(staged.shipDir, "exit 1");
+  const check = ship("plan-check", staged.plan, [], staged.env);
+  assert.equal(reviewWholePlan(staged, check).json.wholePlan.status, "clean");
+  commitToMain(staged.repo, { "other.js": UNRELATED });
+  const dialog = toDialog(staged);
+  const { landing } = landingRecordOf(staged.shipDir);
+  assert.notEqual(landing.on, "whole-plan", "the landing check did not run against the moved base");
+  assert.equal(landing.status, "passed", "a disclosed command that fails on the new base too held the landing");
+  assert.equal(landing.verify.status, FAILS);
+  assert.deepEqual(landing.verify.commands.map((command) => [command.status, command.base?.status ?? null]), [["passed", null], ["failed", "failed"]]);
+  assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });

@@ -5,12 +5,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { git, ship, write, outputOf, arriveAll, findings, stagePlan, pullsOf, factsFileOf } from "./ship-stage.mjs";
 import { driveToRecurrence } from "./ship-driver-shared.mjs";
 import { PLAN_BODY, landingRecordOf, planPullOf, stageClean, toDialog } from "./ship-plan-landing-shared.mjs";
-import { enterMerge, entriesOf, pendingLine, readLedger } from "../scripts/lib/ledger.mjs";
+import { enterMerge, entriesOf, failingInPlan, pendingLine, readLedger } from "../scripts/lib/ledger.mjs";
 
 // The Recurring question at collect, answered accept, and the re-check that
 // follows: the adversary finds nothing new and the carried finding stays open.
@@ -194,6 +195,19 @@ test("the plan's pull request lists every ledger entry and every retry disclosur
     retry, ""
   ].join("\n"));
   fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("the commands a merge says fail without the change are in the ledger once, and a ledger that never held any holds none", () => {
+  const shipDir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-ledger-"));
+  assert.deepEqual([...failingInPlan(shipDir)], []);
+  fs.writeFileSync(path.join(shipDir, "ledger.json"), JSON.stringify({ entries: [], retries: [] }));
+  assert.deepEqual(readLedger(shipDir).failing, []);
+  enterMerge(shipDir, "01-a", { entries: [], retries: [], failing: ["lint"] });
+  enterMerge(shipDir, "01-a", { entries: [], retries: [], failing: ["lint"] });
+  enterMerge(shipDir, "02-b", { entries: [], retries: [], failing: ["lint", "build"] });
+  assert.deepEqual(readLedger(shipDir).failing, [{ spec: "01-a", command: "lint" }, { spec: "02-b", command: "lint" }, { spec: "02-b", command: "build" }]);
+  assert.deepEqual([...failingInPlan(shipDir)].sort(), ["build", "lint"]);
+  fs.rmSync(shipDir, { recursive: true, force: true });
 });
 
 test("a plan pull request body that could not be sent again is a stop, is not recorded as sent, and is sent on the next run", () => {

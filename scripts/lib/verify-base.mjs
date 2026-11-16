@@ -10,9 +10,9 @@
 // results of a command on a commit, keyed by both, so a revisit or a later round
 // whose base has not moved pays for no second run and a different base never
 // borrows another's. `failing` are the commands a spec's candidate disclosed as
-// failing with and without its change; the later checks, and whatever tells a
-// later agent about a known failure, look commands up here by id and never
-// re-read a Risk line.
+// failing with and without its change, looked up by spec and candidate: what a
+// candidate found says nothing about the plan until it merges, and a check of the
+// whole plan takes its disclosures from the plan's ledger, which only a merge writes.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -77,11 +77,6 @@ export function discloseFailing(shipDir, { spec, candidate, base, commands }) {
 /** The commands `candidate` of `spec` disclosed as failing without its change. */
 export const disclosedFor = (shipDir, spec, candidate) =>
   readKnown(shipDir).failing.filter((entry) => entry.spec === spec && entry.candidate === candidate).map((entry) => entry.command);
-
-/** Whether any spec of this plan disclosed `command`. */
-export const isDisclosed = (shipDir, command) => readKnown(shipDir).failing.some((entry) => entry.command === command);
-
-export const anyDisclosed = (shipDir) => readKnown(shipDir).failing.length > 0;
 
 /**
  * The line under `## Risk` for something that fails with and without a change:
