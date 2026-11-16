@@ -5739,6 +5739,7 @@ function revisit(options) {
 // whatever phase the attempt reached without taking another.
 async function resolveCommit(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   const id = options.spec;
   const record = requireOpenRound(ctx, id, "resolve-commit");
   const attempt = record.attempts.at(-1);
@@ -5869,7 +5870,9 @@ async function resolveCommit(options) {
       "--worktree", ctx.worktree, "--config", ctx.configPath, "--candidate", path.join(dir, "candidate.json"),
       "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
-      "--parent-pid", String(process.pid)
+      "--parent-pid", String(process.pid),
+      // Every command runs when a spec disclosed one as failing without its change, so that all that fail are known.
+      ...(failingInPlan(ctx.shipDir).size > 0 ? ["--keep-going", "true"] : [])
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -5877,16 +5880,25 @@ async function resolveCommit(options) {
     // What the verify commands wrote while the worktree sat on the merge commit
     // is theirs, and is discarded, as the landing check discards it.
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", merge]);
-    const outcome = readJson(path.join(dir, "verify.json"));
+    let outcome = readJson(path.join(dir, "verify.json"));
+    // A failure of a command the plan disclosed is the resolution's only if the command passes on the base being merged in.
+    if (outcome.status === "failed") {
+      const accepted = await acceptDisclosed(ctx, { status: "failed", baseOid: record.baseOid, dir, verify: outcome },
+        { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: merge, branch: null } });
+      if (accepted.status === "passed") outcome = accepted.verify;
+    }
     attempt.verify = outcome.status;
     say.push(`Verification of the merge: ${outcome.status}.`);
-    for (const command of outcome.commands ?? []) say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`);
+    for (const command of outcome.commands ?? []) {
+      say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`
+        + `${command.base ? ` — on ${record.base} at ${record.baseOid.slice(0, 12)}, where it is merged in from, it fails too` : ""}`);
+    }
     if (outcome.status === "failed") {
       const failed = (outcome.commands ?? []).find((command) => command.status === "failed");
       return emit(await failAttempt(ctx, record, attempt, { kind: "verify", log: failed?.logPath ?? path.join(dir, "verify.json") },
         `${failed ? `\`${failed.command}\`` : "a verify command"} failed on it`, say));
     }
-    if (outcome.status !== "passed") {
+    if (outcome.status !== "passed" && outcome.status !== FAILS_WITHOUT_CHANGE) {
       return emit(stopRound(ctx, record, "not-applicable", `Resolve attempt ${attempt.k}: none of this repository's verify commands `
         + `selected the merge ${at}, which is not evidence that it works, and the ship does not push it with nobody watching.`, say));
     }
