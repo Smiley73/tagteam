@@ -102,7 +102,20 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                    plan branch (spec, severity, scope, files, title, detail,
                    why it was left open — accepted, disclosed or merged-by-hand — and the
                    merged commit), and retries, the failures that passed when
-                   run again, kept for the plan's body and never re-judged   ignored
+                   run again and the commands that fail without the change
+                   too, kept for the plan's body and never re-judged, and
+                   failing, the commands those lines name, which the check of
+                   the whole plan accepts as disclosed                       ignored
+  known-failures.json  verify commands that fail without the change too:
+                   runs, a command's result on a base commit, kept so that a
+                   revisit or a later check on the same base runs nothing again,
+                   and failing, the commands each spec's candidate disclosed
+                   as failing with and without its change, which the spec's own
+                   later checks and agents look up                           ignored
+  base-run.json    there while a base run has the worktree away: the commit it
+                   is on and where it goes back to. After a run cut short, begin
+                   and the steps that make base runs put it back, and set it
+                   up, before anything else                                  ignored
   <spec-id>/
     state.json     the state machine, the reviewed commit, the gates, the
                    landing check and a person's accept on the plan branch,
@@ -125,7 +138,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  command, the landing check's verify, or checks rerun on the
                  pull request: what failed, both attempts' evidence and the
                  result — and the rerun request a check rerun begins with;
-                 kept on re-entry like the report),
+                 beside them base-<commit>-command-<n>.json and its log
+                 directory, a command that failed twice run once on the
+                 commit the change started from; kept on re-entry like the
+                 report),
                  landing/<new-base>/ (one directory per base this round's
                  commit was checked against: verify.json and verify/, plus
                  reviewed.diff and landing.diff when the two differed),

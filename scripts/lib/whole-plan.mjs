@@ -27,6 +27,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { listResolveRounds, nextRoundNumber, readRecord, writeRecord } from "./resolve.mjs";
+import { FAILS_WITHOUT_CHANGE } from "./verify-base.mjs";
 
 export const WHOLE_PLAN_DIR = "whole-plan";
 export const UNITS_DIR = "units";
@@ -177,11 +178,13 @@ export function ledgerOutcomes({ entries, verdicts, status, made, limit }) {
   };
 }
 
-const verifyClean = (verify) => verify?.status === "passed" || verify?.status === "not-applicable";
+// A command that fails on the tip and on the merge base too, and that a spec
+// disclosed, is not the plan's failure: the check ran it on the merge base itself.
+const verifyClean = (verify) => ["passed", "not-applicable", FAILS_WITHOUT_CHANGE].includes(verify?.status);
 
 /**
  * A record's one overall status, from its two halves, once both are in.
- * Clean is verify passed or had nothing to run — never "passed" for nothing —
+ * Clean is verify passed, failed only where it fails on the merge base too, or had nothing to run — never "passed" for nothing —
  * and a review of the named tip with no blocking or major finding. A review that
  * could not be completed is incomplete, whatever verify said. Anything else is
  * not clean: `open` while a fix unit answers it, `failed` when none can.

@@ -348,13 +348,26 @@ What fails again stops or goes to repair as before. What passes the second time
 is said under Risk in the spec's pull request, and the spec does not merge until
 the pull request says it.
 
+A verify command that fails both of its runs is then run once on the commit the
+change started from, after the repository's worktree setup has run on that base
+so that the command meets the base's own install. If it fails there too, it says nothing about the change.
+On a plan branch every command that fails like that is listed under Risk, in the
+spec's pull request and in the plan's, as failing with and without the change,
+and the spec merges: a new failure inside that command would not be noticed. The
+whole-plan check and the landing checks accept such a command only if it fails on
+their own base as well. A spec that merges straight into the base still stops,
+and no approval merges it; the command has to be put right on the base itself.
+A command that passes on the base, or whose base could not be set up, is the
+change's failure and stops the spec as before.
+
 Where a spec merges decides whether it waits for you. A spec that merges
 straight into the base — a plan of one spec, or any plan with `planBranch` off —
 waits for your approval every time: that is the approval every change reaching
 the base needs, not a sign that anything went wrong. A spec on a plan branch
 (*Shipping a plan as one*, below) merges into it unattended once every gate is
 satisfied, because the plan's own pull request is where you judge the combined
-change. On either route, a pull request also stops when verification failed or
+change. On either route, a pull request also stops when verification failed (or,
+straight to the base, failed on the base too) or
 CI proved nothing or never started, a finding is still open, **a reviewer
 produced no usable evidence**, `.github/workflows/` changed, or the agent that
 wrote it never confirmed it finished what it was given. A workflow change does

@@ -34,6 +34,7 @@ test("the reader says clean only for the tip the record describes", () => {
 test("the reader says clean only when verify ran for that tip and passed or had nothing to run", () => {
   assert.equal(isCleanFor({ ...clean(), verify: { tip: A, status: "not-applicable" } }, A), true);
   assert.equal(isCleanFor({ ...clean(), verify: { tip: A, status: "failed" } }, A), false);
+  assert.equal(isCleanFor({ ...clean(), verify: { tip: A, status: "fails-without-change" } }, A), true, "a disclosed command that fails where the plan began too held the plan back");
   assert.equal(isCleanFor({ ...clean(), verify: { tip: B, status: "passed" } }, A), false, "verify of another tip counted");
   assert.equal(isCleanFor({ ...clean(), verify: null }, A), false);
 });
