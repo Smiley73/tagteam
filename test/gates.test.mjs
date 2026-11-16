@@ -1798,3 +1798,24 @@ test("budgetTaken marks only a round past the configured limit, and only with a 
   const published = { ...before, state: "publishing" };
   assert.equal(budgetTaken(published, step(published, "reviewing", limits), { limits }).granted, undefined);
 });
+
+// A failing check that failed at the same step on the commit the change started from
+// is lifted on a plan branch, and there alone, and only for a comparison against this
+// candidate's own start commit.
+const redOn = (state, baseOid) => recordGate(state, "ci", A, {
+  status: "failed",
+  checks: [{ name: "test", state: "FAILURE", comparison: { verdict: "already-red", baseOid } }]
+});
+
+test("an already red check lifts continuous-integration-failed on a plan branch, for the start commit alone", () => {
+  const lifted = evaluate(redOn(reviewed(), BASE), CONFIG);
+  assert.deepEqual([lifted.ready, lifted.blockers], [true, []], JSON.stringify(lifted));
+
+  const earlier = evaluate(redOn(reviewed(), B), CONFIG);
+  assert.deepEqual(earlier.blockers, ["continuous-integration-failed"], "a comparison against another commit lifted the blocker");
+  assert.equal(earlier.ready, false);
+
+  const onBase = evaluate(redOn(straight(), BASE), CONFIG);
+  assert.deepEqual(onBase.blockers, ["continuous-integration-failed"], "a comparison lifted the blocker off a plan branch");
+  assert.equal(onBase.ready, false);
+});

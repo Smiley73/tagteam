@@ -25,6 +25,11 @@
 // a row of the same Actions run as a failed row is still running. A failed row
 // outside Actions cannot be rerun at all, and then nothing is held back.
 //
+// `--settle-all 1` is for a wait whose failure the caller does not take as the
+// result, because every failed check failed the same way before the change and
+// the other checks decide it. Then a failure is not the answer while any row is
+// still running, whatever run it belongs to.
+//
 // The third non-result is not-started, and only the start wait gives it. Right
 // after a push `gh pr checks` has no rows yet, and on its own that classifies as
 // "no checks were registered" on the first read. With `--start-wait-sec` above
@@ -66,6 +71,8 @@ function parseArgs(argv) {
   options.startWaitSec = Number(options.startWaitSec);
   if (![undefined, "0", "1"].includes(options.settleRuns)) throw new Error("--settle-runs must be 0 or 1");
   options.settleRuns = options.settleRuns === "1";
+  if (![undefined, "0", "1"].includes(options.settleAll)) throw new Error("--settle-all must be 0 or 1");
+  options.settleAll = options.settleAll === "1";
   if (options.rerunAt !== undefined) {
     const at = Date.parse(options.rerunAt);
     if (!Number.isFinite(at)) throw new Error("--rerun-at must be a date");
@@ -125,7 +132,7 @@ function unsettledRun(rows) {
 const ABANDONED = "the command that started this wait has ended, so its result is not written";
 
 export async function waitForChecks({
-  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay,
+  repo, pr, waitSec, startWaitSec = 0, rerunAt = null, settleRuns = false, settleAll = false, poll = POLL_MS, now = Date.now, read = readChecks, sleep = delay,
   abandoned = () => false
 }) {
   if (waitSec === 0) return { status: "not-run", reason: "CI waiting is disabled (ciWaitSec is 0)", checks: [] };
@@ -165,7 +172,7 @@ export async function waitForChecks({
     }
     const judged = pendingRerun(checks, rerunAt);
     const verdict = classifyChecks(judged);
-    const settling = settleRuns && verdict.status === "failed" && unsettledRun(judged);
+    const settling = verdict.status === "failed" && ((settleRuns && unsettledRun(judged)) || (settleAll && judged.some(isRunning)));
     if (verdict.status !== "running" && !settling) return { ...verdict, checks };
     if (now() >= deadline) {
       return {
@@ -190,7 +197,8 @@ async function main() {
       waitSec: options.waitSec,
       startWaitSec: options.startWaitSec,
       rerunAt: options.rerunAt ?? null,
-      settleRuns: options.settleRuns
+      settleRuns: options.settleRuns,
+      settleAll: options.settleAll
     });
     const out = path.resolve(options.out);
     fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });

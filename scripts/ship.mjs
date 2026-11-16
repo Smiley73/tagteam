@@ -87,7 +87,7 @@ import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
-import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
+import { classifyChecks, isFailed, isRunning, judgedStatus, runOf } from "./lib/ci-state.mjs";
 import {
   FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, latestRuns, saveBaseRun,
   verifyStatus
@@ -737,10 +737,15 @@ function riskLines(ctx, id) {
 }
 
 // One line for each command the current candidate's gate found failing on the
-// base too. The current candidate only: a command that failed without the change
-// on an earlier candidate may pass on this one.
-const failsWithoutLines = (ctx, id, state) =>
-  disclosedFor(ctx.shipDir, id, state.candidateOid).map((name) => failsWithoutLine({ name, candidate: state.candidateOid, base: state.baseOid }));
+// base too, and one for each failing check that failed at the same step there,
+// when that is all that is red. The current candidate only: a command that failed
+// without the change on an earlier candidate may pass on this one.
+const failsWithoutLines = (ctx, id, state) => [
+  ...disclosedFor(ctx.shipDir, id, state.candidateOid).map((name) => failsWithoutLine({ name, candidate: state.candidateOid, base: state.baseOid })),
+  ...alreadyRedChecks(ctx, state).map((row) => failsWithoutLine({
+    name: row.name, step: row.comparison.step, candidate: state.candidateOid, base: state.baseOid, what: "The check"
+  }))
+];
 
 /**
  * The line for each finding this spec would carry into the plan branch open if
@@ -5164,7 +5169,7 @@ function spentBudgets(ctx, id, state) {
       + (redesignUsed(ctx, id, state) ? ", and the cycle's one fresh rewrite of the area was tried and did not settle it" : ""));
   }
   const checks = readJson(ciPath(ctx, id), null);
-  const red = (checks?.candidateOid === state.candidateOid && checks.status === "failed") || landingFailure(state) !== null;
+  const red = (checks?.candidateOid === state.candidateOid && judgedCi(ctx, state, checks) === "failed") || landingFailure(state) !== null;
   if (red && (state.ciRepairsUsed ?? 0) >= limits.ciRepairs) {
     spent.push(`limits.ciRepairs: every one of the ${limits.ciRepairs} repairs it allows was used`);
   }
@@ -5323,12 +5328,15 @@ function rerunRequest(ctx, id, candidate) {
  * once, when the rest of its workflow run has finished — GitHub refuses a rerun
  * of a run still going — then waited for again without a start wait; what that
  * gives is the result, and a failure after it goes to `repair` as any failure does.
+ * Except on a plan branch, where a failure whose every failing check was already
+ * red is not the result while another check is still running: those are waited
+ * for as well.
  */
 function waitSpecChecks(ctx, id, state, say, began = null) {
   const pr = state.pr.number;
   const since = began ?? new Date().toISOString();
   let request = rerunRequest(ctx, id, state.candidateOid);
-  const wait = (startSeconds = 0) => {
+  const wait = (startSeconds = 0, { settleAll = false } = {}) => {
     // A rerun that was refused never ran, so no failed row is waiting on it.
     const rerunAt = request && retryOf(ctx, id, "ci", state.candidateOid)?.result !== "refused" ? request.requestedAt : null;
     const ran = node("ci-wait.mjs", [
@@ -5337,6 +5345,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
       ...(rerunAt ? ["--rerun-at", rerunAt] : []),
       // Before a rerun is asked for, a failure waits for the rest of its run.
       ...(request === null ? ["--settle-runs", "1"] : []),
+      // A failure that is not the result waits for every check still running.
+      ...(settleAll ? ["--settle-all", "1"] : []),
       // The wait stops, writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
       "--out", ciPath(ctx, id)
@@ -5359,6 +5369,16 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
     request = requestRerun(ctx, id, state, outcome, say);
     if (request && !request.refused) outcome = wait();
   }
+  // A failure ends the wait while other checks are still running, since it decides
+  // the result whatever they give. Not where every failing check was already red:
+  // the gates then read the result as what the others gave, so they are waited
+  // for before anything is recorded. Nothing is read unless a check is still
+  // running; this comparison only decides whether to wait, and whatever is
+  // recorded is compared then.
+  if (outcome.status === "failed" && outcome.checks.some(isRunning) && judgedCi(ctx, state, comparedChecks(ctx, state, outcome)) === "running") {
+    say.push(`Every failing check is already red on the commit this change started from (${short(state.baseOid)}), so the failure is not the result while other checks are still running: waiting for them.`);
+    outcome = wait(0, { settleAll: true });
+  }
   if (outcome.stillRunning) {
     writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
     say.push(`The checks on #${pr} are still running after ${secondsSince(since)}s of waiting in all, so nothing is recorded yet and the wait goes on. `
@@ -5367,8 +5387,8 @@ function waitSpecChecks(ctx, id, state, say, began = null) {
         : "Ending it is a person's call: finish ends it, and records that the checks proved nothing either way."));
     return { next: nextCommand(ctx, "checks", id) };
   }
-  recordChecks(ctx, id, state, outcome, since, say);
-  if (outcome.status === "failed") return { ci: outcome.status, next: nextCommand(ctx, "repair", id) };
+  const recorded = recordChecks(ctx, id, state, outcome, since, say);
+  if (judgedCi(ctx, state, recorded) === "failed") return { ci: recorded.status, next: nextCommand(ctx, "repair", id) };
   return { next: nextCommand(ctx, "finish", id) };
 }
 
@@ -5404,14 +5424,88 @@ function requestRerun(ctx, id, state, outcome, say) {
   return { ...request, file };
 }
 
+// What `ci` reads as to the gates: on a plan branch, with each failing check that
+// failed at the same step on the commit the change started from counted as passing.
+const judgedCi = (ctx, state, ci) => judgedStatus(ci, onPlanBranch(state, ctx.config) ? state.baseOid : null);
+
+const currentCi = (state) => (state.gates?.ci?.candidateOid === state.candidateOid ? state.gates.ci : null);
+
+// The failing checks of the current candidate's `ci` gate that failed at the same
+// step on the commit it started from, when every failing check did.
+const alreadyRedChecks = (ctx, state) => {
+  const gate = currentCi(state);
+  return gate && judgedCi(ctx, state, gate) !== "failed"
+    ? (gate.checks ?? []).filter((row) => isFailed(row) && row.comparison?.verdict === "already-red" && row.comparison.baseOid === state.baseOid) : [];
+};
+
+// One failing check and what the comparison found, as said to a person.
+function comparedLine(row) {
+  const { verdict, step, baseStep, reason, baseOid } = row.comparison;
+  const start = short(baseOid);
+  if (verdict === "already-red") return `\`${row.name}\` is already red: it fails at step \`${step}\` here and on ${start}`;
+  if (verdict === "new") return `\`${row.name}\` is not already red (it passed on ${start})`;
+  if (verdict === "other-step") return `\`${row.name}\` is not already red (it fails at step \`${step}\`, and at \`${baseStep}\` on ${start})`;
+  return `\`${row.name}\` is not already red (it could not be compared: ${reason})`;
+}
+
+// What the current candidate's failing checks were not already red as, said, once
+// they were compared: empty where nothing was.
+const notAlreadyRed = (state) => (currentCi(state)?.checks ?? [])
+  .filter((row) => isFailed(row) && row.comparison && row.comparison.verdict !== "already-red").map(comparedLine);
+
+const failedStepOf = (job) => (job.steps ?? []).find((step) => step.conclusion === "failure")?.name ?? null;
+
+/**
+ * What one failing check of this pull request did on `baseOid`, the commit the
+ * change started from. The same check is the same job name in the same workflow;
+ * the step is the first one that failed. Every read that fails, and every answer
+ * that cannot be compared, is `not-compared` with the case said, never a pass.
+ */
+function compareCheck(ctx, baseOid, row) {
+  const cannot = (why, reason) => ({ baseOid, verdict: "not-compared", case: why, reason });
+  const job = /\/actions\/runs\/\d+\/job\/(\d+)/.exec(row.link ?? "")?.[1];
+  if (runOf(row) === null) return cannot("outside-actions", "it is not a GitHub Actions check");
+  if (!job) return cannot("read-failed", "its link names no job");
+  const mine = ghRead(ctx, `repos/{owner}/{repo}/actions/jobs/${job}`);
+  if (mine.error) return cannot("read-failed", `GitHub could not be read: ${mine.error}`);
+  const step = failedStepOf(mine.body);
+  if (!step) return cannot("no-failed-step", "GitHub reports no failed step for it");
+  const runs = ghRead(ctx, `repos/{owner}/{repo}/commits/${baseOid}/check-runs?check_name=${encodeURIComponent(mine.body.name)}`);
+  if (runs.error) return cannot("read-failed", `GitHub could not be read: ${runs.error}`);
+  const there = [];
+  for (const run of (runs.body.check_runs ?? []).filter((entry) => runOf({ link: entry.details_url }) !== null || entry.app?.slug === "github-actions")) {
+    const doc = ghRead(ctx, `repos/{owner}/{repo}/actions/jobs/${run.id}`);
+    if (doc.error) return cannot("read-failed", `GitHub could not be read: ${doc.error}`);
+    if (doc.body.workflow_name === mine.body.workflow_name) there.push({ run, job: doc.body });
+  }
+  const latest = there.filter(({ run }) => run.status === "completed")
+    .sort((a, b) => String(b.run.completed_at).localeCompare(String(a.run.completed_at)) || b.run.id - a.run.id)[0];
+  if (!latest) return cannot("no-base-run", `no ${there.length > 0 ? "finished " : ""}run of \`${row.name}\` on ${short(baseOid)}`);
+  if (latest.run.conclusion === "success") return { baseOid, verdict: "new", step };
+  const baseStep = failedStepOf(latest.job);
+  if (!baseStep) return cannot("no-failed-step", `GitHub reports no failed step for its run on ${short(baseOid)}`);
+  return { baseOid, verdict: baseStep === step ? "already-red" : "other-step", step, baseStep };
+}
+
+// A failed `outcome` on a plan branch with each failing check compared; any
+// other outcome as it is, with nothing read.
+const comparedChecks = (ctx, state, outcome) => (outcome.status === "failed" && state.baseOid && onPlanBranch(state, ctx.config)
+  ? { ...outcome, checks: outcome.checks.map((row) => (isFailed(row) ? { ...row, comparison: compareCheck(ctx, state.baseOid, row) } : row)) }
+  : outcome);
+
 // A decided result for this commit's checks, recorded: `ci.json`, the retry
 // record once a rerun has an answer, a re-send of the body when the rerun turned
-// the failure into a pass, and the `ci` gate. A wait a person `ended` is not the
+// the failure into a pass, and the `ci` gate. On a plan branch a failure is
+// compared first, each failing check against the same check on the commit the
+// change started from, and what that found is recorded with it; when every
+// failing check was already red there, the body is sent again to say so. Returns
+// what it recorded. A wait a person `ended` is not the
 // rerun's answer — the rerun may still be running — so it writes no retry
 // record, and a later wait on this commit that sees the rerun decided still
 // records it and says a pass under Risk.
 function recordChecks(ctx, id, state, outcome, since, say, { ended = false } = {}) {
-  writeJson(ciPath(ctx, id), { ...outcome, candidateOid: state.candidateOid, waitBegan: since });
+  const recorded = { ...comparedChecks(ctx, state, outcome), candidateOid: state.candidateOid, waitBegan: since };
+  writeJson(ciPath(ctx, id), recorded);
   const request = rerunRequest(ctx, id, state.candidateOid);
   if (request && !ended && !retryOf(ctx, id, "ci", state.candidateOid)) {
     writeRetry(currentRound(ctx, id, state).dir, {
@@ -5423,6 +5517,12 @@ function recordChecks(ctx, id, state, outcome, since, say, { ended = false } = {
     }
   }
   record(ctx, id, "ci", state.candidateOid, ciPath(ctx, id));
+  for (const row of (recorded.checks ?? []).filter((entry) => entry.comparison)) say.push(`  ${comparedLine(row)}`);
+  if (alreadyRedChecks(ctx, readState(ctx, id)).length > 0) {
+    say.push(`Every failing check also fails at the same step on ${state.base} as this change started from it (${short(state.baseOid)}), so no CI repair is spent and the pull request says so under Risk.`);
+    resendBody(ctx, id, readState(ctx, id), say);
+  }
+  return recorded;
 }
 
 async function repair(options) {
@@ -5433,7 +5533,8 @@ async function repair(options) {
   const landing = landingFailure(state);
   const edge = transition(ctx, id, "reviewing", { budgeted: true });
   if (edge.refused) {
-    return emit({ say: [`${landing ? `${id} fails on ${state.base} as it now stands` : "CI is red"} and no repair is left (${edge.reason.split("\n")[0]}); the pull request stays open for a person.`], budget: "spent", next: nextCommand(ctx, "finish", id) });
+    const unmet = notAlreadyRed(state);
+    return emit({ say: [`${landing ? `${id} fails on ${state.base} as it now stands` : `CI is red${unmet.length > 0 ? `: ${unmet.join("; ")}` : ""}`} and no repair is left (${edge.reason.split("\n")[0]}); the pull request stays open for a person.`], budget: "spent", next: nextCommand(ctx, "finish", id) });
   }
   const job = roles(ctx, id).jobs["repair-fix"];
   const budget = edge.output?.budget ?? {};
@@ -8260,9 +8361,13 @@ async function finish(options) {
   say.push(...usageLines(ctx, id), ...effortLines(ctx, id));
   const accepted = readJson(acceptedPath(ctx, id), null);
   const cause = checksCause(ctx, id, state, verdict);
-  const words = verdict.unapprovedWorkflows.length === 0 ? notStartedWords(state) : {
+  const unmet = notAlreadyRed(state);
+  const words = {
     ...notStartedWords(state),
-    "workflow-change": `${REASONS["workflow-change"]} (${verdict.unapprovedWorkflows.join(", ")} not named for ${id} in the plan's approval)`
+    ...(unmet.length > 0 ? { "continuous-integration-failed": `${REASONS["continuous-integration-failed"]}, and not every failing check is already red on the commit this change started from: ${unmet.join("; ")}` } : {}),
+    ...(verdict.unapprovedWorkflows.length === 0 ? {} : {
+      "workflow-change": `${REASONS["workflow-change"]} (${verdict.unapprovedWorkflows.join(", ")} not named for ${id} in the plan's approval)`
+    })
   };
   const stopped = stopAsk(id, verdict, accepted && accepted.candidate === state.candidateOid ? accepted : null, words, { goalConflict: Boolean(conflict) });
   emit({

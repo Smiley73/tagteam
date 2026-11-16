@@ -14,6 +14,7 @@ import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mj
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { onPlanBranch } from "./lib/carry.mjs";
+import { judgedStatus } from "./lib/ci-state.mjs";
 import { FAILS_WITHOUT_CHANGE } from "./lib/verify-base.mjs";
 import { isFixUnitId } from "./lib/whole-plan.mjs";
 import { normalizeRepoPath } from "./lib/matcher.mjs";
@@ -780,7 +781,10 @@ export function evaluate(state, config, approvedWorkflows = null) {
   if (!verify) blockers.push("verification-not-recorded");
   else if (verify.status === "failed") blockers.push("verification-failed");
   else if (verify.status === FAILS_WITHOUT_CHANGE && !planBranch) blockers.push("verification-fails-without-change");
-  if (ci?.status === "failed") blockers.push("continuous-integration-failed");
+  // A failing check that failed at the same step on the commit the change started
+  // from is lifted on a plan branch, and there alone — see `judgedStatus`.
+  const ciStatus = ci ? judgedStatus(ci, planBranch ? state.baseOid : null) : null;
+  if (ciStatus === "failed") blockers.push("continuous-integration-failed");
   // A repository that waits for checks must actually have them looked at. An
   // unrecorded CI gate means the step was skipped, which is the same class of
   // hole as an unrecorded review — and `not-run` covers a cancelled check, which
@@ -790,8 +794,8 @@ export function evaluate(state, config, approvedWorkflows = null) {
   // looks into is different.
   else if (config?.ciWaitSec > 0) {
     if (!ci) blockers.push("continuous-integration-not-recorded");
-    else if (ci.status === "not-started") approvals.push("continuous-integration-not-started");
-    else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
+    else if (ciStatus === "not-started") approvals.push("continuous-integration-not-started");
+    else if (ciStatus !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
   // (a) Where this lands: see `planBranch` above.
@@ -838,7 +842,7 @@ export function evaluate(state, config, approvedWorkflows = null) {
       && (report?.status === "complete" || report?.status === "unfinished")
       && review?.status === "clean"
       && (verify?.status === "passed" || verify?.status === FAILS_WITHOUT_CHANGE)
-      && (ci?.status === "passed" || !(config?.ciWaitSec > 0))
+      && (ciStatus === "passed" || !(config?.ciWaitSec > 0))
       && Array.isArray(accounting?.items) && accounting.items.length > 0
       && accounting.items.every((item) => item.ruling === "environmental" || item.ruling === "out-of-scope")
       && owed.every((candidate) => (accounting.candidates ?? []).includes(candidate));
