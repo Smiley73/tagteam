@@ -3,13 +3,11 @@
 // with the same check on the commit the spec started from, and a spec whose every
 // failing check failed at the same step there spends no CI repair and merges,
 // with the check disclosed. Anything else goes to repair as it always did.
-//
-// A suite of its own for time alone, as `ship-driver-spec-cycle.test.mjs` says.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, A_CHANGE } from "./ship-stage.mjs";
+import { ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, A_CHANGE } from "./ship-stage.mjs";
 import { readLedger } from "../scripts/lib/ledger.mjs";
 
 const BODY = "## Summary\nSubtracts.\n\n## What you can now do\nSubtract two numbers.\n\n## Risk\n\nNothing known.\n";
@@ -32,14 +30,8 @@ const baseRun = (id, conclusion = "failure", completedAt = "2020-01-01T00:00:00Z
 });
 
 function stageWith({ planBranch = true } = {}) {
-  const staged = stagePlan({ planBranch, specs: 2, ciWaitSec: 1 });
-  const { repo, plan, env, configPath } = staged;
-  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  config.ciWaitSec = 30;
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  git(repo, "add", "-A");
-  git(repo, "commit", "-m", "how this repository waits");
-  git(repo, "push", "origin", "main");
+  const staged = stagePlan({ planBranch, specs: 2, ciWaitSec: 30 });
+  const { plan, env } = staged;
   fs.writeFileSync(staged.body, BODY);
   assert.equal(ship("start", plan, [], env).status, 0);
   return staged;
