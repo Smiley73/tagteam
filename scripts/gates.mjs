@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { onPlanBranch } from "./lib/carry.mjs";
+import { carrying, mergesWithOpenFindings, onPlanBranch } from "./lib/carry.mjs";
 import { judgedStatus } from "./lib/ci-state.mjs";
 import { FAILS_WITHOUT_CHANGE } from "./lib/verify-base.mjs";
 import { isFixUnitId } from "./lib/whole-plan.mjs";
@@ -717,10 +717,11 @@ export function reviewOpenLifts(state, config) {
 // What a carry needs beyond an accept, since no person looked: carrying on, no
 // whole-plan fix, no major code finding on a spec something unmerged depends on
 // — read as depended on unless the record says otherwise — and this cycle's fix
-// rounds spent.
+// rounds spent. `mergeWithOpenFindings` stands in for carrying on and waives the
+// major-finding rule.
 function carryHolds(state, config, accept, code) {
-  return config?.carry === true && !isFixUnitId(state.spec)
-    && !(accept.dependedOn !== false && code.some((finding) => finding.severity === "major"))
+  return carrying(state, config) && !isFixUnitId(state.spec)
+    && !(accept.dependedOn !== false && !mergesWithOpenFindings(state, config) && code.some((finding) => finding.severity === "major"))
     && counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds;
 }
 
@@ -922,9 +923,10 @@ const USAGE = `usage:
   candidate. On the plan branch \`evaluate\` lifts \`review-open\` when it covers
   every open finding and none is blocking. Binding a new candidate clears it.
   With \`--carry\` it records the ship's carry instead, which lifts it only with
-  \`carry\` on, outside a whole-plan fix, with this cycle's fix rounds spent or
-  nothing open for a fixer, and never past a major code finding on a spec that
-  is \`depended-on\` by one not yet merged.
+  \`carry\` or \`mergeWithOpenFindings\` on, outside a whole-plan fix, with this
+  cycle's fix rounds spent or nothing open for a fixer, and never past a major
+  code finding on a spec that is \`depended-on\` by one not yet merged, which
+  \`mergeWithOpenFindings\` waives.
 
   \`evaluate\` reads the workflow files a person approved for this spec from
   \`approved.json\`; given none, or one it cannot read, it approves none.

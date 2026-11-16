@@ -309,6 +309,14 @@ test("the configure command asks about every setting version 11 added", () => {
   }
 });
 
+// `mergeWithOpenFindings` may be missing, so only the interview keeps it from
+// dropping out, and it belongs to the question that asks about carrying.
+test("the configure question that asks about carry also asks about mergeWithOpenFindings", () => {
+  const items = thenAskItems(read("commands", "configure.md")).filter((item) => item.includes("`carry`"));
+  assert.equal(items.length, 1, "exactly one numbered question in configure.md should name carry");
+  assert.ok(items[0].includes("`mergeWithOpenFindings`"), "the numbered question that names carry does not name mergeWithOpenFindings");
+});
+
 // `redesignEscalation` is optional in the schema, so nothing but the interview
 // keeps it from dropping out: the question that turns escalation on has to ask it.
 test("the configure question that asks about escalation also asks about redesignEscalation", () => {

@@ -272,11 +272,12 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. Only two keys have a
+tell the person to run `/tagteam:configure` and stop. Only three keys have a
 fallback in a script, so an older configuration is incomplete. They are
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
-written before it existed stayed current; and `redesignEscalation`, which may be
-missing and reads as `never`, so a version-12 file without it stays current and
+written before it existed stayed current; `redesignEscalation`, which may be
+missing and reads as `never`; and `mergeWithOpenFindings`, which may be missing
+and reads as off. A version-12 file without either of those two stays current and
 needs no reconfigure. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
@@ -311,6 +312,7 @@ the file is written at version 12. Anything older is a different shape and is re
 | `plan` | `null`, or `{models, effort}` replacing them for the whole of `/tagteam:plan` |
 | `planBranch` | True: a plan of two or more specs collects its specs' pull requests on `plan/<slug>`, is checked as one change after its last spec, and reaches `base` through one final pull request a person always confirms; its specs merge into `plan/<slug>` without waiting once every gate is satisfied. False: every spec merges straight into `base`, and each waits for a person's approval. A plan keeps the route it started with, and a one-spec plan always goes straight to `base` |
 | `carry` | True: on a plan branch, a spec whose fix rounds ran out with only findings that may be carried — never a `blocking` one — merges into `plan/<slug>`, and each finding it carries is recorded in the plan's ledger and disclosed under that spec's `## Risk` and in the plan's pull request, which a person still confirms. Never on a spec that merges straight into `base`. False: such a spec stops for a person |
+| `mergeWithOpenFindings` | True: on a plan branch, a spec whose fix rounds ran out merges into `plan/<slug>` with its open findings disclosed, whatever `carry` and `autoRedesign` say, and nobody is asked about recurring findings or at the cap; the one rewrite a cycle gets runs on the round past `limits.fixRounds`. It also merges past a `major` code finding on a spec an unmerged spec depends on. Still stopped by a `blocking` finding, `limits.carried`, a whole-plan fix, a spec that merges straight into `base`, and anything other than its review. May be missing and reads as false; configure always writes it. False: `carry` and `autoRedesign` work as asked |
 | `autoRedesign` | True: the first Recurring question in a review cycle is answered with `redesign` without asking, spending a fix round — at the cap, the one round past `fixRounds`. Every later one is asked, and `accept` is always a person's answer. Applies on every route. False: every one is asked |
 | `versionFiles[]` | The lines that carry this repository's version, each `{file, pointer}` (a JSON Pointer, such as `/version` or `/plugins/0/version`) or `{file, pattern}` (a line pattern with one capture group). On a plan branch, each gets the plan's one increase — patch, or minor when `plan.md` says `Version increase: minor` — made by the ship after the whole-plan check, from the base's version then; a spec that changes one stops. Each must name exactly one `MAJOR.MINOR.PATCH` value on the base, and they must agree. Empty: no increase. A one-spec plan is outside this and keeps the repository's own habit, so it can collide |
 
@@ -863,6 +865,12 @@ non-blocking finding about the pull request's text or the commit history lifts
 the ledger as disclosed, and does not count toward the cap. Every finding carried
 goes into the plan's ledger. When carrying a spec would take the plan past
 `limits.carried`, nothing is carried and the ship stops and asks.
+
+`mergeWithOpenFindings` makes the same record at `finish` without `carry` and without
+the `major` rule: on a plan branch, with it on, `evaluate` lifts `review-open` on a
+carry past no `blocking` finding, outside a whole-plan fix, with the rounds spent,
+and a `major` code finding on a depended-on spec no longer refuses it. The ledger
+entries and `limits.carried` are the carry's. It is off unless turned on.
 
 Every gate is bound to one commit. `gates.mjs bind` clears all of them whenever
 a new commit appears — and every fix round makes one.

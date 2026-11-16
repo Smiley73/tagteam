@@ -3,8 +3,9 @@
 // write, and the route decided by what `next` says rather than by this test.
 //
 // This suite holds `mergeWithOpenFindings`: on a plan branch the Recurring
-// question and the question at the cap are never asked, and at the cap the
-// cycle's one rewrite takes the round past the limit on the setting's say.
+// question and the question at the cap are never asked, at the cap the
+// cycle's one rewrite takes the round past the limit on the setting's say, and
+// what the rewrite leaves open merges at finish, disclosed.
 // With the setting off the recurring, auto-redesign and cap-question suites pin
 // what is asked.
 //
@@ -15,7 +16,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { git, write, outputOf, arriveAll, major, stagePlan } from "./ship-stage.mjs";
+import { git, write, outputOf, arriveAll, major, stagePlan, pullsOf } from "./ship-stage.mjs";
+import { readLedger } from "../scripts/lib/ledger.mjs";
 import { driveToRecurrence, capRecordPath, answersIn, recheckWith, configure, escalateImplementer, RAISED } from "./ship-driver-shared.mjs";
 
 // A plan branch (or, with `specs: 1`, the base) with the setting on and `change`
@@ -123,4 +125,47 @@ test("with the setting on but the spec merging to the base, the question at the 
 
   const redesign = run("redesign");
   assert.match(redesign.json.say[0], /granted by your answer to the question at the cap/);
+});
+
+const ABOUT_PR = { severity: "major", scope: "pull-request", file: null, line: null, title: "the body does not say sub was added", detail: "a reader cannot tell", fix: null };
+
+test("with the setting on, publishing as it is at the cap says the spec merges at finish before the settle has seen any review", () => {
+  const staged = stageSetting({ fixRounds: 2 });
+  const { run } = driveToRecurrence(staged, { fixRounds: 2, env: staged.env });
+  const spent = run("fix");
+  assert.equal(spent.json.budget, "spent");
+  const said = spent.json.say.join("\n");
+  assert.match(said, /mergeWithOpenFindings is on, so at finish the spec merges into plan\/demo with what is open disclosed/);
+  assert.doesNotMatch(said, /a person decides|by hand/);
+});
+
+test("with the setting on and the rewrite at the limit leaving findings open, the spec merges at finish: code findings carried and counted, the pull request finding disclosed", () => {
+  const staged = stageSetting({ fixRounds: 2, change: (config) => { config.limits.carried = 10; } });
+  const { state, app, run } = driveToRecurrence(staged, { fixRounds: 2, env: staged.env });
+  const said = [];
+  const say = (result) => { said.push(...result.json.say, ...(result.json.ask ? [result.json.ask] : [])); return result; };
+  const rewrite = say(run("redesign"));
+  app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b | 0;\n");
+  write(outputOf(rewrite.json.dispatch[0]), { status: "complete", summary: "rewrote sub", unfinished: [] });
+  arriveAll(rewrite, staged.env);
+  say(run("snapshot"));
+  say(run("verify"));
+  const settle = say(recheckWith(run, state, { raised: [ABOUT_PR], resolved: false }));
+  assert.equal(settle.json.ask, undefined);
+  assert.match(settle.json.next, / fix --plan /);
+
+  say(run("fix"));
+  say(run("publish", ["--title", "Ship 01-a", "--body", staged.body]));
+  const open = state().gates.review.open;
+  const code = open.filter((finding) => finding.scope !== "pull-request");
+  assert.ok(code.length >= 1 && open.length === code.length + 1, "code findings and the one about the pull request are open");
+  const finished = say(run("finish"));
+  assert.equal(state().state, "merged", finished.stdout);
+  assert.equal(pullsOf(staged.env)[0].state, "MERGED");
+
+  const entries = readLedger(staged.shipDir).entries;
+  assert.equal(entries.filter((entry) => entry.reason === "carried").length, code.length);
+  assert.deepEqual(entries.filter((entry) => entry.reason === "disclosed").map((entry) => entry.scope), ["pull-request"]);
+  assert.match(finished.json.say.join("\n"), new RegExp(`Carried ${code.length} open finding\\(s\\) into plan/demo with it, as mergeWithOpenFindings allows: the plan has carried ${code.length} of the 10`));
+  assert.doesNotMatch(said.join("\n"), /a person decides|by hand|yours to/);
 });

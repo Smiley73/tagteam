@@ -52,7 +52,7 @@ import {
   restoreWorktree
 } from "./lib/landing.mjs";
 import { findingRound, isPullRequestFinding } from "./collect-findings.mjs";
-import { awaitedByUnmerged, carryEligible, carryRefusal, onPlanBranch, recommendation } from "./lib/carry.mjs";
+import { awaitedByUnmerged, carryEligible, carryRefusal, carrying, mergesWithOpenFindings, onPlanBranch, recommendation } from "./lib/carry.mjs";
 import { enterMerge, entriesOf, failingInPlan, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
@@ -816,7 +816,7 @@ function pendingLines(ctx, id, state) {
   const goalConflict = exists(goalConflictPath(ctx, id));
   return standing.entries.map((entry, index) => {
     const finding = standing.open[index];
-    const advice = recommendation(finding, { addressed: false, goalConflict, eligible: carryEligible(finding, facts), carry: ctx.config.carry === true });
+    const advice = recommendation(finding, { addressed: false, goalConflict, eligible: carryEligible(finding, facts), carry: carrying(state, ctx.config) });
     return pendingLine(entry, { merges: standing.merges, recommendation: advice });
   });
 }
@@ -865,7 +865,8 @@ function planStanding(ctx, id, state) {
 
 /**
  * Whether `finish` would carry this spec's open code findings into the plan
- * branch on the review gate as now recorded: null when carrying is off, the spec
+ * branch on the review gate as now recorded: null when neither `carry` nor
+ * `mergeWithOpenFindings` is on, the spec
  * is not on the plan branch, no code finding is open (those about the pull
  * request or the commit history merge disclosed without a carry), one may not be
  * carried (05's rule) or
@@ -879,7 +880,7 @@ function planStanding(ctx, id, state) {
  * merged with no one looking.
  */
 function carryStanding(ctx, id, state) {
-  if (ctx.config.carry !== true) return null;
+  if (!carrying(state, ctx.config)) return null;
   const standing = planStanding(ctx, id, state);
   const code = standing?.open.filter((finding) => !isPullRequestFinding(finding)) ?? [];
   if (code.length === 0) return null;
@@ -902,13 +903,24 @@ function carryStanding(ctx, id, state) {
   };
 }
 
-// What `fix` and `settle` say instead of "a person decides" when `finish` will
-// carry what is open; null when it will not, and they say what they always did.
+// What `fix`, `settle` and `redesign` say instead of "a person decides" or "by
+// hand" when `finish` will carry what is open; null when it will not, and they
+// say what they always did. Where `mergeWithOpenFindings` applies the answer is
+// never null: it is said before the settle too, when no review gate may yet say
+// what is open, and it names what still stops the merge.
 function carriedAtFinish(ctx, id) {
-  const carry = carryStanding(ctx, id, readState(ctx, id));
-  if (!carry || carry.over) return null;
-  return `Carrying is on, so at finish the ${carry.record.ids.length} finding(s) open are carried into ${carry.base} with it, unless something `
-    + "other than its review stops it: each is entered in the plan's ledger and listed under Risk, and the plan's pull request lists them for a person.";
+  const state = readState(ctx, id);
+  const carry = carryStanding(ctx, id, state);
+  const bySetting = mergesWithOpenFindings(state, ctx.config);
+  const ledger = "each is entered in the plan's ledger and listed under Risk, and the plan's pull request lists them for a person.";
+  if (carry && !carry.over) {
+    return `${bySetting ? "mergeWithOpenFindings is on" : "Carrying is on"}, so at finish the ${carry.record.ids.length} finding(s) open are carried into ${carry.base} with it, `
+      + `unless something other than its review stops it: ${ledger}`;
+  }
+  return bySetting
+    ? `mergeWithOpenFindings is on, so at finish the spec merges into ${state.base} with what is open disclosed, unless a blocking finding, `
+      + `the plan's limits.carried or something other than its review stops it: ${ledger}`
+    : null;
 }
 
 function pullRequestOnlyLine(ctx, id) {
@@ -1069,7 +1081,7 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
   const limit = ctx.config.limits.fixRounds;
   const used = redesignUsed(ctx, id, state);
   const rewritable = files.length > 0;
-  const bySetting = mergesWithOpenFindings(ctx, state);
+  const bySetting = mergesWithOpenFindings(state, ctx.config);
   if (spent < limit) {
     if (bySetting) return result;
     if (autoRedesigns(ctx, state, { signals, used })) {
@@ -1080,11 +1092,12 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
     return result;
   }
   if (used || spent > limit || !rewritable) {
+    const publishes = `so nothing is asked: the spec publishes with what is open disclosed in the pull request${bySetting ? `. ${carriedAtFinish(ctx, id)}` : ", and merging it is yours to do by hand on GitHub."}`;
     result.note = used
-      ? "This cycle's one rewrite has been used, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub."
+      ? `This cycle's one rewrite has been used, ${publishes}`
       : spent > limit
-        ? `Every fix round is spent and no round past the ${limit} is left, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.`
-        : "Every fix round is spent and none of what keeps arriving is in a file a rewrite could change, so nothing is asked: the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub.";
+        ? `Every fix round is spent and no round past the ${limit} is left, ${publishes}`
+        : `Every fix round is spent and none of what keeps arriving is in a file a rewrite could change, ${publishes}`;
     return result;
   }
   if (bySetting) {
@@ -1110,14 +1123,6 @@ function churnAsk(ctx, id, state, round, { openForFixer, atCollect, honour = fal
 // `redesign` to tell a rewrite the setting started from one a person chose.
 function autoRedesigns(ctx, state, { signals, used }) {
   return Boolean(ctx.config.autoRedesign) && (state.fixRoundsUsed ?? 0) < ctx.config.limits.fixRounds && !used && signals.length > 0;
-}
-
-// Whether `mergeWithOpenFindings` applies to this spec: the one place the
-// setting is checked, and it holds only on a plan branch. `churnAsk` asks it to
-// decide whether to ask at all, and `redesign` to take the setting in place of
-// a person's answer at the cap.
-function mergesWithOpenFindings(ctx, state) {
-  return Boolean(ctx.config.mergeWithOpenFindings) && onPlanBranch(state, ctx.config);
 }
 
 // Why a rewrite runs at the settings it does, by what decided it.
@@ -1628,7 +1633,7 @@ function tableOf(ctx, id, fixer, open, made = new Set()) {
       id: finding.id, severity: finding.severity, scope: finding.scope ?? null, file: finding.file ?? null, title: finding.title ?? "",
       outcome: said.get(finding.id)?.outcome ?? null, note: said.get(finding.id)?.note ?? null, addressed,
       ...(deletion ? { deletion: true, recommendation: null }
-        : { recommendation: recommendation(finding, { addressed, goalConflict, eligible: carryEligible(finding, facts), carry: ctx.config.carry === true }) })
+        : { recommendation: recommendation(finding, { addressed, goalConflict, eligible: carryEligible(finding, facts), carry: carrying(facts.state, ctx.config) }) })
     };
   });
   return { round: fixer.round, rows, summary: report?.summary ?? null };
@@ -4081,7 +4086,7 @@ async function snapshot(options) {
       const spent = state.fixRoundsUsed ?? 0;
       const limit = ctx.config.limits.fixRounds;
       if (spent > limit) {
-        say.push(`The one round past the ${limit} fix rounds this repository allows, which ${mergesWithOpenFindings(ctx, state) ? "mergeWithOpenFindings" : "your answer"} granted, is gone; what was open is still open, and the spec publishes with it disclosed in the pull request — merging it is yours to do by hand on GitHub.`);
+        say.push(`The one round past the ${limit} fix rounds this repository allows, which ${mergesWithOpenFindings(state, ctx.config) ? "mergeWithOpenFindings" : "your answer"} granted, is gone; what was open is still open, and the spec publishes with it disclosed in the pull request${mergesWithOpenFindings(state, ctx.config) ? `. ${carriedAtFinish(ctx, id)}` : " — merging it is yours to do by hand on GitHub."}`);
       } else if (churn.ask) {
         say.push("The fix round it spent is gone; what was open is still open, and the question stands — without the redesign answer, since this cycle's one rewrite has been used.");
       } else if (spent >= limit) {
@@ -4239,7 +4244,7 @@ async function snapshot(options) {
   say.push(tidying
     ? `Candidate ${oid.slice(0, 12)} is round ${round}, the tidy of round ${pending.round}${allocation.reentered ? " (re-entered)" : ""}: its tests ran once and passed before it was committed, and no fix round was spent (${allocation.spent} of ${allocation.limit} in this cycle).`
     : allocation.granted
-    ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by ${mergesWithOpenFindings(ctx, state) ? "mergeWithOpenFindings in this repository's configuration" : "your answer to the question at the cap"}. No round is left after it in this cycle.`
+    ? `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}: the one round past the ${allocation.limit} fix rounds this repository allows, granted by ${mergesWithOpenFindings(state, ctx.config) ? "mergeWithOpenFindings in this repository's configuration" : "your answer to the question at the cap"}. No round is left after it in this cycle.`
     : `Candidate ${oid.slice(0, 12)} is round ${round}${allocation.reentered ? " (re-entered)" : ""}; ${allocation.spent} of ${allocation.limit} fix rounds spent in this cycle.`);
   if (outOfBand) {
     say.push(`This commit was not dispatched by fix: nothing in this run asked for it. It is a fix round of this cycle all the same and is counted as one — ${allocation.remaining} of ${allocation.limit} left.`);
@@ -4604,12 +4609,15 @@ async function fix(options) {
     ? { refused: true, reason: `${id} has spent its limits.fixRounds budget: ${spentRounds} of ${ctx.config.limits.fixRounds} round(s) used, so nothing further will be attempted — raise limits.fixRounds in this repository's tagteam configuration and run the command again, or finish what is left by hand` }
     : transition(ctx, id, "fixing", { budgeted: true });
   if (edge.refused) {
-    const spent = `No fix round is left for this cycle (${edge.reason.split("\n")[0]}).`;
-    const say = [`${spent} The spec still publishes and a person decides.`];
+    // Before the settle no review gate may yet say what is open, so only the
+    // setting, which does not need one, is said.
+    const carried = settled || mergesWithOpenFindings(state, ctx.config) ? carriedAtFinish(ctx, id) : null;
+    // The edge's own reason ends in advice to finish by hand, which a spec that merges at finish is not given.
+    const spent = `No fix round is left for this cycle (${carried && mergesWithOpenFindings(state, ctx.config) ? `${spentRounds} of the ${ctx.config.limits.fixRounds} fix rounds are spent` : edge.reason.split("\n")[0]}).`;
+    const say = [carried ? `${spent} The spec still publishes. ${carried}` : `${spent} The spec still publishes and a person decides.`];
     if (settled) {
       transition(ctx, id, "verifying");
-      const carried = carriedAtFinish(ctx, id);
-      return emit({ say: carried ? [`${spent} The spec still publishes. ${carried}`] : say, budget: "spent", next: nextCommand(ctx, "publish", id) });
+      return emit({ say, budget: "spent", next: nextCommand(ctx, "publish", id) });
     }
     // Before the settle, this branch is the answer "publish" to a question put
     // at the cap for this round; the settle reads that off the record.
@@ -4710,7 +4718,7 @@ async function redesign(options) {
   const spent = state.fixRoundsUsed ?? 0;
   const limit = ctx.config.limits.fixRounds;
   const pastCap = spent >= limit;
-  const bySetting = mergesWithOpenFindings(ctx, state);
+  const bySetting = mergesWithOpenFindings(state, ctx.config);
   if (pastCap) {
     const asked = readJson(capAskPath(ctx, id), null);
     if (!bySetting && (!asked || asked.round !== round.round || asked.candidate !== state.candidateOid || asked.scope !== scope)) {
@@ -4718,7 +4726,7 @@ async function redesign(options) {
     }
     if (spent > limit || redesignUsed(ctx, id, state)) {
       const why = redesignUsed(ctx, id, state) ? "this cycle's one rewrite has been used" : `no round past the ${limit} is left`;
-      return spentRoute([`No fix round is left for this cycle, and ${why}, so there is nothing to spend on a redesign. The spec still publishes with what is open disclosed and a person decides.`]);
+      return spentRoute([`No fix round is left for this cycle, and ${why}, so there is nothing to spend on a redesign. The spec still publishes with what is open disclosed${bySetting ? `. ${carriedAtFinish(ctx, id)}` : " and a person decides."}`]);
     }
   } else if (redesignUsed(ctx, id, state)) {
     throw new Stop(`${id} has had this cycle's one redesign already; a cycle gets one, in budget or past the cap, so the answers left are fix (run next), accept and end. Nothing was spent.`);
@@ -4765,7 +4773,7 @@ async function redesign(options) {
   }
   const edge = transition(ctx, id, "fixing", { budgeted: true });
   if (edge.refused) {
-    return spentRoute([`No fix round is left for this cycle (${edge.reason.split("\n")[0]}), and a redesign spends one. The spec still publishes and a person decides.`]);
+    return spentRoute([`No fix round is left for this cycle (${bySetting ? `${spent} of the ${limit} fix rounds are spent` : edge.reason.split("\n")[0]}), and a redesign spends one. The spec still publishes${bySetting ? `. ${carriedAtFinish(ctx, id)}` : " and a person decides."}`]);
   }
   // The round is spent: the cycle's rewrite is used from here on, whatever the
   // rewrite turns out to change.
@@ -4789,7 +4797,7 @@ async function redesign(options) {
       + REWRITE_WHY[why ?? "never"]
       + (escalation ? `; this round moved the counter, so the re-checks of this round and any later fixer run raised once it passes ${escalation.after}.` : "."),
     ...(pastCap
-      ? ["This is the cycle's only rewrite, and no round is left after it: if the rewrite still fails, the spec publishes with what is open disclosed in the pull request, and merging it is yours to do by hand on GitHub."]
+      ? [`This is the cycle's only rewrite, and no round is left after it: if the rewrite still fails, the spec publishes with what is open disclosed in the pull request${bySetting ? `. ${carriedAtFinish(ctx, id)}` : ", and merging it is yours to do by hand on GitHub."}`]
       : ["This is the cycle's one rewrite: if the question comes back, redesign is not among its answers."]),
     `The brief at ${briefPath} holds every finding these rounds record on those files and how each was answered — design context, not a patch list. Findings on the files the rewrite changes start a fresh count.`,
     route === "recheck"
@@ -8434,7 +8442,7 @@ async function finish(options) {
       if (carry && !carry.over) {
         // Read again, since what the landing check took in can have added to it.
         const total = readLedger(ctx.shipDir).entries.filter((entry) => entry.reason === "carried").length;
-        say.push(`Carried ${carry.record.ids.length} open finding(s) into ${state.base} with it, as carrying allows: the plan has carried ${total} `
+        say.push(`Carried ${carry.record.ids.length} open finding(s) into ${state.base} with it, as ${mergesWithOpenFindings(state, ctx.config) ? "mergeWithOpenFindings" : "carrying"} allows: the plan has carried ${total} `
           + `of the ${carry.limit} limits.carried allows.`);
       }
       say.push(...enteredLines(entered));

@@ -27,6 +27,18 @@ export function onPlanBranch(state, config) {
 }
 
 /**
+ * Whether `mergeWithOpenFindings` applies to this spec: on, and on its plan's
+ * own branch. The one place the setting is read, for the driver and the gates
+ * alike.
+ */
+export function mergesWithOpenFindings(state, config) {
+  return Boolean(config?.mergeWithOpenFindings) && onPlanBranch(state, config);
+}
+
+/** Whether the ship carries on this spec's behalf: `carry` is on, or the setting stands in for it. */
+export const carrying = (state, config) => config?.carry === true || mergesWithOpenFindings(state, config);
+
+/**
  * Whether any spec not yet merged depends on `unit`, directly or through other
  * specs, by their `dependsOn`; on the dependency unit, which every spec waits
  * for, any spec not yet merged does. `merged` is the set of merged spec ids.
@@ -53,14 +65,15 @@ export function awaitedByUnmerged(unit, specs, merged) {
  * when it may. Never off the plan branch, never inside a fix unit (unless it is
  * about the pull request or the commit history, which merge disclosed), never
  * `blocking`; and a `major` code finding only when nothing unmerged waits on the
- * spec, because a spec built on top of it would build on the defect.
+ * spec, because a spec built on top of it would build on the defect — a rule
+ * `mergeWithOpenFindings` waives.
  */
 export function carryRefusal(finding, { spec, state, config, specs, merged }) {
   if (!onPlanBranch(state, config)) return "it does not merge into a plan branch";
   const disclosed = isPullRequestFinding(finding) && finding.severity !== "blocking";
   if (spec.fixUnit && !disclosed) return "a whole-plan fix never merges with a finding open";
   if (finding.severity === "blocking") return "it is blocking, and nothing blocking merges unresolved";
-  if (finding.severity === "major" && !isPullRequestFinding(finding) && awaitedByUnmerged(spec, specs, merged)) {
+  if (finding.severity === "major" && !isPullRequestFinding(finding) && !mergesWithOpenFindings(state, config) && awaitedByUnmerged(spec, specs, merged)) {
     return "it is a major finding in the code, and a spec not yet merged depends on this one";
   }
   return null;
