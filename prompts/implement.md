@@ -108,7 +108,12 @@ round that one found here does not. A command you could not run — it outlasts
 what you may wait, or needs the network or credentials — or that fails where
 you cannot tell whether your change caused it, is said in `summary`, not in
 `unfinished`: the run still executes it, and `unfinished` stops the spec for a
-person. You may not stash or check out to find out, so say it could not be told
+person. A command the dispatch marks as failing without the change already
+failed on a base, and its log is named there: say in `summary` that it also fails
+without the change and where that was found, and do not report it as
+`unfinished`. That is not leave to stop looking: compare its failure with the
+base's log, and what fails only now is your change's to fix. For any other
+failure, you may not stash or check out to find out, so say it could not be told
 apart rather than that it predates your change. A failure your change caused and
 you could not resolve is `unfinished`. Remove what a command wrote
 into the tree — coverage output, build products — unless the repository ignores

@@ -58,6 +58,9 @@ export function verifyStatus(commands) {
 export const baseRunOf = (shipDir, base, command) =>
   readKnown(shipDir).runs.find((run) => run.base === base && run.command === command) ?? null;
 
+/** The runs of a command on a base that failed there, in the order they were made. */
+export const failedOnBase = (shipDir) => readKnown(shipDir).runs.filter((run) => run.status === "failed");
+
 /** Record a result of `command` on `base` — `{base, command, status, logPath, result, timedOut}` — once. */
 export function saveBaseRun(shipDir, run) {
   const known = readKnown(shipDir);
