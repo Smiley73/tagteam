@@ -119,9 +119,13 @@ changed before you write the report, and fix what your change broke. A command
 you could not run — it outlasts what you may wait, or needs the network or
 credentials — or that fails where you cannot tell whether your change caused it,
 is said in `summary`, not in `unfinished`: the run still executes it, and
-`unfinished` is about the findings you were handed. You may not stash or check
-out to find out, so say it could not be told apart rather than that it predates
-your change. Remove what a command wrote into the tree unless the repository
+`unfinished` is about the findings you were handed. A command the dispatch marks
+as failing without the change already failed on a base, and its log is named
+there: say in `summary` that it also fails without the change and where that was
+found. That is not leave to stop looking: compare its failure with the base's
+log, and what fails only now is your change's to fix. You may not stash or check
+out to find out. For any command the dispatch does not mark, say it could not be
+told apart rather than that it predates your change. Remove what a command wrote into the tree unless the repository
 ignores it.
 
 Match the surrounding code. This diff has already been reviewed for conventions,

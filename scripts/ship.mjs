@@ -89,7 +89,7 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, runOf } from "./lib/ci-state.mjs";
 import {
-  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, saveBaseRun,
+  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, latestRuns, saveBaseRun,
   verifyStatus
 } from "./lib/verify-base.mjs";
 import {
@@ -383,8 +383,30 @@ function verifyLine(ctx) {
   const when = ({ globs = [], keywords = [] }) => globs.length === 0 && keywords.length === 0
     ? "always"
     : [...globs.map((glob) => `a path this spec changes matches ${glob}`), ...keywords.map((word) => `a line this spec adds contains "${word}"`)].join(", or ");
+  const known = failingWithoutChange(ctx);
   return "Verify commands (run the ones that apply to everything this spec changes from its base, not only this round's edits, before you report):\n"
-    + commands.map((entry) => `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`).join("\n");
+    + commands.map((entry) => {
+      const base = known.get(entry.command);
+      return `- ${entry.command} (timeout ${entry.timeoutSec}s; runs when ${when(entry.when ?? {})})`
+        + (base ? ` — fails without the change: it failed on ${base.spec}'s base at ${short(base.base)}, and that run's log is ${base.logPath}` : "");
+    }).join("\n");
+}
+
+// What this ship's base checks found failing: by command, its latest run on the
+// base of any unit of the ship — a spec, the dependency unit or a whole-plan fix
+// unit — when that run failed there, with the unit it was the base of. A run is
+// recorded only once a command has failed twice on a candidate, so a failed one
+// is a command that fails without the change too, and a later one that passed
+// is a command the change broke.
+function failingWithoutChange(ctx) {
+  const unitOf = new Map();
+  for (const { id } of unitsInOrder(ctx)) {
+    const base = exists(statePath(ctx, id)) ? readState(ctx, id).baseOid : null;
+    if (base && !unitOf.has(base)) unitOf.set(base, id);
+  }
+  return new Map([...latestRuns(ctx.shipDir, unitOf)]
+    .filter(([, run]) => run.status === "failed")
+    .map(([command, run]) => [command, { ...run, spec: unitOf.get(run.base) }]));
 }
 
 // The check an agent runs on its own report before it returns, so that a report
