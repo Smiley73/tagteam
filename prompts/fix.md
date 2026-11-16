@@ -46,6 +46,13 @@ Outcomes:
 nothing to enumerate then, so `outcomes` is an empty array — written, not left
 out, because the key is required — and what you repaired is said in `summary`.
 
+**A dispatch may also name test commands this change broke.** Each one fails on
+the change and passes on the code before it, and the log of its failing run is
+given. Making them pass is part of the work, whether or not findings come with
+them. They are not findings: `outcomes` stays one entry per finding, an empty
+array when you were given none, and what you did about the commands is said in
+`summary`. A command you could not make pass goes in `unfinished`.
+
 Do not report `fixed` for something you did not change. Your report is
 bookkeeping: the reviewer that raised the finding re-reads the code afterwards
 and states what is actually true. A false `fixed` does not get the pull request
@@ -66,7 +73,7 @@ no others:
   `{"part", "reason"}`; `[]` when nothing was left.
 
 **`status`, `summary` and `unfinished` are about the findings, or the failing
-check, you were given, and nothing else.** The spec you were given to read is not
+check or commands, you were given, and nothing else.** The spec you were given to read is not
 work you were given: nobody expects you to answer for it, and a `status` reaching
 for the change as a whole claims something you have no way to know. A finding you
 answered `wont-fix`, `failed` or `goal-conflict` is accounted for by that outcome

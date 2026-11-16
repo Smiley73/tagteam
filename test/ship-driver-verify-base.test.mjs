@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { git, root, ship, write, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged, commitToMain, UNRELATED } from "./ship-stage.mjs";
+import { git, root, ship, write, findings, major, driveToPublishable, stagePlan, ghCalls, pullsOf, trainOf, outputOf, arriveAll, A_CHANGE, B_CHANGE, reviewWholePlan, stageMerged, commitToMain, UNRELATED } from "./ship-stage.mjs";
 import { landingRecordOf, toDialog } from "./ship-plan-landing-shared.mjs";
 import { readKnown } from "../scripts/lib/verify-base.mjs";
 import { enterMerge, failingInPlan, readLedger } from "../scripts/lib/ledger.mjs";
@@ -64,6 +64,50 @@ function snapshotted(staged, files, before = () => {}) {
 const publish = (staged, id = "01-a") => ship("publish", staged.plan, ["--spec", id, "--title", `Ship ${id}`, "--body", staged.body], staged.env);
 const stateOf = (shipDir, id) => () => JSON.parse(fs.readFileSync(path.join(shipDir, id, "state.json"), "utf8"));
 
+// A command the change broke is handed to a fixer. `BROKEN` fails once app.js has `sub` in it, which the base's app.js has not.
+const BROKEN = "if grep -q sub app.js; then exit 1; fi";
+const FIXED = "export const add = (a, b) => a + b;\nexport const minus = (a, b) => a - b;\n";
+const NOTHING = { severity: "major", scope: "pull-request", file: null, line: null, title: "body is silent", detail: "the body names no risk", fix: null };
+
+const stageBroken = ({ planBranch = true, fixRounds = 2, commands = [BROKEN] } = {}) => stageWith({
+  planBranch, change: (config) => { config.limits = { ...config.limits, fixRounds }; verifyWith(...commands)(config); }
+});
+
+// `ship` for 01-a that must succeed.
+const stepsOf = (staged) => (sub, extra = []) => {
+  const result = ship(sub, staged.plan, ["--spec", "01-a", ...extra], staged.env);
+  assert.equal(result.status, 0, `${sub}: ${result.stderr}`);
+  return result;
+};
+
+// The panel of `round` on a candidate, its correctness lens raising `raised`, and the collection.
+function collected(staged, run, state, raised = [], round = 1) {
+  const panel = run("panel");
+  const oid = state().candidateOid;
+  for (const dispatch of panel.json.dispatch.slice(0, 2)) {
+    const lens = /^Lens: (.*)$/m.exec(dispatch.prompt)[1];
+    write(outputOf(dispatch), findings(lens, oid, lens === "correctness" ? raised : []));
+  }
+  write(path.join(staged.shipDir, "01-a", "rounds", String(round), "findings", "codex.json"), findings("codex", oid));
+  arriveAll(panel);
+  return run("collect");
+}
+
+// The re-check of the candidate, the fresh pass raising nothing, and the settle.
+function settledClean(run, state) {
+  const recheck = run("recheck");
+  for (const dispatch of recheck.json.dispatch) write(outputOf(dispatch), findings("adversary", state().candidateOid));
+  arriveAll(recheck);
+  return run("settle");
+}
+
+// What a fixer sent for `fix` does: puts `FIXED` in app.js and reports no findings answered.
+function fixerLands(fix, worktree) {
+  write(path.join(worktree, "app.js"), FIXED);
+  write(outputOf(fix.json.dispatch[0]), { outcomes: [], notes: "", status: "complete", summary: "made the command pass", unfinished: [] });
+  arriveAll(fix);
+}
+
 test("on a plan branch a command that fails with and without the change is disclosed in the spec's pull request and the plan's ledger, and merges", () => {
   const staged = stageWith({ change: (config, { dir }) => verifyWith(`${recordsHead(`${dir}/x-heads`)}; exit 1`, `echo ran >> "${dir}/y-count"`)(config) });
   const { dir, plan, shipDir, env } = staged;
@@ -91,11 +135,15 @@ test("on a plan branch a command that fails with and without the change is discl
 });
 
 test("on a plan branch a failure the base does not share keeps the gate failed and discloses nothing as failing without the change", () => {
-  const staged = stageWith({
-    change: (config, { dir }) => verifyWith(`echo ran >> "${dir}/x-count"; exit 1`, `if grep -q sub app.js; then exit 1; fi`)(config)
-  });
+  const staged = stageBroken({ fixRounds: 1, commands: ["exit 1", BROKEN] });
   const { dir, plan, shipDir, env } = staged;
-  const { state } = driveToPublishable(staged, "01-a", "app.js", A_CHANGE, env);
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  // With a fix round left the command the change broke goes to a fixer; this is the spec once every round is spent.
+  write(path.join(shipDir, "01-a", "state.json"), { ...state(), fixRoundsUsed: 1 });
+  collected(staged, run, state);
+  assert.match(settledClean(run, state).json.next, /ship\.mjs" publish /);
   const gate = state().gates.verify;
   assert.equal(gate.status, "failed");
   assert.deepEqual(gate.commands.map((command) => [command.status, command.base?.status ?? null]), [["failed", "failed"], ["failed", "passed"]]);
@@ -457,5 +505,117 @@ test("the plan's landing check on a base that moved accepts a disclosed command 
   assert.equal(landing.verify.status, FAILS);
   assert.deepEqual(landing.verify.commands.map((command) => [command.status, command.base?.status ?? null]), [["passed", null], ["failed", "failed"]]);
   assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a clean review and a command the change broke send a fixer for the command, and its fix goes on to merge into the plan branch", () => {
+  const staged = stageBroken();
+  const { dir, shipDir } = staged;
+  const run = stepsOf(staged);
+  const { worktree, state } = snapshotted(staged, { "app.js": A_CHANGE });
+  assert.equal(run("verify").json.verify, "failed");
+  const gate = state().gates.verify;
+  assert.deepEqual(gate.commands.map((command) => [command.status, command.base?.status]), [["failed", "passed"]]);
+  const log = gate.commands[0].runs.at(-1).logPath;
+  collected(staged, run, state);
+  const settled = settledClean(run, state);
+  assert.equal(settled.json.review, "clean");
+  assert.match(settled.json.next, /ship\.mjs" fix /, settled.stdout);
+  assert.ok(settled.json.say.some((line) => line.includes(`\`${BROKEN}\` fails on this change and passes on the code before it`)), settled.stdout);
+
+  assert.equal(state().fixRoundsUsed ?? 0, 0);
+  const fix = run("fix");
+  assert.equal(state().fixRoundsUsed, 1, "the fixer spent no fix round");
+  assert.equal(fix.json.dispatch.length, 1);
+  assert.match(fix.json.dispatch[0].prompt, new RegExp(`^Test commands this change broke, each with the log of its failing run: ${BROKEN} \\(${log}\\)$`, "m"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "fix-pending.json"), "utf8")).broken, [{ command: BROKEN, logPath: log }]);
+
+  fixerLands(fix, worktree);
+  run("snapshot");
+  const verified = run("verify");
+  assert.equal(verified.json.verify, "passed", verified.stdout);
+  assert.deepEqual(state().gates.verify.commands.map((command) => command.status), ["passed"]);
+  assert.match(verified.json.next, /panel/, "the whole panel reads a fix made after a settle");
+  collected(staged, run, state, [], 2);
+  assert.match(settledClean(run, state).json.next, /ship\.mjs" publish /);
+  assert.equal(publish(staged).status, 0);
+  const finished = ship("finish", staged.plan, ["--spec", "01-a"], staged.env);
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal(state().state, "merged", finished.stdout);
+  assert.equal(finished.json.blockers, undefined);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("open findings and a command the change broke reach one fixer together, in one fix round", () => {
+  const staged = stageBroken();
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  const log = state().gates.verify.commands[0].runs.at(-1).logPath;
+  const review = collected(staged, run, state, [major("app.js")]);
+  assert.equal(review.json.review, "open");
+  assert.match(review.json.next, /ship\.mjs" fix /);
+
+  const fix = run("fix");
+  assert.equal(state().fixRoundsUsed, 1);
+  assert.equal(fix.json.dispatch.length, 1, "more than one fixer was sent");
+  const { prompt } = fix.json.dispatch[0];
+  assert.match(prompt, new RegExp(`^Test commands this change broke, each with the log of its failing run: ${BROKEN} \\(${log}\\)$`, "m"));
+  const brief = /^Findings to fix \(only these\): (.*)$/m.exec(prompt)[1];
+  assert.deepEqual(JSON.parse(fs.readFileSync(brief, "utf8")).findings.map((finding) => finding.id), ["1.correctness.1"]);
+  assert.match(fix.json.say[0], /and the test command\(s\) this change broke, `[^`]*grep[^`]*`, with their failing logs/);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("only pull request findings open and a command the change broke send a fixer for the command, not the pull-request-only exit", () => {
+  const staged = stageBroken();
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  const review = collected(staged, run, state, [NOTHING]);
+  assert.equal(review.json.review, "open");
+
+  const fix = run("fix");
+  assert.equal(fix.json.dispatch?.length, 1, `no fixer was sent: ${fix.stdout}`);
+  assert.match(fix.json.dispatch[0].prompt, new RegExp(`^Test commands this change broke, each with the log of its failing run: ${BROKEN} `, "m"));
+  assert.equal(state().fixRoundsUsed, 1);
+  const brief = /^Findings to fix \(only these\): (.*)$/m.exec(fix.json.dispatch[0].prompt)[1];
+  assert.deepEqual(JSON.parse(fs.readFileSync(brief, "utf8")).findings, [], "a pull request finding reached the fixer");
+  assert.ok(fix.json.say.some((line) => /pull request/i.test(line)), "the pull request finding was dropped from what is said");
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a command that fails on the base too is not handed to the fixer beside one the change broke", () => {
+  const staged = stageBroken({ commands: ["echo old-failure; exit 1", BROKEN] });
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  assert.deepEqual(state().gates.verify.commands.map((command) => [command.status, command.base?.status]), [["failed", "failed"], ["failed", "passed"]]);
+  collected(staged, run, state);
+  assert.match(settledClean(run, state).json.next, /ship\.mjs" fix /);
+  const fix = run("fix");
+  const lines = fix.json.dispatch[0].prompt.split("\n").filter((line) => line.startsWith("Test commands this change broke"));
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes(BROKEN), lines[0]);
+  assert.ok(!lines[0].includes("old-failure"), `the command that fails on the base was handed over: ${lines[0]}`);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
+test("a command the change broke with every fix round spent sends no fixer and stops at finish as before", () => {
+  const staged = stageBroken({ fixRounds: 1 });
+  const run = stepsOf(staged);
+  const { state } = snapshotted(staged, { "app.js": A_CHANGE });
+  run("verify");
+  // The one fix round was spent on an earlier candidate of this cycle.
+  const file = path.join(staged.shipDir, "01-a", "state.json");
+  write(file, { ...state(), fixRoundsUsed: 1 });
+  collected(staged, run, state);
+  const settled = settledClean(run, state);
+  assert.match(settled.json.next, /ship\.mjs" publish /, settled.stdout);
+  assert.equal(settled.json.dispatch, undefined, "a fixer was sent with no fix round left");
+  assert.equal(state().fixRoundsUsed, 1);
+  assert.equal(publish(staged).status, 0);
+  const finished = ship("finish", staged.plan, ["--spec", "01-a"], staged.env);
+  assert.deepEqual(finished.json.blockers, ["verification-failed"]);
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });

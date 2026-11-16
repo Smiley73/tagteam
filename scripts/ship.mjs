@@ -1042,13 +1042,33 @@ function refuseWhileWaiting(id, state, step) {
     + "Run revisit to look at the reviewed commit again — it spends no fix round and no CI repair — or repair when a check is red.");
 }
 
-function fixerDispatch(ctx, spec, recordPath, job) {
+// The verify commands this candidate's change broke, with the log of the run
+// that failed each: a command that failed both its runs and passed on the commit
+// the change started from. One that also fails there, or whose base run could
+// not be made, is not the change's to fix. Empty once no fix round is left,
+// where the spec publishes and stops at finish as it always has. Read by the
+// route and by the brief, so that neither can disagree about what was broken.
+function brokenByChange(ctx, state) {
+  if ((state.fixRoundsUsed ?? 0) >= ctx.config.limits.fixRounds) return [];
+  const verify = state.gates?.verify?.candidateOid === state.candidateOid ? state.gates.verify : null;
+  return (verify?.commands ?? [])
+    .filter((command) => command.status === "failed" && command.base?.status === "passed")
+    .map((command) => ({ command: command.command, logPath: (command.runs?.at(-1) ?? command).logPath }));
+}
+
+const brokenNames = (broken) => listOf(broken.map(({ command }) => `\`${command}\``));
+
+function fixerDispatch(ctx, spec, recordPath, job, broken = []) {
   return {
     ...agent("fixer", job),
     description: `Fix ${spec.id}`,
     prompt: [
       `Job: fixer`,
       `Findings to fix (only these): ${recordPath}`,
+      ...(broken.length > 0
+        ? ["Test commands this change broke, each with the log of its failing run: "
+          + broken.map(({ command, logPath }) => `${command} (${logPath})`).join("; ")]
+        : []),
       `Spec this change implements (to read, not to work from): ${spec.path}`,
       `The plan's goal (to read, not to work from): ${path.join(ctx.plan, "goal.md")}`,
       `Worktree (work only beneath this path): ${ctx.worktree}`,
@@ -1117,6 +1137,10 @@ function reportResendDispatch(ctx, spec, { pending, state, oid, request, problem
   const brief = [
     ...(pending?.from === "redesign" ? [`Redesign brief: ${pending.record}`, `Files to redesign: ${(pending.files ?? []).join(", ")}`] : []),
     ...(["panel", "settle"].includes(pending?.from) ? [`Findings to fix: ${pending.record}`] : []),
+    ...(pending?.broken?.length > 0
+      ? ["Test commands this change broke, handed to the earlier fixer with the log of each failing run: "
+        + pending.broken.map(({ command, logPath }) => `${command} (${logPath})`).join("; ")]
+      : []),
     ...(pending?.from === "repair"
       ? [landing
         ? `A landing repair: what failed and its log is ${landing.resultPath ?? landing.dir}.`
@@ -4417,7 +4441,8 @@ async function fix(options) {
   const aboutPr = (record.findings ?? []).filter(isPullRequestFinding);
   const forFixer = (record.findings ?? []).filter((finding) => !isPullRequestFinding(finding));
   const prSay = aboutPr.length > 0 ? [pullRequestFindingsLine(ctx, id, aboutPr)] : [];
-  if (forFixer.length === 0 && aboutPr.length > 0) {
+  const broken = brokenByChange(ctx, state);
+  if (forFixer.length === 0 && aboutPr.length > 0 && broken.length === 0) {
     if (settled) {
       // The readers have judged these once already, against the body as it was.
       // The body is rewritten, published, and judged again on a revisit — or
@@ -4487,15 +4512,18 @@ async function fix(options) {
     briefPath = path.join(round.dir, settled ? "still-open.code.json" : "to-fix.code.json");
     writeJson(briefPath, { ...record, findings: [...forFixer, ...deletions] });
   }
-  writeJson(fixPendingPath(ctx, id), { round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", record: briefPath, at: new Date().toISOString() });
+  writeJson(fixPendingPath(ctx, id), {
+    round: round.round, candidate: state.candidateOid, from: settled ? "settle" : "panel", record: briefPath,
+    ...(broken.length > 0 ? { broken } : {}), at: new Date().toISOString()
+  });
   fs.rmSync(fixDeclinedPath(ctx, id), { force: true });
   // A fix is the person choosing to fix over an accept they may have given.
   fs.rmSync(acceptedPath(ctx, id), { force: true });
   const budget = edge.output?.budget ?? {};
-  const dispatch = fixerDispatch(ctx, spec, briefPath, job);
+  const dispatch = fixerDispatch(ctx, spec, briefPath, job, broken);
   const set = await sendForSnapshot(ctx, id, { kind: "fix", round: round.round, dispatch, job });
   emit({
-    say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets the blocking and major findings about the code${deletions.length > 0 ? `, and ${deletions.length} deletion(s) the economy reviewer asked for, which it may decline and which change nothing about merging` : ""}, from ${briefPath}.`, ...prSay],
+    say: [`Fix round ${budget.ordinal} of the ${budget.limit} this repository allows; fixer ${settings(job)}. It gets the blocking and major findings about the code${deletions.length > 0 ? `, and ${deletions.length} deletion(s) the economy reviewer asked for, which it may decline and which change nothing about merging` : ""}${broken.length > 0 ? `, and the test command(s) this change broke, ${brokenNames(broken)}, with their failing logs` : ""}, from ${briefPath}.`, ...prSay],
     dispatch: [dispatch],
     set,
     next: nextCommand(ctx, "snapshot", id)
@@ -4940,6 +4968,15 @@ async function settle(options) {
   const churn = churnAsk(ctx, id, state, plan.round, { openForFixer, atCollect: false, honour: true });
   const signal = churn.signal;
   say.push(...signal);
+  // A command this change broke is for a fixer whatever else is open or accepted:
+  // `verification-failed` is a blocker no approval clears, so publishing would
+  // only reach the same stop later.
+  const broken = brokenByChange(ctx, state);
+  const toFixer = () => {
+    transition(ctx, id, "reviewing");
+    say.push(`${brokenNames(broken)} fail${broken.length === 1 ? "s" : ""} on this change and pass${broken.length === 1 ? "es" : ""} on the code before it, so a fix round follows.`);
+    return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "fix", id) });
+  };
   if (open.length > 0) {
     // A person accepted this candidate as it is, and nothing is open that they
     // did not see. Anything open they have not seen — a fresh adversary finding
@@ -4954,17 +4991,20 @@ async function settle(options) {
     // Off the plan branch an accept covers every finding open.
     const needsAccept = onPlanBranch(state, ctx.config) ? open.filter((finding) => !isPullRequestFinding(finding)) : open;
     const covered = accepted?.candidate === state.candidateOid && accepted.round === plan.round && needsAccept.every((finding) => acceptedIds.has(finding.id));
-    const onPlan = covered ? acceptOnPlanBranch(ctx, id, [...acceptedIds]) : null;
+    const onPlan = covered && broken.length === 0 ? acceptOnPlanBranch(ctx, id, [...acceptedIds]) : null;
     // Everything still open is about the pull request: no fixer can reach it,
     // so no fix round is spent on it. The spec publishes with the body the
     // orchestrator writes, and a revisit puts that body to the readers.
     if (open.every(isPullRequestFinding)) {
-      say.push(pullRequestFindingsLine(ctx, id, open), pullRequestOnlyLine(ctx, id));
+      say.push(pullRequestFindingsLine(ctx, id, open));
+      if (broken.length > 0) return toFixer();
+      say.push(pullRequestOnlyLine(ctx, id));
       if (onPlan) say.push(onPlan.line);
       return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
     }
     // It publishes with what is open disclosed.
     if (covered) {
+      if (broken.length > 0) return toFixer();
       const decided = `Publishing as it is, as you decided at round ${accepted.round}: what is open goes into the pull request under Risk`;
       say.push(onPlan?.merges ? `${decided}. ${onPlan.line}`
         : [`${decided}, it will not merge unattended, and finish cannot approve past an open finding — merging it is yours to do on GitHub.`, onPlan?.line].filter(Boolean).join(" "));
@@ -4984,9 +5024,11 @@ async function settle(options) {
       say.push(AUTO_REDESIGN);
     } else {
       say.push("Something blocking or major is still open, so another fix round follows if the budget allows one.");
+      if (broken.length > 0) say.push(`${brokenNames(broken)} also broke on this change, and the fixer is handed ${broken.length === 1 ? "it" : "them"} too.`);
     }
     return emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}), next: nextCommand(ctx, churn.auto ? "redesign" : "fix", id) });
   }
+  if (broken.length > 0) return toFixer();
   emit({ say, review: settledReview.status, ...(signal.length > 0 ? { signal } : {}), next: nextCommand(ctx, "publish", id) });
 }
 
