@@ -5739,6 +5739,7 @@ function revisit(options) {
 // whatever phase the attempt reached without taking another.
 async function resolveCommit(options) {
   const ctx = context(options);
+  await backFromBase(ctx);
   const id = options.spec;
   const record = requireOpenRound(ctx, id, "resolve-commit");
   const attempt = record.attempts.at(-1);
