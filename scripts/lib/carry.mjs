@@ -4,6 +4,7 @@
 // of this module, and the driver's fixer table asks the rest.
 import { planBranchOf } from "./plan-route.mjs";
 import { isPullRequestFinding } from "../collect-findings.mjs";
+import { isFixUnitId } from "./whole-plan.mjs";
 
 /**
  * Whether this state confirms that its pull request merges into this plan's own
@@ -28,11 +29,12 @@ export function onPlanBranch(state, config) {
 
 /**
  * Whether `mergeWithOpenFindings` applies to this spec: on, and on its plan's
- * own branch. The one place the setting is read, for the driver and the gates
+ * own branch, and not a whole-plan fix unit, which no setting lets merge with a
+ * finding open. The one place the setting is read, for the driver and the gates
  * alike.
  */
 export function mergesWithOpenFindings(state, config) {
-  return Boolean(config?.mergeWithOpenFindings) && onPlanBranch(state, config);
+  return Boolean(config?.mergeWithOpenFindings) && !isFixUnitId(state.spec) && onPlanBranch(state, config);
 }
 
 /** Whether the ship carries on this spec's behalf: `carry` is on, or the setting stands in for it. */

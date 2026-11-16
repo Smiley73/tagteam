@@ -2,7 +2,7 @@
 // the driver and the later carry and accept steps all read.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { awaitedByUnmerged, carryEligible, carryRefusal, recommendation } from "../scripts/lib/carry.mjs";
+import { awaitedByUnmerged, carryEligible, carryRefusal, mergesWithOpenFindings, recommendation } from "../scripts/lib/carry.mjs";
 
 const PLAN = { slug: "s", base: "plan/s", planRouteBranch: "plan/s" };
 const CONFIG = { base: "main" };
@@ -58,4 +58,11 @@ test("the recommendation is the first rule that applies, and an addressed findin
   assert.equal(ask("minor"), "accept");
   assert.equal(ask("nit"), "accept");
   assert.equal(ask("major"), "needs a person");
+});
+
+test("mergeWithOpenFindings applies to a plan's own spec on its plan branch, and to no whole-plan fix unit", () => {
+  const config = { base: "main", mergeWithOpenFindings: true };
+  assert.equal(mergesWithOpenFindings({ ...PLAN, spec: "02-b" }, config), true);
+  assert.equal(mergesWithOpenFindings({ ...PLAN, spec: "plan-fix-1" }, config), false);
+  assert.equal(mergesWithOpenFindings({ ...PLAN, spec: "plan-followup-1" }, config), false);
 });
