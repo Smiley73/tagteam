@@ -149,8 +149,10 @@ function endGroup(pgid) {
   signal("SIGKILL");
 }
 
-// The groups a claim names.
-const groupsOf = (claim) => (Array.isArray(claim?.groups) ? claim.groups : [])
+// The groups a claim names. A claim written before one could name several names
+// its one group beside the run, as `pgid` and `identity`, and can still be on
+// disk with that group running: it is read as naming that group.
+const groupsOf = (claim) => (Array.isArray(claim?.groups) ? claim.groups : [{ pgid: claim?.pgid, identity: claim?.identity }])
   .filter(({ pgid } = {}) => Number.isSafeInteger(pgid) && pgid > 0);
 
 // Whether the group a claim names is still the earlier run's. A dead leader's
