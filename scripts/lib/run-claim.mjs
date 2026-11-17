@@ -156,7 +156,8 @@ const earlierRuns = ({ pgid, identity }) => !alive(pgid) || (identity && identit
  * Records `run` as the one running a command on the spec whose claim is `file`,
  * after ending whatever is left of the group an earlier run's claim names. A
  * command of the run that already holds the claim leaves it alone while that
- * group has a member left and is still the earlier run's. Nothing is done for a
+ * group has a member left, is still the earlier run's and has the command in
+ * its process tree. Nothing is done for a
  * missing or malformed run id.
  */
 export function claimSpec(file, run) {
@@ -165,7 +166,10 @@ export function claimSpec(file, run) {
     const earlier = JSON.parse(fs.readFileSync(file, "utf8"));
     const named = Number.isSafeInteger(earlier.pgid) && earlier.pgid > 0 && earlierRuns(earlier);
     if (named && earlier.run === run) {
-      if (alive(-earlier.pgid)) return;
+      // Only while this command is inside what the claim names: a standalone
+      // command of the same run leads a group of its own, and the claim has to
+      // move to it for a newer run's takeover to reach it.
+      if (alive(-earlier.pgid) && reach(earlier.pgid).includes(process.pid)) return;
     } else if (named && earlier.pgid !== process.pid) {
       endGroup(earlier.pgid);
     }

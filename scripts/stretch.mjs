@@ -7,9 +7,6 @@
 // and stops where the workflow's loop stops, and prints one answer: every step's
 // `say` lines in order, then the fields of the step it ended on.
 //
-//   stretch.mjs --plan <plan> [--spec <unit>] --dir <capture dir> --arrive <command> [--next <command>]
-//   stretch.mjs --plan <plan> [--spec <unit>] --dir <capture dir> --step <command>
-//
 // With `--arrive` it runs the set's arrival, then `--next`, then each step's
 // `next`. Without `--next` it runs the arrival and stops. With `--step` it runs
 // that one command and stops, whatever its `next` says: that is how `finish` and
@@ -25,8 +22,6 @@
 // The stretch holds each claim it needs, as the leader of its own process group,
 // before the step that needs it runs, so that a newer run's claim ends this one
 // and the step under it before that claim is written.
-//
-// Light on purpose: no git and no configuration.
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -105,7 +100,7 @@ const objectOf = (value) => value !== null && typeof value === "object" && !Arra
 /** A driver payload in the step helper's shape, without its checksum. */
 function projected(payload) {
   const text = (value) => (value === undefined || value === null ? null : String(value));
-  const answers = Array.isArray(payload.answers) ? payload.answers : Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name, command }));
+  const answers = Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name, command }));
   return {
     exit: 0,
     stop: text(payload.stop),
@@ -168,13 +163,16 @@ async function stretch(request) {
     const printed = fs.readFileSync(last.stdout, "utf8");
     const lines = fs.readFileSync(last.stderr, "utf8").replace(/\n$/, "").split("\n");
     let result = null;
-    if (code === 0) {
-      let payload = null;
-      try { payload = JSON.parse(printed); } catch {}
-      if (objectOf(payload) && payload.checksum === checksumOf(payload)) result = projected(payload);
-    } else if (lines.at(-1) === `checksum: ${checksumOf({ exit: code, stop: lines[0] })}`) {
-      result = stopped(code, lines[0]);
-    }
+    // A payload of the wrong shape throws in the checksum or the projection: it is
+    // output that did not come back intact, and the say lines so far must survive.
+    try {
+      if (code === 0) {
+        const payload = JSON.parse(printed);
+        if (objectOf(payload) && payload.checksum === checksumOf(payload)) result = projected(payload);
+      } else if (lines.at(-1) === `checksum: ${checksumOf({ exit: code, stop: lines[0] })}`) {
+        result = stopped(code, lines[0]);
+      }
+    } catch {}
     if (result === null) return { stop: `The ${name} step's output did not come back intact, so nothing after it ran. Starting again from begin reads what is on disk.` };
     say.push(...result.say);
     return { result };

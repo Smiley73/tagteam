@@ -302,7 +302,8 @@ test("a command the runner may not run stops it before that command runs, with t
 test("a step whose output does not carry its own checksum stops the runner with the lines before it, and nothing after it runs", () => {
   const bad = {
     "an answer": (c) => ({ payload: { say: ["wrong"], next: c.cmd("collect") }, checksum: "00000000" }),
-    "a stop": () => ({ exit: 1, stop: "The verify step stopped.", checksum: "00000000" })
+    "a stop": () => ({ exit: 1, stop: "The verify step stopped.", checksum: "00000000" }),
+    "a field of the wrong shape": () => ({ payload: { dispatch: {} }, checksum: "00000000" })
   };
   for (const what of Object.keys(bad)) {
     const staged = standIn({});

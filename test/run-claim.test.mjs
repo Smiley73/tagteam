@@ -98,15 +98,21 @@ test("when the earlier run's command has died, a command of another run still en
   }
 });
 
-test("the same run's next command, and a command with no run, end nothing, and the same run's leaves a live claim as it is", async () => {
+test("the same run's next command, and a command with no run, end nothing, and the same run's takes the claim for its own group when it is not inside the one that holds it", async () => {
   const { plan, shipDir } = stage();
   const orphan = await orphanOf(shipDir, "run-a");
   try {
     ship("checks", plan, ["--spec", "01-a"], { TAGTEAM_RUN_ID: "run-a" });
-    ship("checks", plan, ["--spec", "01-a"]);
-    assert.equal(alive(orphan.leader), true, "a command of the same run, or of no run, ended the earlier command");
+    assert.equal(alive(orphan.leader), true, "a command of the same run ended the earlier command");
     assert.equal(alive(orphan.child), true);
-    assert.equal(pgidOf(orphan.claim), orphan.leader, "the same run's command took the claim from the group that holds it");
+    // A later command of run-a is not covered by the earlier one's group, so a
+    // newer run's takeover would never have reached it had the claim stayed.
+    assert.notEqual(pgidOf(orphan.claim), orphan.leader, "the same run's command left the claim on a group that does not hold it");
+    const taken = fs.readFileSync(orphan.claim, "utf8");
+    ship("checks", plan, ["--spec", "01-a"]);
+    assert.equal(fs.readFileSync(orphan.claim, "utf8"), taken, "a command with no run touched the claim");
+    assert.equal(alive(orphan.leader), true, "a command of no run ended the earlier command");
+    assert.equal(alive(orphan.child), true);
   } finally {
     orphan.end();
   }
