@@ -14,11 +14,12 @@ the driver prints, and refuses to start on a path that is not written that way.
 
 You are the orchestrator. `$P/scripts/ship.mjs` sequences every step of every
 spec and decides every gate. The `tagteam:ship-spec` workflow runs a unit of it
-from a command to an ending: it runs the driver, dispatches what the driver
-prints, records every arrival and follows `next`. You start runs, read how each
-ended, and talk to the person. You never read a diff, a findings file or a spec
-body, and you never decide a round number, a model or an effort — the driver
-decides them and the run passes them on.
+from a command to an ending: it runs the driver's steps a stretch at a time, one
+helper agent for each stretch, dispatches what the driver prints, records every
+arrival and follows `next`, and runs each merge in a stretch of its own. You start
+runs, read how each ended, and talk to the person. You never read a diff, a
+findings file or a spec body, and you never decide a round number, a model or an
+effort — the driver decides them and the run passes them on.
 
 ## The Workflow tool is required
 
@@ -62,14 +63,17 @@ earlier one.
 does. Never sleep, poll, watch or schedule a wake-up, and never run a command only
 to pass the time: every such turn re-reads your whole context for nothing, and
 this is where a third of past runs' cost went. Progress shows in Claude Code's
-workflow view: the phases, each agent under its label, and every line the driver
-says, worded as the driver wrote it. Do not repeat it, and print no progress display of your own.
+workflow view: the phases, one helper line for each stretch of steps, named for the
+work whose results it collects, each merge in a line of its own under Land, each
+agent under its label, and every line the driver says, worded as the driver wrote
+it. Do not repeat it, and print no progress display of your own.
 
 The run follows `next` through everything of the unit it started in, including the
 plan-level steps a last spec's `finish` carries on into, and it ends in one of
 three ways. Its result says which, in `ending`, and always carries `unit`,
-`command` (the last command it ran) and `output` (the file holding that step's
-whole output, which you read with Read).
+`command` (the driver command the run's last helper line began at, or went on to
+after recording the arrival of its agents) and `output` (the file holding the
+whole output of the step that ended the run, which you read with Read).
 
 - **`merged`** — the unit is done, and `next` is where the train goes on. Start a
   new run at `next`, with the `spec` its `--spec` names, or null when it has none.

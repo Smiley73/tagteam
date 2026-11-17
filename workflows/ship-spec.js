@@ -3,10 +3,11 @@
 // script per unit; docs/workflow-spike-findings.md is the record of what the
 // runtime was seen to do, and cited below by its question letter.
 //
-// The script decides nothing the driver decides. It runs the driver's command
-// through the step helper, checks the answer came back unmangled, dispatches
-// what the driver printed, records the arrivals and follows `next`. Every gate,
-// every file on disk and every wording is scripts/ship.mjs's.
+// The script decides nothing the driver decides. It runs a stretch of the
+// driver's steps through one step helper, as one command (scripts/stretch.mjs),
+// checks the answer came back unmangled, dispatches what the stretch ended on,
+// and follows its `next`. A merge runs in a line of its own. Every gate, every
+// file on disk and every wording is scripts/ship.mjs's.
 //
 // It cannot import (findings, "Also seen"), so the three pieces it needs from
 // scripts/lib/step-helper.mjs are pasted below, word for word. It is named
@@ -21,13 +22,11 @@ export const meta = {
   description: "Runs one unit of an approved plan through tagteam's ship driver: implement, review, fix, publish, check and merge, from the command it is given until the unit merges, stops, or the driver has a question for a person. Started by /tagteam:ship, which reads how it ended.",
   whenToUse: "Only /tagteam:ship starts this, with the plan, the unit, the plugin root, a run stamp and the first command. A request to ship work never calls for it directly: use /tagteam:ship instead.",
   phases: [
-    { title: "Implement", detail: "begin and redesign: an implementer works in the unit's worktree" },
-    { title: "Snapshot and verify", detail: "the candidate is committed and every verify command runs" },
+    { title: "Implement", detail: "an implementer works in the unit's worktree, then the candidate is committed and every verify command runs" },
     { title: "Review", detail: "the panel, Codex included, and the judging of what it wrote" },
     { title: "Re-check", detail: "the adversary's fresh pass and each reader's re-check" },
     { title: "Fix", detail: "a fixer, the one tidy or a CI repair works the findings, the surplus deletions or the red check" },
-    { title: "Publish", detail: "the pull request is written and opened" },
-    { title: "Checks", detail: "the pull request's checks are waited for" },
+    { title: "Publish", detail: "the pull request is written and opened, and its checks are waited for" },
     { title: "Land", detail: "the merge, the whole-plan check and the landing of the plan" }
   ]
 };
@@ -135,18 +134,21 @@ const command = given(input.command);
 
 const PHASE_OF = {
   begin: "Implement", redesign: "Implement",
-  snapshot: "Snapshot and verify", verify: "Snapshot and verify", "resolve-commit": "Snapshot and verify",
+  snapshot: "Implement", verify: "Implement", "resolve-commit": "Implement",
   panel: "Review", collect: "Review", "resolve-collect": "Review", revisit: "Review",
   recheck: "Re-check", settle: "Re-check",
   fix: "Fix", tidy: "Fix", repair: "Fix",
   publish: "Publish", accept: "Publish",
-  checks: "Checks",
+  checks: "Publish",
   finish: "Land", "plan-check": "Land", "plan-collect": "Land", "plan-land": "Land", "plan-adopt": "Land"
 };
 // The main session's own: a held lock, a person-only answer before any unit
 // begins, and teardown. A run never starts, follows or ends in one of them.
 const SESSION_ONLY = ["start", "dependencies", "end"];
+// A merge runs alone, so that a person can stop the run from the view before it starts.
+const MERGES = ["finish", "plan-land"];
 const HELPER = "tagteam:step-helper";
+const IMPLEMENTER = "tagteam:implementer";
 const RUNNER = "tagteam:codex-runner";
 const UNCONFIRMED = "how it routed could not be confirmed";
 
@@ -195,31 +197,57 @@ function refusal(line, first) {
   return null;
 }
 
+// What the agents of a set did, from the step their dispatching step sent them to: the line that records their
+// arrival is named for it, and sits under its heading.
+const WORK_AFTER = {
+  collect: ["review", "Review"], "resolve-collect": ["review", "Review"],
+  settle: ["re-check", "Re-check"], publish: ["publish", "Publish"],
+  "resolve-commit": ["resolve", "Fix"], "plan-collect": ["plan-check", "Land"], "plan-land": ["land", "Land"]
+};
+
+/** `[name, heading]` for the work a dispatching step's agents did, or null when its next is not one the run knows. */
+function workOf(result) {
+  const named = result.next === null ? null : subcommandOf(result.next);
+  if (named === "snapshot") {
+    return result.dispatch.every((entry) => entry.agent === IMPLEMENTER) ? ["implement", "Implement"] : ["fix", "Fix"];
+  }
+  return Object.hasOwn(WORK_AFTER, named) ? WORK_AFTER[named] : null;
+}
+
+const quoted = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
 let currentPhase = null;
-let steps = 0;
+let lines = 0;
+
+function heading(title) {
+  if (title !== currentPhase) { phase(title); currentPhase = title; }
+}
 
 /**
- * One command through the step helper. Returns `{ result }` when the answer came
- * back whole, or `{ stop }` with the run's own line when it did not.
+ * One stretch of the driver's steps through the step helper, as one command.
+ * `form` is the runner's own arguments; `reported` is the driver command the line
+ * began at, which is what the run's result names. Returns `{ result }` when the
+ * answer came back whole, or `{ stop }` with the run's own line when it did not.
  */
-async function runStep(shell, name, title) {
-  if (title !== currentPhase) { phase(title); currentPhase = title; }
-  steps += 1;
-  const dir = `${shipDir}/steps/${stamp}/${String(steps).padStart(3, "0")}-${name}`;
-  last = { command: shell, output: `${dir}/stdout`, stderr: `${dir}/stderr` };
+async function runLine(reported, name, title, form) {
+  heading(title);
+  lines += 1;
+  const dir = `${shipDir}/steps/${stamp}/${String(lines).padStart(3, "0")}-${name}`;
+  last = { command: reported, output: `${dir}/output`, stderr: `${dir}/stderr` };
+  const runner = `TAGTEAM_RUN_ID=${stamp} ${scriptPrefix("stretch.mjs")}--plan ${quoted(plan)}${spec === null ? "" : ` --spec ${quoted(spec)}`} --dir ${quoted(dir)} ${form}`;
   let result;
   try {
-    result = await agent(stepHelperPrompt(`TAGTEAM_RUN_ID=${stamp} ${shell}`, dir), {
-      label: `Step ${steps}: ${name}`, phase: title, agentType: HELPER, schema: stepHelperSchema()
+    result = await agent(stepHelperPrompt(runner, dir), {
+      label: `Step ${lines}: ${name}`, phase: title, agentType: HELPER, schema: stepHelperSchema()
     });
   } catch (error) {
-    return { stop: `The ${name} step's helper was rejected (${String(error?.message ?? error)}), so nothing after it ran. Starting again from begin reads what is on disk.` };
+    return { stop: `The ${name} line's helper was rejected (${String(error?.message ?? error)}), so nothing after it ran. Starting again from begin reads what is on disk.` };
   }
   if (!fits(result) || checksumOf(result) !== result.checksum) {
-    return { stop: `The ${name} step's output did not come back intact, so nothing after it ran. Starting again from begin reads what is on disk.` };
+    return { stop: `The ${name} line's output did not come back intact, so nothing after it ran. Starting again from begin reads what is on disk.` };
   }
   if (result.exit !== 0 && !result.stop) {
-    return { stop: `The ${name} step did not run, so nothing after it ran. Starting again from begin reads what is on disk.` };
+    return { stop: `The ${name} line did not run, so nothing after it ran. Starting again from begin reads what is on disk.` };
   }
   return { result };
 }
@@ -247,21 +275,36 @@ function endOf(step) {
   return null;
 }
 
-let next = command;
+let todo = { shell: command };
 let first = true;
 for (;;) {
-  const refused = refusal(next, first);
-  if (refused !== null) return stopped(`The command ${JSON.stringify(next)} ${refused}, so it was not run.`);
-  first = false;
-  const name = subcommandOf(next);
-  const title = PHASE_OF[name];
-  const step = await runStep(next, name, title);
-  const over = endOf(step);
+  let line, lineName;
+  if (todo.arrival === undefined) {
+    const refused = refusal(todo.shell, first);
+    if (refused !== null) return stopped(`The command ${JSON.stringify(todo.shell)} ${refused}, so it was not run.`);
+    first = false;
+    const sub = subcommandOf(todo.shell);
+    const merge = MERGES.includes(sub);
+    lineName = merge ? "land" : sub;
+    line = await runLine(todo.shell, lineName, merge ? "Land" : PHASE_OF[sub], `--step ${quoted(todo.shell)}`);
+  } else {
+    const refused = refusal(todo.next, false);
+    if (refused !== null) return stopped(`The command ${JSON.stringify(todo.next)} ${refused}, so it was not run.`);
+    [lineName] = todo.work;
+    line = await runLine(todo.next, ...todo.work, `--arrive ${quoted(todo.arrival)} --next ${quoted(todo.next)}`);
+  }
+  const over = endOf(line);
   if (over !== null) return over;
-  const { result } = step;
-  const stepLast = last;
+  const { result } = line;
+  const lineLast = last;
 
   if (result.dispatch.length > 0) {
+    const work = workOf(result);
+    if (work === null) {
+      return stopped("The step that sent the agents named no step the run can place the work of, so the agents were not sent and nothing after it ran. Starting again from begin releases the set.");
+    }
+    const [workName, title] = work;
+    heading(title);
     const settled = await parallel(result.dispatch.map((entry) => async () => {
       try {
         return { value: await agent(entry.prompt, {
@@ -288,23 +331,28 @@ for (;;) {
     if (!arrival.startsWith(scriptPrefix("dispatch-set.mjs") + "arrive ")) {
       return stopped("The command that records the arrivals is not the plugin's own scripts/dispatch-set.mjs arrive, so it was not run.");
     }
-    const arrived = await runStep(arrival, "arrive", title);
-    const stoppedAt = endOf(arrived);
-    if (stoppedAt !== null) return stoppedAt;
-    if (arrived.result.next === null) {
-      return stopped("The arrivals did not complete the set, so nothing after them ran. Starting again from begin releases it.");
-    }
     if (unconfirmed !== undefined) {
-      last = stepLast;
+      const arrived = await runLine(lineLast.command, workName, title, `--arrive ${quoted(arrival)}`);
+      const stoppedAt = endOf(arrived);
+      if (stoppedAt !== null) return stoppedAt;
+      if (arrived.result.next === null) {
+        return stopped("The arrivals did not complete the set, so nothing after them ran. Starting again from begin releases it.");
+      }
+      last = lineLast;
       return ended("ask", { kind: "codex-routing", line: unconfirmed, next: result.next });
     }
-  } else if (result.set !== null) {
+    todo = { arrival, next: result.next, work };
+    continue;
+  }
+  if (result.set !== null) {
     return stopped("Agents another run sent are still out. Start the unit again from begin once that run has ended and it picks the unit up.");
   }
 
-  if (result.next === null) return stopped("The step named no next command and asked nothing, so the run ended there.");
+  if (result.next === null) {
+    return stopped(`The ${lineName} line ended with no next command to follow, so nothing after it ran. Starting again from begin reads what is on disk.`);
+  }
   const nextName = subcommandOf(result.next);
   const nextUnit = flag(result.next, "spec");
   if (nextName === "end" || (nextUnit !== null && nextUnit !== spec)) return ended("merged", { next: result.next });
-  next = result.next;
+  todo = { shell: result.next };
 }
