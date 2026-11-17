@@ -84,14 +84,17 @@ export function helperTask(call) {
 
 // --- the helper's answers -------------------------------------------------------
 
-/** A driver payload in the helper's schema, with the checksum the driver printed or would print. */
+/**
+ * A driver payload in the helper's schema, with the checksum the driver printed or would print.
+ * A payload already in the helper's shape (a stretch's answer) keeps its `exit`, `stop` and `answers`.
+ */
 export function helperResult(payload, checksum = checksumOf(payload)) {
   return {
-    exit: 0,
-    stop: null,
+    exit: payload.exit ?? 0,
+    stop: payload.stop ?? null,
     say: [].concat(payload.say ?? []),
     ask: payload.ask ?? null,
-    answers: Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name, command })),
+    answers: Array.isArray(payload.answers) ? payload.answers : Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name, command })),
     next: payload.next ?? null,
     dispatch: (payload.dispatch ?? []).map(({ agent, model, effort, description, prompt }) => ({
       agent: agent ?? null, model: model ?? null, effort: effort ?? null, description: description ?? null, prompt: prompt ?? null

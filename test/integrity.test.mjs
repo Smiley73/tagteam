@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 import { spawnSync } from "node:child_process";
 import { stagePlugin, stagePlan } from "./stage.mjs";
 
@@ -1132,6 +1133,16 @@ test("the ship-spec and plan-specs scripts carry the step helper's checksum, sch
       assert.equal(pasted, piece.toString(), `workflows/${file} carries ${piece.name} differently from scripts/lib/step-helper.mjs`);
     }
   }
+});
+
+// The stretch runner refuses what the workflow refuses, from its own copy of the lists.
+test("the stretch runner's run steps and session-only steps are the ones workflows/ship-spec.js holds", async () => {
+  const stretch = await import("../scripts/stretch.mjs");
+  const script = read("workflows", "ship-spec.js");
+  const phaseOf = JSON.parse(JSON.stringify(vm.runInNewContext(`(${/const PHASE_OF = (\{[\s\S]*?\n\});/.exec(script)[1]})`)));
+  const sessionOnly = JSON.parse(JSON.stringify(vm.runInNewContext(/const SESSION_ONLY = (\[.*?\]);/.exec(script)[1])));
+  assert.deepEqual(stretch.RUN_STEPS, Object.keys(phaseOf), "scripts/stretch.mjs RUN_STEPS differs from PHASE_OF in workflows/ship-spec.js");
+  assert.deepEqual(stretch.SESSION_ONLY, sessionOnly, "scripts/stretch.mjs SESSION_ONLY differs from workflows/ship-spec.js");
 });
 
 test("the dispatch guard fails on the plan command as it read before it had sets", () => {

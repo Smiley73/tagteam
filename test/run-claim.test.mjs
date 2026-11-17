@@ -63,6 +63,7 @@ async function settles(pids) {
 }
 
 const claimedBy = (claim) => JSON.parse(fs.readFileSync(claim, "utf8")).run;
+const pgidOf = (claim) => JSON.parse(fs.readFileSync(claim, "utf8")).pgid;
 
 test("a command of another run ends the earlier run's command, what it started in its group and in a group of its own, and takes the claim", async () => {
   const { plan, shipDir } = stage();
@@ -97,7 +98,7 @@ test("when the earlier run's command has died, a command of another run still en
   }
 });
 
-test("the same run's next command, and a command with no run, end nothing", async () => {
+test("the same run's next command, and a command with no run, end nothing, and the same run's leaves a live claim as it is", async () => {
   const { plan, shipDir } = stage();
   const orphan = await orphanOf(shipDir, "run-a");
   try {
@@ -105,9 +106,20 @@ test("the same run's next command, and a command with no run, end nothing", asyn
     ship("checks", plan, ["--spec", "01-a"]);
     assert.equal(alive(orphan.leader), true, "a command of the same run, or of no run, ended the earlier command");
     assert.equal(alive(orphan.child), true);
+    assert.equal(pgidOf(orphan.claim), orphan.leader, "the same run's command took the claim from the group that holds it");
   } finally {
     orphan.end();
   }
+});
+
+test("the same run's command takes the claim once the group it names is empty", async () => {
+  const { plan, shipDir } = stage();
+  const orphan = await orphanOf(shipDir, "run-a");
+  orphan.end();
+  await settles([orphan.leader, orphan.child, orphan.detached]);
+  ship("checks", plan, ["--spec", "01-a"], { TAGTEAM_RUN_ID: "run-a" });
+  assert.equal(claimedBy(orphan.claim), "run-a");
+  assert.notEqual(pgidOf(orphan.claim), orphan.leader, "a command of the run left a claim on a group nobody is in");
 });
 
 test("a claim whose leader's pid now belongs to another process ends nothing, and is taken", async () => {

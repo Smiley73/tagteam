@@ -1,5 +1,8 @@
 // One run at a time on a spec: the newest run's command ends what an earlier
-// run's command is still doing there, and everything that command started.
+// run's command is still doing there, and everything that command started. A
+// run's own commands do not take the claim from each other while the group it
+// names is live, so that a stretch of them (scripts/stretch.mjs) can hold it
+// for its whole life.
 //
 // A workflow's step helper starts every driver command detached, so stopping the
 // run, or a crash, leaves the command running with nobody waiting for it. A new
@@ -151,14 +154,19 @@ const earlierRuns = ({ pgid, identity }) => !alive(pgid) || (identity && identit
 
 /**
  * Records `run` as the one running a command on the spec whose claim is `file`,
- * after ending whatever is left of the group an earlier run's claim names.
- * Nothing is done for a missing or malformed run id.
+ * after ending whatever is left of the group an earlier run's claim names. A
+ * command of the run that already holds the claim leaves it alone while that
+ * group has a member left and is still the earlier run's. Nothing is done for a
+ * missing or malformed run id.
  */
 export function claimSpec(file, run) {
   if (typeof run !== "string" || !RUN_ID.test(run)) return;
   try {
     const earlier = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (earlier.run !== run && Number.isSafeInteger(earlier.pgid) && earlier.pgid > 0 && earlier.pgid !== process.pid && earlierRuns(earlier)) {
+    const named = Number.isSafeInteger(earlier.pgid) && earlier.pgid > 0 && earlierRuns(earlier);
+    if (named && earlier.run === run) {
+      if (alive(-earlier.pgid)) return;
+    } else if (named && earlier.pgid !== process.pid) {
       endGroup(earlier.pgid);
     }
   } catch {}
