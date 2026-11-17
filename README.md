@@ -564,9 +564,12 @@ confirmed, as a report that never holds anything up.
 
 The orchestrator is the main Claude Code agent following the command files. In a
 ship it starts one `tagteam:ship-spec` workflow run per spec and ends its turn, and
-in a plan, past the goal gate, one `tagteam:plan-specs` run. A run runs
-`scripts/ship.mjs` (`scripts/plan.mjs` in a plan) once per step, through a small helper agent whose
-answers are checksummed so a copy that was altered or cut short is refused. The
+in a plan, past the goal gate, one `tagteam:plan-specs` run. A ship runs
+`scripts/ship.mjs` a stretch of steps at a time, through one small helper agent for each
+stretch. A stretch ends where agents are to be sent, a question is asked, a step stops or a merge
+comes, and each merge runs in a line of its own, so that a person can still stop the run from
+the view before it starts. A plan runs `scripts/plan.mjs` once per step, through a small helper
+agent. The helper's answers are checksummed so a copy that was altered or cut short is refused. The
 driver runs git, Codex and the other scripts, decides the round, the route and
 every model and effort, and prints the agents to dispatch with their prompts
 written out. The run sends them out together and tells the driver as each one

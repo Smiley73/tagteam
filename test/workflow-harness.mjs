@@ -82,6 +82,13 @@ export function helperTask(call) {
   return { command: unquote(command), dir: unquote(dir) };
 }
 
+/** The arguments of a stretch command a helper prompt asks for: `plan`, `spec`, `dir`, and `arrive`, `next`, `from` or `step`. */
+export function stretchOf(command) {
+  const form = {};
+  for (const found of command.matchAll(/ --(plan|spec|dir|arrive|next|from|step) ((?:'[^']*'|\\')+)/g)) form[found[1]] = unquote(found[2]);
+  return form;
+}
+
 // --- the helper's answers -------------------------------------------------------
 
 /**
@@ -146,5 +153,17 @@ export function shellHelper(env = process.env) {
       output = spawnSync("sh", ["-c", wait], { encoding: "utf8", env }).stdout;
     }
     return resultOfOutput(output);
+  };
+}
+
+/**
+ * A helper that only launches the command and never answers, which leaves the
+ * command running with nobody waiting on it: a run that crashed in the middle of it.
+ */
+export function launchOnlyHelper(env = process.env) {
+  return (call) => {
+    const [start] = blocks(call.prompt);
+    spawnSync("sh", ["-c", start.slice(0, start.indexOf("\ni=0\n"))], { encoding: "utf8", env });
+    return new Promise(() => {});
   };
 }

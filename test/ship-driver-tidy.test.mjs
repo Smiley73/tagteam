@@ -12,7 +12,7 @@ import { RoundBudgetExhausted, allocateRound, listRounds } from "../scripts/lib/
 import { markRound } from "../scripts/lib/round-store.mjs";
 import { reconcileBudgets } from "../scripts/gates.mjs";
 import { looseSignal } from "../scripts/lib/churn.mjs";
-import { compileWorkflowFile, startWorkflow, isHelperCall, helperTask, helperResult, shellHelper } from "./workflow-harness.mjs";
+import { compileWorkflowFile, startWorkflow, isHelperCall, helperTask, helperResult, stretchOf, shellHelper } from "./workflow-harness.mjs";
 import { ship, write, outputOf, resultOf, arriveAll, findings, major, stagePlan, trainOf, git, root } from "./ship-stage.mjs";
 
 const ID = "01-a";
@@ -125,21 +125,26 @@ test("through the ship-spec workflow, a clean round with one economy deletion ti
   const { plan, env } = cycle;
   const real = shellHelper({ ...process.env, ...env, TAGTEAM_SKIP_TOOL_CHECKS: "1" });
   const SHIP = JSON.stringify(path.join(root, "scripts", "ship.mjs"));
-  const stepOf = (command) => /(?:ship|dispatch-set)\.mjs" ([a-z-]+)/.exec(command)[1];
   const steps = [];
   const helper = (call) => {
-    const { command } = helperTask(call);
-    steps.push(stepOf(command));
-    // Publish needs a pull request; the run is judged up to the step before it.
-    if (stepOf(command) === "publish") return helperResult({ say: ["publish reached"], next: `node ${SHIP} end --plan ${JSON.stringify(plan)}` });
-    return real(call);
+    const { command, dir } = helperTask(call);
+    const form = stretchOf(command);
+    // Publish needs a pull request; the run is judged up to the line that records the writer's arrival and goes on to publish.
+    if (/ publish --plan /.test(form.next ?? form.step)) {
+      return helperResult({ say: ["publish reached"], next: `node ${SHIP} end --plan ${JSON.stringify(plan)}` });
+    }
+    const answer = real(call);
+    steps.push(...fs.readdirSync(dir).filter((name) => /^\d\d-/.test(name)).sort().map((name) => name.slice(3)));
+    return answer;
   };
   const sent = [];
   const agent = (call) => {
     const prompt = call.prompt;
     const oid = cycle.state().candidateOid;
     sent.push({ label: call.options.label, oid });
-    if (/^Job: implementer/m.test(prompt)) {
+    if (/pull request body to write/.test(prompt)) {
+      // The writer's files are not needed: the line that would judge them is stood in for.
+    } else if (/^Job: implementer/m.test(prompt)) {
       write(path.join(cycle.worktree, "app.js"), A_CHANGE);
       write(outputOf({ prompt }), { status: "complete", summary: "added sub", unfinished: [] });
     } else if (/^Job: fixer/m.test(prompt)) {
