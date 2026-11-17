@@ -1,5 +1,10 @@
 // One run at a time on a spec: the newest run's command ends what an earlier
-// run's command is still doing there, and everything that command started.
+// run's command is still doing there, and everything that command started. A
+// run's own command ends only what an earlier one of its commands left behind,
+// and adds its own group to the claim beside the groups of that run that are
+// still running, so that a newer run's takeover reaches all of them, and a
+// stretch of commands (scripts/stretch.mjs) can hold the claim for its whole
+// life.
 //
 // A workflow's step helper starts every driver command detached, so stopping the
 // run, or a crash, leaves the command running with nobody waiting for it. A new
@@ -8,7 +13,8 @@
 // id is the main session's own and neither claims nor ends anything.
 //
 // A run's command does its work as the leader of a process group of its own, and
-// its claim names that group rather than the command. The group is what outlives
+// its claim names that group rather than the command. A claim names the run and
+// every group of it that was still running when the last command claimed, in `groups`. The group is what outlives
 // the command: what it started stays a member when it dies, and the system gives
 // nobody the group's id while a member is left. So the next run reaches all of
 // it without knowing what the command started, or whether the command is still
@@ -143,6 +149,12 @@ function endGroup(pgid) {
   signal("SIGKILL");
 }
 
+// The groups a claim names. A claim written before one could name several names
+// its one group beside the run, as `pgid` and `identity`, and can still be on
+// disk with that group running: it is read as naming that group.
+const groupsOf = (claim) => (Array.isArray(claim?.groups) ? claim.groups : [{ pgid: claim?.pgid, identity: claim?.identity }])
+  .filter(({ pgid } = {}) => Number.isSafeInteger(pgid) && pgid > 0);
+
 // Whether the group a claim names is still the earlier run's. A dead leader's
 // is: its members keep the group, and nobody else can be given its id while one
 // is left. A live leader's is only when it is the process that claimed, and not
@@ -151,17 +163,36 @@ const earlierRuns = ({ pgid, identity }) => !alive(pgid) || (identity && identit
 
 /**
  * Records `run` as the one running a command on the spec whose claim is `file`,
- * after ending whatever is left of the group an earlier run's claim names.
- * Nothing is done for a missing or malformed run id.
+ * and this command's group as one of the groups a newer run has to end. The
+ * groups the claim named are ended first, unless the claim is this run's and the
+ * command that claimed is still running: that group is kept, beside this
+ * one, so that ending the claim reaches every command of the run. What a command
+ * of this run left in a group once it had gone is ended now, as another run's
+ * would be, for the claim no longer names it. Nothing is done for a missing or
+ * malformed run id.
  */
 export function claimSpec(file, run) {
   if (typeof run !== "string" || !RUN_ID.test(run)) return;
+  const groups = [];
   try {
     const earlier = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (earlier.run !== run && Number.isSafeInteger(earlier.pgid) && earlier.pgid > 0 && earlier.pgid !== process.pid && earlierRuns(earlier)) {
-      endGroup(earlier.pgid);
+    for (const group of groupsOf(earlier).filter(earlierRuns)) {
+      if (group.pgid === process.pid) continue;
+      if (earlier.run === run && alive(group.pgid)) groups.push(group);
+      else endGroup(group.pgid);
     }
   } catch {}
+  groups.push({ pgid: process.pid, identity: processIdentity(process.pid) });
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify({ run, pgid: process.pid, identity: processIdentity(process.pid) })}\n`, { mode: 0o600 });
+  fs.writeFileSync(file, `${JSON.stringify({ run, groups })}\n`, { mode: 0o600 });
+}
+
+/** Whether the claim names `run` and this process's own group, as `claimSpec` left it. */
+export function holdsClaim(file, run) {
+  try {
+    const claim = JSON.parse(fs.readFileSync(file, "utf8"));
+    return claim.run === run && groupsOf(claim).some(({ pgid }) => pgid === process.pid);
+  } catch {
+    return false;
+  }
 }
