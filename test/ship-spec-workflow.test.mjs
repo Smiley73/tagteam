@@ -32,8 +32,6 @@ const formsRun = (calls) => helperCalls(calls).map((call) => stretchOf(helperTas
 const logs = (calls) => calls.filter((call) => call.kind === "log").map((call) => call.line);
 const phases = (calls) => calls.filter((call) => call.kind === "phase").map((call) => call.title);
 const labelsOf = (calls) => helperCalls(calls).map((call) => call.options.label);
-// The driver step a line asked for: its one step, or the arrival it opens with.
-const stepOf = (form) => /(?:ship|dispatch-set)\.mjs" ([a-z-]+)/.exec(form.step ?? form.arrive)[1];
 
 const LABELS = ["Review 01-a: correctness", "Review 01-a: security", "Codex review of 01-a"];
 const panelPayload = (next = cmd("collect")) => ({
@@ -64,7 +62,7 @@ async function run(command, script, { agent = async () => "done", args = {} } = 
 test("a panel is launched together, each entry as printed, then one line records the arrival and follows the dispatching step's own next; every say goes out unaltered", async () => {
   const settled = [];
   const { result, calls, events } = await run(cmd("panel"), (form) => {
-    if (form.step) return panelPayload();
+    if (form.from) return panelPayload();
     return { say: ["All 3 are in. Judging the review now.", "Judged."], next: END };
   }, {
     agent: (call) => new Promise((resolve) => setImmediate(() => { settled.push(call.options.label); resolve("done"); }))
@@ -86,10 +84,10 @@ test("a panel is launched together, each entry as printed, then one line records
 
   const prefix = `TAGTEAM_RUN_ID=${STAMP} node ${JSON.stringify(path.join(root, "scripts", "stretch.mjs"))} --plan '${PLAN}' --spec '01-a' --dir '/repo/.tagteam/ships/demo/steps/${STAMP}/`;
   assert.ok(helperCalls(calls).every((call) => helperTask(call).command.startsWith(prefix)), "each line is the stretch runner under the run's stamp");
-  assert.deepEqual(formsRun(calls).map(({ step, arrive, next }) => ({ step, arrive, next })), [
-    { step: cmd("panel"), arrive: undefined, next: undefined },
-    { step: undefined, arrive: arrivalOf(panelPayload()), next: cmd("collect") }
-  ], "the arrival opens the next line, with the dispatching step's next, never the arrival's");
+  assert.deepEqual(formsRun(calls).map(({ from, step, arrive, next }) => ({ from, step, arrive, next })), [
+    { from: cmd("panel"), step: undefined, arrive: undefined, next: undefined },
+    { from: undefined, step: undefined, arrive: arrivalOf(panelPayload()), next: cmd("collect") }
+  ], "the first line follows on from its command, and the arrival opens the next one, with the dispatching step's next, never the arrival's");
   assert.deepEqual(logs(calls), [...panelPayload().say, "All 3 are in. Judging the review now.", "Judged."]);
   assert.equal(result.ending, "merged");
   assert.equal(result.next, END);
@@ -103,7 +101,7 @@ test("the goal's route is seven helper lines under six headings, with every say 
   const say = (...lines) => { said.push(...lines); return lines; };
   const writer = sending("body-1", "tagteam:implementer", "Write the pull request for 01-a", cmd("publish"));
   const script = (form) => {
-    if (form.step === cmd("begin")) return sending("implement-1", "tagteam:implementer", "Implement 01-a", cmd("snapshot"), say("Begin said."));
+    if (form.from === cmd("begin")) return sending("implement-1", "tagteam:implementer", "Implement 01-a", cmd("snapshot"), say("Begin said."));
     if (form.step === cmd("finish")) return { say: say("Merged."), next: END };
     const set = /--set "([^"]+)"/.exec(form.arrive)[1];
     if (set === "implement-1") return { ...panelPayload(), say: say("Arrived.", "Snapshot said.", "The panel is out.") };
@@ -137,7 +135,7 @@ test("a merge runs in a line of its own named land under Land, whether it was ha
     "a run started at finish --approve": [`${cmd("finish")} --approve owner@example.com`, null, "01-a"]
   };
   for (const [what, [start, handed, unit]] of Object.entries(cases)) {
-    const { result, calls } = await run(start, (form) => (form.step === start && handed !== null ? { say: ["Ready."], next: handed } : { say: ["Merged."], next: END }), { args: { spec: unit } });
+    const { result, calls } = await run(start, (form) => (form.from === start ? { say: ["Ready."], next: handed } : { say: ["Merged."], next: END }), { args: { spec: unit } });
     const forms = formsRun(calls);
     const merge = forms.at(-1);
     assert.equal(result.ending, "merged", what);
@@ -145,7 +143,7 @@ test("a merge runs in a line of its own named land under Land, whether it was ha
     assert.equal(merge.arrive, undefined, what);
     assert.equal(helperCalls(calls).at(-1).options.label, `Step ${forms.length}: land`, what);
     assert.equal(helperCalls(calls).at(-1).options.phase, "Land", what);
-    assert.equal(forms.filter((form) => /\b(?:finish|plan-land)\b/.test(form.step ?? "")).length, 1, `${what}: it runs alone, in no line with another step`);
+    assert.equal(forms.filter((form) => /\b(?:finish|plan-land)\b/.test(form.step ?? form.from ?? "")).length, 1, `${what}: it runs alone, in no line with another step`);
   }
 });
 
@@ -164,7 +162,7 @@ test("the agents of a set are named for the work they did, from the step their d
   const driven = new Set([...fs.readFileSync(path.join(root, "scripts", "ship.mjs"), "utf8").matchAll(/\bstep: "([a-z-]+)"/g)].map((found) => found[1]));
   assert.deepEqual([...driven].filter((step) => !table.some(([next]) => next === step)), [], "a step the driver sends a set to has no entry here");
   for (const [next, agent, name, title, unit] of table) {
-    const { result, calls } = await run(cmd("verify"), (form) => (form.step
+    const { result, calls } = await run(cmd("verify"), (form) => (form.from
       ? sending("s-1", agent, "Work", cmd(next, unit))
       : { say: [], next: END }), { args: { spec: "01-a" } });
     assert.equal(result.ending, "merged", `${next}: ${result.reason}`);
@@ -225,10 +223,10 @@ test("a finish whose next begins another unit ends as merged with that next, and
   const plain = cmd("plan-check", null);
   const chain = await run(cmd("finish"), (form) => {
     if (form.step === cmd("finish")) return { say: ["Merged."], next: plain };
-    if (form.step === plain) return { say: ["Checking."], next: cmd("plan-collect", null) };
+    if (form.from === plain) return { say: ["Checking."], next: cmd("plan-collect", null) };
     return { say: ["Collected."], next: cmd("begin", "whole-plan-fix-1") };
   });
-  assert.deepEqual(formsRun(chain.calls).map((form) => form.step), [cmd("finish"), plain, cmd("plan-collect", null)],
+  assert.deepEqual(formsRun(chain.calls).map((form) => form.step ?? form.from), [cmd("finish"), plain, cmd("plan-collect", null)],
     "the plan-level steps ran inside the run that reached them");
   assert.equal(chain.result.ending, "merged");
   assert.equal(chain.result.next, cmd("begin", "whole-plan-fix-1"), "a next naming a fix unit ends the run");
@@ -276,7 +274,7 @@ test("an ask ends as ask with its answers, the command and the capture of the st
 test("a runner line saying its routing could not be confirmed has the arrival recorded alone, then ends as a codex-routing ask carrying next", async () => {
   const line = "Codex ran, but how it routed could not be confirmed: the model.";
   const { result, calls } = await run(cmd("panel"), (form) => {
-    if (form.step) return panelPayload();
+    if (form.from) return panelPayload();
     return { say: "All 3 are in.", next: cmd("collect") };
   }, { agent: (call) => (call.options.agentType === "tagteam:codex-runner" ? `Codex review done.\n${line}\n` : "done") });
   assert.equal(result.ending, "ask");
@@ -290,12 +288,12 @@ test("a runner line saying its routing could not be confirmed has the arrival re
   assert.equal(forms[1].arrive, arrivalOf(panelPayload()));
   assert.equal(forms[1].next, undefined, "the arrival alone");
 
-  const unfinished = await run(cmd("panel"), (form) => (form.step ? panelPayload() : { say: "Two are missing.", next: null }),
+  const unfinished = await run(cmd("panel"), (form) => (form.from ? panelPayload() : { say: "Two are missing.", next: null }),
     { agent: (call) => (call.options.agentType === "tagteam:codex-runner" ? line : "done") });
   assert.equal(unfinished.result.ending, "stopped");
   assert.match(unfinished.result.reason, /The arrivals did not complete the set/);
 
-  const quiet = await run(cmd("panel"), (form) => (form.step ? panelPayload() : { say: "in", next: cmd("begin", "02-b") }), {
+  const quiet = await run(cmd("panel"), (form) => (form.from ? panelPayload() : { say: "in", next: cmd("begin", "02-b") }), {
     agent: (call) => (call.options.agentType === "tagteam:codex-runner" ? "Codex review done." : "how it routed could not be confirmed")
   });
   assert.notEqual(quiet.result.kind, "codex-routing", "only the runner's line counts");
@@ -317,7 +315,7 @@ test("a set with nothing to dispatch ends as stopped: the agents are another run
 });
 
 test("a line that ends with no next says nothing after it ran, and a next the run may not follow is refused before its line", async () => {
-  const none = await run(cmd("panel"), (form) => (form.step ? panelPayload() : { say: ["Done."], next: null }));
+  const none = await run(cmd("panel"), (form) => (form.from ? panelPayload() : { say: ["Done."], next: null }));
   assert.equal(none.result.ending, "stopped");
   assert.match(none.result.reason, /^The review line ended with no next command to follow, so nothing after it ran\. Starting again from begin reads what is on disk\.$/);
   const refused = await run(cmd("panel"), () => panelPayload(cmd("start", null)));
@@ -404,6 +402,9 @@ const until = async (condition) => {
   assert.ok(condition(), "the run never got there");
 };
 
+// The record directories a stretch left in its capture directory, one for each driver step it ran.
+const records = (dir) => fs.readdirSync(dir).filter((name) => /^\d\d-/.test(name)).sort();
+
 test("a run relaunched from begin under a new stamp resumes from disk after a crash, a stop and an ask, and never ends as agents another run sent", { timeout: 300000 }, async () => {
   const staged = stage();
   const { plan, shipDir } = staged;
@@ -427,7 +428,8 @@ test("a run relaunched from begin under a new stamp resumes from disk after a cr
   const stillOut = /another run sent/;
 
   const rejectedReview = /"(?:Review 01-a: [a-z-]+|Codex review of 01-a)" was rejected/;
-  const steps = (calls) => formsRun(calls).map(stepOf);
+  // The driver steps each helper line ran.
+  const steps = (calls) => helperCalls(calls).map((call) => records(helperTask(call).dir).map((name) => name.slice(3)));
   const released = /earlier run in this session, which has ended; released it/;
 
   // A run that crashes with the implementer out: it has written its work, its agent never settles, and the run is abandoned.
@@ -441,7 +443,7 @@ test("a run relaunched from begin under a new stamp resumes from disk after a cr
   assert.match(stoppedOnce.reason, rejectedReview);
   assert.doesNotMatch(stoppedOnce.reason, stillOut);
   assert.match(logs(afterCrash.calls).join("\n"), released);
-  assert.deepEqual(steps(afterCrash.calls), ["begin", "snapshot", "verify", "panel"]);
+  assert.deepEqual(steps(afterCrash.calls), [["begin", "snapshot", "verify", "panel"]], "one helper line ran every step up to the review");
 
   // Relaunched after that stop: the panel the stopped run left out is released, and the review is sent again.
   const afterStop = launch("run-3", "A", refuse);
@@ -450,7 +452,7 @@ test("a run relaunched from begin under a new stamp resumes from disk after a cr
   assert.match(stoppedTwice.reason, rejectedReview);
   assert.doesNotMatch(stoppedTwice.reason, stillOut);
   assert.match(logs(afterStop.calls).join("\n"), released);
-  assert.deepEqual(steps(afterStop.calls), ["begin", "snapshot", "verify", "panel"]);
+  assert.deepEqual(steps(afterStop.calls), [["begin", "snapshot", "verify", "panel"]]);
 
   // A restart that cannot tell which session it is asks, and ends there.
   const asked = launch("run-4", null, never);
@@ -458,7 +460,7 @@ test("a run relaunched from begin under a new stamp resumes from disk after a cr
   assert.equal(question.ending, "ask");
   assert.match(question.ask, /Is that earlier run gone\?/);
   assert.deepEqual(question.answers.map((answer) => answer.name), ["gone", "live"]);
-  assert.deepEqual(steps(asked.calls), ["begin"]);
+  assert.deepEqual(steps(asked.calls), [["begin"]]);
   assert.equal(agentCalls(asked.calls).length, 0);
 
   // Relaunched after the ask, in the session again: released, and the review is sent once more.
@@ -468,7 +470,7 @@ test("a run relaunched from begin under a new stamp resumes from disk after a cr
   assert.match(resumed.reason, rejectedReview);
   assert.doesNotMatch(resumed.reason, stillOut);
   assert.match(logs(afterAsk.calls).join("\n"), released);
-  assert.deepEqual(steps(afterAsk.calls), ["begin", "snapshot", "verify", "panel"]);
+  assert.deepEqual(steps(afterAsk.calls), [["begin", "snapshot", "verify", "panel"]]);
 });
 
 // --- from the call ship.md makes, through a crash in the middle of a stretch ----------
@@ -525,7 +527,6 @@ test("a run that crashes inside a stretch, with its runner still going, is ended
   const held = JSON.parse(fs.readFileSync(claim, "utf8"));
   const groups = held.groups.map(({ pgid }) => pgid);
   const stretchDir = helperTask(helperCalls(crashed.calls)[1]).dir;
-  const records = (dir) => fs.readdirSync(dir).filter((name) => /^\d\d-/.test(name)).sort();
   try {
     assert.equal(held.run, "run-1");
     assert.ok(alive(verifying) && groups.every(alive), "the runner and its verify are going");
@@ -537,6 +538,7 @@ test("a run that crashes inside a stretch, with its runner still going, is ended
     assert.equal(result.ending, "stopped");
     assert.match(result.reason, /"(?:Review 01-a: [a-z-]+|Codex review of 01-a)" was rejected/);
     assert.doesNotMatch(result.reason, /another run sent/);
+    assert.deepEqual(labelsOf(resumed.calls), ["Step 1: begin"], "one helper line took the unit from begin to the review");
     assert.equal(JSON.parse(fs.readFileSync(claim, "utf8")).run, "run-2");
     for (let tries = 0; (alive(verifying) || groups.some(alive)) && tries < 100; tries += 1) await delay(50);
     assert.equal(alive(verifying), false, "the verify under the first run was left running");

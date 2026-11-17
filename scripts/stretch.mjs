@@ -8,8 +8,10 @@
 // `say` lines in order, then the fields of the step it ended on.
 //
 // With `--arrive` it runs the set's arrival, then `--next`, then each step's
-// `next`. Without `--next` it runs the arrival and stops. With `--step` it runs
-// that one command and stops, whatever its `next` says: that is how `finish` and
+// `next`. Without `--next` it runs the arrival and stops. With `--from` there is
+// no arrival: it follows that command as it follows a `next`, which is how a run's
+// first command and the one a merge handed back run. With `--step` it runs that
+// one command and stops, whatever its `next` says: that is how `finish` and
 // `plan-land` run, the two steps this never runs as a follow-on.
 //
 // It exits 0 whatever the steps do, because a non-zero exit would cost the helper
@@ -44,7 +46,7 @@ export const SESSION_ONLY = ["start", "dependencies", "end"];
 const HANDED_BACK = ["finish", "plan-land"];
 export const OWN_STOP = 64;
 
-const USAGE = "usage: stretch.mjs --plan <plan> [--spec <unit>] --dir <capture dir> (--arrive <command> [--next <command>] | --step <command>)";
+const USAGE = "usage: stretch.mjs --plan <plan> [--spec <unit>] --dir <capture dir> (--arrive <command> [--next <command>] | --from <command> | --step <command>)";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const trimmed = (value) => value.replace(/\/+$/, "");
 const scriptPrefix = (name) => `node ${JSON.stringify(path.join(SCRIPTS, name))} `;
@@ -57,7 +59,7 @@ function parseArgs(argv, env) {
   const given = {};
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
-    if (!["--plan", "--spec", "--dir", "--arrive", "--next", "--step"].includes(key)) throw usage(`unexpected argument: ${key}`);
+    if (!["--plan", "--spec", "--dir", "--arrive", "--next", "--from", "--step"].includes(key)) throw usage(`unexpected argument: ${key}`);
     if (argv[index + 1] === undefined || argv[index + 1] === "") throw usage(`${key} requires a value`);
     given[key.slice(2)] = argv[index + 1];
   }
@@ -65,11 +67,11 @@ function parseArgs(argv, env) {
   for (const key of ["plan", "dir"]) {
     if (!path.isAbsolute(given[key] ?? "")) throw usage(`--${key} must be an absolute path`);
   }
-  if ((given.arrive === undefined) === (given.step === undefined)) throw usage("give --arrive or --step, one of them");
+  if (["arrive", "from", "step"].filter((form) => given[form] !== undefined).length !== 1) throw usage("give --arrive, --from or --step, one of them");
   if (given.next !== undefined && given.arrive === undefined) throw usage("--next goes with --arrive");
   const plan = trimmed(given.plan);
   const shipDir = `${plan.slice(0, plan.lastIndexOf("/", plan.lastIndexOf("/") - 1))}/ships/${plan.slice(plan.lastIndexOf("/") + 1)}`;
-  return { run: env.TAGTEAM_RUN_ID, plan, spec: given.spec ?? null, dir: given.dir, shipDir, arrive: given.arrive, next: given.next, step: given.step };
+  return { run: env.TAGTEAM_RUN_ID, plan, spec: given.spec ?? null, dir: given.dir, shipDir, arrive: given.arrive, next: given.next, from: given.from, step: given.step };
 }
 
 // The value of a flag in a command the driver printed: bare, or a JSON string.
@@ -176,7 +178,7 @@ async function stretch(request) {
   };
   const ended = (outcome) => ({ ...outcome, say, output: last?.stdout ?? null });
 
-  /** The three forms, until one stops. */
+  /** The four forms, until one stops. */
   async function follow() {
     if (request.step !== undefined) {
       const refused = refusedOf(request.step);
@@ -185,15 +187,21 @@ async function stretch(request) {
       return ended(step.stop === undefined ? ending(step.result) : own(step.stop));
     }
 
-    if (!request.arrive.startsWith(`${scriptPrefix("dispatch-set.mjs")}arrive `)) {
-      return ended(own("The command that records the arrivals is not the plugin's own scripts/dispatch-set.mjs arrive, so it was not run."));
+    let current;
+    if (request.from !== undefined) {
+      // Nothing has run yet: the command is followed as a step's next is, so a merge given here is handed back, not run.
+      current = { ...projected({}), next: request.from };
+    } else {
+      if (!request.arrive.startsWith(`${scriptPrefix("dispatch-set.mjs")}arrive `)) {
+        return ended(own("The command that records the arrivals is not the plugin's own scripts/dispatch-set.mjs arrive, so it was not run."));
+      }
+      const arrival = await runStep(request.arrive, "arrive", spec);
+      if (arrival.stop !== undefined) return ended(own(arrival.stop));
+      current = arrival.result;
+      // The arrival's own next is never followed: the step that sent the set named the one that is.
+      if (request.next === undefined || current.exit !== 0 || current.next === null) return ended(ending(current));
+      current = { ...current, next: request.next };
     }
-    const arrival = await runStep(request.arrive, "arrive", spec);
-    if (arrival.stop !== undefined) return ended(own(arrival.stop));
-    let current = arrival.result;
-    // The arrival's own next is never followed: the step that sent the set named the one that is.
-    if (request.next === undefined || current.exit !== 0 || current.next === null) return ended(ending(current));
-    current = { ...current, next: request.next };
 
     for (;;) {
       const name = current.next === null ? null : subcommandOf(current.next);

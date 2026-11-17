@@ -82,10 +82,10 @@ export function helperTask(call) {
   return { command: unquote(command), dir: unquote(dir) };
 }
 
-/** The arguments of a stretch command a helper prompt asks for: `plan`, `spec`, `dir`, and `arrive`, `next` or `step`. */
+/** The arguments of a stretch command a helper prompt asks for: `plan`, `spec`, `dir`, and `arrive`, `next`, `from` or `step`. */
 export function stretchOf(command) {
   const form = {};
-  for (const found of command.matchAll(/ --(plan|spec|dir|arrive|next|step) ((?:'[^']*'|\\')+)/g)) form[found[1]] = unquote(found[2]);
+  for (const found of command.matchAll(/ --(plan|spec|dir|arrive|next|from|step) ((?:'[^']*'|\\')+)/g)) form[found[1]] = unquote(found[2]);
   return form;
 }
 

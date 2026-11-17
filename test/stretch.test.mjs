@@ -27,10 +27,10 @@ const alive = (pid) => {
 };
 
 // What 02's workflow writes: the runner as one command through the helper's prompt, run by its own shell text.
-function commandFor({ plan, spec = "01-a", dir, arrive, next, step, runner = RUNNER, stamp }) {
+function commandFor({ plan, spec = "01-a", dir, arrive, next, from, step, runner = RUNNER, stamp }) {
   const flags = [`--plan ${q(plan)}`, ...(spec === null ? [] : [`--spec ${q(spec)}`]), `--dir ${q(dir)}`,
     ...(arrive === undefined ? [] : [`--arrive ${q(arrive)}`]), ...(next === undefined ? [] : [`--next ${q(next)}`]),
-    ...(step === undefined ? [] : [`--step ${q(step)}`])];
+    ...(from === undefined ? [] : [`--from ${q(from)}`]), ...(step === undefined ? [] : [`--step ${q(step)}`])];
   return `TAGTEAM_RUN_ID=${stamp} node ${JSON.stringify(runner)} ${flags.join(" ")}`;
 }
 
@@ -119,6 +119,26 @@ test("an arrival with no next runs the arrival and stops, leaving what the arriv
   assert.equal(one.result.next, JSON.parse(stdoutOf(one.dir, "01-snapshot")).next);
   assert.match(one.result.next, / verify --plan /);
   assert.notEqual(stateOf(staged).candidateOid, null, "the snapshot was taken, and verify was not run");
+});
+
+test("a stretch from a command, with no arrival before it, runs that command and each next after it to the first dispatch", () => {
+  const staged = stage();
+  const { arrival, next } = implemented(staged);
+  assert.deepEqual(recordsIn(stretch(staged, { arrive: arrival }).dir), ["01-arrive"]);
+  const { result, dir } = stretch(staged, { from: next });
+
+  assert.deepEqual(recordsIn(dir), ["01-snapshot", "02-verify", "03-panel"], "it went on from the command it was given, and no collect ran");
+  const panel = JSON.parse(stdoutOf(dir, "03-panel"));
+  assert.ok(panel.dispatch.length > 0 && panel.set, "the stretch ended on the panel's dispatch");
+  const said = recordsIn(dir).flatMap((record) => sayOf(dir, record));
+  assert.ok(said.length >= 3, `every step said something: ${said.join(" | ")}`);
+  assert.deepEqual(result.say, said, "every step's lines, in the order the driver printed them");
+  assert.deepEqual([result.exit, result.stop, result.next], [0, null, panel.next]);
+  assert.deepEqual(result.dispatch.map((entry) => entry.prompt), panel.dispatch.map((entry) => entry.prompt));
+  assert.equal(result.set.arrive, panel.set.arrive);
+  assert.equal(result.checksum, checksumOf(result), "the checksum covers what the answer holds");
+  assert.ok(stdoutOf(dir, "03-panel").equals(fs.readFileSync(path.join(dir, "output"))), "output is panel's stdout byte for byte");
+  assert.equal(stateOf(staged).state, "reviewing", "the spec is where the panel left it");
 });
 
 test("a stretch whose next is finish stops before it, and the one-step form runs finish and nothing after it", () => {
@@ -240,6 +260,27 @@ test("a stretch ends at the first step that fails, dispatches, hands back an emp
   assert.deepEqual(result.say, ["in", "verified", "collected", "settled"]);
 });
 
+test("a stretch from a command follows it as it follows a next: on past a step that stops nothing, and never into a merge, which it hands back unrun", () => {
+  const staged = standIn((c) => ({
+    verify: { payload: { say: ["verified"], next: c.cmd("collect") } },
+    collect: { payload: { say: ["collected"], next: c.cmd("finish") } },
+    finish: { payload: { say: ["merged"] } },
+    "plan-land": { payload: { say: ["landed"] } }
+  }));
+  const { result } = run(staged, { from: staged.cmd("verify") });
+  assert.deepEqual(staged.ran(), ["verify", "collect"], "it stopped before the merge its last step named");
+  assert.deepEqual([result.exit, result.say, result.next], [0, ["verified", "collected"], staged.cmd("finish")]);
+  assert.equal(result.checksum, checksumOf(result));
+
+  for (const merge of [staged.cmd("finish"), staged.cmd("plan-land", { spec: null })]) {
+    const handed = run(staged, { from: merge });
+    assert.deepEqual(staged.ran(), ["verify", "collect"], `${merge}: a merge the stretch began at ran`);
+    assert.deepEqual([handed.result.exit, handed.result.say, handed.result.next], [0, [], merge], "the merge is handed back as the next");
+    assert.deepEqual(recordsIn(handed.dir), []);
+    assert.equal(handed.result.checksum, checksumOf(handed.result));
+  }
+});
+
 test("an arrival whose own next is null stops there, and one whose next is set is followed only by the next the runner was given", () => {
   const dead = standIn({ arrive: { payload: { say: ["Not all in."] } }, verify: { payload: {} } });
   const stopped = run(dead, { arrive: dead.arrive, next: dead.cmd("verify") }).result;
@@ -281,6 +322,11 @@ test("a command the runner may not run stops it before that command runs, with t
     assert.deepEqual(staged.ran(), ["arrive"], `${what}: the command ran after an arrival`);
     assert.deepEqual([after.result.exit, after.result.say], [OWN_STOP, ["in"]], `${what}: the lines said so far are kept`);
     assert.match(after.result.stop, /so it was not run\.$/, what);
+
+    const from = run(staged, { from: command(staged) });
+    assert.deepEqual(staged.ran(), ["arrive"], `${what}: the command ran when the stretch began at it`);
+    assert.equal(from.result.exit, OWN_STOP, what);
+    assert.match(from.result.stop, /^The command .* so it was not run\.$/, what);
   }
 
   const staged = standIn({ arrive: { payload: {} } });
@@ -365,7 +411,8 @@ test("a stretch given bad arguments stops the driver's way, before anything runs
   const staged = standIn({ arrive: { payload: {} }, verify: { payload: {} } });
   const cases = {
     "no run id": [{ arrive: staged.arrive }, /^TAGTEAM_RUN_ID must be set/, ""],
-    "both --arrive and --step": [{ arrive: staged.arrive, step: staged.cmd("verify") }, /^give --arrive or --step/, "both"]
+    "both --arrive and --step": [{ arrive: staged.arrive, step: staged.cmd("verify") }, /^give --arrive, --from or --step/, "both"],
+    "both --from and --step": [{ from: staged.cmd("verify"), step: staged.cmd("verify") }, /^give --arrive, --from or --step/, "both"]
   };
   for (const [what, [form, reason, stamp]] of Object.entries(cases)) {
     const { result, dir } = run(staged, form, { stamp: stamp === "" ? "" : `usage-${(stamps += 1)}` });

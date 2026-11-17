@@ -286,7 +286,7 @@ for (;;) {
     const sub = subcommandOf(todo.shell);
     const merge = MERGES.includes(sub);
     lineName = merge ? "land" : sub;
-    line = await runLine(todo.shell, lineName, merge ? "Land" : PHASE_OF[sub], `--step ${quoted(todo.shell)}`);
+    line = await runLine(todo.shell, lineName, merge ? "Land" : PHASE_OF[sub], `${merge ? "--step" : "--from"} ${quoted(todo.shell)}`);
   } else {
     const refused = refusal(todo.next, false);
     if (refused !== null) return stopped(`The command ${JSON.stringify(todo.next)} ${refused}, so it was not run.`);
