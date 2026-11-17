@@ -33,6 +33,19 @@ export function classifyChecks(rows) {
   return { status: "not-run", reason: "checks were skipped, neutral, or cancelled" };
 }
 
+/**
+ * The status the gates act on for a recorded CI result `ci`, whose failing rows may carry
+ * `comparison` against the commit the change started from. A failed result whose every failing
+ * row is `already-red` against `baseOid` reads as its rows classified with those rows counted
+ * as passing; anything else, and a missing `baseOid`, reads as `ci.status`.
+ */
+export function judgedStatus(ci, baseOid) {
+  const failing = Array.isArray(ci?.checks) ? ci.checks.filter(isFailed) : [];
+  const alreadyRed = (row) => row.comparison?.verdict === "already-red" && row.comparison.baseOid === baseOid;
+  if (!baseOid || ci?.status !== "failed" || failing.length === 0 || !failing.every(alreadyRed)) return ci?.status;
+  return classifyChecks(ci.checks.map((row) => (isFailed(row) ? { ...row, state: "SUCCESS" } : row))).status;
+}
+
 if (isMain(import.meta.url)) {
   const file = process.argv[2];
   if (!file) {

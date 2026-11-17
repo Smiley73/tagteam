@@ -255,6 +255,23 @@ test("a failing verify throws the attempt away before any panel, and with limits
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("a disclosed command that fails on the base being merged in does not fail a resolution: the attempt goes on to its panel", () => {
+  // 01-a merges with `exit 1` disclosed as failing without its change, so the plan branch carries that failure.
+  const staged = stageConflict({ ciRepairs: 1, verifyCommand: "exit 1" });
+  const { dir, plan, shipDir, env, a } = staged;
+  assert.equal(a.state().gates.verify.status, "fails-without-change");
+  const begun = ship("begin", plan, ["--spec", "02-b"], env);
+  const resolved = resolveAs(staged, begun, { "app.js": BOTH_ADD });
+  assert.equal(resolved.status, 0, resolved.stderr);
+  const said = resolved.json.say.join("\n");
+  assert.match(said, /Verification of the merge: fails-without-change/);
+  assert.match(said, /failed: exit 1 — on main at [0-9a-f]{12}, where it is merged in from, it fails too/);
+  assert.doesNotMatch(said, /Resolve attempt 1 failed/);
+  assert.deepEqual(resolved.json.dispatch.map((entry) => entry.agent), ["tagteam:reviewer", "tagteam:reviewer", "tagteam:codex-runner"], "the resolution was not sent to its panel");
+  assert.equal(recordOf(shipDir).attempts[0].verify, "fails-without-change");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a conflicted file committed with its markers still in it is an empty view: a stop, never a pass, with nothing pushed, and begin then takes the next attempt", () => {
   const staged = stageConflict({ ciRepairs: 2 });
   const { dir, plan, shipDir, origin, env, planTip, worktree } = staged;

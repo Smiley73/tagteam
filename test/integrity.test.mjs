@@ -309,6 +309,14 @@ test("the configure command asks about every setting version 11 added", () => {
   }
 });
 
+// `mergeWithOpenFindings` may be missing, so only the interview keeps it from
+// dropping out, and it belongs to the question that asks about carrying.
+test("the configure question that asks about carry also asks about mergeWithOpenFindings", () => {
+  const items = thenAskItems(read("commands", "configure.md")).filter((item) => item.includes("`carry`"));
+  assert.equal(items.length, 1, "exactly one numbered question in configure.md should name carry");
+  assert.ok(items[0].includes("`mergeWithOpenFindings`"), "the numbered question that names carry does not name mergeWithOpenFindings");
+});
+
 // `redesignEscalation` is optional in the schema, so nothing but the interview
 // keeps it from dropping out: the question that turns escalation on has to ask it.
 test("the configure question that asks about escalation also asks about redesignEscalation", () => {
@@ -566,9 +574,9 @@ test("each ship codex template composes with exactly the variables and fences it
 
 // The two answers to the Recurring question are a person's, like `revisit`:
 // `next` never prints `accept` or `revisit`, and prints `redesign` only where
-// `churnAsk` says `autoRedesign` answered the question. A redesign is budgeted
-// like a fix and dispatched after the edge, and its question carries none of
-// the run's vocabulary.
+// `churnAsk` says `autoRedesign` or `mergeWithOpenFindings` answered the
+// question. A redesign is budgeted like a fix and dispatched after the edge,
+// and its question carries none of the run's vocabulary.
 test("redesign and accept are person-only doors, budgeted before dispatch, and the ask names no severity", () => {
   const nexts = [...shipDriver.matchAll(/nextCommand\(ctx,[^)]*\)/g)].map(([call]) => call);
   for (const door of ["accept", "revisit"]) {
@@ -582,7 +590,7 @@ test("redesign and accept are person-only doors, budgeted before dispatch, and t
       assert.ok(redesign.includes(`const answer = (flag) => ${call};`), "a redesign answer command is built outside the question");
       continue;
     }
-    assert.match(call, /^nextCommand\(ctx, churn\.auto \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
+    assert.match(call, /^nextCommand\(ctx, churn\.auto( \|\| churn\.setting)? \? "redesign" : /, `next prints redesign other than behind the setting: ${call}`);
   }
   const churn = driverFunction("churnAsk");
   assert.equal(churn.split("result.auto = true").length - 1, 1, "churnAsk answers redesign in one place");

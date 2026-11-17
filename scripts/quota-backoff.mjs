@@ -18,8 +18,9 @@
 // straight to them.
 //
 // Nothing here decides what the caller then does. It says "this looks like an
-// unusable model", "this looks like an exhausted quota", "this is something
-// else", and how far away a reset is; whether that becomes a refusal, a wait or
+// unusable model", "this looks like an exhausted quota", "this looks like a
+// request the provider refused", "this is something else", and how far away a
+// reset is; whether that becomes a refusal, a wait or
 // a retry is the bridge's business, and the four-hour ceiling is the only policy
 // in this file at all.
 import fs from "node:fs";
@@ -92,9 +93,8 @@ export function classifyProviderError(text, provider = "codex") {
 
 // The typed kinds that mean an exhausted quota, from the protocol description
 // Codex generates (`codex app-server generate-json-schema`). Every other kind it
-// lists — `other`, `contextWindowExceeded`, `unauthorized`, `sandboxError`,
-// `badRequest` and the rest — says nothing about a quota or a model, and is no
-// verdict. No real one of these was ever seen: an exhausted quota cannot be
+// lists — `other`, `unauthorized`, `sandboxError` and the rest — says nothing
+// about a quota or a model, and is no verdict. No real one of these was ever seen: an exhausted quota cannot be
 // provoked on demand. Exported for the client's list of what it uses of the
 // protocol, which the contract probe checks against the installed Codex.
 export const QUOTA_KINDS = Object.freeze(["usageLimitExceeded", "rateLimitExceeded"]);
@@ -104,6 +104,12 @@ export const QUOTA_KINDS = Object.freeze(["usageLimitExceeded", "rateLimitExceed
 // `insufficient_quota` and `rate_limit_exceeded` are the OpenAI API's.
 const QUOTA_ERROR_TYPES = ["usage_limit_reached", "insufficient_quota", "rate_limit_exceeded"];
 const TOO_MANY_REQUESTS = 429;
+const BAD_REQUEST = 400;
+// The typed kinds that mean the request itself was refused, from the same
+// protocol description. Neither was seen either; the refusal that was seen
+// (`oversized-request`) arrived as a JSON-RPC error on `turn/start` and carries
+// no kind. Exported for the same reason as `QUOTA_KINDS`.
+export const REFUSAL_KINDS = Object.freeze(["badRequest", "contextWindowExceeded"]);
 // Today's margin after a reported reset, as `parseResetTime` adds it.
 const RESET_MARGIN_MS = 120_000;
 
@@ -117,10 +123,11 @@ const isRecord = (value) => value !== null && typeof value === "object" && !Arra
  * - `errors`: `{kind, message}` for the failed turn's own error, and for every
  *   `error` notification that said `willRetry: false`. A notification Codex will
  *   retry is not the turn's failure, and one that did not say is not read as
- *   final either. A refused request — the handshake, `thread/start`,
- *   `turn/start` — is a JSON-RPC error rather than a turn's, and is not here;
- *   its text still reaches the word matching through
- *   `appServerFailureEvidence`.
+ *   final either. A refusal of `turn/start` is a JSON-RPC error rather than a
+ *   turn's; it is here as `{kind: null, message, refused: true}`, because
+ *   refusing a request is what `classifyFailure` calls a refusal. The handshake
+ *   and `thread/start` refusals are not: their text reaches the word matching
+ *   through `appServerFailureEvidence`, and nothing else.
  * - `rateLimits`: the rate-limit snapshot the attempt received, or null. It only
  *   ever feeds the wait; on its own it never makes a failure a quota.
  */
@@ -128,6 +135,8 @@ export function appServerFailure(outcome) {
   const errors = [];
   if (outcome?.outcome === "turn-failed" && outcome.stage === "turn") {
     errors.push({ kind: outcome.kind ?? null, message: outcome.message ?? null });
+  } else if (outcome?.outcome === "turn-failed" && outcome.stage === "turn/start") {
+    errors.push({ kind: null, message: outcome.message ?? null, refused: true });
   }
   for (const entry of Array.isArray(outcome?.errors) ? outcome.errors : []) {
     if (entry?.willRetry === false) errors.push({ kind: entry.error?.kind ?? null, message: entry.error?.message ?? null });
@@ -161,6 +170,10 @@ function providerError(message) {
 // A typed kind as Codex sent it: one of the plain strings, or a single-key
 // object such as `{"httpConnectionFailed": {"httpStatusCode": 429}}`. Anything
 // else is an unknown form, and no verdict.
+function kindSaysRefusal(kind) {
+  return typeof kind === "string" && REFUSAL_KINDS.includes(kind);
+}
+
 function kindSaysQuota(kind) {
   if (typeof kind === "string") return QUOTA_KINDS.includes(kind);
   if (!isRecord(kind)) return false;
@@ -180,7 +193,12 @@ function kindSaysQuota(kind) {
  *   `invalid_request_error` as a model the account may not use, with only the
  *   sentence different.
  * - quota when a typed kind says so, a provider's message has status 429 or a
- *   quota error type, or the text says so.
+ *   quota error type, or the text says so. A 429 inside an
+ *   `invalid_request_error` is a quota and stays one.
+ * - refusal (provider `codex` only) when Codex refused the request itself, and only after the two
+ *   above: a JSON-RPC refusal of `turn/start`, a failed turn typed `badRequest`
+ *   or `contextWindowExceeded`, or a provider's message with status 400. The
+ *   same request is refused again however many times it is sent.
  * - transient otherwise.
  *
  * `failure` is what `appServerFailure` returned; anything else, null included,
@@ -198,6 +216,9 @@ export function classifyFailure(failure, text, provider = "codex") {
   const quota = errors.some((error) => kindSaysQuota(error.kind))
     || provided.some(({ status, type }) => status === TOO_MANY_REQUESTS || QUOTA_ERROR_TYPES.includes(type));
   if (fallback === "quota" || quota) return { kind: "quota" };
+  const refused = errors.some((error) => error.refused === true || kindSaysRefusal(error.kind))
+    || provided.some(({ status }) => status === BAD_REQUEST);
+  if (provider === "codex" && refused) return { kind: "refusal" };
   return { kind: "transient" };
 }
 

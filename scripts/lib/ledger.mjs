@@ -1,7 +1,10 @@
 // The plan's ledger: one entry for every finding a spec still had open when it
 // merged into the plan branch, and beside them the failures that passed when run
 // again on the same commit. Entries are what a later step re-judges; `retries`
-// are disclosure only, and never become an entry.
+// are disclosure only, and never become an entry. `failing` holds the verify
+// commands whose lines among them say that they fail without the change too: what
+// the plan's pull request states, and so the only disclosure a check of the whole
+// plan may accept.
 import fs from "node:fs";
 import path from "node:path";
 import { isPullRequestFinding } from "../collect-findings.mjs";
@@ -10,8 +13,12 @@ const ledgerPath = (shipDir) => path.join(shipDir, "ledger.json");
 
 export function readLedger(shipDir) {
   const file = ledgerPath(shipDir);
-  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { entries: [], retries: [] };
+  const ledger = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  return { entries: ledger.entries ?? [], retries: ledger.retries ?? [], failing: ledger.failing ?? [] };
 }
+
+/** The verify commands that specs merged into this plan disclosed as failing without their change. */
+export const failingInPlan = (shipDir) => new Set(readLedger(shipDir).failing.map((item) => item.command));
 
 /**
  * The entries `spec` makes by merging `commit` with `open` still open: each one
@@ -35,17 +42,19 @@ export function entriesOf(spec, commit, open, accepted, carried = new Set(), onP
 
 /**
  * `entries` and `retries` (the lines that disclose them) written into the
- * ledger, each once. Returns how many entries the ledger holds for `spec`.
+ * ledger, each once, with the `failing` commands the lines among `retries` say
+ * fail without the change. Returns how many entries the ledger holds for `spec`.
  */
-export function enterMerge(shipDir, spec, { entries, retries }) {
+export function enterMerge(shipDir, spec, { entries, retries, failing = [] }) {
   const ledger = readLedger(shipDir);
   const known = new Set(ledger.entries.map((entry) => entry.id));
   const said = new Set(ledger.retries.map((retry) => `${retry.spec}\n${retry.line}`));
   const added = entries.filter((entry) => !known.has(entry.id));
   const disclosed = retries.filter((line) => !said.has(`${spec}\n${line}`)).map((line) => ({ spec, line }));
-  const next = { entries: [...ledger.entries, ...added], retries: [...ledger.retries, ...disclosed] };
+  const stated = failing.filter((command) => !ledger.failing.some((item) => item.spec === spec && item.command === command)).map((command) => ({ spec, command }));
+  const next = { entries: [...ledger.entries, ...added], retries: [...ledger.retries, ...disclosed], failing: [...ledger.failing, ...stated] };
   const count = next.entries.filter((entry) => entry.spec === spec).length;
-  if (added.length === 0 && disclosed.length === 0) return count;
+  if (added.length === 0 && disclosed.length === 0 && stated.length === 0) return count;
   const file = ledgerPath(shipDir);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(`${file}.tmp`, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });

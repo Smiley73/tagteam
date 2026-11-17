@@ -132,6 +132,20 @@ test("settling runs, a failure waits for the rest of its Actions run before it i
   assert.equal(outside.reads.length, 1, "a failure that cannot be rerun was held back");
 });
 
+test("settling all, a failure waits for every row still running before it is the answer", async () => {
+  const going = [...failing, ...running];
+  const done = [...failing, ...passing];
+
+  const settles = harness([going, going, done]);
+  const result = await run(settles, { waitSec: 600, settleAll: true });
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.checks, done, "the failure was answered while another check was still running");
+  assert.equal(settles.reads.length, 3);
+
+  const stalled = await run(harness([going]), { waitSec: 60, settleAll: true });
+  assert.equal(stalled.stillRunning, true, "a failure beside a check that never finished was the answer");
+});
+
 test("a wait of 0 is disabled whatever the start wait, without a read", async () => {
   const h = harness([[]]);
   const result = await run(h, { waitSec: 0, startWaitSec: 120 });

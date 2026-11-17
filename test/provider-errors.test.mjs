@@ -175,7 +175,6 @@ const kindOf = (outcome) => classifyFailure(appServerFailure(outcome), appServer
 test("01's captures get the same kind through the first pass as through the word matching", async () => {
   const kinds = {
     "unusable-model": "model-unavailable",
-    "refused-schema": "transient",
     "exits-mid-turn": "transient",
     "killed-mid-turn": "transient"
   };
@@ -188,6 +187,38 @@ test("01's captures get the same kind through the first pass as through the word
     const byWords = classifyProviderError(appServerFailureEvidence(outcome), "codex").kind;
     if (kinds[name]) assert.equal(byWords, kinds[name], `${name} no longer classifies by its words as it did`);
     assert.equal(kindOf(outcome), byWords, `${name} classifies differently through the first pass`);
+  }
+});
+
+// A refused request has two real shapes: a JSON-RPC error on `turn/start` that
+// names no provider and no kind, and a turn that starts and then fails with a
+// provider 400. Neither has a word on the lists, so only the structure says so.
+test("both real refusals of a request are a refusal from their structure alone, for Codex only", async () => {
+  for (const name of ["oversized-request", "refused-schema"]) {
+    const outcome = await outcomeOf(name);
+    const failure = appServerFailure(outcome);
+    assert.equal(classifyProviderError(appServerFailureEvidence(outcome), "codex").kind, "transient", `${name}'s words already said so; this proves nothing`);
+    assert.equal(classifyFailure(failure, "", "codex").kind, "refusal", `${name} was not recognised as a refusal`);
+    assert.equal(kindOf(outcome), "refusal", `${name} was not a refusal through the bridge's own reading`);
+    assert.equal(classifyFailure(failure, "", "claude").kind, "transient", "a refusal is Codex's alone");
+  }
+  assert.equal(appServerFailure(await outcomeOf("oversized-request")).errors.length, 1, "the refused turn/start is read once");
+});
+
+test("a refusal never takes the place of a quota or an unusable model, however it was reported", () => {
+  const quota = providerMessage({ status: 429, type: "invalid_request_error", sentence: NEUTRAL });
+  assert.equal(classifyFailure(finalError("badRequest", quota), "", "codex").kind, "quota", "a 429 inside an invalid_request_error stopped being a quota");
+  const usage = providerMessage({ status: 400, type: "usage_limit_reached", sentence: NEUTRAL });
+  assert.equal(classifyFailure(finalError("badRequest", usage), "", "codex").kind, "quota");
+  const model = providerMessage({ status: 400, sentence: SENTENCE });
+  assert.equal(classifyFailure(finalError("badRequest", model), "", "codex").kind, "model-unavailable");
+  const refused = { outcome: "turn-failed", stage: "turn/start", message: "429 Too Many Requests", errors: [], stderr: "" };
+  assert.equal(kindOf(refused), "quota", "a refused turn/start whose words say quota is a quota");
+});
+
+test("the typed kinds that mean a refused request are a refusal", () => {
+  for (const kind of ["badRequest", "contextWindowExceeded"]) {
+    assert.equal(classifyFailure(finalError(kind, NEUTRAL), NEUTRAL, "codex").kind, "refusal", `${kind} is not a refusal`);
   }
 });
 
@@ -210,8 +241,8 @@ test("an unusable model the raw text hides is found in the parsed sentence", () 
 });
 
 // A 400 `invalid_request_error` is what an unusable model and a refused schema
-// both arrive as. A first pass keyed on those would refuse a refused schema in
-// one attempt and tell the person to change --model.
+// both arrive as. A first pass keyed on those would tell the person to change
+// --model for a request that was refused for something else.
 test("status and error type never decide a model: a 400 invalid_request_error about something else is not one", () => {
   for (const sentence of [
     "Invalid schema for response_format 'codex_output_schema': 'schema.required' is required to include every key in properties. Missing 'extra'.",
@@ -220,7 +251,7 @@ test("status and error type never decide a model: a 400 invalid_request_error ab
   ]) {
     for (const kind of ["other", "badRequest", null]) {
       const message = providerMessage({ sentence });
-      assert.equal(classifyFailure(finalError(kind, message), message, "codex").kind, "transient",
+      assert.equal(classifyFailure(finalError(kind, message), message, "codex").kind, "refusal",
         `a 400 invalid_request_error typed ${kind} saying "${sentence}" was taken for an unusable model`);
     }
   }
@@ -251,7 +282,7 @@ test("a typed usage limit, and a 429 inside the parsed message, are a quota what
 
 test("a typed kind that is neither gives no verdict and never demotes the words", () => {
   const neither = [
-    "other", "contextWindowExceeded", "unauthorized", "sandboxError", "badRequest", "serverOverloaded",
+    "other", "unauthorized", "sandboxError", "serverOverloaded",
     { httpConnectionFailed: { httpStatusCode: 500 } }, { httpConnectionFailed: { httpStatusCode: null } },
     { httpConnectionFailed: {} }, { a: { httpStatusCode: 429 }, b: {} }, { somethingNew: 429 }, 429, [], true
   ];

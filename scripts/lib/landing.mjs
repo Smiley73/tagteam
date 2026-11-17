@@ -47,6 +47,7 @@ import { writeRoundFile } from "./round-store.mjs";
 // that would drift silently if this file re-derived them. The import direction
 // is unusual for `lib/`, and it is cheaper than the drift.
 import { parseNameStatus } from "../snapshot-candidate.mjs";
+import { FAILS_WITHOUT_CHANGE, failsWithoutNames } from "./verify-base.mjs";
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -191,9 +192,12 @@ export function landingMessage(outcome, { spec, base, repair } = {}) {
   const to = String(outcome.baseOid ?? "").slice(0, 12);
   const moved = `origin/${base} moved from ${from} to ${to} since this candidate was reviewed`;
   if (outcome.status === "passed") {
-    return `${moved}; the reviewed change merges into it cleanly, lands as the same change, and was re-verified `
-      + `against the new base (${outcome.verify?.status ?? "not-applicable"}) before merging. The reviewed commit `
-      + "merges unchanged — nothing was rebased and nothing was re-reviewed.";
+    const verified = outcome.verify?.status === FAILS_WITHOUT_CHANGE
+      ? `re-verified against the new base: ${failsWithoutNames(outcome.verify)} fails there as well as on the `
+        + "merge, as it does without the change, and nothing else fails, so it is disclosed and not held against the change"
+      : `re-verified against the new base (${outcome.verify?.status ?? "not-applicable"})`;
+    return `${moved}; the reviewed change merges into it cleanly, lands as the same change, and was ${verified} before merging. `
+      + "The reviewed commit merges unchanged — nothing was rebased and nothing was re-reviewed.";
   }
   if (outcome.status === "conflict") {
     return `${moved}, and the reviewed change does not merge into it cleanly`
@@ -332,13 +336,16 @@ export function dryRunMerge(repo, ours, theirs) {
  * make `validateCandidateSnapshot` refuse. Handing it the round's snapshot is
  * also what makes the same `when` matchers select the same commands.
  *
+ * `keepGoing` runs every command though one failed, for a caller that has to
+ * know which of them fail.
+ *
  * A plan's landing passes `select: "all"`, as its whole-plan check selects, and
  * `branch: null`: the worktree is detached at the plan's tip, and goes back
  * there, detached, with what the verify commands wrote discarded.
  */
 export function checkLanding({
   repo, worktree, branch, config, configPath,
-  baseOid, newBaseOid, candidateOid, candidatePath, landingDir, select = null
+  baseOid, newBaseOid, candidateOid, candidatePath, landingDir, select = null, keepGoing = false
 }) {
   const exclusions = pathExclusions(config?.reviewExclude);
   const base = { reviewedBaseOid: baseOid, baseOid: newBaseOid, candidateOid };
@@ -378,6 +385,7 @@ export function checkLanding({
       path.join(SCRIPTS, "verify-run.mjs"),
       "--worktree", worktree, "--config", configPath, "--candidate", candidatePath,
       ...(select ? ["--select", select] : []),
+      ...(keepGoing ? ["--keep-going", "true"] : []),
       "--base", baseOid, "--candidate-oid", candidateOid,
       "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this process dies under it.

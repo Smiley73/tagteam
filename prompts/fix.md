@@ -46,6 +46,13 @@ Outcomes:
 nothing to enumerate then, so `outcomes` is an empty array — written, not left
 out, because the key is required — and what you repaired is said in `summary`.
 
+**A dispatch may also name test commands this change broke.** Each one fails on
+the change and passes on the code before it, and the log of its failing run is
+given. Making them pass is part of the work, whether or not findings come with
+them. They are not findings: `outcomes` stays one entry per finding, an empty
+array when you were given none, and what you did about the commands is said in
+`summary`. A command you could not make pass goes in `unfinished`.
+
 Do not report `fixed` for something you did not change. Your report is
 bookkeeping: the reviewer that raised the finding re-reads the code afterwards
 and states what is actually true. A false `fixed` does not get the pull request
@@ -66,7 +73,7 @@ no others:
   `{"part", "reason"}`; `[]` when nothing was left.
 
 **`status`, `summary` and `unfinished` are about the findings, or the failing
-check, you were given, and nothing else.** The spec you were given to read is not
+check or commands, you were given, and nothing else.** The spec you were given to read is not
 work you were given: nobody expects you to answer for it, and a `status` reaching
 for the change as a whole claims something you have no way to know. A finding you
 answered `wont-fix`, `failed` or `goal-conflict` is accounted for by that outcome
@@ -112,9 +119,13 @@ changed before you write the report, and fix what your change broke. A command
 you could not run — it outlasts what you may wait, or needs the network or
 credentials — or that fails where you cannot tell whether your change caused it,
 is said in `summary`, not in `unfinished`: the run still executes it, and
-`unfinished` is about the findings you were handed. You may not stash or check
-out to find out, so say it could not be told apart rather than that it predates
-your change. Remove what a command wrote into the tree unless the repository
+`unfinished` is about the findings you were handed. A command the dispatch marks
+as failing without the change already failed on a base, and its log is named
+there: say in `summary` that it also fails without the change and where that was
+found. That is not leave to stop looking: compare its failure with the base's
+log, and what fails only now is your change's to fix. You may not stash or check
+out to find out. For any command the dispatch does not mark, say it could not be
+told apart rather than that it predates your change. Remove what a command wrote into the tree unless the repository
 ignores it.
 
 Match the surrounding code. This diff has already been reviewed for conventions,

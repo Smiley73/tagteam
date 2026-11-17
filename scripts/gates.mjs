@@ -13,7 +13,9 @@ import { spawnSync } from "node:child_process";
 import { RoundBudgetExhausted, allocateRound, listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR, lensBrief } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { onPlanBranch } from "./lib/carry.mjs";
+import { carrying, mergesWithOpenFindings, onPlanBranch } from "./lib/carry.mjs";
+import { judgedStatus } from "./lib/ci-state.mjs";
+import { FAILS_WITHOUT_CHANGE } from "./lib/verify-base.mjs";
 import { isFixUnitId } from "./lib/whole-plan.mjs";
 import { normalizeRepoPath } from "./lib/matcher.mjs";
 import { isWorkflowPath } from "./lib/workflows.mjs";
@@ -715,10 +717,11 @@ export function reviewOpenLifts(state, config) {
 // What a carry needs beyond an accept, since no person looked: carrying on, no
 // whole-plan fix, no major code finding on a spec something unmerged depends on
 // — read as depended on unless the record says otherwise — and this cycle's fix
-// rounds spent.
+// rounds spent. `mergeWithOpenFindings` stands in for carrying on and waives the
+// major-finding rule.
 function carryHolds(state, config, accept, code) {
-  return config?.carry === true && !isFixUnitId(state.spec)
-    && !(accept.dependedOn !== false && code.some((finding) => finding.severity === "major"))
+  return carrying(state, config) && !isFixUnitId(state.spec)
+    && !(accept.dependedOn !== false && !mergesWithOpenFindings(state, config) && code.some((finding) => finding.severity === "major"))
     && counterOf(state, FIX_COUNTER) >= config.limits?.fixRounds;
 }
 
@@ -766,10 +769,23 @@ export function evaluate(state, config, approvedWorkflows = null) {
   if (!review) blockers.push("review-not-recorded");
   else if (review.status !== "clean" && !reviewOpenLifts(state, config)) blockers.push(`review-${review.status}`);
 
-  // (b) Verification and CI.
+  // Where this lands. Nothing reaches the base without a person, and a plan
+  // branch is the one target where the plan's own pull request is that person's
+  // look. So a candidate merges with nobody asked only when its state confirms
+  // that its pull request merges into this plan's own plan branch — see
+  // `onPlanBranch` — and anything else waits.
+  const planBranch = onPlanBranch(state, config);
+
+  // (b) Verification and CI. A command that fails on the base as well as on the
+  // change is disclosed and merges into a plan branch; straight to the base it
+  // is a blocker, which nothing but putting it right there clears.
   if (!verify) blockers.push("verification-not-recorded");
   else if (verify.status === "failed") blockers.push("verification-failed");
-  if (ci?.status === "failed") blockers.push("continuous-integration-failed");
+  else if (verify.status === FAILS_WITHOUT_CHANGE && !planBranch) blockers.push("verification-fails-without-change");
+  // A failing check that failed at the same step on the commit the change started
+  // from is lifted on a plan branch, and there alone — see `judgedStatus`.
+  const ciStatus = ci ? judgedStatus(ci, planBranch ? state.baseOid : null) : null;
+  if (ciStatus === "failed") blockers.push("continuous-integration-failed");
   // A repository that waits for checks must actually have them looked at. An
   // unrecorded CI gate means the step was skipped, which is the same class of
   // hole as an unrecorded review — and `not-run` covers a cancelled check, which
@@ -779,16 +795,11 @@ export function evaluate(state, config, approvedWorkflows = null) {
   // looks into is different.
   else if (config?.ciWaitSec > 0) {
     if (!ci) blockers.push("continuous-integration-not-recorded");
-    else if (ci.status === "not-started") approvals.push("continuous-integration-not-started");
-    else if (ci.status !== "passed") approvals.push("continuous-integration-inconclusive");
+    else if (ciStatus === "not-started") approvals.push("continuous-integration-not-started");
+    else if (ciStatus !== "passed") approvals.push("continuous-integration-inconclusive");
   }
 
-  // (a) Where this lands. Nothing reaches the base without a person, and a plan
-  // branch is the one target where the plan's own pull request is that person's
-  // look. So a candidate merges with nobody asked only when its state confirms
-  // that its pull request merges into this plan's own plan branch — see
-  // `onPlanBranch` — and anything else waits.
-  const planBranch = onPlanBranch(state, config);
+  // (a) Where this lands: see `planBranch` above.
   if (!planBranch) approvals.push("straight-to-base");
 
   // (e) A change to CI is a change to what every later gate is worth. Judged from
@@ -819,7 +830,7 @@ export function evaluate(state, config, approvedWorkflows = null) {
   //
   // On a plan branch the readers can decide instead, and only there. They rule
   // on every item left undone, and the settled review records the accounting;
-  // it stands for a person only with the review clean, verify passed, CI passed
+  // it stands for a person only with the review clean, verify passed (or failing on the base too), CI passed
   // or not waited for, and every item of the current candidate and of every
   // earlier unaccounted one ruled environmental or out-of-scope by every reader
   // that was given it. A missing report, or one that names nothing, has no item
@@ -831,8 +842,8 @@ export function evaluate(state, config, approvedWorkflows = null) {
     const cleared = planBranch
       && (report?.status === "complete" || report?.status === "unfinished")
       && review?.status === "clean"
-      && verify?.status === "passed"
-      && (ci?.status === "passed" || !(config?.ciWaitSec > 0))
+      && (verify?.status === "passed" || verify?.status === FAILS_WITHOUT_CHANGE)
+      && (ciStatus === "passed" || !(config?.ciWaitSec > 0))
       && Array.isArray(accounting?.items) && accounting.items.length > 0
       && accounting.items.every((item) => item.ruling === "environmental" || item.ruling === "out-of-scope")
       && owed.every((candidate) => (accounting.candidates ?? []).includes(candidate));
@@ -912,9 +923,10 @@ const USAGE = `usage:
   candidate. On the plan branch \`evaluate\` lifts \`review-open\` when it covers
   every open finding and none is blocking. Binding a new candidate clears it.
   With \`--carry\` it records the ship's carry instead, which lifts it only with
-  \`carry\` on, outside a whole-plan fix, with this cycle's fix rounds spent or
-  nothing open for a fixer, and never past a major code finding on a spec that
-  is \`depended-on\` by one not yet merged.
+  \`carry\` or \`mergeWithOpenFindings\` on, outside a whole-plan fix, with this
+  cycle's fix rounds spent or nothing open for a fixer, and never past a major
+  code finding on a spec that is \`depended-on\` by one not yet merged, which
+  \`mergeWithOpenFindings\` waives.
 
   \`evaluate\` reads the workflow files a person approved for this spec from
   \`approved.json\`; given none, or one it cannot read, it approves none.

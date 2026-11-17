@@ -635,6 +635,21 @@ test("on a plan branch, every item ruled acceptable with every gate passing clea
   assert.equal(evaluate({ ...ruled(), gates: { ...ruled().gates, ci: null } }, CONFIG).ready, true);
 });
 
+test("a command that fails on the base too is no blocker on a plan branch, is its own blocker straight to the base, and clears an unfinished account only on the plan branch", () => {
+  const disclosed = (state) => recordGate(state, "verify", A, { status: "fails-without-change" });
+  const onPlan = evaluate(disclosed(reviewed()), CONFIG);
+  assert.deepEqual([onPlan.blockers, onPlan.approvals, onPlan.ready], [[], [], true]);
+
+  const onBase = evaluate(disclosed(straight()), CONFIG);
+  assert.deepEqual(onBase.blockers, ["verification-fails-without-change"]);
+  assert.equal(onBase.ready, false);
+  const approved = evaluate(recordGate(disclosed(straight()), "human", A, { approved: true }), CONFIG);
+  assert.equal(approved.ready, false, "a person approved away a command that fails on the base");
+
+  assert.deepEqual(evaluate(disclosed(ruled()), CONFIG).approvals, [], "the rulings did not clear the account beside a disclosed command");
+  assert.ok(evaluate(recordGate(ruled(), "verify", A, { status: "failed" }), CONFIG).approvals.includes("work-not-accounted-for"));
+});
+
 // --- regressions from the Codex review of this rewrite ---
 
 test("a round that found something reaches publishing through fixing", () => {
@@ -1782,4 +1797,25 @@ test("budgetTaken marks only a round past the configured limit, and only with a 
   // And the repair edge never is.
   const published = { ...before, state: "publishing" };
   assert.equal(budgetTaken(published, step(published, "reviewing", limits), { limits }).granted, undefined);
+});
+
+// A failing check that failed at the same step on the commit the change started from
+// is lifted on a plan branch, and there alone, and only for a comparison against this
+// candidate's own start commit.
+const redOn = (state, baseOid) => recordGate(state, "ci", A, {
+  status: "failed",
+  checks: [{ name: "test", state: "FAILURE", comparison: { verdict: "already-red", baseOid } }]
+});
+
+test("an already red check lifts continuous-integration-failed on a plan branch, for the start commit alone", () => {
+  const lifted = evaluate(redOn(reviewed(), BASE), CONFIG);
+  assert.deepEqual([lifted.ready, lifted.blockers], [true, []], JSON.stringify(lifted));
+
+  const earlier = evaluate(redOn(reviewed(), B), CONFIG);
+  assert.deepEqual(earlier.blockers, ["continuous-integration-failed"], "a comparison against another commit lifted the blocker");
+  assert.equal(earlier.ready, false);
+
+  const onBase = evaluate(redOn(straight(), BASE), CONFIG);
+  assert.deepEqual(onBase.blockers, ["continuous-integration-failed"], "a comparison lifted the blocker off a plan branch");
+  assert.equal(onBase.ready, false);
 });

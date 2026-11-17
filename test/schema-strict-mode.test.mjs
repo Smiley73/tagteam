@@ -90,6 +90,8 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 //   current; `scripts/ship.mjs` reads a missing one as 120.
 // - `redesignEscalation` in the configuration, added to version 12 without a
 //   bump for the same reason; the ship reads a missing one as `never`.
+// - `mergeWithOpenFindings` in the configuration, the third such key; the ship
+//   reads a missing one as false.
 // - `autoMerge` in the configuration, which nothing reads any more and which
 //   stays declared so a file that carries it is not refused for it.
 // - `user_visible` in a spec's front matter, retired and ignored, and declared
@@ -102,6 +104,7 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 const DELIBERATELY_OPTIONAL = [
   { schema: "config.schema.json", property: "ciStartWaitSec" },
   { schema: "config.schema.json", property: "redesignEscalation" },
+  { schema: "config.schema.json", property: "mergeWithOpenFindings" },
   { schema: "config.schema.json", property: "autoMerge" },
   { schema: "spec.schema.json", property: "user_visible" },
   { schema: "spec.schema.json", property: "workflows" }

@@ -148,6 +148,8 @@ export function validateJson(schema, value) {
 // `redesignEscalation` is the second such key, for the same reason: the ship
 // reads a missing one as `never`, and requiring it would have reported every
 // version-12 file stale for a setting whose absence changes nothing.
+// `mergeWithOpenFindings` is the third, for the same reason: a missing one reads
+// as false, which is how every version-12 file already written behaves.
 //
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its

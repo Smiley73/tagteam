@@ -251,9 +251,20 @@ names, internal ids. See *Asking* in the skill.
     put every one still real in the plan's pull request instead). Offer the
     safe answers first: `carry` off, 5 and 2.
 
-    With `planBranch` off, none of the three is asked: write the values the file
-    already holds, or `carry` false, 5 and 2, and say in one sentence that
-    carrying settings exist and take effect only with `planBranch` on.
+    In the same call, ask `mergeWithOpenFindings`, offered off first. On, a spec
+    on a plan branch whose fix rounds are spent merges into the plan's branch
+    with what is open disclosed, whatever `carry` and `autoRedesign` say, and
+    nobody is asked. Say what it gives up: nobody is asked when fixing does not
+    converge; a spec can merge into the plan branch with a major finding open,
+    even one that later specs build on; the rewrite at the limit spends the
+    round past `fixRounds`; and only `limits.carried` and the plan's final Merge
+    stand between those findings and the base. Say that it overrides `carry` and
+    `autoRedesign` on a plan branch, and that off, those two work as asked.
+
+    With `planBranch` off, none of the four is asked: write the values the file
+    already holds, or `carry` false, `mergeWithOpenFindings` false, 5 and 2, and
+    say in one sentence that carrying settings exist and take effect only with
+    `planBranch` on.
 
 Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
@@ -366,9 +377,9 @@ Say two things afterwards, because neither is visible from the file:
   refresh commands.
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
-configured them; the only keys with a fallback are `ciStartWaitSec` and
-`redesignEscalation`, so any other omitted key is an invalid file rather than
-an unused feature.
+configured them; the only keys with a fallback are `ciStartWaitSec`,
+`redesignEscalation` and `mergeWithOpenFindings`, so any other omitted key is an
+invalid file rather than an unused feature.
 `autoMerge` is the one key the file may omit without either, because nothing
 reads it — and this command always omits it.
 
@@ -391,6 +402,12 @@ Write `carry`, `autoRedesign`, `limits.carried` and `limits.followUps`
 explicitly too, as questions 10 and 11 answered them or at the values the file
 holds when they were not asked. Under `--reconfigure` of a current file all
 four are offered back with the values the file already has.
+
+Always write `mergeWithOpenFindings` as well, for the same reason as
+`redesignEscalation`: the answer question 11 gave, otherwise the value the file
+holds, or `false`. Under `--reconfigure` it is offered back with the value the
+file holds. When a version-9 or version-10 file is carried forward, or a version-11
+file, write it as `false`.
 
 A version-9 configuration is carried forward, not replaced. Run the interview as
 `--reconfigure` does, with every value the file holds offered back as the
@@ -423,6 +440,10 @@ that the setting was retired and that nothing else changed. This path adds no
 A version-12 configuration without `redesignEscalation` is current: it needs no
 reconfigure and behaves as `never`. A `--reconfigure` of it asks the question
 only when escalation is on.
+
+A version-12 configuration without `mergeWithOpenFindings` is current in the same
+way: it needs no reconfigure and reads as off. A `--reconfigure` of it asks the
+question when `planBranch` is on.
 
 A configuration older than version 9 is not upgraded — each of those versions is
 a different shape, not an extension. Say that the old file is being replaced.

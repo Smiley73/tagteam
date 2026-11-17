@@ -68,30 +68,36 @@ async function runCommand(command, cwd, timeoutSec, logPath, { abandoned, watch 
 // `select` is which commands run: "when", the default, runs those whose `when`
 // matches the change; "all" runs every configured command whatever its `when`,
 // which is the whole-plan check's question — does the plan hold as one change —
-// and is said in the result so the record shows what ran. Either way commands
-// stop at the first failure, and nothing to run is `not-applicable`, never a
-// pass.
+// and is said in the result so the record shows what ran. Commands stop at the
+// first failure unless `keepGoing` asks for every one to run; `only`, positions
+// in the applicable list counted from 1, runs just those, each under the log
+// number it has in a full run, and is said in the result. Nothing to run is
+// `not-applicable`, never a pass.
 export const SELECTIONS = ["when", "all"];
 
-export async function verify({ config, candidate, worktree, outDir, select = "when", abandoned = () => false, watch = WATCH_MS }) {
+export async function verify({ config, candidate, worktree, outDir, select = "when", keepGoing = false, only = null, abandoned = () => false, watch = WATCH_MS }) {
   if (!SELECTIONS.includes(select)) throw new Error(`--select is ${SELECTIONS.join(" or ")}, not ${JSON.stringify(select)}`);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const every = select === "all";
   const applicable = every ? [...config.verify] : config.verify.filter((entry) =>
     matchWhen(entry.when, candidate.changedPaths, candidate.addedLines).matched
   );
-  const done = (result) => (every ? { ...result, select } : result);
+  const done = (result) => ({ ...result, ...(every ? { select } : {}), ...(only === null ? {} : { only }) });
   if (applicable.length === 0) return done({ status: "not-applicable", commands: [] });
+  if (only !== null && !only.every((position) => Number.isInteger(position) && position >= 1 && position <= applicable.length)) {
+    throw new Error(`--only names positions 1 to ${applicable.length} of the commands that apply, not ${JSON.stringify(only)}`);
+  }
   const results = [];
   for (let index = 0; index < applicable.length; index += 1) {
+    if (only !== null && !only.includes(index + 1)) continue;
     if (abandoned()) throw new Error(ABANDONED);
     const entry = applicable[index];
     const logPath = path.join(outDir, `${index + 1}.log`);
     const result = await runCommand(entry.command, worktree, entry.timeoutSec, logPath, { abandoned, watch });
     results.push(result);
-    if (result.status === "failed") return done({ status: "failed", commands: results });
+    if (result.status === "failed" && !keepGoing) return done({ status: "failed", commands: results });
   }
-  return done({ status: "passed", commands: results });
+  return done({ status: results.some((result) => result.status === "failed") ? "failed" : "passed", commands: results });
 }
 
 async function main() {
@@ -130,7 +136,9 @@ async function main() {
       candidate,
       worktree: path.resolve(args.worktree),
       outDir: path.resolve(args["out-dir"]),
-      ...(args.select === undefined ? {} : { select: args.select })
+      ...(args.select === undefined ? {} : { select: args.select }),
+      keepGoing: args["keep-going"] === "true",
+      ...(args.only === undefined ? {} : { only: args.only.split(",").map(Number) })
     });
     if (args.out) writeRoundFile(args.out, JSON.stringify(result, null, 2) + "\n");
     process.stdout.write(JSON.stringify(result) + "\n");
