@@ -1,8 +1,9 @@
 // One run at a time on a spec: the newest run's command ends what an earlier
 // run's command is still doing there, and everything that command started. A
-// run's own commands do not take the claim from each other while the group it
-// names is live, so that a stretch of them (scripts/stretch.mjs) can hold it
-// for its whole life.
+// run's own command ends only what an earlier one of its commands left behind,
+// and leaves the claim where it is while it runs under the command that
+// claimed, so that a stretch of them (scripts/stretch.mjs) can hold it for its
+// whole life.
 //
 // A workflow's step helper starts every driver command detached, so stopping the
 // run, or a crash, leaves the command running with nobody waiting for it. A new
@@ -154,23 +155,24 @@ const earlierRuns = ({ pgid, identity }) => !alive(pgid) || (identity && identit
 
 /**
  * Records `run` as the one running a command on the spec whose claim is `file`,
- * after ending whatever is left of the group an earlier run's claim names. A
- * command of the run that already holds the claim leaves it alone while that
- * group has a member left, is still the earlier run's and has the command in
- * its process tree. Nothing is done for a
- * missing or malformed run id.
+ * after ending whatever is left of the group the claim names. While the command
+ * that claimed is still running, a command of its own run ends nothing, and
+ * leaves the claim alone when it runs beneath that command. Nothing is done for
+ * a missing or malformed run id.
  */
 export function claimSpec(file, run) {
   if (typeof run !== "string" || !RUN_ID.test(run)) return;
   try {
     const earlier = JSON.parse(fs.readFileSync(file, "utf8"));
     const named = Number.isSafeInteger(earlier.pgid) && earlier.pgid > 0 && earlierRuns(earlier);
-    if (named && earlier.run === run) {
+    if (named && earlier.run === run && alive(earlier.pgid)) {
       // Only while this command is inside what the claim names: a standalone
       // command of the same run leads a group of its own, and the claim has to
       // move to it for a newer run's takeover to reach it.
-      if (alive(-earlier.pgid) && reach(earlier.pgid).includes(process.pid)) return;
+      if (reach(earlier.pgid).includes(process.pid)) return;
     } else if (named && earlier.pgid !== process.pid) {
+      // What an earlier run's command is doing, or what a command of this run
+      // left when it went: once the claim moves, no claim names that group.
       endGroup(earlier.pgid);
     }
   } catch {}

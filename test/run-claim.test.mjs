@@ -98,7 +98,7 @@ test("when the earlier run's command has died, a command of another run still en
   }
 });
 
-test("the same run's next command, and a command with no run, end nothing, and the same run's takes the claim for its own group when it is not inside the one that holds it", async () => {
+test("while the same run's earlier command is still running, its next command, and a command with no run, end nothing, and the same run's takes the claim for its own group when it is not inside the one that holds it", async () => {
   const { plan, shipDir } = stage();
   const orphan = await orphanOf(shipDir, "run-a");
   try {
@@ -113,6 +113,25 @@ test("the same run's next command, and a command with no run, end nothing, and t
     assert.equal(fs.readFileSync(orphan.claim, "utf8"), taken, "a command with no run touched the claim");
     assert.equal(alive(orphan.leader), true, "a command of no run ended the earlier command");
     assert.equal(alive(orphan.child), true);
+  } finally {
+    orphan.end();
+  }
+});
+
+test("when the same run's earlier command has gone, its next command ends what that one left in its group before it takes the claim", async () => {
+  const { plan, shipDir } = stage();
+  const orphan = await orphanOf(shipDir, "run-a");
+  try {
+    process.kill(orphan.leader, "SIGKILL");
+    await settles([orphan.leader]);
+    assert.equal(alive(orphan.child), true, "the dead leader took its child with it, so there is nothing to test");
+    ship("checks", plan, ["--spec", "01-a"], { TAGTEAM_RUN_ID: "run-a" });
+    await settles([orphan.child]);
+    // Left running, it would be in a group no claim names any more, where a
+    // newer run's takeover never reaches it.
+    assert.equal(alive(orphan.child), false, "what the earlier command left was still running once the claim had moved off its group");
+    assert.equal(claimedBy(orphan.claim), "run-a");
+    assert.notEqual(pgidOf(orphan.claim), orphan.leader, "the claim stayed on the group of a command that has gone");
   } finally {
     orphan.end();
   }

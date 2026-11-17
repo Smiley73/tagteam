@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { checksumOf, stepHelperPrompt } from "../scripts/lib/step-helper.mjs";
 import { shellQuote as q } from "../scripts/lib/codex-command.mjs";
@@ -344,6 +344,9 @@ test("a second run taking the spec mid-stretch ends the runner and the step unde
   assert.equal(held.run, "run-a");
   assert.ok(alive(held.pgid) && alive(verifying));
   try {
+    // Were the claim the verify step's own, ending that step alone would read below as ending the runner.
+    const claimant = execFileSync("ps", ["-ww", "-o", "command=", "-p", String(held.pgid)], { encoding: "utf8" });
+    assert.ok(claimant.includes(RUNNER), `the claim names ${claimant.trim()} and not the runner over the step`);
     // `checks` stops at once, with no wait to take up; the claim comes before that.
     ship("checks", staged.plan, ["--spec", "01-a"], { TAGTEAM_RUN_ID: "run-b" });
     for (let waited = 0; (alive(held.pgid) || alive(verifying)) && waited < 100; waited += 1) await delay(100);
