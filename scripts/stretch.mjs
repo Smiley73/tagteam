@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { claimSpec, leadsOwnGroup, relaunchAsLeader } from "./lib/run-claim.mjs";
+import { claimSpec, holdsClaim, leadsOwnGroup, relaunchAsLeader } from "./lib/run-claim.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
 
@@ -100,13 +100,12 @@ const objectOf = (value) => value !== null && typeof value === "object" && !Arra
 /** A driver payload in the step helper's shape, without its checksum. */
 function projected(payload) {
   const text = (value) => (value === undefined || value === null ? null : String(value));
-  const answers = Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name, command }));
   return {
     exit: 0,
     stop: text(payload.stop),
     say: [].concat(payload.say ?? []).map(String),
     ask: text(payload.ask),
-    answers: answers.map(({ name, command }) => ({ name: String(name), command: String(command) })),
+    answers: Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name: String(name), command: String(command) })),
     next: text(payload.next),
     dispatch: (payload.dispatch ?? []).map((entry) => Object.fromEntries(["agent", "model", "effort", "description", "prompt"].map((key) => [key, text(entry[key])]))),
     set: payload.set ? { id: text(payload.set.id), labels: [].concat(payload.set.labels ?? []).map(String), arrive: text(payload.set.arrive) } : null
@@ -125,18 +124,10 @@ async function stretch(request) {
 
   const own = (sentence) => ({ fields: stopped(OWN_STOP, sentence), stderr: `${sentence}\n` });
   const claimFile = (unit) => path.join(request.shipDir, "steps", `${unit === null ? "plan" : encodeURIComponent(unit)}.claim.json`);
-  const holds = (file) => {
-    try {
-      const claim = JSON.parse(fs.readFileSync(file, "utf8"));
-      return claim.run === run && claim.pgid === process.pid;
-    } catch {
-      return false;
-    }
-  };
 
   /** One command through `sh -c`, as the helper runs it. A `{ stop }` when it did not come back whole. */
   async function runStep(command, name, unit) {
-    if (![...held].every(holds)) {
+    if (![...held].every((file) => holdsClaim(file, run))) {
       return { stop: `Another run has taken over the claim this stretch held, so the ${name} step was not run and nothing after it ran.` };
     }
     const file = claimFile(unit);
@@ -178,42 +169,52 @@ async function stretch(request) {
     return { result };
   }
 
-  const ending = (result) => ({ fields: result, stderr: last === null ? "" : fs.readFileSync(last.stderr, "utf8") });
+  const ending = (result) => ({ fields: result, stderr: last === null ? "" : fs.readFileSync(last.stderr) });
   const refusedOf = (command) => {
     const why = refusal(command, request);
     return why === null ? null : own(`The command ${JSON.stringify(command)} ${why}, so it was not run.`);
   };
   const ended = (outcome) => ({ ...outcome, say, output: last?.stdout ?? null });
 
-  if (request.step !== undefined) {
-    const refused = refusedOf(request.step);
-    if (refused !== null) return ended(refused);
-    const step = await runStep(request.step, subcommandOf(request.step), flag(request.step, "spec"));
-    return ended(step.stop === undefined ? ending(step.result) : own(step.stop));
-  }
-
-  if (!request.arrive.startsWith(`${scriptPrefix("dispatch-set.mjs")}arrive `)) {
-    return ended(own("The command that records the arrivals is not the plugin's own scripts/dispatch-set.mjs arrive, so it was not run."));
-  }
-  const arrival = await runStep(request.arrive, "arrive", spec);
-  if (arrival.stop !== undefined) return ended(own(arrival.stop));
-  let current = arrival.result;
-  // The arrival's own next is never followed: the step that sent the set named the one that is.
-  if (request.next === undefined || current.exit !== 0 || current.next === null) return ended(ending(current));
-  current = { ...current, next: request.next };
-
-  for (;;) {
-    const name = current.next === null ? null : subcommandOf(current.next);
-    const unit = current.next === null ? null : flag(current.next, "spec");
-    if (current.exit !== 0 || current.dispatch.length > 0 || current.set !== null || current.ask !== null || current.next === null
-      || name === "end" || (unit !== null && unit !== spec) || HANDED_BACK.includes(name)) {
-      return ended(ending(current));
+  /** The three forms, until one stops. */
+  async function follow() {
+    if (request.step !== undefined) {
+      const refused = refusedOf(request.step);
+      if (refused !== null) return ended(refused);
+      const step = await runStep(request.step, subcommandOf(request.step), flag(request.step, "spec"));
+      return ended(step.stop === undefined ? ending(step.result) : own(step.stop));
     }
-    const refused = refusedOf(current.next);
-    if (refused !== null) return ended(refused);
-    const step = await runStep(current.next, name, unit);
-    if (step.stop !== undefined) return ended(own(step.stop));
-    current = step.result;
+
+    if (!request.arrive.startsWith(`${scriptPrefix("dispatch-set.mjs")}arrive `)) {
+      return ended(own("The command that records the arrivals is not the plugin's own scripts/dispatch-set.mjs arrive, so it was not run."));
+    }
+    const arrival = await runStep(request.arrive, "arrive", spec);
+    if (arrival.stop !== undefined) return ended(own(arrival.stop));
+    let current = arrival.result;
+    // The arrival's own next is never followed: the step that sent the set named the one that is.
+    if (request.next === undefined || current.exit !== 0 || current.next === null) return ended(ending(current));
+    current = { ...current, next: request.next };
+
+    for (;;) {
+      const name = current.next === null ? null : subcommandOf(current.next);
+      const unit = current.next === null ? null : flag(current.next, "spec");
+      if (current.exit !== 0 || current.dispatch.length > 0 || current.set !== null || current.ask !== null || current.next === null
+        || name === "end" || (unit !== null && unit !== spec) || HANDED_BACK.includes(name)) {
+        return ended(ending(current));
+      }
+      const refused = refusedOf(current.next);
+      if (refused !== null) return ended(refused);
+      const step = await runStep(current.next, name, unit);
+      if (step.stop !== undefined) return ended(own(step.stop));
+      current = step.result;
+    }
+  }
+
+  // Whatever goes wrong past this point, the lines said so far still go back with it.
+  try {
+    return await follow();
+  } catch (error) {
+    return ended(own(`The stretch could not go on (${error?.message ?? error}), so nothing after the step it was on ran.`));
   }
 }
 

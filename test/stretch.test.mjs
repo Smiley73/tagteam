@@ -17,9 +17,9 @@ import {
   root, git, stage, stagePlan, ship, write, outputOf, opensPlainly, driveToPublishable, bodyFileOf, titleFileOf, A_CHANGE
 } from "./ship-stage.mjs";
 import { shellHelper } from "./workflow-harness.mjs";
+import { OWN_STOP } from "../scripts/stretch.mjs";
 
 const RUNNER = path.join(root, "scripts", "stretch.mjs");
-const OWN_STOP = 64;
 let stamps = 0;
 
 const alive = (pid) => {
@@ -163,8 +163,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const [sub] = process.argv.slice(2);
 fs.appendFileSync(path.join(here, "ran.log"), sub + "\\n");
 const row = JSON.parse(fs.readFileSync(path.join(here, "table.json"), "utf8"))[sub];
+if (row.claim) fs.writeFileSync(row.claim.file, JSON.stringify(row.claim.value));
 if (row.exit) {
-  process.stderr.write(row.stop + "\\nchecksum: " + (row.checksum ?? checksumOf({ exit: row.exit, stop: row.stop })) + "\\n");
+  const stop = Buffer.from(row.stop, row.bytes ?? "utf8");
+  const checksum = row.checksum ?? checksumOf({ exit: row.exit, stop: stop.toString("utf8") });
+  process.stderr.write(Buffer.concat([stop, Buffer.from("\\nchecksum: " + checksum + "\\n")]));
   process.exitCode = row.exit;
 } else {
   const payload = { ok: true, ...row.payload };
@@ -172,6 +175,8 @@ if (row.exit) {
 }
 `;
 
+// The table is the rows the stand-ins answer from, or a function of the staged
+// root for rows that name its commands.
 function standIn(table) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-stretch-")));
   const scripts = path.join(dir, "plugin", "scripts");
@@ -179,7 +184,6 @@ function standIn(table) {
   fs.symlinkSync(path.join(root, "scripts", "lib"), path.join(scripts, "lib"));
   fs.copyFileSync(RUNNER, path.join(scripts, "stretch.mjs"));
   for (const name of ["ship.mjs", "dispatch-set.mjs"]) fs.writeFileSync(path.join(scripts, name), STAND_IN);
-  fs.writeFileSync(path.join(scripts, "table.json"), JSON.stringify(table));
   const plan = path.join(dir, ".tagteam", "plans", "demo");
   const ship = JSON.stringify(path.join(scripts, "ship.mjs"));
   const staged = {
@@ -189,6 +193,7 @@ function standIn(table) {
     ran: () => (fs.existsSync(path.join(scripts, "ran.log")) ? fs.readFileSync(path.join(scripts, "ran.log"), "utf8").trim().split("\n") : []),
     runner: path.join(scripts, "stretch.mjs")
   };
+  fs.writeFileSync(path.join(scripts, "table.json"), JSON.stringify(typeof table === "function" ? table(staged) : table));
   return staged;
 }
 
@@ -208,11 +213,10 @@ test("a stretch ends at the first step that fails, dispatches, hands back an emp
     "names plan-land": (c) => ({ payload: { next: c.cmd("plan-land", { spec: null }) } })
   };
   for (const [what, row] of Object.entries(cases)) {
-    const staged = standIn({});
-    const verify = row(staged);
-    fs.writeFileSync(path.join(staged.dir, "plugin", "scripts", "table.json"), JSON.stringify({
-      arrive: { payload: { say: ["in"], next: staged.cmd("collect") } },
-      verify,
+    let verify;
+    const staged = standIn((c) => ({
+      arrive: { payload: { say: ["in"], next: c.cmd("collect") } },
+      verify: (verify = row(c)),
       collect: { payload: { say: ["collected"] } }
     }));
     const { result } = run(staged, { arrive: staged.arrive, next: staged.cmd("verify") });
@@ -225,11 +229,10 @@ test("a stretch ends at the first step that fails, dispatches, hands back an emp
     assert.equal(result.checksum, checksumOf(result), what);
   }
 
-  const staged = standIn({});
-  fs.writeFileSync(path.join(staged.dir, "plugin", "scripts", "table.json"), JSON.stringify({
-    arrive: { payload: { say: "in", next: staged.cmd("collect") } },
-    verify: { payload: { say: ["verified"], next: staged.cmd("collect") } },
-    collect: { payload: { say: ["collected"], next: staged.cmd("settle") } },
+  const staged = standIn((c) => ({
+    arrive: { payload: { say: "in", next: c.cmd("collect") } },
+    verify: { payload: { say: ["verified"], next: c.cmd("collect") } },
+    collect: { payload: { say: ["collected"], next: c.cmd("settle") } },
     settle: { payload: { say: ["settled"] } }
   }));
   const { result } = run(staged, { arrive: staged.arrive, next: staged.cmd("verify") });
@@ -238,17 +241,13 @@ test("a stretch ends at the first step that fails, dispatches, hands back an emp
 });
 
 test("an arrival whose own next is null stops there, and one whose next is set is followed only by the next the runner was given", () => {
-  const dead = standIn({});
-  fs.writeFileSync(path.join(dead.dir, "plugin", "scripts", "table.json"), JSON.stringify({
-    arrive: { payload: { say: ["Not all in."] } }, verify: { payload: {} }
-  }));
+  const dead = standIn({ arrive: { payload: { say: ["Not all in."] } }, verify: { payload: {} } });
   const stopped = run(dead, { arrive: dead.arrive, next: dead.cmd("verify") }).result;
   assert.deepEqual(dead.ran(), ["arrive"], "the set was not complete, so nothing ran after it");
   assert.deepEqual([stopped.exit, stopped.next, stopped.say], [0, null, ["Not all in."]]);
 
-  const staged = standIn({});
-  fs.writeFileSync(path.join(staged.dir, "plugin", "scripts", "table.json"), JSON.stringify({
-    arrive: { payload: { say: ["in"], next: staged.cmd("settle") } }, verify: { payload: { say: ["verified"] } }, settle: { payload: {} }
+  const staged = standIn((c) => ({
+    arrive: { payload: { say: ["in"], next: c.cmd("settle") } }, verify: { payload: { say: ["verified"] } }, settle: { payload: {} }
   }));
   const { result } = run(staged, { arrive: staged.arrive, next: staged.cmd("verify") });
   assert.deepEqual(staged.ran(), ["arrive", "verify"], "the arrival's own next is not followed");
@@ -264,10 +263,9 @@ test("a command the runner may not run stops it before that command runs, with t
     "a script that is not the plugin's": (c) => c.cmd("verify").replace(/^node "[^"]*"/, 'node "/elsewhere/scripts/ship.mjs"')
   };
   for (const [what, command] of Object.entries(refused)) {
-    const staged = standIn({});
-    fs.writeFileSync(path.join(staged.dir, "plugin", "scripts", "table.json"), JSON.stringify({
+    const staged = standIn({
       arrive: { payload: { say: ["in"], next: "unused" } }, verify: { payload: {} }, start: { payload: {} }, status: { payload: {} }
-    }));
+    });
     const one = run(staged, { step: command(staged) });
     assert.deepEqual(staged.ran(), [], `${what}: the command ran`);
     assert.equal(one.result.exit, OWN_STOP, what);
@@ -306,9 +304,8 @@ test("a step whose output does not carry its own checksum stops the runner with 
     "a field of the wrong shape": () => ({ payload: { dispatch: {} }, checksum: "00000000" })
   };
   for (const what of Object.keys(bad)) {
-    const staged = standIn({});
-    fs.writeFileSync(path.join(staged.dir, "plugin", "scripts", "table.json"), JSON.stringify({
-      arrive: { payload: { say: ["in"], next: "unused" } }, verify: bad[what](staged), collect: { payload: {} }
+    const staged = standIn((c) => ({
+      arrive: { payload: { say: ["in"], next: "unused" } }, verify: bad[what](c), collect: { payload: {} }
     }));
     const { result, dir } = run(staged, { arrive: staged.arrive, next: staged.cmd("verify") });
     assert.deepEqual(staged.ran(), ["arrive", "verify"], what);
@@ -318,6 +315,67 @@ test("a step whose output does not carry its own checksum stops the runner with 
     assert.equal(fs.readFileSync(path.join(dir, "stderr"), "utf8"), `${result.stop}\n`, what);
     assert.equal(result.checksum, checksumOf(result), what);
   }
+});
+
+test("a stretch that finds the claim no longer its own between two steps starts nothing more, and stops with the lines said so far", () => {
+  const taken = {
+    "another run's": () => ({ run: "someone-else", groups: [{ pgid: process.pid, identity: "x" }] }),
+    "this run's, on another group": () => ({ run: "run-c", groups: [{ pgid: 1, identity: "x" }] })
+  };
+  for (const what of Object.keys(taken)) {
+    const staged = standIn((c) => ({
+      arrive: { payload: { say: ["in"], next: "unused" } },
+      verify: { payload: { say: ["verified"], next: c.cmd("collect") }, claim: { file: path.join(c.shipDir, "steps", "01-a.claim.json"), value: taken[what]() } },
+      collect: { payload: {} }
+    }));
+    const { result, dir } = run(staged, { arrive: staged.arrive, next: staged.cmd("verify") }, { stamp: "run-c" });
+    assert.deepEqual(staged.ran(), ["arrive", "verify"], `${what}: a step started after the claim was taken`);
+    assert.deepEqual([result.exit, result.say], [OWN_STOP, ["in", "verified"]], what);
+    assert.match(result.stop, /^Another run has taken over the claim this stretch held, so the collect step was not run and nothing after it ran\.$/, what);
+    assert.ok(opensPlainly(result.stop), what);
+    assert.equal(fs.readFileSync(path.join(dir, "stderr"), "utf8"), `${result.stop}\n`, what);
+    assert.equal(result.checksum, checksumOf(result), what);
+  }
+});
+
+test("a stretch that cannot go on for a reason of its own still exits 0 with the lines said so far", () => {
+  const staged = standIn((c) => ({
+    arrive: { payload: { say: ["in"], next: "unused" } },
+    verify: { payload: {} }
+  }));
+  // A directory where the plan-level claim goes: the claim cannot be taken.
+  fs.mkdirSync(path.join(staged.shipDir, "steps", "plan.claim.json"), { recursive: true });
+  const { result } = run(staged, { arrive: staged.arrive, next: staged.cmd("verify", { spec: null }) });
+  assert.deepEqual(staged.ran(), ["arrive"]);
+  assert.deepEqual([result.exit, result.say], [OWN_STOP, ["in"]]);
+  assert.match(result.stop, /^The stretch could not go on \(.*\), so nothing after the step it was on ran\.$/);
+  assert.ok(opensPlainly(result.stop));
+});
+
+test("a stop's stderr reaches the capture directory byte for byte, whatever bytes it holds", () => {
+  const staged = standIn((c) => ({ verify: { exit: 1, stop: "The file caf\u00e9 stopped it.", bytes: "latin1" } }));
+  const { result, dir } = run(staged, { step: staged.cmd("verify") });
+  const written = fs.readFileSync(path.join(dir, "01-verify", "stderr"));
+  assert.ok(written.includes(0xe9), "the stand-in did not write a byte that is not UTF-8");
+  assert.ok(fs.readFileSync(path.join(dir, "stderr")).equals(written));
+  assert.equal(result.exit, 1);
+});
+
+test("a stretch given bad arguments stops the driver's way, before anything runs", () => {
+  const staged = standIn({ arrive: { payload: {} }, verify: { payload: {} } });
+  const cases = {
+    "no run id": [{ arrive: staged.arrive }, /^TAGTEAM_RUN_ID must be set/, ""],
+    "both --arrive and --step": [{ arrive: staged.arrive, step: staged.cmd("verify") }, /^give --arrive or --step/, "both"]
+  };
+  for (const [what, [form, reason, stamp]] of Object.entries(cases)) {
+    const { result, dir } = run(staged, form, { stamp: stamp === "" ? "" : `usage-${(stamps += 1)}` });
+    assert.notEqual(result.exit, 0, what);
+    assert.match(result.stop, reason, what);
+    assert.ok(opensPlainly(result.stop), what);
+    assert.equal(result.checksum, checksumOf({ exit: result.exit, stop: result.stop }), what);
+    assert.deepEqual(recordsIn(dir), [], `${what}: a step ran`);
+  }
+  assert.deepEqual(staged.ran(), []);
 });
 
 test("a second run taking the spec mid-stretch ends the runner and the step under it, and no step after that one starts", async () => {
@@ -342,20 +400,21 @@ test("a second run taking the spec mid-stretch ends the runner and the step unde
   const claim = path.join(staged.shipDir, "steps", "01-a.claim.json");
   const held = JSON.parse(fs.readFileSync(claim, "utf8"));
   assert.equal(held.run, "run-a");
-  assert.ok(alive(held.pgid) && alive(verifying));
+  const groups = held.groups.map(({ pgid }) => pgid);
+  // The runner's own group is on the claim, not only the groups of the steps under it.
+  const runner = groups.find((pgid) => execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pgid)], { encoding: "utf8" }).includes(RUNNER));
+  assert.notEqual(runner, undefined, "the claim does not name the runner's group");
+  assert.ok(alive(runner) && alive(verifying));
   try {
-    // Were the claim the verify step's own, ending that step alone would read below as ending the runner.
-    const claimant = execFileSync("ps", ["-ww", "-o", "command=", "-p", String(held.pgid)], { encoding: "utf8" });
-    assert.ok(claimant.includes(RUNNER), `the claim names ${claimant.trim()} and not the runner over the step`);
     // `checks` stops at once, with no wait to take up; the claim comes before that.
     ship("checks", staged.plan, ["--spec", "01-a"], { TAGTEAM_RUN_ID: "run-b" });
-    for (let waited = 0; (alive(held.pgid) || alive(verifying)) && waited < 100; waited += 1) await delay(100);
-    assert.equal(alive(held.pgid), false, "the runner was left running");
+    for (let waited = 0; (alive(runner) || alive(verifying)) && waited < 100; waited += 1) await delay(100);
+    assert.equal(alive(runner), false, "the runner was left running");
     assert.equal(alive(verifying), false, "the verify under the runner was left running");
     assert.equal(JSON.parse(fs.readFileSync(claim, "utf8")).run, "run-b");
     assert.deepEqual(recordsIn(dir), ["01-arrive", "02-snapshot", "03-verify"], "no step after verify started");
   } finally {
-    for (const pid of [held.pgid, verifying]) {
+    for (const pid of [...groups, verifying]) {
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
   }
