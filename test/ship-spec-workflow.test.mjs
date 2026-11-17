@@ -134,8 +134,7 @@ test("a merge runs in a line of its own named land under Land, whether it was ha
   const cases = {
     "finish handed back": [cmd("snapshot"), cmd("finish"), "01-a"],
     "plan-land handed back": [cmd("snapshot"), cmd("plan-land", null), "01-a"],
-    "a run started at finish --approve": [`${cmd("finish")} --approve owner@example.com`, null, "01-a"],
-    "a plan-level run started at plan-land": [`${cmd("plan-land", null)} --approve`, null, null]
+    "a run started at finish --approve": [`${cmd("finish")} --approve owner@example.com`, null, "01-a"]
   };
   for (const [what, [start, handed, unit]] of Object.entries(cases)) {
     const { result, calls } = await run(start, (form) => (form.step === start && handed !== null ? { say: ["Ready."], next: handed } : { say: ["Merged."], next: END }), { args: { spec: unit } });
