@@ -231,6 +231,14 @@ that changes nothing, fails the tests or writes no usable report is put back as 
 it had not run, and one whose fresh adversary pass raises a blocking or major
 finding on what it changed is thrown away, with the run saying which.
 
+An implementer is handed the spec's `## Tests` and `## Done when` lines, each
+under an id, and its report answers every one: met, with what in the change
+meets it, or not done, with why. A report that leaves one unanswered, answers one
+twice or names one it was not given is sent back once, like any unusable report.
+A line answered not done is unfinished work: it reaches every reader as an item
+and stops the pull request for a person as any other unfinished work does. A spec
+without those sections is handed nothing. A fixer is not asked.
+
 A fixer may answer that the right repair for a finding would go against the
 plan's goal, because the spec conflicts with it there; that stops the spec at
 `finish`, see *Merge or stop*. A finding about the pull request itself or the

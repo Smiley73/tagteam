@@ -62,7 +62,8 @@ missing, and it does not ask you to answer the findings one by one. Keep the
 interfaces the rest of the candidate depends on. Touch other files only as the
 rewrite requires. The spec still binds — it says what the change delivers, and
 the rewrite delivers it. Report against the brief with the same
-`schemas/implement-report.schema.json`, at the path the dispatch names. A brief
+`schemas/implement-report.schema.json`, at the path the dispatch names, and
+answer the spec's lines as the Report section says. A brief
 that is wrong about the area — a file it names that does not exist, a finding
 that describes code that is not there — is reported as unfinished with the
 reason, not patched around.
@@ -83,8 +84,9 @@ that report is kept. Change nothing under the worktree. Read the range and the
 brief, work out what the commit does and what it leaves undone, and write the
 report at the path you are given. Check it as the Report section says. If you
 cannot tell what part of the work is done, say so in `unfinished` rather than
-claiming it complete. The run sends an agent back for a report once, and a person
-decides after that.
+claiming it complete. If the dispatch names lines, answer them as the Report
+section says, from what the commits do. The run sends an agent back for a report
+once, and a person decides after that.
 
 ## Subtract
 
@@ -119,12 +121,27 @@ you could not resolve is `unfinished`. Remove what a command wrote
 into the tree — coverage output, build products — unless the repository ignores
 it, so it does not land in the change.
 
+If the dispatch names a lines file, go down it by id now, with the change and the
+tests run in front of you, and decide each line: met only when you can point at
+what meets it. The Report section says how they are answered.
+
 ## Report
 
 Write your report at the path you are given, matching
 `schemas/implement-report.schema.json`, before you return: whether you finished
 the spec, one or two sentences on what you changed, and every part you left
 undone with the reason.
+
+When the dispatch names a lines file, it holds the spec's `## Tests` and
+`## Done when` lines, each under an id. Go down it by id and answer each line
+once in the report's `account`, and answer no id it does not hold. Met means
+something in the change meets the line, and the note names that something: the
+test, the branch, the file. Not done carries the reason. A line you are unsure
+of is not done, for the same reason an honest `unfinished` is preferred. A line
+answered not done is recorded as unfinished work, so the run stops for a person
+on it; a line wrongly marked met is the worse mistake. A report that leaves an
+id unanswered, answers one twice or names one it was not given is refused and
+you are sent back for it. Without a lines file, `account` is an empty array.
 
 **An honest `unfinished` costs you nothing, and a false `complete` costs the
 change.** The run stops for a person whichever of the two you write — an

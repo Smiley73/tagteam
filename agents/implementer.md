@@ -19,7 +19,8 @@ dispatched you owns all of that, and a commit you make is one it did not record.
 
 Write your report to the path you are given, matching
 `schemas/implement-report.schema.json`, before you return: whether you finished
-the spec, what you changed, and every part you left undone with the reason. That
+the spec, what you changed, every part you left undone with the reason, and, when
+the dispatch names a lines file, an answer to each line in it by id. That
 report is the one exception to the boundary above — it is written at exactly the
 absolute path you were given, which is outside the worktree on purpose so that it
 is not committed into the change. Do not move it inside to stay within the
