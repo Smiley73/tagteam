@@ -578,7 +578,9 @@ asks the questions only a person can answer, and starts the next run from the
 answer. A dedicated agent writes the pull request body. The implementer is given
 the spec's test and done-when lines by id and answers each as met or not done in
 its report; a line it did not do counts as unfinished work, and a report that
-skips or repeats one is sent back.
+skips or repeats one is sent back. Every reviewer reading the spec's code afresh
+is shown what the implementer said meets each line it answered as met, and checks
+it against the code.
 Subagents write their own outputs; scripts read them. Nothing large is ever
 moved between steps by passing it through a model.
 

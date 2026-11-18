@@ -6,7 +6,7 @@ see theirs and are not confined to one of them.
 <!-- No lens brief is interpolated into this prompt, and none should be. Being
 unlensed is what this pass is for, so the briefs under prompts/lenses/ and the
 ones a repository writes under .tagteam/lenses/ are both deliberately absent
-here. The only substitutions are CANDIDATE, LENSES, CONVENTIONS, SPEC, DIFF and ITEMS. -->
+here. The only substitutions are CANDIDATE, LENSES, CONVENTIONS, SPEC, DIFF, ITEMS and ACCOUNT. -->
 
 
 Return only JSON matching the schema you were given. Set `lens` to "codex" and
@@ -65,6 +65,20 @@ one sentence.
 An item you rule `spec-requirement-missing` becomes a finding of its own, so do
 not also file one for it. An item you leave unruled keeps the spec waiting for a
 person. When the list is empty, write `rulings` as `[]` — never omit it.
+
+The lines of the spec's `## Tests` and `## Done when` that the implementer said
+are met, each with the spec's own text and the implementer's note on where it is
+met, and the candidate it said so about (an empty `lines` list when there are
+none):
+
+{{ACCOUNT}}
+
+That is a claim, and the note says where to look; it is not evidence. Check the
+claims against the candidate you are reviewing, which may have changed since. A
+line that is not met is a finding like any other requirement the change lacks,
+at the severity below. Write nothing about the account otherwise: no answer per
+line, no ids, no quoted lines. Lines the implementer reported not done are not
+in this file; they are among the unfinished items above.
 
 Read the repository around what the diff touches. A diff read on its own hides
 everything about the code it is changing — the callers, the contract that used to

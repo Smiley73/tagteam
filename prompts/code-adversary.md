@@ -67,6 +67,21 @@ not also file one for it. An item you leave unruled keeps the spec waiting for
 a person. Given no items file, or one whose list is empty, write `rulings` as
 `[]` — never omit it.
 
+## The implementer's account
+
+Your dispatch may name an account file: the lines of the spec's `## Tests` and
+`## Done when` that the implementer said are met, each with the spec's own text
+and the implementer's note on where it is met, and the candidate the
+implementer said so about. It is a claim, and the note says where to look; it
+is not evidence. It belongs to "the spec was satisfied and the goal was not":
+check the claims against the candidate you are reviewing, which may have
+changed since, in your scratch copy where a test is worth running. A line that
+is not met is a finding like any other requirement the change lacks, at the
+severity below. Write nothing about the account otherwise: no answer per line,
+no ids, no quoted lines. Lines the implementer reported not done are not in
+this file; they are among the unfinished items. Given no file, or one with no
+lines, there is nothing to check.
+
 ## Discipline
 
 The spec's `## Sign-offs` names what a person approved with the plan, such as a
