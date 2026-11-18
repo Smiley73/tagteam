@@ -26,7 +26,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "scope", "file", "line", "title", "detail", "fix"],
+        "required": ["severity", "scope", "file", "line", "title", "detail", "fix", "weakTest"],
         "properties": {
           "severity": {
             "type": "string",
@@ -59,6 +59,10 @@
           "fix": {
             "type": ["string", "null"],
             "description": "What to change, when that is obvious. Null when the right repair is a judgement call."
+          },
+          "weakTest": {
+            "type": "boolean",
+            "description": "Yes when a test this finding names would still pass with the behaviour it is meant to prove broken. No otherwise."
           }
         }
       }

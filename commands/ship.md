@@ -231,6 +231,29 @@ that changes nothing, fails the tests or writes no usable report is put back as 
 it had not run, and one whose fresh adversary pass raises a blocking or major
 finding on what it changed is thrown away, with the run saying which.
 
+At a spec's first panel, the minor findings about the code that nobody could run
+are tried before the round is judged: correctness's and Codex's, and
+code-quality's that say a test would still pass with the behaviour broken. When
+there are some, `collect` sends one adversary job, once per spec, with those
+findings by id, and the next `collect` judges its answers. A finding becomes major
+only when the job names it as reproduced and gives the command it ran and what it
+saw; that evidence travels with the finding to the fixer and to the re-check, and
+a reproduction alone opens a fix round. A finding the job did not answer, answered
+in a way that does not bind, or could not reproduce stays minor, and that is
+never a stop. The run says what became of each. Later panels and the adversary's
+fresh pass are not tried.
+
+An implementer is handed the spec's `## Tests` and `## Done when` lines, each
+under an id, and its report answers every one: met, with what in the change
+meets it, or not done, with why. A report that leaves one unanswered, answers one
+twice or names one it was not given is sent back once, like any unusable report.
+A line answered not done is unfinished work: it reaches every reader as an item
+and stops the pull request for a person as any other unfinished work does. A spec
+without those sections is handed nothing. A fixer is not asked. The reviewers,
+Codex and the adversary's fresh pass are shown what the implementer said meets
+each line it answered as met, and check it; a claim that does not hold is
+raised as an ordinary finding.
+
 A fixer may answer that the right repair for a finding would go against the
 plan's goal, because the spec conflicts with it there; that stops the spec at
 `finish`, see *Merge or stop*. A finding about the pull request itself or the

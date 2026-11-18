@@ -161,7 +161,7 @@ test("the dispatches name a command that passes a valid report and fails an inva
   const { begin } = begun();
   const check = checkReportOf;
   const [implementer] = begin.json.dispatch;
-  assert.equal(check(implementer, IMPLEMENTED).stdout.trim(), "valid");
+  assert.equal(check(implementer, { ...IMPLEMENTED, account: [] }).stdout.trim(), "valid");
   const refused = check(implementer, { status: "complete", summary: "added sub" });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /unfinished/);

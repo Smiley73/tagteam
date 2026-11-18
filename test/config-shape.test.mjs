@@ -1152,7 +1152,7 @@ test("the shipped example states today's behaviour", () => {
   // held to it: nobody copies this repository's own settings, and `limits` is a
   // question `/tagteam:configure` asks, so pinning the answer here would mean tagteam
   // could not configure itself the way it offers to configure everyone else.
-  assert.deepEqual(example.limits, { fixRounds: 1, ciRepairs: 1, carried: 5, followUps: 2 }, "examples/config.json");
+  assert.deepEqual(example.limits, { fixRounds: 2, ciRepairs: 1, carried: 5, followUps: 2 }, "examples/config.json");
 });
 
 test("the schema declares no default anywhere", () => {

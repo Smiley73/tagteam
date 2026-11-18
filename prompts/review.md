@@ -58,6 +58,9 @@ change to the pull request's text — what its description says or leaves out.
 the change is split into commits — and not to any file. `code` otherwise, including a code defect that names no single file, such as
 three modules that disagree: write `file` as `null` and it still goes to a fixer.
 
+Set `weakTest` on every finding. It is `false` unless your lens brief says when
+to set it `true`.
+
 Severity:
 
 - `blocking` — must not merge. Data loss, a security hole, a broken contract, a
@@ -105,6 +108,20 @@ An item you rule `spec-requirement-missing` becomes a finding of its own, so do
 not also file one for it. An item you leave unruled keeps the spec waiting for
 a person. Given no items file, or one whose list is empty, write `rulings` as
 `[]` — never omit it.
+
+## The implementer's account
+
+Your dispatch may name an account file: the lines of the spec's `## Tests` and
+`## Done when` that the implementer said are met, each with the spec's own text
+and the implementer's note on where it is met, and the candidate the
+implementer said so about. It is a claim, and the note says where to look; it
+is not evidence. Check the claims that fall inside your lens against the
+candidate you are reviewing, which may have changed since. A line that is not
+met is a finding like any other requirement the change lacks, at the severity
+above. Write nothing about the account otherwise: no answer per line, no ids,
+no quoted lines. Lines the implementer reported not done are not in this file;
+they are among the unfinished items. Given no file, or one with no lines, there
+is nothing to check.
 
 ## Discipline
 

@@ -54,6 +54,15 @@
 // re-entered round can only be recorded again by the same report, byte for byte,
 // and a later agent's file cannot become the account of a commit it did not make.
 //
+// An implementer's report also answers for the spec's lines. `--lines` names the
+// file the driver wrote them to, and the report must answer every id in it, once
+// each and no other — checked where the schema is, so a report that does not is
+// refused and sent back like a malformed one. Each line answered not-done is then
+// appended to `unfinished`, which is what makes the round unfinished and puts the
+// line in front of every reader as an item. The wrapper keeps the report as the
+// agent wrote it beside that, so the unchanged scratch file is still recognised
+// as already recorded.
+//
 // A round that already holds its account is never asked to reproduce it. The
 // held wrapper's bytes are a function of the scratch directory, which is mutable
 // and shared, so a resume cannot be required to regenerate them — a scratch file
@@ -127,6 +136,14 @@ function parseArgs(argv) {
 // whitespace.
 const serialize = (document) => `${JSON.stringify(document, null, 2)}\n`;
 
+// What two copies of one agent report are compared on. An empty account is the
+// same as none, because a report with none is recorded with an empty one.
+const keyOf = (document) => {
+  if (!document || typeof document !== "object" || !Array.isArray(document.account) || document.account.length > 0) return serialize(document);
+  const { account, ...rest } = document;
+  return serialize(rest);
+};
+
 // Every other round's report, by the bytes of the document it recorded. The
 // rounds root is derived from `--out` the way `recheck.mjs` derives it from a
 // round directory: the round's parent. The round being written into is left out —
@@ -151,7 +168,8 @@ function recordedElsewhere(roundsRoot, ownRound) {
       continue;
     }
     if (!recorded || typeof recorded !== "object" || recorded.report == null) continue;
-    if (!held.has(serialize(recorded.report))) held.set(serialize(recorded.report), entry.name);
+    const key = keyOf(recorded.asWritten ?? recorded.report);
+    if (!held.has(key)) held.set(key, entry.name);
   }
   return held;
 }
@@ -164,7 +182,7 @@ function recordedElsewhere(roundsRoot, ownRound) {
  * the one place that knows rather than re-serializing on its own.
  */
 export function recordedIn(roundsRoot, document) {
-  return recordedElsewhere(path.resolve(roundsRoot), null).get(serialize(document)) ?? null;
+  return recordedElsewhere(path.resolve(roundsRoot), null).get(keyOf(document)) ?? null;
 }
 
 // The wrapper the round already holds at `out`, or null when there is none or
@@ -184,6 +202,34 @@ function heldWrapper(target) {
   return typeof parsed.status === "string" ? parsed : null;
 }
 
+// What is wrong with an implement report's account against the lines the dispatch
+// named, in one sentence that names the ids, or null when every id is answered
+// once and none other is.
+function accountProblem(report, lines, file) {
+  const answered = (Array.isArray(report?.account) ? report.account : []).map((entry) => entry?.id);
+  const given = new Set(lines.map((line) => line.id));
+  const unanswered = lines.filter((line) => !answered.includes(line.id)).map((line) => line.id);
+  const unknown = [...new Set(answered.filter((id) => !given.has(id)))];
+  const twice = [...new Set(answered.filter((id, at) => given.has(id) && answered.indexOf(id) !== at))];
+  if (unanswered.length + unknown.length + twice.length === 0) return null;
+  return `the account in the report at ${file} must answer each line id the dispatch named, once: `
+    + [
+      unanswered.length > 0 ? `no answer for ${unanswered.join(", ")}` : null,
+      unknown.length > 0 ? `${unknown.join(", ")} ${unknown.length > 1 ? "are" : "is"} not a line it was given` : null,
+      twice.length > 0 ? `${twice.join(", ")} ${twice.length > 1 ? "are" : "is"} answered more than once` : null
+    ].filter(Boolean).join("; ");
+}
+
+// Each line answered not-done, as the unfinished work it is: named by its id and
+// the driver's text for it, so the item reads without trusting the agent to echo
+// the line. In the order the spec gives the lines.
+function notDone(report, lines) {
+  return lines.flatMap((line) => {
+    const answer = report.account.find((entry) => entry.id === line.id);
+    return answer?.outcome === "not-done" ? [{ part: `${line.id}: ${line.text}`, reason: answer.note }] : [];
+  });
+}
+
 /**
  * Record the report the agent of this round wrote, from `dir`, at `out`.
  *
@@ -194,7 +240,7 @@ function heldWrapper(target) {
  * `absence: "refuse"` it also throws, and writes nothing, when there is no new
  * report or two of them, instead of recording that the round has none.
  */
-export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
+export function recordRoundReport({ dir, out, schemaDir, absence = "record", lines }) {
   const source = path.resolve(dir);
   const target = path.resolve(out);
   const ownRound = path.dirname(target);
@@ -206,6 +252,7 @@ export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
       + "directory so that this step is the only thing that puts one in — re-dispatch it with a path outside");
   }
 
+  const expected = lines ? JSON.parse(fs.readFileSync(path.resolve(lines), "utf8")) : [];
   const held = recordedElsewhere(path.dirname(ownRound), ownRound);
   const considered = [];
   const found = [];
@@ -223,7 +270,7 @@ export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
       refused.push({ file, problem: `the report at ${file} is unreadable: ${error.message}` });
       continue;
     }
-    const round = held.get(serialize(parsed));
+    const round = held.get(keyOf(parsed));
     if (round !== undefined) {
       considered.push(`${file} (already recorded in round ${round})`);
       continue;
@@ -241,6 +288,14 @@ export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
       parsed = { ...parsed, notes: "" };
       filled.push("notes");
     }
+    // The account is how an implementer answers for the lines it was handed. A
+    // dispatch that named none leaves nothing to answer, and a report that says
+    // nothing about it is recorded with an empty one; with lines named, a report
+    // with no account is refused below for the lines it leaves unanswered.
+    if (candidate.kind === "implement" && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      && !Object.hasOwn(parsed, "account") && expected.length === 0) {
+      parsed = { ...parsed, account: [] };
+    }
     // Validated here, before anything is counted, and not after one report has
     // been singled out. Two new reports are recorded as an absence below, and an
     // absence is approvable — so validating only the singled-out one would let a
@@ -249,12 +304,14 @@ export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
     // looked at, or none of them is.
     const schemaPath = path.join(schemaDir, candidate.schema);
     const errors = validateJson(JSON.parse(fs.readFileSync(schemaPath, "utf8")), parsed);
+    const unaccounted = candidate.kind === "implement" ? accountProblem(parsed, expected, file) : null;
     if (errors.length > 0) {
       refused.push({ file, problem: `the report at ${file} does not match the `
         + `${candidate.schema.replace(/\.schema\.json$/, "")} schema:\n`
         + errors.slice(0, 5).map((entry) => `- ${entry}`).join("\n") });
-      continue;
     }
+    if (unaccounted) refused.push({ file, problem: unaccounted });
+    if (errors.length > 0 || unaccounted) continue;
     found.push({ ...candidate, file, parsed, filled });
   }
   if (refused.length > 0) {
@@ -300,8 +357,14 @@ export function recordRoundReport({ dir, out, schemaDir, absence = "record" }) {
   // itself, and neither refusing it nor believing it is right: the gate reads
   // the wrapper, so the contradiction is recorded as `unfinished` and said out
   // loud in the summary, where a person can see which of the two the agent meant.
-  const status = parsed.status === "complete" && parsed.unfinished.length === 0 ? "complete" : "unfinished";
-  const record = { status, kind, source: file, reason: null, report: parsed, ...(filled.length > 0 ? { filled } : {}) };
+  const folded = kind === "implement" ? notDone(parsed, expected) : [];
+  const report = folded.length > 0 ? { ...parsed, unfinished: [...parsed.unfinished, ...folded] } : parsed;
+  const status = report.status === "complete" && report.unfinished.length === 0 ? "complete" : "unfinished";
+  const record = {
+    status, kind, source: file, reason: null, report,
+    ...(folded.length > 0 ? { asWritten: parsed } : {}),
+    ...(filled.length > 0 ? { filled } : {})
+  };
   writeRoundFile(target, serialize(record));
   return record;
 }

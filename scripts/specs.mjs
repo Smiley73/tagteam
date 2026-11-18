@@ -48,6 +48,30 @@ export function parseFrontMatter(text, file) {
   return { front, body: text.slice(match[0].length) };
 }
 
+const FENCE = /^\s*(```|~~~)/;
+const NOTHING = /^[*_`\s]*(none|n\/a|nothing|no sign-offs?)(\s+(needed|required))?[*_`.\s]*$/i;
+const RULE = /^(-{3,}|\*{3,}|_{3,})\s*$/;
+const MARKER = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/;
+
+// The lines of a `## <heading>` section, fences skipped, up to the next `#`/`##`
+// heading or horizontal rule. Blank lines are kept: a reader of prose needs them.
+function sectionLines(body, heading, file) {
+  const opening = new RegExp(`^## ${heading}[ \\t]*$`);
+  let fenced = false;
+  let sections = 0;
+  let inside = false;
+  const lines = [];
+  for (const raw of body.split(/\r?\n/)) {
+    if (FENCE.test(raw)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    if (opening.test(raw)) { sections += 1; inside = true; continue; }
+    if (/^#{1,2}\s/.test(raw) || RULE.test(raw)) { inside = false; continue; }
+    if (inside) lines.push(raw);
+  }
+  if (sections > 1) throw new Error(`${file} has ${sections} "## ${heading}" sections; a spec has one`);
+  return { present: sections === 1, lines };
+}
+
 // A spec's `## Sign-offs`: what the repository's conventions say to ask about
 // first, which the person approving the plan approves with it. Returned so that
 // approval can show them without anyone reading a spec body. The body is read a
@@ -60,29 +84,71 @@ export function parseFrontMatter(text, file) {
 // with no entries; an entry that says anything more is shown, because hiding a
 // sign-off from the person approving is worse than showing one that was not.
 // A second section is refused.
-const FENCE = /^\s*(```|~~~)/;
-const NOTHING = /^[*_`\s]*(none|n\/a|nothing|no sign-offs?)(\s+(needed|required))?[*_`.\s]*$/i;
-
 export function parseSignOffs(body, file = "the spec") {
-  let fenced = false;
-  let sections = 0;
-  let inside = false;
+  const section = sectionLines(body, "Sign-offs", file);
   const items = [];
   const prose = [];
-  for (const raw of body.split(/\r?\n/)) {
-    if (FENCE.test(raw)) { fenced = !fenced; continue; }
-    if (fenced) continue;
-    if (/^## Sign-offs[ \t]*$/.test(raw)) { sections += 1; inside = true; continue; }
-    if (/^#{1,2}\s/.test(raw) || /^(-{3,}|\*{3,}|_{3,})\s*$/.test(raw)) { inside = false; continue; }
-    if (!inside || raw.trim() === "") continue;
+  for (const raw of section.lines) {
+    if (raw.trim() === "") continue;
     const item = /^(?:[-*+]|\d+[.)])\s+(.*)$/.exec(raw);
     if (item) items.push(item[1].replace(/^\[[ xX]\]\s+/, "").trim());
     else if (/^\s/.test(raw) && items.length > 0) items[items.length - 1] += ` ${raw.trim()}`;
     else if (!raw.trimEnd().endsWith(":")) prose.push(raw.trim());
   }
-  if (sections > 1) throw new Error(`${file} has ${sections} "## Sign-offs" sections; a spec has one`);
   const entries = [...items, ...(prose.length > 0 ? [prose.join(" ")] : [])].filter((entry) => !NOTHING.test(entry));
-  return { present: sections === 1, entries };
+  return { present: section.present, entries };
+}
+
+// What a spec asks an implementer to account for: each requirement of `## Tests`
+// and `## Done when`, under an id minted from its place in the section, so that
+// rereading an unchanged spec mints the same ids. A list item is a line, a nested
+// one carrying its parents' text so it reads on its own; an item that introduces
+// children (ends in a colon and has some) is not one. A prose paragraph that does
+// not end in a colon is one line. The ids start `line:`, which is neither a
+// finding's `<round>.<n>` nor an unfinished item's `item:`.
+const LINE_SECTIONS = [{ heading: "Tests", key: "tests" }, { heading: "Done when", key: "done" }];
+
+function requirementsOf(lines) {
+  const order = [];
+  const stack = [];
+  let item = null;
+  let paragraph = null;
+  for (const raw of lines) {
+    if (raw.trim() === "") { paragraph = null; continue; }
+    const marker = MARKER.exec(raw);
+    if (marker) {
+      const indent = marker[1].replace(/\t/g, "    ").length;
+      while (stack.length > 0 && stack.at(-1).indent >= indent) stack.pop();
+      item = { indent, text: marker[2].replace(/^\[[ xX]\]\s+/, "").trim(), parent: stack.at(-1) ?? null, children: 0 };
+      if (item.parent) item.parent.children += 1;
+      stack.push(item);
+      order.push(item);
+      paragraph = null;
+    } else if (/^\s/.test(raw) && item) {
+      item.text += ` ${raw.trim()}`;
+    } else if (paragraph) {
+      paragraph.text += ` ${raw.trim()}`;
+    } else {
+      item = null;
+      stack.length = 0;
+      paragraph = { text: raw.trim(), prose: true, children: 0, parent: null };
+      order.push(paragraph);
+    }
+  }
+  return order
+    .filter((entry) => !entry.text.endsWith(":") || (!entry.prose && entry.children === 0))
+    .map((entry) => {
+      const context = [];
+      for (let up = entry.parent; up; up = up.parent) context.unshift(up.text);
+      return [...context, entry.text].join(" ");
+    });
+}
+
+export function parseRequirementLines(body, file = "the spec") {
+  return LINE_SECTIONS.flatMap(({ heading, key }) => {
+    const { lines } = sectionLines(body, heading, file);
+    return requirementsOf(lines).map((text, at) => ({ id: `line:${key}.${at + 1}`, section: heading, text }));
+  });
 }
 
 // The default set applies to every spec. A spec names only its differences:
@@ -190,6 +256,7 @@ export function readSpecs(planDir, config, schemaPath, { enforceSize = false } =
         dependsOn: front.depends_on,
         reviewers: resolveReviewers(front.reviewers, config, { file: name }),
         signOffs: signOffs.entries,
+        lines: parseRequirementLines(body, name),
         workflows
       });
     } catch (error) {

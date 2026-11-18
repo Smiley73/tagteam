@@ -157,6 +157,34 @@ export function roundDirectoryFor(dir, round, option = "--dir") {
   return roundDir;
 }
 
+// The one lens whose `weakTest` mark is read; see `recordWeakTest`.
+const WEAK_TEST_LENS = "code-quality";
+
+/**
+ * A findings file whose findings omit `weakTest`, read as every one of them
+ * saying no, before it is validated. The schema requires the mark so that
+ * Codex's strict output answers it, but an in-flight round or a reviewer that
+ * forgets it must not cost a re-dispatch: no can never raise a finding.
+ */
+export function fillWeakTest(parsed) {
+  if (!Array.isArray(parsed?.findings)) return parsed;
+  return {
+    ...parsed,
+    findings: parsed.findings.map((finding) => (
+      finding && typeof finding === "object" && !Object.hasOwn(finding, "weakTest") ? { ...finding, weakTest: false } : finding
+    ))
+  };
+}
+
+/**
+ * A finding as it is recorded: `weakTest: true` only when the code-quality lens
+ * set it to yes. Any other lens's mark counts for nothing and is not kept.
+ */
+export function recordWeakTest(finding, lens) {
+  const { weakTest, ...rest } = finding;
+  return lens === WEAK_TEST_LENS && weakTest === true ? { ...rest, weakTest: true } : rest;
+}
+
 /**
  * A surplus deletion the shipped economy brief wrote: `minor` or `nit`, from the
  * lens the driver names, about the code and with a `fix` that says what to
@@ -166,11 +194,44 @@ export function roundDirectoryFor(dir, round, option = "--dir") {
 const isDeletion = (finding, lens, deletionLens) => lens === deletionLens && !GATING.has(finding.severity)
   && finding.scope === "code" && !isPullRequestFinding(finding) && finding.fix !== null;
 
-export function collect({ dir, candidate, expect, schemaPath, round, items = null, deletionLens = null }) {
+/**
+ * A minor code finding the adversary reproduced, as major: it keeps the severity
+ * it was raised from and carries what was run and seen as its `evidence`, which
+ * `to-fix.json` and `open/` hold like any finding's. The driver passes only ids it
+ * bound against this same review, so one that names no minor code finding is a bug
+ * to stop on.
+ */
+function raiseReproduced(findings, reproduced) {
+  const named = new Map();
+  for (const entry of reproduced) {
+    const finding = findings.find((candidate) => candidate.id === entry.id);
+    if (!finding || finding.severity !== "minor" || isPullRequestFinding(finding) || finding.scope !== "code") {
+      throw new Error(`reproduced id ${entry.id} names no minor code finding of this collection; nothing was written`);
+    }
+    named.set(entry.id, entry);
+  }
+  return findings.map((finding) => {
+    const entry = named.get(finding.id);
+    return entry
+      ? { ...finding, severity: "major", raisedFrom: finding.severity, evidence: `Reproduced by running: ${entry.command}\nWhat it showed: ${entry.saw}` }
+      : finding;
+  });
+}
+
+/** The `{ reproduced: [{ id, command, saw }] }` file `--reproduced` names. */
+function readReproduced(file) {
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (!Array.isArray(parsed?.reproduced) || !parsed.reproduced.every((entry) => typeof entry?.id === "string" && entry.id !== "")) {
+    throw new Error(`${file} is not a list of reproduced findings, each with an id`);
+  }
+  return parsed.reproduced;
+}
+
+export function collect({ dir, candidate, expect, schemaPath, round, items = null, deletionLens = null, reproduced = null }) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
   const present = [];
   const missing = [];
-  const findings = [];
+  let findings = [];
   const filled = [];
   const given = items?.items ?? [];
   const ids = new Set(given.map((item) => item.id));
@@ -182,6 +243,7 @@ export function collect({ dir, candidate, expect, schemaPath, round, items = nul
     let wasFilled;
     try {
       ({ parsed, filled: wasFilled } = fillRulings(JSON.parse(fs.readFileSync(file, "utf8"))));
+      parsed = fillWeakTest(parsed);
     } catch (error) {
       missing.push({ lens, file, reason: fs.existsSync(file) ? `unreadable (${error.message})` : "no file was written" });
       continue;
@@ -211,11 +273,13 @@ export function collect({ dir, candidate, expect, schemaPath, round, items = nul
     readers.push({ reader: lens, bound: bindRulings(parsed.rulings, ids) });
     parsed.findings.forEach((finding, index) => {
       findings.push({
-        ...finding, id: findingId(round, lens, index), lens, file: finding.file, source: file,
+        ...recordWeakTest(finding, lens), id: findingId(round, lens, index), lens, file: finding.file, source: file,
         ...(isDeletion(finding, lens, deletionLens) ? { deletion: true } : {})
       });
     });
   }
+
+  if (reproduced) findings = raiseReproduced(findings, reproduced);
 
   // A lens that ruled an item missing is not also asked to file a finding for
   // it: the item becomes one here, once, whatever the other lenses said.
@@ -452,7 +516,8 @@ async function main() {
     const schemaPath = options.schema
       ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "findings.schema.json");
     const items = options.items ? readItems(path.resolve(options.items), options.candidate) : null;
-    const result = collect({ ...options, round, schemaPath, items });
+    const reproduced = options.reproduced ? readReproduced(path.resolve(options.reproduced)) : null;
+    const result = collect({ ...options, round, schemaPath, items, reproduced });
     const { perLens, list } = writeDerived(options.dir, options.out, result);
     sealConsumedFindings(options.dir, result);
     process.stdout.write(`${summaryLines(result).join("\n")}\n`);

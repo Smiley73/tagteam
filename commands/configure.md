@@ -183,7 +183,7 @@ names, internal ids. See *Asking* in the skill.
     and then either the re-checks or another full review panel over a new
     commit, and a CI repair is a new candidate through the whole cycle again.
     What a panel costs depends on the answer to question 6, so ask this one
-    after it. Offer 1 for both and let them raise either. Skip `ciRepairs` when
+    after it. Offer 2 for `fixRounds` and 1 for `ciRepairs`, and let them raise either. Skip `ciRepairs` when
     the repository has no workflows; there is no red pull request to repair.
 
     If they turned escalation on in question 4, this is where that answer gets

@@ -155,6 +155,46 @@ test("findings are ordered by severity so the summary leads with what matters", 
   assert.deepEqual(result.findings.map((entry) => entry.severity), ["blocking", "minor"]);
 });
 
+test("only the code-quality lens's yes is recorded as a weak test", () => {
+  const marked = finding({ severity: "minor", weakTest: true });
+  const target = dir({
+    "code-quality.json": lensFile("code-quality", [marked]),
+    "correctness.json": lensFile("correctness", [marked])
+  });
+  const result = collect({ dir: target, candidate: OID, expect: ["code-quality", "correctness"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  const byLens = Object.fromEntries(result.findings.map((entry) => [entry.lens, entry]));
+  assert.equal(byLens["code-quality"].weakTest, true);
+  assert.equal(Object.hasOwn(byLens.correctness, "weakTest"), false);
+  const no = dir({ "code-quality.json": lensFile("code-quality", [finding({ severity: "minor", weakTest: false })]) });
+  const unmarked = collect({ dir: no, candidate: OID, expect: ["code-quality"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  assert.equal(Object.hasOwn(unmarked.findings[0], "weakTest"), false);
+});
+
+test("a findings file with no weakTest is read as no, in collect and in the adversary's fresh pass", () => {
+  const target = dir({ "code-quality.json": lensFile("code-quality", [finding({ severity: "minor" })]) });
+  const result = collect({ dir: target, candidate: OID, expect: ["code-quality"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  assert.equal(result.status, "clean");
+  assert.deepEqual(result.missing, []);
+  assert.equal(Object.hasOwn(result.findings[0], "weakTest"), false);
+
+  const settled = settle({
+    review, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2,
+    ...adversary([finding({ severity: "minor" })])
+  });
+  assert.deepEqual(settled.missing.filter((entry) => entry.lens === "adversary"), []);
+  assert.equal(settled.findings.filter((entry) => entry.lens === "adversary").length, 1);
+});
+
+test("an adversary finding marked yes is recorded without the mark", () => {
+  const settled = settle({
+    review, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2,
+    ...adversary([finding({ severity: "minor", weakTest: true })])
+  });
+  const [recorded] = settled.findings.filter((entry) => entry.lens === "adversary");
+  assert.equal(recorded.severity, "minor");
+  assert.equal(Object.hasOwn(recorded, "weakTest"), false);
+});
+
 // --- the re-check ---
 
 const review = {
@@ -2147,4 +2187,71 @@ test("a collection of the same candidate counts its lenses' rulings beside the s
   const ruled = settleWith([{ lens: "correctness", id: "item:1.1", ruling: "out-of-scope", reason: "another spec owns it" }]);
   assert.deepEqual(ruled.accounting.items.map((entry) => entry.ruling), ["environmental"]);
   assert.equal(ruled.accounting.acceptable, true);
+});
+
+// --- a reproduced minor finding raised to major ---
+
+test("a reproduced minor finding becomes major with its evidence in review.json, to-fix.json and open/, and nothing else moves", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, findings, out, base } = round({
+    "correctness.json": lensFile("correctness", [finding({ severity: "minor", title: "a" }), finding({ severity: "minor", title: "b" })]),
+    "codex.json": lensFile("codex", [finding({ severity: "nit", title: "c" })])
+  });
+  const reproduced = path.join(base, "try.json");
+  fs.writeFileSync(reproduced, JSON.stringify({ reproduced: [{ id: "1.correctness.2", command: "node repro.js", saw: "prints -1" }] }));
+  const run = (...extra) => spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--round", "1", "--out", out, ...extra
+  ], { encoding: "utf8" });
+  assert.equal(run().status, 0, "two minors and a nit gate nothing");
+  assert.equal(run("--reproduced", reproduced).status, 1, "a raised finding is open");
+
+  const review = JSON.parse(fs.readFileSync(out, "utf8"));
+  const byId = Object.fromEntries(review.findings.map((entry) => [entry.id, entry]));
+  assert.equal(review.status, "open");
+  assert.equal(byId["1.correctness.2"].severity, "major");
+  assert.equal(byId["1.correctness.2"].raisedFrom, "minor");
+  assert.match(byId["1.correctness.2"].evidence, /node repro\.js/);
+  assert.match(byId["1.correctness.2"].evidence, /prints -1/);
+  assert.equal(byId["1.correctness.1"].severity, "minor", "a minor nobody reproduced stays minor");
+  assert.equal(byId["1.codex.1"].severity, "nit");
+  assert.deepEqual(review.open.map((entry) => entry.id), ["1.correctness.2"]);
+
+  const toFix = JSON.parse(fs.readFileSync(path.join(roundDir, "to-fix.json"), "utf8")).findings;
+  assert.deepEqual(toFix.map((entry) => [entry.id, entry.severity]), [["1.correctness.2", "major"]]);
+  assert.match(toFix[0].evidence, /prints -1/);
+  const open = JSON.parse(fs.readFileSync(path.join(roundDir, "open", "correctness.json"), "utf8")).findings;
+  assert.deepEqual(open.map((entry) => entry.id), ["1.correctness.2"]);
+  assert.match(open[0].evidence, /node repro\.js/);
+
+  assert.equal(run().status, 0, "collected again without the raise, it is minor again: the driver hands the same list every time");
+});
+
+test("a reproduced id that names no minor code finding of the collection is refused with exit 2 and writes nothing", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, findings, out, base } = round({
+    "correctness.json": lensFile("correctness", [
+      finding({ severity: "minor", title: "minor" }),
+      finding({ severity: "nit", title: "nit" }),
+      finding({ severity: "major", title: "major" }),
+      finding({ severity: "minor", scope: "pull-request", file: null, title: "body" })
+    ]),
+    "codex.json": lensFile("codex", [])
+  });
+  const run = (entries) => {
+    const file = path.join(base, "try.json");
+    fs.writeFileSync(file, JSON.stringify({ reproduced: entries }));
+    return spawnSync("node", [
+      path.join(root, "scripts", "collect-findings.mjs"),
+      "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--round", "1", "--out", out, "--reproduced", file
+    ], { encoding: "utf8" });
+  };
+  const one = (id) => ({ id, command: "node repro.js", saw: "wrong" });
+  for (const id of ["1.correctness.2", "1.correctness.3", "1.correctness.4", "1.correctness.9"]) {
+    const result = run([one(id)]);
+    assert.equal(result.status, 2, `${id}: ${result.stdout}`);
+    assert.match(result.stderr, /names no minor code finding/);
+    assert.equal(fs.existsSync(out), false, `${id}: nothing was written`);
+  }
+  assert.equal(fs.existsSync(path.join(roundDir, "to-fix.json")), false);
 });

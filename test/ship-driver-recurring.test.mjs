@@ -84,7 +84,7 @@ test("the Recurring question at collect, answered redesign: a fresh implementer 
 
   // The redesign implementer is told to check its report, against the schema
   // an implementer reports by.
-  const implemented = { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [] };
+  const implemented = { status: "complete", summary: "rewrote sub without the workarounds", unfinished: [], account: [] };
   const passed = checkReportOf(implementer, implemented);
   assert.equal([passed.schema, passed.stdout.trim()].join(" "), "implement-report valid");
   assert.equal(checkReportOf(implementer, { status: "complete", summary: "rewrote sub" }).status, 1);

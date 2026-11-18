@@ -58,7 +58,7 @@
   ],
   "maxConcurrentCodex": 3,
   "limits": {
-    "fixRounds": 1,
+    "fixRounds": 2,
     "ciRepairs": 1,
     "carried": 5,
     "followUps": 2

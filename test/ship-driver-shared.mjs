@@ -19,7 +19,7 @@ import { root, git, ship, write, outputOf, arriveAll, findings, major } from "./
 // re-check resolves the panel's finding and whose adversary raises the next;
 // round 3 the second fix, which goes to the whole panel, and the panel raises
 // the third. The carried adversary finding from round 2 is still open at 3.
-export function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5, on = ["app.js", "app.js", "app.js"], env = {} } = {}) {
+export function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5, on = ["app.js", "app.js", "app.js"], env = {}, account } = {}) {
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.limits = { ...config.limits, fixRounds, ciRepairs: 1 };
@@ -51,7 +51,7 @@ export function driveToRecurrence({ repo, plan, shipDir }, { fixRounds = 5, on =
     return collect;
   };
   app("export const add = (a, b) => a + b;\nexport const sub = (a, b) => a + b;\n");
-  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [] });
+  write(outputOf(begin.json.dispatch[0]), { status: "complete", summary: "added sub", unfinished: [], ...(account ? { account } : {}) });
   arriveAll(begin);
   run("snapshot");
   run("verify");

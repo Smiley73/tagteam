@@ -319,6 +319,17 @@ fresh pass then raises something blocking or major on what the tidy changed, the
 tidy is thrown away and the earlier commit is re-checked again with its own
 verify and report as they were.
 
+Reviewers cannot run anything, so the minor findings they file about the code are
+suspicions. At a spec's first panel, the ones from correctness and Codex, and
+code-quality's that say a test would still pass with the behaviour broken, are
+handed once to the adversary, which runs each and answers reproduced, with the
+command and what it saw, or not reproduced. Only a reproduction makes a finding
+major: it then goes to the fixer with that evidence and opens a fix round, which
+spends one of the spec's fix rounds. A finding the adversary does not answer
+properly stays minor, and nothing stops for it. The run lists each finding and
+what became of it. Later panels are not tried, and the adversary's fresh pass
+after the fix is sent as before.
+
 The fixer reads the spec and the plan's goal as well as the findings, and can
 answer that the right repair would go against the goal because the spec
 conflicts with it. That stops the spec at once: no further fixer is sent, the
@@ -575,7 +586,12 @@ every model and effort, and prints the agents to dispatch with their prompts
 written out. The run sends them out together and tells the driver as each one
 reports, and the driver judges their work only once all are in. The orchestrator
 asks the questions only a person can answer, and starts the next run from the
-answer. A dedicated agent writes the pull request body.
+answer. A dedicated agent writes the pull request body. The implementer is given
+the spec's test and done-when lines by id and answers each as met or not done in
+its report; a line it did not do counts as unfinished work, and a report that
+skips or repeats one is sent back. Every reviewer reading the spec's code afresh
+is shown what the implementer said meets each line it answered as met, and checks
+it against the code.
 Subagents write their own outputs; scripts read them. Nothing large is ever
 moved between steps by passing it through a model.
 
