@@ -107,6 +107,8 @@ the change is split into commits — and not to any file. `code` otherwise, incl
 re-planning — this diff should have been two specs, or the work should have
 been planned differently — is `minor` at most, because no fixer can answer it.
 
+Set `weakTest` to `false` on every finding.
+
 Severity is a claim you have to earn: `blocking` or `major` only with the
 failing input, state or reproduction in `detail`. A defect you reasoned about
 but did not confirm is `minor`. You run late in the cycle, so every gating

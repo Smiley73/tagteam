@@ -157,6 +157,34 @@ export function roundDirectoryFor(dir, round, option = "--dir") {
   return roundDir;
 }
 
+// The one lens whose `weakTest` mark is read; see `recordWeakTest`.
+const WEAK_TEST_LENS = "code-quality";
+
+/**
+ * A findings file whose findings omit `weakTest`, read as every one of them
+ * saying no, before it is validated. The schema requires the mark so that
+ * Codex's strict output answers it, but an in-flight round or a reviewer that
+ * forgets it must not cost a re-dispatch: no can never raise a finding.
+ */
+export function fillWeakTest(parsed) {
+  if (!Array.isArray(parsed?.findings)) return parsed;
+  return {
+    ...parsed,
+    findings: parsed.findings.map((finding) => (
+      finding && typeof finding === "object" && !Object.hasOwn(finding, "weakTest") ? { ...finding, weakTest: false } : finding
+    ))
+  };
+}
+
+/**
+ * A finding as it is recorded: `weakTest: true` only when the code-quality lens
+ * set it to yes. Any other lens's mark counts for nothing and is not kept.
+ */
+export function recordWeakTest(finding, lens) {
+  const { weakTest, ...rest } = finding;
+  return lens === WEAK_TEST_LENS && weakTest === true ? { ...rest, weakTest: true } : rest;
+}
+
 /**
  * A surplus deletion the shipped economy brief wrote: `minor` or `nit`, from the
  * lens the driver names, about the code and with a `fix` that says what to
@@ -182,6 +210,7 @@ export function collect({ dir, candidate, expect, schemaPath, round, items = nul
     let wasFilled;
     try {
       ({ parsed, filled: wasFilled } = fillRulings(JSON.parse(fs.readFileSync(file, "utf8"))));
+      parsed = fillWeakTest(parsed);
     } catch (error) {
       missing.push({ lens, file, reason: fs.existsSync(file) ? `unreadable (${error.message})` : "no file was written" });
       continue;
@@ -211,7 +240,7 @@ export function collect({ dir, candidate, expect, schemaPath, round, items = nul
     readers.push({ reader: lens, bound: bindRulings(parsed.rulings, ids) });
     parsed.findings.forEach((finding, index) => {
       findings.push({
-        ...finding, id: findingId(round, lens, index), lens, file: finding.file, source: file,
+        ...recordWeakTest(finding, lens), id: findingId(round, lens, index), lens, file: finding.file, source: file,
         ...(isDeletion(finding, lens, deletionLens) ? { deletion: true } : {})
       });
     });

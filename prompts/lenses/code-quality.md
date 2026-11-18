@@ -20,6 +20,12 @@ threw, or that a result is truthy; an assertion inside a callback that never
 runs or a condition that is never true; an expected value computed with the
 logic under test.
 
+Set `weakTest` to `true` on a finding that names an existing test and the single
+change to the line that carries the behaviour that no assertion in that test
+would notice: the "still passes when broken" case and the test that cannot fail.
+Set it `false` on every other finding, including a behaviour with no test at all
+and a runtime-cost finding.
+
 For runtime cost, look for: a query inside a loop, or a full scan where an index
 exists; work repeated per item that could be done once; something loaded
 entirely into memory that grows with the data; a synchronous call on a hot

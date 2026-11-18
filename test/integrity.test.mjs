@@ -433,6 +433,15 @@ test("every brief that writes findings says how to choose `scope`, and caps a fi
   }
 });
 
+test("every brief that writes findings names the `weakTest` mark, and the code-quality lens says when it is yes", () => {
+  for (const file of ["prompts/review.md", "prompts/codex/review.md", "prompts/code-adversary.md"]) {
+    const text = read(...file.split("/")).replace(/\s+/g, " ");
+    assert.match(text, /Set `weakTest`/, `${file} no longer names the weakTest mark`);
+  }
+  const lens = read("prompts", "lenses", "code-quality.md").replace(/\s+/g, " ");
+  assert.match(lens, /Set `weakTest` to `true` on a finding that names an existing test/, "the code-quality lens no longer says when weakTest is yes");
+});
+
 test("the ship command names both limits its loops are bounded by, and asserts no single round", () => {
   const ship = read("commands", "ship.md");
   assert.match(ship, /fixRounds/);

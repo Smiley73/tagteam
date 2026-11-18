@@ -155,6 +155,46 @@ test("findings are ordered by severity so the summary leads with what matters", 
   assert.deepEqual(result.findings.map((entry) => entry.severity), ["blocking", "minor"]);
 });
 
+test("only the code-quality lens's yes is recorded as a weak test", () => {
+  const marked = finding({ severity: "minor", weakTest: true });
+  const target = dir({
+    "code-quality.json": lensFile("code-quality", [marked]),
+    "correctness.json": lensFile("correctness", [marked])
+  });
+  const result = collect({ dir: target, candidate: OID, expect: ["code-quality", "correctness"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  const byLens = Object.fromEntries(result.findings.map((entry) => [entry.lens, entry]));
+  assert.equal(byLens["code-quality"].weakTest, true);
+  assert.equal(Object.hasOwn(byLens.correctness, "weakTest"), false);
+  const no = dir({ "code-quality.json": lensFile("code-quality", [finding({ severity: "minor", weakTest: false })]) });
+  const unmarked = collect({ dir: no, candidate: OID, expect: ["code-quality"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  assert.equal(Object.hasOwn(unmarked.findings[0], "weakTest"), false);
+});
+
+test("a findings file with no weakTest is read as no, in collect and in the adversary's fresh pass", () => {
+  const target = dir({ "code-quality.json": lensFile("code-quality", [finding({ severity: "minor" })]) });
+  const result = collect({ dir: target, candidate: OID, expect: ["code-quality"], schemaPath: FINDINGS_SCHEMA, round: 1 });
+  assert.equal(result.status, "clean");
+  assert.deepEqual(result.missing, []);
+  assert.equal(Object.hasOwn(result.findings[0], "weakTest"), false);
+
+  const settled = settle({
+    review, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2,
+    ...adversary([finding({ severity: "minor" })])
+  });
+  assert.deepEqual(settled.missing.filter((entry) => entry.lens === "adversary"), []);
+  assert.equal(settled.findings.filter((entry) => entry.lens === "adversary").length, 1);
+});
+
+test("an adversary finding marked yes is recorded without the mark", () => {
+  const settled = settle({
+    review, dir: dir({}), candidate: NEW_OID, schemaPath: RECHECK_SCHEMA, round: 2,
+    ...adversary([finding({ severity: "minor", weakTest: true })])
+  });
+  const [recorded] = settled.findings.filter((entry) => entry.lens === "adversary");
+  assert.equal(recorded.severity, "minor");
+  assert.equal(Object.hasOwn(recorded, "weakTest"), false);
+});
+
 // --- the re-check ---
 
 const review = {

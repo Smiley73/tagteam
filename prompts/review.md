@@ -58,6 +58,9 @@ change to the pull request's text — what its description says or leaves out.
 the change is split into commits — and not to any file. `code` otherwise, including a code defect that names no single file, such as
 three modules that disagree: write `file` as `null` and it still goes to a fixer.
 
+Set `weakTest` on every finding. It is `false` unless your lens brief says when
+to set it `true`.
+
 Severity:
 
 - `blocking` — must not merge. Data loss, a security hole, a broken contract, a
