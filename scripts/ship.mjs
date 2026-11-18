@@ -484,7 +484,7 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
 // for "Spec:", and the round directory holding the diff and taking the findings.
 // A spec's round, ordinarily; a resolve attempt's round on the plan route, whose
 // brief is the one `resolveBrief` writes.
-const specTarget = (ctx, spec, round, items) => ({ label: spec.id, specPath: spec.path, dir: roundDir(ctx, spec.id, round), items });
+const specTarget = (ctx, spec, round, items, account) => ({ label: spec.id, specPath: spec.path, dir: roundDir(ctx, spec.id, round), items, account });
 
 // What every reader of a spec round is handed to rule on: the items its
 // candidate's own report left undone, and those of every earlier candidate that
@@ -508,6 +508,34 @@ function writeItems(ctx, id, state, round) {
 
 const itemsFile = (dir, list) => writeRoundFile(path.join(dir, "unfinished.json"), `${JSON.stringify(list, null, 2)}\n`);
 
+// What every fresh reader of a spec round is handed beside the diff: the lines
+// the implementer answered met, with its note on what meets each, and the
+// candidate it said so about. The implementer is the latest report of the cycle
+// at or below `round` that is an implement report — the first implementation or
+// a redesign, which answers every line again; a fix report carries no account and
+// replaces nothing. Each line's text is the driver's own, joined by exact id. Lines
+// answered not done are already unfinished items, so they are left out. The file
+// is written with an empty list when there is nothing to hand: a round whose
+// report is missing or has no account, a unit with no lines, a round recorded
+// before accounts. Its inputs are write-once, so every later write is the same.
+function writeAccount(ctx, spec, round) {
+  const rounds = listRounds(roundsRoot(ctx, spec.id)).filter((entry) => entry.round <= round);
+  let owner = null;
+  let answered = [];
+  for (const entry of rounds.reverse()) {
+    const wrapper = readJson(path.join(entry.dir, ROUND_REPORT), null);
+    if (wrapper?.kind !== "implement") continue;
+    owner = entry.candidate;
+    answered = Array.isArray(wrapper.report?.account) ? wrapper.report.account : [];
+    break;
+  }
+  const lines = spec.lines.flatMap((line) => {
+    const answer = answered.find((entry) => entry.id === line.id && entry.outcome === "met");
+    return answer ? [{ id: line.id, text: line.text, note: answer.note }] : [];
+  });
+  return writeRoundFile(path.join(roundDir(ctx, spec.id, round), "account.json"), `${JSON.stringify({ candidate: owner, lines }, null, 2)}\n`);
+}
+
 function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) {
   const { dir } = target;
   return {
@@ -521,6 +549,7 @@ function reviewerDispatch(ctx, target, oid, lens, brief, job, pullRequest = []) 
       `Spec: ${target.specPath}`,
       conventionsLine(ctx),
       ...(target.items ? [`Unfinished items to rule on: ${target.items}`] : []),
+      ...(target.account ? [`The implementer's account of the spec's lines it met: ${target.account}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${path.join(dir, "findings", `${lens}.json`)}`
@@ -588,7 +617,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { resend = false } =
     plugin: PLUGIN,
     template: "review.md",
     vars: { CANDIDATE: oid, LENSES: lenses.join(", "), CONVENTIONS: conventionsPath(ctx) },
-    fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff"), ITEMS: target.items },
+    fences: { SPEC: target.specPath, DIFF: path.join(dir, "review.diff"), ITEMS: target.items, ACCOUNT: target.account },
     schema: "findings.schema.json",
     out,
     model: job.model,
@@ -601,7 +630,7 @@ function codexReviewDispatch(ctx, target, oid, lenses, job, { resend = false } =
   return runnerDispatch({ description: `Codex review of ${target.label}`, ...prepared });
 }
 
-function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null, items = null) {
+function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = null, items = null, account = null) {
   const dir = roundDir(ctx, spec.id, round);
   return {
     ...agent("adversary", job),
@@ -614,6 +643,7 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
       `The candidate's worktree (copy it to check a test, never edit it): ${ctx.worktree}`,
       conventionsLine(ctx),
       ...(items ? [`Unfinished items to rule on: ${items}`] : []),
+      ...(account ? [`The implementer's account of the spec's lines it met: ${account}`] : []),
       ...pullRequest,
       `Candidate commit (set candidate to exactly this): ${oid}`,
       `Write your findings to: ${out ?? path.join(dir, "findings", "adversary.json")}`
@@ -2948,6 +2978,7 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
   // Nothing stands against a resolve round, but Codex's template takes a list
   // all the same; its Claude readers are given none and rule on none.
   const items = itemsFile(dir, { candidate: attempt.mergeOid, candidates: [], items: [] });
+  const account = writeRoundFile(path.join(dir, "account.json"), `${JSON.stringify({ candidate: null, lines: [] }, null, 2)}\n`);
   const target = { label: resolveLabel(record), specPath: resolveBriefPath(ctx, record.n), dir };
   const agents = lenses.filter((lens) => lens !== "codex").map((lens) => ({
     dispatch: reviewerDispatch(ctx, target, attempt.mergeOid, lens, briefs[lens], lensJob), job: lensJob, name: reviewerName(lens)
@@ -2955,7 +2986,7 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
   let codexRefused = false;
   if (!resend || lenses.includes("codex")) {
     const reviewed = attempt.lenses ?? lenses;
-    const dispatch = codexReviewDispatch(ctx, { ...target, items }, attempt.mergeOid, reviewed.filter((lens) => lens !== "codex"), codexJob, { resend });
+    const dispatch = codexReviewDispatch(ctx, { ...target, items, account }, attempt.mergeOid, reviewed.filter((lens) => lens !== "codex"), codexJob, { resend });
     if (dispatch) agents.push({ dispatch, job: codexJob, name: "Codex" });
     else codexRefused = true;
   }
@@ -4434,7 +4465,7 @@ async function panel(options) {
   const pr = pullRequestLines(ctx, id, state);
   const lensJob = resolved.jobs["review-lens"];
   const codexJob = resolved.jobs["review-codex"];
-  const target = specTarget(ctx, spec, round.round, writeItems(ctx, id, state, round.round));
+  const target = specTarget(ctx, spec, round.round, writeItems(ctx, id, state, round.round), writeAccount(ctx, spec, round.round));
   const agents = lenses.map((lens) => ({
     dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
     job: lensJob,
@@ -4482,7 +4513,7 @@ async function collect(options) {
       const pr = pullRequestLines(ctx, id, state);
       const lensJob = resolved.jobs["review-lens"];
       const codexJob = resolved.jobs["review-codex"];
-      const target = specTarget(ctx, spec, round.round, items);
+      const target = specTarget(ctx, spec, round.round, items, writeAccount(ctx, spec, round.round));
       const agents = missing.filter((lens) => lens !== "codex").map((lens) => ({
         dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
         job: lensJob,
@@ -4960,7 +4991,7 @@ async function recheck(options) {
     }
   }
   const items = writeItems(ctx, id, state, round.round);
-  const where = { round: round.round, dir: verdictsDir, given, items };
+  const where = { round: round.round, dir: verdictsDir, given, items, account: writeAccount(ctx, spec, round.round) };
   const agents = readers.map((reader) => ({
     dispatch: recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr), job: recheckReaderJob(reader, resolved), name: reader.name
   }));
@@ -4973,7 +5004,7 @@ async function recheck(options) {
   writeJson(recheckPlanPath(ctx, id), {
     round: round.round, candidate: state.candidateOid, collectionRound: collected, carry: carry?.count > 0 ? carry.file : null,
     declined: declined ? fixDeclinedPath(ctx, id) : null, dir: verdictsDir, adversary: adversaryFile,
-    deletions: handed.length > 0 ? handedFile : null, lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, items, resend: null, at: new Date().toISOString()
+    deletions: handed.length > 0 ? handedFile : null, lenses: [...inputs.keys()], set: sent?.id ?? null, readers, given, items, account: where.account, resend: null, at: new Date().toISOString()
   });
   const dispatch = agents.map((entry) => entry.dispatch);
   const say = [adversaryFile
@@ -5018,7 +5049,7 @@ function recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { res
   const { lines, fresh } = declinedContext(where.given?.declined ?? null);
   const job = recheckReaderJob(reader, resolved);
   if (reader.role === "adversary") {
-    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output, where.items);
+    return adversaryDispatch(ctx, spec, where.round, state.candidateOid, job, [...pr.lines, ...fresh], reader.output, where.items, where.account);
   }
   if (reader.role === "codex-recheck") {
     return codexRecheckDispatch(ctx, spec, where.round, state.candidateOid, reader.input, job,
@@ -5098,7 +5129,8 @@ async function settle(options) {
     const spec = specById(ctx, id);
     const resolved = roles(ctx, id);
     const pr = pullRequestLines(ctx, id, state);
-    const where = { round: plan.round, dir: plan.dir, given: plan.given, items: plan.items ?? writeItems(ctx, id, state, plan.round) };
+    const where = { round: plan.round, dir: plan.dir, given: plan.given, items: plan.items ?? writeItems(ctx, id, state, plan.round),
+      account: plan.account ?? writeAccount(ctx, spec, plan.round) };
     const agents = [];
     for (const reader of failed) {
       const dispatch = recheckSetDispatch(ctx, spec, state, where, reader, resolved, pr, { resend: true });
