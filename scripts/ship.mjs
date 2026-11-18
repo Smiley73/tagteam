@@ -3776,7 +3776,7 @@ async function beginDependencies(ctx, { baseOid, branch, say }) {
   const upgrades = decided.keep.map((key) => byKey.get(key));
   fs.mkdirSync(dependencyUnitDir(ctx.shipDir), { recursive: true, mode: 0o700 });
   fs.writeFileSync(dependencyDocumentPath(ctx.shipDir), dependencyDocument({ slug: ctx.slug, upgrades, recordPath: path.join(ctx.shipDir, "dependencies", "record.json") }), { mode: 0o600 });
-  writeJson(implementReportPath(ctx, id), { status: "complete", summary: `Upgraded ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")}.`, unfinished: [], account: [] });
+  writeJson(implementReportPath(ctx, id), { status: "complete", summary: `Upgraded ${upgrades.map((finding) => `${finding.name} ${finding.installed} to ${finding.proposed}`).join(", ")}.`, unfinished: [] });
   unit.made = decided.keep;
   delete unit.making;
   saveAudit(ctx.shipDir, audit);

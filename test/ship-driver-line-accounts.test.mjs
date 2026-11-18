@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { git, stage, ship, write, outputOf, arriveAll, findings, major } from "./ship-stage.mjs";
+import { driveToRecurrence } from "./ship-driver-shared.mjs";
 import { recordedIn } from "../scripts/record-round-report.mjs";
 
 const SPEC = "---\nid: 01-a\ndepends_on: []\nreviewers: []\n---\n\n## Outcome\nadd works.\n\n"
@@ -141,4 +142,19 @@ test("a line folded in at round 1 does not make the next round's report a second
   assert.equal(next.json.round, 2);
   assert.equal(wrapperOf(shipDir, 2).kind, "fix");
   assert.equal(wrapperOf(shipDir, 2).report.summary, "fixed sub");
+});
+
+test("the redesign implementer is handed the lines file too", () => {
+  const staged = stage();
+  const { repo, plan } = staged;
+  fs.writeFileSync(path.join(plan, "specs", "01-a.md"), SPEC);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "a spec with lines");
+  git(repo, "push", "origin", "main");
+  const { run } = driveToRecurrence(staged, { account: IDS.map((id) => answer(id)) });
+  const [implementer] = run("redesign").json.dispatch;
+  assert.match(implementer.prompt, /This is a redesign/);
+  const linesFile = path.join(path.dirname(outputOf(implementer)), "lines.json");
+  assert.ok(implementer.prompt.includes(`Lines to account for, each answered by id in your report's account: ${linesFile}`));
+  assert.ok(fs.existsSync(linesFile));
 });
