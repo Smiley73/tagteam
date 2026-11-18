@@ -2188,3 +2188,70 @@ test("a collection of the same candidate counts its lenses' rulings beside the s
   assert.deepEqual(ruled.accounting.items.map((entry) => entry.ruling), ["environmental"]);
   assert.equal(ruled.accounting.acceptable, true);
 });
+
+// --- a reproduced minor finding raised to major ---
+
+test("a reproduced minor finding becomes major with its evidence in review.json, to-fix.json and open/, and nothing else moves", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, findings, out, base } = round({
+    "correctness.json": lensFile("correctness", [finding({ severity: "minor", title: "a" }), finding({ severity: "minor", title: "b" })]),
+    "codex.json": lensFile("codex", [finding({ severity: "nit", title: "c" })])
+  });
+  const reproduced = path.join(base, "try.json");
+  fs.writeFileSync(reproduced, JSON.stringify({ reproduced: [{ id: "1.correctness.2", command: "node repro.js", saw: "prints -1" }] }));
+  const run = (...extra) => spawnSync("node", [
+    path.join(root, "scripts", "collect-findings.mjs"),
+    "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--round", "1", "--out", out, ...extra
+  ], { encoding: "utf8" });
+  assert.equal(run().status, 0, "two minors and a nit gate nothing");
+  assert.equal(run("--reproduced", reproduced).status, 1, "a raised finding is open");
+
+  const review = JSON.parse(fs.readFileSync(out, "utf8"));
+  const byId = Object.fromEntries(review.findings.map((entry) => [entry.id, entry]));
+  assert.equal(review.status, "open");
+  assert.equal(byId["1.correctness.2"].severity, "major");
+  assert.equal(byId["1.correctness.2"].raisedFrom, "minor");
+  assert.match(byId["1.correctness.2"].evidence, /node repro\.js/);
+  assert.match(byId["1.correctness.2"].evidence, /prints -1/);
+  assert.equal(byId["1.correctness.1"].severity, "minor", "a minor nobody reproduced stays minor");
+  assert.equal(byId["1.codex.1"].severity, "nit");
+  assert.deepEqual(review.open.map((entry) => entry.id), ["1.correctness.2"]);
+
+  const toFix = JSON.parse(fs.readFileSync(path.join(roundDir, "to-fix.json"), "utf8")).findings;
+  assert.deepEqual(toFix.map((entry) => [entry.id, entry.severity]), [["1.correctness.2", "major"]]);
+  assert.match(toFix[0].evidence, /prints -1/);
+  const open = JSON.parse(fs.readFileSync(path.join(roundDir, "open", "correctness.json"), "utf8")).findings;
+  assert.deepEqual(open.map((entry) => entry.id), ["1.correctness.2"]);
+  assert.match(open[0].evidence, /node repro\.js/);
+
+  assert.equal(run().status, 0, "collected again without the raise, it is minor again: the driver hands the same list every time");
+});
+
+test("a reproduced id that names no minor code finding of the collection is refused with exit 2 and writes nothing", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { dir: roundDir, findings, out, base } = round({
+    "correctness.json": lensFile("correctness", [
+      finding({ severity: "minor", title: "minor" }),
+      finding({ severity: "nit", title: "nit" }),
+      finding({ severity: "major", title: "major" }),
+      finding({ severity: "minor", scope: "pull-request", file: null, title: "body" })
+    ]),
+    "codex.json": lensFile("codex", [])
+  });
+  const run = (entries) => {
+    const file = path.join(base, "try.json");
+    fs.writeFileSync(file, JSON.stringify({ reproduced: entries }));
+    return spawnSync("node", [
+      path.join(root, "scripts", "collect-findings.mjs"),
+      "--dir", findings, "--candidate", OID, "--expect", "correctness,codex", "--round", "1", "--out", out, "--reproduced", file
+    ], { encoding: "utf8" });
+  };
+  const one = (id) => ({ id, command: "node repro.js", saw: "wrong" });
+  for (const id of ["1.correctness.2", "1.correctness.3", "1.correctness.4", "1.correctness.9"]) {
+    const result = run([one(id)]);
+    assert.equal(result.status, 2, `${id}: ${result.stdout}`);
+    assert.match(result.stderr, /names no minor code finding/);
+    assert.equal(fs.existsSync(out), false, `${id}: nothing was written`);
+  }
+  assert.equal(fs.existsSync(path.join(roundDir, "to-fix.json")), false);
+});

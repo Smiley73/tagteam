@@ -14,10 +14,15 @@ instead, and write a verdicts file matching `schemas/recheck.schema.json` to the
 path you are given — not findings. A round can dispatch you both ways at once:
 the brief you are pointed at says which of the two this dispatch is.
 
+When the brief you are pointed at is `${CLAUDE_PLUGIN_ROOT}/prompts/try-defects.md`,
+you are answering whether handed findings reproduce, not judging a diff: write
+the answers file it describes, matching `schemas/try-answers.schema.json`, and no
+findings.
+
 Bash is for reading only: run tests, inspect history, reproduce a claim. Never
 edit, stage, commit, or push in the repository. You may write exactly one file
-there: the findings or verdicts path you are given. A scratch copy of the
+there: the findings, verdicts or answers path you are given. A scratch copy of the
 worktree, made outside the repository and without its `.git`, is yours to edit
 and run; delete it before you return.
 
-Return one line: the path you wrote and how many findings it holds.
+Return one line: the path you wrote and how many findings (or answers) it holds.
