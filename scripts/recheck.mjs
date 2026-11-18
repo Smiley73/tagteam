@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
-import { findingId, findingRound, isItemFinding, itemFinding, parseRound, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
+import { fillWeakTest, findingId, findingRound, isItemFinding, itemFinding, parseRound, recordWeakTest, roundDirectoryFor, writeOpenViews } from "./collect-findings.mjs";
 import { readRoundMarker, roundRootForWrite, sealRoundRecord, writeRoundFile } from "./lib/round-store.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { ACCEPTABLE, bindRulings, combineRulings, fillRulings, readItems } from "./lib/rulings.mjs";
@@ -464,7 +464,7 @@ export function settle({
     const findingsSchema = JSON.parse(fs.readFileSync(adversarySchemaPath, "utf8"));
     let parsed;
     try {
-      parsed = readRulings("adversary", JSON.parse(fs.readFileSync(path.resolve(adversary), "utf8")));
+      parsed = fillWeakTest(readRulings("adversary", JSON.parse(fs.readFileSync(path.resolve(adversary), "utf8"))));
     } catch (error) {
       unusable.push({
         lens: "adversary",
@@ -496,7 +496,7 @@ export function settle({
         parsed.findings.forEach((finding, index) => {
           // Minted at the round the adversary's file sits in, through the one
           // minter, so a verdict from another round binds to nothing here.
-          const entry = { ...finding, id: findingId(round, "adversary", index), lens: "adversary", resolved: false };
+          const entry = { ...recordWeakTest(finding, "adversary"), id: findingId(round, "adversary", index), lens: "adversary", resolved: false };
           if (finding.severity === "blocking" || finding.severity === "major") {
             fresh.push({ ...entry, evidence: PLACEHOLDER_EVIDENCE.adversaryFresh });
           } else {

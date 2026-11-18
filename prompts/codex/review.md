@@ -115,6 +115,8 @@ the change is split into commits — and not to any file. `code` otherwise, incl
 re-planning — this diff should have been two specs, or the work should have
 been planned differently — is `minor` at most, because no fixer can answer it.
 
+Set `weakTest` to `false` on every finding.
+
 Verify before asserting. If you claim something is never called, look. If you
 claim a case is unhandled, find the handler and confirm it is missing. A
 confident wrong finding spends a fix round this change may not get again — how
