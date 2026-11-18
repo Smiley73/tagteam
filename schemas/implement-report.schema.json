@@ -4,7 +4,7 @@
   "description": "The round's account of its own work. A round that records none, and a round that records unfinished work, both stop the pull request for a person to read — so an honest `unfinished` costs nothing that silence does not cost too.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "summary", "unfinished"],
+  "required": ["status", "summary", "unfinished", "account"],
   "properties": {
     "status": {
       "type": "string",
@@ -33,6 +33,32 @@
             "type": "string",
             "minLength": 1,
             "description": "Why it was left undone, in a sentence a person can act on."
+          }
+        }
+      }
+    },
+    "account": {
+      "type": "array",
+      "description": "One entry for each line id the dispatch handed you, answered once: met, with what in the change meets it, or not-done, with why. A line you are unsure of is not-done. Every id the dispatch named is answered and no other id appears. An empty array when the dispatch named no lines. A line answered not-done is recorded as unfinished work.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "outcome", "note"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The line's id, exactly as the dispatch gave it."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["met", "not-done"],
+            "description": "met only when something in the change meets the line; not-done otherwise, including when you are unsure."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "For met, what in the change meets the line, named so a reviewer can find it. For not-done, why it was not done, in a sentence a person can act on."
           }
         }
       }

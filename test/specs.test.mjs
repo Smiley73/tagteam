@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseFrontMatter, parseSignOffs, resolveReviewers, readSpecs } from "../scripts/specs.mjs";
+import { parseFrontMatter, parseSignOffs, parseRequirementLines, resolveReviewers, readSpecs } from "../scripts/specs.mjs";
+import { findingRound } from "../scripts/collect-findings.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const SCHEMA = path.join(root, "schemas", "spec.schema.json");
@@ -83,7 +84,7 @@ test("resolved lenses ride along with the order", () => {
 
 test("a spec without the retired user_visible key validates, and nothing about visibility comes back", () => {
   const [entry] = readSpecs(planWith({ "01-a.md": spec("01-a") }), CONFIG, SCHEMA);
-  assert.deepEqual(Object.keys(entry).sort(), ["dependsOn", "id", "path", "reviewers", "signOffs", "workflows"]);
+  assert.deepEqual(Object.keys(entry).sort(), ["dependsOn", "id", "lines", "path", "reviewers", "signOffs", "workflows"]);
 });
 
 test("an older spec that still carries user_visible reads exactly as one without it", () => {
@@ -177,4 +178,68 @@ test("a workflows entry that is not an exact workflow file is refused, naming th
   }
   assert.throws(() => readSpecs(planWith({ "01-a.md": spec("01-a", { workflows: [ci, ci] }) }), CONFIG, SCHEMA),
     /01-a\.md: workflows entry "\.github\/workflows\/ci\.yml" is listed twice/);
+});
+
+// A `## Tests` in the shape the real specs write it: a leading paragraph, top-level
+// items that end "Check:" over sub-bullets, continuation lines, an indented
+// paragraph after a blank line, and a fence holding list lines.
+const REAL_SHAPE = `## Outcome
+Something.
+
+## Tests
+
+All against the real driver through the fixtures. Each command is written
+the way the workflow will write it:
+\`prompt("run it")\`.
+That way the quoting is part of what is tested.
+
+- **A stretch that runs to a dispatch.** Start with an implementer who has
+  committed, then give the runner the arrival. Check:
+  - \`say\` equals the concatenation of each step's own
+    \`say\` from its record directory
+  - the checksum matches
+
+    An indented paragraph after a blank line joins the sub-bullet above.
+  - no \`collect\` ran
+- **Arrival alone, and asks.** Given an arrival and no next, only the
+  arrival's directory exists.
+- **A step that lists:** nothing
+\`\`\`
+- not a line, inside a fence
+\`\`\`
+
+## Done when
+
+\`npm test\` passes and nothing else changes.
+`;
+
+test("the lines of a spec read the way real specs write them", () => {
+  const lines = parseRequirementLines(REAL_SHAPE, "real.md");
+  assert.deepEqual(lines.map(({ id, section, text }) => [id, section, text]), [
+    ["line:tests.1", "Tests", "All against the real driver through the fixtures. Each command is written the way the workflow will write it: `prompt(\"run it\")`. That way the quoting is part of what is tested."],
+    ["line:tests.2", "Tests", "**A stretch that runs to a dispatch.** Start with an implementer who has committed, then give the runner the arrival. Check: `say` equals the concatenation of each step's own `say` from its record directory"],
+    ["line:tests.3", "Tests", "**A stretch that runs to a dispatch.** Start with an implementer who has committed, then give the runner the arrival. Check: the checksum matches An indented paragraph after a blank line joins the sub-bullet above."],
+    ["line:tests.4", "Tests", "**A stretch that runs to a dispatch.** Start with an implementer who has committed, then give the runner the arrival. Check: no `collect` ran"],
+    ["line:tests.5", "Tests", "**Arrival alone, and asks.** Given an arrival and no next, only the arrival's directory exists."],
+    ["line:tests.6", "Tests", "**A step that lists:** nothing"],
+    ["line:done.1", "Done when", "`npm test` passes and nothing else changes."]
+  ]);
+  for (const { id } of lines) {
+    assert.equal(findingRound(id), null, `${id} reads as a finding`);
+    assert.ok(!id.startsWith("item:"), `${id} reads as an unfinished item`);
+  }
+  assert.deepEqual(parseRequirementLines(REAL_SHAPE, "real.md"), lines, "an unchanged spec mints the same ids");
+});
+
+test("a colon-ending item with no children is a line, a prose paragraph ending in a colon is not, and a missing section has no lines", () => {
+  assert.deepEqual(parseRequirementLines("## Tests\n\nThese hold:\n\n- the last one is:\n", "a.md").map((line) => line.text), ["the last one is:"]);
+  assert.deepEqual(parseRequirementLines("## Outcome\nx\n", "a.md"), []);
+  assert.throws(() => parseRequirementLines("## Tests\n- a\n\n## Done when\nb\n\n---\n## Tests\n- c\n", "a.md"), /has 2 "## Tests" sections/);
+});
+
+test("readSpecs hands each spec its lines", () => {
+  const dir = planWith({ "01-a.md": `${spec("01-a")}\n## Tests\n- one\n`, "02-b.md": spec("02-b") });
+  const [first, second] = readSpecs(dir, CONFIG, SCHEMA);
+  assert.deepEqual(first.lines, [{ id: "line:tests.1", section: "Tests", text: "one" }]);
+  assert.deepEqual(second.lines, []);
 });

@@ -247,7 +247,7 @@ function fixUnitSpec(ctx, id) {
   if (front.id !== id) throw new Stop(`The spec document for ${id} names ${front.id} instead (${file})`);
   return {
     id, path: file, dependsOn: [],
-    reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], fixUnit: true
+    reviewers: resolveReviewers([], ctx.config, { file }), signOffs: [], lines: [], fixUnit: true
   };
 }
 
@@ -290,7 +290,7 @@ const dependencyQuestions = (ctx) => { const record = readAudit(ctx.shipDir); re
 // are made, so `begin` reads this before there is one.
 const dependencyUnitSpec = (ctx) => ({
   id: DEPENDENCY_ID, path: dependencyDocumentPath(ctx.shipDir), dependsOn: [],
-  reviewers: resolveReviewers([], ctx.config, { file: dependencyDocumentPath(ctx.shipDir) }), signOffs: [], dependencyUnit: true
+  reviewers: resolveReviewers([], ctx.config, { file: dependencyDocumentPath(ctx.shipDir) }), signOffs: [], lines: [], dependencyUnit: true
 });
 
 // The dependency unit, then the specs and then the fix units: everything of this
@@ -421,6 +421,22 @@ function validateLine(ctx, file, schema) {
 
 const implementReportPath = (ctx, id) => path.join(specDir(ctx, id), "implement-report.json");
 const fixReportPath = (ctx, id) => path.join(specDir(ctx, id), "fix-report.json");
+const linesPath = (ctx, id) => path.join(specDir(ctx, id), "lines.json");
+
+// The spec's `## Tests` and `## Done when` lines, written where the implementer
+// and the recorder both read them, outside every round. A function of the
+// approved spec, so writing it again changes nothing. Null when the spec has none.
+function writeLines(ctx, spec) {
+  if (spec.lines.length === 0) return null;
+  writeJson(linesPath(ctx, spec.id), spec.lines);
+  return linesPath(ctx, spec.id);
+}
+
+// The prompt line that hands an implementer its lines, when it has any.
+function linesLine(ctx, spec) {
+  const file = writeLines(ctx, spec);
+  return file ? [`Lines to account for, each answered by id in your report's account: ${file}`] : [];
+}
 
 function implementerDispatch(ctx, spec, job) {
   return {
@@ -429,6 +445,7 @@ function implementerDispatch(ctx, spec, job) {
     prompt: [
       `Job: implementer`,
       `Spec: ${spec.path}`,
+      ...linesLine(ctx, spec),
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       conventionsLine(ctx),
       verifyLine(ctx),
@@ -453,6 +470,7 @@ function redesignDispatch(ctx, spec, briefPath, files, job) {
       `Redesign brief: ${briefPath}`,
       `Files to redesign: ${files.join(", ")}`,
       `Spec: ${spec.path}`,
+      ...linesLine(ctx, spec),
       `Worktree (work only beneath this path): ${ctx.worktree}`,
       conventionsLine(ctx),
       verifyLine(ctx),
@@ -1254,7 +1272,8 @@ function reportResendDispatch(ctx, spec, { pending, state, oid, request, problem
         ? `A landing repair: what failed and its log is ${landing.resultPath ?? landing.dir}.`
         : `A CI repair: its record is ${path.join(specDir(ctx, spec.id), "ci.json")}.`]
       : []),
-    `Spec: ${spec.path}`
+    `Spec: ${spec.path}`,
+    ...(implementer ? linesLine(ctx, spec) : [])
   ];
   return {
     ...request,
@@ -4211,7 +4230,8 @@ async function snapshot(options) {
   // is refused, and the agent sent back for it.
   const dispatched = Boolean(pending) || state.state === "implementing";
   const recorded = node("record-round-report.mjs", [
-    "--dir", specDir(ctx, id), "--out", path.join(dir, "report.json"), ...(dispatched ? ["--absence", "refuse"] : [])
+    "--dir", specDir(ctx, id), "--out", path.join(dir, "report.json"), ...(dispatched ? ["--absence", "refuse"] : []),
+    ...(writeLines(ctx, spec) ? ["--lines", linesPath(ctx, id)] : [])
   ], { allow: [2] });
   if (recorded.status === 2) {
     const refused = lastJson(recorded.stdout)?.refused;
