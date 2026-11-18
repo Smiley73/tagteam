@@ -27,15 +27,16 @@ const fencedAccount = (dispatch) => /'--fence' 'ACCOUNT=([^']*)'/.exec(fs.readFi
 
 // A spec with two lines, the implementer's change in the tree and its report
 // written; up to a panel sent out and not yet collected.
-function toPanel(account, { withLines = true } = {}) {
+//
+// `recorded` is handed the round's recorded report path once the snapshot has
+// written it, to put in its place what a round can hold that this one does not.
+function toPanel(account, { recorded } = {}) {
   const staged = stage();
   const { repo, plan, shipDir } = staged;
-  if (withLines) {
-    fs.writeFileSync(path.join(plan, "specs", "01-a.md"), SPEC);
-    git(repo, "add", "-A");
-    git(repo, "commit", "-m", "a spec with lines");
-    git(repo, "push", "origin", "main");
-  }
+  fs.writeFileSync(path.join(plan, "specs", "01-a.md"), SPEC);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "a spec with lines");
+  git(repo, "push", "origin", "main");
   ship("start", plan);
   const begin = ship("begin", plan, ["--spec", "01-a"]);
   const worktree = JSON.parse(fs.readFileSync(path.join(shipDir, "train.json"), "utf8")).worktree;
@@ -43,6 +44,7 @@ function toPanel(account, { withLines = true } = {}) {
   write(outputOf(begin.json.dispatch[0]), report(account));
   arriveAll(begin);
   assert.equal(ship("snapshot", plan, ["--spec", "01-a"]).status, 0);
+  if (recorded) recorded(path.join(round(shipDir, 1), "report.json"));
   ship("verify", plan, ["--spec", "01-a"]);
   const panel = ship("panel", plan, ["--spec", "01-a"]);
   assert.equal(panel.status, 0, panel.stderr);
@@ -64,7 +66,6 @@ test("every panel lens and Codex are handed the met line under the spec's own te
   assert.equal(fencedAccount(codex), file, "Codex's request does not fence the account");
 
   assert.deepEqual(accountOf(shipDir, 1), { candidate: oid, lines: [{ id: "line:tests.1", text: "the add works", note: "app.js does it" }] });
-  assert.doesNotMatch(fs.readFileSync(file, "utf8"), /sub works|no time|tests\.2/);
   const items = JSON.parse(fs.readFileSync(path.join(round(shipDir, 1), "unfinished.json"), "utf8")).items;
   assert.deepEqual(items.map(({ part }) => part), ["line:tests.2: the sub works"]);
   for (const dispatch of lenses) assert.ok(dispatch.prompt.search(ACCOUNT_LINE) < dispatch.prompt.indexOf("Write your findings to:"), "the account line comes before the findings line");
@@ -145,18 +146,42 @@ test("after a redesign the next review is handed the redesign's account, not the
   assert.deepEqual(accountOf(shipDir, 4), {
     candidate: state().candidateOid, lines: [{ id: "line:tests.1", text: "the add works", note: "rewritten in app.js" }]
   });
-  assert.notEqual(accountOf(shipDir, 4).candidate, first.candidate);
 });
 
-test("a round whose report carries no account gets an empty account file, Codex's request still composes, and collect routes as it did", () => {
-  const { plan, shipDir, panel, oid } = toPanel([], { withLines: false });
-  const file = path.join(round(shipDir, 1), "account.json");
-  assert.deepEqual(accountOf(shipDir, 1), { candidate: oid, lines: [] });
-  for (const dispatch of panel.json.dispatch.filter((entry) => entry.agent !== "tagteam:codex-runner")) assert.equal(accountNamed(dispatch), file);
-  assert.equal(fencedAccount(panel.json.dispatch.find((entry) => entry.agent === "tagteam:codex-runner")), file);
-  for (const dispatch of panel.json.dispatch) answer(dispatch, oid);
-  arriveAll(panel);
-  const collected = ship("collect", plan, ["--spec", "01-a"]);
-  assert.equal(collected.status, 0, collected.stderr);
-  assert.equal(collected.json.review, "clean");
-});
+// A report recorded before the account existed, and a round recorded as having
+// no report (a change made by hand): each is an empty account, never an error,
+// on a spec that has lines to look the answers up for.
+// A round's records are read-only, so the file is replaced rather than written over.
+const replace = (file, value) => {
+  fs.rmSync(file);
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+};
+const NO_ACCOUNT = {
+  "a report recorded without an account": {
+    candidate: (oid) => oid,
+    record: (file) => {
+      const wrapper = JSON.parse(fs.readFileSync(file, "utf8"));
+      delete wrapper.report.account;
+      replace(file, wrapper);
+    }
+  },
+  "a round recorded as having no report": {
+    candidate: () => null,
+    record: (file) => replace(file, { status: "missing", kind: null, source: null, reason: "no new report from this round", report: null })
+  }
+};
+
+for (const [what, { candidate, record }] of Object.entries(NO_ACCOUNT)) {
+  test(`${what} gets an empty account file, Codex's request still composes, and collect routes as it did`, () => {
+    const { plan, shipDir, panel, oid } = toPanel([MET, { ...NOT_DONE, outcome: "met", note: "sub is there" }], { recorded: record });
+    const file = path.join(round(shipDir, 1), "account.json");
+    assert.deepEqual(accountOf(shipDir, 1), { candidate: candidate(oid), lines: [] });
+    for (const dispatch of panel.json.dispatch.filter((entry) => entry.agent !== "tagteam:codex-runner")) assert.equal(accountNamed(dispatch), file);
+    assert.equal(fencedAccount(panel.json.dispatch.find((entry) => entry.agent === "tagteam:codex-runner")), file);
+    for (const dispatch of panel.json.dispatch) answer(dispatch, oid);
+    arriveAll(panel);
+    const collected = ship("collect", plan, ["--spec", "01-a"]);
+    assert.equal(collected.status, 0, collected.stderr);
+    assert.equal(collected.json.review, "clean");
+  });
+}
