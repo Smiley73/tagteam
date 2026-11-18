@@ -1217,9 +1217,9 @@ test("escalation fires past `after`, not at it, and never without an escalation 
 // and `recheck-codex` appear in none of them — so `implement` rewired to the
 // lead's settings, or the Codex re-check handed a Claude model name, dispatched
 // every run wrong with nothing erroring. One deepEqual of the whole `jobs`
-// object pins the count (ten), every job name, and every job-to-role mapping
+// object pins the count (eleven), every job name, and every job-to-role mapping
 // in a single assertion, on both sides of the line.
-test("the resolver emits exactly ten jobs, each mapped to its role's settings", () => {
+test("the resolver emits exactly eleven jobs, each mapped to its role's settings", () => {
   const worker = { model: "sonnet", effort: "medium", escalated: false };
   const lead = { model: "opus", effort: "high", escalated: false };
   const codex = { model: "gpt-5-codex", effort: "medium", escalated: false };
@@ -1228,6 +1228,7 @@ test("the resolver emits exactly ten jobs, each mapped to its role's settings", 
     "review-lens": lead,
     "review-codex": codex,
     fix: worker,
+    "adversary-try": lead,
     "adversary-fresh": lead,
     "recheck-lens": lead,
     "recheck-adversary": lead,
@@ -1237,12 +1238,13 @@ test("the resolver emits exactly ten jobs, each mapped to its role's settings", 
   }, "an ordinary round runs every job at its role's base settings");
 
   // A raised round moves the five escalating jobs to the escalation block's
-  // settings for their roles and leaves the other five exactly where they were.
+  // settings for their roles and leaves the other six exactly where they were.
   assert.deepEqual(resolveRoles(at("fixing", { fixRoundsUsed: 2 }), RAISED).jobs, {
     implement: worker,
     "review-lens": lead,
     "review-codex": codex,
     fix: { model: "opus", effort: "high", escalated: true },
+    "adversary-try": lead,
     "adversary-fresh": lead,
     "recheck-lens": { model: "opus", effort: "max", escalated: true },
     "recheck-adversary": { model: "opus", effort: "max", escalated: true },
@@ -1266,7 +1268,7 @@ test("a redesign request moves implement alone, at any counter, and nothing with
   const plain = resolveRoles(past, RAISED).jobs;
   const asked = resolveRoles(past, RAISED, true).jobs;
   assert.deepEqual(asked, { ...plain, implement: raisedImplement });
-  for (const job of ["review-lens", "review-codex", "adversary-fresh", "resolve"]) {
+  for (const job of ["review-lens", "review-codex", "adversary-try", "adversary-fresh", "resolve"]) {
     assert.equal(asked[job].escalated, false, `${job} stays on the ordinary settings`);
   }
 

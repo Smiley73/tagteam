@@ -287,6 +287,7 @@ export const SHIP_JOBS = {
   "review-lens": { role: "lead", effort: "reviewer" },            // step 5
   "review-codex": { role: "codex", effort: "codex" },             // step 5
   fix: { role: "worker", effort: "fixer" },                       // step 6
+  "adversary-try": { role: "lead", effort: "adversary" },         // step 5
   "adversary-fresh": { role: "lead", effort: "adversary" },       // step 7
   "recheck-lens": { role: "lead", effort: "recheck" },            // step 7
   "recheck-adversary": { role: "lead", effort: "recheck" },       // step 7

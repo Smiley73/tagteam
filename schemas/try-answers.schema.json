@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The adversary's answers on whether suspected defects can be reproduced",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate", "answers"],
+  "properties": {
+    "candidate": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$",
+      "description": "The commit these answers were tried against."
+    },
+    "answers": {
+      "type": "array",
+      "description": "One entry per finding id the dispatch handed over, and nothing else: there is no place here for a finding of your own. A finding with no entry is not answered, and stays as it was.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "outcome", "command", "saw"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The finding's id, copied unchanged from the candidates file."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["reproduced", "not-reproduced"],
+            "description": "reproduced: you ran something that showed the defect. not-reproduced: you tried and the defect did not show, or you could not try it."
+          },
+          "command": {
+            "type": "string",
+            "description": "The command you ran that showed the defect, as it could be run again. For not-reproduced, what you tried, or an empty string when you could not run anything."
+          },
+          "saw": {
+            "type": "string",
+            "description": "What the command printed or did that shows the defect. For not-reproduced, what you saw instead, or an empty string. An empty one on a reproduced answer is read as no answer."
+          }
+        }
+      }
+    }
+  }
+}

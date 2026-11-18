@@ -651,6 +651,28 @@ function adversaryDispatch(ctx, spec, round, oid, job, pullRequest = [], out = n
   };
 }
 
+// The adversary asked whether each suspected defect reproduces, and nothing else:
+// the answers file has no place for a finding of its own.
+function tryDispatch(ctx, spec, round, oid, job, candidates, out) {
+  const dir = roundDir(ctx, spec.id, round);
+  return {
+    ...agent("adversary", job),
+    description: `Try the suspected defects of ${spec.id}`,
+    prompt: [
+      `Job: try`,
+      `Brief: ${path.join(PLUGIN, "prompts", "try-defects.md")} — you are answering whether each handed defect reproduces, not reviewing`,
+      `Spec: ${spec.path}`,
+      `Diff: ${path.join(dir, "review.diff")} (per file under ${path.join(dir, "review.diff.d")})`,
+      `The candidate's worktree (copy it to try a defect, never edit it): ${ctx.worktree}`,
+      conventionsLine(ctx),
+      `Suspected defects to try, with their ids (answer every id, and only those): ${candidates}`,
+      `Candidate commit (set candidate to exactly this): ${oid}`,
+      validateLine(ctx, out, "try-answers.schema.json"),
+      `Write your verdicts to: ${out}`
+    ].join("\n")
+  };
+}
+
 function recheckDispatch(ctx, spec, round, oid, lens, inputs, brief, job, pullRequest = [], outDir = null, items = null) {
   const dir = roundDir(ctx, spec.id, round);
   const base = lens === "adversary" ? "adversary" : "reviewer";
@@ -1758,6 +1780,49 @@ function deletionLine({ round, rows }) {
   return `The fixer sent at round ${round} was also handed ${handed.length} deletion(s) the economy reviewer asked for; none of them gates. `
     + `${handed.length - unmade.length} made${unmade.length > 0 ? `; declined or not made: ${unmade.map(said).join(", ")}` : ""}.`;
 }
+
+// --- trying the suspected defects -------------------------------------------
+
+// The minor code findings a spec's first panel could not confirm — reviewers have
+// no shell — are tried once: the adversary runs each and answers reproduced or
+// not. `try.json` is written when the job is sent and is never removed, so a
+// spec has one. It names the round, the candidate and the set, the ids handed
+// over, and once judged what became of each, with the `reproduced` answers the
+// deriver is handed again at every later collect of that round.
+const tryPath = (ctx, id) => path.join(specDir(ctx, id), "try.json");
+const tryDir = (ctx, id) => path.join(specDir(ctx, id), "try");
+
+// Correctness's and Codex's minors about the code, and code-quality's that carry
+// the weak-test mark, at a spec's first panel when it has not been tried. A
+// finding about the pull request or the history has nothing to run.
+function tryCandidates(ctx, id, round, review) {
+  if (exists(tryPath(ctx, id)) || listRounds(roundsRoot(ctx, id)).some((entry) => entry.round < round.round)) return [];
+  return (review.findings ?? []).filter((finding) => finding.severity === "minor" && finding.scope === "code" && !isPullRequestFinding(finding)
+    && (finding.lens === "correctness" || finding.lens === "codex" || (finding.lens === "code-quality" && finding.weakTest === true)));
+}
+
+const NOT_ANSWERED = "not-answered";
+
+// What each id handed over came to, by the answers file: bound only by exact id,
+// as that id's only answer, from a file about this candidate, and for a
+// reproduction only with both evidence strings. Everything else is not answered.
+function triedOutcomes(ctx, tried) {
+  let answers = [];
+  if (exists(tried.answers)
+    && node("validate-json.mjs", ["--repo", ctx.repo, path.join(PLUGIN, "schemas", "try-answers.schema.json"), tried.answers], { allow: [1] }).status === 0) {
+    const document = readJson(tried.answers);
+    if (document.candidate === tried.candidate) answers = document.answers;
+  }
+  return tried.ids.map((id) => {
+    const mine = answers.filter((answer) => answer.id === id);
+    const [answer] = mine;
+    if (mine.length !== 1) return { id, outcome: NOT_ANSWERED };
+    if (answer.outcome === "not-reproduced") return { id, outcome: "not-reproduced" };
+    return answer.command.trim() && answer.saw.trim() ? { id, outcome: "reproduced", command: answer.command, saw: answer.saw } : { id, outcome: NOT_ANSWERED };
+  });
+}
+
+const triedLines = (outcomes) => outcomes.map(({ id, outcome }) => `  ${id}: ${outcome === NOT_ANSWERED ? "not answered" : outcome === "reproduced" ? "reproduced" : "not reproduced"}`);
 
 // --- the tidy ---------------------------------------------------------------
 
@@ -4497,12 +4562,17 @@ async function collect(options) {
   requireSetIn(ctx, id, sentFor.set, "collect");
   const expect = [...state.reviewers, "codex"];
   const items = writeItems(ctx, id, state, round.round);
-  const result = node("collect-findings.mjs", [
+  const tried = readJson(tryPath(ctx, id), null);
+  const derive = (reproduced) => node("collect-findings.mjs", [
     "--dir", path.join(round.dir, "findings"), "--candidate", state.candidateOid, "--expect", expect.join(","),
     "--round", String(round.round), "--out", path.join(round.dir, "review.json"), "--items", items,
-    ...(deletionLensOf(ctx, state) ? ["--deletion-lens", DELETION_LENS] : [])
+    ...(deletionLensOf(ctx, state) ? ["--deletion-lens", DELETION_LENS] : []),
+    ...(reproduced ? ["--reproduced", tryPath(ctx, id)] : [])
   ], { allow: [1] });
-  const review = readJson(path.join(round.dir, "review.json"));
+  // Once the try is judged, every collect of its round hands the deriver the same raises.
+  const judgedHere = tried?.judged === true && tried.round === round.round && tried.candidate === state.candidateOid;
+  const result = derive(judgedHere && tried.reproduced.length > 0);
+  let review = readJson(path.join(round.dir, "review.json"));
   const say = result.stdout.trim().split("\n");
 
   if (review.status === "incomplete") {
@@ -4549,6 +4619,21 @@ async function collect(options) {
     say.push(`${missing.join(", ")} produced no usable evidence twice; carrying the incomplete review forward — it never merges unattended.`);
     return emit({ say, review: review.status, next: nextCommand(ctx, "recheck", id) });
   }
+  if (tried && !tried.judged && tried.set === sentFor.set && tried.round === round.round) {
+    // The try's set is in. What each answer came to is recorded before the
+    // deriver raises anything from it, so a collect run again raises the same.
+    const outcomes = triedOutcomes(ctx, tried);
+    const reproduced = outcomes.filter(({ outcome }) => outcome === "reproduced").map(({ id: found, command, saw }) => ({ id: found, command, saw }));
+    writeJson(tryPath(ctx, id), { ...tried, judged: true, outcomes, reproduced, judgedAt: new Date().toISOString() });
+    if (reproduced.length > 0) {
+      say.splice(0, say.length, ...derive(true).stdout.trim().split("\n"));
+      review = readJson(path.join(round.dir, "review.json"));
+    }
+    say.push(`The adversary tried the ${outcomes.length} suspected defect(s) of round ${round.round}:`, ...triedLines(outcomes));
+  } else if (!tried) {
+    const candidates = tryCandidates(ctx, id, round, review);
+    if (candidates.length > 0) return sendTry(ctx, spec, state, round, candidates, sentFor, say);
+  }
   await closeReviewSet(ctx, id, sentFor.set);
   const openForFixer = review.status === "open" && (review.open ?? []).some((finding) => !isPullRequestFinding(finding));
   const churn = churnAsk(ctx, id, state, round.round, { openForFixer, atCollect: true });
@@ -4562,10 +4647,39 @@ async function collect(options) {
   if (deletions.length > 0) {
     say.push(`${deletions.length} deletion(s) the economy reviewer asked for are handed over and nothing about the code gates: one tidy fixer is sent for them before the fresh pass. No fix round is spent on it.`);
   }
+  const next = churn.auto || churn.setting ? "redesign" : deletions.length > 0 ? "tidy" : routeAfterCollect(ctx, id, round.round);
+  if (next === "fix" && (review.open ?? []).length > 0 && review.open.every((finding) => finding.raisedFrom)) {
+    say.push("A reproduction is the only thing open, and it opens the fix round: it was minor until the adversary ran it.");
+  }
   emit({
     say, review: review.status, ...(churn.signal.length > 0 ? { signal: churn.signal } : {}), ...(churn.ask ? { ask: churn.ask } : {}),
-    next: nextCommand(ctx, churn.auto || churn.setting ? "redesign" : deletions.length > 0 ? "tidy" : routeAfterCollect(ctx, id, round.round), id)
+    next: nextCommand(ctx, next, id)
   });
+}
+
+// The try: see `tryPath`. The job is its own set, the one `collect` judges next,
+// recorded before the pointer moves and the panel's set is closed, as for the
+// re-send of a missing reviewer.
+async function sendTry(ctx, spec, state, round, candidates, sentFor, say) {
+  const id = spec.id;
+  const job = roles(ctx, id).jobs["adversary-try"];
+  const candidatesFile = path.join(tryDir(ctx, id), "candidates.json");
+  const answers = path.join(tryDir(ctx, id), "answers.json");
+  writeJson(candidatesFile, {
+    candidate: state.candidateOid,
+    findings: candidates.map(({ id: found, lens, file, line, title, detail, fix, weakTest }) => ({ id: found, lens, file, line, title, detail, fix, ...(weakTest ? { weakTest } : {}) }))
+  });
+  const dispatch = tryDispatch(ctx, spec, round.round, state.candidateOid, job, candidatesFile, answers);
+  const sent = await sendSet(ctx, id, { kind: "try", round: round.round, agents: [{ dispatch, job, name: "the adversary" }], step: "collect" });
+  const at = new Date().toISOString();
+  writeJson(tryPath(ctx, id), {
+    round: round.round, candidate: state.candidateOid, set: sent.id, candidates: candidatesFile, answers,
+    ids: candidates.map((finding) => finding.id), judged: false, at
+  });
+  writeJson(collectSetPath(ctx, id), { round: round.round, candidate: state.candidateOid, set: sent.id, at });
+  await closeReviewSet(ctx, id, sentFor.set);
+  say.push(`${candidates.length} suspected defect(s) the panel could not confirm are handed to the adversary (${settings(job)}) to run before they are judged: ${candidates.map((finding) => finding.id).join(", ")}.`);
+  return emit({ say, dispatch: [dispatch], set: setPayload(sent), next: nextCommand(ctx, "collect", id) });
 }
 
 // The tidy: see `tidyPath`. It takes no edge of the state machine and spends no

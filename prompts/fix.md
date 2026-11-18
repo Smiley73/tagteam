@@ -114,6 +114,12 @@ version, so say in that finding's outcome `note` which line of the old behaviour
 the test depends on and what it asserts there. A test that passes either way
 documents nothing.
 
+A finding that carries a reproduction in its `evidence` was confirmed by running
+it: the command and what it showed are what is true, whatever the reviewer's
+`detail` suspected. A reproduced finding about a weak test is fixed by adding or
+tightening the test so that it fails with the behaviour broken. That is added
+code, and within scope.
+
 Where the dispatch lists verify commands, run the ones that apply to what you
 changed before you write the report, and fix what your change broke. A command
 you could not run — it outlasts what you may wait, or needs the network or
