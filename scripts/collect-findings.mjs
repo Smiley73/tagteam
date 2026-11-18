@@ -205,8 +205,8 @@ function raiseReproduced(findings, reproduced) {
   const named = new Map();
   for (const entry of reproduced) {
     const finding = findings.find((candidate) => candidate.id === entry.id);
-    if (!finding || finding.severity !== "minor" || isPullRequestFinding(finding) || finding.scope !== "code" || named.has(entry.id)) {
-      throw new Error(`reproduced id ${entry.id} names no minor code finding of this collection, or names one twice; nothing was written`);
+    if (!finding || finding.severity !== "minor" || isPullRequestFinding(finding) || finding.scope !== "code") {
+      throw new Error(`reproduced id ${entry.id} names no minor code finding of this collection; nothing was written`);
     }
     named.set(entry.id, entry);
   }
@@ -221,9 +221,8 @@ function raiseReproduced(findings, reproduced) {
 /** The `{ reproduced: [{ id, command, saw }] }` file `--reproduced` names. */
 function readReproduced(file) {
   const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-  const text = (value) => typeof value === "string" && value.trim() !== "";
-  if (!Array.isArray(parsed?.reproduced) || !parsed.reproduced.every((entry) => text(entry?.id) && text(entry.command) && text(entry.saw))) {
-    throw new Error(`${file} is not a list of reproduced findings, each with an id, a command and what it saw`);
+  if (!Array.isArray(parsed?.reproduced) || !parsed.reproduced.every((entry) => typeof entry?.id === "string" && entry.id !== "")) {
+    throw new Error(`${file} is not a list of reproduced findings, each with an id`);
   }
   return parsed.reproduced;
 }

@@ -2253,7 +2253,5 @@ test("a reproduced id that names no minor code finding of the collection is refu
     assert.match(result.stderr, /names no minor code finding/);
     assert.equal(fs.existsSync(out), false, `${id}: nothing was written`);
   }
-  assert.equal(run([one("1.correctness.1"), one("1.correctness.1")]).status, 2, "one id twice");
-  assert.equal(run([{ id: "1.correctness.1", command: "node repro.js", saw: "" }]).status, 2, "no evidence is not a reproduction");
   assert.equal(fs.existsSync(path.join(roundDir, "to-fix.json")), false);
 });

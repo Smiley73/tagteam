@@ -1822,6 +1822,17 @@ function triedOutcomes(ctx, tried) {
   });
 }
 
+// The recorded reproductions that still name the finding they were run against:
+// the same id and the same finding as the one handed to the adversary, and still
+// a minor code finding. Positional ids carry over to a different panel's findings.
+function reproductionsHeld(tried, review) {
+  const handed = readJson(tried.candidates).findings;
+  const same = (was, now) => was && now && now.severity === "minor" && now.scope === "code"
+    && ["id", "lens", "file", "line", "title", "detail"].every((key) => was[key] === now[key]);
+  const holds = (entry) => same(handed.find((was) => was.id === entry.id), review.findings.find((now) => now.id === entry.id));
+  return { held: tried.reproduced.filter(holds), dropped: tried.reproduced.filter((entry) => !holds(entry)).map((entry) => entry.id) };
+}
+
 const triedLines = (outcomes) => outcomes.map(({ id, outcome }) => `  ${id}: ${outcome === NOT_ANSWERED ? "not answered" : outcome === "reproduced" ? "reproduced" : "not reproduced"}`);
 
 // --- the tidy ---------------------------------------------------------------
@@ -4567,13 +4578,25 @@ async function collect(options) {
     "--dir", path.join(round.dir, "findings"), "--candidate", state.candidateOid, "--expect", expect.join(","),
     "--round", String(round.round), "--out", path.join(round.dir, "review.json"), "--items", items,
     ...(deletionLensOf(ctx, state) ? ["--deletion-lens", DELETION_LENS] : []),
-    ...(reproduced ? ["--reproduced", tryPath(ctx, id)] : [])
+    ...(reproduced ? ["--reproduced", reproduced] : [])
   ], { allow: [1] });
-  // Once the try is judged, every collect of its round hands the deriver the same raises.
-  const judgedHere = tried?.judged === true && tried.round === round.round && tried.candidate === state.candidateOid;
-  const result = derive(judgedHere && tried.reproduced.length > 0);
+  const result = derive(null);
   let review = readJson(path.join(round.dir, "review.json"));
   const say = result.stdout.trim().split("\n");
+  // Once the try is judged, every collect of its round hands the deriver the same
+  // raises, those the findings now in the round still name: a round re-entered
+  // through the snapshot is panelled again and may file different findings.
+  const raise = (judged) => {
+    const { held, dropped } = reproductionsHeld(judged, review);
+    if (held.length > 0) {
+      const file = path.join(tryDir(ctx, id), "reproduced.json");
+      writeJson(file, { reproduced: held });
+      say.splice(0, say.length, ...derive(file).stdout.trim().split("\n"));
+      review = readJson(path.join(round.dir, "review.json"));
+    }
+    if (dropped.length > 0) say.push(`${dropped.join(", ")} was reproduced for an earlier panel of round ${round.round}; the findings now filed under that name are not those, so nothing is raised from it.`);
+  };
+  if (tried?.judged === true && tried.round === round.round && tried.candidate === state.candidateOid && tried.reproduced.length > 0) raise(tried);
 
   if (review.status === "incomplete") {
     const marker = path.join(specDir(ctx, id), `redispatched-${round.round}.json`);
@@ -4624,11 +4647,9 @@ async function collect(options) {
     // deriver raises anything from it, so a collect run again raises the same.
     const outcomes = triedOutcomes(ctx, tried);
     const reproduced = outcomes.filter(({ outcome }) => outcome === "reproduced").map(({ id: found, command, saw }) => ({ id: found, command, saw }));
-    writeJson(tryPath(ctx, id), { ...tried, judged: true, outcomes, reproduced, judgedAt: new Date().toISOString() });
-    if (reproduced.length > 0) {
-      say.splice(0, say.length, ...derive(true).stdout.trim().split("\n"));
-      review = readJson(path.join(round.dir, "review.json"));
-    }
+    const judged = { ...tried, judged: true, outcomes, reproduced, judgedAt: new Date().toISOString() };
+    writeJson(tryPath(ctx, id), judged);
+    if (reproduced.length > 0) raise(judged);
     say.push(`The adversary tried the ${outcomes.length} suspected defect(s) of round ${round.round}:`, ...triedLines(outcomes));
   } else if (!tried) {
     const candidates = tryCandidates(ctx, id, round, review);

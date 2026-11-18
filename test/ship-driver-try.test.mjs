@@ -288,3 +288,27 @@ test("a collect run again after the try was judged sends nothing and derives the
   assert.match(sayOf(again), /A reproduction is the only thing open/);
   assert.equal(cycle.state().fixRoundsUsed, 0, "collect itself spends no round");
 });
+
+test("a round re-entered through the snapshot and panelled again raises nothing from a reproduction of other findings", () => {
+  const cycle = begun();
+  const sent = collected(cycle, { correctness: [MINOR] });
+  answered(cycle, sent, reproducing);
+  assert.equal(cycle.json("rounds", "1", "review.json").findings[0].severity, "major");
+
+  cycle.run("snapshot");
+  cycle.run("verify");
+  const again = collected(cycle, { correctness: [{ ...MINOR, line: 9, title: "an unrelated minor" }] });
+  assert.equal(again.json.dispatch, undefined, "the job is not sent again");
+  assert.match(again.json.next, /ship\.mjs" recheck /);
+  assert.match(sayOf(again), /1\.correctness\.1 was reproduced for an earlier panel of round 1/);
+  const review = cycle.json("rounds", "1", "review.json");
+  assert.equal(review.findings[0].severity, "minor");
+  assert.equal(review.findings[0].title, "an unrelated minor");
+  assert.deepEqual(cycle.json("rounds", "1", "to-fix.json").findings, []);
+
+  cycle.run("snapshot");
+  cycle.run("verify");
+  const empty = collected(cycle, {});
+  assert.match(empty.json.next, /ship\.mjs" recheck /);
+  assert.deepEqual(cycle.json("rounds", "1", "review.json").findings, []);
+});
