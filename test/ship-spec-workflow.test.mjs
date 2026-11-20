@@ -176,7 +176,59 @@ test("the agents of a set are named for the work they did, from the step their d
   assert.equal(agentCalls(lost.calls).length, 0, "agents whose work cannot be placed are not sent");
 });
 
-test("a helper result one character off what the checksum covers ends the run as stopped with no agent launched and no line after it", async () => {
+// A copy damaged the way the 2026-11-20 run's was: one character of a commit hash in a say line, the true checksum kept.
+const COMMIT = "3f9a1c2d";
+const withCommit = (payload) => ({ ...payload, say: ["The panel is out.", `Committed ${COMMIT} on the branch.`] });
+const damaged = (copy, to = "3f9a1c3d") => ({ ...copy, say: copy.say.map((line, index) => (index === 1 ? line.replace(COMMIT, to) : line)) });
+const isReread = (call) => /^Re-read:/m.test(call.prompt);
+const finishedAt = (n, name) => new RegExp(`The ${name} line finished, but its answer did not come back intact twice\\. The saved answer is /repo/\\.tagteam/ships/demo/steps/${STAMP}/00${n}-${name}/stdout\\. Nothing after the line ran\\.`);
+const identicalClause = /Both copies were the same, so the saved answer itself fails the check/;
+
+/** A run whose helper answers `answer(call, copyNumber)` and whose other agents answer "done". */
+async function runCopies(command, answer, args = {}) {
+  const started = startWorkflow(compiled, argsFor(command, args), (call) => (isHelperCall(call) ? answer(call) : "done"));
+  const result = await started.done;
+  return { result, ...started };
+}
+
+test("the 2026-11-20 replay: a copy one character off is read again by a second helper over the same capture, and the run carries on", async () => {
+  const good = withCommit(panelPayload());
+  const { result, calls } = await runCopies(cmd("panel"), (call) => {
+    const task = helperTask(call);
+    if (stretchOf(task.command).from) return isReread(call) ? helperResult(good) : damaged(helperResult(good));
+    return helperResult({ say: ["All 3 are in."], next: END });
+  });
+  assert.equal(result.ending, "merged");
+  assert.equal(result.next, END);
+  assert.equal(agentCalls(calls).length, 3, "the dispatch of the faithful copy went out");
+  const [first, second, arrival] = helperCalls(calls);
+  assert.deepEqual(helperTask(second), helperTask(first), "the same command and capture directory");
+  assert.notEqual(second.options.label, first.options.label);
+  assert.notEqual(second.prompt, first.prompt);
+  assert.equal(first.options.label, "Step 1: panel");
+  assert.ok(!isReread(first) && isReread(second));
+  assert.match(first.prompt, /^Job: step-helper$/m);
+  assert.match(second.prompt, /^Job: step-helper$/m);
+  assert.deepEqual(second.prompt.slice(0, first.prompt.length), first.prompt, "the shell text is the first call's, untouched");
+  assert.equal(helperTask(arrival).dir.endsWith("002-review"), true, "the re-read took no line number of its own");
+  const said = logs(calls);
+  assert.deepEqual(said.filter((line) => /read again/.test(line)), ["The panel line's first copy failed the check and was read again from disk; the second copy matched."]);
+  assert.ok(said.indexOf(said.find((line) => /read again/.test(line))) < said.indexOf(good.say[0]), "the progress line comes before the line's own say lines");
+  assert.ok(said.includes(good.say[1]) && !said.some((line) => line.includes("3f9a1c3d")), "only the faithful copy's lines were logged");
+});
+
+test("the same replay on a merge line goes on to the merge's next", async () => {
+  const good = { say: ["Merged.", `Merged as ${COMMIT}.`], next: END };
+  const { result, calls } = await runCopies(cmd("finish"), (call) => (isReread(call) ? helperResult(good) : damaged(helperResult(good))));
+  assert.equal(result.ending, "merged");
+  assert.equal(result.next, END);
+  assert.deepEqual(labelsOf(calls), ["Step 1: land", "Step 1: land (re-read)"]);
+  assert.equal(helperCalls(calls).length, 2);
+  assert.equal(stretchOf(helperTask(helperCalls(calls)[1]).command).step, cmd("finish"), "the re-read is over the merge's own capture");
+  assert.deepEqual(logs(calls).filter((line) => /read again/.test(line)), ["The land line's first copy failed the check and was read again from disk; the second copy matched."]);
+});
+
+test("a copy that fails the check twice ends the run as stopped after two helper calls, saying the line finished and where its answer is saved", async () => {
   const good = panelPayload();
   const sum = checksumOf(good);
   const variants = {
@@ -186,28 +238,61 @@ test("a helper result one character off what the checksum covers ends the run as
     "a label": (payload) => { payload.set.labels[2] = "Codex review of 01-b"; return payload; }
   };
   for (const [what, change] of Object.entries(variants)) {
-    const started = startWorkflow(compiled, argsFor(cmd("panel")), (call) => (isHelperCall(call) ? helperResult(change(structuredClone(good)), sum) : "done"));
-    const result = await started.done;
+    const { result, calls } = await runCopies(cmd("panel"), () => helperResult(change(structuredClone(good)), sum));
     assert.equal(result.ending, "stopped", what);
-    assert.match(result.reason, /output did not come back intact, so nothing after it ran/, what);
-    assert.equal(agentCalls(started.calls).length, 0, `${what}: no agent was launched`);
-    assert.equal(helperCalls(started.calls).length, 1, `${what}: no line ran after it`);
-    assert.deepEqual(logs(started.calls), [], `${what}: nothing was logged from a damaged answer`);
+    assert.match(result.reason, finishedAt(1, "panel"), what);
+    assert.match(result.reason, identicalClause, what);
+    assert.match(result.reason, /Starting again from begin reads what is on disk\.$/, what);
+    assert.equal(result.output, `/repo/.tagteam/ships/demo/steps/${STAMP}/001-panel/output`, `${what}: the ending's output is still the driver's payload`);
+    assert.equal(agentCalls(calls).length, 0, `${what}: no agent was launched`);
+    assert.equal(helperCalls(calls).length, 2, `${what}: no third call, no line after it`);
+    assert.deepEqual(logs(calls), ["The panel line's first copy failed the check and was read again from disk; the second copy did not match."], `${what}: nothing was logged from a damaged answer`);
   }
 });
 
-test("a helper result that does not fit the schema, a rejected helper call and a command that did not run each end as stopped", async () => {
+test("two different bad copies stop the same way without the identical-copies clause, and a re-read that is rejected or empty is not an identical copy", async () => {
+  const good = withCommit(panelPayload());
+  const reversed = (copy) => Object.fromEntries(Object.entries(copy).reverse());
   const cases = {
-    "fit the schema": [() => ({ ...helperResult({ say: ["x"] }), say: "x" }), /did not come back intact/],
-    "answer": [() => Promise.reject(new Error("Workflow agent() call cap reached")), /helper was rejected \(Workflow agent\(\) call cap reached\), so nothing after it ran/],
-    "run": [() => ({ ...helperResult({}), exit: 126, stop: null, checksum: checksumOf({ exit: 126, stop: null }) }), /begin line did not run, so nothing after it ran/]
+    "two different copies": (call) => (isReread(call) ? damaged(helperResult(good), "3f9a1c4d") : damaged(helperResult(good))),
+    "a rejected re-read": (call) => (isReread(call) ? Promise.reject(new Error("killed")) : damaged(helperResult(good))),
+    "an empty re-read": (call) => (isReread(call) ? null : damaged(helperResult(good)))
   };
-  for (const [what, [answer, reason]] of Object.entries(cases)) {
+  for (const [what, answer] of Object.entries(cases)) {
+    const { result, calls } = await runCopies(cmd("panel"), answer);
+    assert.equal(result.ending, "stopped", what);
+    assert.match(result.reason, finishedAt(1, "panel"), what);
+    assert.doesNotMatch(result.reason, identicalClause, what);
+    assert.equal(helperCalls(calls).length, 2, what);
+    assert.equal(agentCalls(calls).length, 0, what);
+    assert.equal(logs(calls).length, 1, what);
+    assert.match(logs(calls)[0], /the second copy did not match\.$/, what);
+  }
+  const same = await runCopies(cmd("panel"), (call) => (isReread(call) ? reversed(damaged(helperResult(good))) : damaged(helperResult(good))));
+  assert.match(same.result.reason, identicalClause, "a difference in key order alone is not a difference");
+});
+
+test("a first call that returns nothing gets no re-read, and its stop says no answer came back, not that the line finished", async () => {
+  const { result, calls } = await runCopies(cmd("panel"), () => null);
+  assert.equal(result.ending, "stopped");
+  assert.match(result.reason, /^No answer came back from the panel line's helper, so nothing after it ran\. Starting again from begin reads what is on disk\.$/);
+  assert.doesNotMatch(result.reason, /finished/);
+  assert.equal(helperCalls(calls).length, 1);
+  assert.deepEqual(logs(calls), []);
+});
+
+test("a helper result that does not fit the schema is read again before it stops, and a rejected helper call and a command that did not run each end as stopped", async () => {
+  const cases = {
+    "fit the schema": [() => ({ ...helperResult({ say: ["x"] }), say: "x" }), /begin line finished, but its answer did not come back intact twice/, 2],
+    "answer": [() => Promise.reject(new Error("Workflow agent() call cap reached")), /helper was rejected \(Workflow agent\(\) call cap reached\), so nothing after it ran/, 1],
+    "run": [() => ({ ...helperResult({}), exit: 126, stop: null, checksum: checksumOf({ exit: 126, stop: null }) }), /begin line did not run, so nothing after it ran/, 1]
+  };
+  for (const [what, [answer, reason, count]] of Object.entries(cases)) {
     const started = startWorkflow(compiled, argsFor(cmd("begin")), (call) => (isHelperCall(call) ? answer() : "done"));
     const result = await started.done;
     assert.equal(result.ending, "stopped", what);
     assert.match(result.reason, reason, what);
-    assert.equal(helperCalls(started.calls).length, 1, what);
+    assert.equal(helperCalls(started.calls).length, count, what);
     assert.equal(agentCalls(started.calls).length, 0, what);
   }
 });
@@ -552,4 +637,61 @@ test("a run that crashes inside a stretch, with its runner still going, is ended
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
   }
+});
+
+// --- a re-read against the real driver ----------------------------------------------
+
+/** A staged unit with a session started, and a launch of the run at `begin`. */
+function stagedBegin() {
+  const staged = stage();
+  const sessions = sessionsFor(staged);
+  sessions.transcript("A");
+  const env = { ...process.env, ...sessions.as("A"), TAGTEAM_SKIP_TOOL_CHECKS: "1" };
+  assert.equal(ship("start", staged.plan, [], sessions.as("A")).status, 0);
+  const begin = `node ${SHIP} begin --plan ${JSON.stringify(staged.plan)} --spec 01-a`;
+  const launch = (helper) => startWorkflow(compiled, { plan: staged.plan, spec: "01-a", plugin: root, stamp: STAMP, command: begin },
+    (call) => (isHelperCall(call) ? helper(call) : Promise.reject(new Error(`${call.options.label} was killed`))));
+  return { staged, env, launch };
+}
+
+const stamped = (file) => ({ bytes: fs.readFileSync(file, "utf8"), mtime: fs.statSync(file).mtimeMs });
+
+test("a re-read against the real driver launches the step once and reads the same status and stdout twice, and the run carries on", { timeout: 300000 }, async () => {
+  const { env, launch } = stagedBegin();
+  const real = shellHelper(env);
+  const launched = [];
+  const seen = [];
+  const started = launch((call) => {
+    const { dir } = helperTask(call);
+    launched.push(!fs.existsSync(path.join(dir, "started")));
+    const copy = real(call);
+    seen.push({ status: stamped(path.join(dir, "status")), stdout: stamped(path.join(dir, "stdout")) });
+    return launched.length === 1 ? { ...copy, say: copy.say.map((line, index) => (index === 0 ? `${line} ` : line)) } : copy;
+  });
+  const result = await started.done;
+
+  assert.deepEqual(launched, [true, false], "the start text took its launch branch once, for the first call only");
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[1], seen[0], "status and stdout are the same bytes at the same modification time");
+  assert.deepEqual(labelsOf(started.calls), ["Step 1: begin", "Step 1: begin (re-read)"]);
+  assert.match(logs(started.calls).join("\n"), /first copy failed the check and was read again from disk; the second copy matched\./);
+  assert.equal(agentCalls(started.calls).length, 1, "the run went on to its dispatch");
+  assert.match(result.reason, /was rejected \(.* was killed\)/);
+});
+
+test("a saved answer that is itself bad is read twice and stops with the identical-copies clause and the stdout path", { timeout: 300000 }, async () => {
+  const { staged, env, launch } = stagedBegin();
+  const dir = path.join(staged.shipDir, "steps", STAMP, "001-begin");
+  fs.mkdirSync(path.join(dir, "started"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "status"), "143\n");
+  fs.writeFileSync(path.join(dir, "stdout"), "");
+  fs.writeFileSync(path.join(dir, "stderr"), "");
+  const started = launch(shellHelper(env));
+  const result = await started.done;
+
+  assert.equal(result.ending, "stopped");
+  assert.equal(helperCalls(started.calls).length, 2);
+  assert.equal(agentCalls(started.calls).length, 0);
+  assert.match(result.reason, new RegExp(`The begin line finished, but .* The saved answer is ${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/stdout\\.`));
+  assert.match(result.reason, identicalClause);
 });

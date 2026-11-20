@@ -10,7 +10,7 @@
 // and whether a set is complete are all scripts/plan.mjs's. It is the same
 // script shape as workflows/ship-spec.js, and what both need is pasted into both.
 //
-// It cannot import (findings, "Also seen"), so the three pieces it needs from
+// It cannot import (findings, "Also seen"), so the four pieces it needs from
 // scripts/lib/step-helper.mjs are pasted below, word for word. It is named
 // plan-specs because a workflow named like its command shadows the command (f).
 // Prompts go to agents untouched and are never inspected: the harness puts its own
@@ -115,6 +115,32 @@ function stepHelperPrompt(command, dir, { boundSec = 420 } = {}) {
     "Wait text:",
     block([`d=${q(dir)}`, ...wait])
   ].join("\n");
+}
+
+async function readStepAnswer(agent, prompt, options, accepts) {
+  let first;
+  try {
+    first = await agent(prompt, options);
+  } catch (error) {
+    return { outcome: "rejected", error: String(error?.message ?? error) };
+  }
+  if (first === null || first === undefined) return { outcome: "none" };
+  if (accepts(first)) return { outcome: "first", result: first };
+  let second = null;
+  try {
+    second = await agent(
+      `${prompt}\n\nRe-read: this answer was already copied once and the copy failed the run's check. The command has run; the start text launches nothing now. Paste the same texts and copy the saved answer again.`,
+      { ...options, label: `${options.label} (re-read)` }
+    );
+  } catch {
+    second = null;
+  }
+  if (second === null || second === undefined) return { outcome: "failed", identical: false };
+  if (accepts(second)) return { outcome: "reread", result: second };
+  const canonical = (value) => JSON.stringify(value, (key, inner) => (inner && typeof inner === "object" && !Array.isArray(inner)
+    ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : inner));
+  return { outcome: "failed", identical: canonical(first) === canonical(second) };
 }
 
 // --- the run ------------------------------------------------------------------
