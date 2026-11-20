@@ -296,8 +296,7 @@ flowchart TD
   call of up to ten minutes with no output. Claude Code was seen to let a call stay
   silent for eight minutes, and nothing longer has been tried, so whether a run
   survives the last two minutes is not known. A run that is cut short ends as a
-  stop, and starting the ship again reads what is on disk and carries on. With
-  Codex off no review waits in such a call.
+  stop, and starting the ship again reads what is on disk and carries on.
 - The configured per-role efforts, and an escalation's raised ones, reach the
   agents inside a run exactly as they reach an agent sent from the session: a
   per-call effort applies inside a workflow and overrides an agent file's. The one
@@ -402,8 +401,7 @@ When the repository uses Codex, a Codex line follows it with what that spec's ow
 Codex calls spent, in plain tokens — input, how much of it was cached, and
 output — kept apart from the Claude figure because Codex is paid from a different
 bill, and still there when the Claude figure could not be worked out. A Codex call
-that fails keeps its spend on record too. With Codex off there are no Codex calls,
-so there is no Codex line, and nothing is said about Codex.
+that fails keeps its spend on record too.
 Each spec, and each plan at approval, also names any agent that ran at a
 different effort or model than it was sent at, or whose run could not be
 confirmed, as a report that never holds anything up.

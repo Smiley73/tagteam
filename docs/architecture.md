@@ -56,8 +56,7 @@ does not.
   call; anything else that differs is said once and blocks nothing; anything
   Codex did not report is asked about.
 - A Codex call writes its own short-lived files under Codex's home directory
-  while it runs, and tagteam deletes nothing there. With Codex off, no call is made
-  and there is nothing to write.
+  while it runs, and tagteam deletes nothing there.
 - Every gate binds to one commit; a new commit clears all of them, and every fix
   round makes one.
 - Merges use `--match-head-commit`, so what merges is the commit that was
