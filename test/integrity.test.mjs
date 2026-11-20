@@ -1133,12 +1133,12 @@ test("the waiting guard fails on the publish passage ship.md had, and passes the
 // A workflow script cannot import, so each piece of the step helper it needs is
 // pasted into it. They are held equal to the module's text, so a change to one
 // without the other fails here and not mid-run.
-test("the ship-spec and plan-specs scripts carry the step helper's checksum, schema and prompt exactly as the module does", async () => {
+test("the ship-spec and plan-specs scripts carry the step helper's checksum, schema, prompt and re-read rule exactly as the module does", async () => {
   const helper = await import("../scripts/lib/step-helper.mjs");
   for (const file of ["ship-spec.js", "plan-specs.js"]) {
     const script = read("workflows", file);
-    for (const piece of [helper.checksumOf, helper.stepHelperSchema, helper.stepHelperPrompt]) {
-      const pasted = new RegExp(`^function ${piece.name}\\(.*?\\n\\}$`, "ms").exec(script)?.[0];
+    for (const piece of [helper.checksumOf, helper.stepHelperSchema, helper.stepHelperPrompt, helper.readStepAnswer]) {
+      const pasted = new RegExp(`^(?:async )?function ${piece.name}\\(.*?\\n\\}$`, "ms").exec(script)?.[0];
       assert.equal(pasted, piece.toString(), `workflows/${file} carries ${piece.name} differently from scripts/lib/step-helper.mjs`);
     }
   }

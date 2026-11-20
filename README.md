@@ -580,7 +580,9 @@ in a plan, past the goal gate, one `tagteam:plan-specs` run. A ship runs
 stretch. A stretch ends where agents are to be sent, a question is asked, a step stops or a merge
 comes, and each merge runs in a line of its own, so that a person can still stop the run from
 the view before it starts. A plan runs `scripts/plan.mjs` once per step, through a small helper
-agent. The helper's answers are checksummed so a copy that was altered or cut short is refused. The
+agent. The helper's answers are checksummed so a copy that was altered or cut short is refused: the
+saved answer is then read once more by a second helper without running the step again, and a
+second refused copy stops the run, in a ship and in a plan alike. The
 driver runs git, Codex and the other scripts, decides the round, the route and
 every model and effort, and prints the agents to dispatch with their prompts
 written out. The run sends them out together and tells the driver as each one
