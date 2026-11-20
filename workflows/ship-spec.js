@@ -25,7 +25,7 @@ export const meta = {
   whenToUse: "Only /tagteam:ship starts this, with the plan, the unit, the plugin root, a run stamp and the first command. A request to ship work never calls for it directly: use /tagteam:ship instead.",
   phases: [
     { title: "Implement", detail: "an implementer works in the unit's worktree, then the candidate is committed and every verify command runs" },
-    { title: "Review", detail: "the panel, Codex included, and the judging of what it wrote" },
+    { title: "Review", detail: "the panel and the judging of what it wrote" },
     { title: "Re-check", detail: "the adversary's fresh pass and each reader's re-check" },
     { title: "Fix", detail: "a fixer, the one tidy or a CI repair works the findings, the surplus deletions or the red check" },
     { title: "Publish", detail: "the pull request is written and opened, and its checks are waited for" },

@@ -411,7 +411,11 @@ export function driveToPublishable({ plan, shipDir }, id, file, contents, env = 
   for (const dispatch of panel.json.dispatch.slice(0, 2)) {
     write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], oid));
   }
-  write(path.join(shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  // A panel with no Codex runner in it, as one for a repository with Codex off is,
+  // has no Codex artifact to stand in for.
+  if (panel.json.dispatch.some((dispatch) => dispatch.agent === "tagteam:codex-runner")) {
+    write(path.join(shipDir, id, "rounds", "1", "findings", "codex.json"), findings("codex", oid));
+  }
   arriveAll(panel);
   ship("collect", plan, ["--spec", id], env);
   const recheck = ship("recheck", plan, ["--spec", id], env);
@@ -431,13 +435,21 @@ export const resultOf = (dispatch) => /^Command file: (.*)\.cmd\.sh$/m.exec(disp
 // checkout stays clean for every snapshot after it. The merging `gh` is on the
 // PATH every call here is made with, so every call the ship makes to it is in
 // its log. `autoMerge` is written only when given: the key does nothing, and a
-// test that stages it is proving that a leftover one reaches nothing.
-export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge, branchPrefix = null } = {}) {
+// test that stages it is proving that a leftover one reaches nothing. `codex:
+// false` is a repository that does not use Codex, with none of the keys only
+// Codex reads.
+export function stagePlan({ planBranch = true, specs = 2, ciWaitSec = 0, autoMerge, branchPrefix = null, codex = true } = {}) {
   const staged = stage();
   const { repo, plan } = staged;
   const configPath = path.join(repo, ".tagteam", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   Object.assign(config, { planBranch, ciWaitSec }, autoMerge === undefined ? {} : { autoMerge }, branchPrefix ? { branchPrefix } : {});
+  if (!codex) {
+    config.useCodex = false;
+    delete config.models.codex;
+    delete config.effort.codex;
+    delete config.maxConcurrentCodex;
+  }
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   if (specs >= 2) {
     fs.writeFileSync(path.join(plan, "specs", "02-b.md"),

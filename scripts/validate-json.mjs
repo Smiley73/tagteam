@@ -9,6 +9,9 @@ import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { REPO_LENS_DIR, RESERVED_ROLES, lensBrief, lensInventory, shippedLenses, untrackedBriefs } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { usesCodex } from "./lib/uses-codex.mjs";
+
+export { usesCodex };
 
 function typeMatches(value, expected) {
   if (expected === "null") return value === null;
@@ -100,7 +103,14 @@ export function validateJson(schema, value) {
       // wanted — and a reader given two unconnected lines had to work that out.
       // Each line says what the field is, and the unknown key names the missing
       // ones, so the correction is in the message rather than in the schema file.
-      const missing = (rule.required ?? []).filter((key) => !Object.hasOwn(current, key));
+      // `requiredWithCodex` names keys that are required only while the document
+      // says `useCodex: true`, each after the entry of `required` it followed
+      // when it was required outright, so a refusal reads as it always did.
+      const required = [...(rule.required ?? [])];
+      if (usesCodex(value)) {
+        for (const [key, after] of Object.entries(rule.requiredWithCodex ?? {})) required.splice(required.indexOf(after) + 1, 0, key);
+      }
+      const missing = required.filter((key) => !Object.hasOwn(current, key));
       for (const key of missing) errors.push(`${location}.${key}: is required${describeField(rule.properties?.[key], schema)}`);
       for (const [key, item] of Object.entries(current)) {
         if (rule.properties?.[key]) visit(rule.properties[key], item, `${location}.${key}`);
@@ -137,8 +147,10 @@ export function validateJson(schema, value) {
 // safe value unless the person answers otherwise. Version 12 is version 11
 // without `progressBoard`, a setting nothing reads any more: the root of the
 // schema refuses keys it does not declare, so the version moves with the key and
-// a version-11 file is reported stale, which `/tagteam:configure` carries
-// forward without asking anything.
+// a version-11 file is reported stale. Version 13 adds `useCodex`, whether this
+// repository uses Codex at all, required with no fallback like `planBranch`: every
+// older file is stale, and `/tagteam:configure` carries a version-11 or version-12
+// one forward by asking only that question.
 //
 // The first exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120 when
 // it is missing. It was added as an optional key so that the version-10 and
@@ -150,6 +162,14 @@ export function validateJson(schema, value) {
 // version-12 file stale for a setting whose absence changes nothing.
 // `mergeWithOpenFindings` is the third, for the same reason: a missing one reads
 // as false, which is how every version-12 file already written behaves.
+// `lensSettings` is the fourth: a missing one means no lens has settings of its own.
+//
+// `maxConcurrentCodex`, `models.codex`, `effort.codex` and the `codex` entries
+// under a non-null `escalation` or `plan` are a different kind of exception: no
+// script supplies a fallback for them, they are required only while `useCodex`
+// is on. The schema has no `if`/`then`, so it leaves them off `required` and
+// names them under `requiredWithCodex`, which `validateJson` adds to `required`
+// when the document says `useCodex: true`.
 //
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its
@@ -160,7 +180,7 @@ export function validateJson(schema, value) {
 // deleting it would make every file that carries it invalid for a setting that
 // does nothing. `autoMergeNotices` says so out loud instead, and
 // `/tagteam:configure` no longer writes it.
-export const CONFIG_VERSION = 12;
+export const CONFIG_VERSION = 13;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.
@@ -413,9 +433,19 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   const errors = [];
   if (schemaName !== "config.schema.json") return errors;
 
+  // With Codex off the panel is the lenses and nothing else, so a repository
+  // with no default lens has a resolve round with no reader at all.
+  if (!usesCodex(value) && Array.isArray(value.reviewers?.default) && value.reviewers.default.length === 0) {
+    errors.push("reviewers.default is empty and useCodex is false, so a review panel would have no reader; name at least one default lens or turn Codex on");
+  }
+
   const roster = new Set(value.reviewers?.roster ?? []);
   for (const lens of value.reviewers?.default ?? []) {
     if (!roster.has(lens)) errors.push(`reviewers.default names ${lens}, which is not in reviewers.roster`);
+  }
+
+  for (const lens of Object.keys(value.lensSettings ?? {})) {
+    if (!roster.has(lens)) errors.push(`lensSettings.${lens} is for a lens that is not in reviewers.roster`);
   }
 
   // `adversary` and `codex` are roles, not lenses a plan may pick. Both run on

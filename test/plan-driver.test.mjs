@@ -12,6 +12,8 @@ import { arriveInto, planEnv, runScript, stagePlanWorkspace, stageTranscript } f
 
 const write = (file, value) => fs.writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
 const setsDir = (ws) => path.join(ws.D, "work", "sets");
+const ROSTER_LINE = "The lens roster, the only lenses a spec's front matter may name: "
+  + "correctness, resilience, security, architecture, code-quality, experience, consistency, cost, economy, docs";
 const finding = (severity, title) => ({ severity, where: "deliverable 1", title, detail: "grounded in a file", remedy: "cut it" });
 const review = (reader, findings = []) => ({ reviewer: reader, summary: `${reader} read the plan`, findings });
 const spec = (id, depends = "[]") => `---\nid: ${id}\ndepends_on: ${depends}\nreviewers: []\n---\n\n## Outcome\nSomething.\n\n## Sign-offs\nNone.\n`;
@@ -94,6 +96,7 @@ test("a plan runs from the explorer to validated specs, each step recording its 
   assert.equal(draft.status, 0, draft.stderr);
   assert.equal(draft.json.dispatch[0].description, "Draft the plan");
   assert.match(draft.json.dispatch[0].prompt, /^Job: plan-drafter$/m);
+  assert.ok(draft.json.dispatch[0].prompt.split("\n").includes(ROSTER_LINE));
   write(path.join(ws.D, "plan.md"), PLAN);
   const drafted = arrive(ws, draft);
   assert.equal(command(drafted.json.next), "review");
@@ -154,6 +157,7 @@ test("a plan runs from the explorer to validated specs, each step recording its 
   assert.match(first.prompt, /^Your row: # ?: 1 · spec: 01-a · delivers: a · depends on: —$/m);
   assert.ok(first.prompt.includes(`Conventions document: ${path.join(ws.repo, "CONTRIBUTING.md")}\n`));
   assert.match(first.prompt, /^The default lens set, which your front matter names exceptions to: correctness, code-quality$/m);
+  assert.ok(first.prompt.split("\n").includes(ROSTER_LINE));
   assert.match(first.prompt, new RegExp(`^Write your spec to: ${path.join(ws.D, "specs", "01-a.md")}$`, "m"));
   write(path.join(ws.D, "specs", "01-a.md"), spec("01-a"));
   write(path.join(ws.D, "specs", "01-b.md"), spec("01-b", "[01-a]"));
@@ -183,6 +187,82 @@ test("a collection missing only Codex sends Codex alone as a review-resend set, 
   assert.equal(second.json.set, undefined);
   assert.match(second.json.say.join("\n"), /Codex is still missing \(no file was written\)/);
   assert.equal(command(second.json.next), "writers");
+});
+
+const setCodex = (ws, useCodex) => {
+  const file = path.join(ws.repo, ".tagteam", "config.json");
+  write(file, { ...JSON.parse(fs.readFileSync(file, "utf8")), useCodex });
+};
+
+// A plan drafted and ready for its review.
+function drafted() {
+  const ws = explored();
+  write(path.join(ws.D, "plan.md"), PLAN);
+  return ws;
+}
+
+test("with useCodex off a review sends the two Claude readers only, and collect is complete over 2/2 and never mentions Codex", () => {
+  const ws = drafted();
+  setCodex(ws, false);
+  const sent = step(ws, "review");
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.deepEqual(sent.json.dispatch.map((entry) => entry.description), ["Plan review: Claude", "Plan review: adversary"]);
+  assert.ok(!sent.json.dispatch.some((entry) => entry.agent === "tagteam:codex-runner"));
+  assert.deepEqual(fs.readdirSync(ws.review).filter((name) => name.startsWith("codex")), [], "no Codex command file was written");
+  assert.doesNotMatch(sent.json.say.join("\n"), /Codex/);
+  assert.deepEqual(recorded(ws, sent).agents.map((agent) => agent.output), ["claude", "adversary"].map((reader) => path.join(ws.review, `${reader}.json`)));
+
+  write(path.join(ws.review, "claude.json"), review("claude"));
+  write(path.join(ws.review, "adversary.json"), review("adversary"));
+  arrive(ws, sent);
+  const collect = step(ws, "collect");
+  assert.equal(collect.status, 0, collect.stderr);
+  assert.equal(collect.json.status, "clean");
+  assert.deepEqual(collect.json.missing, []);
+  assert.equal(collect.json.dispatch, undefined, "nothing is sent again");
+  assert.equal(collect.json.set, undefined);
+  assert.match(collect.json.say.join("\n"), /2\/2 readers/);
+  assert.doesNotMatch(collect.json.say.join("\n"), /Codex/i);
+  assert.equal(command(collect.json.next), "writers");
+});
+
+test("a review sent with Codex on and collected after useCodex went off still waits for Codex, and sends it again once", () => {
+  const ws = drafted();
+  const sent = step(ws, "review");
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.equal(sent.json.dispatch.length, 3);
+  write(path.join(ws.review, "claude.json"), review("claude"));
+  write(path.join(ws.review, "adversary.json"), review("adversary"));
+  arrive(ws, sent);
+  setCodex(ws, false);
+  const first = step(ws, "collect");
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.json.status, "incomplete");
+  assert.deepEqual(first.json.missing, ["codex"]);
+  assert.deepEqual(first.json.dispatch.map((entry) => entry.description), ["Codex plan review"]);
+  assert.match(first.json.set.id, /^\d+-review-resend$/);
+  assert.match(first.json.say.join("\n"), /2\/3 readers/);
+
+  arrive(ws, first);
+  const second = step(ws, "collect");
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.json.dispatch, undefined, "the one re-send is spent");
+  assert.match(second.json.say.join("\n"), /Codex is still missing/);
+});
+
+test("a review sent with Codex off and collected after useCodex went on does not wait for Codex", () => {
+  const ws = drafted();
+  setCodex(ws, false);
+  const sent = step(ws, "review");
+  write(path.join(ws.review, "claude.json"), review("claude"));
+  write(path.join(ws.review, "adversary.json"), review("adversary"));
+  arrive(ws, sent);
+  setCodex(ws, true);
+  const collect = step(ws, "collect");
+  assert.equal(collect.status, 0, collect.stderr);
+  assert.equal(collect.json.status, "clean");
+  assert.equal(collect.json.dispatch, undefined);
+  assert.match(collect.json.say.join("\n"), /2\/2 readers/);
 });
 
 test("a reader of Claude missing is sent again under its own label and prompt", () => {

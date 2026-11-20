@@ -120,7 +120,9 @@ they spent, so the totals are short — say so. Token figures of `null` mean no
 call reported any: what Codex spent is unknown. An `unreadable` above zero is
 that many request records nobody could read, whose spend is unknown too. Say
 nothing for a spec with no entry: absent is unknown, not free, for Codex as for
-Claude.
+Claude. The one exception is a repository whose configuration has `useCodex` off:
+its specs never have an entry because Codex never ran, which is a fact about the
+setting and not an unknown spend, so say nothing about Codex for them at all.
 
 **A landing record is a base that moved**, under `landing` on the ship, keyed by
 spec. It is there only for a spec whose reviewed change met a base branch that

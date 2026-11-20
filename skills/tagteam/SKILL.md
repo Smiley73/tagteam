@@ -268,17 +268,18 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 12, validated by
+`.tagteam/config.json`, version 13, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. Only three keys have a
+tell the person to run `/tagteam:configure` and stop. Only four keys have a
 fallback in a script, so an older configuration is incomplete. They are
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
 written before it existed stayed current; `redesignEscalation`, which may be
-missing and reads as `never`; and `mergeWithOpenFindings`, which may be missing
-and reads as off. A version-12 file without either of those two stays current and
-needs no reconfigure. `autoMerge` is the
+missing and reads as `never`; `mergeWithOpenFindings`, which may be missing
+and reads as off; and `lensSettings`, which may be missing and means no lens has
+settings of its own. A version-13 file without any of those three stays current
+and needs no reconfigure. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
 it. Configure carries a version-9 or version-10 file forward: every value it
@@ -286,26 +287,30 @@ holds but `autoMerge` is offered back, and the keys it lacks are asked about —
 version 10's `planBranch` and `versionFiles`, and version 11's `carry`,
 `autoRedesign`, `limits.carried` and `limits.followUps`, each offered at its
 safe value: off, empty, off, off, 5 and 2. At those values nothing about how a
-plan ships changes. A version-11 file is carried forward without asking anything:
-every value stays, `progressBoard`, which nothing reads any more, is dropped, and
-the file is written at version 12. Anything older is a different shape and is replaced.
+plan ships changes, and each is also asked whether to use Codex. A version-11 or
+version-12 file is carried forward by asking only whether to use Codex: every
+value stays, version 11's `progressBoard`, which nothing reads any more, is
+dropped, and the file is written at version 13. Anything older is a different
+shape and is replaced.
 
 | Key | Meaning |
 |---|---|
 | `base` | Branch pull requests target and each spec branches from |
+| `useCodex` | Whether Codex is a second reviewer here. Required, with no fallback; configure asks it first and records the answer, offering it back on a reconfigure. False: configure runs neither Codex check, `/tagteam:plan` makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only, counted out of two. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex`, and the `plan` and `escalation` Codex entries) are needed only when this is true; with it false, configure writes none of them into a fresh file |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document spec writers, implementers, fixers, reviewers and the adversary (re-checks included) are told to read, or null |
-| `models` | Per role: `lead` (every reader and planner — reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer), `worker` (implementer, fixer), `codex` (every Codex call). Sonnet is the floor for `worker`: specs are written for a model of at least that capability |
-| `effort` | Per job: `implementer`, `fixer`, `reviewer`, `recheck`, `adversary`, `planner`, `codex`. Measured defaults are high for the three that write or falsify, medium for reviewers and low for re-checks: at high effort more than half of a reviewer's output was its own thinking, and a re-check only has to say whether one fix landed |
+| `models` | Per role: `lead` (every reader and planner — reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer), `worker` (implementer, fixer), `codex` (every Codex call; needed only when `useCodex` is on). Sonnet is the floor for `worker`: specs are written for a model of at least that capability |
+| `effort` | Per job: `implementer`, `fixer`, `reviewer`, `recheck`, `adversary`, `planner`, `codex` (needed only when `useCodex` is on). Measured defaults are high for the three that write or falsify, medium for reviewers and low for re-checks: at high effort more than half of a reviewer's output was its own thinking, and a re-check only has to say whether one fix landed |
 | `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused |
 | `reviewers.default` | Lenses applied to every spec unless it drops one. Every lens is one more reader over every round of every spec |
+| `lensSettings` | `{}`, or a map from a lens in `reviewers.roster` to `{model, effort}`, both required, on the Claude models and efforts: that lens's reviewer runs at that pair in the review panel, its one re-send and a plan's resolve-round panel, and every other lens, re-check, adversary, Codex and escalation is unchanged. Each override costs that lens's reviewer at that pair on every round. Missing reads as `{}` |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
 | `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |
 | `autoMerge` | Accepted and ignored, in either value: nothing reads it, and the validator prints a `note:` saying so. `planBranch` replaced it as the setting that lets specs merge without waiting; a spec that merges straight into `base` always waits for a person. Configure no longer writes it |
 | `worktree` | `setup[]`, `copyUntracked[]`, `setupTimeoutSec` |
 | `reviewExclude[]` | Globs summarised rather than included in the review diff |
-| `maxConcurrentCodex` | Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
+| `maxConcurrentCodex` | Needed only when `useCodex` is on. Concurrent Codex calls across this repository. The cap is one repository's, not one ship's, so every ship running here queues on the same slots — worth raising when several run at once |
 | `limits` | `fixRounds` (fix rounds per spec per cycle — plus one more per cycle, only when the Recurring question at the cap is answered with `redesign`), `ciRepairs` (repairs of a red pull request), each at least 1; `carried` (the most findings a plan may carry before the ship stops and asks, at least 1 — turning carrying off is `carry`'s job) and `followUps` (how many fix units the whole-plan check may build from the carried findings, at least 0; with 0 every one still real goes into the plan's pull request body). Follow-up units are counted apart from the whole-plan fix units `ciRepairs` counts |
 | `escalation` | `null`, or `{after, models, effort}` on the same shapes as `models` and `effort`. `after` counts fix rounds and is at least 1. Null means every dispatch runs at `models` and `effort`; otherwise `gates.mjs roles` hands the raised pair to the fixer and the re-checks once `after` fix rounds have not settled the spec. The raised `models.worker` and `effort.implementer` also reach a redesign's implementer, as `redesignEscalation` says, and reach no other implementer |
 | `redesignEscalation` | `always`, `never` or `ask`. Whether a rewrite chosen from the Recurring question runs at the raised pair, and the raise is immediate: whatever `after` says and whatever the fix counter is. `never` runs it at the ordinary settings; `always` raises every rewrite; `ask` raises one `autoRedesign` started, and puts the choice to the person for one they chose, naming what each answer runs at. An automatic rewrite cannot ask, so it runs raised under `ask` too. May be missing and reads as `never`; configure always writes it. Does nothing while `escalation` is null |
@@ -321,7 +326,7 @@ the file is written at version 12. Anything older is a different shape and is re
 ### Lens briefs
 
 A rostered lens is a reviewer that can be dispatched, and one file calibrates it.
-The plugin ships nine under `prompts/lenses/`; a repository writes its own
+The plugin ships ten under `prompts/lenses/`; a repository writes its own
 under `.tagteam/lenses/`, which is how a roster names a lens the plugin has no
 brief for — `financial`, `math`, whatever this codebase's correctness actually
 turns on. A brief is a markdown file whose first line is a `# Lens: …` heading;
@@ -329,6 +334,9 @@ an empty file, a stray note, a symlink or a directory is refused by name rather
 than treated as calibration, because a reviewer with nothing to read invents the
 lens and files findings the review gate, the merge decision and the pull request
 body all count as a calibrated reviewer's.
+
+`docs` is the shipped lens for specs that change documentation. The spec writer
+assigns it only when the repository's roster names it, and it is not a default.
 
 Resolution is **repository first**, against the primary checkout and never the
 worktree. `gates.mjs init` resolves each lens once per spec and freezes the paths
@@ -376,7 +384,7 @@ confirmed, never as a mismatch.
 
 **In a ship, a fan-out is one set, and the run judges it from its own record of
 who has reported.** In a ship, every dispatch is a set — a review panel is one
-fan-out holding one reviewer per lens plus the Codex runner, and the implementer,
+fan-out holding one reviewer per lens plus the Codex runner when Codex is on, and the implementer,
 a fixer, a redesign implementer or a repair is a set of one. The `tagteam:ship-spec`
 workflow launches every entry of a set at once as an agent of the entry's type,
 model, effort, label and prompt, as `ship.mjs` printed them, and records the
@@ -407,13 +415,15 @@ to the goal gate, and how it starts and reads a run after it.
 
 ## Codex
 
-Required, at 0.153.0 or newer. Run
+Required when `useCodex` is on, at 0.153.0 or newer. Run
 
 ```bash
-node "$P/scripts/codex-preflight.mjs" version
+node "$P/scripts/codex-preflight.mjs" version --config "$R/.tagteam/config.json"
 ```
 
-and if it exits non-zero, stop and say what it printed. It checks the binary
+and if it exits non-zero, stop and say what it printed. With `useCodex` off it
+prints that Codex is not used here and exits 0 without running the binary, so the
+version check is skipped. It checks the binary
 the bridge will run — `TAGTEAM_CODEX_BIN` when that is set, otherwise `codex`
 on the PATH — and refuses one too old to report how a call ran, or whose version
 cannot be read.

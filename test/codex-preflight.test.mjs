@@ -54,6 +54,28 @@ test("version refuses a Codex below the floor or unreadable, and accepts the flo
   assert.equal(flag.status, 0, flag.stderr);
 });
 
+test("version given a configuration that does not use Codex exits 0 without running the binary, and one that does still refuses it", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-preflight-config-"));
+  const example = JSON.parse(fs.readFileSync(path.join(root, "examples", "config.json"), "utf8"));
+  const configFor = (name, useCodex) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, JSON.stringify({ ...example, useCodex }));
+    return file;
+  };
+  const absent = path.join(dir, "no-such-codex");
+
+  const off = run(["version", "--config", configFor("off.json", false)], { TAGTEAM_CODEX_BIN: absent });
+  assert.equal(off.status, 0, off.stderr);
+  assert.match(off.stdout, /Codex is not used in this repository/);
+
+  const on = run(["version", "--config", configFor("on.json", true)], { TAGTEAM_CODEX_BIN: absent });
+  assert.equal(on.status, 1);
+  assert.match(on.stderr, /Codex 0\.153\.0 or newer is required/);
+
+  const unreadable = run(["version", "--config", path.join(dir, "missing.json")], { TAGTEAM_CODEX_BIN: absent });
+  assert.equal(unreadable.status, 1, "a configuration that cannot be read is not a yes or a no");
+});
+
 function probe(fixture) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-probe-"));
   const record = path.join(dir, "received.jsonl");

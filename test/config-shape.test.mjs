@@ -24,15 +24,15 @@ const schema = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.sch
 // This repository's own configuration, as `/tagteam:configure` would leave it.
 // The file is untracked, and every ship of this repository copies it from the
 // primary checkout into its worktree, so while the plan that introduces version
-// 12 is itself being shipped the copy is still at version 11: bumping it there
-// would break the run reviewing the change. A version-11 file is read the way
-// configure carries one forward — every value kept, `progressBoard` dropped — and
-// anything else is held to the schema exactly as it is.
+// 13 is itself being shipped the copy is still at version 12: bumping it there
+// would break the run reviewing the change. A version-12 file is read the way
+// configure carries one forward — every value kept, Codex used because that is
+// what this repository has been running — and anything else is held to the
+// schema exactly as it is.
 function ownConfiguration() {
   const own = JSON.parse(fs.readFileSync(path.join(root, ".tagteam", "config.json"), "utf8"));
-  if (own.version !== 11) return own;
-  const { progressBoard, ...kept } = own;
-  return { ...kept, version: 12 };
+  if (own.version !== 12) return own;
+  return { ...own, useCodex: true, version: 13 };
 }
 
 // Every dotted key a script dereferences off the config object, and where.
@@ -49,7 +49,7 @@ const CONSUMED = [
   // resolves a dotted key through `?.` against `examples/config.json` and asserts
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
-  ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
+  ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation", "lensSettings"]],
   ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "redesignEscalation", "mergeWithOpenFindings"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
@@ -258,7 +258,7 @@ test("a current-version configuration carrying the old role-keyed effort map is 
   const { validateJson } = await import("../scripts/validate-json.mjs");
   const stale = {
     ...example,
-    version: 12,
+    version: 13,
     models: { plan: "opus", implement: "sonnet", review: "opus", codex: "gpt-5.6-sol" },
     effort: { lead: "high", worker: "high", codex: "high" }
   };
@@ -333,7 +333,8 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
   // its own inline enum — the same five words today, and Codex's to change.
   const effortDef = schema.$defs?.jobEffort;
   const claudeJobs = ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner"];
-  assert.deepEqual(effortDef?.required, [...claudeJobs, "codex"]);
+  // `codex` is required only while Codex is on, which `requiredWithCodex` holds.
+  assert.deepEqual(effortDef?.required, claudeJobs);
   for (const job of claudeJobs) assert.equal(effortDef?.properties?.[job]?.$ref, "#/$defs/claudeEffort", job);
   assert.equal(effortDef?.properties?.codex?.$ref, undefined, "effort.codex reaches the Claude ladder instead of keeping its own");
   assert.deepEqual(effortDef?.properties?.codex?.enum, ["low", "medium", "high", "xhigh", "max"]);
@@ -349,8 +350,8 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
     `expected effort.codex: "ultra" to be refused, got: ${codexErrors.join("; ")}`
   );
   const { CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(CONFIG_VERSION, 12, "a Codex effort word joining the ladder is not a new configuration shape");
-  assert.equal(schema.properties?.version?.const, 12);
+  assert.equal(CONFIG_VERSION, 13, "a Codex effort word joining the ladder is not a new configuration shape");
+  assert.equal(schema.properties?.version?.const, 13);
 
   const recheckMax = { ...example, effort: { ...example.effort, recheck: "max" } };
   const recheckErrors = validateJson(schema, recheckMax).filter((error) => error.includes("effort.recheck"));
@@ -1336,9 +1337,9 @@ const VERSION_11_KEYS = ["carry", "autoRedesign", "limits.carried", "limits.foll
 
 // A version-10 file: the example without the four keys version 11 added, and
 // without `redesignEscalation` and `mergeWithOpenFindings`, which a version-12
-// key does not belong in a version-10 file.
+// key does not belong in a version-10 file, and without `useCodex`.
 function versionTen() {
-  const { carry, autoRedesign, redesignEscalation, mergeWithOpenFindings, ...ten } = example;
+  const { carry, autoRedesign, redesignEscalation, mergeWithOpenFindings, useCodex, ...ten } = example;
   const { carried, followUps, ...limits } = example.limits;
   return { ...ten, version: 10, limits };
 }
@@ -1375,14 +1376,14 @@ test("a version-9 or version-10 configuration is refused as older, with the run-
     assert.match(result.stdout, /run \/tagteam:configure/);
   }
   // Bumping the number by hand does not make it current: the keys are still missing.
-  const bumped = validateFile(versionRepo(), { ...ten, version: 12 });
+  const bumped = validateFile(versionRepo(), { ...ten, version: 13 });
   assert.equal(bumped.status, 1, `a hand-bumped version-10 file must be invalid: ${bumped.stdout}${bumped.stderr}`);
   for (const key of VERSION_11_KEYS) {
     assert.match(bumped.stderr, new RegExp(`\\$\\.${key.replace(".", "\\.")}: is required`));
   }
 });
 
-test("a version-11 file is stale whatever `progressBoard` holds, and a version-12 file that carries it is invalid", () => {
+test("a version-11 file is stale whatever `progressBoard` holds, and a version-13 file that carries it is invalid", () => {
   const dir = versionRepo();
   for (const board of [true, false, undefined]) {
     const document = { ...example, version: 11, ...(board === undefined ? {} : { progressBoard: board }) };
@@ -1392,15 +1393,16 @@ test("a version-11 file is stale whatever `progressBoard` holds, and a version-1
   }
   for (const board of [true, false]) {
     const result = validateFile(dir, { ...example, progressBoard: board });
-    assert.equal(result.status, 1, `a version-12 file with progressBoard ${board} must be invalid: ${result.stdout}${result.stderr}`);
+    assert.equal(result.status, 1, `a version-13 file with progressBoard ${board} must be invalid: ${result.stdout}${result.stderr}`);
     assert.match(result.stderr, /\$\.progressBoard: is not allowed/);
   }
 });
 
-test("the example validates at version 12 with every setting at its safe value", async () => {
+test("the example validates at version 13 with every setting at its safe value", async () => {
   const { validateJson, CONFIG_VERSION } = await import("../scripts/validate-json.mjs");
-  assert.equal(example.version, 12);
-  assert.equal(CONFIG_VERSION, 12);
+  assert.equal(example.version, 13);
+  assert.equal(CONFIG_VERSION, 13);
+  assert.equal(example.useCodex, true, "examples/config.json must ship Codex on, which is what every earlier version did");
   assert.equal(example.planBranch, false, "examples/config.json must ship the setting off");
   assert.deepEqual(example.versionFiles, [], "examples/config.json must ship no version lines");
   // The defaults an upgrade promises: carrying off and redesign asked. The 5 and
@@ -1414,6 +1416,20 @@ test("the example validates at version 12 with every setting at its safe value",
   assert.equal(validateFile(versionRepo(), example).status, 0);
 });
 
+test("a version-12 file is stale, and a version-13 file without `useCodex` is invalid, naming the key", () => {
+  const dir = versionRepo();
+  const { useCodex, ...twelve } = example;
+  const stale = validateFile(dir, { ...twelve, version: 12 });
+  assert.equal(stale.status, 3, `expected exit 3, got ${stale.status}: ${stale.stdout}${stale.stderr}`);
+  assert.match(stale.stdout, /run \/tagteam:configure/);
+  const missing = validateFile(dir, twelve);
+  assert.equal(missing.status, 1, `expected exit 1, got ${missing.status}: ${missing.stdout}${missing.stderr}`);
+  assert.match(missing.stderr, /\$\.useCodex: is required/);
+  const wrong = validateFile(dir, { ...example, useCodex: "yes" });
+  assert.equal(wrong.status, 1, "useCodex is a boolean");
+  assert.equal(validateFile(dir, { ...example, useCodex: false }).status, 0, "off is a valid answer");
+});
+
 test("the version-10 and version-11 keys are required and typed", () => {
   const dir = versionRepo();
   for (const key of ["planBranch", "versionFiles", ...VERSION_11_KEYS]) {
@@ -1421,7 +1437,7 @@ test("the version-10 and version-11 keys are required and typed", () => {
     const { [child]: removed, ...rest } = parent ? example[parent] : example;
     const without = parent ? { ...example, [parent]: rest } : rest;
     const result = validateFile(dir, without);
-    assert.equal(result.status, 1, `a version-12 file without ${key} must be invalid: ${result.stderr}`);
+    assert.equal(result.status, 1, `a version-13 file without ${key} must be invalid: ${result.stderr}`);
     assert.match(result.stderr, new RegExp(`\\$\\.${key.replace(".", "\\.")}: is required`));
   }
   const wrongs = [
@@ -1525,6 +1541,27 @@ test("a current file without mergeWithOpenFindings, or with true or false, is va
   }
 });
 
+test("lensSettings: a file without it, or with an empty one, is valid and current; an entry the roster, the Claude models or the effort ladder refuses is refused naming the entry", () => {
+  const dir = versionRepo();
+  const { lensSettings, ...without } = example;
+  for (const config of [without, example, { ...example, lensSettings: { security: { model: "opus", effort: "high" } } }]) {
+    const result = validateFile(dir, config);
+    assert.equal(result.status, 0, `${JSON.stringify(config.lensSettings)}: expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+  }
+  const refused = [
+    [{ financial: { model: "opus", effort: "high" } }, /lensSettings\.financial is for a lens that is not in reviewers\.roster/],
+    [{ security: { model: "haiku", effort: "high" } }, /\$\.lensSettings\.security\.model: expected one of opus, fable, sonnet/],
+    [{ security: { model: "opus", effort: "extreme" } }, /\$\.lensSettings\.security\.effort: expected one of low, medium, high, xhigh, max/],
+    [{ security: { model: "opus" } }, /\$\.lensSettings\.security\.effort: is required/]
+  ];
+  for (const [entries, message] of refused) {
+    const result = validateFile(dir, { ...example, lensSettings: entries });
+    assert.equal(result.status, 1, `${JSON.stringify(entries)} must be invalid: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, message);
+  }
+});
+
 test("redesignEscalation refuses any other value, naming the key", () => {
   const dir = versionRepo();
   for (const bad of ["sometimes", "Always", "", true, false, null, 1]) {
@@ -1534,15 +1571,83 @@ test("redesignEscalation refuses any other value, naming the key", () => {
   }
 });
 
-test("ciStartWaitSec, redesignEscalation, mergeWithOpenFindings and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("ciStartWaitSec, redesignEscalation, mergeWithOpenFindings, lensSettings, maxConcurrentCodex and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
   // 120 when it is missing, `redesignEscalation`, which the ship reads as
-  // `never`, `mergeWithOpenFindings`, which it reads as false, and `autoMerge`,
-  // which nothing reads at all. Another key quietly
+  // `never`, `mergeWithOpenFindings`, which it reads as false, `lensSettings`,
+  // whose absence means no lens has settings of its own, `autoMerge`,
+  // which nothing reads at all, and `maxConcurrentCodex`, which is required only
+  // while Codex is on and is held to that by `requiredWithCodex`. Another key quietly
   // going optional would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "mergeWithOpenFindings", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
-  assert.equal(schema.properties.version.const, 12);
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "lensSettings", "maxConcurrentCodex", "mergeWithOpenFindings", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
+  assert.equal(schema.properties.version.const, 13);
+});
+
+// --- Codex off: the keys only Codex reads ---
+
+const omitCodex = ({ codex, ...others }) => others;
+const stripped = (block) => (block === null ? null : { ...block, models: omitCodex(block.models), effort: omitCodex(block.effort) });
+const withoutCodexKeys = ({ maxConcurrentCodex, ...config }) => ({ ...stripped(config), escalation: stripped(config.escalation), plan: stripped(config.plan) });
+const CODEX_KEY = /maxConcurrentCodex|codex/;
+
+test("with Codex off, a configuration with none of the Codex-only keys validates, at the root and under escalation and plan", () => {
+  const dir = versionRepo();
+  const populated = configured({ useCodex: false });
+  for (const [what, document] of [["the example", { ...example, useCodex: false }], ["escalation and plan set", populated]]) {
+    const stripped = withoutCodexKeys(document);
+    assert.equal(Object.hasOwn(stripped, "maxConcurrentCodex"), false);
+    assert.equal(Object.hasOwn(stripped.models, "codex"), false);
+    const result = validateFile(dir, stripped);
+    assert.equal(result.status, 0, `${what}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stderr, CODEX_KEY, `${what}: a line names a Codex key`);
+  }
+  assert.equal(Object.hasOwn(withoutCodexKeys(populated).escalation.effort, "codex"), false);
+  assert.equal(Object.hasOwn(withoutCodexKeys(populated).plan.models, "codex"), false);
+  // A Codex key that is there is still checked.
+  const bad = validateFile(dir, { ...withoutCodexKeys(example), useCodex: false, maxConcurrentCodex: 0 });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /maxConcurrentCodex/);
+  const badEffort = validateFile(dir, { ...example, useCodex: false, effort: { ...example.effort, codex: "ludicrous" } });
+  assert.equal(badEffort.status, 1);
+  assert.match(badEffort.stderr, /effort\.codex/);
+});
+
+test("with Codex off, no default lens is refused, because the panel would have no reader; with Codex on it is not", () => {
+  const dir = versionRepo();
+  const off = validateFile(dir, { ...example, useCodex: false, reviewers: { ...example.reviewers, default: [] } });
+  assert.equal(off.status, 1, off.stderr);
+  assert.match(off.stderr, /reviewers\.default is empty and useCodex is false/);
+  const on = validateFile(dir, { ...example, useCodex: true, reviewers: { ...example.reviewers, default: [] } });
+  assert.equal(on.status, 0, on.stderr);
+});
+
+test("with Codex on, a configuration missing a Codex-only key is refused naming that key", () => {
+  const dir = versionRepo();
+  const populated = configured({});
+  const missing = {
+    "$.maxConcurrentCodex": ({ maxConcurrentCodex, ...rest }) => rest,
+    "$.models.codex": ({ models: { codex, ...models }, ...rest }) => ({ ...rest, models }),
+    "$.effort.codex": ({ effort: { codex, ...effort }, ...rest }) => ({ ...rest, effort }),
+    "$.escalation.models.codex": ({ escalation, ...rest }) => ({ ...rest, escalation: { ...escalation, models: { lead: "opus", worker: "opus" } } }),
+    "$.escalation.effort.codex": ({ escalation: { effort: { codex, ...effort }, ...more }, ...rest }) => ({ ...rest, escalation: { ...more, effort } }),
+    "$.plan.models.codex": ({ plan, ...rest }) => ({ ...rest, plan: { ...plan, models: { lead: "opus", worker: "opus" } } }),
+    "$.plan.effort.codex": ({ plan: { effort: { codex, ...effort }, ...more }, ...rest }) => ({ ...rest, plan: { ...more, effort } })
+  };
+  for (const [where, remove] of Object.entries(missing)) {
+    const result = validateFile(dir, remove(populated));
+    assert.equal(result.status, 1, `${where}: ${result.stdout}`);
+    assert.ok(result.stderr.split("\n").some((line) => line.startsWith(`- ${where}: is required (`)), `${where}: ${result.stderr}`);
+  }
+  // The refusal is the one the schema's own `required` gave it: in schema order,
+  // and with the missing key offered as what a misspelt sibling was meant to be.
+  const { codex, ...leadAndWorker } = populated.models;
+  const misspelt = validateFile(dir, { ...populated, models: { ...leadAndWorker, codx: codex } }).stderr.split("\n");
+  const required = misspelt.findIndex((line) => line.startsWith("- $.models.codex: is required ("));
+  assert.ok(required >= 0 && misspelt[required + 1].startsWith("- $.models.codx: is not allowed; the missing field `codex` may be what this was meant to be"), misspelt.join("\n"));
+  // A null escalation or plan has no Codex entries to be missing.
+  const nulls = validateFile(dir, example);
+  assert.equal(nulls.status, 0, nulls.stderr);
 });
 
 // --- autoMerge: accepted, ignored, and said so ---

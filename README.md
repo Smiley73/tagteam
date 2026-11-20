@@ -1,73 +1,98 @@
 # tagteam
 
 A Claude Code plugin that takes a change from a vague idea to merged pull
-requests, using Claude and Codex together. It is multi-agent orchestration for
-agentic, spec-driven development: autonomous AI agents from Anthropic and
-OpenAI plan the work, implement it, and cross-review every diff, with an
-adversarial AI code review on both the plan and the code.
+requests: multi-agent orchestration for agentic, spec-driven development, with an
+adversarial AI code review on both the plan and the code. Codex, from OpenAI, can
+join as an extra reviewing engine; it is optional.
 
-You describe what you want, however roughly. Tagteam interviews you until the
-outcome is concrete, writes a plan, has it read once by three independent
-reviewers whose findings the drafter answers in writing, and breaks it into spec
-files. Then it implements those specs one at a time — each in its own branch,
-each reviewed by a cross-engine panel, each verified. Nothing reaches your base
-branch without your approval or your Merge. Ship a plan as one, on a branch of
-its own, and its specs merge there without waiting once their checks are clean,
-and you judge the plan as one change in its own pull request; otherwise each
-spec waits for your approval before it merges into the base.
+## What it does for you
 
-It is for changes big enough that you want them delegated and not so opaque that
-you cannot check them. Every decision you make is written to a file you can edit.
-Every merge happens at the exact commit that was reviewed.
+- **A vague goal becomes merged pull requests.** Describe what you want, however
+  roughly. Tagteam interviews you until the outcome is concrete, writes a plan,
+  breaks it into specs, then implements them one at a time, each in its own
+  branch and each verified.
+- **Every change is reviewed independently.** Lens reviewers, each calibrated to
+  one concern such as correctness or security, read the diff separately, an
+  adversary reads it fresh, and the findings gate the merge. The plan is reviewed
+  the same way before any code is written. Give a lens its own model for a
+  different view, or turn Codex on for a second engine from another vendor.
+- **You stay in control.** Every decision you make is written to a file you can edit,
+  and you approve what reaches your base branch.
+- **Runs resume and show their cost.** A run that stops or crashes carries on
+  from what is on disk. Each job thinks as hard as its work needs, a limit caps
+  the fix rounds, and `/tagteam:status` shows where each spec is and what it cost.
+
+It is for changes big enough to delegate and not so opaque that you cannot check
+them.
+
+## What a run looks like
+
+You give `/tagteam:plan` a rough idea. Tagteam asks questions in plain language and
+writes `goal.md`, which you read, edit and approve. It drafts, reviews and cuts the
+plan into specs, then asks one last question with the deliverables and any finding
+it declined. Approve, then run `/tagteam:ship` in a new session. It goes quiet while
+Claude Code's workflow view shows each agent at work, and ends merged, stopped with
+its reason, or asking you a question. A ship's review panel, as an illustration
+with Codex on (the driver's wording, made-up lenses and models, the last line cut):
+
+```text
+Review panel on round 1: correctness, code-quality (sonnet at medium effort),
+  security (opus at high effort) plus Codex (gpt-5.6-sol at high effort).
+The correctness reviewer is in (1 of 4)
+The security reviewer and the code-quality reviewer are in (3 of 4)
+All 4 are in.
+```
 
 ```mermaid
 ---
-title: From a rough idea to merged pull requests
+title: A ship, in outline
 ---
 flowchart LR
-    idea(["A rough idea"]) --> plan["/tagteam:plan<br>interview · draft · review · specs"]
-    plan --> artifacts[("Approved plan<br>goal.md · plan.md · specs/")]
-    artifacts --> ship["/tagteam:ship<br>implement · review · verify · merge"]
-    ship --> merged(["Merged pull requests"])
-    ship --> waiting(["Pull requests that wait for you"])
+    spec(["A spec"]) --> implement["Implement"]
+    implement --> verify["Verify"]
+    verify --> review["Review panel"]
+    review -->|"something open"| fix["Fix, then re-check<br>for a limited number of rounds"]
+    fix --> review
+    review -->|"nothing open"| publish["Publish"]
+    publish --> merged(["Merged into a plan branch"])
+    publish --> waiting(["Waits for your approval"])
+    publish --> stopped(["Stopped, with the reason"])
 ```
 
-## Install
+## Quick start
 
-Requires Claude Code 2.1.301 or newer with its Workflow tool (`/tagteam:ship`
-runs each spec, and `/tagteam:plan` its draft, review and specs, as a Claude Code
-workflow, and each stops before creating anything when the session has no such
-tool), Git, the
-[Codex CLI](https://github.com/openai/codex) 0.153.0 or newer, and an
-authenticated GitHub CLI. An older Codex is refused before a plan or a ship
-starts: every Codex call goes through `codex app-server`, and 0.153.0 is the
-first release that reports the model and effort a call actually ran at.
-`TAGTEAM_CODEX_BIN`, when set, names the Codex binary to use instead of the one
-on your PATH, and that is the one checked.
+### Install
 
-Not yet verified: Windows (where ending a Codex process and everything it
-started works differently), Codex signed in with an API key or pointed at a
-custom model provider rather than a ChatGPT account, and whether a `notify` hook
-in your own Codex configuration fires on tagteam's calls.
+Always required: Claude Code 2.1.301 or newer with its Workflow tool (`/tagteam:ship`
+and `/tagteam:plan` each run as a workflow and stop before creating anything when the
+session has none), Git, and an authenticated GitHub CLI.
+
+Required only with Codex on: the [Codex CLI](https://github.com/openai/codex)
+0.153.0 or newer, refused before a plan or a ship starts when older: every call
+goes through `codex app-server`, and 0.153.0 is the first release that reports the
+model and effort a call ran at. `TAGTEAM_CODEX_BIN`, when set, names the Codex
+binary to use and check instead of the one on your PATH.
+
+Not yet verified: Windows, where ending a Codex process and everything it started
+works differently. With Codex on, also Codex signed in with an API key or pointed
+at a custom model provider rather than a ChatGPT account, and whether a `notify`
+hook in your Codex configuration fires on tagteam's calls.
 
 ```bash
 claude plugin marketplace add Smiley73/tagteam
 claude plugin install tagteam@tagteam
 ```
 
-There is no release to download — Claude Code installs plugins from the
-repository itself, and `claude plugin update` picks up each version bump. From
-a local checkout, `claude plugin marketplace add` the checkout's absolute path
-instead, or run Claude Code with `--plugin-dir /absolute/path/to/tagteam`.
+There is no release to download: Claude Code installs plugins from the repository,
+and `claude plugin update` picks up each version bump.
 
 [CodeGraph](https://github.com/colbymchenry/codegraph) is optional, but every
-agent tagteam dispatches can use it: one query returns a symbol's source
-together with its callers, so a reviewer sees a diff's blast radius — and an
-implementer the code around its change — without spending context on search.
-Without the index the agents read files instead; with `codegraph` on your
-PATH, `/tagteam:configure` offers to build one.
+agent can use it: one query returns a symbol's source with its callers, so a
+reviewer sees a diff's blast radius and an implementer the code around its change,
+without spending context on search. Without the index the agents read files; with
+`codegraph` on your PATH, `/tagteam:configure` offers to build one.
 
-## Use
+### Use
 
 ```text
 /tagteam:configure
@@ -76,627 +101,15 @@ PATH, `/tagteam:configure` offers to build one.
 /tagteam:status
 ```
 
-Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**. The interview
-loads repository material that shipping does not need, and context is the thing
-that runs out.
+Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**: the interview
+loads repository material shipping does not need, and context is what runs out.
 
-### Planning
+### Updating
 
-```mermaid
----
-title: The plan cycle
----
-flowchart TD
-    orient["Orient — an explorer agent reads the repository and writes what it found"]
-    interview["Interview — batched questions until nothing material is ambiguous"]
-    goal["Goal gate — you read goal.md, edit it if it is wrong, approve it"]
-    draft["Draft — one plan-drafter writes plan.md, an index under 12 KB"]
-    claude["Claude reviewer"]
-    codex["Codex reviewer"]
-    adversary["Adversary"]
-    answer["Answer — the drafter applies each blocking or major finding<br>or rejects it with a reason you read at approval"]
-    owner["A finding against the goal itself: you answer,<br>goal.md changes, the gate re-closes, the plan is revised once more"]
-    specs["Specs — one spec-writer per deliverable, in parallel, each under 18 KB"]
-    approve["Approve — deliverables, lenses, sign-offs, the rejected findings, one question"]
-
-    orient --> interview
-    interview --> goal
-    goal --> draft
-    subgraph review["One review — three readers at once, then the answer"]
-        claude
-        codex
-        adversary
-    end
-    draft --> claude
-    draft --> codex
-    draft --> adversary
-    claude --> answer
-    codex --> answer
-    adversary --> answer
-    answer -. "only when a reader found a hole in the goal" .-> owner
-    owner --> specs
-    answer --> specs
-    specs --> approve
-```
-
-1. **Interview.** Questions in batches, informed by reading the repository first.
-   Multiple choice where there are real options. Questions are about the outcome
-   and asked in plain language — the symbols, paths and line numbers behind them
-   stay in the notes, so answering never means opening a file. Product and
-   interface decisions are always yours; when you have no preference, tagteam
-   decides and records the reasoning and what it rejected.
-2. **Goal gate.** The interview writes `goal.md`. You read it, edit it if it is
-   wrong, and everything downstream binds to the file rather than to the
-   conversation.
-3. **Draft and review.** One drafter writes a plan. A Claude reviewer, a Codex
-   reviewer, and an adversary read it at the same time. The drafter then answers
-   every blocking and major finding by id: it applies the ones it accepts and
-   writes one line on why for each one it rejects, and you read the rejections
-   when you approve. There is no second review round. Across every plan this
-   plugin had reviewed, no round of three readers ever closed with nothing
-   blocking or major, so a loop that ran until one did ran to its budget every
-   time, finding new things in each revision.
-4. **Specs.** One file per deliverable, written in parallel, each self-contained
-   for the implementer that will receive it. A plan is an index and a spec says
-   what the repository cannot; both have a size the run enforces.
-5. **Approve.** Deliverables in dependency order, the lenses each will get, the
-   findings the drafter declined and why, and one question. Anything a spec
-   needs that the repository's conventions say to ask about first — a new
-   dependency, a new top-level directory — is listed there as that spec's
-   sign-off and approved with the plan, so shipping does not stop to ask. The
-   `.github/workflows/` files a spec will change are listed per spec, one per
-   line, and approved the same way: that spec may then change exactly those
-   files and merge into the plan branch without stopping.
-
-The session you started in runs the interview and the goal gate itself. From the
-approved goal to specs that validate, one Claude Code workflow run,
-`tagteam:plan-specs`, runs the draft, the three-reader review, the drafter's answer
-and the spec writers, and the session goes quiet until it ends. Progress is in
-Claude Code's own workflow view, each agent under its name and every line the
-driver says as the driver wrote it. A run ends with the specs validated, with a
-stop and its reason, or with a question for you, such as a finding against the
-goal itself; you answer in the session and a new run carries on from your answer,
-without reviewing anything again.
-
-### Shipping
-
-Per spec, in dependency order: branch, implement, verify, review, fix, re-check,
-publish, merge — with the fix and the review repeating for as many rounds as you
-allow. A driver script sequences every step and prints every dispatch; each spec
-runs as one Claude Code workflow run, `tagteam:ship-spec`, which runs the driver,
-dispatches what it prints and records the agents as they report. The session you
-started it in starts the run, goes quiet until the run finishes, and talks to you.
-Progress is in Claude Code's own workflow view: the phases, each agent under its
-name, and every line the driver says, worded as the driver wrote it. A run ends
-with the spec merged, with a stop and its reason, or with a question for you; you
-answer in the session, and a new run carries on from your answer.
-
-```mermaid
----
-title: The ship cycle, per spec
----
-flowchart TD
-    branch["Branch — from the base, in a dedicated worktree"]
-    implement["Implement — one implementer, given only the spec"]
-    snapshot["Commit + snapshot — the candidate commit every gate binds to"]
-    verify["Verify — executable evidence, recorded as a gate"]
-    lenses["One reviewer per lens"]
-    codexr["Codex cross-review"]
-    open{"Anything blocking or major open?"}
-    fixer["Fix — a fixer gets the blocking and major findings, plus any surplus deletions that gate nothing"]
-    tidy["Tidy — once per spec: one fixer gets only the surplus deletions; its tests run once, and no fix round is spent"]
-    redesign["Redesign — a fresh implementer rewrites the area from a brief of everything raised on it"]
-    route{"Which review does the fixed commit get?"}
-    adv["Adversary — reads the final diff fresh"]
-    recheck["Re-check — each reviewer that raised a finding judges its own against the new code"]
-    settle{"Still open after the re-check?"}
-    publish["Publish — push, open the pull request, wait for CI"]
-    outcome["Merge, or stop and wait — the gates decide, below"]
-
-    branch --> implement
-    implement --> snapshot
-    snapshot --> verify
-    subgraph panel["Review panel, sent out together — every lens plus Codex,<br>on every round this step runs; judged once all are in"]
-        lenses
-        codexr
-    end
-    verify --> lenses
-    verify --> codexr
-    lenses --> open
-    codexr --> open
-    open -->|"yes, and this is the cycle's first panel —<br>its brief starts the first fix round"| fixer
-    fixer -->|"a new commit — re-snapshot, re-verify;<br>every gate clears. A spec gets<br>limits.fixRounds rounds of this"| route
-    subgraph final["Fresh eyes on the final diff"]
-        adv
-        recheck
-    end
-    route -->|"after the first fix of a cycle: no second panel — the<br>lenses that raised the findings re-judge them below"| adv
-    route -->|"after the first fix of a cycle"| recheck
-    route -->|"after a second or later fix round, or a CI repair:<br>the whole panel again, against a diff no lens has read"| lenses
-    route -->|"after a second or later fix round, or a CI repair"| codexr
-    open -->|"no gating finding about the code, but surplus<br>deletions were handed over, and the spec has had no tidy"| tidy
-    tidy -->|"tests pass: a round of its own, with no verify. Otherwise the tree<br>is put back and the spec goes on as if the tidy had not run"| adv
-    tidy --> recheck
-    open -->|"no — or this panel is a re-run, whose own findings<br>nothing fixes until the re-check below settles them"| adv
-    open -->|"no, or this panel is a re-run"| recheck
-    adv --> settle
-    recheck --> settle
-    settle -->|"yes — another fix round, while limits.fixRounds allows one"| fixer
-    settle -->|"nothing open, or the fix rounds this repository allows are spent —<br>with the person's answer to publish as it is, or with this cycle's rewrite used"| publish
-    settle -. "the same file keeps failing, or new findings keep arriving on different files,<br>round after round — one question, and a person answers.<br>A fix round left: fix it once more, redesign (spends a fix round; the rewrite starts a fresh count),<br>accept (publish as it is, disclosed, to be merged by hand — or, on a plan branch, into it), or stop.<br>Every fix round spent: redesign (one round past limits.fixRounds, granted only by this answer),<br>publish as it is, disclosed, or stop. A cycle gets one rewrite; after it, or with no file to rewrite, redesign is not offered" .-> redesign
-    open -. "the same question, asked here too, and asked once per round — a rewrite chosen here<br>goes to the re-check; chosen after settle, to the whole panel" .-> redesign
-    redesign --> snapshot
-    publish -. "CI red — up to limits.ciRepairs repairs, and each repair<br>is a new candidate through the whole cycle again,<br>with a fresh fix budget of its own" .-> fixer
-    publish --> outcome
-    outcome -. "something resolved without a new commit — revisit:<br>the same commit through verify, review and settle again, spending nothing" .-> snapshot
-```
-
-Each lens is calibrated by a brief: the plugin ships nine, and a repository
-adds its own by committing `.tagteam/lenses/<lens>.md`. That is how a project
-whose correctness lives in tax years or dosages gets a `financial` or a `math`
-reviewer the plugin could never have written, and a brief named after one the
-plugin ships replaces it. A rostered lens with a brief in neither place is
-refused rather than reviewed on improvisation.
-
-Before the first spec begins, the ship audits the dependencies of the repository
-root: pnpm, npm, yarn, uv and pip, from their lockfiles, in the ship's worktree.
-Patch and minor fixes are made without asking and go through the full cycle as one
-pull request of their own, with every verify command run whatever its `when`; no
-spec begins until it has merged. A major, a minor of a `0.x` package, a version
-the ship cannot class and a package with no fixed version are never touched
-without you: the ship stops, names each one, and takes your approval or decline
-package by package, remembering a decline for the repository. An upgrade that
-makes verify fail, cannot be made, or moves another package past a minor is left
-out and listed under Risk. The check runs once per ship, never again after a spec
-has begun, and changes no version of your project.
-
-The review panel is the spec's lenses plus a Codex cross-review, sent out
-together to run at the same time. As each one reports you see one line saying
-who is in and how many of the panel have reported ("The correctness reviewer is
-in (1 of 3)"), and the review is judged once, when the last one is in; a reviewer
-still working is never mistaken for one that failed. Codex is told which
-lenses are reading beside it and hunts for what falls between them. After a fix
-round, each reviewer that raised a finding re-checks its own findings against
-the new code, and an adversary reads the fixed diff fresh. Anything still open
-starts another round, for as many rounds as `limits.fixRounds` allows; when they
-run out the pull request stops with the findings on it and says so. The one way
-past that limit without raising it is a person's answer to the question below,
-once per cycle.
-
-The rounds also watch for two patterns no single round can see. One is the same
-file drawing a new blocking or major finding three or more rounds running, each
-repair opening the next case. The other is new blocking or major findings
-arriving in each of the last three rounds of the cycle, on a different file each
-time — or on the pull request, or on no file at all. A spec that is converging
-never shows the second: a quiet round breaks the run. When either happens the
-run stops to ask, and when both do it asks once, naming each file once. While a
-fix round is still left there are four answers: fix it once more; redesign — a
-fresh implementer rewrites the files from a brief of everything raised on them
-this cycle, spending a fix round, and the rewrite starts a fresh count for each
-file it changes; accept — publish it as it is with what is open disclosed, which
-on a plan branch merges the spec into the plan branch with nobody asked when
-everything open may be carried there (what is open is then listed in the plan's
-pull request), and otherwise leaves it waiting to be merged by hand; or stop. A
-redesign covers the files both patterns name; when
-the findings are only about the pull request or name no file, there is nothing
-to rewrite, and redesign is not offered.
-
-When every fix round is spent, the run asks before it publishes, with three
-answers: redesign, which takes one more round past `limits.fixRounds` that only
-this answer grants; publish it as it is, with what is open disclosed, to be
-merged by hand; or stop. The question is put once per round: answered at the
-review, the re-check that follows does not ask again unless it raises something
-the person was not shown.
-
-A cycle gets one rewrite, whether it is chosen with rounds left or at the cap,
-and whether or not it changes anything. After it, the question no longer offers
-redesign, and once the fix rounds are spent the run publishes with what is open
-disclosed without asking, and says so. A rewrite at the cap that still fails is
-published the same way, for a person to merge by hand. A CI repair starts a new
-cycle, and the new cycle gets a rewrite of its own.
-
-After every fixer you see a table of what it was handed: each finding's
-severity, file and title, what the fixer said it did, whether the re-check found
-it addressed, and a recommendation worked out by code rather than by a model —
-re-plan, needs a person, carry, or accept. Whatever is not addressed in a spec's
-last table is described under Risk in its pull request.
-
-When a fixer is sent for something blocking or major, it is also handed the
-minor and nit deletions the economy reviewer asked for, if the repository uses
-the economy brief this plugin ships. It may make them or decline them: they
-never gate, never spend a fix round and never stop the spec, and a run says
-which were made and which were not. They appear in the table but are not
-described under Risk.
-
-When a panel round hands over such deletions and nothing about the code is
-blocking or major, one fixer is sent for them alone, once per spec, before the
-adversary's fresh pass; the spec's tests must have passed on the commit it starts
-from. The tests run on what the fixer left. If they pass, the result is a round of
-its own, marked as the tidy, which spends no fix round and is not verified again;
-if they fail, the fixer changed nothing or its report cannot be used, the tree is
-put back exactly as it was and the spec goes on as if the tidy had not run. If the
-fresh pass then raises something blocking or major on what the tidy changed, the
-tidy is thrown away and the earlier commit is re-checked again with its own
-verify and report as they were.
-
-Reviewers cannot run anything, so the minor findings they file about the code are
-suspicions. At a spec's first panel, the ones from correctness and Codex, and
-code-quality's that say a test would still pass with the behaviour broken, are
-handed once to the adversary, which runs each and answers reproduced, with the
-command and what it saw, or not reproduced. Only a reproduction makes a finding
-major: it then goes to the fixer with that evidence and opens a fix round, which
-spends one of the spec's fix rounds. A finding the adversary does not answer
-properly stays minor, and nothing stops for it. The run lists each finding and
-what became of it. Later panels are not tried, and the adversary's fresh pass
-after the fix is sent as before.
-
-The fixer reads the spec and the plan's goal as well as the findings, and can
-answer that the right repair would go against the goal because the spec
-conflicts with it. That stops the spec at once: no further fixer is sent, the
-table recommends re-planning, and the stop says how many fix rounds were spent,
-which are not given back.
-
-Each job thinks as hard as its work needs: the implementer, the fixer and the
-adversary at high effort by default, lens reviewers at medium, and re-checks —
-which only have to say whether one fix landed — at low. Every one of those is a
-setting in `.tagteam/config.json`.
-
-Publishing waits for CI, for up to `ciWaitSec` once the checks have started.
-Right after a pull request opens GitHub shows no checks on it yet, so when the
-branch has workflows that run on pull requests, `publish` first waits up to
-`ciStartWaitSec` — two minutes unless you set it, 0 to not wait — for checks to
-appear, and stops for you if none do. A repository with no such workflows gets
-no extra wait. Checks still running when `ciWaitSec` runs out are waited on
-rather than given up on, and the run says how long they have been waited for;
-telling it to finish the spec is how you end the wait, and the spec then stops
-for you as for checks that proved nothing — or, when a check had already
-failed, as for checks that failed.
-
-A single failure does not stop a spec on its own. A verify command that fails is
-run once more on the same commit, and so is the verify run against a base that
-moved; failed GitHub Actions checks are rerun once before a repair is offered.
-What fails again stops or goes to repair as before. What passes the second time
-is said under Risk in the spec's pull request, and the spec does not merge until
-the pull request says it.
-
-A verify command that fails both of its runs is then run once on the commit the
-change started from, after the repository's worktree setup has run on that base
-so that the command meets the base's own install. If it fails there too, it says nothing about the change.
-On a plan branch every command that fails like that is listed under Risk, in the
-spec's pull request and in the plan's, as failing with and without the change,
-and the spec merges: a new failure inside that command would not be noticed. The
-whole-plan check and the landing checks accept such a command only if it fails on
-their own base as well. A spec that merges straight into the base still stops,
-and no approval merges it; the command has to be put right on the base itself.
-A command that passes on the base, or whose base could not be set up, is the
-change's failure and stops the spec as before.
-
-Where a spec merges decides whether it waits for you. A spec that merges
-straight into the base — a plan of one spec, or any plan with `planBranch` off —
-waits for your approval every time: that is the approval every change reaching
-the base needs, not a sign that anything went wrong. A spec on a plan branch
-(*Shipping a plan as one*, below) merges into it unattended once every gate is
-satisfied, because the plan's own pull request is where you judge the combined
-change. On either route, a pull request also stops when verification failed (or,
-straight to the base, failed on the base too) or
-CI proved nothing or never started, a finding is still open, **a reviewer
-produced no usable evidence**, `.github/workflows/` changed, or the agent that
-wrote it never confirmed it finished what it was given. A workflow change does
-not stop a spec on a plan branch when the plan's approval named every workflow
-file it changed for that spec. A file the approval did not name still stops it,
-and the stop names that file; a spec going straight to the base stops whatever
-was approved.
-
-On a plan branch that last stop can clear without you. Every reader of the
-change rules on each thing the agent said it left undone: something the spec
-still needs, something the agent could not do where it ran, or something this
-change does not owe. One the readers say the spec still needs goes back for a
-fix like any other finding. When all of them are the other two kinds, and the
-review, verify and checks are clean, the spec merges into the plan branch and
-its pull request names what was left under Risk. A commit made by hand,
-with no agent to ask for a report, still waits, and so does everything that
-merges straight into the base. An agent that leaves a report the run cannot use
-is sent back for it once, and a person decides if that fails too.
-
-An open finding can stop being a stop on a plan branch too, if you turn
-carrying on (`carry` in `.tagteam/config.json`; it is off by default). Then a
-spec whose fix rounds have run out merges into the plan branch anyway: each open
-finding goes into the plan's ledger and under Risk in the spec's pull request and
-in the plan's, where you judge it. A finding about the pull request's text or the
-commit history, which no fixer can change, does not wait for carrying: on a plan
-branch it is disclosed the same way and the spec merges, carrying on or off, as
-long as it is not blocking, and it does not count toward the cap. Carrying is never used for a blocking finding, for
-a whole-plan fix, for a major finding in the code of a spec that another spec
-still to merge depends on, or for anything that goes straight to the base. When
-carrying one more spec would take the plan past `limits.carried`, the run stops
-and asks you instead.
-
-`mergeWithOpenFindings` (`.tagteam/config.json`; off unless you turn it on, and
-only on a plan branch) goes further: a spec whose fix rounds have run out merges
-into the plan branch with what is open disclosed, whatever `carry` says, and nobody
-is asked about it. That includes a major finding in code another spec still to
-merge depends on, so only `limits.carried` and the plan's final pull request, which
-you confirm, stand between those findings and the base. A blocking finding, a
-whole-plan fix, a spec that goes straight to the base and anything other than its
-review still stop it, and reaching `limits.carried` stops and asks you as it does
-with carrying.
-
-The missing evidence matters more than it sounds: an absent or malformed findings
-file yields an empty finding set, and an empty finding set otherwise reads as a
-clean review.
-
-A person can approve past some of those stops and not others. Merging straight
-into the base, a workflow change the plan's approval did not name, and an
-unconfirmed account are theirs to accept; a failed verification, an open finding, and a reviewer that produced no
-usable evidence are cleared only by new evidence, and `finish` offers approval
-only when it would count.
-
-```mermaid
----
-title: Merge or stop
----
-flowchart TD
-    evaluate{"gates.mjs evaluate — code, not judgement"}
-    route{"Where does it merge?"}
-    merge["Merged into the plan branch unattended, at exactly the reviewed commit"]
-    wait["Stops and waits — approve and merge, leave it open, or stop the train"]
-
-    evaluate -->|"every gate satisfied"| route
-    route -->|"into a plan branch"| merge
-    route -->|"straight into the base: waits for you"| wait
-    evaluate -->|"verification failed or proved nothing"| wait
-    evaluate -->|"a finding is still open"| wait
-    evaluate -->|"a reviewer produced no usable evidence"| wait
-    evaluate -->|".github/workflows/ changed"| wait
-    evaluate -->|"the agent that wrote it never confirmed it finished"| wait
-```
-
-#### Running a ship as workflows
-
-- `/tagteam:ship` and `/tagteam:plan` need the Workflow tool. Without it the
-  command says so in one sentence and creates nothing.
-- In auto mode, Claude Code asks once per workflow name the first time
-  `tagteam:ship-spec` or `tagteam:plan-specs` is launched, and remembers the answer.
-- Recommended: set `subagentPromptCacheTtl` to `"1h"` in your own Claude Code
-  settings. `/tagteam:configure` does not write it.
-- Known exposure: a Codex review makes the run wait in a shell call of up to ten
-  minutes with no output. Claude Code was seen to let a call stay silent for eight
-  minutes, and nothing longer has been tried, so whether a run survives the last two
-  minutes is not known. A run that is cut short ends as a stop, and starting the
-  ship again reads what is on disk and carries on.
-- The configured per-role efforts, and an escalation's raised ones, reach the
-  agents inside a run exactly as they reach an agent sent from the session: a
-  per-call effort applies inside a workflow and overrides an agent file's. The one
-  thing that beats it is `CLAUDE_CODE_EFFORT_LEVEL` in your environment, which
-  overrides every effort, an escalated fixer's included.
-
-### Shipping a plan as one
-
-A plan shipped as one goes on the familiar feature branch: the branch one feature
-— here, one plan — is collected on before it reaches the base through a single
-pull request. Tagteam calls it the plan branch. What is particular to it is that
-tagteam creates it and deletes it for you, and checks the combined change once
-before that final pull request.
-
-Without `planBranch`, every spec of a plan merges straight into the base branch,
-and each waits for your approval before it does. Turn on `planBranch` in
-`/tagteam:configure` and a plan of two or more specs ships as one instead, and
-the wait for your approval moves to the plan's own pull request:
-
-- Its specs collect on a branch of their own, `plan/<slug>`. Each is still its
-  own pull request, into that branch, reviewed and gated exactly as above, and
-  merged into it without asking you once every gate is satisfied. Nothing from
-  the plan reaches the base until the end.
-- Before each spec starts, the base is tried against the plan's branch. When it
-  no longer merges cleanly, an agent resolves that one merge, the review panel
-  reads what it resolved, and the ship pushes the merge commit itself. The plan's
-  branch is never rebased.
-- After the last spec, the whole plan is checked as one change: every verify
-  command, and one reviewer reading how the specs fit together. What it finds is
-  fixed as one more small pull request into the plan's branch. The same reviewer
-  also looks again at every finding in the plan's ledger, the ones specs merged
-  with still open, and says of each whether it is fixed, still wrong in the
-  code, or needs you. When the check is otherwise clean, findings still wrong
-  in the code become follow-up pull requests into the plan's branch, findings
-  that touch the same files sharing one, up to `limits.followUps`. Everything
-  else is listed in the plan's own pull request with where it ended up. None of
-  this changes whether the check is clean or whether Merge is offered.
-- Then the plan reaches the base through one final pull request, merged with a
-  merge commit at exactly the commit that was checked, so each spec keeps its own
-  commit in the base's history. **A person confirms that merge every time**, and
-  no setting stands in for them: you are shown what lands, the plan's checks, the
-  check against the base as it is now, and what the plan lands as, and you
-  answer Merge, Leave open, or Stop. Merge is offered only when nothing shown
-  fails. Leaving it open ends the run, and `/tagteam:ship` on the plan brings the
-  same question back. That pull request's checks get the same `ciStartWaitSec`
-  to appear as a spec's, when the plan's branch has workflows that run on pull
-  requests; if none appears, the question says CI never started, and the next
-  run waits for them again.
-
-The repository has to allow merge commits into the base, and its checks have to
-run on pull requests into the plan's branch; the ship says so plainly when
-either is not the case, and changing it is a repository setting for you. When
-your git signs commits, the commits the ship makes on the plan's branch itself
-are signed with your own git signing setup. A base that requires signed commits
-needs signing turned on in git on the machine that ships: when it is off, the
-ship stops when it starts, and again before it lands the plan, with nothing
-created or pushed, and says how to turn it on.
-
-On such a base, the plan's branch can still hold commits GitHub does not show as
-verified — pushed before signing was set up, or from another machine — and
-GitHub refuses a merge commit for a branch that holds them. The question then
-names each of them and does not offer Merge. When they are all that stands in
-the way and the repository allows squash merges into the base, it offers
-**Squash** instead: the plan lands as one squash commit of the checked commit,
-which GitHub signs. What you give up is the history — each spec's own commit no
-longer stays separate on the base. Squash is only ever your answer; the ship
-never picks it for you. When a squash is not allowed either, the question says
-what you can do: allow squash merges for the base, remove the signature
-requirement, or re-sign those commits and merge the pull request on GitHub
-yourself.
-
-**The version.** List the lines that carry your version in `versionFiles` —
-configure proposes them — and a plan of two or more specs carries exactly one
-increase of them: a patch, unless the plan document says `Version increase:
-minor` under its title. The ship makes it itself, as the last commit on the
-plan's branch, once the whole plan is checked, from the base's version at that
-moment, and the question names it ("lands as 0.10.6 → 0.10.7"). A spec that
-changes a version line on the plan's branch stops before it is published, since
-the increase is the ship's. If another plan lands first, the ship notices that
-the base's version moved — it compares the numbers, because two plans raising
-the same number merge without any conflict — merges the base in, and makes the
-increase again over it. So two plans of two or more specs that land one after
-the other never land the same number. A plan of one spec goes straight to the
-base, as it always did, and keeps your repository's own habit for its version:
-it is outside that guarantee and can collide with a plan landing beside it. The
-guarantee is one checkout's: two people confirming two plans from two machines
-within seconds are guarded only by your repository's own rule that a branch be
-up to date before it merges, a setting you change on GitHub. An empty
-`versionFiles` makes no increase at all; emptying it mid-plan takes effect at the
-next `start`, which drops the lines, the increase and any version you set, says
-so, and leaves a version commit already pushed on the branch. A version line you
-set yourself in commits you pushed to the plan's branch and had the ship adopt is
-your decision: the plan lands as that value and the ship makes no increase on
-top, until the base's version moves, when the ship stops and says so.
-
-After each spec, `/tagteam:status` can say what it cost: tagteam reads the
-session transcripts Claude Code keeps and reports the spend as input-token
-equivalents, split between the orchestrating agent and the agents it dispatched.
-A Codex line follows it with what that spec's own Codex calls spent, in plain
-tokens — input, how much of it was cached, and output — kept apart from the
-Claude figure because Codex is paid from a different bill, and still there when
-the Claude figure could not be worked out. A Codex call that fails keeps its
-spend on record too.
-Each spec, and each plan at approval, also names any agent that ran at a
-different effort or model than it was sent at, or whose run could not be
-confirmed, as a report that never holds anything up.
-
-## How it is built
-
-The orchestrator is the main Claude Code agent following the command files. In a
-ship it starts one `tagteam:ship-spec` workflow run per spec and ends its turn, and
-in a plan, past the goal gate, one `tagteam:plan-specs` run. A ship runs
-`scripts/ship.mjs` a stretch of steps at a time, through one small helper agent for each
-stretch. A stretch ends where agents are to be sent, a question is asked, a step stops or a merge
-comes, and each merge runs in a line of its own, so that a person can still stop the run from
-the view before it starts. A plan runs `scripts/plan.mjs` once per step, through a small helper
-agent. The helper's answers are checksummed so a copy that was altered or cut short is refused: the
-saved answer is then read once more by a second helper without running the step again, and a
-second refused copy stops the run, in a ship and in a plan alike. The
-driver runs git, Codex and the other scripts, decides the round, the route and
-every model and effort, and prints the agents to dispatch with their prompts
-written out. The run sends them out together and tells the driver as each one
-reports, and the driver judges their work only once all are in. The orchestrator
-asks the questions only a person can answer, and starts the next run from the
-answer. A dedicated agent writes the pull request body. The implementer is given
-the spec's test and done-when lines by id and answers each as met or not done in
-its report; a line it did not do counts as unfinished work, and a report that
-skips or repeats one is sent back. Every reviewer reading the spec's code afresh
-is shown what the implementer said meets each line it answered as met, and checks
-it against the code.
-Subagents write their own outputs; scripts read them. Nothing large is ever
-moved between steps by passing it through a model.
-
-Decisions that are silent when wrong are code, not prose: which commit gets
-merged, whether the gates are satisfied, how CI checks classify, which round a
-commit belongs to, and which settings a dispatch runs at. What is left in the
-command files is what a person has to be told and asked.
-
-State is files on disk. There are no fingerprints, reuse ledgers, or invocation
-records — a re-run looks at what exists and continues from the first thing that
-does not.
-
-## Safety
-
-- Reviewers have no write or shell tools. Codex runs `read-only` and only ever
-  reviews.
-- Codex runs through `codex app-server`: one throwaway thread per call, a
-  read-only sandbox with the network closed, approvals never, and the answer
-  held to a JSON schema. MCP is unsupported because its tool contract cannot
-  enforce a response schema.
-- What Codex reports it ran as is recorded beside every answer: the model, the
-  effort, the sandbox and network, the approval policy, the Codex version, and
-  the instruction files it read. Those instruction files — your own global
-  `AGENTS.md` and the repository's — keep steering Codex by design; they are
-  recorded, not switched off. An effort other than the one asked for fails the
-  call; anything else that differs is said once and blocks nothing; anything
-  Codex did not report is asked about.
-- Codex still writes its own short-lived files under its home directory while a
-  call runs, and tagteam deletes nothing there.
-- Every gate binds to one commit; a new commit clears all of them, and every fix
-  round makes one.
-- Merges use `--match-head-commit`, so what merges is the commit that was
-  reviewed. When the base branch has moved since the review, the merge is not
-  taken on trust: the reviewed change is checked against the base as it now
-  stands — it has to merge cleanly, land as the same change, and pass this
-  repository's verify commands there — and only a check that passes lets the
-  reviewed commit merge. Nothing is ever rebased, amended or re-committed; a
-  check that does not pass, and any other merge failure, stops and reports.
-- A commit is only made through `git add -A && guard-staged && git commit`, which
-  refuses to commit a copied ignored file.
-- Nothing reaches the base without a person: a spec that merges straight into it
-  waits for your approval, and a plan branch reaches it only through the pull
-  request you say Merge to.
-
-## Reference
-
-[skills/tagteam/SKILL.md](skills/tagteam/SKILL.md) — configuration, artifact
-layout, dispatching, the Codex bridge, the Git protocol, the gates and recovery.
-[examples/config.json](examples/config.json) — a complete configuration.
-
-## Development
-
-```bash
-npm test
-```
-
-Node built-ins only, no dependencies.
-
-After updating Codex, check that tagteam still fits it:
-
-```bash
-npm run probe:codex                  # both halves
-npm run probe:codex -- --free-only   # the free half alone
-```
-
-The free half asks the installed Codex to describe its own protocol and checks
-that everything tagteam sends to Codex and reads back is still in it. It costs
-nothing and takes about a second. The paid half runs only when the free half
-passes. It makes one real Codex call the way a review does and checks that Codex
-answered, reported how it ran, answered in the requested format, reported what
-the call spent, and left no Codex process or session behind. That call costs
-about 19K input tokens and a few seconds at the default `low` effort. It uses
-the model `models.codex` names in `.tagteam/config.json`; `--model` and
-`--effort` choose others, and `--effort max` checks the most expensive setting.
-Either half names the first thing that broke. The probe exits 1 when the
-installed Codex no longer fits tagteam, and 2 when it could not check at all:
-Codex is missing or too old, its configuration is broken, a usage limit was
-hit, or the model is not available to the account. It never runs under
-`npm test`.
-
-The probe has only been run on macOS with a ChatGPT sign-in and OpenAI's own
-models. It says so when Codex reports a different platform or model provider,
-and it has not been tried with an API-key sign-in. Whether a `notify` hook in
-your Codex configuration fires on the paid call has not been checked either.
-
-The diagrams in this file are Mermaid source. GitHub renders them, and changing
-one is a text edit here, with no image files to regenerate.
-
-A repository that calibrates its own lenses needs plugin 0.8.2 or newer
-**everywhere it is run**, one configured at version 9 needs 0.9.0 or newer, one
-configured at version 10 needs 0.10.6 or newer, and one configured at version 11
-needs 0.13.0 or newer, and one configured at version 12 needs 0.14.0 or newer.
-Commit a brief and the roster entry that names it in the same commit, and
-refresh the plugin below.
-
-This repository self-hosts tagteam. Unless you start Claude Code with
-`--plugin-dir`, it runs the installed plugin snapshot rather than this working
-tree: `.tagteam/config.json` is read live from the repository, but the scripts
-and command files reading it belong to the snapshot. A change to a plugin file
-does nothing here until the snapshot is refreshed. `/tagteam:status`,
-`/tagteam:plan` and `/tagteam:ship` each say which snapshot is running them
-and, in a checkout of the plugin itself, name the files that actually execute
-whose installed copy differs from the working tree.
+A repository needs the plugin version its configuration requires **everywhere it
+is run**: 0.8.2 if it calibrates its own lenses, and for a configuration at
+version 9, 0.9.0; 10, 0.10.6; 11, 0.13.0; 12, 0.14.0; 13, which added the Codex
+setting, 0.14.8. Commit a brief and the roster entry that names it together.
 
 Which refresh applies depends on which version moved. If the package version in
 `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` was raised,
@@ -707,9 +120,110 @@ claude plugin marketplace update tagteam
 claude plugin update tagteam@tagteam
 ```
 
-For every other change, `update` reports there is nothing to do. Run
+For every other change `update` reports nothing to do: run
 `claude plugin uninstall tagteam@tagteam` and install again with the
-[Install](#install) command. Restart the session either way.
+[Install](#install) commands. Restart the session either way.
+
+## How it works
+
+### Planning
+
+```mermaid
+---
+title: The plan cycle
+---
+flowchart TD
+    orient["Orient — an explorer agent reads the repository"] --> interview["Interview — batched questions until nothing material is ambiguous"]
+    interview --> goal["Goal gate — you read goal.md, edit it if it is wrong, approve it"]
+    goal --> draft["Draft — one plan-drafter writes plan.md, an index under 12 KB"]
+    draft --> claude["Claude reviewer"] & adversary["Adversary"]
+    draft -.-> codex["Codex reviewer, only when Codex is on"]
+    claude & adversary --> answer["Answer — the drafter applies each blocking or major finding<br>or rejects it with a reason you read at approval"]
+    codex -.-> answer
+    answer -. "only when a reader found a hole in the goal" .-> owner["You answer, goal.md changes,<br>the gate re-closes, the plan is revised once more"]
+    owner --> specs
+    answer --> specs["Specs — one spec-writer per deliverable, in parallel, each under 18 KB"]
+    specs --> approve["Approve — deliverables, lenses, sign-offs, the rejected findings, one question"]
+```
+
+1. **Interview.** Batched questions, informed by reading the repository first,
+   multiple choice where there are real options, about the outcome and in plain
+   language, so answering never means opening a file. Product and interface
+   decisions are yours; with no preference, tagteam decides and records why.
+2. **Goal gate.** You read the `goal.md` the interview writes and edit it if it is
+   wrong; everything downstream binds to the file, not the conversation.
+3. **Draft and review.** One drafter writes a plan. A Claude reviewer and an
+   adversary read it at the same time, and with Codex on, so does a Codex
+   reviewer. The drafter answers every blocking and major finding by id: it
+   applies the ones it accepts and writes one line on why for each it rejects,
+   which you read at approval. There is no second review round: across the plans
+   reviewed by three readers, none ever closed with nothing blocking or major.
+4. **Specs.** One file per deliverable, written in parallel, each self-contained
+   for its implementer; a plan and a spec each have a size the run enforces.
+5. **Approve.** Deliverables in dependency order, the lenses each will get, the
+   findings the drafter declined and why, and one question. Anything the
+   repository's conventions say to ask about first, such as a new dependency or
+   top-level directory, is listed as that spec's sign-off and approved with the
+   plan, so shipping does not stop to ask. So are the `.github/workflows/` files a
+   spec will change: it may then change exactly those and merge into the plan
+   branch without stopping.
+
+The session you started in runs the interview and the goal gate. From the
+approved goal to validated specs, one workflow run, `tagteam:plan-specs`, does the
+draft, review, answer and spec writing. It ends with validated specs, a stop and
+its reason, or a question for you, such as a finding against the goal itself; a
+new run carries on from your answer, reviewing nothing again.
+
+### Shipping
+
+Each spec runs the outline above. The review panel is the spec's lens reviewers,
+plus Codex when it is on, and an adversary reads the code fresh after a fix. Ship
+a plan as one, on a branch of its own, and its specs merge there without waiting
+once their checks are clean, and you judge the plan as one change in its own pull
+request; otherwise each spec waits for your approval before it merges into the
+base. [docs/shipping.md](docs/shipping.md) has every step, what stops a spec and
+what a person can approve past.
+
+What you can rely on: reviewers cannot write, and Codex, when on, only reviews. A
+review binds to one commit, and a merge happens at exactly that commit. Nothing
+reaches the base without a person; a plan branch reaches it only through the pull
+request you say Merge to. [docs/architecture.md](docs/architecture.md) has how each
+is enforced and how a Codex call is sandboxed and recorded.
+
+## Configuration
+
+`/tagteam:configure` writes `.tagteam/config.json`, which you commit, and
+[skills/tagteam/SKILL.md](skills/tagteam/SKILL.md) has every key. The settings a
+newcomer would change:
+
+| Setting | What it does |
+|---|---|
+| `useCodex` | Codex on or off, asked first as whether Codex should review as a second reader, alongside Claude. Run `/tagteam:configure --reconfigure` to change it. With it off, nothing checks for or calls Codex and configure asks no Codex model or effort. [How it works](#how-it-works) has what a review consists of either way |
+| `models`, `effort` | The `lead` and `worker` models, and an effort for each job: the implementer, fixer and adversary at `high` by default, lens reviewers at `medium`, and re-checks, which only say whether one fix landed, at `low`. `codex` entries apply only with Codex on |
+| `lensSettings` | A lens's own `model` and `effort` in the review panel, such as `"security": { "model": "opus", "effort": "high" }`. It applies to lens reviewers only, falls back to `models` and `effort`, shows in the panel line and costs that lens on every round |
+| `reviewers.roster`, `reviewers.default` | The lenses a plan may assign and those every spec gets. Every default lens is one more reader on every round |
+| `planBranch`, `carry`, `mergeWithOpenFindings` | Whether a plan's specs merge into a branch of their own without waiting, and whether a spec whose fix rounds ran out may merge with its open findings disclosed (`carry`: findings that may be carried; `mergeWithOpenFindings`: more). See [Shipping a plan as one](docs/shipping.md#shipping-a-plan-as-one) |
+| `limits`, `ciWaitSec`, `ciStartWaitSec` | Fix rounds, CI repairs, carried findings and follow-up units, and how long to wait for checks |
+| `versionFiles` | The lines that carry your version, so a plan's one increase is made for you |
+
+**Lenses.** The plugin ships ten briefs: correctness, resilience, security,
+architecture, code-quality, experience, consistency, cost, economy and `docs`,
+which reads documentation changes for whether they are true, written once and
+concise. `docs` is in the example roster and no default; a plan assigns it to specs
+that change documentation. A repository adds its own by committing
+`.tagteam/lenses/<lens>.md`, so a project whose correctness lives in tax years or
+dosages gets a `financial` or a `math` reviewer the plugin could never have written.
+A brief named after a shipped one replaces it; a rostered lens with no brief is refused.
+
+## Reference
+
+- [skills/tagteam/SKILL.md](skills/tagteam/SKILL.md) — every configuration key, the
+  artifact layout, the gates and recovery, and the Codex bridge.
+- [examples/config.json](examples/config.json) — a complete configuration.
+- [docs/shipping.md](docs/shipping.md) — every step of a ship and what stops it.
+- [docs/architecture.md](docs/architecture.md) — how tagteam is built and kept safe.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — working on tagteam, from setup to a pull request.
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each version.
 
 ## License
 

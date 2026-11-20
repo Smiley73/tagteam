@@ -82,8 +82,8 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 // Not Codex-bound, but the same discipline: an optional property in a schema
 // validate-json enforces is a shape nothing actually requires. A few properties
 // are optional on purpose, each one entry here naming one schema file and one
-// property at that schema's root — never a whole file, which would let any other
-// key there go optional unnoticed:
+// property at that schema's root, or at the one pointer the entry names — never
+// a whole file, which would let any other key there go optional unnoticed:
 //
 // - `ciStartWaitSec` in the configuration, which was added to version 10
 //   without a bump so the version-10 files written before it existed stayed
@@ -92,8 +92,13 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 //   bump for the same reason; the ship reads a missing one as `never`.
 // - `mergeWithOpenFindings` in the configuration, the third such key; the ship
 //   reads a missing one as false.
+// - `lensSettings` in the configuration, the fourth: a missing one means no lens
+//   has settings of its own, and its entries are required to carry both fields.
 // - `autoMerge` in the configuration, which nothing reads any more and which
 //   stays declared so a file that carries it is not refused for it.
+// - `maxConcurrentCodex` at the root of the configuration, and `codex` in its
+//   `$defs/roleModels` and `$defs/jobEffort`: required only while Codex is on,
+//   which the schema cannot say, so `requiredWithCodex` names them for `validateJson`.
 // - `user_visible` in a spec's front matter, retired and ignored, and declared
 //   only so that specs written while it was required still validate.
 // - `workflows` in a spec's front matter, which most specs do not have and which
@@ -105,7 +110,11 @@ const DELIBERATELY_OPTIONAL = [
   { schema: "config.schema.json", property: "ciStartWaitSec" },
   { schema: "config.schema.json", property: "redesignEscalation" },
   { schema: "config.schema.json", property: "mergeWithOpenFindings" },
+  { schema: "config.schema.json", property: "lensSettings" },
   { schema: "config.schema.json", property: "autoMerge" },
+  { schema: "config.schema.json", property: "maxConcurrentCodex" },
+  { schema: "config.schema.json", property: "codex", at: "/$defs/roleModels" },
+  { schema: "config.schema.json", property: "codex", at: "/$defs/jobEffort" },
   { schema: "spec.schema.json", property: "user_visible" },
   { schema: "spec.schema.json", property: "workflows" }
 ];
@@ -114,7 +123,7 @@ const DELIBERATELY_OPTIONAL = [
 function unexcused(name, schema) {
   const allowed = DELIBERATELY_OPTIONAL
     .filter((entry) => entry.schema === name)
-    .map((entry) => `/ omits ${entry.property} from required`);
+    .map((entry) => `${entry.at ?? "/"} omits ${entry.property} from required`);
   return strictViolations(schema).filter((violation) => !allowed.includes(violation));
 }
 
@@ -132,7 +141,7 @@ test("the strict-mode exceptions cover their own properties and nothing else", (
   // any other schema.
   const config = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.schema.json"), "utf8"));
   assert.deepEqual(unexcused("config.schema.json", config), []);
-  const excepted = DELIBERATELY_OPTIONAL.filter((entry) => entry.schema === "config.schema.json").map((entry) => entry.property);
+  const excepted = DELIBERATELY_OPTIONAL.filter((entry) => entry.schema === "config.schema.json" && !entry.at).map((entry) => entry.property);
   const others = config.required.filter((key) => !excepted.includes(key));
   assert.ok(others.length > 10, "the configuration's required keys were not read");
   for (const key of others) {
@@ -147,6 +156,24 @@ test("the strict-mode exceptions cover their own properties and nothing else", (
     const elsewhere = { type: "object", additionalProperties: false, required: [], properties: { [property]: { type: "boolean" } } };
     assert.deepEqual(unexcused("findings.schema.json", elsewhere), [`/ omits ${property} from required`]);
   }
+});
+
+test("codex is excused as optional in the two $defs it is excused in and nowhere else", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, "schemas", "config.schema.json"), "utf8"));
+  for (const def of ["roleModels", "jobEffort"]) {
+    assert.ok(!config.$defs[def].required.includes("codex"), `${def} still requires codex`);
+    assert.ok(config.$defs[def].properties.codex, `${def} no longer declares codex`);
+    // The same def with another property optional is not excused.
+    const [other] = config.$defs[def].required;
+    const loosened = { ...config, $defs: { ...config.$defs, [def]: { ...config.$defs[def], required: config.$defs[def].required.filter((key) => key !== other) } } };
+    assert.deepEqual(unexcused("config.schema.json", loosened), [`/$defs/${def} omits ${other} from required`]);
+  }
+  const optionalCodex = { type: "object", additionalProperties: false, required: [], properties: { codex: { type: "string" } } };
+  const at = (where) => ({ ...config, ...where });
+  assert.deepEqual(unexcused("config.schema.json", at({ properties: { ...config.properties, limits: optionalCodex } })), ["/properties/limits omits codex from required"]);
+  assert.deepEqual(unexcused("config.schema.json", at({ $defs: { ...config.$defs, claudeModel: optionalCodex } })), ["/$defs/claudeModel omits codex from required"]);
+  assert.deepEqual(unexcused("config.schema.json", optionalCodex), ["/ omits codex from required"]);
+  assert.deepEqual(unexcused("findings.schema.json", { $defs: { roleModels: optionalCodex } }), ["/$defs/roleModels omits codex from required"]);
 });
 
 test("the spec schema's exceptions cover user_visible and workflows and no other property", () => {

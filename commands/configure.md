@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 12. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 13. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -19,9 +19,9 @@ command.
 | `git -C "$R" rev-parse --show-toplevel` | yes |
 | `git --version` is 2.38 or newer | yes |
 | `git -C "$R" status --porcelain` is empty | no — warn |
-| `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes |
+| `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes, only when Codex is used |
 | `gh auth status` and `gh repo view --json defaultBranchRef` | yes |
-| `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes |
+| `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes, only when Codex is used |
 | `codegraph` on PATH and `.codegraph/` present | no |
 
 The git version matters for the same reason: when the base branch moves under a
@@ -29,6 +29,22 @@ reviewed change, a ship tests that the same change still lands on the new base
 with `git merge-tree --write-tree`, which arrived in 2.38, and `ship.mjs start`
 stops without it. Checked here, a machine that cannot merge says so before
 anyone plans anything on it.
+
+### Whether Codex is used
+
+Before either Codex row runs, ask this on its own, in one `AskUserQuestion` and
+in plain words: should Codex review as a second reader, alongside Claude? It
+records `useCodex`. The Codex rows run only on a yes; on a no, run neither and
+say that Codex is not checked because this repository does not use it.
+
+On a first configure, offer yes first and say what it requires: the Codex CLI at
+0.153.0 or newer, and one live call now, to prove it answers. On a
+`--reconfigure`, and when an older file is carried forward, offer the answer the
+file holds as the default; a file without one is offered yes, which is what that
+repository has been running. Question 2 offers `codex: <installed model>` from
+what the probe reported, so this runs before the numbered questions. With Codex
+off there is no probe and no Codex question to ask: *Then ask* says what it
+leaves out.
 
 Both Codex rows check the binary the reviews will run: `TAGTEAM_CODEX_BIN` when
 it is set, otherwise `codex` on the PATH. Each exits non-zero with the reason on
@@ -94,12 +110,13 @@ names, internal ids. See *Asking* in the skill.
 2. `models` — which model reads and plans (`lead`: every reviewer, re-check,
    adversary, explorer, drafter and spec writer), which one writes code
    (`worker`: the implementer and the fixer), and which Codex model every Codex
-   call uses (`codex`). Offer `lead: opus`, `worker: sonnet`, `codex: <installed
-   model>` and let them override. Sonnet is the floor for `worker`; see
-   `$P/skills/tagteam/SKILL.md` for why.
+   call uses (`codex`; with Codex off, leave that one out). Offer `lead: opus`,
+   `worker: sonnet`, `codex: <installed model>` and let them override. Sonnet is
+   the floor for `worker`; see `$P/skills/tagteam/SKILL.md` for why.
 3. `effort` — how hard each job thinks, one setting per job: `implementer`,
    `fixer`, `reviewer`, `recheck`, `adversary`, `planner` (the explorer, the
-   drafter, the plan reviewer and the spec writer together) and `codex`. Offer
+   drafter, the plan reviewer and the spec writer together) and `codex` (with
+   Codex off, leave that one out). Offer
    the measured defaults and say why they differ: `implementer` and `fixer`
    `high` because they write the code; `adversary` `high` because it is the one
    reader looking for what everyone else missed; `reviewer` `medium`, because
@@ -119,7 +136,8 @@ names, internal ids. See *Asking* in the skill.
    effort of your own; if they turn it on, ask them for the settings: after how
    many unsettled fix rounds the raised ones take over — at least 1, because the
    ordinary settings always get a fix round — and the raised `models` for the
-   three roles and `effort` for the seven jobs.
+   three roles and `effort` for the seven jobs. With Codex off, it is two roles
+   and six jobs: leave the `codex` model and effort out.
 
    When it is on, a follow-up rides in the next call, because only that answer
    needs it: should a rewrite chosen from the "rewrite this area?" question run
@@ -141,15 +159,24 @@ names, internal ids. See *Asking* in the skill.
    turn it on, ask them for the `lead` and `codex` models and the `planner`,
    `adversary` and `codex` efforts, the settings the plan cycle actually
    dispatches at; carry the rest over from questions 2 and 3 without asking.
+   With Codex off, leave the `codex` model and effort out.
 6. `reviewers.default`. Recommend `correctness`, `code-quality` and `economy`,
-   and explain that Codex and the adversary run on every spec regardless, so a
-   typical spec gets five readers, that every lens is one more reader over every
+   and explain that Codex (when it is on) and the adversary run on every spec
+   regardless, so a typical spec gets five readers, or four with Codex off, that every lens is one more reader over every
    round of every spec, and that `economy` is the one reader asking what the
    change could do without — the only lens whose findings make a diff smaller.
    Show the full roster and let them pick from it — the shipped
    briefs plus anything this repository calibrates in `.tagteam/lenses/`, which
    are equally selectable and, on a reconfigure, are usually the ones this
    project cares most about.
+
+   In the same call, ask `lensSettings`: should any lens run at a model or
+   effort of its own? Offer none first, and say that each override changes only
+   that lens's reviewer, at that lens's cost on every round of every spec it
+   reads; Codex, the adversary and the re-checks are not changed by it. Propose
+   no values. For each lens they name, ask for both a `model` and an `effort`,
+   from the same words question 2 and 3 take for the Claude roles; someone who
+   wants only a higher effort names the `lead` model beside it.
 7. `ciWaitSec` and `ciStartWaitSec`, asked only if the repository has
    workflows. Ask the start wait alongside the CI wait, as behaviour: "how long
    should a new pull request wait for its checks to start before this stops to
@@ -266,11 +293,18 @@ names, internal ids. See *Asking* in the skill.
     say in one sentence that carrying settings exist and take effect only with
     `planBranch` on.
 
-Everything else takes its default: `branchPrefix` `tagteam/`,
-`maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
-`examples/config.json`.
+With `useCodex` off, questions 2, 3, 4 and 5 leave out the `codex` model and
+effort, and `maxConcurrentCodex` is not offered. Write none of those keys into a
+fresh file: the configuration needs them only while Codex is on. A key an
+existing file already holds is carried forward unchanged, so turning Codex back
+on later offers the values back as the current ones.
 
-`maxConcurrentCodex` is the one of those worth a sentence when you show the file:
+Everything else takes its default: `branchPrefix` `tagteam/`,
+`maxConcurrentCodex` 3 (only with Codex on), `setupTimeoutSec` 900, the full
+roster from `examples/config.json`.
+
+With Codex on, `maxConcurrentCodex` is the one of those worth a sentence when you
+show the file:
 it caps Codex calls for the whole repository, and that cap now spans every ship
 running in it rather than giving each of them its own — two plans shipping from
 this checkout at once share those three slots and each waits on the other's
@@ -311,7 +345,7 @@ anything, so those files stay in history until someone runs `git rm --cached` on
 them, and this command will not do that on its own.
 
 Then show the file and say what it means: which commands prove a candidate, which
-lenses read every spec, which jobs think how hard, whether a plan ships as one —
+lenses read every spec, whether Codex reviews, which jobs think how hard, whether a plan ships as one —
 and if it does, which lines carry its one version increase — and what merges
 without asking. With `planBranch` on, a clean spec merges into the plan's branch
 without asking anyone; with it off, every spec waits for a person. Either way,
@@ -378,10 +412,13 @@ Say two things afterwards, because neither is visible from the file:
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; the only keys with a fallback are `ciStartWaitSec`,
-`redesignEscalation` and `mergeWithOpenFindings`, so any other omitted key is an
+`redesignEscalation`, `mergeWithOpenFindings` and `lensSettings`, so any other omitted key is an
 invalid file rather than an unused feature.
 `autoMerge` is the one key the file may omit without either, because nothing
 reads it — and this command always omits it.
+
+Always write `useCodex`, as the answer to *Whether Codex is used* gave it. There
+is no fallback for it, and a file without it is invalid.
 
 Always write `ciStartWaitSec`: the answer when question 7 asked it, 120 when it
 did not. It is the one key that may be missing — the ship reads a missing one
@@ -409,6 +446,14 @@ holds, or `false`. Under `--reconfigure` it is offered back with the value the
 file holds. When a version-9 or version-10 file is carried forward, or a version-11
 file, write it as `false`.
 
+Always write `lensSettings`, as `{}` when no lens has settings of its own: the
+answer the question under 6 gave, otherwise the entries the file holds. Under
+`--reconfigure`, and whenever a file is carried forward, offer those entries
+back, so a lens someone gave a pair of its own is not reset by a reconfigure
+about something else. When the roster loses a lens, drop that lens's entry and
+say so, because the validator refuses an entry for a lens that is not in the
+roster.
+
 A version-9 configuration is carried forward, not replaced. Run the interview as
 `--reconfigure` does, with every value the file holds offered back as the
 default, and say what version 10 adds: `planBranch`, whether a plan of two or
@@ -419,7 +464,8 @@ nothing about how a plan ships changes. Say what version 11 adds as well, as
 below. Answering every question as before, and leaving the setting off, writes
 the old file with those two keys, version 11's four at their safe values,
 `ciStartWaitSec` added, `redesignEscalation` at `never`, `autoMerge` left out,
-version 12, and nothing else different.
+`useCodex` as answered, version 13, and nothing else different. Ask the Codex
+question as *Whether Codex is used* says.
 
 A version-10 configuration is carried forward the same way: every value the
 file holds is offered back as the default, `autoMerge` is still never written,
@@ -429,19 +475,26 @@ plan branch, `carry`, whether a spec out of fix rounds with only carriable
 findings merges into the plan's branch with them disclosed, offered off, with
 `limits.carried` at 5 and `limits.followUps` at 2. Answering every question as
 before writes the old file with those four keys at their safe values,
-`redesignEscalation` at `never`, version 12, and nothing else different.
+`redesignEscalation` at `never`, `useCodex` as answered, version 13, and nothing
+else different. Ask the Codex question as *Whether Codex is used* says.
 
-A version-11 configuration is carried forward without an interview. Keep every
-value the file holds, drop `progressBoard` whatever its value, write version 12,
-validate it, and show the file as *Write* says. Tell the person in one sentence
-that the setting was retired and that nothing else changed. This path adds no
-`redesignEscalation`.
+A version-11 configuration is carried forward by asking one question: whether to
+use Codex, as *Whether Codex is used* says. Keep every value
+the file holds, drop `progressBoard` whatever its value, write `useCodex` as
+answered and version 13, validate it, and show the file as *Write* says. Tell the
+person in one sentence that `progressBoard` was retired, and that the Codex
+question is the only new thing. This path adds no `redesignEscalation`.
 
-A version-12 configuration without `redesignEscalation` is current: it needs no
+A version-12 configuration is carried forward the same way, asking only the Codex
+question. Keep every value the file holds, write `useCodex` as answered and
+version 13, validate it, and show the file as *Write* says. Tell the person in
+one sentence that nothing else changed.
+
+A version-13 configuration without `redesignEscalation` is current: it needs no
 reconfigure and behaves as `never`. A `--reconfigure` of it asks the question
 only when escalation is on.
 
-A version-12 configuration without `mergeWithOpenFindings` is current in the same
+A version-13 configuration without `mergeWithOpenFindings` is current in the same
 way: it needs no reconfigure and reads as off. A `--reconfigure` of it asks the
 question when `planBranch` is on.
 

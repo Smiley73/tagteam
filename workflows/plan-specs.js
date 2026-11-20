@@ -28,7 +28,7 @@ export const meta = {
   whenToUse: "Only /tagteam:plan starts this, with the plan directory, the plugin root, a run stamp and the first command. A request to plan work never calls for it directly: use /tagteam:plan instead.",
   phases: [
     { title: "Draft", detail: "the drafter writes, cuts or revises the plan" },
-    { title: "Review", detail: "the plan reviewer, the adversary and Codex read it, and the drafter answers what they found" },
+    { title: "Review", detail: "the plan reviewer and the adversary read it, and Codex too when the repository uses it, and the drafter answers what they found" },
     { title: "Specs", detail: "one spec writer per deliverable, and the specs checked" }
   ]
 };
