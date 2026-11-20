@@ -272,13 +272,14 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
-tell the person to run `/tagteam:configure` and stop. Only three keys have a
+tell the person to run `/tagteam:configure` and stop. Only four keys have a
 fallback in a script, so an older configuration is incomplete. They are
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
 written before it existed stayed current; `redesignEscalation`, which may be
-missing and reads as `never`; and `mergeWithOpenFindings`, which may be missing
-and reads as off. A version-13 file without either of those two stays current and
-needs no reconfigure. `autoMerge` is the
+missing and reads as `never`; `mergeWithOpenFindings`, which may be missing
+and reads as off; and `lensSettings`, which may be missing and means no lens has
+settings of its own. A version-13 file without any of those three stays current
+and needs no reconfigure. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
 it. Configure carries a version-9 or version-10 file forward: every value it
@@ -302,6 +303,7 @@ shape and is replaced.
 | `effort` | Per job: `implementer`, `fixer`, `reviewer`, `recheck`, `adversary`, `planner`, `codex` (needed only when `useCodex` is on). Measured defaults are high for the three that write or falsify, medium for reviewers and low for re-checks: at high effort more than half of a reviewer's output was its own thinking, and a re-check only has to say whether one fix landed |
 | `reviewers.roster` | Every lens a plan may assign. Each must have a brief, at `$R/.tagteam/lenses/<lens>.md` in this repository or `$P/prompts/lenses/<lens>.md` in the plugin — the repository's wins when both exist, and the validator reports the substitution. A name with a brief in neither place is refused |
 | `reviewers.default` | Lenses applied to every spec unless it drops one. Every lens is one more reader over every round of every spec |
+| `lensSettings` | `{}`, or a map from a lens in `reviewers.roster` to `{model, effort}`, both required, on the Claude models and efforts: that lens's reviewer runs at that pair in the review panel, its one re-send and a plan's resolve-round panel, and every other lens, re-check, adversary, Codex and escalation is unchanged. Each override costs that lens's reviewer at that pair on every round. Missing reads as `{}` |
 | `verify[]` | `{command, when: {globs, keywords}, timeoutSec}` |
 | `ciWaitSec` | How long to wait for checks, counted from when one appears; 0 skips CI |
 | `ciStartWaitSec` | How long a pull request whose commit has a workflow that runs on pull requests waits for its first check to appear, 0 to 3600. A missing key reads as 120; 0 turns the start wait off. No check by then stops for a person |

@@ -343,6 +343,8 @@ const ESCALATING_JOBS = new Set(["fix", "recheck-lens", "recheck-adversary", "re
  * round at `after: 1`, which is the setting a repository is most likely to
  * choose and the one the minimum of 1 exists to protect.
  *
+ * `lensJobs` is the pair of each lens that has one of its own, by lens.
+ *
  * `redesign` asks for the resolution of a redesign's implementer: with an
  * escalation block, `implement` and nothing else resolves from it, at any
  * counter. The caller decides whether a given redesign escalates; this only
@@ -362,11 +364,18 @@ export function resolveRoles(state, config, redesign = false) {
       escalated
     };
   }
+  // A lens with a pair of its own in `lensSettings` dispatches at that pair, which
+  // never escalates, and is named for the setting a person would correct. The
+  // others fall back to `jobs["review-lens"]`, which the caller looks up.
+  const lensJobs = {};
+  for (const [lens, own] of Object.entries(config?.lensSettings ?? {})) {
+    lensJobs[lens] = { model: own?.model ?? null, effort: own?.effort ?? null, escalated: false, name: `lensSettings.${lens}` };
+  }
   // The briefs ride along because this is read immediately before every
   // dispatching message that needs one — step 5's panel and step 7's re-check
   // both — so the model, the effort and the brief a reviewer is given all come
   // off the same read and cannot drift apart.
-  return { spec: state?.spec ?? null, fixRoundsUsed, jobs, briefs: state?.briefs ?? {} };
+  return { spec: state?.spec ?? null, fixRoundsUsed, jobs, lensJobs, briefs: state?.briefs ?? {} };
 }
 
 /**

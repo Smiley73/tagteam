@@ -169,6 +169,14 @@ names, internal ids. See *Asking* in the skill.
    briefs plus anything this repository calibrates in `.tagteam/lenses/`, which
    are equally selectable and, on a reconfigure, are usually the ones this
    project cares most about.
+
+   In the same call, ask `lensSettings`: should any lens run at a model or
+   effort of its own? Offer none first, and say that each override changes only
+   that lens's reviewer, at that lens's cost on every round of every spec it
+   reads; Codex, the adversary and the re-checks are not changed by it. Propose
+   no values. For each lens they name, ask for both a `model` and an `effort`,
+   from the same words question 2 and 3 take for the Claude roles; someone who
+   wants only a higher effort names the `lead` model beside it.
 7. `ciWaitSec` and `ciStartWaitSec`, asked only if the repository has
    workflows. Ask the start wait alongside the CI wait, as behaviour: "how long
    should a new pull request wait for its checks to start before this stops to
@@ -404,7 +412,7 @@ Say two things afterwards, because neither is visible from the file:
 
 Write `escalation` and `plan` as an explicit `null` unless the person has
 configured them; the only keys with a fallback are `ciStartWaitSec`,
-`redesignEscalation` and `mergeWithOpenFindings`, so any other omitted key is an
+`redesignEscalation`, `mergeWithOpenFindings` and `lensSettings`, so any other omitted key is an
 invalid file rather than an unused feature.
 `autoMerge` is the one key the file may omit without either, because nothing
 reads it — and this command always omits it.
@@ -437,6 +445,14 @@ Always write `mergeWithOpenFindings` as well, for the same reason as
 holds, or `false`. Under `--reconfigure` it is offered back with the value the
 file holds. When a version-9 or version-10 file is carried forward, or a version-11
 file, write it as `false`.
+
+Always write `lensSettings`, as `{}` when no lens has settings of its own: the
+answer the question under 6 gave, otherwise the entries the file holds. Under
+`--reconfigure`, and whenever a file is carried forward, offer those entries
+back, so a lens someone gave a pair of its own is not reset by a reconfigure
+about something else. When the roster loses a lens, drop that lens's entry and
+say so, because the validator refuses an entry for a lens that is not in the
+roster.
 
 A version-9 configuration is carried forward, not replaced. Run the interview as
 `--reconfigure` does, with every value the file holds offered back as the
