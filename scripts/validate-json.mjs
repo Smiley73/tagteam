@@ -9,6 +9,9 @@ import { assertNoSymlinkedSegment, assertSafeRelativePath } from "./lib/matcher.
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { REPO_LENS_DIR, RESERVED_ROLES, lensBrief, lensInventory, shippedLenses, untrackedBriefs } from "./lib/lenses.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { usesCodex } from "./lib/uses-codex.mjs";
+
+export { usesCodex };
 
 function typeMatches(value, expected) {
   if (expected === "null") return value === null;
@@ -153,6 +156,12 @@ export function validateJson(schema, value) {
 // `mergeWithOpenFindings` is the third, for the same reason: a missing one reads
 // as false, which is how every version-12 file already written behaves.
 //
+// `maxConcurrentCodex`, `models.codex`, `effort.codex` and the `codex` entries
+// under a non-null `escalation` or `plan` are a different kind of exception: no
+// script supplies a fallback for them, they are required only while `useCodex`
+// is on. The schema cannot say that, so it leaves them off `required` and
+// `semanticErrors` requires them.
+//
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its
 // absence is not a value anyone silently gets. It used to decide whether a pull
@@ -170,10 +179,6 @@ export function configStaleness(value) {
   const version = value?.version;
   return { stale: version !== CONFIG_VERSION, version };
 }
-
-// Whether the repository uses Codex, read off a parsed configuration. The one
-// home of the answer: a caller never reads `config.useCodex` for itself.
-export const usesCodex = (config) => config?.useCodex === true;
 
 // What the configured limits commit the repository to, as lines of text. The
 // numbers validate — there is no ceiling in the schema — but nobody works out
@@ -415,9 +420,26 @@ export function lensNotices(value, { repo } = {}) {
   return notices;
 }
 
-export function semanticErrors(schemaName, value, { repo } = {}) {
+export function semanticErrors(schemaName, value, { repo, schema } = {}) {
   const errors = [];
   if (schemaName !== "config.schema.json") return errors;
+
+  // The Codex-only keys are optional in the schema and required here while
+  // Codex is on: the schema has no `if`/`then`, and `anyOf` cannot name the key.
+  // Worded as the schema's own `is required` lines are.
+  if (usesCodex(value)) {
+    const isMap = (entry) => entry !== null && typeof entry === "object" && !Array.isArray(entry);
+    const needKey = (container, key, location, rule) => {
+      if (isMap(container) && !Object.hasOwn(container, key)) errors.push(`${location}.${key}: is required${describeField(rule, schema)}`);
+    };
+    needKey(value, "maxConcurrentCodex", "$", schema?.properties?.maxConcurrentCodex);
+    const blocks = [["", value], ["escalation.", value.escalation], ["plan.", value.plan]];
+    for (const [prefix, block] of blocks) {
+      if (!isMap(block)) continue;
+      needKey(block.models, "codex", `$.${prefix}models`, schema?.$defs?.roleModels?.properties?.codex);
+      needKey(block.effort, "codex", `$.${prefix}effort`, schema?.$defs?.jobEffort?.properties?.codex);
+    }
+  }
 
   const roster = new Set(value.reviewers?.roster ?? []);
   for (const lens of value.reviewers?.default ?? []) {
@@ -589,7 +611,7 @@ export function loadAndValidate(schemaPath, documentPath, options = {}) {
   const document = JSON.parse(fs.readFileSync(documentPath, "utf8"));
   const errors = [
     ...validateJson(schema, document),
-    ...semanticErrors(path.basename(schemaPath), document, options)
+    ...semanticErrors(path.basename(schemaPath), document, { ...options, schema })
   ];
   return { schema, document, errors };
 }

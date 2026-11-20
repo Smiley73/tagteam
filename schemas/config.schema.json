@@ -6,14 +6,14 @@
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "worktree", "reviewExclude",
-    "maxConcurrentCodex", "limits", "escalation", "plan", "planBranch", "versionFiles",
+    "limits", "escalation", "plan", "planBranch", "versionFiles",
     "carry", "autoRedesign", "useCodex"
   ],
   "properties": {
     "version": { "const": 13, "type": "integer" },
     "useCodex": {
       "type": "boolean",
-      "description": "Whether Codex is a second reviewer in this repository. When false, /tagteam:configure runs neither Codex check, /tagteam:plan makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex` and the Codex entries under `plan` and `escalation`) are still required and still written."
+      "description": "Whether Codex is a second reviewer in this repository. When false, /tagteam:configure runs neither Codex check, /tagteam:plan makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex` and the Codex entries under `plan` and `escalation`) are required only when this is true; when it is false they may be missing, and are not asked about."
     },
     "base": {
       "type": "string",
@@ -53,7 +53,7 @@
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
-          "description": "Lenses applied to every spec unless that spec removes one. A Codex cross-review, when `useCodex` is on, and the adversary run in addition, always."
+          "description": "Lenses applied to every spec unless that spec removes one. The adversary runs in addition, always, and a Codex cross-review runs only when `useCodex` is on."
         }
       }
     },
@@ -128,7 +128,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 16,
-      "description": "How many Codex calls may run at once across this repository. The cap spans every ship running here rather than allowing this many per ship, so raise it if you ship several plans at the same time."
+      "description": "Required only when `useCodex` is on. How many Codex calls may run at once across this repository. The cap spans every ship running here rather than allowing this many per ship, so raise it if you ship several plans at the same time."
     },
     "limits": {
       "type": "object",
@@ -243,8 +243,8 @@
     "roleModels": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lead", "worker", "codex"],
-      "description": "The model each role is dispatched at. `lead` is every reader and planner (reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer); `worker` is the implementer and the fixer; `codex` is the model every Codex call runs. Every site carrying a role triple $refs this one, so a role added here is a role added everywhere. Note that `validate-json.mjs` returns on a $ref: a keyword written beside one of those $refs is silently ignored, so anything extra a site needs belongs here instead. Codex model names are not enumerable, which is why `codex` is a non-empty string.",
+      "required": ["lead", "worker"],
+      "description": "The model each role is dispatched at. `lead` is every reader and planner (reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer); `worker` is the implementer and the fixer; `codex` is the model every Codex call runs, and is required only when `useCodex` is on. Every site carrying a role triple $refs this one, so a role added here is a role added everywhere. Note that `validate-json.mjs` returns on a $ref: a keyword written beside one of those $refs is silently ignored, so anything extra a site needs belongs here instead. Codex model names are not enumerable, which is why `codex` is a non-empty string.",
       "properties": {
         "lead": { "$ref": "#/$defs/claudeModel" },
         "worker": { "$ref": "#/$defs/claudeModel" },
@@ -254,8 +254,8 @@
     "jobEffort": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner", "codex"],
-      "description": "The thinking effort each job is dispatched at. A reader that only has to answer whether one fix landed (`recheck`) needs less than a reader looking for what is wrong (`reviewer`), which needs less than the one writing the code (`implementer`). `planner` covers the explorer, the plan-drafter, the plan-reviewer and the spec-writer; `adversary` covers both the plan adversary and the code adversary; `codex` covers every Codex call. Every site carrying an effort map $refs this one. The Codex ladder is its own inline list rather than a $ref to the Claude one, though the two now hold the same words: `$defs.claudeEffort` is the ladder Claude dispatches are checked against, and Codex's words are Codex's to change.",
+      "required": ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner"],
+      "description": "The thinking effort each job is dispatched at. A reader that only has to answer whether one fix landed (`recheck`) needs less than a reader looking for what is wrong (`reviewer`), which needs less than the one writing the code (`implementer`). `planner` covers the explorer, the plan-drafter, the plan-reviewer and the spec-writer; `adversary` covers both the plan adversary and the code adversary; `codex` covers every Codex call and is required only when `useCodex` is on. Every site carrying an effort map $refs this one. The Codex ladder is its own inline list rather than a $ref to the Claude one, though the two now hold the same words: `$defs.claudeEffort` is the ladder Claude dispatches are checked against, and Codex's words are Codex's to change.",
       "properties": {
         "implementer": { "$ref": "#/$defs/claudeEffort" },
         "fixer": { "$ref": "#/$defs/claudeEffort" },

@@ -43,9 +43,8 @@ On a first configure, offer yes first and say what it requires: the Codex CLI at
 file holds as the default; a file without one is offered yes, which is what that
 repository has been running. Question 2 offers `codex: <installed model>` from
 what the probe reported, so this runs before the numbered questions. With Codex
-off there is no probe to name an installed model: offer the value the file holds,
-or `examples/config.json`'s, for `models.codex`, and the same for the Codex
-effort.
+off there is no probe and no Codex question to ask: *Then ask* says what it
+leaves out.
 
 Both Codex rows check the binary the reviews will run: `TAGTEAM_CODEX_BIN` when
 it is set, otherwise `codex` on the PATH. Each exits non-zero with the reason on
@@ -111,12 +110,13 @@ names, internal ids. See *Asking* in the skill.
 2. `models` — which model reads and plans (`lead`: every reviewer, re-check,
    adversary, explorer, drafter and spec writer), which one writes code
    (`worker`: the implementer and the fixer), and which Codex model every Codex
-   call uses (`codex`). Offer `lead: opus`, `worker: sonnet`, `codex: <installed
-   model>` and let them override. Sonnet is the floor for `worker`; see
-   `$P/skills/tagteam/SKILL.md` for why.
+   call uses (`codex`; with Codex off, leave that one out). Offer `lead: opus`,
+   `worker: sonnet`, `codex: <installed model>` and let them override. Sonnet is
+   the floor for `worker`; see `$P/skills/tagteam/SKILL.md` for why.
 3. `effort` — how hard each job thinks, one setting per job: `implementer`,
    `fixer`, `reviewer`, `recheck`, `adversary`, `planner` (the explorer, the
-   drafter, the plan reviewer and the spec writer together) and `codex`. Offer
+   drafter, the plan reviewer and the spec writer together) and `codex` (with
+   Codex off, leave that one out). Offer
    the measured defaults and say why they differ: `implementer` and `fixer`
    `high` because they write the code; `adversary` `high` because it is the one
    reader looking for what everyone else missed; `reviewer` `medium`, because
@@ -136,7 +136,8 @@ names, internal ids. See *Asking* in the skill.
    effort of your own; if they turn it on, ask them for the settings: after how
    many unsettled fix rounds the raised ones take over — at least 1, because the
    ordinary settings always get a fix round — and the raised `models` for the
-   three roles and `effort` for the seven jobs.
+   three roles and `effort` for the seven jobs. With Codex off, it is two roles
+   and six jobs: leave the `codex` model and effort out.
 
    When it is on, a follow-up rides in the next call, because only that answer
    needs it: should a rewrite chosen from the "rewrite this area?" question run
@@ -158,9 +159,10 @@ names, internal ids. See *Asking* in the skill.
    turn it on, ask them for the `lead` and `codex` models and the `planner`,
    `adversary` and `codex` efforts, the settings the plan cycle actually
    dispatches at; carry the rest over from questions 2 and 3 without asking.
+   With Codex off, leave the `codex` model and effort out.
 6. `reviewers.default`. Recommend `correctness`, `code-quality` and `economy`,
-   and explain that Codex and the adversary run on every spec regardless, so a
-   typical spec gets five readers, that every lens is one more reader over every
+   and explain that Codex (when it is on) and the adversary run on every spec
+   regardless, so a typical spec gets five readers, or four with Codex off, that every lens is one more reader over every
    round of every spec, and that `economy` is the one reader asking what the
    change could do without — the only lens whose findings make a diff smaller.
    Show the full roster and let them pick from it — the shipped
@@ -283,15 +285,18 @@ names, internal ids. See *Asking* in the skill.
     say in one sentence that carrying settings exist and take effect only with
     `planBranch` on.
 
-With `useCodex` off, questions 2, 3 and 5 still name the Codex model and effort,
-and `maxConcurrentCodex` is still written: those keys stay required and nothing
-reads them until Codex is turned on.
+With `useCodex` off, questions 2, 3, 4 and 5 leave out the `codex` model and
+effort, and `maxConcurrentCodex` is not offered. Write none of those keys into a
+fresh file: the configuration needs them only while Codex is on. A key an
+existing file already holds is carried forward unchanged, so turning Codex back
+on later offers the values back as the current ones.
 
 Everything else takes its default: `branchPrefix` `tagteam/`,
-`maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
-`examples/config.json`.
+`maxConcurrentCodex` 3 (only with Codex on), `setupTimeoutSec` 900, the full
+roster from `examples/config.json`.
 
-`maxConcurrentCodex` is the one of those worth a sentence when you show the file:
+With Codex on, `maxConcurrentCodex` is the one of those worth a sentence when you
+show the file:
 it caps Codex calls for the whole repository, and that cap now spans every ship
 running in it rather than giving each of them its own — two plans shipping from
 this checkout at once share those three slots and each waits on the other's
