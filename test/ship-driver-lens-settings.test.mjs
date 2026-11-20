@@ -68,6 +68,28 @@ test("with no lensSettings, and with an empty one, every lens reviewer runs at t
   }
 });
 
+test("a custom lens named like an inherited property runs at the shared pair rather than at the Object constructor", () => {
+  const staged = stageLens(undefined);
+  const { repo, plan, configFile } = staged;
+  const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
+  config.reviewers.roster = [...config.reviewers.roster, "constructor"];
+  fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+  fs.mkdirSync(path.join(repo, ".tagteam", "lenses"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".tagteam", "lenses", "constructor.md"), "# Lens: constructor\n\nWhat to look for.\n");
+  const specFile = path.join(plan, "specs", "01-a.md");
+  fs.writeFileSync(specFile, fs.readFileSync(specFile, "utf8").replace("reviewers: [security]", "reviewers: [constructor]"));
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "constructor lens");
+  git(repo, "push", "origin", "main");
+  toVerified(staged);
+  const panel = ship("panel", plan, ["--spec", "01-a"]);
+  assert.equal(panel.status, 0, panel.stderr);
+  const dispatch = panel.json.dispatch.find((entry) => lensOf(entry) === "constructor");
+  assert.deepEqual(pairOf(dispatch), SHARED);
+  assert.match(panel.json.say[0], /code-quality, constructor, correctness \(opus at medium effort\)/);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
+});
+
 test("a lens with a pair of its own is dispatched, recorded and named at it, the other lenses stay shared, and the re-send keeps it while its re-check does not", () => {
   const staged = stageLens({ security: OWN });
   const { plan, shipDir } = staged;

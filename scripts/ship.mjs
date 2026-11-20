@@ -370,14 +370,16 @@ const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ?
 
 // A lens reviewer's job: the pair `lensSettings` gives that lens, else the
 // shared `review-lens` one. Only the panel and its re-sends ask this; the
-// whole-plan reviewer and the re-checks take their jobs by name.
-const lensJobOf = (resolved, lens) => resolved.lensJobs?.[lens] ?? resolved.jobs["review-lens"];
+// whole-plan reviewer and the re-checks take their jobs by name. A lens named
+// like an inherited property (`constructor`) has no pair of its own.
+const ownLensJob = (resolved, lens) => (resolved.lensJobs && Object.hasOwn(resolved.lensJobs, lens) ? resolved.lensJobs[lens] : undefined);
+const lensJobOf = (resolved, lens) => ownLensJob(resolved, lens) ?? resolved.jobs["review-lens"];
 
 // The lenses of a panel as the person hears of them: those at the shared pair
 // together, then each lens with a pair of its own.
 function lensLine(resolved, lenses) {
-  const shared = lenses.filter((lens) => !resolved.lensJobs?.[lens]);
-  const own = lenses.filter((lens) => resolved.lensJobs?.[lens]);
+  const shared = lenses.filter((lens) => !ownLensJob(resolved, lens));
+  const own = lenses.filter((lens) => ownLensJob(resolved, lens));
   return [
     ...(shared.length > 0 || own.length === 0 ? [`${shared.join(", ")} (${settings(resolved.jobs["review-lens"])})`] : []),
     ...own.map((lens) => `${lens} (${settings(lensJobOf(resolved, lens))})`)
@@ -3095,7 +3097,7 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
     : null;
   const codexAt = usesCodex(ctx.config) ? `; Codex ${settings(codexJob)}` : "";
   const panelled = lenses.filter((lens) => lens !== "codex");
-  const alone = !panelled.some((lens) => resolved.lensJobs?.[lens]);
+  const alone = !panelled.some((lens) => ownLensJob(resolved, lens));
   return { agents, sent, codexRefused, settings: alone ? `${panelled.join(", ")} (${settings(resolved.jobs["review-lens"])}${codexAt})` : `${lensLine(resolved, panelled)}${codexAt}` };
 }
 
