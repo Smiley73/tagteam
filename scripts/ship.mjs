@@ -368,6 +368,24 @@ const record = (ctx, id, gate, oid, file) => node("gates.mjs", ["record", stateP
 const agent = (base, job) => ({ agent: `tagteam:${base}`, model: job.model, effort: job.effort });
 const settings = (job) => `${job.model} at ${job.effort} effort${job.escalated ? " (raised: escalation is in force)" : ""}`;
 
+// A lens reviewer's job: the pair `lensSettings` gives that lens, else the
+// shared `review-lens` one. Only the panel and its re-sends ask this; the
+// whole-plan reviewer and the re-checks take their jobs by name. A lens named
+// like an inherited property (`constructor`) has no pair of its own.
+const ownLensJob = (resolved, lens) => (resolved.lensJobs && Object.hasOwn(resolved.lensJobs, lens) ? resolved.lensJobs[lens] : undefined);
+const lensJobOf = (resolved, lens) => ownLensJob(resolved, lens) ?? resolved.jobs["review-lens"];
+
+// The lenses of a panel as the person hears of them: those at the shared pair
+// together, then each lens with a pair of its own.
+function lensLine(resolved, lenses) {
+  const shared = lenses.filter((lens) => !ownLensJob(resolved, lens));
+  const own = lenses.filter((lens) => ownLensJob(resolved, lens));
+  return [
+    ...(shared.length > 0 || own.length === 0 ? [`${shared.join(", ")} (${settings(resolved.jobs["review-lens"])})`] : []),
+    ...own.map((lens) => `${lens} (${settings(lensJobOf(resolved, lens))})`)
+  ].join(", ");
+}
+
 // Where the repository's conventions document is: the primary checkout's copy,
 // not the worktree's, so that every agent of a run reads the same file. `none`
 // when the configuration names no document.
@@ -3052,18 +3070,18 @@ function markerSizesOf(ctx, paths) {
 async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {}) {
   let briefs;
   try { briefs = resolveLensBriefs(lenses.filter((lens) => lens !== "codex"), { repo: ctx.repo }); } catch (error) { throw Stop.raw(error.message, "the review lenses could not be read"); }
-  const { jobs } = resolveJobs(ctx);
-  const lensJob = jobs["review-lens"];
-  const codexJob = jobs["review-codex"];
+  const resolved = resolveJobs(ctx);
+  const codexJob = resolved.jobs["review-codex"];
   const dir = attemptDirOf(ctx, record.n, attempt.k);
   // Nothing stands against a resolve round, but Codex's template takes a list
   // all the same; its Claude readers are given none and rule on none.
   const items = itemsFile(dir, { candidate: attempt.mergeOid, candidates: [], items: [] });
   const account = writeRoundFile(path.join(dir, "account.json"), `${JSON.stringify({ candidate: null, lines: [] }, null, 2)}\n`);
   const target = { label: resolveLabel(record), specPath: resolveBriefPath(ctx, record.n), dir };
-  const agents = lenses.filter((lens) => lens !== "codex").map((lens) => ({
-    dispatch: reviewerDispatch(ctx, target, attempt.mergeOid, lens, briefs[lens], lensJob), job: lensJob, name: reviewerName(lens)
-  }));
+  const agents = lenses.filter((lens) => lens !== "codex").map((lens) => {
+    const lensJob = lensJobOf(resolved, lens);
+    return { dispatch: reviewerDispatch(ctx, target, attempt.mergeOid, lens, briefs[lens], lensJob), job: lensJob, name: reviewerName(lens) };
+  });
   let codexRefused = false;
   if (usesCodex(ctx.config) && (!resend || lenses.includes("codex"))) {
     const reviewed = attempt.lenses ?? lenses;
@@ -3077,7 +3095,10 @@ async function resolvePanel(ctx, record, attempt, { lenses, resend = false } = {
       kind: resend ? "resolve-resend" : "resolve-panel", round: attempt.k, agents, step: "resolve-collect", home: resolveDirOf(ctx, record.n)
     })
     : null;
-  return { agents, sent, codexRefused, settings: `${settings(lensJob)}${usesCodex(ctx.config) ? `; Codex ${settings(codexJob)}` : ""}` };
+  const codexAt = usesCodex(ctx.config) ? `; Codex ${settings(codexJob)}` : "";
+  const panelled = lenses.filter((lens) => lens !== "codex");
+  const alone = !panelled.some((lens) => ownLensJob(resolved, lens));
+  return { agents, sent, codexRefused, settings: alone ? `${panelled.join(", ")} (${settings(resolved.jobs["review-lens"])}${codexAt})` : `${lensLine(resolved, panelled)}${codexAt}` };
 }
 
 /**
@@ -4544,19 +4565,21 @@ async function panel(options) {
   const resolved = roles(ctx, id);
   const lenses = state.reviewers;
   const pr = pullRequestLines(ctx, id, state);
-  const lensJob = resolved.jobs["review-lens"];
   const codexJob = resolved.jobs["review-codex"];
   const target = specTarget(ctx, spec, round.round, writeItems(ctx, id, state, round.round), writeAccount(ctx, spec, round.round));
-  const agents = lenses.map((lens) => ({
-    dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
-    job: lensJob,
-    name: reviewerName(lens)
-  }));
+  const agents = lenses.map((lens) => {
+    const lensJob = lensJobOf(resolved, lens);
+    return {
+      dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
+      job: lensJob,
+      name: reviewerName(lens)
+    };
+  });
   if (usesCodex(ctx.config)) agents.push({ dispatch: codexReviewDispatch(ctx, target, state.candidateOid, lenses, codexJob), job: codexJob, name: "Codex" });
   const sent = await sendSet(ctx, id, { kind: "panel", round: round.round, agents, step: "collect" });
   writeJson(collectSetPath(ctx, id), { round: round.round, candidate: state.candidateOid, set: sent.id, at: new Date().toISOString() });
   emit({
-    say: [`Review panel on round ${round.round}: ${lenses.join(", ")} (${settings(resolved.jobs["review-lens"])})${usesCodex(ctx.config) ? ` plus Codex (${settings(resolved.jobs["review-codex"])})` : ""}.`, ...pr.say],
+    say: [`Review panel on round ${round.round}: ${lensLine(resolved, lenses)}${usesCodex(ctx.config) ? ` plus Codex (${settings(resolved.jobs["review-codex"])})` : ""}.`, ...pr.say],
     dispatch: agents.map((entry) => entry.dispatch),
     set: setPayload(sent),
     next: nextCommand(ctx, "collect", id)
@@ -4609,14 +4632,16 @@ async function collect(options) {
     if (!exists(marker)) {
       const resolved = roles(ctx, id);
       const pr = pullRequestLines(ctx, id, state);
-      const lensJob = resolved.jobs["review-lens"];
       const codexJob = resolved.jobs["review-codex"];
       const target = specTarget(ctx, spec, round.round, items, writeAccount(ctx, spec, round.round));
-      const agents = missing.filter((lens) => lens !== "codex").map((lens) => ({
-        dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
-        job: lensJob,
-        name: reviewerName(lens)
-      }));
+      const agents = missing.filter((lens) => lens !== "codex").map((lens) => {
+        const lensJob = lensJobOf(resolved, lens);
+        return {
+          dispatch: reviewerDispatch(ctx, target, state.candidateOid, lens, resolved.briefs[lens], lensJob, pr.lines),
+          job: lensJob,
+          name: reviewerName(lens)
+        };
+      });
       say.push(...pr.say);
       let resending = missing;
       if (missing.includes("codex")) {
@@ -6105,7 +6130,7 @@ async function resolveCommit(options) {
   attempt.resendSet = null;
   attempt.phase = "panel";
   saveRecord(ctx, record);
-  say.push(`Review panel on the resolution of attempt ${attempt.k}: ${lenses.join(", ")} (${panelAt}). They read only what this `
+  say.push(`Review panel on the resolution of attempt ${attempt.k}: ${panelAt}. They read only what this `
     + "merge does differently from git's own merge, and a blocking or major finding throws the attempt away.");
   emit({ say, dispatch: agents.map((entry) => entry.dispatch), set: setPayload(sent), next: nextCommand(ctx, "resolve-collect", id) });
 }

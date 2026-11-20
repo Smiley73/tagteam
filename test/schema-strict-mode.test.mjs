@@ -92,6 +92,8 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 //   bump for the same reason; the ship reads a missing one as `never`.
 // - `mergeWithOpenFindings` in the configuration, the third such key; the ship
 //   reads a missing one as false.
+// - `lensSettings` in the configuration, the fourth: a missing one means no lens
+//   has settings of its own, and its entries are required to carry both fields.
 // - `autoMerge` in the configuration, which nothing reads any more and which
 //   stays declared so a file that carries it is not refused for it.
 // - `maxConcurrentCodex` at the root of the configuration, and `codex` in its
@@ -108,6 +110,7 @@ const DELIBERATELY_OPTIONAL = [
   { schema: "config.schema.json", property: "ciStartWaitSec" },
   { schema: "config.schema.json", property: "redesignEscalation" },
   { schema: "config.schema.json", property: "mergeWithOpenFindings" },
+  { schema: "config.schema.json", property: "lensSettings" },
   { schema: "config.schema.json", property: "autoMerge" },
   { schema: "config.schema.json", property: "maxConcurrentCodex" },
   { schema: "config.schema.json", property: "codex", at: "/$defs/roleModels" },

@@ -49,7 +49,7 @@ const CONSUMED = [
   // resolves a dotted key through `?.` against `examples/config.json` and asserts
   // it is not undefined, and a nullable key has no sub-keys to resolve in an
   // example that leaves it null.
-  ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation"]],
+  ["scripts/gates.mjs", ["base", "limits.fixRounds", "limits.ciRepairs", "models", "effort", "escalation", "lensSettings"]],
   ["scripts/ship.mjs", ["base", "branchPrefix", "conventionsPath", "maxConcurrentCodex", "ciWaitSec", "ciStartWaitSec", "planBranch", "redesignEscalation", "mergeWithOpenFindings"]],
   ["scripts/plan.mjs", ["models", "effort", "plan"]],
   ["scripts/probe-codex.mjs", ["models"]]
@@ -1541,6 +1541,27 @@ test("a current file without mergeWithOpenFindings, or with true or false, is va
   }
 });
 
+test("lensSettings: a file without it, or with an empty one, is valid and current; an entry the roster, the Claude models or the effort ladder refuses is refused naming the entry", () => {
+  const dir = versionRepo();
+  const { lensSettings, ...without } = example;
+  for (const config of [without, example, { ...example, lensSettings: { security: { model: "opus", effort: "high" } } }]) {
+    const result = validateFile(dir, config);
+    assert.equal(result.status, 0, `${JSON.stringify(config.lensSettings)}: expected exit 0, got ${result.status}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
+  }
+  const refused = [
+    [{ docs: { model: "opus", effort: "high" } }, /lensSettings\.docs is for a lens that is not in reviewers\.roster/],
+    [{ security: { model: "haiku", effort: "high" } }, /\$\.lensSettings\.security\.model: expected one of opus, fable, sonnet/],
+    [{ security: { model: "opus", effort: "extreme" } }, /\$\.lensSettings\.security\.effort: expected one of low, medium, high, xhigh, max/],
+    [{ security: { model: "opus" } }, /\$\.lensSettings\.security\.effort: is required/]
+  ];
+  for (const [entries, message] of refused) {
+    const result = validateFile(dir, { ...example, lensSettings: entries });
+    assert.equal(result.status, 1, `${JSON.stringify(entries)} must be invalid: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, message);
+  }
+});
+
 test("redesignEscalation refuses any other value, naming the key", () => {
   const dir = versionRepo();
   for (const bad of ["sometimes", "Always", "", true, false, null, 1]) {
@@ -1550,15 +1571,16 @@ test("redesignEscalation refuses any other value, naming the key", () => {
   }
 });
 
-test("ciStartWaitSec, redesignEscalation, mergeWithOpenFindings, maxConcurrentCodex and the accepted-and-ignored keys are the only root properties missing from required", () => {
+test("ciStartWaitSec, redesignEscalation, mergeWithOpenFindings, lensSettings, maxConcurrentCodex and the accepted-and-ignored keys are the only root properties missing from required", () => {
   // Each exception is one key wide: `ciStartWaitSec`, which a script reads as
   // 120 when it is missing, `redesignEscalation`, which the ship reads as
-  // `never`, `mergeWithOpenFindings`, which it reads as false, `autoMerge`,
+  // `never`, `mergeWithOpenFindings`, which it reads as false, `lensSettings`,
+  // whose absence means no lens has settings of its own, `autoMerge`,
   // which nothing reads at all, and `maxConcurrentCodex`, which is required only
   // while Codex is on and is held to that by `requiredWithCodex`. Another key quietly
   // going optional would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
-  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "maxConcurrentCodex", "mergeWithOpenFindings", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
+  assert.deepEqual(optional.sort(), ["ciStartWaitSec", "lensSettings", "maxConcurrentCodex", "mergeWithOpenFindings", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
   assert.equal(schema.properties.version.const, 13);
 });
 

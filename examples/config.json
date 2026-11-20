@@ -71,5 +71,6 @@
   "versionFiles": [],
   "carry": false,
   "autoRedesign": false,
-  "mergeWithOpenFindings": false
+  "mergeWithOpenFindings": false,
+  "lensSettings": {}
 }

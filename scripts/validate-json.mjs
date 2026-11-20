@@ -162,6 +162,7 @@ export function validateJson(schema, value) {
 // version-12 file stale for a setting whose absence changes nothing.
 // `mergeWithOpenFindings` is the third, for the same reason: a missing one reads
 // as false, which is how every version-12 file already written behaves.
+// `lensSettings` is the fourth: a missing one means no lens has settings of its own.
 //
 // `maxConcurrentCodex`, `models.codex`, `effort.codex` and the `codex` entries
 // under a non-null `escalation` or `plan` are a different kind of exception: no
@@ -441,6 +442,10 @@ export function semanticErrors(schemaName, value, { repo } = {}) {
   const roster = new Set(value.reviewers?.roster ?? []);
   for (const lens of value.reviewers?.default ?? []) {
     if (!roster.has(lens)) errors.push(`reviewers.default names ${lens}, which is not in reviewers.roster`);
+  }
+
+  for (const lens of Object.keys(value.lensSettings ?? {})) {
+    if (!roster.has(lens)) errors.push(`lensSettings.${lens} is for a lens that is not in reviewers.roster`);
   }
 
   // `adversary` and `codex` are roles, not lenses a plan may pick. Both run on
