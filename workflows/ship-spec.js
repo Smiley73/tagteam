@@ -134,9 +134,7 @@ async function readStepAnswer(agent, prompt, options, accepts) {
       `${prompt}\n\nRe-read: this answer was already copied once and the copy failed the run's check. The command has run; the start text launches nothing now. Paste the same texts and copy the saved answer again.`,
       { ...options, label: `${options.label} (re-read)` }
     );
-  } catch {
-    second = null;
-  }
+  } catch {}
   if (second === null || second === undefined) return { outcome: "failed", identical: false };
   if (accepts(second)) return { outcome: "reread", result: second };
   const canonical = (value) => JSON.stringify(value, (key, inner) => (inner && typeof inner === "object" && !Array.isArray(inner)

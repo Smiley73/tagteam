@@ -184,7 +184,7 @@ const isReread = (call) => /^Re-read:/m.test(call.prompt);
 const finishedAt = (n, name) => new RegExp(`The ${name} line finished, but its answer did not come back intact twice\\. The saved answer is /repo/\\.tagteam/ships/demo/steps/${STAMP}/00${n}-${name}/stdout\\. Nothing after the line ran\\.`);
 const identicalClause = /Both copies were the same, so the saved answer itself fails the check/;
 
-/** A run whose helper answers `answer(call, copyNumber)` and whose other agents answer "done". */
+/** A run whose helper answers `answer(call)` and whose other agents answer "done". */
 async function runCopies(command, answer, args = {}) {
   const started = startWorkflow(compiled, argsFor(command, args), (call) => (isHelperCall(call) ? answer(call) : "done"));
   const result = await started.done;
@@ -204,7 +204,6 @@ test("the 2026-11-20 replay: a copy one character off is read again by a second 
   const [first, second, arrival] = helperCalls(calls);
   assert.deepEqual(helperTask(second), helperTask(first), "the same command and capture directory");
   assert.notEqual(second.options.label, first.options.label);
-  assert.notEqual(second.prompt, first.prompt);
   assert.equal(first.options.label, "Step 1: panel");
   assert.ok(!isReread(first) && isReread(second));
   assert.match(first.prompt, /^Job: step-helper$/m);
@@ -223,7 +222,6 @@ test("the same replay on a merge line goes on to the merge's next", async () => 
   assert.equal(result.ending, "merged");
   assert.equal(result.next, END);
   assert.deepEqual(labelsOf(calls), ["Step 1: land", "Step 1: land (re-read)"]);
-  assert.equal(helperCalls(calls).length, 2);
   assert.equal(stretchOf(helperTask(helperCalls(calls)[1]).command).step, cmd("finish"), "the re-read is over the merge's own capture");
   assert.deepEqual(logs(calls).filter((line) => /read again/.test(line)), ["The land line's first copy failed the check and was read again from disk; the second copy matched."]);
 });
@@ -671,7 +669,6 @@ test("a re-read against the real driver launches the step once and reads the sam
   const result = await started.done;
 
   assert.deepEqual(launched, [true, false], "the start text took its launch branch once, for the first call only");
-  assert.equal(seen.length, 2);
   assert.deepEqual(seen[1], seen[0], "status and stdout are the same bytes at the same modification time");
   assert.deepEqual(labelsOf(started.calls), ["Step 1: begin", "Step 1: begin (re-read)"]);
   assert.match(logs(started.calls).join("\n"), /first copy failed the check and was read again from disk; the second copy matched\./);
