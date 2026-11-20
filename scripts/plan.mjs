@@ -578,6 +578,8 @@ function explorerPrompt(ctx) {
   ].join("\n");
 }
 
+const rosterLine = (ctx) => `The lens roster, the only lenses a spec's front matter may name: ${(ctx.config.reviewers?.roster ?? []).join(", ")}`;
+
 function drafterPrompt(ctx, purpose, refusal) {
   const work = { cut: ["cut", "cut"], revise: ["revise", "revised"], dependencies: ["correct", "corrected"] }[purpose];
   return [
@@ -594,6 +596,7 @@ function drafterPrompt(ctx, purpose, refusal) {
             "Correct the depends-on entries so each names a spec from the table (a row number also works), and none names its own spec or closes a cycle. Change nothing else that this does not require."]
           : []),
     ...inputs(ctx, "goal", "exploration"),
+    rosterLine(ctx),
     ...(work ? [`Plan to ${work[0]}: ${ctx.plan}`] : []),
     `Write ${work ? `the ${work[1]} plan` : "the plan"} to: ${ctx.plan}`
   ].join("\n");
@@ -638,6 +641,7 @@ function writerPart(ctx, row, note = null) {
       `Conventions document: ${ctx.config.conventionsPath ? path.join(ctx.repo, ctx.config.conventionsPath) : "none"}`,
       `Your row: ${row.row}`,
       `The default lens set, which your front matter names exceptions to: ${(ctx.config.reviewers?.default ?? []).join(", ")}`,
+      rosterLine(ctx),
       `Write your spec to: ${spec}`
     ].join("\n")
   };

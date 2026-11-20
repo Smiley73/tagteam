@@ -12,6 +12,8 @@ import { arriveInto, planEnv, runScript, stagePlanWorkspace, stageTranscript } f
 
 const write = (file, value) => fs.writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
 const setsDir = (ws) => path.join(ws.D, "work", "sets");
+const ROSTER_LINE = "The lens roster, the only lenses a spec's front matter may name: "
+  + "correctness, resilience, security, architecture, code-quality, experience, consistency, cost, economy, docs";
 const finding = (severity, title) => ({ severity, where: "deliverable 1", title, detail: "grounded in a file", remedy: "cut it" });
 const review = (reader, findings = []) => ({ reviewer: reader, summary: `${reader} read the plan`, findings });
 const spec = (id, depends = "[]") => `---\nid: ${id}\ndepends_on: ${depends}\nreviewers: []\n---\n\n## Outcome\nSomething.\n\n## Sign-offs\nNone.\n`;
@@ -94,6 +96,7 @@ test("a plan runs from the explorer to validated specs, each step recording its 
   assert.equal(draft.status, 0, draft.stderr);
   assert.equal(draft.json.dispatch[0].description, "Draft the plan");
   assert.match(draft.json.dispatch[0].prompt, /^Job: plan-drafter$/m);
+  assert.ok(draft.json.dispatch[0].prompt.split("\n").includes(ROSTER_LINE));
   write(path.join(ws.D, "plan.md"), PLAN);
   const drafted = arrive(ws, draft);
   assert.equal(command(drafted.json.next), "review");
@@ -154,6 +157,7 @@ test("a plan runs from the explorer to validated specs, each step recording its 
   assert.match(first.prompt, /^Your row: # ?: 1 · spec: 01-a · delivers: a · depends on: —$/m);
   assert.ok(first.prompt.includes(`Conventions document: ${path.join(ws.repo, "CONTRIBUTING.md")}\n`));
   assert.match(first.prompt, /^The default lens set, which your front matter names exceptions to: correctness, code-quality$/m);
+  assert.ok(first.prompt.split("\n").includes(ROSTER_LINE));
   assert.match(first.prompt, new RegExp(`^Write your spec to: ${path.join(ws.D, "specs", "01-a.md")}$`, "m"));
   write(path.join(ws.D, "specs", "01-a.md"), spec("01-a"));
   write(path.join(ws.D, "specs", "01-b.md"), spec("01-b", "[01-a]"));

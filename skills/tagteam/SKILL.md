@@ -326,7 +326,7 @@ shape and is replaced.
 ### Lens briefs
 
 A rostered lens is a reviewer that can be dispatched, and one file calibrates it.
-The plugin ships nine under `prompts/lenses/`; a repository writes its own
+The plugin ships ten under `prompts/lenses/`; a repository writes its own
 under `.tagteam/lenses/`, which is how a roster names a lens the plugin has no
 brief for — `financial`, `math`, whatever this codebase's correctness actually
 turns on. A brief is a markdown file whose first line is a `# Lens: …` heading;
@@ -334,6 +334,9 @@ an empty file, a stray note, a symlink or a directory is refused by name rather
 than treated as calibration, because a reviewer with nothing to read invents the
 lens and files findings the review gate, the merge decision and the pull request
 body all count as a calibrated reviewer's.
+
+`docs` is the shipped lens for specs that change documentation. The spec writer
+assigns it only when the repository's roster names it, and it is not a default.
 
 Resolution is **repository first**, against the primary checkout and never the
 worktree. `gates.mjs init` resolves each lens once per spec and freezes the paths

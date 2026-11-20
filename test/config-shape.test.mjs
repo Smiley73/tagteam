@@ -1550,7 +1550,7 @@ test("lensSettings: a file without it, or with an empty one, is valid and curren
     assert.doesNotMatch(result.stdout, /run \/tagteam:configure/);
   }
   const refused = [
-    [{ docs: { model: "opus", effort: "high" } }, /lensSettings\.docs is for a lens that is not in reviewers\.roster/],
+    [{ financial: { model: "opus", effort: "high" } }, /lensSettings\.financial is for a lens that is not in reviewers\.roster/],
     [{ security: { model: "haiku", effort: "high" } }, /\$\.lensSettings\.security\.model: expected one of opus, fable, sonnet/],
     [{ security: { model: "opus", effort: "extreme" } }, /\$\.lensSettings\.security\.effort: expected one of low, medium, high, xhigh, max/],
     [{ security: { model: "opus" } }, /\$\.lensSettings\.security\.effort: is required/]
