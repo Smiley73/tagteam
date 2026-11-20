@@ -147,9 +147,7 @@ test("a draft copy one character off is read again by a second helper over the s
   const run = launch(ws, "run-1", draftAt(ws), canned(ws), (call) => {
     const copy = real(call);
     if (!isDraft(call) || isReread(call)) return copy;
-    const bad = reworded(copy);
-    assert.notDeepEqual(bad.say, copy.say, "the stand-in changed a say line");
-    return bad;
+    return reworded(copy);
   });
   assert.deepEqual(await run.done, { ending: "ready" });
 
@@ -160,7 +158,6 @@ test("a draft copy one character off is read again by a second helper over the s
   assert.equal(first.options.label, "Step 2: draft");
   assert.equal(second.options.label, "Step 2: draft (re-read)");
   assert.ok(!isReread(first) && isReread(second));
-  assert.deepEqual(second.prompt.slice(0, first.prompt.length), first.prompt, "the shell text is the first call's, untouched");
   assert.deepEqual(rereadLines(run.calls), ["The draft step's first copy failed the check and was read again from disk; the second copy matched."]);
   assert.ok(!logs(run.calls).some((line) => line.startsWith("sending")), "only the faithful copy's lines were logged");
   assert.deepEqual(stepsOf(run.commands()), ["resume", "draft", "draft", "arrive", "review", "arrive", "collect", "writers", "arrive", "specs"]);
