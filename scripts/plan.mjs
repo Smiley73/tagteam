@@ -5,7 +5,8 @@
 // `ask` for the owner, or a stop.
 //
 // A plan is reviewed once. Three readers — a Claude plan reviewer, a Codex plan
-// reviewer and the adversary — read the same draft in parallel; `collect` folds
+// reviewer and the adversary, the Codex one only when the repository uses Codex
+// — read the same draft in parallel; `collect` folds
 // their findings into one brief with an id per finding; the drafter revises the
 // plan and answers each blocking or major finding by id: applied, rejected with
 // a reason, or handed to the owner because it is about the goal rather than the
@@ -39,7 +40,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { validateJson } from "./validate-json.mjs";
+import { usesCodex, validateJson } from "./validate-json.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { runnerDispatch, writeCodexCommand } from "./lib/codex-command.mjs";
 import { arriveCommand } from "./dispatch-set.mjs";
@@ -229,7 +230,8 @@ export function planDispatch(config, kind, selection = {}) {
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
 /**
- * Fold the three readers' files under `dir` into `findings.json` and `brief.md`.
+ * Fold the readers' files under `dir` into `findings.json` and `brief.md`. The
+ * `readers` are the ones the review sent, and the only ones expected.
  *
  * Ids are assigned here — `<reader>.<n>`, by position in that reader's file —
  * never by the readers: a model that invents identifiers cannot be asked to
@@ -238,12 +240,12 @@ const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
  * `incomplete` until it is re-dispatched: an empty finding set is otherwise
  * indistinguishable from a reader that found nothing.
  */
-export function collectPlanReview({ dir, schemaPath = path.join(SCHEMAS, "plan-review.schema.json") }) {
+export function collectPlanReview({ dir, readers = READERS, schemaPath = path.join(SCHEMAS, "plan-review.schema.json") }) {
   const schema = readJson(schemaPath);
   const present = [];
   const missing = [];
   const findings = [];
-  for (const reader of READERS) {
+  for (const reader of readers) {
     const file = path.join(path.resolve(dir), `${reader}.json`);
     let parsed;
     try {
@@ -364,7 +366,8 @@ const USAGE = `usage:
   \`explore\` sends the explorer with the request in work/request.md. \`draft\` sends
   the drafter, for the plan (\`draft\`), a cut of it (\`cut\`) or its revision after
   the owner answered (\`revise\`, refused until work/review/owner-answers.md
-  exists). \`review\` prepares the Codex plan review and sends the three readers.
+  exists). \`review\` sends the plan reviewer and the adversary, and Codex too when
+  the repository uses it.
   \`collect\` folds the readers' files into findings.json and brief.md, and sends
   a missing reader again once, or the drafter to answer the brief. \`check\` reads
   response.json against findings.json, and sends the drafter again once for what
@@ -724,27 +727,43 @@ async function review(options) {
   if (over?.cut) return sendDraft(ctx, "cut", [`${over.sentence}: sending the drafter to cut it before anyone reviews it.`]);
   if (over) say.push(`${over.sentence} after a cut; reviewing it as it is.`);
   const parts = ["claude", "adversary"].map((reader) => readerPart(ctx, reader));
+  const withCodex = usesCodex(ctx.config);
   // Before the Codex command is written: a review already on record has a runner
   // that may be working from the file this would rewrite.
-  requireRecordable({ planDir: ctx.D, kind: "review", agents: [...parts.map(({ output }) => ({ label: "", output })), { label: "", output: readerFile(ctx, "codex") }] });
+  requireRecordable({
+    planDir: ctx.D, kind: "review",
+    agents: [...parts.map(({ output }) => ({ label: "", output })), ...(withCodex ? [{ label: "", output: readerFile(ctx, "codex") }] : [])]
+  });
   const claude = claudeParts(ctx, "review", {}, parts);
   fs.mkdirSync(ctx.review, { recursive: true });
-  return send(ctx, "review", [...claude, codexEntry(ctx)], { say: [...say, "Sending the plan reviewer, the adversary and Codex."] });
+  return send(ctx, "review", [...claude, ...(withCodex ? [codexEntry(ctx)] : [])], {
+    say: [...say, `Sending the plan reviewer, the adversary${withCodex ? " and Codex" : ""}.`]
+  });
+}
+
+// The readers the review set on record was sent to, in `READERS` order. The
+// configuration is not asked: it is re-read at every step and may have changed
+// since the review went out, and what was sent is what is owed.
+function sentReaders(ctx) {
+  const sent = listSets(ctx.D).filter((set) => set.kind === "review").at(-1);
+  const outputs = new Set(sent.record.agents.map((agent) => agent.output));
+  return READERS.filter((reader) => outputs.has(readerFile(ctx, reader)));
 }
 
 async function collect(options) {
   const ctx = contextFor(options);
   const set = requireFamilyIn(ctx.D, "review", "collect");
   requireGoal(ctx);
-  const collection = collectPlanReview({ dir: ctx.review });
+  const expected = sentReaders(ctx);
+  const collection = collectPlanReview({ dir: ctx.review, readers: expected });
   const missing = collection.missing.map((gap) => gap.reader);
   const tally = SEVERITY_ORDER.filter((severity) => collection.counts[severity] > 0)
     .map((severity) => `${collection.counts[severity]} ${severity}`).join(", ") || "nothing found";
-  const say = [`plan review: ${collection.status} — ${tally} across ${collection.present.length}/${READERS.length} readers`];
+  const say = [`plan review: ${collection.status} — ${tally} across ${collection.present.length}/${expected.length} readers`];
   const payload = { status: collection.status, counts: collection.counts, missing, brief: ctx.brief };
   let sending = null;
   if (missing.length > 0 && !resendSpent(ctx.D, "review")) {
-    const readers = READERS.filter((reader) => missing.includes(reader) && reader !== "codex");
+    const readers = expected.filter((reader) => missing.includes(reader) && reader !== "codex");
     const claude = readers.length > 0 ? claudeParts(ctx, "review-resend", { readers }, readers.map((reader) => readerPart(ctx, reader))) : [];
     sending = { kind: "review-resend", entries: [...claude, ...(missing.includes("codex") ? [codexEntry(ctx)] : [])] };
     say.push(`Sending ${missing.map((reader) => READER_NAMES[reader]).join(" and ")} again, once.`);

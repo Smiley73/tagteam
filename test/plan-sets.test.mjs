@@ -419,6 +419,20 @@ test("a later run in the same session releases the review an earlier run left ou
   assert.equal(waiting.json.set.id, unrecorded.json.set.id, "a set that recorded no run was released by a run");
 });
 
+test("a review set may leave Codex out and may not leave out either Claude reader", () => {
+  const ws = stagePlanWorkspace();
+  stageTranscript(ws, "same");
+  stageExplored(ws, "same");
+  const [claude, adversary] = PLAN_READERS(ws);
+  for (const left of [[claude], [adversary]]) {
+    const refused = recordPlanSet(ws, "review", left, "same");
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /a review set is the plan reviewer and the adversary, and Codex when it is used; this one leaves out .*(claude|adversary)\.json/);
+  }
+  const recorded = recordPlanSet(ws, "review", [claude, adversary], "same");
+  assert.equal(recorded.status, 0, recorded.stderr);
+});
+
 test("a run id that cannot be a set id is refused, not read as no run", () => {
   const ws = stagePlanWorkspace();
   stageTranscript(ws, "same");

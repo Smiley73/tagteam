@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 // What a command checks about Codex before it relies on it.
 //
-//   node scripts/codex-preflight.mjs version [--codex-bin <path>]
-//   node scripts/codex-preflight.mjs probe [--codex-bin <path>] [--timeout-sec <n>]
+//   node scripts/codex-preflight.mjs version [--config <config.json>] [--codex-bin <path>]
+//   node scripts/codex-preflight.mjs probe [--config <config.json>] [--codex-bin <path>] [--timeout-sec <n>]
 //
 // `version` refuses a Codex older than the floor every call depends on, and
 // `probe` makes one real call through the same client the bridge uses. Both
 // check the binary the bridge will run: `--codex-bin`, else `TAGTEAM_CODEX_BIN`,
 // else `codex` on the PATH. Prose cannot compare versions, so the commands run
 // this and stop on its exit: 0 is a pass, 1 a refusal with the reason on stderr.
+//
+// Given `--config`, a repository whose configuration says it does not use Codex
+// gets one line saying so and exit 0, and the binary is never run. Without it
+// the check runs, which is how `/tagteam:configure` uses it before the answer
+// has been recorded.
 //
 // `ship.mjs start` calls `codexVersionProblem` in-process rather than through
 // this command line, so the two cannot drift apart.
@@ -23,7 +28,7 @@ import {
 } from "./lib/codex-app-server.mjs";
 import { appServerFailureEvidence } from "./quota-backoff.mjs";
 import { configurationErrorMessage } from "./codex.mjs";
-import { validateJson } from "./validate-json.mjs";
+import { usesCodex, validateJson } from "./validate-json.mjs";
 
 /** The binary the bridge runs, chosen the way its `parseArgs` chooses it. */
 export function codexBinary(env = process.env) {
@@ -117,11 +122,12 @@ function parseArgs(argv) {
     const value = rest[++index];
     if (value === undefined) throw new Error(`${key} requires a value`);
     if (key === "--codex-bin") options.codexBin = value;
+    else if (key === "--config") options.config = value;
     else if (key === "--timeout-sec") options.timeoutSec = Number(value);
     else throw new Error(`unexpected argument: ${key}`);
   }
   if (mode !== "version" && mode !== "probe") {
-    throw new Error("usage: codex-preflight.mjs version|probe [--codex-bin <path>] [--timeout-sec <n>]");
+    throw new Error("usage: codex-preflight.mjs version|probe [--config <config.json>] [--codex-bin <path>] [--timeout-sec <n>]");
   }
   if (!Number.isFinite(options.timeoutSec) || options.timeoutSec <= 0) throw new Error("--timeout-sec must be positive");
   return options;
@@ -130,6 +136,10 @@ function parseArgs(argv) {
 async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
+    if (options.config && !usesCodex(JSON.parse(fs.readFileSync(options.config, "utf8")))) {
+      process.stdout.write("Codex is not used in this repository (useCodex is false); nothing was checked.\n");
+      return;
+    }
     if (options.mode === "version") {
       const problem = codexVersionProblem(options.codexBin);
       if (problem) throw new Error(problem);

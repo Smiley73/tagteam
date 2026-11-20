@@ -268,7 +268,7 @@ commit takes from where it was chosen — after `collect`, the re-check; after
 
 ## Configuration
 
-`.tagteam/config.json`, version 12, validated by
+`.tagteam/config.json`, version 13, validated by
 `node $P/scripts/validate-json.mjs --repo $R $P/schemas/config.schema.json $R/.tagteam/config.json`.
 
 Exit 0 is current, 1 is invalid, **3 is a configuration an older plugin wrote** —
@@ -277,7 +277,7 @@ fallback in a script, so an older configuration is incomplete. They are
 `ciStartWaitSec`: it may be missing, and a missing one reads as 120, so the files
 written before it existed stayed current; `redesignEscalation`, which may be
 missing and reads as `never`; and `mergeWithOpenFindings`, which may be missing
-and reads as off. A version-12 file without either of those two stays current and
+and reads as off. A version-13 file without either of those two stays current and
 needs no reconfigure. `autoMerge` is the
 one key the schema accepts without requiring and without a fallback, because
 nothing reads it: it stays declared so a file that carries it is not refused for
@@ -286,13 +286,16 @@ holds but `autoMerge` is offered back, and the keys it lacks are asked about —
 version 10's `planBranch` and `versionFiles`, and version 11's `carry`,
 `autoRedesign`, `limits.carried` and `limits.followUps`, each offered at its
 safe value: off, empty, off, off, 5 and 2. At those values nothing about how a
-plan ships changes. A version-11 file is carried forward without asking anything:
-every value stays, `progressBoard`, which nothing reads any more, is dropped, and
-the file is written at version 12. Anything older is a different shape and is replaced.
+plan ships changes, and each is also asked whether to use Codex. A version-11 or
+version-12 file is carried forward by asking only whether to use Codex: every
+value stays, version 11's `progressBoard`, which nothing reads any more, is
+dropped, and the file is written at version 13. Anything older is a different
+shape and is replaced.
 
 | Key | Meaning |
 |---|---|
 | `base` | Branch pull requests target and each spec branches from |
+| `useCodex` | Whether Codex is a second reviewer here. Required, with no fallback; configure asks it first and records the answer, offering it back on a reconfigure. False: configure runs neither Codex check, `/tagteam:plan` makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only, counted out of two. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex`, and the `plan` and `escalation` Codex entries) are still required and still written |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document spec writers, implementers, fixers, reviewers and the adversary (re-checks included) are told to read, or null |
 | `models` | Per role: `lead` (every reader and planner — reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer), `worker` (implementer, fixer), `codex` (every Codex call). Sonnet is the floor for `worker`: specs are written for a model of at least that capability |
@@ -407,13 +410,15 @@ to the goal gate, and how it starts and reads a run after it.
 
 ## Codex
 
-Required, at 0.153.0 or newer. Run
+Required when `useCodex` is on, at 0.153.0 or newer. Run
 
 ```bash
-node "$P/scripts/codex-preflight.mjs" version
+node "$P/scripts/codex-preflight.mjs" version --config "$R/.tagteam/config.json"
 ```
 
-and if it exits non-zero, stop and say what it printed. It checks the binary
+and if it exits non-zero, stop and say what it printed. With `useCodex` off it
+prints that Codex is not used here and exits 0 without running the binary, so the
+version check is skipped. It checks the binary
 the bridge will run — `TAGTEAM_CODEX_BIN` when that is set, otherwise `codex`
 on the PATH — and refuses one too old to report how a call ran, or whose version
 cannot be read.

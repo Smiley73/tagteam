@@ -137,8 +137,10 @@ export function validateJson(schema, value) {
 // safe value unless the person answers otherwise. Version 12 is version 11
 // without `progressBoard`, a setting nothing reads any more: the root of the
 // schema refuses keys it does not declare, so the version moves with the key and
-// a version-11 file is reported stale, which `/tagteam:configure` carries
-// forward without asking anything.
+// a version-11 file is reported stale. Version 13 adds `useCodex`, whether this
+// repository uses Codex at all, required with no fallback like `planBranch`: every
+// older file is stale, and `/tagteam:configure` carries a version-11 or version-12
+// one forward by asking only that question.
 //
 // The first exception is `ciStartWaitSec`, which `scripts/ship.mjs` reads as 120 when
 // it is missing. It was added as an optional key so that the version-10 and
@@ -160,7 +162,7 @@ export function validateJson(schema, value) {
 // deleting it would make every file that carries it invalid for a setting that
 // does nothing. `autoMergeNotices` says so out loud instead, and
 // `/tagteam:configure` no longer writes it.
-export const CONFIG_VERSION = 12;
+export const CONFIG_VERSION = 13;
 
 // Staleness is not an error, so it never joins the error list: it gets its own
 // exit code and the caller decides what to do about it.
@@ -168,6 +170,10 @@ export function configStaleness(value) {
   const version = value?.version;
   return { stale: version !== CONFIG_VERSION, version };
 }
+
+// Whether the repository uses Codex, read off a parsed configuration. The one
+// home of the answer: a caller never reads `config.useCodex` for itself.
+export const usesCodex = (config) => config?.useCodex === true;
 
 // What the configured limits commit the repository to, as lines of text. The
 // numbers validate — there is no ceiling in the schema — but nobody works out

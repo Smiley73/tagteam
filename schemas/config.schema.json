@@ -1,16 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tagteam project configuration, version 12",
+  "title": "tagteam project configuration, version 13",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "version", "base", "branchPrefix", "conventionsPath", "models", "effort",
     "reviewers", "verify", "ciWaitSec", "worktree", "reviewExclude",
     "maxConcurrentCodex", "limits", "escalation", "plan", "planBranch", "versionFiles",
-    "carry", "autoRedesign"
+    "carry", "autoRedesign", "useCodex"
   ],
   "properties": {
-    "version": { "const": 12, "type": "integer" },
+    "version": { "const": 13, "type": "integer" },
+    "useCodex": {
+      "type": "boolean",
+      "description": "Whether Codex is a second reviewer in this repository. When false, /tagteam:configure runs neither Codex check, /tagteam:plan makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex` and the Codex entries under `plan` and `escalation`) are still required and still written."
+    },
     "base": {
       "type": "string",
       "minLength": 1,
@@ -49,7 +53,7 @@
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
-          "description": "Lenses applied to every spec unless that spec removes one. A Codex cross-review and the adversary run in addition, always."
+          "description": "Lenses applied to every spec unless that spec removes one. A Codex cross-review, when `useCodex` is on, and the adversary run in addition, always."
         }
       }
     },
