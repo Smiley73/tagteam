@@ -217,7 +217,13 @@ say so and stop.
 - **`ready`** — the specs validated. Go to step 7.
 - **`stopped`** — `reason` is the first line the refusing command printed. Relay
   it as given, with what a person would change to go on, and stop; `--resume`
-  picks the plan up again after a person has acted.
+  picks the plan up again after a person has acted. A helper's copy of a step's
+  answer that fails the run's check is read once more from disk by a second
+  helper, and the step is not run again; the workflow view shows one line when
+  that happens. A `reason` that names a finished step and its saved answer means
+  nothing on disk is wrong: running `/tagteam:plan --resume` again is what a
+  person does. If it says the saved answer itself fails the check, they look at
+  that file first.
 - **`needs you`** — `ask` is the question and `answers` the commands that follow
   from each answer. Ask it, then start a new run at the command of the answer
   they give:
