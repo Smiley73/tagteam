@@ -333,7 +333,7 @@ test("effort is keyed by job, and effort.codex keeps its own ladder", async () =
   // its own inline enum — the same five words today, and Codex's to change.
   const effortDef = schema.$defs?.jobEffort;
   const claudeJobs = ["implementer", "fixer", "reviewer", "recheck", "adversary", "planner"];
-  // `codex` is required only while Codex is on, which `semanticErrors` holds.
+  // `codex` is required only while Codex is on, which `requiredWithCodex` holds.
   assert.deepEqual(effortDef?.required, claudeJobs);
   for (const job of claudeJobs) assert.equal(effortDef?.properties?.[job]?.$ref, "#/$defs/claudeEffort", job);
   assert.equal(effortDef?.properties?.codex?.$ref, undefined, "effort.codex reaches the Claude ladder instead of keeping its own");
@@ -1555,7 +1555,7 @@ test("ciStartWaitSec, redesignEscalation, mergeWithOpenFindings, maxConcurrentCo
   // 120 when it is missing, `redesignEscalation`, which the ship reads as
   // `never`, `mergeWithOpenFindings`, which it reads as false, `autoMerge`,
   // which nothing reads at all, and `maxConcurrentCodex`, which is required only
-  // while Codex is on and is held to that in `semanticErrors`. Another key quietly
+  // while Codex is on and is held to that by `requiredWithCodex`. Another key quietly
   // going optional would be a missing key read as something nobody wrote down.
   const optional = Object.keys(schema.properties).filter((key) => !schema.required.includes(key));
   assert.deepEqual(optional.sort(), ["ciStartWaitSec", "maxConcurrentCodex", "mergeWithOpenFindings", "redesignEscalation", ...ACCEPTED_AND_IGNORED].sort());
@@ -1591,6 +1591,15 @@ test("with Codex off, a configuration with none of the Codex-only keys validates
   assert.match(badEffort.stderr, /effort\.codex/);
 });
 
+test("with Codex off, no default lens is refused, because the panel would have no reader; with Codex on it is not", () => {
+  const dir = versionRepo();
+  const off = validateFile(dir, { ...example, useCodex: false, reviewers: { ...example.reviewers, default: [] } });
+  assert.equal(off.status, 1, off.stderr);
+  assert.match(off.stderr, /reviewers\.default is empty and useCodex is false/);
+  const on = validateFile(dir, { ...example, useCodex: true, reviewers: { ...example.reviewers, default: [] } });
+  assert.equal(on.status, 0, on.stderr);
+});
+
 test("with Codex on, a configuration missing a Codex-only key is refused naming that key", () => {
   const dir = versionRepo();
   const populated = configured({});
@@ -1608,6 +1617,12 @@ test("with Codex on, a configuration missing a Codex-only key is refused naming 
     assert.equal(result.status, 1, `${where}: ${result.stdout}`);
     assert.ok(result.stderr.split("\n").some((line) => line.startsWith(`- ${where}: is required (`)), `${where}: ${result.stderr}`);
   }
+  // The refusal is the one the schema's own `required` gave it: in schema order,
+  // and with the missing key offered as what a misspelt sibling was meant to be.
+  const { codex, ...leadAndWorker } = populated.models;
+  const misspelt = validateFile(dir, { ...populated, models: { ...leadAndWorker, codx: codex } }).stderr.split("\n");
+  const required = misspelt.findIndex((line) => line.startsWith("- $.models.codex: is required ("));
+  assert.ok(required >= 0 && misspelt[required + 1].startsWith("- $.models.codx: is not allowed; the missing field `codex` may be what this was meant to be"), misspelt.join("\n"));
   // A null escalation or plan has no Codex entries to be missing.
   const nulls = validateFile(dir, example);
   assert.equal(nulls.status, 0, nulls.stderr);

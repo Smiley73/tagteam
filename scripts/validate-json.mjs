@@ -103,7 +103,14 @@ export function validateJson(schema, value) {
       // wanted — and a reader given two unconnected lines had to work that out.
       // Each line says what the field is, and the unknown key names the missing
       // ones, so the correction is in the message rather than in the schema file.
-      const missing = (rule.required ?? []).filter((key) => !Object.hasOwn(current, key));
+      // `requiredWithCodex` names keys that are required only while the document
+      // says `useCodex: true`, each after the entry of `required` it followed
+      // when it was required outright, so a refusal reads as it always did.
+      const required = [...(rule.required ?? [])];
+      if (usesCodex(value)) {
+        for (const [key, after] of Object.entries(rule.requiredWithCodex ?? {})) required.splice(required.indexOf(after) + 1, 0, key);
+      }
+      const missing = required.filter((key) => !Object.hasOwn(current, key));
       for (const key of missing) errors.push(`${location}.${key}: is required${describeField(rule.properties?.[key], schema)}`);
       for (const [key, item] of Object.entries(current)) {
         if (rule.properties?.[key]) visit(rule.properties[key], item, `${location}.${key}`);
@@ -159,8 +166,9 @@ export function validateJson(schema, value) {
 // `maxConcurrentCodex`, `models.codex`, `effort.codex` and the `codex` entries
 // under a non-null `escalation` or `plan` are a different kind of exception: no
 // script supplies a fallback for them, they are required only while `useCodex`
-// is on. The schema cannot say that, so it leaves them off `required` and
-// `semanticErrors` requires them.
+// is on. The schema has no `if`/`then`, so it leaves them off `required` and
+// names them under `requiredWithCodex`, which `validateJson` adds to `required`
+// when the document says `useCodex: true`.
 //
 // `autoMerge` is the one key the schema accepts without requiring and without a
 // fallback, because nothing reads it: no script assumes a value for it, so its
@@ -420,25 +428,14 @@ export function lensNotices(value, { repo } = {}) {
   return notices;
 }
 
-export function semanticErrors(schemaName, value, { repo, schema } = {}) {
+export function semanticErrors(schemaName, value, { repo } = {}) {
   const errors = [];
   if (schemaName !== "config.schema.json") return errors;
 
-  // The Codex-only keys are optional in the schema and required here while
-  // Codex is on: the schema has no `if`/`then`, and `anyOf` cannot name the key.
-  // Worded as the schema's own `is required` lines are.
-  if (usesCodex(value)) {
-    const isMap = (entry) => entry !== null && typeof entry === "object" && !Array.isArray(entry);
-    const needKey = (container, key, location, rule) => {
-      if (isMap(container) && !Object.hasOwn(container, key)) errors.push(`${location}.${key}: is required${describeField(rule, schema)}`);
-    };
-    needKey(value, "maxConcurrentCodex", "$", schema?.properties?.maxConcurrentCodex);
-    const blocks = [["", value], ["escalation.", value.escalation], ["plan.", value.plan]];
-    for (const [prefix, block] of blocks) {
-      if (!isMap(block)) continue;
-      needKey(block.models, "codex", `$.${prefix}models`, schema?.$defs?.roleModels?.properties?.codex);
-      needKey(block.effort, "codex", `$.${prefix}effort`, schema?.$defs?.jobEffort?.properties?.codex);
-    }
+  // With Codex off the panel is the lenses and nothing else, so a repository
+  // with no default lens has a resolve round with no reader at all.
+  if (!usesCodex(value) && Array.isArray(value.reviewers?.default) && value.reviewers.default.length === 0) {
+    errors.push("reviewers.default is empty and useCodex is false, so a review panel would have no reader; name at least one default lens or turn Codex on");
   }
 
   const roster = new Set(value.reviewers?.roster ?? []);
@@ -611,7 +608,7 @@ export function loadAndValidate(schemaPath, documentPath, options = {}) {
   const document = JSON.parse(fs.readFileSync(documentPath, "utf8"));
   const errors = [
     ...validateJson(schema, document),
-    ...semanticErrors(path.basename(schemaPath), document, { ...options, schema })
+    ...semanticErrors(path.basename(schemaPath), document, options)
   ];
   return { schema, document, errors };
 }

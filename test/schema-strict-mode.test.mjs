@@ -96,7 +96,7 @@ test("every Codex-bound schema exists and is strict-mode legal", () => {
 //   stays declared so a file that carries it is not refused for it.
 // - `maxConcurrentCodex` at the root of the configuration, and `codex` in its
 //   `$defs/roleModels` and `$defs/jobEffort`: required only while Codex is on,
-//   which the schema cannot say, so `semanticErrors` requires them instead.
+//   which the schema cannot say, so `requiredWithCodex` names them for `validateJson`.
 // - `user_visible` in a spec's front matter, retired and ignored, and declared
 //   only so that specs written while it was required still validate.
 // - `workflows` in a spec's front matter, which most specs do not have and which
