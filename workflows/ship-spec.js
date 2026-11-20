@@ -5,11 +5,13 @@
 //
 // The script decides nothing the driver decides. It runs a stretch of the
 // driver's steps through one step helper, as one command (scripts/stretch.mjs),
-// checks the answer came back unmangled, dispatches what the stretch ended on,
-// and follows its `next`. A merge runs in a line of its own. Every gate, every
-// file on disk and every wording is scripts/ship.mjs's.
+// checks the copy it hands back, dispatches what the stretch ended on, and follows
+// its `next`. A copy that fails the check is read once more from disk by a second
+// helper, which launches nothing; a second failing copy ends the run. A merge runs
+// in a line of its own. Every gate, every file on disk and every wording is
+// scripts/ship.mjs's.
 //
-// It cannot import (findings, "Also seen"), so the three pieces it needs from
+// It cannot import (findings, "Also seen"), so the four pieces it needs from
 // scripts/lib/step-helper.mjs are pasted below, word for word. It is named
 // ship-spec because a workflow named like its command shadows the command (f).
 // Prompts go to agents untouched and are never inspected: the harness puts its own
@@ -115,6 +117,30 @@ function stepHelperPrompt(command, dir, { boundSec = 420 } = {}) {
     "Wait text:",
     block([`d=${q(dir)}`, ...wait])
   ].join("\n");
+}
+
+async function readStepAnswer(agent, prompt, options, accepts) {
+  let first;
+  try {
+    first = await agent(prompt, options);
+  } catch (error) {
+    return { outcome: "rejected", error: String(error?.message ?? error) };
+  }
+  if (first === null || first === undefined) return { outcome: "none" };
+  if (accepts(first)) return { outcome: "first", result: first };
+  let second = null;
+  try {
+    second = await agent(
+      `${prompt}\n\nRe-read: this answer was already copied once and the copy failed the run's check. The command has run; the start text launches nothing now. Paste the same texts and copy the saved answer again.`,
+      { ...options, label: `${options.label} (re-read)` }
+    );
+  } catch {}
+  if (second === null || second === undefined) return { outcome: "failed", identical: false };
+  if (accepts(second)) return { outcome: "reread", result: second };
+  const canonical = (value) => JSON.stringify(value, (key, inner) => (inner && typeof inner === "object" && !Array.isArray(inner)
+    ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : inner));
+  return { outcome: "failed", identical: canonical(first) === canonical(second) };
 }
 
 // --- the run ------------------------------------------------------------------
@@ -235,17 +261,25 @@ async function runLine(reported, name, title, form) {
   const dir = `${shipDir}/steps/${stamp}/${String(lines).padStart(3, "0")}-${name}`;
   last = { command: reported, output: `${dir}/output`, stderr: `${dir}/stderr` };
   const runner = `TAGTEAM_RUN_ID=${stamp} ${scriptPrefix("stretch.mjs")}--plan ${quoted(plan)}${spec === null ? "" : ` --spec ${quoted(spec)}`} --dir ${quoted(dir)} ${form}`;
-  let result;
-  try {
-    result = await agent(stepHelperPrompt(runner, dir), {
-      label: `Step ${lines}: ${name}`, phase: title, agentType: HELPER, schema: stepHelperSchema()
-    });
-  } catch (error) {
-    return { stop: `The ${name} line's helper was rejected (${String(error?.message ?? error)}), so nothing after it ran. Starting again from begin reads what is on disk.` };
+  const read = await readStepAnswer(
+    agent,
+    stepHelperPrompt(runner, dir),
+    { label: `Step ${lines}: ${name}`, phase: title, agentType: HELPER, schema: stepHelperSchema() },
+    (copy) => fits(copy) && checksumOf(copy) === copy.checksum
+  );
+  if (read.outcome === "rejected") {
+    return { stop: `The ${name} line's helper was rejected (${read.error}), so nothing after it ran. Starting again from begin reads what is on disk.` };
   }
-  if (!fits(result) || checksumOf(result) !== result.checksum) {
-    return { stop: `The ${name} line's output did not come back intact, so nothing after it ran. Starting again from begin reads what is on disk.` };
+  if (read.outcome === "none") {
+    return { stop: `No answer came back from the ${name} line's helper, so nothing after it ran. Starting again from begin reads what is on disk.` };
   }
+  if (read.outcome === "reread" || read.outcome === "failed") {
+    log(`The ${name} line's first copy failed the check and was read again from disk; the second copy ${read.outcome === "reread" ? "matched" : "did not match"}.`);
+  }
+  if (read.outcome === "failed") {
+    return { stop: `The ${name} line finished, but its answer did not come back intact twice. The saved answer is ${dir}/stdout. Nothing after the line ran. ${read.identical ? "Both copies were the same, so the saved answer itself fails the check: look at the step's output, not at the copy. " : ""}Starting again from begin reads what is on disk.` };
+  }
+  const { result } = read;
   if (result.exit !== 0 && !result.stop) {
     return { stop: `The ${name} line did not run, so nothing after it ran. Starting again from begin reads what is on disk.` };
   }

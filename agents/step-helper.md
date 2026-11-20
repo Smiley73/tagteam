@@ -25,7 +25,13 @@ retype, reorder, shorten or repair them.
      `stop`, the last stderr line without its leading `checksum: ` in `checksum`,
      and leave every other field null or empty.
    - When stdout is not one JSON object, return what you have. The checksum will
-     not match and the run ends there; that is the right outcome, not yours to avoid.
+     not match, so the run reads the answer once more and then ends; that is the
+     right outcome, not yours to avoid.
+
+A prompt may end with a line starting `Re-read:`. It means the command already ran
+and a copy of its answer failed the run's check. Nothing changes for you: the start
+text finds the command already started and launches nothing, and you copy the saved
+answer exactly as you would the first time.
 
 Never edit or retry the command, never repair or complete its output, and never
 run or read anything else. Your structured answer is the whole of your job.

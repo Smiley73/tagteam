@@ -1,8 +1,9 @@
 // What a workflow script needs to run a driver command through `tagteam:step-helper`
-// and to know the answer came back unmangled.
+// and to know the answer came back unmangled: a copy that fails the run's check is
+// read once more from disk, and only a second failing copy ends the run.
 //
 // A workflow script cannot import (docs/workflow-spike-findings.md), so each of
-// the three exports below is one function that refers to nothing outside its own
+// the four exports below is one function that refers to nothing outside its own
 // text: no imports, no module-level names, no Node globals. `workflows/ship-spec.js` and
 // `workflows/plan-specs.js` paste the text word for word, and test/step-helper.test.mjs rebuilds each
 // piece from `toString()` alone to prove it stands by itself. Keep it that way:
@@ -108,4 +109,40 @@ export function stepHelperPrompt(command, dir, { boundSec = 420 } = {}) {
     "Wait text:",
     block([`d=${q(dir)}`, ...wait])
   ].join("\n");
+}
+
+/**
+ * One helper call for a driver command, and one more over the same capture
+ * directory when its copy fails `accepts`. The second prompt carries a re-read
+ * marker and the second label a suffix, so the two calls are not the same call
+ * to the runtime; the start text finds the capture already started, so the
+ * re-read launches nothing and copies the saved answer again. Never a third
+ * call. Returns `{ outcome }`: `first` or `reread` with the accepted `result`;
+ * `none` when the first call returned nothing, which nothing shows ever started;
+ * `rejected` with the `error` text when the first call threw; `failed` with
+ * `identical` when both copies failed, true only when two copies came back and
+ * are equal as values, whatever their key order.
+ */
+export async function readStepAnswer(agent, prompt, options, accepts) {
+  let first;
+  try {
+    first = await agent(prompt, options);
+  } catch (error) {
+    return { outcome: "rejected", error: String(error?.message ?? error) };
+  }
+  if (first === null || first === undefined) return { outcome: "none" };
+  if (accepts(first)) return { outcome: "first", result: first };
+  let second = null;
+  try {
+    second = await agent(
+      `${prompt}\n\nRe-read: this answer was already copied once and the copy failed the run's check. The command has run; the start text launches nothing now. Paste the same texts and copy the saved answer again.`,
+      { ...options, label: `${options.label} (re-read)` }
+    );
+  } catch {}
+  if (second === null || second === undefined) return { outcome: "failed", identical: false };
+  if (accepts(second)) return { outcome: "reread", result: second };
+  const canonical = (value) => JSON.stringify(value, (key, inner) => (inner && typeof inner === "object" && !Array.isArray(inner)
+    ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : inner));
+  return { outcome: "failed", identical: canonical(first) === canonical(second) };
 }
