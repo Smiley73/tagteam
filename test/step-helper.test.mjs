@@ -1,4 +1,4 @@
-// The step helper's three pieces and the checksums the drivers print with them.
+// The step helper's four pieces and the checksums the drivers print with them.
 //
 // The pieces are pasted word for word into a workflow script, which cannot
 // import, so one test rebuilds each from its source text in an empty context.
@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { spawnSync } from "node:child_process";
-import { checksumOf, stepHelperPrompt, stepHelperSchema } from "../scripts/lib/step-helper.mjs";
+import { checksumOf, stepHelperPrompt, stepHelperSchema, readStepAnswer } from "../scripts/lib/step-helper.mjs";
 import { shellQuote } from "../scripts/lib/codex-command.mjs";
 import { stage, ship, arrive } from "./ship-stage.mjs";
 
@@ -122,7 +122,7 @@ test("a refused ship step and a refused arrival keep their first line and end wi
   }
 });
 
-test("each piece, rebuilt from its source text in an empty context, gives the results of the imported one", () => {
+test("each piece, rebuilt from its source text in an empty context, gives the results of the imported one", async () => {
   const rebuilt = (piece) => vm.runInNewContext(`(${piece.toString()})`, Object.create(null));
   const same = (made, imported) => assert.equal(JSON.stringify(made), JSON.stringify(imported));
   for (const payload of [FULL, projected(FULL), {}, { say: "line", stop: "x", exit: 5 }]) {
@@ -131,6 +131,17 @@ test("each piece, rebuilt from its source text in an empty context, gives the re
   same(rebuilt(stepHelperSchema)(), stepHelperSchema());
   for (const command of ["node a", `node "it's" 'x y'`]) {
     assert.equal(rebuilt(stepHelperPrompt)(command, "/tmp/a b", { boundSec: 9 }), stepHelperPrompt(command, "/tmp/a b", { boundSec: 9 }));
+  }
+  const copies = (...answers) => {
+    const calls = [];
+    return { calls, agent: async (prompt, options) => { calls.push({ prompt, options }); return answers[calls.length - 1]; } };
+  };
+  for (const answers of [["good"], ["bad", "good"], ["bad", "bad"], ["bad", null], [null], [{ a: 1, b: 2 }, { b: 2, a: 1 }]]) {
+    const [mine, theirs] = [copies(...answers), copies(...answers)];
+    const accepts = (copy) => copy === "good";
+    const options = { label: "Step 1: x" };
+    same(await rebuilt(readStepAnswer)(mine.agent, "prompt", options, accepts), await readStepAnswer(theirs.agent, "prompt", options, accepts));
+    same(mine.calls, theirs.calls);
   }
 });
 

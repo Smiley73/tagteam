@@ -66,7 +66,10 @@ this is where a third of past runs' cost went. Progress shows in Claude Code's
 workflow view: the phases, one helper line for each stretch of steps, named for the
 work whose results it collects, each merge in a line of its own under Land, each
 agent under its label, and every line the driver says, worded as the driver wrote
-it. Do not repeat it, and print no progress display of your own.
+it. Do not repeat it, and print no progress display of your own. A helper's copy of
+a line's answer that fails the run's check is read once more from disk by a second
+helper, and the step is not run again; the workflow view shows one line when that
+happens, and a second failing copy ends the run.
 
 The run follows `next` through everything of the unit it started in, including the
 plan-level steps a last spec's `finish` carries on into, and it ends in one of
@@ -91,7 +94,8 @@ whole output of the step that ended the run, which you read with Read).
   run to wait for, so say who is still out and that `/tagteam:ship` on the plan
   again picks the unit up. A stop that names `plan-adopt` is a question, *Commits
   pushed to the plan branch* below. A budget spent never stops a run: the driver
-  prints where the spec goes instead.
+  prints where the spec goes instead. A stop after a second failing copy says the
+  step finished and where its answer is saved: relay it as given, like any other.
 - **`ask`** — the driver has a question only a person can answer. Read `output`
   for what the question rests on, ask it the way *Asking* in the skill says, with
   exactly the answers `answers` offers, and then start a new run at the command of
