@@ -154,11 +154,11 @@ test("each command grants exactly the agents its driver can print, once each, an
   }
 });
 
-// The commands and the README say the same about effort inside a run as the
+// The commands and the shipping page say the same about effort inside a run as the
 // findings do: when a per-call effort is not shown to apply there, it is the agent
 // files that pin it, and the configuration's per-role efforts do not reach those agents.
-test("the commands and the README say that configured efforts do not reach a run's agents exactly when a per-call effort is not shown to apply", () => {
-  for (const file of ["commands/ship.md", "commands/plan.md", "README.md"]) {
+test("the commands and the shipping page say that configured efforts do not reach a run's agents exactly when a per-call effort is not shown to apply", () => {
+  for (const file of ["commands/ship.md", "commands/plan.md", "docs/shipping.md"]) {
     const says = /per-role efforts do not reach them/.test(read(file).replace(/\s+/g, " "));
     assert.equal(says, !effortApplies(), `${file} ${says ? "says" : "does not say"} that the per-role efforts do not reach a run's agents`);
   }

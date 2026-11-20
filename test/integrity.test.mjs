@@ -13,6 +13,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { spawnSync } from "node:child_process";
 import { stagePlugin, stagePlan } from "./stage.mjs";
+import { DOC_FILES } from "./docs-files.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -20,6 +21,8 @@ const commandFiles = fs.readdirSync(path.join(root, "commands"));
 const commands = commandFiles.map((file) => ({ file, text: read("commands", file) }));
 const skill = read("skills", "tagteam", "SKILL.md");
 const readme = read("README.md");
+const shippingPage = read("docs", "shipping.md");
+const docPages = DOC_FILES.map((file) => [file, read(file)]);
 const shipDriver = read("scripts", "ship.mjs");
 const planDriver = read("scripts", "plan.mjs");
 const everything = [...commands.map((entry) => entry.text), skill].join("\n");
@@ -771,17 +774,48 @@ test("both commands carry the unobserved-routing section and point at it from th
   }
 });
 
+// A page that moves a directory deeper breaks every link it carried over until it
+// is rewritten, and nothing else notices: GitHub shows a link to nowhere as text.
+function brokenRelativeLinks(file, text) {
+  const prose = text.replace(/```[\s\S]*?```/g, "");
+  const links = [...prose.matchAll(/\]\(([^)\s]+)\)/g)].map(([, target]) => target);
+  return links
+    .filter((target) => !/^(?:[a-z][a-z0-9+.-]*:|#)/i.test(target))
+    .map((target) => target.replace(/#.*$/, ""))
+    .filter((target) => !fs.existsSync(path.join(root, path.dirname(file), target)))
+    .map((target) => `${file} links ${target}, which is not in the repository`);
+}
+
+test("every relative link in the README and its pages resolves, and the README links each page", () => {
+  const problems = docPages.flatMap(([file, text]) => brokenRelativeLinks(file, text));
+  assert.deepEqual(problems, [], problems.join("\n"));
+  for (const page of ["CONTRIBUTING.md", "docs/architecture.md", "docs/shipping.md"]) {
+    assert.ok(readme.includes(`](${page})`), `the README does not link ${page}`);
+  }
+  // A link written as it would be from the repository root, from a page one
+  // directory down, is the mistake the guard exists for.
+  assert.equal(brokenRelativeLinks("docs/shipping.md", "See [the skill](skills/tagteam/SKILL.md).").length, 1);
+  assert.deepEqual(brokenRelativeLinks("docs/shipping.md", "See [the skill](../skills/tagteam/SKILL.md) and [the README](../README.md#shipping)."), []);
+});
+
 // The diagrams are the first thing anyone reads about how these cycles run, and
 // a drawn loop with no setting on it is a loop nobody can find the ceiling for.
+const mermaidDiagrams = (text) => [...text.matchAll(/```mermaid\n([\s\S]*?)```/g)].map(([, body]) => body);
+
+test("each page has the diagrams it is meant to carry", () => {
+  const titles = (text) => mermaidDiagrams(text).map((body) => /^title: (.*)$/m.exec(body)?.[1]);
+  assert.deepEqual(titles(readme).slice(1), ["The plan cycle", "A ship, in outline"], "the README no longer has its plan cycle and its ship outline");
+  assert.deepEqual(titles(shippingPage), ["The ship cycle, per spec", "Merge or stop"], "docs/shipping.md no longer has its two ship diagrams");
+});
+
 test("the ship diagram names the settings that bound its loops, and the plan diagram draws no loop", () => {
-  const diagrams = [...readme.matchAll(/```mermaid\n([\s\S]*?)```/g)].map(([, body]) => body);
-  assert.ok(diagrams.length >= 3, "the README no longer has its cycle diagrams");
-  const ship = diagrams.find((body) => body.includes("title: The ship cycle"));
-  assert.ok(ship, "the README no longer has a ship cycle diagram");
-  for (const limit of ["fixRounds", "ciRepairs"]) {
-    assert.ok(ship.includes(limit), `the ship diagram does not name ${limit}, so its loop is drawn without its ceiling`);
-  }
-  const plan = diagrams.find((body) => body.includes("title: The plan cycle"));
+  const ship = mermaidDiagrams(shippingPage).find((body) => body.includes("title: The ship cycle"));
+  assert.ok(ship, "docs/shipping.md no longer has a ship cycle diagram");
+  // On the edges that close the loops, not anywhere in the picture: the same
+  // setting is also named in the labels of the questions drawn beside them.
+  assert.match(ship, /fixer -->\|"[^|]*limits\.fixRounds[^|]*\| route/, "the ship diagram does not name limits.fixRounds on the edge that loops a fix back to review");
+  assert.match(ship, /publish -\. "[^"]*limits\.ciRepairs[^"]*" \.-> fixer/, "the ship diagram does not name limits.ciRepairs on the CI repair loop");
+  const plan = mermaidDiagrams(readme).find((body) => body.includes("title: The plan cycle"));
   assert.ok(plan, "the README no longer has a plan cycle diagram");
   assert.ok(!plan.includes("planReviewRounds"), "the plan diagram still draws a budgeted loop");
   assert.match(plan, /answer/, "the plan diagram does not draw the answered review");
@@ -789,8 +823,8 @@ test("the ship diagram names the settings that bound its loops, and the plan dia
 });
 
 test("the ship diagram draws the two routes a fixed commit actually takes", () => {
-  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(readme) ?? [];
-  assert.ok(ship, "the README no longer has a ship cycle diagram");
+  const [, ship] = /```mermaid\n(---\ntitle: The ship cycle[\s\S]*?)```/.exec(shippingPage) ?? [];
+  assert.ok(ship, "docs/shipping.md no longer has a ship cycle diagram");
   assert.match(ship, /no second panel/, "the diagram does not draw the first fix skipping the panel");
   assert.match(ship, /second or later fix round, or a CI repair/, "the diagram does not draw the route that re-enters the whole panel");
   assert.match(ship, /route -->\|"after the first fix of a cycle[^|]*\| adv/);
@@ -853,7 +887,7 @@ test("nothing a person reads still says a moved base refuses the merge, or that 
     "the ship lock is repository-wide",
     "the base OID the review was bound to"
   ];
-  for (const [file, text] of [["README.md", readme], ["skills/tagteam/SKILL.md", skill], ...commands.map((entry) => [`commands/${entry.file}`, entry.text])]) {
+  for (const [file, text] of [...docPages, ["skills/tagteam/SKILL.md", skill], ...commands.map((entry) => [`commands/${entry.file}`, entry.text])]) {
     const flat = text.replace(/\s+/g, " ");
     for (const claim of retired) assert.ok(!flat.includes(claim), `${file} still says "${claim}"`);
   }
@@ -921,7 +955,7 @@ test("the compared set is exactly the directories the plugin reaches into", asyn
 });
 
 test("nothing a person reads still says a fix cycle happens once", () => {
-  for (const [file, text] of [["README.md", readme], ["skills/tagteam/SKILL.md", skill]]) {
+  for (const [file, text] of [...docPages, ["skills/tagteam/SKILL.md", skill]]) {
     const flat = text.replace(/\s+/g, " ");
     for (const claim of ["fix once", "After the single fix round", "the fix round always makes one", "one repair"]) {
       assert.ok(!flat.includes(claim), `${file} still says "${claim}"`);
@@ -945,7 +979,7 @@ function markdownFiles(dir) {
 
 test("every model or effort reference names a key the schema defines", () => {
   const failures = [];
-  for (const dir of ["commands", "skills", "prompts", "agents", "README.md"]) {
+  for (const dir of ["commands", "skills", "prompts", "agents", ...DOC_FILES]) {
     const files = dir.endsWith(".md") ? [dir] : markdownFiles(dir);
     for (const file of files) {
       if (!file.endsWith(".md")) continue;
@@ -1215,7 +1249,7 @@ function codexTransportProblems(name, text) {
 
 test("nothing a person or an agent reads describes codex exec, codex delete, or Codex sessions kept or deleted", () => {
   const agents = agentNames.map((agent) => [`agents/${agent}.md`, read("agents", `${agent}.md`)]);
-  const files = [["README.md", readme], ["skills/tagteam/SKILL.md", skill], ...commands.map((entry) => [`commands/${entry.file}`, entry.text]), ...agents];
+  const files = [...docPages, ["skills/tagteam/SKILL.md", skill], ...commands.map((entry) => [`commands/${entry.file}`, entry.text]), ...agents];
   const problems = files.flatMap(([name, text]) => codexTransportProblems(name, text));
   assert.deepEqual(problems, [], problems.join("\n"));
 });
@@ -1288,7 +1322,7 @@ const RETIRED_MERGE_CLAIMS = [
 // the list itself, and `.tagteam/` holds old plans that quote the old account on
 // purpose; neither is read.
 const MERGE_STORY_ROOTS = ["skills", "commands", "prompts", "agents", "schemas", "examples", "scripts"];
-const MERGE_STORY_FILES = ["README.md"];
+const MERGE_STORY_FILES = DOC_FILES;
 
 function filesUnder(dir) {
   return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) =>
@@ -1345,7 +1379,7 @@ test("the retired-merge-claims guard reads every file under its directories, and
   for (const dir of MERGE_STORY_ROOTS) {
     for (const file of filesUnder(dir)) assert.ok(names.includes(file), `${file} is not scanned`);
   }
-  for (const file of ["README.md", "commands/ship.md", "commands/status.md", "skills/tagteam/SKILL.md", "scripts/ship.mjs",
+  for (const file of ["README.md", "CONTRIBUTING.md", "docs/architecture.md", "docs/shipping.md", "commands/ship.md", "commands/status.md", "skills/tagteam/SKILL.md", "scripts/ship.mjs",
     "scripts/merge.mjs", "scripts/gates.mjs", "schemas/config.schema.json", "schemas/spec.schema.json", "prompts/plan-draft.md"]) {
     assert.ok(names.includes(file), `${file} is not scanned`);
   }
@@ -1474,13 +1508,15 @@ test("the standing-permission guard fails when the passage, its planBranch groun
   }
 });
 
-// Where the README and the skill first introduce the plan branch, they say it is
-// the familiar feature branch — before they use the name — and what tagteam does
-// that is particular to it.
-test("the README and the skill introduce the plan branch as the familiar feature branch", () => {
-  const readmeSection = readme.slice(readme.indexOf("### Shipping a plan as one"));
+// Where the shipping page and the skill first introduce the plan branch, they say
+// it is the familiar feature branch — before they use the name — and what tagteam
+// does that is particular to it.
+test("the shipping page and the skill introduce the plan branch as the familiar feature branch", () => {
+  const heading = /^#{2,3} Shipping a plan as one$/m.exec(shippingPage);
+  assert.ok(heading, "docs/shipping.md has no Shipping a plan as one section");
+  const shippingSection = shippingPage.slice(heading.index);
   const passages = [
-    ["README.md *Shipping a plan as one*", readmeSection.slice(0, readmeSection.indexOf("\n#", 1))],
+    ["docs/shipping.md *Shipping a plan as one*", shippingSection.slice(0, shippingSection.indexOf("\n#", 1))],
     ["skills/tagteam/SKILL.md overview", skill.slice(0, skill.indexOf("\n## "))]
   ];
   for (const [where, raw] of passages) {
