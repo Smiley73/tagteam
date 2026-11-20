@@ -28,7 +28,8 @@
       "experience",
       "consistency",
       "cost",
-      "economy"
+      "economy",
+      "docs"
     ],
     "default": ["correctness", "code-quality"]
   },

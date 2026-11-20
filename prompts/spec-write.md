@@ -32,7 +32,11 @@ be merged first — copy them from the plan's table, and add one only if you fou
 a real dependency the plan missed. `reviewers` names only the lenses this spec needs *beyond* the
 configured default set, or a lens prefixed with `-` to drop a default that does
 not apply (a docs-only spec has nothing for `code-quality` to say). Leave it
-`[]` when the defaults are right, which is most of the time.
+`[]` when the defaults are right, which is most of the time. A lens you add must
+be in the roster the run names. A spec that changes documentation (README,
+`docs/`, guides, user-facing reference) adds `docs` when the roster names it;
+when it does not, the spec carries any style rules itself, because the ordinary
+implementer implements documentation specs.
 
 `workflows` declares every `.github/workflows/` file this spec's work will add,
 change, delete or rename, as exact repository paths — both sides of a rename,

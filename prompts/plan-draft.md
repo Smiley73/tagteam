@@ -43,6 +43,11 @@ section when there are none worth naming.>
 <Cut work belonging to excluded or deferred decisions. Omit when there is none.>
 ```
 
+The run shows you the repository's lens roster. Lenses are still chosen in each
+spec's front matter, but when the roster names `docs` you may note in a
+documentation deliverable's row, or in Risks, that `docs` reviews it. Do not
+mention `docs` when the roster does not name it.
+
 In the depends column, use the spec name from the table, for example
 `01-redesign-settings`; row numbers also work.
 
