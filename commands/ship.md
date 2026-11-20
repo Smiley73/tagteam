@@ -148,8 +148,8 @@ node "$P/scripts/ship.mjs" start --plan "$D"
 ```
 
 It checks `approved.json`, validates the configuration, checks `git`, `codex`
-(0.153.0 or newer, the binary `TAGTEAM_CODEX_BIN` names when it is set) and
-`gh`, takes this plan's ship lock, creates or reuses the worktree, and prints
+(0.153.0 or newer, the binary `TAGTEAM_CODEX_BIN` names when it is set; only
+when the configuration says Codex is on) and `gh`, takes this plan's ship lock, creates or reuses the worktree, and prints
 the specs in dependency order with what state each is in. Its `snapshot` key is
 what `scripts/running-plugin.mjs` reported: render it first, as *The running
 snapshot* in the skill says. It never stops anything, whatever it says — a
@@ -213,7 +213,7 @@ begins once they have merged it.
 
 The driver walks each spec through: `begin` (branch, implementer), `snapshot`
 (commit, allocate the round, snapshot, record the report), `verify`, `panel`
-(every lens plus Codex), `collect`, then `fix` and back to `snapshot` when
+(every lens, plus Codex when it is on), `collect`, then `fix` and back to `snapshot` when
 something blocking or major is open, or a test command the change broke is
 failing, and a fix round is left, `recheck` (the adversary's fresh pass and each reader's re-check of what it raised), `settle`,
 `publish`, `checks` while the pull request's checks are still running, `repair`
@@ -232,8 +232,8 @@ it had not run, and one whose fresh adversary pass raises a blocking or major
 finding on what it changed is thrown away, with the run saying which.
 
 At a spec's first panel, the minor findings about the code that nobody could run
-are tried before the round is judged: correctness's and Codex's, and
-code-quality's that say a test would still pass with the behaviour broken. When
+are tried before the round is judged: correctness's and, when Codex is on,
+Codex's, and code-quality's that say a test would still pass with the behaviour broken. When
 there are some, `collect` sends one adversary job, once per spec, with those
 findings by id, and the next `collect` judges its answers. A finding becomes major
 only when the job names it as reproduced and gives the command it ran and what it
@@ -250,7 +250,7 @@ twice or names one it was not given is sent back once, like any unusable report.
 A line answered not done is unfinished work: it reaches every reader as an item
 and stops the pull request for a person as any other unfinished work does. A spec
 without those sections is handed nothing. A fixer is not asked. The reviewers,
-Codex and the adversary's fresh pass are shown what the implementer said meets
+Codex when it is on, and the adversary's fresh pass are shown what the implementer said meets
 each line it answered as met, and check it; a claim that does not hold is
 raised as an ordinary finding.
 

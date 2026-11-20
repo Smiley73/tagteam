@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJson } from "./validate-json.mjs";
+import { usesCodex } from "./lib/uses-codex.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { closeJudged, requireFamilyIn } from "./lib/plan-sets.mjs";
 import { normalizeRepoPath } from "./lib/matcher.mjs";
@@ -164,6 +165,11 @@ export function resolveReviewers(specReviewers, config, { file }) {
     }
     if (remove) selected.delete(lens);
     else selected.add(lens);
+  }
+  // Codex is the panel's only other reader, so with it off, no lens is no reader.
+  if (selected.size === 0 && !usesCodex(config)) {
+    throw new Error(`${file}: has no lens reviewers, and with Codex off the review panel would have nobody to send; `
+      + "name a lens it adds, or stop removing the last default lens");
   }
   return [...selected].sort();
 }

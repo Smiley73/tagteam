@@ -44,6 +44,14 @@ test("the default set applies, a bare lens adds, and a leading minus removes", (
   assert.deepEqual(resolveReviewers(["-code-quality"], CONFIG, { file: "x" }), ["correctness"]);
 });
 
+test("with Codex off, a spec left with no lens is refused, because nothing else would review it", () => {
+  const off = { ...CONFIG, useCodex: false };
+  assert.throws(() => resolveReviewers(["-code-quality", "-correctness"], off, { file: "03-x.md" }), /03-x\.md: has no lens reviewers/);
+  assert.deepEqual(resolveReviewers(["-code-quality", "-correctness", "security"], off, { file: "x" }), ["security"]);
+  // Codex is the reader in a lens's place while it is on.
+  assert.deepEqual(resolveReviewers(["-code-quality", "-correctness"], { ...CONFIG, useCodex: true }, { file: "x" }), []);
+});
+
 test("a lens outside the roster is a configuration error, not a silent no-op", () => {
   assert.throws(() => resolveReviewers(["telepathy"], CONFIG, { file: "03-x.md" }), /not in reviewers.roster/);
 });
