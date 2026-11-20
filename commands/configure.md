@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first.
 
-Write `.tagteam/config.json` at version 12. Infer what you can, ask about the
+Write `.tagteam/config.json` at version 13. Infer what you can, ask about the
 rest, and show the result. Aim for under a dozen questions.
 
 ## Preflight
@@ -19,9 +19,9 @@ command.
 | `git -C "$R" rev-parse --show-toplevel` | yes |
 | `git --version` is 2.38 or newer | yes |
 | `git -C "$R" status --porcelain` is empty | no — warn |
-| `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes |
+| `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes, only when Codex is used |
 | `gh auth status` and `gh repo view --json defaultBranchRef` | yes |
-| `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes |
+| `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes, only when Codex is used |
 | `codegraph` on PATH and `.codegraph/` present | no |
 
 The git version matters for the same reason: when the base branch moves under a
@@ -29,6 +29,23 @@ reviewed change, a ship tests that the same change still lands on the new base
 with `git merge-tree --write-tree`, which arrived in 2.38, and `ship.mjs start`
 stops without it. Checked here, a machine that cannot merge says so before
 anyone plans anything on it.
+
+### Whether Codex is used
+
+Before either Codex row runs, ask this on its own, in one `AskUserQuestion` and
+in plain words: should Codex review as a second reader, alongside Claude? It
+records `useCodex`. The Codex rows run only on a yes; on a no, run neither and
+say that Codex is not checked because this repository does not use it.
+
+On a first configure, offer yes first and say what it requires: the Codex CLI at
+0.153.0 or newer, and one live call now, to prove it answers. On a
+`--reconfigure`, and when an older file is carried forward, offer the answer the
+file holds as the default; a file without one is offered yes, which is what that
+repository has been running. Question 2 offers `codex: <installed model>` from
+what the probe reported, so this runs before the numbered questions. With Codex
+off there is no probe to name an installed model: offer the value the file holds,
+or `examples/config.json`'s, for `models.codex`, and the same for the Codex
+effort.
 
 Both Codex rows check the binary the reviews will run: `TAGTEAM_CODEX_BIN` when
 it is set, otherwise `codex` on the PATH. Each exits non-zero with the reason on
@@ -266,6 +283,10 @@ names, internal ids. See *Asking* in the skill.
     say in one sentence that carrying settings exist and take effect only with
     `planBranch` on.
 
+With `useCodex` off, questions 2, 3 and 5 still name the Codex model and effort,
+and `maxConcurrentCodex` is still written: those keys stay required and nothing
+reads them until Codex is turned on.
+
 Everything else takes its default: `branchPrefix` `tagteam/`,
 `maxConcurrentCodex` 3, `setupTimeoutSec` 900, the full roster from
 `examples/config.json`.
@@ -311,7 +332,7 @@ anything, so those files stay in history until someone runs `git rm --cached` on
 them, and this command will not do that on its own.
 
 Then show the file and say what it means: which commands prove a candidate, which
-lenses read every spec, which jobs think how hard, whether a plan ships as one —
+lenses read every spec, whether Codex reviews, which jobs think how hard, whether a plan ships as one —
 and if it does, which lines carry its one version increase — and what merges
 without asking. With `planBranch` on, a clean spec merges into the plan's branch
 without asking anyone; with it off, every spec waits for a person. Either way,
@@ -383,6 +404,9 @@ invalid file rather than an unused feature.
 `autoMerge` is the one key the file may omit without either, because nothing
 reads it — and this command always omits it.
 
+Always write `useCodex`, as the answer to *Whether Codex is used* gave it. There
+is no fallback for it, and a file without it is invalid.
+
 Always write `ciStartWaitSec`: the answer when question 7 asked it, 120 when it
 did not. It is the one key that may be missing — the ship reads a missing one
 as 120, so the version-10 files written before it existed stayed current — but a
@@ -419,7 +443,9 @@ nothing about how a plan ships changes. Say what version 11 adds as well, as
 below. Answering every question as before, and leaving the setting off, writes
 the old file with those two keys, version 11's four at their safe values,
 `ciStartWaitSec` added, `redesignEscalation` at `never`, `autoMerge` left out,
-version 12, and nothing else different.
+`useCodex` as answered, version 13, and nothing else different. Ask the Codex
+question as *Whether Codex is used* says; a file this old holds no answer to
+offer, so offer yes first.
 
 A version-10 configuration is carried forward the same way: every value the
 file holds is offered back as the default, `autoMerge` is still never written,
@@ -429,19 +455,29 @@ plan branch, `carry`, whether a spec out of fix rounds with only carriable
 findings merges into the plan's branch with them disclosed, offered off, with
 `limits.carried` at 5 and `limits.followUps` at 2. Answering every question as
 before writes the old file with those four keys at their safe values,
-`redesignEscalation` at `never`, version 12, and nothing else different.
+`redesignEscalation` at `never`, `useCodex` as answered, version 13, and nothing
+else different. Ask the Codex question as *Whether Codex is used* says, offering
+yes first.
 
-A version-11 configuration is carried forward without an interview. Keep every
-value the file holds, drop `progressBoard` whatever its value, write version 12,
-validate it, and show the file as *Write* says. Tell the person in one sentence
-that the setting was retired and that nothing else changed. This path adds no
-`redesignEscalation`.
+A version-11 configuration is carried forward by asking one question: whether to
+use Codex, as *Whether Codex is used* says, offering yes first. Keep every value
+the file holds, drop `progressBoard` whatever its value, write `useCodex` as
+answered and version 13, validate it, and show the file as *Write* says. Tell the
+person in one sentence that `progressBoard` was retired, and that the Codex
+question is the only new thing. This path adds no `redesignEscalation`.
 
-A version-12 configuration without `redesignEscalation` is current: it needs no
+A version-12 configuration is carried forward the same way, asking only the Codex
+question. Keep every value the file holds, write `useCodex` as answered and
+version 13, validate it, and show the file as *Write* says. Tell the person in
+one sentence that nothing else changed. A version-12 file's answer is not
+recorded anywhere, so offer yes first: that is what the repository has been
+running.
+
+A version-13 configuration without `redesignEscalation` is current: it needs no
 reconfigure and behaves as `never`. A `--reconfigure` of it asks the question
 only when escalation is on.
 
-A version-12 configuration without `mergeWithOpenFindings` is current in the same
+A version-13 configuration without `mergeWithOpenFindings` is current in the same
 way: it needs no reconfigure and reads as off. A `--reconfigure` of it asks the
 question when `planBranch` is on.
 

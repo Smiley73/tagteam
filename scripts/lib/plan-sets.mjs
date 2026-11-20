@@ -187,9 +187,10 @@ function checkOutputs(kind, planDir, agents) {
       if (!allowed.has(output)) refuse(`a ${kind} set's agents write ${[...allowed.keys()].join(", ")}; ${output} is none of them`);
     }
     if (new Set(outputs).size !== outputs.length) refuse(`a ${kind} set names the same reader's file twice`);
-    if (kind === "review" && outputs.length !== READERS.length) {
-      const absent = [...allowed.keys()].filter((file) => !outputs.includes(file));
-      refuse(`a review set is the three readers; this one leaves out ${absent.join(", ")}`);
+    // Codex's file is the one a review may leave out: a repository that does not use it never sends it.
+    const absent = [...allowed].filter(([file, reader]) => reader !== "codex" && !outputs.includes(file)).map(([file]) => file);
+    if (kind === "review" && absent.length > 0) {
+      refuse(`a review set is the plan reviewer and the adversary, and Codex when it is used; this one leaves out ${absent.join(", ")}`);
     }
     return undefined;
   }
