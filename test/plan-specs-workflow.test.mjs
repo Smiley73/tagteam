@@ -133,27 +133,104 @@ test("a finding handed to the owner ends the run as needs you with the driver's 
   assert.deepEqual(labelsOf(again.calls), ["Revise the plan", "Write spec 01-a", "Write spec 01-b"]);
 });
 
-test("a copy that was reworded ends the run as stopped with nothing dispatched after it", MINUTES, async () => {
-  const variants = {
-    "a say line": (result) => { result.say[0] = result.say[0].replace("Sending", "sending"); },
-    "a label": (result) => { result.dispatch[0].description += "!"; result.set.labels[0] += "!"; }
-  };
-  for (const [what, change] of Object.entries(variants)) {
-    const ws = staged();
-    const real = shellHelper(planEnv(ws, "A"));
-    const mangled = (call) => {
-      const result = real(call);
-      if (helperTask(call).command.includes(" draft ")) change(result);
-      return result;
-    };
-    const run = launch(ws, "run-1", draftAt(ws), canned(ws), mangled);
-    const result = await run.done;
-    assert.equal(result.ending, "stopped", what);
-    assert.match(result.reason, /draft step's output did not come back intact, so nothing after it ran/, what);
-    assert.equal(agentCalls(run.calls).length, 0, `${what}: no agent was sent`);
-    assert.deepEqual(stepsOf(run.commands()), ["resume", "draft"], `${what}: no step ran after it`);
-    assert.deepEqual(logs(run.calls), run.rec.printed[0].result.say, `${what}: nothing was said from the damaged answer`);
-  }
+// A copy damaged the way a helper's slip does: one character of a say line, the true checksum kept.
+const isReread = (call) => /^Re-read:/m.test(call.prompt);
+const isDraft = (call) => helperTask(call).command.includes(" draft ");
+const reworded = (copy) => ({ ...copy, say: copy.say.map((line, index) => (index === 0 ? line.replace("Sending", "sending") : line)) });
+const draftDir = (ws, stamp = "run-1") => path.join(ws.D, "work", "steps", stamp, "002-draft");
+const stamped = (file) => ({ bytes: fs.readFileSync(file, "utf8"), mtime: fs.statSync(file).mtimeMs });
+const rereadLines = (calls) => logs(calls).filter((line) => /read again from disk/.test(line));
+
+test("a draft copy one character off is read again by a second helper over the same capture, and the run carries on to ready", MINUTES, async () => {
+  const ws = staged();
+  const real = shellHelper(planEnv(ws, "A"));
+  const run = launch(ws, "run-1", draftAt(ws), canned(ws), (call) => {
+    const copy = real(call);
+    if (!isDraft(call) || isReread(call)) return copy;
+    return reworded(copy);
+  });
+  assert.deepEqual(await run.done, { ending: "ready" });
+
+  const draft = helperCalls(run.calls).filter(isDraft);
+  assert.equal(draft.length, 2);
+  const [first, second] = draft;
+  assert.deepEqual(helperTask(second), helperTask(first), "the same command and directory");
+  assert.equal(first.options.label, "Step 2: draft");
+  assert.equal(second.options.label, "Step 2: draft (re-read)");
+  assert.ok(!isReread(first) && isReread(second));
+  assert.deepEqual(rereadLines(run.calls), ["The draft step's first copy failed the check and was read again from disk; the second copy matched."]);
+  assert.ok(!logs(run.calls).some((line) => line.startsWith("sending")), "only the faithful copy's lines were logged");
+  assert.deepEqual(stepsOf(run.commands()), ["resume", "draft", "draft", "arrive", "review", "arrive", "collect", "writers", "arrive", "specs"]);
+  assert.deepEqual(labelsOf(run.calls), ["Draft the plan", ...READ_LABELS, "Write spec 01-a", "Write spec 01-b"]);
+});
+
+test("a draft re-read launches the step once and reads the same status and stdout twice", MINUTES, async () => {
+  const ws = staged();
+  const real = shellHelper(planEnv(ws, "A"));
+  const launched = [];
+  const seen = [];
+  const run = launch(ws, "run-1", draftAt(ws), canned(ws), (call) => {
+    if (!isDraft(call)) return real(call);
+    const dir = helperTask(call).dir;
+    launched.push(!fs.existsSync(path.join(dir, "started")));
+    const copy = real(call);
+    seen.push({ status: stamped(path.join(dir, "status")), stdout: stamped(path.join(dir, "stdout")) });
+    return launched.length === 1 ? reworded(copy) : copy;
+  });
+  assert.deepEqual(await run.done, { ending: "ready" });
+  assert.deepEqual(launched, [true, false], "the start text took its launch branch once, for the first call only");
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[1], seen[0], "status and stdout are the same bytes at the same modification time");
+});
+
+test("a draft copy that fails the check twice ends the run as stopped, saying the step finished and where its answer is saved", MINUTES, async () => {
+  const ws = staged();
+  const real = shellHelper(planEnv(ws, "A"));
+  const run = launch(ws, "run-1", draftAt(ws), canned(ws), (call) => {
+    const copy = real(call);
+    if (!isDraft(call)) return copy;
+    return isReread(call) ? { ...copy, say: copy.say.map((line, index) => (index === 0 ? `${line}!` : line)) } : reworded(copy);
+  });
+  const result = await run.done;
+  assert.equal(result.ending, "stopped");
+  assert.deepEqual(Object.keys(result), ["ending", "reason"]);
+  assert.match(result.reason, /^The draft step finished, but its answer did not come back intact twice\. The saved answer is /);
+  assert.ok(result.reason.includes(`The saved answer is ${draftDir(ws)}/stdout.`), "the reason gives the saved answer's path");
+  assert.match(result.reason, /Nothing after the step ran\. Running \/tagteam:plan again reads what is on disk\.$/);
+  assert.doesNotMatch(result.reason, /itself fails the check/, "two different copies do not blame the saved answer");
+  assert.equal(agentCalls(run.calls).length, 0, "no agent was sent");
+  assert.deepEqual(stepsOf(run.commands()), ["resume", "draft", "draft"], "no step ran after it");
+  assert.deepEqual(logs(run.calls), [...run.rec.printed[0].result.say, "The draft step's first copy failed the check and was read again from disk; the second copy did not match."]);
+});
+
+test("a draft capture a killed driver left is read twice and the stop says the saved answer itself fails the check", MINUTES, async () => {
+  const ws = staged();
+  const dir = draftDir(ws);
+  fs.mkdirSync(path.join(dir, "started"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "status"), "143\n");
+  fs.writeFileSync(path.join(dir, "stdout"), "");
+  fs.writeFileSync(path.join(dir, "stderr"), "");
+  const run = launch(ws, "run-1", draftAt(ws), canned(ws));
+  const result = await run.done;
+  assert.equal(result.ending, "stopped");
+  assert.match(result.reason, /^The draft step finished, but its answer did not come back intact twice\./);
+  assert.ok(result.reason.includes(`The saved answer is ${dir}/stdout.`));
+  assert.match(result.reason, /Both copies were the same, so the saved answer itself fails the check/);
+  assert.equal(helperCalls(run.calls).filter(isDraft).length, 2);
+  assert.equal(agentCalls(run.calls).length, 0);
+});
+
+test("a helper that returns nothing for the draft step gets no second helper, and the stop says no answer came back", MINUTES, async () => {
+  const ws = staged();
+  const real = shellHelper(planEnv(ws, "A"));
+  const run = launch(ws, "run-1", draftAt(ws), canned(ws), (call) => (isDraft(call) ? null : real(call)));
+  const result = await run.done;
+  assert.equal(result.ending, "stopped");
+  assert.match(result.reason, /^No answer came back from the draft step's helper, so nothing after it ran\. Running \/tagteam:plan again reads what is on disk\.$/);
+  assert.doesNotMatch(result.reason, /finished/);
+  assert.equal(helperCalls(run.calls).filter(isDraft).length, 1);
+  assert.deepEqual(rereadLines(run.calls), []);
+  assert.equal(agentCalls(run.calls).length, 0);
 });
 
 test("a driver refusal ends the run as stopped with the first stderr line byte for byte, and nothing after it", MINUTES, async () => {

@@ -4,8 +4,10 @@
 // of what the runtime was seen to do, and cited below by its question letter.
 //
 // The script decides nothing the driver decides. It runs scripts/plan.mjs's
-// command through the step helper, checks the answer came back unmangled,
-// dispatches what the driver printed, records the arrivals and follows `next`.
+// command through the step helper, checks the copy it hands back, dispatches what
+// the driver printed, records the arrivals and follows `next`. A copy that fails the
+// check is read once more from disk by a second helper, which launches nothing; a
+// second failing copy ends the run.
 // Whether a review is clean, what is re-sent or cut, the ceilings, the goal gate
 // and whether a set is complete are all scripts/plan.mjs's. It is the same
 // script shape as workflows/ship-spec.js, and what both need is pasted into both.
@@ -205,23 +207,33 @@ let steps = 0;
 
 /**
  * One command through the step helper. Returns `{ result }` when the answer came
- * back whole, or `{ stop }` with the run's own line when it did not.
+ * back whole, or `{ stop }` with the run's own line when it did not. A copy that
+ * fails the check is read once more from disk by a second helper, which launches
+ * nothing; a second failing copy stops the run.
  */
 async function runStep(shell, name, title) {
   if (title !== currentPhase) { phase(title); currentPhase = title; }
   steps += 1;
   const dir = `${plan}/work/steps/${stamp}/${String(steps).padStart(3, "0")}-${name}`;
-  let result;
-  try {
-    result = await agent(stepHelperPrompt(`TAGTEAM_RUN_ID=${stamp} ${shell}`, dir), {
-      label: `Step ${steps}: ${name}`, phase: title, agentType: HELPER, schema: stepHelperSchema()
-    });
-  } catch (error) {
-    return { stop: `The ${name} step's helper was rejected (${String(error?.message ?? error)}), so nothing after it ran. Running /tagteam:plan again reads what is on disk.` };
+  const read = await readStepAnswer(
+    agent,
+    stepHelperPrompt(`TAGTEAM_RUN_ID=${stamp} ${shell}`, dir),
+    { label: `Step ${steps}: ${name}`, phase: title, agentType: HELPER, schema: stepHelperSchema() },
+    (copy) => fits(copy) && checksumOf(copy) === copy.checksum
+  );
+  if (read.outcome === "rejected") {
+    return { stop: `The ${name} step's helper was rejected (${read.error}), so nothing after it ran. Running /tagteam:plan again reads what is on disk.` };
   }
-  if (!fits(result) || checksumOf(result) !== result.checksum) {
-    return { stop: `The ${name} step's output did not come back intact, so nothing after it ran. Running /tagteam:plan again reads what is on disk.` };
+  if (read.outcome === "none") {
+    return { stop: `No answer came back from the ${name} step's helper, so nothing after it ran. Running /tagteam:plan again reads what is on disk.` };
   }
+  if (read.outcome === "reread" || read.outcome === "failed") {
+    log(`The ${name} step's first copy failed the check and was read again from disk; the second copy ${read.outcome === "reread" ? "matched" : "did not match"}.`);
+  }
+  if (read.outcome === "failed") {
+    return { stop: `The ${name} step finished, but its answer did not come back intact twice. The saved answer is ${dir}/stdout. Nothing after the step ran. ${read.identical ? "Both copies were the same, so the saved answer itself fails the check: look at the step's output, not at the copy. " : ""}Running /tagteam:plan again reads what is on disk.` };
+  }
+  const { result } = read;
   if (result.exit !== 0 && !result.stop) {
     return { stop: `The ${name} step did not run, so nothing after it ran. Running /tagteam:plan again reads what is on disk.` };
   }
