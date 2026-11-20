@@ -804,7 +804,7 @@ const mermaidDiagrams = (text) => [...text.matchAll(/```mermaid\n([\s\S]*?)```/g
 
 test("each page has the diagrams it is meant to carry", () => {
   const titles = (text) => mermaidDiagrams(text).map((body) => /^title: (.*)$/m.exec(body)?.[1]);
-  assert.deepEqual(titles(readme).slice(1), ["The plan cycle", "A ship, in outline"], "the README no longer has its plan cycle and its ship outline");
+  assert.deepEqual(titles(readme), ["A ship, in outline", "The plan cycle"], "the README no longer has its ship outline and its plan cycle");
   assert.deepEqual(titles(shippingPage), ["The ship cycle, per spec", "Merge or stop"], "docs/shipping.md no longer has its two ship diagrams");
 });
 
