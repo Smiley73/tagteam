@@ -444,8 +444,7 @@ below. Answering every question as before, and leaving the setting off, writes
 the old file with those two keys, version 11's four at their safe values,
 `ciStartWaitSec` added, `redesignEscalation` at `never`, `autoMerge` left out,
 `useCodex` as answered, version 13, and nothing else different. Ask the Codex
-question as *Whether Codex is used* says; a file this old holds no answer to
-offer, so offer yes first.
+question as *Whether Codex is used* says.
 
 A version-10 configuration is carried forward the same way: every value the
 file holds is offered back as the default, `autoMerge` is still never written,
@@ -456,11 +455,10 @@ findings merges into the plan's branch with them disclosed, offered off, with
 `limits.carried` at 5 and `limits.followUps` at 2. Answering every question as
 before writes the old file with those four keys at their safe values,
 `redesignEscalation` at `never`, `useCodex` as answered, version 13, and nothing
-else different. Ask the Codex question as *Whether Codex is used* says, offering
-yes first.
+else different. Ask the Codex question as *Whether Codex is used* says.
 
 A version-11 configuration is carried forward by asking one question: whether to
-use Codex, as *Whether Codex is used* says, offering yes first. Keep every value
+use Codex, as *Whether Codex is used* says. Keep every value
 the file holds, drop `progressBoard` whatever its value, write `useCodex` as
 answered and version 13, validate it, and show the file as *Write* says. Tell the
 person in one sentence that `progressBoard` was retired, and that the Codex
@@ -469,9 +467,7 @@ question is the only new thing. This path adds no `redesignEscalation`.
 A version-12 configuration is carried forward the same way, asking only the Codex
 question. Keep every value the file holds, write `useCodex` as answered and
 version 13, validate it, and show the file as *Write* says. Tell the person in
-one sentence that nothing else changed. A version-12 file's answer is not
-recorded anywhere, so offer yes first: that is what the repository has been
-running.
+one sentence that nothing else changed.
 
 A version-13 configuration without `redesignEscalation` is current: it needs no
 reconfigure and behaves as `never`. A `--reconfigure` of it asks the question
