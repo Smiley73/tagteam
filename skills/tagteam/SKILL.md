@@ -296,7 +296,7 @@ shape and is replaced.
 | Key | Meaning |
 |---|---|
 | `base` | Branch pull requests target and each spec branches from |
-| `useCodex` | Whether Codex is a second reviewer here. Required, with no fallback; configure asks it first and records the answer, offering it back on a reconfigure. False: configure runs neither Codex check, `/tagteam:plan` makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only, counted out of two. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex`, and the `plan` and `escalation` Codex entries) are still required and still written |
+| `useCodex` | Whether Codex is a second reviewer here. Required, with no fallback; configure asks it first and records the answer, offering it back on a reconfigure. False: configure runs neither Codex check, `/tagteam:plan` makes no Codex version check, and a plan review is read by the Claude plan reviewer and the adversary only, counted out of two. The Codex-only keys (`models.codex`, `effort.codex`, `maxConcurrentCodex`, and the `plan` and `escalation` Codex entries) are needed only when this is true; with it false, configure writes none of them into a fresh file |
 | `branchPrefix` | Prefix for generated branches |
 | `conventionsPath` | A repository document spec writers, implementers, fixers, reviewers and the adversary (re-checks included) are told to read, or null |
 | `models` | Per role: `lead` (every reader and planner — reviewer, re-check, adversary, explorer, plan-drafter, plan-reviewer, spec-writer), `worker` (implementer, fixer), `codex` (every Codex call; needed only when `useCodex` is on). Sonnet is the floor for `worker`: specs are written for a model of at least that capability |
