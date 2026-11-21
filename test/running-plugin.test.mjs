@@ -18,6 +18,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { stagePlugin } from "./stage.mjs";
+import { stepHelperPrompt } from "../scripts/lib/step-helper.mjs";
+import { helperResult, hookInput, stageSession, writeHelperTranscript } from "./workflow-harness.mjs";
 import { EXECUTED_ROOTS, runningPlugin } from "../scripts/running-plugin.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -102,6 +104,43 @@ test("a workflow script edited in the checkout is named, and a staged plugin car
   fs.appendFileSync(path.join(worktree, "workflows", "ship-spec.js"), "// edited\n");
 
   assert.deepEqual(report(snapshot, worktree).drift, [{ file: "workflows/ship-spec.js", state: "differs" }]);
+});
+
+test("a staged plugin carries the hook registration and the script it runs, and an edit to hooks/hooks.json is named", () => {
+  const snapshot = stageTree("snapshot");
+  const worktree = stageTree("worktree");
+  const registration = JSON.parse(fs.readFileSync(path.join(worktree, "hooks", "hooks.json"), "utf8"));
+  const [entry] = registration.hooks.PreToolUse;
+  assert.equal(entry.matcher, "StructuredOutput");
+  const [{ command }] = entry.hooks;
+  const script = /^node "\$\{CLAUDE_PLUGIN_ROOT\}\/(scripts\/[a-z-]+\.mjs)"$/.exec(command)?.[1];
+  assert.ok(script, `the hook's command is not the plugin's own script: ${command}`);
+  assert.ok(fs.existsSync(path.join(worktree, script)), `${script} is not in the stage`);
+
+  assert.deepEqual(report(snapshot, worktree).drift, []);
+  fs.appendFileSync(path.join(worktree, "hooks", "hooks.json"), "\n");
+  assert.deepEqual(report(snapshot, worktree).drift, [{ file: "hooks/hooks.json", state: "differs" }]);
+});
+
+test("the registered command runs from a plugin path with a space in it, and corrects a copy there", () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-hook-spaced-")));
+  const plugin = path.join(home, "First Last", "plugin cache", "tagteam");
+  stagePlugin(plugin);
+  const { command } = JSON.parse(fs.readFileSync(path.join(plugin, "hooks", "hooks.json"), "utf8")).hooks.PreToolUse[0].hooks[0];
+  const session = stageSession();
+  const dir = path.join(session.home, "steps", "001-a");
+  fs.mkdirSync(dir, { recursive: true });
+  const saved = helperResult({ say: ["Done."], next: null });
+  fs.writeFileSync(path.join(dir, "status"), "0\n");
+  fs.writeFileSync(path.join(dir, "stdout"), JSON.stringify(saved));
+  fs.writeFileSync(path.join(dir, "stderr"), "");
+  writeHelperTranscript(session, "a1", stepHelperPrompt("node x", dir));
+
+  const run = spawnSync("sh", ["-c", command], {
+    input: JSON.stringify(hookInput(session, "a1", { ...saved, say: ["Dune."] })), encoding: "utf8", env: { ...process.env, CLAUDE_PLUGIN_ROOT: plugin }
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout).hookSpecificOutput.updatedInput, saved);
 });
 
 test("a workflows directory neither side has reports nothing", () => {

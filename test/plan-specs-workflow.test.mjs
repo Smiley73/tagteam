@@ -12,7 +12,7 @@ import { stepCommand } from "../scripts/lib/plan-sets.mjs";
 import { planEnv, runScript, stageExplored, stagePlanWorkspace, stageTranscript } from "./stage.mjs";
 import { root } from "./ship-stage.mjs";
 import {
-  compileWorkflowFile, startWorkflow, isHelperCall, helperTask, scriptedHelper, shellHelper
+  compileWorkflowFile, startWorkflow, isHelperCall, helperTask, scriptedHelper, shellHelper, throughHook
 } from "./workflow-harness.mjs";
 
 const compiled = compileWorkflowFile(path.join(root, "workflows", "plan-specs.js"));
@@ -181,6 +181,32 @@ test("a draft re-read launches the step once and reads the same status and stdou
   assert.deepEqual(launched, [true, false], "the start text took its launch branch once, for the first call only");
   assert.equal(seen.length, 2);
   assert.deepEqual(seen[1], seen[0], "status and stdout are the same bytes at the same modification time");
+});
+
+test("the 2026-11-20 replay through the hook: a draft copy one character off is corrected from the saved answer, with one helper call and one note, and the run carries on to ready", MINUTES, async () => {
+  const ws = staged();
+  const real = shellHelper(planEnv(ws, "A"));
+  let saved = null;
+  const hooked = throughHook((call) => {
+    const copy = real(call);
+    if (!isDraft(call)) return copy;
+    saved = copy;
+    return reworded(copy);
+  });
+  const run = launch(ws, "run-1", draftAt(ws), canned(ws), hooked.helper);
+  assert.deepEqual(await run.done, { ending: "ready" });
+
+  assert.equal(helperCalls(run.calls).filter(isDraft).length, 1, "one helper call and no re-read");
+  assert.deepEqual(rereadLines(run.calls), []);
+  assert.deepEqual(stepsOf(run.commands()), ["resume", "draft", "arrive", "review", "arrive", "collect", "writers", "arrive", "specs"]);
+  assert.notEqual(reworded(saved).say[0], saved.say[0], "the copy really was changed");
+  assert.ok(logs(run.calls).includes(saved.say[0]) && !logs(run.calls).includes(reworded(saved).say[0]), "the saved answer's line was logged, not the copy's");
+
+  const notes = fs.readdirSync(draftDir(ws)).filter((name) => name.startsWith("answer-corrected-"));
+  assert.equal(notes.length, 1);
+  const note = JSON.parse(fs.readFileSync(path.join(draftDir(ws), notes[0]), "utf8"));
+  assert.deepEqual(note.differed, { say: { copied: reworded(saved).say, saved: saved.say } });
+  assert.deepEqual(note.supplied, saved);
 });
 
 test("a draft copy that fails the check twice ends the run as stopped, saying the step finished and where its answer is saved", MINUTES, async () => {

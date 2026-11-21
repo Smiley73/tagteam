@@ -6,13 +6,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { setTimeout as delay } from "node:timers/promises";
 import { checksumOf } from "../scripts/lib/step-helper.mjs";
 import { root, stage, ship, write, outputOf, sessionsFor, git } from "./ship-stage.mjs";
 import {
-  compileWorkflow, compileWorkflowFile, startWorkflow, isHelperCall, helperTask, helperResult, stretchOf, shellHelper, launchOnlyHelper
+  compileWorkflow, compileWorkflowFile, startWorkflow, isHelperCall, helperTask, helperResult, stretchOf, shellHelper, launchOnlyHelper, savingHelper, throughHook
 } from "./workflow-harness.mjs";
 
 const compiled = compileWorkflowFile(path.join(root, "workflows", "ship-spec.js"));
@@ -691,4 +692,53 @@ test("a saved answer that is itself bad is read twice and stops with the identic
   assert.equal(agentCalls(started.calls).length, 0);
   assert.match(result.reason, new RegExp(`The begin line finished, but .* The saved answer is ${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/stdout\\.`));
   assert.match(result.reason, identicalClause);
+});
+
+// --- the same replay through the hook ------------------------------------------------
+
+const notesOf = (dir) => fs.readdirSync(dir).filter((name) => name.startsWith("answer-corrected-"));
+
+test("the 2026-11-20 replay through the hook: a copy one character off on a real begin line is corrected from the saved answer, with one helper call and one note", { timeout: 300000 }, async () => {
+  const { env, launch } = stagedBegin();
+  const real = shellHelper(env);
+  let copied = null;
+  const hooked = throughHook((call) => {
+    copied = real(call);
+    return { ...copied, say: copied.say.map((line, index) => (index === 0 ? `X${line.slice(1)}` : line)) };
+  });
+  const started = launch(hooked.helper);
+  await started.done;
+
+  assert.deepEqual(labelsOf(started.calls), ["Step 1: begin"], "one helper call and no re-read");
+  assert.deepEqual(logs(started.calls).filter((line) => /read again/.test(line)), []);
+  assert.notEqual(copied.say[0][0], "X", "the copy really was changed");
+  assert.deepEqual(logs(started.calls).slice(0, copied.say.length), copied.say, "the run logged the saved answer's lines");
+  assert.equal(agentCalls(started.calls).length, 1, "the run went on to its dispatch");
+
+  const { dir } = helperTask(helperCalls(started.calls)[0]);
+  assert.equal(hooked.runs.length, 1);
+  assert.deepEqual(hooked.runs[0].updated, copied);
+  assert.equal(notesOf(dir).length, 1);
+  const note = JSON.parse(fs.readFileSync(path.join(dir, notesOf(dir)[0]), "utf8"));
+  assert.deepEqual(note.differed, { say: { copied: copied.say.map((line, index) => (index === 0 ? `X${line.slice(1)}` : line)), saved: copied.say } });
+  assert.deepEqual(note.supplied, copied);
+});
+
+test("the same replay through the hook on a merge line goes on to the merge's next with one helper call and one note", async () => {
+  const plan = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-merge-")), ".tagteam", "plans", "demo");
+  const next = `node ${SHIP} end --plan ${JSON.stringify(plan)}`;
+  const good = { say: ["Merged.", `Merged as ${COMMIT}.`], next };
+  const hooked = throughHook((call) => damaged(savingHelper(() => good)(call)));
+  const started = startWorkflow(compiled, argsFor(cmd("finish", "01-a", plan), { plan }), (call) => (isHelperCall(call) ? hooked.helper(call) : "done"));
+  const result = await started.done;
+
+  assert.equal(result.ending, "merged");
+  assert.equal(result.next, next);
+  assert.deepEqual(labelsOf(started.calls), ["Step 1: land"]);
+  assert.deepEqual(logs(started.calls), good.say, "the run logged the saved answer's lines");
+  const { dir } = helperTask(helperCalls(started.calls)[0]);
+  assert.equal(notesOf(dir).length, 1);
+  const note = JSON.parse(fs.readFileSync(path.join(dir, notesOf(dir)[0]), "utf8"));
+  assert.deepEqual(note.differed, { say: { copied: ["Merged.", "Merged as 3f9a1c3d."], saved: good.say } });
+  assert.deepEqual(note.supplied, helperResult(good));
 });
