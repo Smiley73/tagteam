@@ -1,16 +1,9 @@
 # Confirming the step answer check in a real session
 
 tagteam's answer check (`scripts/step-answer-check.mjs`, registered in
-`hooks/hooks.json`) compares a step helper's copy of a step's answer with the saved
-answer and replaces a copy that differs. It is a backstop for the run's own check
-(the checksum, the schema and the single re-read), which are unchanged and still
-decide whenever the check is off, absent or fails. The tests run the hook
-directly; none of them shows that Claude Code runs it from the installed copy
-under `~/.claude/plugins/cache`. That is still to be confirmed, once, with the
-steps below.
-
-Do this once, after updating to a version that has the check. It needs a checkout
-only for the commands; nothing in a run reads this page.
+`hooks/hooks.json`) has not yet been confirmed to run from the installed copy under
+`~/.claude/plugins/cache`. Do this once, after updating to a version that has the
+check.
 
 ## 1. Start a session whose debug log records hooks
 
