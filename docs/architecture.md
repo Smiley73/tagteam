@@ -16,7 +16,15 @@ comes, and each merge runs in a line of its own, so that a person can still stop
 the view before it starts. A plan runs `scripts/plan.mjs` once per step, through a small helper
 agent. The helper's answers are checksummed so a copy that was altered or cut short is refused: the
 saved answer is then read once more by a second helper without running the step again, and a
-second refused copy stops the run, in a ship and in a plan alike. The
+second refused copy stops the run, in a ship and in a plan alike. Ahead of that, a plugin
+hook, the answer check, compares the helper's copy with the answer the step saved: a copy
+that means the same is left alone, and a copy that differs is replaced by the saved answer,
+with one note left in the step's folder and nothing in the workflow view, in a run's result
+or in a spec's finishing summary. The helper still copies the whole answer, and the check
+is a backstop for the run's own check, not a replacement for it: anything the check cannot
+do lets the copy through as before. Whether it fires from the installed copy of the
+plugin is still to be confirmed once, with
+[this procedure](confirm-step-answer-check.md). The
 driver runs git, Codex when the repository uses it, and the other scripts, decides
 the round, the route and every model and effort, and prints the agents to dispatch
 with their prompts written out. The run sends them out together and tells the driver as each one

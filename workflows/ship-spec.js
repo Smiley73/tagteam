@@ -7,7 +7,10 @@
 // driver's steps through one step helper, as one command (scripts/stretch.mjs),
 // checks the copy it hands back, dispatches what the stretch ended on, and follows
 // its `next`. A copy that fails the check is read once more from disk by a second
-// helper, which launches nothing; a second failing copy ends the run. A merge runs
+// helper, which launches nothing; a second failing copy ends the run. The copy may
+// already have been replaced by the plugin's answer check
+// (scripts/step-answer-check.mjs); that check can be off, absent or fail, which is why
+// this one and the re-read stay. A merge runs
 // in a line of its own. Every gate, every file on disk and every wording is
 // scripts/ship.mjs's.
 //

@@ -1,6 +1,9 @@
 // What a workflow script needs to run a driver command through `tagteam:step-helper`
 // and to know the answer came back unmangled: a copy that fails the run's check is
-// read once more from disk, and only a second failing copy ends the run.
+// read once more from disk, and only a second failing copy ends the run. The copy
+// that reaches a script may already have been replaced by the plugin's answer check
+// (scripts/step-answer-check.mjs), which is why this check and the re-read stay: it
+// can be off, absent or fail, and the run's check is what decides then.
 //
 // A workflow script cannot import (docs/workflow-spike-findings.md), so each of
 // the four exports below is one function that refers to nothing outside its own
@@ -10,7 +13,9 @@
 // a helper hoisted out of a function is a name the pasted copy does not have.
 //
 // The helper hands back only what a run consumes. A later spec that consumes
-// another driver field adds it to `checksumOf` and `stepHelperSchema` here.
+// another driver field adds it to `checksumOf` and `stepHelperSchema` here, and to
+// `projected` in scripts/lib/step-answer.mjs, which the answer check reads a plan's
+// saved answer through; the check itself takes both from here.
 
 /**
  * A short lowercase hex checksum of the fields a run consumes, from a payload in

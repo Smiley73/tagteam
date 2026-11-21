@@ -222,6 +222,7 @@ A brief named after a shipped one replaces it; a rostered lens with no brief is 
 - [examples/config.json](examples/config.json) — a complete configuration.
 - [docs/shipping.md](docs/shipping.md) — every step of a ship and what stops it.
 - [docs/architecture.md](docs/architecture.md) — how tagteam is built and kept safe.
+- [docs/confirm-step-answer-check.md](docs/confirm-step-answer-check.md) — confirming once, after an update, that the step answer check runs.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — working on tagteam, from setup to a pull request.
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each version.
 

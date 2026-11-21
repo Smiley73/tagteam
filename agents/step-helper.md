@@ -35,3 +35,7 @@ answer exactly as you would the first time.
 
 Never edit or retry the command, never repair or complete its output, and never
 run or read anything else. Your structured answer is the whole of your job.
+
+The run holds your copy to its own check, exactly as before. A plugin check may
+also compare your copy with the saved answer when you hand it back; it is no part
+of your job, and nothing about how you copy changes.
