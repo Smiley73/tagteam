@@ -66,10 +66,12 @@ this is where a third of past runs' cost went. Progress shows in Claude Code's
 workflow view: the phases, one helper line for each stretch of steps, named for the
 work whose results it collects, each merge in a line of its own under Land, each
 agent under its label, and every line the driver says, worded as the driver wrote
-it. Do not repeat it, and print no progress display of your own. A helper's copy of
-a line's answer that fails the run's check is read once more from disk by a second
-helper, and the step is not run again; the workflow view shows one line when that
-happens, and a second failing copy ends the run.
+it. Do not repeat it, and print no progress display of your own. The plugin's answer
+check puts the answer a step saved in the place of a helper's copy that differs from it,
+before the run's check sees it, and the view shows nothing of that. A copy the answer
+check did not replace and that fails the run's check is read once more from disk
+by a second helper, and the step is not run again; the workflow view shows one line when
+that happens, and a second failing copy ends the run.
 
 The run follows `next` through everything of the unit it started in, including the
 plan-level steps a last spec's `finish` carries on into, and it ends in one of

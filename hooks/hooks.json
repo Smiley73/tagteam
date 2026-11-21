@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "StructuredOutput",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/step-answer-check.mjs\"", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
