@@ -7,7 +7,9 @@
 // command through the step helper, checks the copy it hands back, dispatches what
 // the driver printed, records the arrivals and follows `next`. A copy that fails the
 // check is read once more from disk by a second helper, which launches nothing; a
-// second failing copy ends the run.
+// second failing copy ends the run. The copy may already have been replaced by the
+// plugin's answer check (scripts/step-answer-check.mjs); that check can be off,
+// absent or fail, which is why this one and the re-read stay.
 // Whether a review is clean, what is re-sent or cut, the ceilings, the goal gate
 // and whether a set is complete are all scripts/plan.mjs's. It is the same
 // script shape as workflows/ship-spec.js, and what both need is pasted into both.
