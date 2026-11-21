@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { claimSpec, holdsClaim, leadsOwnGroup, relaunchAsLeader } from "./lib/run-claim.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { checksumOf } from "./lib/step-helper.mjs";
+import { projected, stopped } from "./lib/step-answer.mjs";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = path.join(PLUGIN, "scripts");
@@ -98,23 +99,6 @@ function refusal(line, { plan, spec }) {
 }
 
 const objectOf = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-
-/** A driver payload in the step helper's shape, without its checksum. */
-function projected(payload) {
-  const text = (value) => (value === undefined || value === null ? null : String(value));
-  return {
-    exit: 0,
-    stop: text(payload.stop),
-    say: [].concat(payload.say ?? []).map(String),
-    ask: text(payload.ask),
-    answers: Object.entries(payload.answers ?? {}).map(([name, command]) => ({ name: String(name), command: String(command) })),
-    next: text(payload.next),
-    dispatch: (payload.dispatch ?? []).map((entry) => Object.fromEntries(["agent", "model", "effort", "description", "prompt"].map((key) => [key, text(entry[key])]))),
-    set: payload.set ? { id: text(payload.set.id), labels: [].concat(payload.set.labels ?? []).map(String), arrive: text(payload.set.arrive) } : null
-  };
-}
-
-const stopped = (exit, stop) => ({ ...projected({}), exit, stop });
 
 /** The ending of a stretch, from the step it ended on, or the sentence of its own stop. */
 async function stretch(request) {
