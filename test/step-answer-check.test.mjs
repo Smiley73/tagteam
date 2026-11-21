@@ -216,3 +216,21 @@ test("whatever else goes wrong the copy goes through: no output, no note, exit 0
 test("garbage on stdin is let through", () => {
   for (const input of ["", "not json", "[1, 2]", "null", "{\"hook_event_name\": "]) untouched(runHook(input));
 });
+
+test("the procedure's example note has the keys the hook writes, and the hook it names is the one registered", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const procedure = fs.readFileSync(path.join(root, "docs", "confirm-step-answer-check.md"), "utf8");
+  const example = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(procedure)[1]);
+  const staging = staged();
+  shipCapture(staging.dir);
+  assert.deepEqual(check(staging, miscopied(SHIP_ANSWER), "a1").updated, SHIP_ANSWER);
+  const note = JSON.parse(fs.readFileSync(path.join(staging.dir, notesIn(staging.dir)[0]), "utf8"));
+  const keys = (value) => Object.keys(value).sort();
+  assert.deepEqual(keys(example), keys(note));
+  assert.deepEqual(keys(Object.values(example.differed)[0]), keys(Object.values(note.differed)[0]));
+  assert.deepEqual(keys(example.supplied), keys(note.supplied));
+
+  const named = /^HOOK=.*\/<version>\/(scripts\/\S+)$/m.exec(procedure)[1];
+  assert.ok(fs.existsSync(path.join(root, named)), named);
+  assert.ok(JSON.stringify(JSON.parse(fs.readFileSync(path.join(root, "hooks", "hooks.json"), "utf8"))).includes(named));
+});
