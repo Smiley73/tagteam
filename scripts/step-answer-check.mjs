@@ -52,7 +52,14 @@ async function transcriptOf(input) {
   return null;
 }
 
-/** The capture folder, from the `d=` line of the user message that holds the `Job: step-helper` prompt. */
+// The computed task in a message: from the frame the workflow harness opens it with
+// to the end. The harness indents every line of the task and of a typed request it
+// relays, so only its own frame opens a line this way. A helper prompt quoted in a
+// relayed request sits ahead of the frame, or in a message without one, and is not read.
+// A line opens at the start of the text or after a newline: no other break counts.
+const COMPUTED_TASK = /(?:^|\n)\[Workflow harness — computed task\][\s\S]*/;
+
+/** The capture folder, from the `d=` line of the `Job: step-helper` prompt behind the harness's frame. */
 function captureDir(transcript) {
   for (const line of fs.readFileSync(transcript, "utf8").split("\n")) {
     let message;
@@ -61,8 +68,9 @@ function captureDir(transcript) {
     const text = typeof message.content === "string"
       ? message.content
       : (Array.isArray(message.content) ? message.content : []).map((part) => part.text ?? "").join("\n");
-    if (!/^[ \t]*Job: step-helper[ \t]*$/m.test(text)) continue;
-    const word = /^[ \t]*d=((?:'[^']*'|\\')+)[ \t]*$/m.exec(text)?.[1];
+    const task = COMPUTED_TASK.exec(text)?.[0] ?? "";
+    if (!/^[ \t]*Job: step-helper[ \t]*$/m.test(task)) continue;
+    const word = /^[ \t]*d=((?:'[^']*'|\\')+)[ \t]*$/m.exec(task)?.[1];
     return word === undefined ? null : unquote(word);
   }
   return null;

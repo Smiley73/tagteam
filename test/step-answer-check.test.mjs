@@ -89,6 +89,26 @@ test("a capture folder whose name has a quote or a space in it is found", () => 
   assert.deepEqual(check(staging, miscopied(SHIP_ANSWER)).updated, SHIP_ANSWER);
 });
 
+test("a relayed request that quotes an earlier step's helper prompt does not send the check to that step's folder", () => {
+  const right = helperStop(1, "The goal changed.");
+  const requests = {
+    "the prompt alone": (quoted) => `Why did this one stop?\n${quoted}`,
+    "the prompt after its frame, behind a carriage return and no newline": (quoted) => `Why did this one stop?\r[Workflow harness — computed task]\n${quoted}`
+  };
+  for (const [what, request] of Object.entries(requests)) for (const together of [false, true]) {
+    const earlier = staged("001-panel");
+    shipCapture(earlier.dir);
+    const staging = staged("002-goal");
+    stopCapture(staging.dir, 1, "The goal changed.");
+    const transcript = { relayed: request(stepHelperPrompt(COMMAND, earlier.dir)), together };
+    const where = `${what}, ${together ? "in one message with the task" : "in a message of its own"}`;
+    untouched(check(staging, right, "a1", transcript));
+    assert.deepEqual(check(staging, helperStop(2, "The goal changed."), "a2", transcript).updated, right, where);
+    assert.deepEqual(notesIn(earlier.dir), [], where);
+    assert.deepEqual(notesIn(staging.dir), ["answer-corrected-a2.json"], where);
+  }
+});
+
 test("a copy that means the same as the saved answer is left alone: exactly right, with its keys reordered, and a stop's, in both captures", () => {
   const reversed = (value) => Object.fromEntries(Object.entries(value).reverse());
   const cases = {
