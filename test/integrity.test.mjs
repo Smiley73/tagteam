@@ -14,6 +14,7 @@ import vm from "node:vm";
 import { spawnSync } from "node:child_process";
 import { stagePlugin, stagePlan } from "./stage.mjs";
 import { DOC_FILES } from "./docs-files.mjs";
+import { SESSION_VARIABLES } from "../scripts/usage.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -1162,6 +1163,132 @@ test("the waiting guard fails on the publish passage ship.md had, and passes the
   assert.ok(waitingProblems("ship.md", "Schedule a wake-up for the agent.").some((problem) => /other than ending its turn/.test(problem)));
   assert.deepEqual(waitingProblems("ship.md", "Never sleep, poll, watch or schedule a wake-up for a run: its completion notice is what wakes you."), []);
   assert.deepEqual(waitingProblems("ship.md", "Then end your turn. Never run a command only to pass the time."), []);
+});
+
+// --- the offer to start the next session ---
+//
+// Both hand-off points offer to start `/tagteam:ship <plan-dir>` in a new
+// session. The procedure lives once in the skill; each command points at it,
+// asks nothing of its own and starts nothing itself.
+const HAND_OFF = "Handing off to a new session";
+const IDENTITY_VARIABLES = [...SESSION_VARIABLES, "TAGTEAM_RUN_ID"];
+const hand = (text) => {
+  const at = text.indexOf(`## ${HAND_OFF}`);
+  if (at === -1) return "";
+  const rest = text.slice(at);
+  const end = rest.indexOf("\n## ", 1);
+  return end === -1 ? rest : rest.slice(0, end);
+};
+
+function handOffProblems(text) {
+  const section = hand(text);
+  if (!section) return ["the skill has no section on handing off to a new session"];
+  const problems = [];
+  const flat = section.replace(/\s+/g, " ");
+  const firstStart = Math.min(...["claude --bg", "call the tool"].map((needle) => section.indexOf(needle)).filter((at) => at > -1));
+  const ask = section.indexOf("AskUserQuestion");
+  if (ask === -1 || ask > firstStart) problems.push("a session is started before the person is asked");
+  for (const answer of ['"Start it"', '"I\'ll do it myself"']) {
+    const at = section.indexOf(answer);
+    if (at === -1 || at > firstStart) problems.push(`the question does not offer ${answer} before it starts anything`);
+  }
+  if (!/Otherwise ask nothing and give today's wording/.test(flat)) problems.push("no way to start a session does not give today's wording");
+  if (!/"I'll do it myself" gives today's wording/.test(flat)) problems.push('"I\'ll do it myself" does not give today\'s wording');
+
+  const launch = section.split("\n").find((line) => line.includes("claude --bg")) ?? "";
+  const clears = IDENTITY_VARIABLES.map((name) => `-u ${name}`).join(" ");
+  if (!launch.trim().startsWith(`cd "$R" && env ${clears} claude --bg`)) problems.push("the claude --bg line is not run from $R with the identity variables cleared");
+  if (!/ -n "<slug>" /.test(launch)) problems.push("the claude --bg line does not name the session after the plan");
+  if (!/ --permission-mode auto /.test(launch)) problems.push("the claude --bg line is not in auto mode");
+  if (!/ "\/tagteam:ship \$D"$/.test(launch.trim())) problems.push("the claude --bg prompt is not /tagteam:ship with $D and nothing else");
+  const block = /```bash\n([\s\S]*?)```/.exec(section)?.[1] ?? "";
+  if (/--(?:continue|resume|fork-session|model|effort)\b|\s-[cr]\s/.test(block)) problems.push("the claude --bg call carries a conversation, a model or an effort");
+  for (const field of ["background", "wake_when_done"]) {
+    if (!new RegExp(`without \`${field}\``).test(flat)) problems.push(`the desktop call is not said to go without ${field}`);
+  }
+
+  if (!/sidebar/.test(flat)) problems.push("the desktop app is not told where the questions arrive");
+  for (const command of ["claude agents", "claude attach"]) {
+    if (!flat.includes(command)) problems.push(`the terminal is not told ${command}`);
+  }
+
+  const failure = /\*\*On a failed start\*\*([\s\S]*)$/.exec(flat)?.[1] ?? "";
+  if (!/one line/.test(failure) || !/today's wording/.test(failure)) problems.push("a failed start is not one line followed by today's wording");
+  if (!/Never try again/.test(failure)) problems.push("a failed start can be tried again");
+  if (!/Do not follow, check on or report on the started ship/.test(flat)) problems.push("the session does not end after handing off");
+  return problems;
+}
+
+// What a command file keeps for itself: that it points at the procedure, quotes
+// its own closing words, and holds the grant that makes "Start it" a single
+// permission prompt. Neither starts a session itself.
+function commandOfferProblems(name, text, wording) {
+  const flat = text.replace(/\s+/g, " ");
+  const problems = [];
+  if (!flat.includes(`*${HAND_OFF}* in the skill`)) problems.push(`${name} never points at the hand-off section`);
+  if (!flat.includes(wording)) problems.push(`${name} no longer gives today's wording`);
+  if (!/^allowed-tools: .*\bmcp__ccd_session__start_session\b/m.test(text)) problems.push(`${name} does not grant the desktop tool`);
+  if (/claude --bg|--fork-session|--continue/.test(text)) problems.push(`${name} starts a session by itself`);
+  return problems;
+}
+
+// The ship's offer follows `end` and depends on its saying it released the lock.
+function shipOfferProblems(text) {
+  const stop = text.slice(text.indexOf("## Stopping between specs"), text.indexOf("\n## Teardown")).replace(/\s+/g, " ");
+  const problems = [];
+  const ended = stop.indexOf('ship.mjs" end --plan "$D"');
+  const offer = stop.indexOf(`*${HAND_OFF}*`);
+  if (ended === -1 || offer === -1 || offer < ended) problems.push("the offer comes before the plan's end ran");
+  const sentence = stop.split(/(?<=[.!?])\s+(?=[A-Z])/).find((part) => part.includes(`*${HAND_OFF}*`)) ?? "";
+  const condition = stop.slice(Math.max(0, stop.indexOf(sentence) - 160), stop.indexOf(sentence) + sentence.length);
+  if (!condition.includes("Released <slug>'s ship lock.")) problems.push("the offer does not depend on end having released the lock");
+  return problems;
+}
+
+test("the offer asks before it starts anything and gives today's wording when it cannot", () => {
+  assert.deepEqual(handOffProblems(skill), []);
+  const withoutQuestion = skill.replace("2. **Ask once**, with `AskUserQuestion`, as *Asking* says", "2. **Say so**, as *Asking* says");
+  assert.ok(handOffProblems(withoutQuestion).some((problem) => /before the person is asked/.test(problem)), "a session started with no question");
+  assert.ok(handOffProblems(skill.replaceAll('"I\'ll do it myself"', '"Not now"')).some((problem) => /I'll do it myself/.test(problem)));
+  const askStart = skill.indexOf("2. **Ask once**");
+  const askEnd = skill.indexOf("3. **On \"Start it\"");
+  const sectionEnd = skill.indexOf("\n## Context");
+  const askedLast = skill.slice(0, askStart) + skill.slice(askEnd, sectionEnd) + "\n" + skill.slice(askStart, askEnd) + skill.slice(sectionEnd);
+  assert.ok(handOffProblems(askedLast).some((problem) => /started before the person is asked/.test(problem)), "the question moved after the start");
+  assert.ok(handOffProblems(skill.replace(/Otherwise ask nothing and\s+give today's wording/, "Otherwise try the other way")).some((problem) => /no way to start/.test(problem)));
+});
+
+test("each hand-off point goes through the skill's section, keeps today's wording and starts nothing itself", () => {
+  const plan = read("commands", "plan.md");
+  const ship = read("commands", "ship.md");
+  assert.deepEqual(commandOfferProblems("plan.md", plan, "tell them to run `/tagteam:ship <plan-dir>` **in a new session**"), []);
+  assert.deepEqual(commandOfferProblems("ship.md", ship, "say that `/tagteam:ship <plan-dir>` can be run again"), []);
+  assert.ok(commandOfferProblems("plan.md", plan.replace(`*${HAND_OFF}*`, "the skill's last section"), "tell them").some((problem) => /never points/.test(problem)));
+  assert.ok(commandOfferProblems("ship.md", ship.replace(", mcp__ccd_session__start_session", ""), "can be run again").some((problem) => /grant/.test(problem)));
+  assert.ok(commandOfferProblems("ship.md", `${ship}\nRun claude --bg "/tagteam:ship $D".`, "can be run again").some((problem) => /by itself/.test(problem)));
+});
+
+test("a started session is the next ship of this plan, fresh, and the person is told where it is", () => {
+  assert.ok(handOffProblems(skill.replace("claude --bg -n", "claude --bg --fork-session -n")).some((problem) => /conversation/.test(problem)));
+  assert.ok(handOffProblems(skill.replace('"/tagteam:ship $D"', '"/tagteam:ship $D /tagteam:ship other"')).some((problem) => /nothing else/.test(problem)));
+  assert.ok(handOffProblems(skill.replace("-u TAGTEAM_RUN_ID ", "")).some((problem) => /identity variables/.test(problem)));
+  assert.ok(handOffProblems(skill.replace('cd "$R" && ', "")).some((problem) => /from \$R/.test(problem)));
+  assert.ok(handOffProblems(skill.replace(/without\s+`wake_when_done`/, "with `wake_when_done`")).some((problem) => /wake_when_done/.test(problem)));
+  assert.ok(handOffProblems(skill.replace(/without\s+`background`/, "with `background`")).some((problem) => /background/.test(problem)));
+  assert.ok(handOffProblems(skill.replace(/in the sidebar/g, "somewhere")).some((problem) => /where the questions arrive/.test(problem)));
+  assert.ok(handOffProblems(skill.replace("`claude attach <id>`", "its id")).some((problem) => /claude attach/.test(problem)));
+  assert.ok(handOffProblems(skill.replace(/`claude agents`\s+lists it and that /, "")).some((problem) => /claude agents/.test(problem)));
+});
+
+test("a failed start is one line, never retried and followed by today's wording; the ship offers only after end released the lock", () => {
+  assert.ok(handOffProblems(skill.replace("Never try again, in either way", "Try the other way")).some((problem) => /tried again/.test(problem)));
+  assert.ok(handOffProblems(skill.replace(/say in one line that it failed, then give\s+today's\s+wording/, "say that it failed")).some((problem) => /one line/.test(problem)));
+  const ship = read("commands", "ship.md");
+  assert.deepEqual(shipOfferProblems(ship), []);
+  const stopStart = ship.indexOf("## Stopping between specs");
+  const moved = ship.slice(0, stopStart) + "## Stopping between specs\n\nOffer a new session, as *Handing off to a new session* in the skill says, when `end` printed \"Released <slug>'s ship lock.\"\n\n" + ship.slice(stopStart + "## Stopping between specs\n\n".length);
+  assert.ok(shipOfferProblems(moved).some((problem) => /before the plan's end/.test(problem)), "an offer placed before end");
+  assert.ok(shipOfferProblems(ship.replace("Released <slug>'s ship lock.", "Done.")).some((problem) => /released the lock/.test(problem)), "an offer without the released condition");
 });
 
 // A workflow script cannot import, so each piece of the step helper it needs is

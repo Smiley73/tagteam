@@ -30,9 +30,9 @@ them.
 You give `/tagteam:plan` a rough idea. Tagteam asks questions in plain language and
 writes `goal.md`, which you read, edit and approve. It drafts, reviews and cuts the
 plan into specs, then asks one last question with the deliverables and any finding
-it declined. Approve, then run `/tagteam:ship` in a new session. It goes quiet while
-Claude Code's workflow view shows each agent at work, and ends merged, stopped with
-its reason, or asking you a question. A ship's review panel, as an illustration
+it declined. Approve, and tagteam offers to start `/tagteam:ship` for you in a new
+session. The ship goes quiet while Claude Code's workflow view shows each agent at
+work, and ends merged, stopped with its reason, or asking you a question. A ship's review panel, as an illustration
 with Codex on (the driver's wording, made-up lenses and models, the last line cut):
 
 ```text
@@ -103,6 +103,24 @@ without spending context on search. Without the index the agents read files; wit
 
 Run `/tagteam:plan` and `/tagteam:ship` in **separate sessions**: the interview
 loads repository material shipping does not need, and context is what runs out.
+Tagteam offers to start the ship's session for you, after you approve a plan and
+when a ship stops between specs because its session is running out of room. You
+are asked once, "Start it" or "I'll do it myself", and only when your session has
+a way to start one.
+
+- **In the Claude desktop app**, "Start it" opens a fresh session in this
+  repository folder that runs only `/tagteam:ship` on the plan. It shows in the
+  sidebar, and the ship's questions are answered there.
+- **In a terminal**, "Start it" runs `claude --bg` from the repository root,
+  named after the plan and in auto mode, and tells you the session's id. Find it
+  with `claude agents` and answer its questions with `claude attach <id>`. A
+  terminal without `claude --bg` is not offered this.
+
+Either way the new session carries nothing of the one that started it, and the
+session that offered it ends without following it. "I'll do it myself", no way to
+start a session, and a start that fails all give you the instruction as before:
+run `/tagteam:ship <plan-dir>` in a new session, or again. A stop between specs
+makes the offer only once the plan is released for another run to take it.
 
 ### Updating
 
@@ -223,6 +241,7 @@ A brief named after a shipped one replaces it; a rostered lens with no brief is 
 - [docs/shipping.md](docs/shipping.md) — every step of a ship and what stops it.
 - [docs/architecture.md](docs/architecture.md) — how tagteam is built and kept safe.
 - [docs/confirm-step-answer-check.md](docs/confirm-step-answer-check.md) — confirming once, after an update, that the step answer check runs.
+- [docs/confirm-session-hand-off.md](docs/confirm-session-hand-off.md) — confirming once that the desktop app and the terminal start the ship's session as described.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — working on tagteam, from setup to a pull request.
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each version.
 
