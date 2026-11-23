@@ -1,7 +1,7 @@
 ---
 description: Implement, review, and merge an approved plan one spec at a time
 argument-hint: <plan-dir>
-allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, Workflow(tagteam:ship-spec), Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer), Agent(tagteam:codex-runner), Agent(tagteam:step-helper)
+allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, Workflow(tagteam:ship-spec), mcp__ccd_session__start_session, Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer), Agent(tagteam:codex-runner), Agent(tagteam:step-helper)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
@@ -757,11 +757,18 @@ node "$P/scripts/ship.mjs" end --plan "$D"
 It releases this run's lock, so a ship of the plan started afterwards, in any
 session, takes it without being asked whether an earlier run is still going.
 `## Teardown` says what else `end` does. Then say which specs merged and which
-is next, pass on what `end` printed in `say` as written, and say that
-`/tagteam:ship <plan-dir>` can be run again — `start` reads what is on disk and
-`begin` resumes each spec from wherever it stopped. When `end` says this run held
-no lock, or that another run took it over, the stop still ends with that sentence.
-Stopping early is free; running out mid-merge is not.
+is next, and pass on what `end` printed in `say` as written.
+
+Only when that `say` holds "Released <slug>'s ship lock." has this run given the
+plan up, and only then offer to start the ship again for them, as *Handing off to
+a new session* in the skill says. It asks only when that section finds a way to
+start a session, and starts one only on "Start it". Never offer before `end` has
+run, and never infer the release. With no offer, on "I'll do it myself" and on a
+failed start, say that `/tagteam:ship <plan-dir>` can be run again — `start`
+reads what is on disk and `begin` resumes each spec from wherever it stopped.
+When `end` says this run held no lock, that another run took it over, or that the
+lock was not released, nothing is offered and the stop still ends with that
+sentence. Stopping early is free; running out mid-merge is not.
 
 ## Teardown
 

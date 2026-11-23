@@ -1003,6 +1003,52 @@ question that says "some of the error paths" where it could have said "what
 happens when the payment provider times out" is the same failure in the other
 direction.
 
+## Handing off to a new session
+
+Approving a plan and a ship that stops between specs both end by sending the
+person to a new session to run `/tagteam:ship <plan-dir>`. This section is how to
+offer to start that session for them. The command file says when the offer
+applies and quotes its own closing words, called *today's wording* below; this
+section is the same for both.
+
+1. **Choose the way by looking.** Look at the tools you can call right now, the
+   ones given to you with their parameters; a name in a command's grants does not
+   count. If one of them starts a new Claude desktop session, that is the desktop
+   way (past hand-offs used `mcp__ccd_session__start_session`), and it wins when
+   the terminal way exists too. Otherwise, if `command -v claude` finds the
+   command in a Bash call, that is the terminal way. Otherwise ask nothing and
+   give today's wording.
+2. **Ask once**, with `AskUserQuestion`, as *Asking* says: a new session would
+   start in this repository running only `/tagteam:ship <plan-dir>`. Two answers,
+   worded exactly "Start it" and "I'll do it myself". "I'll do it myself" gives
+   today's wording. Nothing starts before "Start it".
+3. **On "Start it", start exactly one session** for this plan's `$D` (absolute),
+   with the prompt `/tagteam:ship $D` and nothing else. No model, no effort, no
+   fork, and none of `--continue`, `--resume` and `--fork-session`: the started
+   ship carries nothing of this conversation.
+   - Desktop: call the tool with that prompt, the folder `$R` and a title naming
+     the plan (`<slug>`). Leave every other field out. In particular, call it
+     without `background`, which would carry this conversation over, and without
+     `wake_when_done`, which would have this session follow the ship.
+   - Terminal: one foreground Bash call, from `$R`, with this session's identity
+     variables cleared so the started ship takes none of them for its own:
+
+     ```bash
+     cd "$R" && env -u TAGTEAM_SESSION_ID -u CLAUDE_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u TAGTEAM_RUN_ID claude --bg -n "<slug>" --permission-mode auto "/tagteam:ship $D"
+     ```
+
+     It returns once the session is started. A non-zero exit, or output without
+     the session's id, is a failed start.
+4. **Say where it is.** Desktop: the new session shows in the sidebar, and the
+   ship's questions are answered there. Terminal: give its id, say it runs in the
+   background, that `claude agents` lists it and that `claude attach <id>` opens
+   it to answer its questions.
+5. **End.** Do not follow, check on or report on the started ship, and in a ship
+   start no further run of this plan: its questions belong to its own session.
+6. **On a failed start**, say in one line that it failed, then give today's
+   wording. Never try again, in either way: a second attempt can leave two ships
+   of one plan.
+
 ## Context
 
 The orchestrator's context is the scarce resource, and running out of it
@@ -1012,13 +1058,18 @@ mid-train is the failure this design exists to avoid. Three rules:
    yourself.** Pass paths. `collect-findings.mjs`, `recheck.mjs --print` and
    `plan.mjs collect` exist so findings arrive as a summary.
 2. **Plan and ship in separate sessions.** The interview loads repository
-   material that shipping does not need.
+   material that shipping does not need, so approving a plan offers to start the
+   ship in a new session (*Handing off to a new session*), and a person who
+   declines runs `/tagteam:ship <plan-dir>` there themselves.
 3. **Stop between specs when context is tight**, report where you got to, and
-   say the command can be run again. State is on disk; resuming is free.
+   offer to start the ship again in a new session once `end` has released the
+   plan; otherwise say the command can be run again. State is on disk; resuming
+   is free.
 
 ## Recovery
 
-- **A stopped ship**: re-run `/tagteam:ship <plan-dir>`. `start` skips every
+- **A stopped ship**: re-run `/tagteam:ship <plan-dir>`, which a stop between
+  specs offers to start in a new session for you. `start` skips every
   spec whose `state.json` says merged and `begin` restarts each one from
   whatever is committed on its branch.
 - **A stale worktree**: `git -C "$R" worktree remove` it (never `--force`), then
