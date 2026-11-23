@@ -1508,6 +1508,31 @@ test("the standing-permission guard fails when the passage, its planBranch groun
   }
 });
 
+// A ship that stops between specs releases its lock, so the next ship of the plan is
+// not asked whether this one is still going. Scoped to the section: the same line in
+// `## Teardown` does not count.
+function stopReleasesLockProblems(file, text) {
+  const section = "## Stopping between specs";
+  const at = text.indexOf(`${section}\n`);
+  if (at === -1) return [`${file} has no ${section} section`];
+  const end = text.indexOf("\n## ", at + section.length);
+  if (!text.slice(at, end === -1 ? undefined : end).includes('ship.mjs" end --plan "$D"')) {
+    return [`${file} ${section} no longer runs \`ship.mjs end --plan "$D"\` before the report`];
+  }
+  return [];
+}
+
+test("a ship that stops between specs runs end before it reports", () => {
+  const ship = read("commands", "ship.md");
+  assert.deepEqual(stopReleasesLockProblems("commands/ship.md", ship), []);
+  const endLine = 'node "$P/scripts/ship.mjs" end --plan "$D"';
+  const section = ship.slice(ship.indexOf("## Stopping between specs"), ship.indexOf("\n## Teardown"));
+  assert.ok(ship.slice(ship.indexOf("\n## Teardown")).includes(endLine), "## Teardown carries the end line");
+  assert.ok(stopReleasesLockProblems("ship.md", ship.replace(section, section.replace(endLine, ""))).length > 0,
+    "the guard passes with the end line removed from the stop section while Teardown keeps it");
+  assert.ok(stopReleasesLockProblems("ship.md", ship.replace("## Stopping between specs", "## Stopping")).length > 0);
+});
+
 // Where the shipping page and the skill first introduce the plan branch, they say
 // it is the familiar feature branch — before they use the name — and what tagteam
 // does that is particular to it.

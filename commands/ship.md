@@ -747,9 +747,20 @@ GitHub is recorded as merged, its branch is deleted, and the train ends.
 
 ## Stopping between specs
 
-Stop between specs when your context is getting tight. Say which specs merged,
-which is next, and that `/tagteam:ship <plan-dir>` can be run again — `start`
-reads what is on disk and `begin` resumes each spec from wherever it stopped.
+Stop between specs when your context is getting tight. Before you report, run
+this plan's `end` in the session, as `## Teardown` does:
+
+```bash
+node "$P/scripts/ship.mjs" end --plan "$D"
+```
+
+It releases this run's lock, so a ship of the plan started afterwards, in any
+session, takes it without being asked whether an earlier run is still going.
+`## Teardown` says what else `end` does. Then say which specs merged and which
+is next, pass on what `end` printed in `say` as written, and say that
+`/tagteam:ship <plan-dir>` can be run again — `start` reads what is on disk and
+`begin` resumes each spec from wherever it stopped. When `end` says this run held
+no lock, or that another run took it over, the stop still ends with that sentence.
 Stopping early is free; running out mid-merge is not.
 
 ## Teardown
