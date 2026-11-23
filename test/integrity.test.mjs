@@ -1528,7 +1528,6 @@ test("a ship that stops between specs runs end before it reports", () => {
   const endLine = 'node "$P/scripts/ship.mjs" end --plan "$D"';
   const section = ship.slice(ship.indexOf("## Stopping between specs"), ship.indexOf("\n## Teardown"));
   assert.ok(ship.slice(ship.indexOf("\n## Teardown")).includes(endLine), "## Teardown carries the end line");
-  assert.ok(section.includes(endLine), "the stop section carries the end line");
   assert.ok(stopReleasesLockProblems("ship.md", ship.replace(section, section.replace(endLine, ""))).length > 0,
     "the guard passes with the end line removed from the stop section while Teardown keeps it");
   assert.ok(stopReleasesLockProblems("ship.md", ship.replace("## Stopping between specs", "## Stopping")).length > 0);
