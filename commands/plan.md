@@ -317,8 +317,7 @@ the one approved; never write that file by hand. Then commit
 `goal.md`, `plan.md`, `specs/`, `approved.json`.
 
 Then offer to start the ship for them, as *Handing off to a new session* in the
-skill says. It asks only when that section finds a way to start a session, and
-starts one only on "Start it". With no way to start one, on "I'll do it myself"
+skill says. With no way to start one, on "I'll do it myself"
 and on a failed start, tell them to run `/tagteam:ship <plan-dir>` **in a new
 session** — the interview loaded material shipping does not need.
 

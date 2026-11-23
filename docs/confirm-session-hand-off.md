@@ -29,9 +29,12 @@ Answer "Start it".
   the plan in, and it knows nothing of the planning conversation.
 - **Fails** when the session opens as plain text instead of running the command,
   in another folder, or with the planning conversation in it. The desktop app then
-  gets today's wording only: remove the desktop tool from step 1 of the section
-  and from both `allowed-tools:` lines. Do not let it fall back to `claude --bg`:
-  that session would not show in the sidebar.
+  gets today's wording only: add a rule to step 1 of the section that in the
+  Claude desktop app it asks nothing and gives today's wording, without trying the
+  terminal way. Removing the desktop tool from the section and from both
+  `allowed-tools:` lines is housekeeping and does not do this, because step 1
+  finds the tool by looking. Do not let it fall back to `claude --bg`: that
+  session would not show in the sidebar.
 
 ## Terminal
 

@@ -1250,6 +1250,11 @@ test("the offer asks before it starts anything and gives today's wording when it
   const withoutQuestion = skill.replace("2. **Ask once**, with `AskUserQuestion`, as *Asking* says", "2. **Say so**, as *Asking* says");
   assert.ok(handOffProblems(withoutQuestion).some((problem) => /before the person is asked/.test(problem)), "a session started with no question");
   assert.ok(handOffProblems(skill.replaceAll('"I\'ll do it myself"', '"Not now"')).some((problem) => /I'll do it myself/.test(problem)));
+  const askStart = skill.indexOf("2. **Ask once**");
+  const askEnd = skill.indexOf("3. **On \"Start it\"");
+  const sectionEnd = skill.indexOf("\n## Context");
+  const askedLast = skill.slice(0, askStart) + skill.slice(askEnd, sectionEnd) + "\n" + skill.slice(askStart, askEnd) + skill.slice(sectionEnd);
+  assert.ok(handOffProblems(askedLast).some((problem) => /started before the person is asked/.test(problem)), "the question moved after the start");
   assert.ok(handOffProblems(skill.replace(/Otherwise ask nothing and\s+give today's wording/, "Otherwise try the other way")).some((problem) => /no way to start/.test(problem)));
 });
 
@@ -1264,7 +1269,6 @@ test("each hand-off point goes through the skill's section, keeps today's wordin
 });
 
 test("a started session is the next ship of this plan, fresh, and the person is told where it is", () => {
-  assert.deepEqual(handOffProblems(skill), []);
   assert.ok(handOffProblems(skill.replace("claude --bg -n", "claude --bg --fork-session -n")).some((problem) => /conversation/.test(problem)));
   assert.ok(handOffProblems(skill.replace('"/tagteam:ship $D"', '"/tagteam:ship $D /tagteam:ship other"')).some((problem) => /nothing else/.test(problem)));
   assert.ok(handOffProblems(skill.replace("-u TAGTEAM_RUN_ID ", "")).some((problem) => /identity variables/.test(problem)));

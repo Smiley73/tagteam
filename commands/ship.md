@@ -761,14 +761,11 @@ is next, and pass on what `end` printed in `say` as written.
 
 Only when that `say` holds "Released <slug>'s ship lock." has this run given the
 plan up, and only then offer to start the ship again for them, as *Handing off to
-a new session* in the skill says. It asks only when that section finds a way to
-start a session, and starts one only on "Start it". Never offer before `end` has
+a new session* in the skill says. Never offer before `end` has
 run, and never infer the release. With no offer, on "I'll do it myself" and on a
 failed start, say that `/tagteam:ship <plan-dir>` can be run again — `start`
 reads what is on disk and `begin` resumes each spec from wherever it stopped.
-When `end` says this run held no lock, that another run took it over, or that the
-lock was not released, nothing is offered and the stop still ends with that
-sentence. Stopping early is free; running out mid-merge is not.
+Stopping early is free; running out mid-merge is not.
 
 ## Teardown
 
