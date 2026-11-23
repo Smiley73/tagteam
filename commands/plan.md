@@ -1,7 +1,7 @@
 ---
 description: Turn a goal into a reviewed plan and a set of implementable spec files
 argument-hint: <goal, however vague> [--resume <slug>]
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, Workflow(tagteam:plan-specs), Agent(tagteam:explorer), Agent(tagteam:plan-drafter), Agent(tagteam:plan-reviewer), Agent(tagteam:adversary), Agent(tagteam:spec-writer), Agent(tagteam:codex-runner), Agent(tagteam:step-helper)
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, Workflow(tagteam:plan-specs), mcp__ccd_session__start_session, Agent(tagteam:explorer), Agent(tagteam:plan-drafter), Agent(tagteam:plan-reviewer), Agent(tagteam:adversary), Agent(tagteam:spec-writer), Agent(tagteam:codex-runner), Agent(tagteam:step-helper)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
@@ -314,9 +314,12 @@ Then one question — Approve / Adjust / Stop. On approve, run
 which writes `$D/approved.json` itself, hashes and each spec's approved workflow
 files included, and refuses if the specs no longer validate or the goal is not
 the one approved; never write that file by hand. Then commit
-`goal.md`, `plan.md`, `specs/`, `approved.json`, and tell them to run
-`/tagteam:ship <plan-dir>` **in a new session** — the interview loaded material
-shipping does not need.
+`goal.md`, `plan.md`, `specs/`, `approved.json`.
+
+Then offer to start the ship for them, as *Handing off to a new session* in the
+skill says. With no way to start one, on "I'll do it myself"
+and on a failed start, tell them to run `/tagteam:ship <plan-dir>` **in a new
+session** — the interview loaded material shipping does not need.
 
 ## When Codex could not say how it ran
 

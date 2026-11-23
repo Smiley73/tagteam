@@ -1,7 +1,7 @@
 ---
 description: Implement, review, and merge an approved plan one spec at a time
 argument-hint: <plan-dir>
-allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, Workflow(tagteam:ship-spec), Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer), Agent(tagteam:codex-runner), Agent(tagteam:step-helper)
+allowed-tools: Read, Write, Glob, Grep, Bash, AskUserQuestion, Skill, Workflow, Workflow(tagteam:ship-spec), mcp__ccd_session__start_session, Agent(tagteam:implementer), Agent(tagteam:reviewer), Agent(tagteam:adversary), Agent(tagteam:fixer), Agent(tagteam:codex-runner), Agent(tagteam:step-helper)
 ---
 
 Read `${CLAUDE_PLUGIN_ROOT}/skills/tagteam/SKILL.md` first. `$P` is
@@ -747,8 +747,23 @@ GitHub is recorded as merged, its branch is deleted, and the train ends.
 
 ## Stopping between specs
 
-Stop between specs when your context is getting tight. Say which specs merged,
-which is next, and that `/tagteam:ship <plan-dir>` can be run again — `start`
+Stop between specs when your context is getting tight. Before you report, run
+this plan's `end` in the session, as `## Teardown` does:
+
+```bash
+node "$P/scripts/ship.mjs" end --plan "$D"
+```
+
+It releases this run's lock, so a ship of the plan started afterwards, in any
+session, takes it without being asked whether an earlier run is still going.
+`## Teardown` says what else `end` does. Then say which specs merged and which
+is next, and pass on what `end` printed in `say` as written.
+
+Only when that `say` holds "Released <slug>'s ship lock." has this run given the
+plan up, and only then offer to start the ship again for them, as *Handing off to
+a new session* in the skill says. Never offer before `end` has
+run, and never infer the release. With no offer, on "I'll do it myself" and on a
+failed start, say that `/tagteam:ship <plan-dir>` can be run again — `start`
 reads what is on disk and `begin` resumes each spec from wherever it stopped.
 Stopping early is free; running out mid-merge is not.
 

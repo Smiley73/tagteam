@@ -1,6 +1,6 @@
 {
   "name": "tagteam",
-  "version": "0.14.8",
+  "version": "0.14.9",
   "description": "Plan, implement, review, and merge substantial changes in Claude Code, with Codex as an optional extra reviewer.",
   "author": {
     "name": "tagteam contributors"
