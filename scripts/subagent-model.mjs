@@ -12,9 +12,6 @@
 // The model a run's agents use is decided by Claude Code's own process, so the
 // environment read here is a copy: clearing the variable in one command passes this
 // and changes nothing for the run, which is why the commands say never to do that.
-//
-// `ship.mjs start` calls `subagentModelProblem` in-process, as it calls the Codex
-// version check, so `start` and `/tagteam:configure` cannot drift apart.
 import process from "node:process";
 import { isMain } from "./lib/is-main.mjs";
 
@@ -22,7 +19,7 @@ export const SUBAGENT_MODEL_VARIABLE = "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL";
 const NO_EFFECT = ["inherit", ""];
 
 /** `{kind, value}`: kind is "unset", "no-effect" or "in-effect". */
-export function subagentModel(env = process.env) {
+function subagentModel(env = process.env) {
   const value = env[SUBAGENT_MODEL_VARIABLE];
   if (value === undefined) return { kind: "unset", value: null };
   return { kind: NO_EFFECT.includes(value) ? "no-effect" : "in-effect", value };
@@ -38,7 +35,7 @@ export function subagentModelProblem(what, env = process.env) {
 }
 
 /** The line `/tagteam:configure` shows. */
-export function subagentModelReport(env = process.env) {
+function subagentModelReport(env = process.env) {
   const { kind, value } = subagentModel(env);
   if (kind === "unset") return `${SUBAGENT_MODEL_VARIABLE} is not set: a ship and a plan run each agent on the model it is given.`;
   if (kind === "no-effect") return `${SUBAGENT_MODEL_VARIABLE} is set to ${JSON.stringify(value)}, which takes no effect and counts as unset: a ship and a plan run each agent on the model it is given.`;

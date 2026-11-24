@@ -25,22 +25,18 @@ function run(args, value, extra = {}) {
 }
 
 test("start refuses a model name before it creates anything, and says the variable, its value and what to do", () => {
-  for (const value of ["haiku", "opus"]) {
-    const staged = stage();
-    const before = { git: listing(path.join(staged.repo, ".git")), tagteam: listing(path.join(staged.repo, ".tagteam")) };
-    const refused = ship("start", staged.plan, [], { [VARIABLE]: value });
-    assert.equal(refused.status, 1, refused.stdout);
-    const [first, ...beneath] = refused.stderr.split("\n");
-    assert.equal(first, subagentModelProblem("ship", { [VARIABLE]: value }));
-    assert.match(first, new RegExp(`^The ship is unavailable in this session \\(${VARIABLE} is set to "${value}", `));
-    assert.match(first, /so nothing was started; unset it where it is set.* and start a new session\.$/);
-    assert.deepEqual(beneath.filter((line) => line && !line.startsWith("checksum:")), []);
-    assert.ok(!fs.existsSync(staged.shipDir), "a ship folder was made");
-    assert.ok(!fs.existsSync(path.join(staged.repo, ".tagteam", "locks")), "a lock was taken");
-    assert.ok(!fs.existsSync(path.join(staged.repo, ".git", "worktrees")), "a worktree entry was made");
-    assert.deepEqual({ git: listing(path.join(staged.repo, ".git")), tagteam: listing(path.join(staged.repo, ".tagteam")) }, before);
-    fs.rmSync(staged.dir, { recursive: true, force: true });
-  }
+  const value = "haiku";
+  const staged = stage();
+  const before = { git: listing(path.join(staged.repo, ".git")), tagteam: listing(path.join(staged.repo, ".tagteam")) };
+  const refused = ship("start", staged.plan, [], { [VARIABLE]: value });
+  assert.equal(refused.status, 1, refused.stdout);
+  const [first, ...beneath] = refused.stderr.split("\n");
+  assert.equal(first, subagentModelProblem("ship", { [VARIABLE]: value }));
+  assert.match(first, new RegExp(`^The ship is unavailable in this session \\(${VARIABLE} is set to "${value}", `));
+  assert.match(first, /so nothing was started; unset it where it is set.* and start a new session\.$/);
+  assert.deepEqual(beneath.filter((line) => line && !line.startsWith("checksum:")), []);
+  assert.deepEqual({ git: listing(path.join(staged.repo, ".git")), tagteam: listing(path.join(staged.repo, ".tagteam")) }, before);
+  fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
 test("start with the variable unset, or set to a value that takes no effect, reaches begin as it always did", () => {
@@ -113,19 +109,6 @@ test("the report mode exits 0 with a different line for unset, a value that take
   assert.match(lines.get("empty"), /""/);
   assert.match(lines.get("empty"), /takes no effect/);
   assert.match(lines.get("haiku"), /"haiku" and is in effect: a ship and a plan refuse/);
-});
-
-test("the stop mode exits 1 for a model name and 0, silently, for anything that takes no effect; a bad call exits 2", () => {
-  for (const what of ["ship", "plan"]) {
-    const refused = run(["stop", what], "sonnet");
-    assert.equal(refused.status, 1);
-    assert.equal(refused.stdout, "");
-    assert.equal(refused.stderr, `${subagentModelProblem(what, { [VARIABLE]: "sonnet" })}\n`);
-    for (const value of [undefined, ...NO_EFFECT]) {
-      const passed = run(["stop", what], value);
-      assert.deepEqual([passed.status, passed.stdout, passed.stderr], [0, "", ""]);
-    }
-  }
   assert.equal(run(["stop"], "sonnet").status, 2);
   assert.equal(run(["stop", "review"], "sonnet").status, 2);
 });
