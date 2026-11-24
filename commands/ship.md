@@ -34,6 +34,14 @@ it, and if it shows no such row, workflows are unavailable, or are disabled by
 your organization's policy", asking nothing and creating nothing. Never stand in
 for the run by dispatching agents yourself.
 
+`start` also refuses, before anything is created, while `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`
+holds a model name: every agent of the run would use it in place of the model it is
+given. The stop names the variable and its value and says to unset it where it is
+set and start a new session; relay it as written and end your turn. **Never unset the
+variable in a command, rerun `start` with it cleared, or stand in for the run** — Claude
+Code's own process, not the command, decides what the agents run on, so that would
+pass the check and the run would still use the variable.
+
 ## A run
 
 A unit is what one run covers: a spec, the dependency unit, a whole-plan fix unit

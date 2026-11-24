@@ -36,6 +36,7 @@ import { isDeepStrictEqual } from "node:util";
 import { spawnSync } from "node:child_process";
 import { projectDirectoryFor } from "../scripts/usage.mjs";
 import { EFFORT_LADDER } from "../scripts/lib/effort-ladder.mjs";
+import { SUBAGENT_MODEL_VARIABLE } from "../scripts/subagent-model.mjs";
 
 export const root = path.resolve(import.meta.dirname, "..");
 const SHIP = path.join(root, "scripts", "ship.mjs");
@@ -116,9 +117,12 @@ function assertStopOpensPlainly({ status, stderr, json }) {
 // own TAGTEAM_RUN_ID, and inherited it would be recorded on every set a test
 // sends, so a restart a test means as "no run" would release, or wait on, the
 // wrong set. Empty is how the driver reads "no run"; a run given in `env` wins.
+// The same goes for the workflow subagent model variable a developer may have in
+// their own shell: `start` refuses while it is in effect, so only a test sets it.
 export function ship(sub, plan, extra = [], env = {}) {
+  const { [SUBAGENT_MODEL_VARIABLE]: inheritedModel, ...inherited } = process.env;
   const result = spawnSync(process.execPath, [SHIP, sub, "--plan", plan, ...extra], {
-    encoding: "utf8", env: { ...process.env, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...env }
+    encoding: "utf8", env: { ...inherited, TAGTEAM_SKIP_TOOL_CHECKS: "1", TAGTEAM_RUN_ID: "", ...env }
   });
   let json = null;
   try { json = JSON.parse(result.stdout); } catch {}

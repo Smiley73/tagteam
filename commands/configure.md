@@ -23,6 +23,7 @@ command.
 | `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes, only when Codex is used |
 | `gh auth status` and `gh repo view --json defaultBranchRef` | yes |
 | `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes, only when Codex is used |
+| `node "$P/scripts/subagent-model.mjs" report` — whether `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` is set and what it does | no — report it |
 | `codegraph` on PATH and `.codegraph/` present | no |
 
 The git version matters for the same reason: when the base branch moves under a
@@ -30,6 +31,11 @@ reviewed change, a ship tests that the same change still lands on the new base
 with `git merge-tree --write-tree`, which arrived in 2.38, and `ship.mjs start`
 stops without it. Checked here, a machine that cannot merge says so before
 anyone plans anything on it.
+
+The variable row matters because a model name in `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`
+beats the model every agent of a run is given, so a ship and a plan refuse while it
+is in effect; `inherit` and an empty value take no effect and count as unset. The row
+prints one line and exits 0: show the line as given and never stop for it.
 
 Report the sandbox row's first result as given and never rerun it outside the
 sandbox: an escaped pass would tell the person a ship can run when it cannot. The
