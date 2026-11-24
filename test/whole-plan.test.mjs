@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  checkDir, cleanResultFor, fixUnitIds, isCleanFor, isFixUnitId, ledgerOutcomes, nextUnitId, saveCheck, unitDocument, unitDir, verdict
+  checkDir, cleanResultFor, failuresOf, fixUnitIds, isCleanFor, isFixUnitId, ledgerOutcomes, nextUnitId, rerunCommands, saveCheck, unitDocument, unitDir, verdict
 } from "../scripts/lib/whole-plan.mjs";
 
 const A = "a".repeat(40);
@@ -93,7 +93,7 @@ test("a fix unit's document is in spec shape and lists every gating finding and 
   const text = unitDocument({
     id: "plan-fix-1", slug: "demo", branch: "plan/demo", tip: A, check: 2, recordPath: "/s/whole-plan/2/record.json",
     findings: [{ severity: "major", scope: "code", file: "b.js", line: 3, title: "wrong", detail: "breaks\n  the add" }],
-    failedVerify: { command: "npm test", logPath: "/s/whole-plan/2/rounds/1/verify/1.log" },
+    failedVerify: [{ command: "npm test", logPath: "/s/whole-plan/2/rounds/1/verify/1.log" }],
     goalPath: "/p/goal.md", planPath: "/p/plan.md", diffPath: "/s/whole-plan/2/rounds/1/review.diff"
   });
   assert.match(text, /^---\nid: plan-fix-1\ndepends_on: \[\]\nreviewers: \[\]\n---\n/);
@@ -116,4 +116,66 @@ test("a ledger entry about the pull request or the commit history is disclosed u
     ["01:h1", "pull-request"], ["01:h2", "pull-request"], ["01:h3", "resolved"], ["01:p1", "pull-request"], ["01:c1", "follow-up"]
   ]);
   assert.deepEqual(result.units.map((unit) => unit.entries), [["01:c1"]], "only the code entry is handed to a follow-up");
+});
+
+test("a ledger entry a person accepted is judged like any other and never makes a follow-up unit, whatever it is judged", () => {
+  const entry = (id, reason) => ({ id, reason, scope: "code", severity: "major", files: ["a.js"] });
+  const entries = [entry("p:1", "accepted-empty"), entry("p:2", "accepted-empty"), entry("p:3", "accepted-empty"), entry("01:c1", "carried")];
+  const verdicts = [{ id: "p:1", verdict: "still-real" }, { id: "p:2", verdict: "resolved" }, { id: "01:c1", verdict: "still-real" }];
+  const result = ledgerOutcomes({ entries, verdicts, status: "clean", made: [], limit: 3 });
+  assert.deepEqual(result.entries.map((item) => [item.id, item.outcome]), [["p:1", "accepted"], ["p:2", "resolved"], ["p:3", "accepted"], ["01:c1", "follow-up"]]);
+  assert.deepEqual(result.units.map((unit) => unit.entries), [["01:c1"]], "an accepted entry was handed to a follow-up");
+});
+
+test("a verify that failed only on commands a person accepted is clean for its tip, and one that failed for another reason is not", () => {
+  const record = (status) => ({ tip: A, status: "clean", verify: { tip: A, status }, review: { tip: A, status: "clean" } });
+  assert.equal(isCleanFor(record("failed-accepted"), A), true);
+  assert.equal(isCleanFor(record("failed"), A), false);
+  assert.equal(verdict({ verify: { status: "failed-accepted" }, review: { status: "clean" } }), "clean");
+});
+
+// --- a verify that only ran out of time ----------------------------------------
+
+const slow = (command, extra = {}) => ({ command, status: "failed", timedOut: true, logPath: `/l/${command}.log`, ...extra });
+const broke = (command, extra = {}) => ({ command, status: "failed", timedOut: false, logPath: `/l/${command}.log`, ...extra });
+const timedOutCheck = (commands, extra = {}) => ({
+  tip: A, verify: { tip: A, status: "failed", commands: commands.map((command, index) => ({ position: index + 1, ...command })) }, review: { status: "clean", tip: A }, ...extra
+});
+
+const rerun = (record) => rerunCommands(record).map((entry) => entry.command);
+
+test("only commands that ran out of time are rerun, and only when nothing else holds the check back", () => {
+  assert.deepEqual(rerun(timedOutCheck([slow("a"), { command: "b", status: "passed" }, slow("c")])), ["a", "c"]);
+  assert.deepEqual(rerun(timedOutCheck([slow("a"), broke("b")])), [], "a mix with an outright failure is a real failure");
+  assert.deepEqual(rerun(timedOutCheck([slow("a")], { review: { status: "open", tip: A } })), [], "a review that is not clean");
+  assert.deepEqual(rerun(timedOutCheck([slow("a")], { review: { status: "incomplete", tip: A } })), []);
+  assert.deepEqual(rerun(timedOutCheck([slow("a")], { ci: { status: "failed" } })), [], "a failed check on the pull request");
+  assert.deepEqual(rerun(timedOutCheck([slow("a", { base: { status: "failed" } })])), [], "a command that fails without the change too is not the plan's");
+  assert.deepEqual(rerun(timedOutCheck([slow("a", { base: { status: "failed" } }), slow("b")])), ["b"]);
+  assert.deepEqual(rerun(timedOutCheck([slow("a", { accepted: true })])), [], "a command a person accepted");
+});
+
+test("a command whose rerun passed is not a failure, and one whose rerun did not pass is named with the rerun's log", () => {
+  const record = timedOutCheck([slow("a"), slow("b"), slow("c")], {
+    rerun: { commands: [
+      { command: "a", position: 1, did: "passed", configuredSec: 60, limitSec: 120, logPath: "/r/1.log" },
+      { command: "b", position: 2, did: "timed-out", configuredSec: 60, limitSec: 120, logPath: "/r/2.log" },
+      { command: "c", position: 3, configuredSec: 60, limitSec: 120, logPath: "/r/3.log" }
+    ] }
+  });
+  assert.deepEqual(failuresOf(record).map((entry) => [entry.command, entry.logPath]), [["b", "/r/2.log"], ["c", "/l/c.log"]]);
+  const text = unitDocument({
+    id: "plan-fix-1", slug: "demo", branch: "plan/demo", tip: A, check: 1, recordPath: "/s/r.json", findings: [], failedVerify: failuresOf(record),
+    goalPath: "/p/goal.md", planPath: "/p/plan.md", diffPath: "/s/review.diff"
+  });
+  assert.match(text, /`b` failed on the plan's tip \(it timed out at its configured limit of 60s, and the rerun at twice that, 120s, timed out again\)\. Its log is \/r\/2\.log;.*`verify\[\]\.timeoutSec` for `b`/);
+  assert.match(text, /`c` failed on the plan's tip \(it timed out at its configured limit of 60s, and the rerun at twice that, 120s, did not finish\)/);
+  const unrun = unitDocument({
+    id: "plan-fix-1", slug: "demo", branch: "plan/demo", tip: A, check: 1, recordPath: "/s/r.json", findings: [],
+    failedVerify: failuresOf(timedOutCheck([slow("a")], { rerun: { commands: [{ command: "a", position: 1, configuredSec: 60, limitSec: 120, logPath: "/r/1.log", error: "EEXIST: file already exists" }] } })),
+    goalPath: "/p/goal.md", planPath: "/p/plan.md", diffPath: "/s/review.diff"
+  });
+  assert.match(unrun, /the rerun at twice that, 120s, could not be run: EEXIST: file already exists\)/);
+  assert.deepEqual(failuresOf(timedOutCheck([slow("same"), slow("same")], { rerun: { commands: [{ command: "same", position: 2, did: "passed", configuredSec: 1, limitSec: 2, logPath: "/r/2.log" }] } })).map((entry) => entry.position ?? entry.logPath), ["/l/same.log"], "a rerun of the second of two equal commands settled the first");
+  assert.doesNotMatch(text, /`a`/);
 });

@@ -71,12 +71,17 @@ async function runCommand(command, cwd, timeoutSec, logPath, { abandoned, watch 
 // and is said in the result so the record shows what ran. Commands stop at the
 // first failure unless `keepGoing` asks for every one to run; `only`, positions
 // in the applicable list counted from 1, runs just those, each under the log
-// number it has in a full run, and is said in the result. Nothing to run is
-// `not-applicable`, never a pass.
+// number it has in a full run, and is said in the result. `timeoutScale`, a
+// whole number, runs each at that multiple of its configured `timeoutSec` — in
+// memory only — and each command's result then says the limit it ran at.
+// Nothing to run is `not-applicable`, never a pass.
 export const SELECTIONS = ["when", "all"];
 
-export async function verify({ config, candidate, worktree, outDir, select = "when", keepGoing = false, only = null, abandoned = () => false, watch = WATCH_MS }) {
+export async function verify({ config, candidate, worktree, outDir, select = "when", keepGoing = false, only = null, timeoutScale = null, abandoned = () => false, watch = WATCH_MS }) {
   if (!SELECTIONS.includes(select)) throw new Error(`--select is ${SELECTIONS.join(" or ")}, not ${JSON.stringify(select)}`);
+  if (timeoutScale !== null && !(Number.isInteger(timeoutScale) && timeoutScale >= 1)) {
+    throw new Error(`--timeout-scale is a whole number from 1, not ${JSON.stringify(timeoutScale)}`);
+  }
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const every = select === "all";
   const applicable = every ? [...config.verify] : config.verify.filter((entry) =>
@@ -93,8 +98,9 @@ export async function verify({ config, candidate, worktree, outDir, select = "wh
     if (abandoned()) throw new Error(ABANDONED);
     const entry = applicable[index];
     const logPath = path.join(outDir, `${index + 1}.log`);
-    const result = await runCommand(entry.command, worktree, entry.timeoutSec, logPath, { abandoned, watch });
-    results.push(result);
+    const limit = entry.timeoutSec * (timeoutScale ?? 1);
+    const result = await runCommand(entry.command, worktree, limit, logPath, { abandoned, watch });
+    results.push(timeoutScale === null ? result : { ...result, timeoutSec: limit });
     if (result.status === "failed" && !keepGoing) return done({ status: "failed", commands: results });
   }
   return done({ status: results.some((result) => result.status === "failed") ? "failed" : "passed", commands: results });
@@ -138,6 +144,7 @@ async function main() {
       outDir: path.resolve(args["out-dir"]),
       ...(args.select === undefined ? {} : { select: args.select }),
       keepGoing: args["keep-going"] === "true",
+      ...(args["timeout-scale"] === undefined ? {} : { timeoutScale: Number(args["timeout-scale"]) }),
       ...(args.only === undefined ? {} : { only: args.only.split(",").map(Number) })
     });
     if (args.out) writeRoundFile(args.out, JSON.stringify(result, null, 2) + "\n");
