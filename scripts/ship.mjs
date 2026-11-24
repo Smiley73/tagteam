@@ -6399,8 +6399,8 @@ async function resolveCommit(options) {
       "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
-      // Every command runs when a spec disclosed one as failing without its change, so that all that fail are known.
-      ...(failingInPlan(ctx.shipDir).size > 0 ? ["--keep-going", "true"] : [])
+      // Every command runs when a spec disclosed one as failing without its change, or a person accepted one, so that all that fail are known.
+      ...(keepsGoing(ctx) ? ["--keep-going", "true"] : [])
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -6409,24 +6409,28 @@ async function resolveCommit(options) {
     // is theirs, and is discarded, as the landing check discards it.
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", merge]);
     let outcome = readJson(path.join(dir, "verify.json"));
-    // A failure of a command the plan disclosed is the resolution's only if the command passes on the base being merged in.
+    // A command that failed and that a person accepted for this plan is set aside. A failure of one
+    // the plan disclosed is the resolution's only if the command passes on the base being merged in.
     if (outcome.status === "failed") {
-      const accepted = await acceptDisclosed(ctx, { status: "failed", baseOid: record.baseOid, dir, verify: outcome },
-        { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: merge, branch: null } });
-      if (accepted.status === "passed") outcome = accepted.verify;
+      let judged = setAsideAccepted(ctx, { status: "failed", baseOid: record.baseOid, dir, verify: outcome });
+      if (judged.status === "failed") {
+        judged = await acceptDisclosed(ctx, judged, { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: merge, branch: null } });
+      }
+      outcome = judged.verify;
     }
     attempt.verify = outcome.status;
     say.push(`Verification of the merge: ${outcome.status}.`);
     for (const command of outcome.commands ?? []) {
       say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`
+        + `${command.accepted ? " — a person accepted it as failing for this plan, so it does not fail the resolution" : ""}`
         + `${command.base ? ` — on ${record.base} at ${record.baseOid.slice(0, 12)}, where it is merged in from, it fails too` : ""}`);
     }
     if (outcome.status === "failed") {
-      const failed = (outcome.commands ?? []).find((command) => command.status === "failed");
+      const failed = (outcome.commands ?? []).find((command) => command.status === "failed" && !command.accepted);
       return emit(await failAttempt(ctx, record, attempt, { kind: "verify", log: failed?.logPath ?? path.join(dir, "verify.json") },
         `${failed ? `\`${failed.command}\`` : "a verify command"} failed on it`, say));
     }
-    if (outcome.status !== "passed" && outcome.status !== FAILS_WITHOUT_CHANGE) {
+    if (!["passed", FAILS_WITHOUT_CHANGE, ACCEPTED_FAILING].includes(outcome.status)) {
       return emit(stopRound(ctx, record, "not-applicable", `Resolve attempt ${attempt.k}: none of this repository's verify commands `
         + `selected the merge ${at}, which is not evidence that it works, and the ship does not push it with nobody watching.`, say));
     }
@@ -8874,9 +8878,9 @@ async function acceptDisclosed(ctx, outcome, { disclosed, back }) {
   return status === FAILS_WITHOUT_CHANGE || status === ACCEPTED_FAILING ? { ...outcome, status: "passed", verify: { ...outcome.verify, status, commands } } : outcome;
 }
 
-// A whole-plan landing verify's failed commands that a person accepted are marked, and
-// when nothing else failed the outcome passes with the status that says so. What is left
-// failing, marked ones apart, goes on to `acceptDisclosed`.
+// A whole-plan landing verify's failed commands that a person accepted are marked, as a
+// resolve attempt's are, and when nothing else failed the outcome passes with the status
+// that says so. What is left failing, marked ones apart, goes on to `acceptDisclosed`.
 function setAsideAccepted(ctx, outcome) {
   const accepted = acceptedCommandsIn(ctx.shipDir);
   const commands = (outcome.verify?.commands ?? []).map((command) => (command.status === "failed" && accepted.has(command.command) ? { ...command, accepted: true } : command));

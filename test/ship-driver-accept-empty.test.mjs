@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { git, ship, write, outputOf, arriveAll, trainOf, unitDirIn, unitStateOf, reviewWholePlan, stagePlan, stage, shipThrough, stageMerged,
-  commitToMain, mergeBaseIn, pullsOf, bodyWriterOf, answerBodyWriter, factsFileOf } from "./ship-stage.mjs";
+  commitToMain, mergeBaseIn, pullsOf, bodyWriterOf, answerBodyWriter, factsFileOf, findings, resultOf, recordOf, resolvedReport, MAIN_ADD,
+  BOTH_ADD } from "./ship-stage.mjs";
 import { stageVersioned, walkToDialog, approve, landingRecordOf } from "./ship-plan-version-shared.mjs";
 import { stageClean, toDialog, RED_CHECK } from "./ship-plan-landing-shared.mjs";
 import os from "node:os";
@@ -252,6 +253,58 @@ test("the landing check of a base that moved sets the accepted command aside, an
   const stopped = ship("plan-land", plan, [], both);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.notEqual(landingRecordOf(shipDir).landing.status, "passed");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a base that conflicts with the accepted plan is resolved with the accepted command still failing: it alone does not fail the resolution, which goes on to its panel and to Merge, and a new failure beside it fails the attempt under its own name", () => {
+  // Fresh: its verify commands differ from the shared builds'.
+  const staged = stageMerged({ ciRepairs: 2, verify: [FAILS_A, FAILS_B] });
+  const { dir, repo, plan, shipDir, worktree } = staged;
+  const { failing } = acceptedUnit(staged);
+  commitToMain(repo, { "app.js": MAIN_ADD });
+  const landing = toDialog(staged, [], failing);
+  assert.equal(landingRecordOf(shipDir).landing.status, "conflict");
+
+  // What the resolver does, and then the driver's commit step with `env` deciding which commands fail on the merge.
+  const resolveWith = (sent, env) => {
+    const [resolver] = sent.json.dispatch;
+    assert.equal(resolver.agent, "tagteam:fixer", sent.stdout);
+    fs.writeFileSync(path.join(worktree, "app.js"), BOTH_ADD);
+    write(outputOf(resolver), resolvedReport(resolver));
+    arriveAll(sent);
+    const committed = ship("resolve-commit", plan, [], env);
+    assert.equal(committed.status, 0, committed.stderr);
+    return committed;
+  };
+
+  // A new failure beside the accepted one is the resolution's: every command ran, and the attempt fails on the new one.
+  const first = resolveWith(landing, { ...failing, FAIL_B: "1" });
+  const firstSaid = first.json.say.join("\n");
+  assert.ok(firstSaid.includes(`Resolve attempt 1 failed: \`${FAILS_B.command}\` failed on it`), firstSaid);
+  assert.ok(firstSaid.includes(`failed: ${FAILS_A.command} — a person accepted it as failing for this plan`), firstSaid);
+  assert.match(first.json.dispatch[0].prompt, /verify commands failed on it; the log is .*attempts\/1\/verify\/2\.log/, "the next resolver is handed the accepted command's log");
+  assert.equal(recordOf(shipDir).attempts[0].verify, "failed");
+
+  // The accepted command alone does not fail it: the resolution goes to its panel, is pushed, and the plan reaches Merge.
+  const second = resolveWith(first, failing);
+  const said = second.json.say.join("\n");
+  assert.doesNotMatch(said, /Resolve attempt 2 failed/, "the accepted command alone threw the resolution away");
+  assert.match(said, /Verification of the merge: failed-accepted\./);
+  assert.ok(said.includes(`failed: ${FAILS_A.command} — a person accepted it as failing for this plan`), said);
+  assert.ok(said.includes(`passed: ${FAILS_B.command}`), "a command after the accepted one was not run");
+  const attempt = recordOf(shipDir).attempts[1];
+  assert.deepEqual([attempt.verify, attempt.phase], ["failed-accepted", "panel"]);
+  for (const dispatch of second.json.dispatch) {
+    if (dispatch.agent === "tagteam:codex-runner") write(resultOf(dispatch), findings("codex", attempt.mergeOid));
+    else write(outputOf(dispatch), findings(/^Lens: (.*)$/m.exec(dispatch.prompt)[1], attempt.mergeOid));
+  }
+  arriveAll(second);
+  const collected = ship("resolve-collect", plan, [], failing);
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.match(collected.json.next, /plan-land --plan /);
+  const walked = walkToDialog({ ...staged, env: failing }, { env: failing });
+  assert.equal(walked.dialog.json.planLanding.merge, true, walked.dialog.json.planLanding.withheld.join("; "));
+  assert.ok(!fs.existsSync(unitDirIn(shipDir, "plan-fix-2")), "a second fix unit was opened for the accepted command");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
