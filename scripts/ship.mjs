@@ -68,7 +68,8 @@ import { itemId, itemsOfReport } from "./lib/rulings.mjs";
 import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
   BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
-  fixUnitIds, followUpIds, isCleanFor, isFixUnitId, isFollowUpId, ledgerOutcomes, listChecks, nextCheckNumber, nextUnitId, saveCheck,
+  failuresOf, fixUnitIds, followUpIds, isCleanFor, isFixUnitId, isFollowUpId, ledgerOutcomes, listChecks, nextCheckNumber, nextUnitId,
+  passedReruns, raiseSaid, rerunCommands, rerunOf, rerunSaid, saveCheck,
   unitDir, unitDocument, unitDocumentPath, unitIds, verdict, verifyClean, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
 import {
@@ -4343,7 +4344,7 @@ function acceptedProblems(ctx, maker, id) {
   const acceptedCommands = byOthers(ledger.acceptedCommands, "command");
   const acceptedChecks = byOthers(ledger.acceptedChecks, "name");
   const commands = maker.verify?.status === "failed"
-    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command) && !acceptedCommands.has(command.command)).map((command) => command.command)
+    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command) && !acceptedCommands.has(command.command) && rerunOf(maker, command.command)?.did !== "passed").map((command) => command.command)
     : [];
   const entries = entriesOf(id, maker.tip, unitFindings(ctx, maker), new Set()).map((entry) => ({ ...entry, reason: ACCEPTED_EMPTY }));
   const failedChecks = maker.ci?.failed ?? [];
@@ -6744,9 +6745,8 @@ function ensureUnitDocument(ctx, record, id) {
         + `found it still real: ${evidence.get(entry.id)})`
     }))
     : unitFindings(ctx, record);
-  const failedVerify = record.verify?.status === "failed"
-    ? (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command) && !command.accepted) ?? { command: "a verify command", logPath: record.verify.result }
-    : null;
+  let failedVerify = record.verify?.status === "failed" ? failuresOf(record) : [];
+  if (record.verify?.status === "failed" && failedVerify.length === 0) failedVerify = [{ command: "a verify command", logPath: record.verify.result }];
   const failedChecks = record.ci?.status === "failed" ? { pr: record.ci.pr, names: unacceptedChecks(ctx, record), result: record.ci.result } : null;
   const text = unitDocument({
     id, slug: ctx.slug, branch: record.branch, tip: record.tip, check: record.n, recordPath: checkRecordPath(ctx.shipDir, record.n),
@@ -6767,8 +6767,11 @@ const unacceptedChecks = (ctx, record) => (record.ci?.failed ?? []).filter((name
 function foundLine(ctx, record) {
   const parts = [];
   if (record.verify?.status === "failed") {
-    const failed = (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command) && !command.accepted);
-    parts.push(`${failed ? `\`${failed.command}\`` : "a verify command"} failed on the plan's tip${failed?.timedOut ? " (timed out)" : ""} — its log is ${failed?.logPath ?? record.verify.result}`);
+    const failures = failuresOf(record);
+    parts.push(failures.length === 0
+      ? `a verify command failed on the plan's tip — its log is ${record.verify.result}`
+      : failures.map((failed) => `\`${failed.command}\` failed on the plan's tip${failed.rerun ? ` (${rerunSaid(failed.rerun)})` : failed.timedOut ? " (timed out)" : ""}`
+        + ` — its log is ${failed.logPath}${failed.rerun ? `; ${raiseSaid(failed.rerun)}` : ""}`).join("; "));
   }
   if (record.review?.status === "open") {
     const count = (record.review.counts?.blocking ?? 0) + (record.review.counts?.major ?? 0);
@@ -6802,6 +6805,11 @@ const VERIFY_SAID = {
   "not-applicable": "had nothing to run, which is recorded as that and not as a pass"
 };
 
+// What a command whose rerun passed is told as, in the check's words and the
+// plan's pull request alike.
+const rerunPassedLine = (entry) => `\`${entry.command}\` ran out of time at its configured limit of ${entry.configuredSec}s and passed when run once more at `
+  + `twice that, ${entry.limitSec}s, for this check only; the configuration was not changed, and ${raiseSaid(entry)}.`;
+
 // What a decided check prints, whether it was decided now or is being reused for
 // its tip: on clean, what follows the check on this route; on a fix unit, that
 // unit's `begin`; on a stop, `ask` and `end`, with the work left on the branch.
@@ -6821,7 +6829,7 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
         + `stays in its record, and no fix is made for it. Its record is ${where}.`
       : `The whole-plan check of ${at} is clean: verify ${VERIFY_SAID[record.verify.status]}, `
       + `and the reviewer found nothing blocking or major${minor > 0 ? ` (${minor} minor or nit finding(s) recorded in ${record.review.findings}, and nothing fixed for them)` : ""}. `
-      + `Its record is ${where}.`);
+      + `${passedReruns([record]).map((entry) => `${rerunPassedLine(entry)} `).join("")}Its record is ${where}.`);
     if (ledger) say.push(ledger);
     const pending = (record.followUps ?? []).filter((unit) => !finished(ctx, unit.id));
     const made = followUpIds(ctx.shipDir);
@@ -6931,6 +6939,7 @@ async function planCheck(options) {
       + `yet, so the plan is not whole and the whole-plan check did not run; run ${nextCommand(ctx, "begin", unmerged[0].id)}`);
   }
   if (existing?.phase === "review") return emit(await reviewStillOut(ctx, existing, options, say));
+  if (existing?.phase === "rerun") return emit(settleRerun(ctx, existing, records, say));
 
   let record = existing;
   if (record) {
@@ -7060,6 +7069,7 @@ async function planCollect(options) {
   const records = wholePlanChecks(ctx);
   const record = records.at(-1) ?? null;
   if (record?.status) return emit(decidedPayload(ctx, record, [], { reused: true }));
+  if (record?.phase === "rerun") return emit(settleRerun(ctx, record, records, []));
   if (record?.phase !== "review") {
     throw new Stop(`no whole-plan review is out for this plan, so there is nothing for plan-collect to judge; run ${nextCommand(ctx, "plan-check", null)}`);
   }
@@ -7085,6 +7095,68 @@ async function planCollect(options) {
   record.review = {
     ...record.review, status: review.status, findings: path.join(dir, "review.json"), toFix: path.join(dir, "to-fix.json"), counts: review.counts ?? null
   };
+  const rerun = rerunCommands(record).map((command) => ({ command, position: (ctx.config.verify ?? []).findIndex((entry) => entry.command === command) + 1 }));
+  if (rerun.length > 0 && rerun.every((entry) => entry.position > 0)) {
+    // The begun mark and the review's result are one write: a restart that finds
+    // the mark knows the one rerun was used, and never runs it again.
+    record.phase = "rerun";
+    record.rerun = {
+      dir: path.join(dir, "verify-rerun"), result: path.join(dir, "verify-rerun.json"), begunAt: new Date().toISOString(),
+      commands: rerun.map(({ command, position }) => {
+        const configuredSec = ctx.config.verify[position - 1].timeoutSec;
+        return { command, position, configuredSec, limitSec: configuredSec * RERUN_SCALE, logPath: path.join(dir, "verify-rerun", `${position}.log`) };
+      })
+    };
+    saveCheck(ctx.shipDir, record);
+    say.push(`Verify ran out of time on ${listOf(record.rerun.commands.map((entry) => `\`${entry.command}\` (limit ${entry.configuredSec}s)`))}, and nothing else holds `
+      + `the check back, so ${record.rerun.commands.length > 1 ? "they are" : "it is"} run once more at twice the limit, for this check only; .tagteam/config.json is not changed.`);
+    runRerun(ctx, record);
+    return emit(settleRerun(ctx, record, records, say));
+  }
+  emit(decideCollected(ctx, record, records, say));
+}
+
+// The most a check runs a command that ran out of time again: twice its limit, once.
+const RERUN_SCALE = 2;
+
+// The commands that ran out of time, once more, each at twice its configured
+// limit. Their results go into the record at once; a run that wrote none leaves
+// them without one, which is a rerun that did not finish.
+function runRerun(ctx, record) {
+  const { dir, result, commands } = record.rerun;
+  git(ctx.worktree, ["switch", "--discard-changes", "--detach", record.tip]);
+  node("verify-run.mjs", [
+    "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all", "--only", commands.map((entry) => entry.position).join(","),
+    "--timeout-scale", String(RERUN_SCALE), "--keep-going", "true", "--out-dir", dir, "--out", result,
+    // The verification stops, ending its command and writing nothing, if this driver dies under it.
+    "--parent-pid", String(process.pid)
+  ], { allow: [1] });
+  const ran = readJson(result, { commands: [] }).commands;
+  for (const entry of commands) {
+    const outcome = ran.find((command) => command.command === entry.command);
+    if (outcome) entry.did = outcome.status === "passed" ? "passed" : outcome.timedOut ? "timed-out" : "failed";
+  }
+  saveCheck(ctx.shipDir, record);
+}
+
+// A check whose rerun is begun, found again or just run: nothing runs a second
+// time, and a rerun with no result counts as one that did not pass.
+function settleRerun(ctx, record, records, say) {
+  git(ctx.worktree, ["switch", "--discard-changes", "--detach", record.tip]);
+  const unfinished = record.rerun.commands.filter((entry) => !entry.did);
+  if (unfinished.length > 0) {
+    say.push(`Whole-plan check ${record.n} of ${record.branch} at ${short(record.tip)} had begun running ${listOf(unfinished.map((entry) => `\`${entry.command}\``))} `
+      + "once more at twice its limit and has no result for it; nothing is run again, and it counts as not passed.");
+  }
+  const passed = new Set(record.rerun.commands.filter((entry) => entry.did === "passed").map((entry) => entry.command));
+  const commands = record.verify.commands.map((command) => (passed.has(command.command) ? { ...command, status: "passed" } : command));
+  record.verify.status = verifyStatus(commands, new Set(commands.filter((command) => command.accepted).map((command) => command.command)));
+  return decideCollected(ctx, record, records, say);
+}
+
+// Decide a check whose verify and review are both in: clean, or a fix unit while
+// limits.ciRepairs allows one, or stopped.
+function decideCollected(ctx, record, records, say) {
   const decided = verdict(record);
   let [status, reason] = decided === "incomplete" ? ["incomplete", "review-incomplete"] : decided === "clean" ? ["clean", null] : ["open", null];
   if (status === "open") {
@@ -7097,7 +7169,7 @@ async function planCollect(options) {
   }
   judgeLedger(ctx, record, status, records);
   say.push(...unitTables(ctx, records, record, status));
-  emit(closeCheck(ctx, record, status, reason, say));
+  return closeCheck(ctx, record, status, reason, say);
 }
 
 // --- the plan's landing ----------------------------------------------------------
@@ -7263,6 +7335,7 @@ function bodyFacts(ctx, file) {
   const landsAs = landsAsOf(ctx, routeOf(ctx).tipOid);
   const carried = planLines(ledger).length > 0;
   const accepted = acceptedRecords(ctx);
+  const reruns = passedReruns(wholePlanChecks(ctx));
   return {
     path: file, shape: ["## Summary", "## What you can now do", "## Risk"],
     goal: path.join(ctx.plan, "goal.md"), plan: path.join(ctx.plan, "plan.md"),
@@ -7270,6 +7343,12 @@ function bodyFacts(ctx, file) {
     ...(accepted.length > 0 ? {
       accepted: accepted.map((entry) => ({ id: entry.id, fixUnit: entry.kind === "fix-unit", problems: entry.problems, reasons: acceptedReasons(entry) })),
       acceptedNote: "a person accepted each of these with nothing merged: none of it is in the plan, so never describe it as shipped; the ship says each under ## Risk itself"
+    } : {}),
+    ...(reruns.length > 0 ? {
+      reruns: {
+        commands: reruns.map((entry) => entry.command),
+        riskLines: "the ship adds under ## Risk itself one line for each verify command that ran out of time and passed when a whole-plan check ran it once more at twice its limit"
+      }
     } : {}),
     ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {}),
     ...(carried ? {
@@ -7317,7 +7396,10 @@ const landsAsLine = (landsAs) => `This plan lands as version ${landsAs}.`;
 // beside the orchestrator's file, which is left as it was written.
 function sentBody(ctx, text, tip) {
   const landsAs = landsAsOf(ctx, tip);
-  let composed = composeBody(text, [...planLines(readLedger(ctx.shipDir)), ...acceptedRecords(ctx).map(acceptedLine)]);
+  let composed = composeBody(text, [
+    ...planLines(readLedger(ctx.shipDir)), ...acceptedRecords(ctx).map(acceptedLine),
+    ...passedReruns(wholePlanChecks(ctx)).map((entry) => `- The verify command ${rerunPassedLine(entry)}`)
+  ]);
   if (landsAs) {
     const line = landsAsLine(landsAs);
     const summary = /^## Summary[ \t]*\r?$/m.exec(composed);

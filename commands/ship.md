@@ -660,6 +660,15 @@ branch's tip, whatever its `when`. `plan-collect` ends in one of three ways, and
   change is empty — returns `ask`. Say what the driver says — what failed, and
   where the record is — then ask it. The work stays on the plan's branch.
 
+A failed verify command that only ran out of time is not a real problem yet. When
+the review is clean, nothing else holds the check back, and every command that
+failed ran out of time, `plan-collect` runs only those commands once more, once,
+at twice their limit, for that check only, and `.tagteam/config.json` is not
+changed. A rerun that passes counts as clean, and the plan's pull request says so
+under Risk. A command that ran out of time again, failed or did not finish becomes
+a fix unit like any other, whose document names `verify[].timeoutSec` for that
+command as the setting a person would raise. A restart never reruns a second time.
+
 A check that is clean on its own may also make *follow-up* units, one per group of
 entries in the plan's ledger still wrong in the code, up to `limits.followUps`; a
 follow-up ships exactly as a fix unit does, and never carries.
