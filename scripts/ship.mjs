@@ -87,6 +87,7 @@ import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from 
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
 import { sandboxTrial } from "./sandbox-trial.mjs";
+import { subagentModelProblem } from "./subagent-model.mjs";
 import { usesCodex } from "./lib/uses-codex.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
@@ -3348,6 +3349,10 @@ async function routeLines(ctx, decided) {
 }
 
 async function start(options) {
+  // First, ahead of everything that reads the disk or the network: nothing the
+  // refusal could be waiting on is created, and it outranks the sandbox trial.
+  const modelProblem = subagentModelProblem("ship");
+  if (modelProblem) throw new Stop(modelProblem);
   const ctx = context(options, { requireTrain: false });
   const say = [];
   if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`The plan has not been approved, so there is nothing to ship; run /tagteam:plan first (${ctx.plan} has no approved.json).`);
