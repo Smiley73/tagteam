@@ -112,8 +112,8 @@ Every command a run starts at or follows is `ship.mjs` for this plan. `start`,
 `dependencies` and `end` are the session's own and are never a run's. The commands
 that are a person's alone to order are each a run's first command — `finish
 --approve`, `redesign`, `accept`, `revisit`, `plan-adopt`, `plan-land` with
-`--approve`, `--squash` or `--stop`, and `begin` with `--run-gone` or `--run-live`
-— and each below says whose word starts it. None of them is ever a `next`. The two
+`--approve`, `--squash` or `--stop`, and `begin` with `--run-gone`, `--run-live` or
+`--send-back` — and each below says whose word starts it. None of them is ever a `next`. The two
 flagged `redesign` commands, with `--escalated` or `--normal`, are a person's answer
 to the question *After `collect` and `settle`* describes: never add either flag on
 your own judgement, and never to a `redesign` that `next` printed.
@@ -236,6 +236,24 @@ its own that skips `verify`, spends no fix round and goes on to `recheck`. A tid
 that changes nothing, fails the tests or writes no usable report is put back as if
 it had not run, and one whose fresh adversary pass raises a blocking or major
 finding on what it changed is thrown away, with the run saying which.
+
+A spec's or a whole-plan fix's first implementer that finishes having changed
+nothing makes no round and spends no fix round. It is sent back once, by itself:
+a fresh implementer at the same agent, model and effort, told that the last
+attempt changed nothing and handed its report, with `snapshot` next. If that one
+changes nothing too, the run ends as `ask`: it says in plain words that the
+implementer changed nothing twice and quotes the latest report's summary and each
+part left undone with its reason, or says that no report was written. Its two
+answers are `send-back` and `end`. `end` stops the ship. `send-back` is the
+person's, with a note: write their words, exactly as they said them, to the file
+the question names — never into a command, where quotes, `$` and newlines break —
+and then start a run at that answer, which is `begin` with `--send-back`. It
+refuses in plain words, changing nothing, when the file is missing or empty, and
+the question still stands. Otherwise a fresh implementer is sent with the note word
+for word and `snapshot` next; if it changes nothing too, the same question comes
+back. The ship never sends one back by itself a second time, whatever restarts in
+between. `begin` or `snapshot` run while the question waits put it again and
+dispatch nothing.
 
 At a spec's first panel, the minor findings about the code that nobody could run
 are tried before the round is judged: correctness's and, when Codex is on,
