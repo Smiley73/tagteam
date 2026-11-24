@@ -42,6 +42,14 @@ function repository({ commits = true } = {}) {
   return repo;
 }
 
+// A `nohup` that refuses the way the sandbox does, or fails some other way.
+function nohupStub(dir, says) {
+  const bin = path.join(dir, "nohup-bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "nohup"), `#!/bin/sh\necho "${says}" >&2\nexit 127\n`, { mode: 0o755 });
+  return `${bin}${path.delimiter}${process.env.PATH}`;
+}
+
 // A `git` that fails the trial's call matching `pattern` with `says`, or, given a
 // gate directory, holds the trial's commit until `go-<its name>` exists there.
 function gitStub(dir, { pattern, says, gate } = {}) {
@@ -71,7 +79,6 @@ test("the trial passes in a clean repository and leaves the repository exactly a
     assert.ok(!fs.existsSync(path.join(repo, ".tagteam")) && !fs.existsSync(path.join(repo, ".git", "worktrees")));
     const trial = sandboxTrial(repo);
     assert.equal(trial.kind, "passed", `${trial.say} ${trial.detail}`);
-    assert.deepEqual(trial.left, []);
     assert.deepEqual(everything(repo), before, `commits: ${commits}`);
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -123,6 +130,39 @@ for (const [step, pattern] of [["the worktree step", "worktree add"], ["the comm
   });
 }
 
+test("start stops with the sandbox sentence when the launcher a step helper uses is refused, and creates nothing; a nohup that fails otherwise is not the sandbox's", () => {
+  for (const says of ["nice(5) failed: operation not permitted", "nohup: can't detach from console: No such process"]) {
+    const staged = stage();
+    const before = { ...everything(staged.repo), objects: listing(path.join(staged.repo, ".git", "objects")) };
+    const refused = ship("start", staged.plan, [], { PATH: nohupStub(staged.dir, says) });
+    assert.equal(refused.status, 1, refused.stdout);
+    const [first, ...beneath] = refused.stderr.split("\n");
+    assert.equal(first, SANDBOX_STOP);
+    assert.match(beneath.join("\n"), /^nohup sh -c :: /m);
+    assert.ok(!fs.existsSync(staged.shipDir), "a ship folder was made");
+    assert.deepEqual({ ...everything(staged.repo), objects: listing(path.join(staged.repo, ".git", "objects")) }, before);
+    fs.rmSync(staged.dir, { recursive: true, force: true });
+  }
+  const repo = repository();
+  const path_ = process.env.PATH;
+  process.env.PATH = nohupStub(repo, "nohup: some other trouble");
+  try { assert.equal(sandboxTrial(repo).kind, "passed"); } finally { process.env.PATH = path_; }
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test("the trial runs nothing of the repository's file system monitor", () => {
+  const repo = repository();
+  const log = path.join(repo, "..", `${path.basename(repo)}-fsmonitor.log`);
+  const hook = path.join(repo, "..", `${path.basename(repo)}-fsmonitor.sh`);
+  fs.writeFileSync(hook, `#!/bin/sh\necho ran >> "${log}"\nprintf '/\\0'\n`, { mode: 0o755 });
+  git(repo, "config", "core.fsmonitor", hook);
+  fs.rmSync(log, { force: true });
+  assert.equal(sandboxTrial(repo).kind, "passed");
+  assert.ok(!fs.existsSync(log), "the repository's fsmonitor hook ran during the trial");
+  fs.rmSync(repo, { recursive: true, force: true });
+  fs.rmSync(hook, { force: true });
+});
+
 test("start with no sandbox goes on as before and the trial leaves no worktree entry, ref or object of its own", () => {
   const staged = stage();
   const looseObjects = () => listing(path.join(staged.repo, ".git", "objects")).filter((entry) => /^[0-9a-f]{2}\/[0-9a-f]{38}$/.test(entry));
@@ -147,7 +187,7 @@ test("a start that reuses its worktree still runs the trial", () => {
   fs.rmSync(staged.dir, { recursive: true, force: true });
 });
 
-test("the command line prints a pass and exits 0, or puts the reason on stderr and exits 1", () => {
+test("the command line prints a pass and exits 0, or puts the reason on stderr and exits 1 for the sandbox, 2 for anything else", () => {
   const repo = repository();
   const passed = spawnSync(process.execPath, [TRIAL, repo], { encoding: "utf8" });
   assert.equal(passed.status, 0, passed.stderr);
@@ -156,7 +196,7 @@ test("the command line prints a pass and exits 0, or puts the reason on stderr a
   assert.equal(refused.status, 1);
   assert.equal(refused.stderr.split("\n")[0], SANDBOX_STOP);
   const failed = spawnSync(process.execPath, [TRIAL, repo], { encoding: "utf8", env: { ...process.env, PATH: gitStub(repo, { pattern: "worktree add", says: "fatal: No space left on device" }) } });
-  assert.equal(failed.status, 1);
+  assert.equal(failed.status, 2, "a failure that is not the sandbox's has the exit code configure reports as given");
   assert.match(failed.stderr, /^git worktree add .*: fatal: No space left on device\n$/);
   fs.rmSync(repo, { recursive: true, force: true });
 });

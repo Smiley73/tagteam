@@ -156,7 +156,7 @@ node "$P/scripts/ship.mjs" start --plan "$D"
 It checks `approved.json`, validates the configuration, checks `git`, `codex`
 (0.153.0 or newer, the binary `TAGTEAM_CODEX_BIN` names when it is set; only
 when the configuration says Codex is on) and `gh`, tries that the Bash sandbox, when one is on, lets git make a worktree
-and commit in it, takes this plan's ship lock, creates or reuses the worktree, and prints
+and commit in it, and lets a helper start its command, takes this plan's ship lock, creates or reuses the worktree, and prints
 the specs in dependency order with what state each is in. Its `snapshot` key is
 what `scripts/running-plugin.mjs` reported: render it first, as *The running
 snapshot* in the skill says. It never stops anything, whatever it says — a
@@ -172,7 +172,7 @@ and names none. The stop says which, and how to turn signing on; relay it and
 stop. Running `start` again once signing is on picks the plan up.
 
 It also stops, before anything is created, when Claude Code's Bash sandbox is on
-and does not let git make the ship's worktree or commit in it. The stop says to
+and does not let git make the ship's worktree or commit in it, or start its steps. The stop says to
 turn the sandbox off; relay it as given and end your turn. **Never rerun `start`,
 or any other ship command, outside the sandbox** — not with
 `dangerouslyDisableSandbox`, and not because the error tells you to retry that

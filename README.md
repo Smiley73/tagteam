@@ -68,7 +68,7 @@ and `/tagteam:plan` each run as a workflow and stop before creating anything whe
 session has none), Git, and an authenticated GitHub CLI.
 
 With Claude Code's Bash sandbox on, a ship also needs it to allow the ship's
-worktree and the commits in it, which no narrower setting does; a ship needs the
+worktree, the commits in it and the start of its steps, which no narrower setting does; a ship needs the
 sandbox off (`{ "sandbox": { "enabled": false } }`). `/tagteam:ship` refuses before
 starting when the sandbox does not allow them, and `/tagteam:plan` needs nothing
 from the sandbox.
