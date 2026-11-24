@@ -220,3 +220,17 @@ test("a verification whose starter died while its command ran ends the command a
   }
   fs.rmSync(temp, { recursive: true, force: true });
 });
+
+test("a time scale runs each command at that multiple of its limit, says the limit it ran at, and a run without one says nothing of it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-verify-scale-"));
+  // Out of time at 1 second, done well inside 2.
+  const config = { verify: [{ command: "sleep 1.5", when: { globs: [], keywords: [] }, timeoutSec: 1 }] };
+  const candidate = { changedPaths: [], addedLines: "" };
+  const plain = await verify({ config, candidate, worktree: dir, outDir: path.join(dir, "plain"), select: "all" });
+  assert.deepEqual([plain.commands[0].status, plain.commands[0].timedOut, "timeoutSec" in plain.commands[0]], ["failed", true, false]);
+  const scaled = await verify({ config, candidate, worktree: dir, outDir: path.join(dir, "scaled"), select: "all", timeoutScale: 2 });
+  assert.deepEqual([scaled.commands[0].status, scaled.commands[0].timeoutSec], ["passed", 2]);
+  assert.equal(config.verify[0].timeoutSec, 1, "the configuration was rewritten");
+  await assert.rejects(verify({ config, candidate, worktree: dir, outDir: path.join(dir, "bad"), select: "all", timeoutScale: 1.5 }), /--timeout-scale/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

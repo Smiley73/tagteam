@@ -27,7 +27,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { listResolveRounds, nextRoundNumber, readRecord, writeRecord } from "./resolve.mjs";
-import { ACCEPTED_FAILING, FAILS_WITHOUT_CHANGE } from "./verify-base.mjs";
+import { ACCEPTED_FAILING, FAILS_WITHOUT_CHANGE, failsWithout } from "./verify-base.mjs";
 import { ACCEPTED_EMPTY } from "./ledger.mjs";
 
 export const WHOLE_PLAN_DIR = "whole-plan";
@@ -223,14 +223,74 @@ export function cleanResultFor(shipDir, tip) {
 
 const short = (oid) => String(oid ?? "").slice(0, 12);
 
+// The most `verify[].timeoutSec` accepts: a doubled limit past it is still used.
+const MAX_TIMEOUT_SEC = 7200;
+
+// What a rerun's entry in `record.rerun.commands` says it did; one begun with
+// no `did` has no result, and did not finish.
+const DID = { passed: "passed", "timed-out": "timed out again", failed: "failed", unfinished: "did not finish" };
+
+/**
+ * The rerun of a verify command of `record`, or null. A command is told apart by
+ * its position in the full run, not its text: two entries may share one command
+ * and differ in their limits.
+ */
+export const rerunOf = (record, command) => (record?.rerun?.commands ?? []).find((entry) => entry.position === command.position) ?? null;
+
+/**
+ * The commands that held a check's verify back, whose failure is the plan's own:
+ * failed, not failing on the merge base too, not accepted by a person, and not
+ * one whose rerun passed.
+ */
+export const ownFailures = (record) => (record?.verify?.commands ?? []).filter((command) =>
+  command.status === "failed" && !failsWithout(command) && !command.accepted && rerunOf(record, command)?.did !== "passed");
+
+/**
+ * The commands, each with its position in the full run, to run once more at twice their limit, or none: when the review
+ * is in and clean, nothing else holds the check back, and every command that
+ * failed on the plan's own account ran out of time. One that failed outright
+ * makes the failure real, and nothing is rerun.
+ */
+export function rerunCommands(record) {
+  if (record?.review?.status !== "clean" || record.ci?.status === "failed" || record.verify?.status !== "failed") return [];
+  const own = ownFailures(record);
+  return own.length > 0 && own.every((command) => command.timedOut) ? own.map(({ command, position }) => ({ command, position })) : [];
+}
+
+/**
+ * What a command's rerun was and did, as words: its two limits and its result. A
+ * rerun the verification could not start says why instead.
+ */
+export const rerunSaid = (entry) => `timed out at its configured limit of ${entry.configuredSec}s, and the rerun at twice that, `
+  + `${entry.limitSec}s, ${entry.error ? `could not be run: ${entry.error}` : DID[entry.did ?? "unfinished"]}`;
+
+/** The setting a person raises for a command that ran out of time. */
+export const raiseSaid = (entry) => `\`verify[].timeoutSec\` for \`${entry.command}\` in .tagteam/config.json is the setting to raise`
+  + `${entry.limitSec > MAX_TIMEOUT_SEC ? `; the doubled ${entry.limitSec}s is past the ${MAX_TIMEOUT_SEC}s it accepts` : ""}`;
+
+/** What failed on the plan's own account, each with the log to read: the rerun's once it ran. */
+export const failuresOf = (record) => ownFailures(record).map((command) => {
+  const rerun = rerunOf(record, command);
+  return { command: command.command, timedOut: command.timedOut, logPath: rerun?.did ? rerun.logPath : command.logPath, rerun };
+});
+
+/** Each command whose rerun passed in any of `records`, once, with the limits it passed at. */
+export function passedReruns(records) {
+  const seen = new Map();
+  for (const record of records) {
+    for (const entry of record?.rerun?.commands ?? []) if (entry.did === "passed" && !seen.has(entry.command)) seen.set(entry.command, entry);
+  }
+  return [...seen.values()];
+}
+
 /**
  * A fix unit's document, in a spec's shape: no dependencies, the default
  * reviewers. Its Outcome lists exactly what the check found that gates — each
  * blocking or major finding with its file, line and detail, and the failing
- * verify command with its log, and any check that failed on the plan's own pull
+ * verify commands with their logs, and any check that failed on the plan's own pull
  * request — and its Out of scope says nothing else changes.
  */
-export function unitDocument({ id, slug, branch, tip, check, recordPath, findings, failedVerify, failedChecks = null, goalPath, planPath, diffPath }) {
+export function unitDocument({ id, slug, branch, tip, check, recordPath, findings, failedVerify = [], failedChecks = null, goalPath, planPath, diffPath }) {
   const where = (finding) => (finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ""}` : "the whole change");
   const flat = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
   return [
@@ -248,10 +308,8 @@ export function unitDocument({ id, slug, branch, tip, check, recordPath, finding
       + "the plan is already merged into that branch; this change fixes exactly these and nothing else, so that the "
       + "plan holds as one change.",
     "",
-    ...(failedVerify
-      ? [`- The verify command \`${failedVerify.command}\` failed on the plan's tip${failedVerify.timedOut ? " (it timed out)" : ""}. `
-        + `Its log is ${failedVerify.logPath}; read it before changing anything.`]
-      : []),
+    ...failedVerify.map((failed) => `- The verify command \`${failed.command}\` failed on the plan's tip${failed.rerun ? ` (it ${rerunSaid(failed.rerun)})` : failed.timedOut ? " (it timed out)" : ""}. `
+      + `Its log is ${failed.logPath}; read it before changing anything.${failed.rerun ? ` ${raiseSaid(failed.rerun)}.` : ""}`),
     ...(failedChecks
       ? [`- A check on the plan's pull request #${failedChecks.pr} failed at ${short(tip)}: `
         + `${failedChecks.names.length > 0 ? failedChecks.names.join(", ") : "its name was not reported"}. Read its log with gh `
