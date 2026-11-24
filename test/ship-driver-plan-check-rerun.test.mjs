@@ -25,8 +25,8 @@ const slowOnce = (marks) => gated(marks, `if [ -e ${path.join(marks, "once")} ];
 const slowAlways = (marks) => gated(marks, "sleep 30");
 const counted = (marks, name, tail = "") => gated(marks, `echo ran >> ${path.join(marks, name)}${tail}`);
 
-function stage(verify, ciRepairs = 2) {
-  return stageMerged({ ciRepairs, verify });
+function stage(verify) {
+  return stageMerged({ ciRepairs: 2, verify });
 }
 
 test("a command that ran out of time and passes at twice its limit is a clean check, and the plan's pull request says so", () => {
@@ -113,6 +113,51 @@ test("a command that ran out of time beside one that failed outright, or beside 
   const other = checkRecordOf(reviewed.shipDir, 1);
   assert.equal(other.rerun, undefined, "a rerun was begun beside a blocking finding");
   assert.ok(!fs.existsSync(path.join(checkRoundIn(reviewed.shipDir, 1), "verify-rerun")), "a rerun directory exists");
+});
+
+test("two entries with the same command and different limits: the rerun is of the one that ran out of time", () => {
+  const marks = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-rerun-"));
+  const command = gated(marks, "sleep 3");
+  const staged = stage([
+    { command, when: EVERY, timeoutSec: 60 },
+    { command, when: EVERY, timeoutSec: 1 }
+  ]);
+  goAhead(marks);
+  const { plan, shipDir, env } = staged;
+
+  const collected = reviewWholePlan(staged, ship("plan-check", plan, [], env));
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.match(collected.json.next, /begin --plan .* --spec plan-fix-1$/);
+  const record = checkRecordOf(shipDir, 1);
+  assert.deepEqual(record.rerun.commands.map((entry) => [entry.position, entry.configuredSec, entry.limitSec, entry.did]), [[2, 1, 2, "timed-out"]]);
+  assert.equal(record.verify.commands[0].status, "passed");
+  assert.equal(record.verify.commands[1].status, "failed", "the second entry was settled as passed by a rerun of the first");
+  fs.rmSync(marks, { recursive: true, force: true });
+});
+
+test("a rerun that verify-run could not start is said to be one that could not run, with the reason, and not one that did not finish", () => {
+  const marks = fs.mkdtempSync(path.join(os.tmpdir(), "tagteam-rerun-"));
+  const staged = stage([{ command: slowAlways(marks), when: EVERY, timeoutSec: 1 }]);
+  goAhead(marks);
+  const { plan, shipDir, env } = staged;
+  const check = ship("plan-check", plan, [], env);
+  // A file where the rerun's directory goes: verify-run cannot make it, and writes no result.
+  fs.writeFileSync(path.join(checkRoundIn(shipDir, 1), "verify-rerun"), "");
+
+  const collected = reviewWholePlan(staged, check);
+  assert.equal(collected.status, 0, collected.stderr);
+  assert.match(collected.json.next, /begin --plan .* --spec plan-fix-1$/);
+  const record = checkRecordOf(shipDir, 1);
+  assert.equal(record.rerun.commands[0].did, undefined);
+  assert.match(record.rerun.commands[0].error, /EEXIST|exists/);
+  const said = collected.json.say.join("\n");
+  const document = fs.readFileSync(path.join(unitDirIn(shipDir, "plan-fix-1"), "spec.md"), "utf8");
+  assert.match(said, /could not run .* once more at twice its limit: .*(EEXIST|exists)/);
+  for (const text of [said, document]) {
+    assert.match(text, /the rerun at twice that, 2s, could not be run: .*(EEXIST|exists)/);
+    assert.doesNotMatch(text, /did not finish/);
+  }
+  fs.rmSync(marks, { recursive: true, force: true });
 });
 
 // A check whose reviewer is in and whose rerun was begun with no result, as a driver that died

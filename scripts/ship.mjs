@@ -4344,7 +4344,7 @@ function acceptedProblems(ctx, maker, id) {
   const acceptedCommands = byOthers(ledger.acceptedCommands, "command");
   const acceptedChecks = byOthers(ledger.acceptedChecks, "name");
   const commands = maker.verify?.status === "failed"
-    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command) && !acceptedCommands.has(command.command) && rerunOf(maker, command.command)?.did !== "passed").map((command) => command.command)
+    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command) && !acceptedCommands.has(command.command) && rerunOf(maker, command)?.did !== "passed").map((command) => command.command)
     : [];
   const entries = entriesOf(id, maker.tip, unitFindings(ctx, maker), new Set()).map((entry) => ({ ...entry, reason: ACCEPTED_EMPTY }));
   const failedChecks = maker.ci?.failed ?? [];
@@ -7014,8 +7014,9 @@ async function planCheck(options) {
     const commands = markAccepted(accepted, (outcome.commands ?? []).map((command) => (bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command)));
     record.verify = {
       tip, status: outcome.status === "failed" ? verifyStatus(commands, accepted) : outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
-      commands: commands.map(({ command, status, timedOut, logPath, base, accepted: person }) => ({
-        command, status, timedOut, logPath, ...(base ? { base } : {}), ...(person ? { accepted: true } : {})
+      // Every command ran, so a command's place in the list is its position in the full run.
+      commands: commands.map(({ command, status, timedOut, logPath, base, accepted: person }, index) => ({
+        command, position: index + 1, status, timedOut, logPath, ...(base ? { base } : {}), ...(person ? { accepted: true } : {})
       }))
     };
     record.phase = "verified";
@@ -7095,8 +7096,8 @@ async function planCollect(options) {
   record.review = {
     ...record.review, status: review.status, findings: path.join(dir, "review.json"), toFix: path.join(dir, "to-fix.json"), counts: review.counts ?? null
   };
-  const rerun = rerunCommands(record).map((command) => ({ command, position: (ctx.config.verify ?? []).findIndex((entry) => entry.command === command) + 1 }));
-  if (rerun.length > 0 && rerun.every((entry) => entry.position > 0)) {
+  const rerun = rerunCommands(record);
+  if (rerun.length > 0 && rerun.every((entry) => ctx.config.verify?.[entry.position - 1]?.command === entry.command)) {
     // The begun mark and the review's result are one write: a restart that finds
     // the mark knows the one rerun was used, and never runs it again.
     record.phase = "rerun";
@@ -7125,15 +7126,21 @@ const RERUN_SCALE = 2;
 function runRerun(ctx, record) {
   const { dir, result, commands } = record.rerun;
   git(ctx.worktree, ["switch", "--discard-changes", "--detach", record.tip]);
-  node("verify-run.mjs", [
+  const run = node("verify-run.mjs", [
     "--worktree", ctx.worktree, "--config", ctx.configPath, "--select", "all", "--only", commands.map((entry) => entry.position).join(","),
     "--timeout-scale", String(RERUN_SCALE), "--keep-going", "true", "--out-dir", dir, "--out", result,
     // The verification stops, ending its command and writing nothing, if this driver dies under it.
     "--parent-pid", String(process.pid)
   ], { allow: [1] });
+  if (!exists(result)) {
+    // This driver is alive, so a rerun with no result is one verify-run could not start; its words are all there is of why.
+    const why = (run.stderr || run.stdout || "").replace(/\s+/g, " ").trim().slice(0, 300) || "verify-run wrote no result";
+    for (const entry of commands) entry.error = why;
+  }
   const ran = readJson(result, { commands: [] }).commands;
   for (const entry of commands) {
-    const outcome = ran.find((command) => command.command === entry.command);
+    // A command's log is numbered by its position in the full run, so that is how its result is found.
+    const outcome = ran.find((command) => path.basename(command.logPath) === path.basename(entry.logPath));
     if (outcome) entry.did = outcome.status === "passed" ? "passed" : outcome.timedOut ? "timed-out" : "failed";
   }
   saveCheck(ctx.shipDir, record);
@@ -7144,12 +7151,19 @@ function runRerun(ctx, record) {
 function settleRerun(ctx, record, records, say) {
   git(ctx.worktree, ["switch", "--discard-changes", "--detach", record.tip]);
   const unfinished = record.rerun.commands.filter((entry) => !entry.did);
-  if (unfinished.length > 0) {
-    say.push(`Whole-plan check ${record.n} of ${record.branch} at ${short(record.tip)} had begun running ${listOf(unfinished.map((entry) => `\`${entry.command}\``))} `
+  const named = (entries) => listOf(entries.map((entry) => `\`${entry.command}\``));
+  const unrun = unfinished.filter((entry) => entry.error);
+  const begun = unfinished.filter((entry) => !entry.error);
+  if (unrun.length > 0) {
+    say.push(`Whole-plan check ${record.n} of ${record.branch} at ${short(record.tip)} could not run ${named(unrun)} once more at twice its limit: ${unrun[0].error}. `
+      + "Nothing is run again, and it counts as not passed.");
+  }
+  if (begun.length > 0) {
+    say.push(`Whole-plan check ${record.n} of ${record.branch} at ${short(record.tip)} had begun running ${named(begun)} `
       + "once more at twice its limit and has no result for it; nothing is run again, and it counts as not passed.");
   }
-  const passed = new Set(record.rerun.commands.filter((entry) => entry.did === "passed").map((entry) => entry.command));
-  const commands = record.verify.commands.map((command) => (passed.has(command.command) ? { ...command, status: "passed" } : command));
+  const passed = new Set(record.rerun.commands.filter((entry) => entry.did === "passed").map((entry) => entry.position));
+  const commands = record.verify.commands.map((command) => (passed.has(command.position) ? { ...command, status: "passed" } : command));
   record.verify.status = verifyStatus(commands, new Set(commands.filter((command) => command.accepted).map((command) => command.command)));
   return decideCollected(ctx, record, records, say);
 }

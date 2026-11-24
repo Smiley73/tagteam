@@ -139,26 +139,28 @@ test("a verify that failed only on commands a person accepted is clean for its t
 const slow = (command, extra = {}) => ({ command, status: "failed", timedOut: true, logPath: `/l/${command}.log`, ...extra });
 const broke = (command, extra = {}) => ({ command, status: "failed", timedOut: false, logPath: `/l/${command}.log`, ...extra });
 const timedOutCheck = (commands, extra = {}) => ({
-  tip: A, verify: { tip: A, status: "failed", commands }, review: { status: "clean", tip: A }, ...extra
+  tip: A, verify: { tip: A, status: "failed", commands: commands.map((command, index) => ({ position: index + 1, ...command })) }, review: { status: "clean", tip: A }, ...extra
 });
 
+const rerun = (record) => rerunCommands(record).map((entry) => entry.command);
+
 test("only commands that ran out of time are rerun, and only when nothing else holds the check back", () => {
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a"), { command: "b", status: "passed" }, slow("c")])), ["a", "c"]);
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a"), broke("b")])), [], "a mix with an outright failure is a real failure");
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a")], { review: { status: "open", tip: A } })), [], "a review that is not clean");
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a")], { review: { status: "incomplete", tip: A } })), []);
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a")], { ci: { status: "failed" } })), [], "a failed check on the pull request");
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a", { base: { status: "failed" } })])), [], "a command that fails without the change too is not the plan's");
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a", { base: { status: "failed" } }), slow("b")])), ["b"]);
-  assert.deepEqual(rerunCommands(timedOutCheck([slow("a", { accepted: true })])), [], "a command a person accepted");
+  assert.deepEqual(rerun(timedOutCheck([slow("a"), { command: "b", status: "passed" }, slow("c")])), ["a", "c"]);
+  assert.deepEqual(rerun(timedOutCheck([slow("a"), broke("b")])), [], "a mix with an outright failure is a real failure");
+  assert.deepEqual(rerun(timedOutCheck([slow("a")], { review: { status: "open", tip: A } })), [], "a review that is not clean");
+  assert.deepEqual(rerun(timedOutCheck([slow("a")], { review: { status: "incomplete", tip: A } })), []);
+  assert.deepEqual(rerun(timedOutCheck([slow("a")], { ci: { status: "failed" } })), [], "a failed check on the pull request");
+  assert.deepEqual(rerun(timedOutCheck([slow("a", { base: { status: "failed" } })])), [], "a command that fails without the change too is not the plan's");
+  assert.deepEqual(rerun(timedOutCheck([slow("a", { base: { status: "failed" } }), slow("b")])), ["b"]);
+  assert.deepEqual(rerun(timedOutCheck([slow("a", { accepted: true })])), [], "a command a person accepted");
 });
 
 test("a command whose rerun passed is not a failure, and one whose rerun did not pass is named with the rerun's log", () => {
   const record = timedOutCheck([slow("a"), slow("b"), slow("c")], {
     rerun: { commands: [
-      { command: "a", did: "passed", configuredSec: 60, limitSec: 120, logPath: "/r/1.log" },
-      { command: "b", did: "timed-out", configuredSec: 60, limitSec: 120, logPath: "/r/2.log" },
-      { command: "c", configuredSec: 60, limitSec: 120, logPath: "/r/3.log" }
+      { command: "a", position: 1, did: "passed", configuredSec: 60, limitSec: 120, logPath: "/r/1.log" },
+      { command: "b", position: 2, did: "timed-out", configuredSec: 60, limitSec: 120, logPath: "/r/2.log" },
+      { command: "c", position: 3, configuredSec: 60, limitSec: 120, logPath: "/r/3.log" }
     ] }
   });
   assert.deepEqual(failuresOf(record).map((entry) => [entry.command, entry.logPath]), [["b", "/r/2.log"], ["c", "/l/c.log"]]);
@@ -168,5 +170,12 @@ test("a command whose rerun passed is not a failure, and one whose rerun did not
   });
   assert.match(text, /`b` failed on the plan's tip \(it timed out at its configured limit of 60s, and the rerun at twice that, 120s, timed out again\)\. Its log is \/r\/2\.log;.*`verify\[\]\.timeoutSec` for `b`/);
   assert.match(text, /`c` failed on the plan's tip \(it timed out at its configured limit of 60s, and the rerun at twice that, 120s, did not finish\)/);
+  const unrun = unitDocument({
+    id: "plan-fix-1", slug: "demo", branch: "plan/demo", tip: A, check: 1, recordPath: "/s/r.json", findings: [],
+    failedVerify: failuresOf(timedOutCheck([slow("a")], { rerun: { commands: [{ command: "a", position: 1, configuredSec: 60, limitSec: 120, logPath: "/r/1.log", error: "EEXIST: file already exists" }] } })),
+    goalPath: "/p/goal.md", planPath: "/p/plan.md", diffPath: "/s/review.diff"
+  });
+  assert.match(unrun, /the rerun at twice that, 120s, could not be run: EEXIST: file already exists\)/);
+  assert.deepEqual(failuresOf(timedOutCheck([slow("same"), slow("same")], { rerun: { commands: [{ command: "same", position: 2, did: "passed", configuredSec: 1, limitSec: 2, logPath: "/r/2.log" }] } })).map((entry) => entry.position ?? entry.logPath), ["/l/same.log"], "a rerun of the second of two equal commands settled the first");
   assert.doesNotMatch(text, /`a`/);
 });

@@ -230,8 +230,12 @@ const MAX_TIMEOUT_SEC = 7200;
 // no `did` has no result, and did not finish.
 const DID = { passed: "passed", "timed-out": "timed out again", failed: "failed", unfinished: "did not finish" };
 
-/** The command's rerun in `record`, or null. */
-export const rerunOf = (record, command) => (record?.rerun?.commands ?? []).find((entry) => entry.command === command) ?? null;
+/**
+ * The rerun of a verify command of `record`, or null. A command is told apart by
+ * its position in the full run, not its text: two entries may share one command
+ * and differ in their limits.
+ */
+export const rerunOf = (record, command) => (record?.rerun?.commands ?? []).find((entry) => entry.position === command.position) ?? null;
 
 /**
  * The commands that held a check's verify back, whose failure is the plan's own:
@@ -239,10 +243,10 @@ export const rerunOf = (record, command) => (record?.rerun?.commands ?? []).find
  * one whose rerun passed.
  */
 export const ownFailures = (record) => (record?.verify?.commands ?? []).filter((command) =>
-  command.status === "failed" && !failsWithout(command) && !command.accepted && rerunOf(record, command.command)?.did !== "passed");
+  command.status === "failed" && !failsWithout(command) && !command.accepted && rerunOf(record, command)?.did !== "passed");
 
 /**
- * The commands to run once more at twice their limit, or none: when the review
+ * The commands, each with its position in the full run, to run once more at twice their limit, or none: when the review
  * is in and clean, nothing else holds the check back, and every command that
  * failed on the plan's own account ran out of time. One that failed outright
  * makes the failure real, and nothing is rerun.
@@ -250,12 +254,15 @@ export const ownFailures = (record) => (record?.verify?.commands ?? []).filter((
 export function rerunCommands(record) {
   if (record?.review?.status !== "clean" || record.ci?.status === "failed" || record.verify?.status !== "failed") return [];
   const own = ownFailures(record);
-  return own.length > 0 && own.every((command) => command.timedOut) ? own.map((command) => command.command) : [];
+  return own.length > 0 && own.every((command) => command.timedOut) ? own.map(({ command, position }) => ({ command, position })) : [];
 }
 
-/** What a command's rerun was and did, as words: its two limits and its result. */
+/**
+ * What a command's rerun was and did, as words: its two limits and its result. A
+ * rerun the verification could not start says why instead.
+ */
 export const rerunSaid = (entry) => `timed out at its configured limit of ${entry.configuredSec}s, and the rerun at twice that, `
-  + `${entry.limitSec}s, ${DID[entry.did ?? "unfinished"]}`;
+  + `${entry.limitSec}s, ${entry.error ? `could not be run: ${entry.error}` : DID[entry.did ?? "unfinished"]}`;
 
 /** The setting a person raises for a command that ran out of time. */
 export const raiseSaid = (entry) => `\`verify[].timeoutSec\` for \`${entry.command}\` in .tagteam/config.json is the setting to raise`
@@ -263,7 +270,7 @@ export const raiseSaid = (entry) => `\`verify[].timeoutSec\` for \`${entry.comma
 
 /** What failed on the plan's own account, each with the log to read: the rerun's once it ran. */
 export const failuresOf = (record) => ownFailures(record).map((command) => {
-  const rerun = rerunOf(record, command.command);
+  const rerun = rerunOf(record, command);
   return { command: command.command, timedOut: command.timedOut, logPath: rerun?.did ? rerun.logPath : command.logPath, rerun };
 });
 
