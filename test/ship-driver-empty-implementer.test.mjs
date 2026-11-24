@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { root, git, stage, ship, write, outputOf, arriveAll, trainOf, unitDirIn, unitStateOf, reviewWholePlan,
-  stageMerged } from "./ship-stage.mjs";
+  stageMerged, commitToMain } from "./ship-stage.mjs";
 
 const reportOf = (summary, reason) => ({ status: "unfinished", summary, unfinished: [{ part: "the whole spec", reason }], account: [] });
 const WRONG = /implementation was not committed|Put right what the error/;
@@ -192,5 +192,78 @@ test("a whole-plan fix unit left at the incident's state is sent back once, asks
   assert.match(snapshot.json.next, /verify --plan /);
   const after = ship("begin", plan, ["--spec", id], env);
   assert.doesNotMatch(outcome(after), /changed nothing twice/, "a committed unit still reads as waiting at the question");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The spec's implementer, having changed nothing twice: the question is waiting.
+function questionOf(plan) {
+  let result = ship("begin", plan, ["--spec", "01-a"]);
+  arrivesEmpty(result, "nothing", "no reason");
+  result = ship("snapshot", plan, ["--spec", "01-a"]);
+  arrivesEmpty(result, "still nothing", "no reason either");
+  return asked(ship("snapshot", plan, ["--spec", "01-a"]));
+}
+
+test("work a person commits by hand at the question is snapshotted, and the record then no longer reads as waiting", () => {
+  const { dir, plan, shipDir } = stage();
+  const record = path.join(shipDir, "01-a", "empty-implementer.json");
+  ship("start", plan);
+  questionOf(plan);
+  assert.equal(JSON.parse(fs.readFileSync(record, "utf8")).waiting, true);
+  const worktree = trainOf(shipDir).worktree;
+  fs.writeFileSync(path.join(worktree, "by-hand.js"), "export const byHand = 1;\n");
+  git(worktree, "add", "-A");
+  git(worktree, "commit", "-m", "by hand");
+
+  const begun = ship("begin", plan, ["--spec", "01-a"]);
+  assert.equal(begun.status, 0, begun.stderr);
+  assert.equal(begun.json.ask, undefined, "work committed by hand was still asked about");
+  assert.match(begun.json.next, /snapshot --plan /);
+  assert.equal(JSON.parse(fs.readFileSync(record, "utf8")).waiting, true, "only the snapshot should settle the record");
+  const snapshot = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.deepEqual(rounds(path.join(shipDir, "01-a")), ["1"]);
+  const after = JSON.parse(fs.readFileSync(record, "utf8"));
+  assert.equal(after.waiting, false, "a snapshot that committed real work left the record waiting");
+  assert.equal(after.resent, true, "the spent resend was forgotten");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a resend keeps the agent, model and effort the original implementer was sent with, whatever the roles resolve to now", () => {
+  const { dir, repo, plan, config } = stage();
+  ship("start", plan);
+  const begin = ship("begin", plan, ["--spec", "01-a"]);
+  const [original] = begin.json.dispatch;
+  // Changed after the original went out: what the roles resolve to now differs from what was sent.
+  const changed = { ...config, effort: { ...config.effort, implementer: original.effort === "low" ? "high" : "low" } };
+  fs.writeFileSync(path.join(repo, ".tagteam", "config.json"), JSON.stringify(changed, null, 2));
+  arrivesEmpty(begin, "nothing", "no reason");
+  const resent = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.equal(resent.status, 0, resent.stderr);
+  const [again] = resent.json.dispatch;
+  assert.notEqual(again.effort, changed.effort.implementer, "the resend took its effort from the roles as they are now");
+  assert.deepEqual([again.agent, again.model, again.effort], [original.agent, original.model, original.effort]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the question is put back, and the send-back answer works, after the base branch moved while it waited", () => {
+  const { dir, repo, plan, shipDir } = stage();
+  ship("start", plan);
+  const ask = questionOf(plan);
+  commitToMain(repo, { "elsewhere.js": "export const elsewhere = 1;\n" });
+
+  const begun = ship("begin", plan, ["--spec", "01-a"]);
+  assert.equal(asked(begun), ask, "the moved base lost the question");
+  assert.doesNotMatch(begun.json.next ?? "", /snapshot/);
+  assert.equal(asked(ship("snapshot", plan, ["--spec", "01-a"])), ask, "a bare snapshot lost the question");
+
+  write(path.join(shipDir, "01-a", "send-back-note.md"), "Please try again.\n");
+  const sent = ship("begin", plan, ["--spec", "01-a", "--send-back"]);
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.match(sent.json.dispatch[0].prompt, /Please try again\./);
+  arrivesEmpty(sent, "third attempt: nothing", "third reason");
+  const third = ship("snapshot", plan, ["--spec", "01-a"]);
+  assert.match(asked(third), /third reason/);
+  assert.deepEqual(rounds(path.join(shipDir, "01-a")), [], "an attempt that changed nothing made a round");
   fs.rmSync(dir, { recursive: true, force: true });
 });

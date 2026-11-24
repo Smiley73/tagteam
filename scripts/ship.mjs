@@ -3642,7 +3642,7 @@ async function begin(options) {
   }
   if (["implementing", "reviewing", "fixing", "verifying"].includes(state.state) && init.existing) {
     git(ctx.worktree, ["switch", branch]);
-    const asking = state.state === "implementing" && readJson(emptyImplementerPath(ctx, id), {}).waiting === true && nothingChanged(ctx);
+    const asking = state.state === "implementing" && readJson(emptyImplementerPath(ctx, id), {}).waiting === true && nothingChanged(ctx, id);
     if (options.sendBack && !asking) throw new Stop(`${id} is not waiting at a question about an implementer that changed nothing, so nothing was sent back.`);
     // Before the route below, which re-enters the candidate's round and so
     // empties it — a review set this spec sent out may still have agents working
@@ -4155,27 +4155,35 @@ function unusableReportStop(ctx, id, { oid, round, refused, resent, role }) {
 // Whether the first implementer's one automatic resend is spent, and whether the
 // question after it is waiting. On disk, so that a restart can neither forget a
 // resend that was spent nor lose the question: `begin` and `snapshot` both read
-// it. A snapshot that commits real work clears `waiting`; `resent` stays.
+// it. A snapshot that commits real work clears `waiting`; `resent` stays. `base`
+// is the base the empty attempt was handed: `begin` fetches a new one on every
+// resume, and the branch is never moved onto it, so the tree is judged against
+// both.
 const emptyImplementerPath = (ctx, id) => path.join(specDir(ctx, id), "empty-implementer.json");
 // Where the person's note is written for the send-back answer: free text never
 // travels as a command argument.
 const sendBackNotePath = (ctx, id) => path.join(specDir(ctx, id), "send-back-note.md");
 
+// The bases an empty attempt is judged against: the one the snapshot script is
+// handed, and the one the attempt itself was handed, which differs once the base
+// branch has moved since.
+const emptyBases = (ctx, id) => [...new Set([ctx.baseOid, readJson(emptyImplementerPath(ctx, id), {}).base].filter(Boolean))];
+
 // Everything `snapshot-candidate.mjs` refuses as empty, against the base it is
 // handed: nothing uncommitted, and HEAD is the base or has its tree.
-function nothingChanged(ctx) {
-  if (!ctx.baseOid || git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") return false;
+function nothingChanged(ctx, id) {
+  if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") return false;
   const tree = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{tree}`]).stdout.trim();
-  return tree("HEAD") === tree(ctx.baseOid);
+  return emptyBases(ctx, id).some((base) => tree("HEAD") === tree(base));
 }
 
 // A round the base owns holds nothing a review could use, because the snapshot
 // always refuses candidate == base. One an older refusal left behind, with only
 // its marker in it, would still count as a spent fix round.
 function dropBaseRound(ctx, id) {
-  if (!ctx.baseOid) return;
+  const bases = emptyBases(ctx, id);
   for (const entry of listRounds(roundsRoot(ctx, id))) {
-    const held = entry.candidate === ctx.baseOid ? fs.readdirSync(entry.dir).filter((name) => name !== ROUND_MARKER) : null;
+    const held = bases.includes(entry.candidate) ? fs.readdirSync(entry.dir).filter((name) => name !== ROUND_MARKER) : null;
     if (held?.length === 0) fs.rmSync(entry.dir, { recursive: true, force: true });
   }
 }
@@ -4248,12 +4256,12 @@ async function emptyImplementer(ctx, id, spec, { say }) {
   say.push(kept ? `The implementer changed nothing (its report is kept at ${kept}).` : "The implementer changed nothing and wrote no report.");
   const report = kept ? readJson(kept, null) : null;
   if (record.resent) {
-    writeJson(file, { resent: true, waiting: true, report: kept, at: new Date().toISOString() });
+    writeJson(file, { resent: true, waiting: true, report: kept, base: record.base ?? ctx.baseOid, at: new Date().toISOString() });
     spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "the implementer changed nothing twice"], { stdio: "ignore" });
     return emptyQuestion(ctx, id, say);
   }
   // Written before the dispatch: a restart must never be able to send a second one.
-  writeJson(file, { resent: true, waiting: false, report: kept, at: new Date().toISOString() });
+  writeJson(file, { resent: true, waiting: false, report: kept, base: ctx.baseOid, at: new Date().toISOString() });
   const job = roles(ctx, id).jobs.implement;
   const dispatch = emptyResendDispatch(ctx, spec, job, implementerRequest(ctx, id, job), kept, null);
   const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
@@ -4440,7 +4448,7 @@ async function snapshot(options) {
   // The first implementer of a spec or a fix unit that changed nothing: no
   // marker says so, and the commit step below would allocate a round for the
   // base that the snapshot script then refuses.
-  if (state.state === "implementing" && !pending && !resent && !isDependencyId(id) && nothingChanged(ctx)) {
+  if (state.state === "implementing" && !pending && !resent && !isDependencyId(id) && nothingChanged(ctx, id)) {
     return done(await emptyImplementer(ctx, id, spec, { say }));
   }
 
