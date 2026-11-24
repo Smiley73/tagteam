@@ -84,8 +84,9 @@ test("a stretch from an arrival runs to the first dispatch and prints every step
 
 test("a stretch whose later step stops exits 0 with the earlier lines, and the stopping step's exit, stop and stderr as written", () => {
   const staged = stage();
-  // Nothing committed: the arrival says its line, then snapshot refuses.
-  const { arrival, next } = implemented(staged, {});
+  // The primary checkout touched during the ship: the arrival says its line, then snapshot refuses.
+  const { arrival, next } = implemented(staged);
+  fs.writeFileSync(path.join(staged.repo, "stray.txt"), "not the ship's\n");
   const { result, dir } = stretch(staged, { arrive: arrival, next });
 
   assert.deepEqual(recordsIn(dir), ["01-arrive", "02-snapshot"]);

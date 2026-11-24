@@ -159,6 +159,16 @@ fresh pass then raises something blocking or major on what the tidy changed, the
 tidy is thrown away and the earlier commit is re-checked again with its own
 verify and report as they were.
 
+An implementer that finishes having changed nothing, whether for a spec or for the
+fix the whole-plan check opens, is not sent to review: there is nothing to review,
+and it costs no fix round. It is sent back once, by itself, told that its last attempt
+changed nothing and given what it reported. If that attempt changes nothing too, the
+ship stops and asks, saying so in plain words and quoting what the implementer said
+it did and what it left undone, and why. You can send it back with a note of your own,
+which it is given exactly as you wrote it, or stop the ship. If it changes nothing
+again after your note, you are asked again; the ship never sends it back on its own a
+second time.
+
 Reviewers cannot run anything, so the minor findings they file about the code are
 suspicions. At a spec's first panel, the ones from correctness, from Codex when it is
 on, and code-quality's that say a test would still pass with the behaviour broken, are

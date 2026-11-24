@@ -56,7 +56,7 @@ import { awaitedByUnmerged, carryEligible, carryRefusal, carrying, mergesWithOpe
 import { enterMerge, entriesOf, failingInPlan, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
-import { ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, markRound, writeRoundFile } from "./lib/round-store.mjs";
+import { ROUND_MARKER, ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, markRound, writeRoundFile } from "./lib/round-store.mjs";
 import {
   RECORD, RESOLVE_DIR, attemptsLeft, hasMarkers, listResolveRounds, markerSizes, nextRoundNumber, parentsProblem, resolveBrief,
   versionStep, writeRecord
@@ -3642,6 +3642,8 @@ async function begin(options) {
   }
   if (["implementing", "reviewing", "fixing", "verifying"].includes(state.state) && init.existing) {
     git(ctx.worktree, ["switch", branch]);
+    const asking = state.state === "implementing" && readJson(emptyImplementerPath(ctx, id), {}).waiting === true && nothingChanged(ctx);
+    if (options.sendBack && !asking) throw new Stop(`${id} is not waiting at a question about an implementer that changed nothing, so nothing was sent back.`);
     // Before the route below, which re-enters the candidate's round and so
     // empties it — a review set this spec sent out may still have agents working
     // into that round — and which sends to `snapshot`, which would read a fixer
@@ -3650,6 +3652,7 @@ async function begin(options) {
     say.push(...restarted.say);
     const held = heldByRestart(ctx, id, state, restarted, say);
     if (held) return emit(held);
+    if (asking) return emit(options.sendBack ? await sendBack(ctx, id, spec, say) : emptyQuestion(ctx, id, say));
     return emit({
       say: [...say, `${id} was interrupted while ${state.state}; resuming from whatever is committed on ${branch}.`],
       next: nextCommand(ctx, "snapshot", id)
@@ -3657,6 +3660,7 @@ async function begin(options) {
   }
 
   // A genuinely new spec.
+  if (options.sendBack) throw new Stop(`${id} is not waiting at a question about an implementer that changed nothing, so nothing was sent back.`);
   if (isDependencyId(id)) return beginDependencies(ctx, { baseOid, branch, say });
   git(ctx.worktree, ["checkout", "--detach", baseOid]);
   git(ctx.worktree, ["switch", "-c", branch]);
@@ -4146,6 +4150,140 @@ function unusableReportStop(ctx, id, { oid, round, refused, resent, role }) {
     + "The round is not recorded as having no report.");
 }
 
+// --- a first implementer that changed nothing --------------------------------
+
+// Whether the first implementer's one automatic resend is spent, and whether the
+// question after it is waiting. On disk, so that a restart can neither forget a
+// resend that was spent nor lose the question: `begin` and `snapshot` both read
+// it. A snapshot that commits real work clears `waiting`; `resent` stays.
+const emptyImplementerPath = (ctx, id) => path.join(specDir(ctx, id), "empty-implementer.json");
+// Where the person's note is written for the send-back answer: free text never
+// travels as a command argument.
+const sendBackNotePath = (ctx, id) => path.join(specDir(ctx, id), "send-back-note.md");
+
+// Everything `snapshot-candidate.mjs` refuses as empty, against the base it is
+// handed: nothing uncommitted, and HEAD is the base or has its tree.
+function nothingChanged(ctx) {
+  if (!ctx.baseOid || git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") return false;
+  const tree = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{tree}`]).stdout.trim();
+  return tree("HEAD") === tree(ctx.baseOid);
+}
+
+// A round the base owns holds nothing a review could use, because the snapshot
+// always refuses candidate == base. One an older refusal left behind, with only
+// its marker in it, would still count as a spent fix round.
+function dropBaseRound(ctx, id) {
+  if (!ctx.baseOid) return;
+  for (const entry of listRounds(roundsRoot(ctx, id))) {
+    const held = entry.candidate === ctx.baseOid ? fs.readdirSync(entry.dir).filter((name) => name !== ROUND_MARKER) : null;
+    if (held?.length === 0) fs.rmSync(entry.dir, { recursive: true, force: true });
+  }
+}
+
+const quoteReport = (report) => [
+  typeof report.summary === "string" && report.summary ? report.summary : "(it gave no summary)",
+  ...(Array.isArray(report.unfinished) ? report.unfinished : []).map((entry) => `  left undone: ${entry?.part} — ${entry?.reason}`)
+];
+
+// The agent request the spec's implementer was sent with, so a resend runs at
+// the same agent, model and effort.
+function implementerRequest(ctx, id, job) {
+  const pointer = readJson(snapshotSetPath(ctx, id), null);
+  return (pointer?.set ? readSet(setDir(ctx, id, pointer.set), pointer.set)?.agents?.[0]?.request : null) ?? agent("implementer", job);
+}
+
+function emptyResendDispatch(ctx, spec, job, request, kept, note) {
+  const dispatch = implementerDispatch(ctx, spec, job);
+  const [first, ...rest] = dispatch.prompt.split("\n");
+  const report = kept ? readJson(kept, null) : null;
+  return {
+    ...dispatch, ...request,
+    description: `Implement ${spec.id} again`,
+    prompt: [
+      first,
+      "The previous attempt at this spec changed nothing: the worktree is as it was handed over, with no commit and no change.",
+      ...(report ? [`Its report is kept at ${kept}:`, ...quoteReport(report)] : ["It wrote no report."]),
+      "Do the work the spec describes. If changing nothing is right, say so in the report: its `unfinished` must say why, part by part.",
+      ...(note === null ? [] : [`The note from the person who read that attempt, word for word:\n${note}\nEnd of the note.`]),
+      ...rest
+    ].join("\n")
+  };
+}
+
+// The question a first implementer that changed nothing twice ends in. It has
+// two answers, and is built from the record alone, so `begin`, `snapshot` and
+// the first time it is put read the same.
+function emptyQuestion(ctx, id, say) {
+  const record = readJson(emptyImplementerPath(ctx, id), {});
+  const report = record.report ? readJson(record.report, null) : null;
+  const sendBack = nextCommand(ctx, "begin", id, " --send-back");
+  const end = nextCommand(ctx, "end", null);
+  return {
+    say,
+    ask: `The implementer for ${id} changed nothing twice: once when it was sent, and again when it was sent back, so there is no work to review, `
+      + "and no fix round was spent.\n"
+      + `${report ? `Its latest report (kept at ${record.report}):\n${quoteReport(report).join("\n")}` : "Its latest attempt wrote no report."}\n`
+      + `You decide: send it back with your note — write your words, exactly as you want it to read them, to ${sendBackNotePath(ctx, id)}, and run ${sendBack}; `
+      + `or stop the ship (run ${end}).`,
+    answers: { "send-back": sendBack, end },
+    next: end
+  };
+}
+
+// `snapshot` on a first implementer that changed nothing. The first such attempt
+// is sent back once, by itself, with its own report; the next ends in the
+// question. Neither allocates a round, and a base-owned leftover is removed.
+async function emptyImplementer(ctx, id, spec, { say }) {
+  dropBaseRound(ctx, id);
+  const file = emptyImplementerPath(ctx, id);
+  const record = readJson(file, {});
+  if (record.waiting) return emptyQuestion(ctx, id, say);
+  const reportFile = implementReportPath(ctx, id);
+  let kept = null;
+  if (exists(reportFile)) {
+    kept = path.join(specDir(ctx, id), "declined", `empty-implementer-${stampNow()}-${randomBytes(2).toString("hex")}.json`);
+    fs.mkdirSync(path.dirname(kept), { recursive: true, mode: 0o700 });
+    fs.renameSync(reportFile, kept);
+  }
+  say.push(kept ? `The implementer changed nothing (its report is kept at ${kept}).` : "The implementer changed nothing and wrote no report.");
+  const report = kept ? readJson(kept, null) : null;
+  if (record.resent) {
+    writeJson(file, { resent: true, waiting: true, report: kept, at: new Date().toISOString() });
+    spawnSync(process.execPath, [path.join(SCRIPTS, "notify.mjs"), `${ctx.slug} ${id} needs you`, "the implementer changed nothing twice"], { stdio: "ignore" });
+    return emptyQuestion(ctx, id, say);
+  }
+  // Written before the dispatch: a restart must never be able to send a second one.
+  writeJson(file, { resent: true, waiting: false, report: kept, at: new Date().toISOString() });
+  const job = roles(ctx, id).jobs.implement;
+  const dispatch = emptyResendDispatch(ctx, spec, job, implementerRequest(ctx, id, job), kept, null);
+  const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
+  if (report) say.push(...quoteReport(report));
+  say.push("One fresh implementer is sent back, once, and told this. No round was made for the attempt that changed nothing, and none is spent.");
+  return { say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) };
+}
+
+// The send-back answer, run through `begin`: the person's note, read from the
+// file the question named, goes to a fresh implementer word for word.
+async function sendBack(ctx, id, spec, say) {
+  const notePath = sendBackNotePath(ctx, id);
+  const note = exists(notePath) ? fs.readFileSync(notePath, "utf8") : "";
+  if (note.trim() === "") {
+    throw new Stop(`Nothing was sent back for ${id}, because there is no note at ${notePath}, or it is empty. The question stands: write the person's words there, `
+      + `exactly as they said them, and run ${nextCommand(ctx, "begin", id, " --send-back")} again; or stop the ship (run ${nextCommand(ctx, "end", null)}).`);
+  }
+  const file = emptyImplementerPath(ctx, id);
+  const record = readJson(file, {});
+  const job = roles(ctx, id).jobs.implement;
+  const dispatch = emptyResendDispatch(ctx, spec, job, implementerRequest(ctx, id, job), record.report ?? null, note);
+  const set = await sendForSnapshot(ctx, id, { kind: "implement", dispatch, job });
+  writeJson(file, { ...record, waiting: false, at: new Date().toISOString() });
+  fs.mkdirSync(path.join(specDir(ctx, id), "declined"), { recursive: true, mode: 0o700 });
+  const kept = path.join(specDir(ctx, id), "declined", `send-back-note-${stampNow()}-${randomBytes(2).toString("hex")}.md`);
+  fs.renameSync(notePath, kept);
+  say.push(`${id} was sent back to a fresh implementer with the person's note (kept at ${kept}); no round is made or spent for it.`);
+  return { say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) };
+}
+
 async function snapshot(options) {
   const ctx = context(options);
   const id = options.spec;
@@ -4299,6 +4437,13 @@ async function snapshot(options) {
     return done({ say, next: nextCommand(ctx, "recheck", id) });
   }
 
+  // The first implementer of a spec or a fix unit that changed nothing: no
+  // marker says so, and the commit step below would allocate a round for the
+  // base that the snapshot script then refuses.
+  if (state.state === "implementing" && !pending && !resent && !isDependencyId(id) && nothingChanged(ctx)) {
+    return done(await emptyImplementer(ctx, id, spec, { say }));
+  }
+
   if (dirty) {
     const message = options.message
       ?? (tidying ? `Tidy ${id}: remove surplus code`
@@ -4328,6 +4473,7 @@ async function snapshot(options) {
   // they find this time, and `settle` would publish a finding nobody accepted.
   fs.rmSync(acceptedPath(ctx, id), { force: true });
 
+  dropBaseRound(ctx, id);
   const allocation = lastJson(node("gates.mjs", ["round", statePath(ctx, id), roundsRoot(ctx, id), oid, ctx.configPath, ...(tidying ? ["--tidy"] : [])]).stdout);
   const round = allocation.round;
   const dir = roundDir(ctx, id, round);
@@ -4351,6 +4497,8 @@ async function snapshot(options) {
     writeRoundFile(path.join(dir, ROUND_REDESIGN), `${JSON.stringify(redesigned, null, 2)}\n`);
   }
   node("gates.mjs", ["bind", statePath(ctx, id), oid, ctx.baseOid, path.join(dir, "candidate.json")]);
+  const asked = readJson(emptyImplementerPath(ctx, id), null);
+  if (asked?.waiting) writeJson(emptyImplementerPath(ctx, id), { ...asked, waiting: false });
   // The tidy's tests ran once, on the tree before it was committed, and that run
   // is this round's verify: `verify` does not run on it.
   if (tidying) {
@@ -8944,9 +9092,12 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       a person's answer to the dependency audit's stop, never printed by next: approve or decline
                                       each package it would not upgrade unasked, by the keys the stop printed. A decline is kept
                                       for the repository, so no later ship asks about that package at that version again
-  begin   --spec <id> [--run-gone | --run-live]
-                                      branch and dispatch the implementer, or resume; the flags answer
-                                      the question a resume asks about agents an earlier run sent out
+  begin   --spec <id> [--run-gone | --run-live | --send-back]
+                                      branch and dispatch the implementer, or resume; the first two flags answer
+                                      the question a resume asks about agents an earlier run sent out. --send-back is a
+                                      person's answer to the question after an implementer changed nothing twice, never
+                                      printed by next: it sends a fresh implementer the note written to the file the question
+                                      named, and refuses, changing nothing, when there is none
   snapshot --spec <id> [--message m]  commit, allocate the round, snapshot, bind, record the report
   verify  --spec <id>                 run the verify commands against the candidate
   panel   --spec <id>                 dispatch every lens plus Codex
@@ -9011,6 +9162,7 @@ function parseArgs(argv) {
     if (key === "--escalated") { options.escalated = true; continue; }
     if (key === "--normal") { options.normal = true; continue; }
     if (key === "--squash") { options.squash = true; continue; }
+    if (key === "--send-back") { options.sendBack = true; continue; }
     const value = rest[++index];
     if (value === undefined) throw Stop.beneath(`${key} requires a value`, USAGE, 2);
     options[key.slice(2)] = value;
