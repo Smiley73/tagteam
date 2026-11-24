@@ -173,6 +173,14 @@ test("after a merge-in the accepted command fails and the check is still clean; 
   assert.ok(document.includes(FAILS_B.command), "the unit's document does not name the new failure");
   assert.ok(!document.includes(FAILS_A.command), "the unit's document names the accepted command");
   assert.doesNotMatch(opened.json.say.join("\n"), /FAIL_A/, "the accepted command is said to be what is found");
+
+  questionFor(plan, "plan-fix-2", both, "still nothing to change");
+  const again = accept(plan, "plan-fix-2", both);
+  assert.equal(again.status, 0, again.stderr);
+  const record = JSON.parse(fs.readFileSync(path.join(unitDirIn(shipDir, "plan-fix-2"), "accepted-empty.json"), "utf8"));
+  assert.equal(record.problems.length, 1, "the second unit accepted what the first had accepted");
+  assert.ok(record.problems[0].includes(FAILS_B.command));
+  assert.doesNotMatch(again.json.say.join("\n"), /FAIL_A/, "the accepted command is said to be accepted again");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -200,11 +208,18 @@ test("accept is refused, changing nothing, unless the spec is still waiting at t
   assert.equal(dirty.status, 1);
   assert.match(dirty.stderr, /^01-a was not accepted: the worktree has uncommitted changes/);
 
+  fs.rmSync(path.join(worktree, "stray.js"));
+  git(worktree, "commit", "--allow-empty", "-m", "nothing, after the question");
+  const emptied = accept(plan, "01-a");
+  assert.equal(emptied.status, 1, "an empty commit with the base's tree was accepted as nothing changed");
+  assert.match(emptied.stderr, /^01-a was not accepted: its branch has a commit made after the question was asked/);
+  assert.equal(stateOf(), "implementing");
+  fs.writeFileSync(path.join(worktree, "stray.js"), "export const stray = 1;\n");
   git(worktree, "add", "-A");
   git(worktree, "commit", "-m", "work, after the question");
   const committed = accept(plan, "01-a");
   assert.equal(committed.status, 1);
-  assert.match(committed.stderr, /^01-a was not accepted: its branch has a commit that changes something, made after the question was asked/);
+  assert.match(committed.stderr, /^01-a was not accepted: its branch has a commit made after the question was asked/);
   assert.match(committed.stderr, /Nothing changed\./);
   assert.equal(committed.json, null, "a refusal printed a payload");
   assert.equal(stateOf(), "implementing");

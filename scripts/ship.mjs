@@ -232,8 +232,7 @@ const roundsRoot = (ctx, id) => path.join(specDir(ctx, id), "rounds");
 const roundDir = (ctx, id, round) => path.join(roundsRoot(ctx, id), String(round));
 const readState = (ctx, id) => readJson(statePath(ctx, id));
 const stateOf = (ctx, id) => (exists(statePath(ctx, id)) ? readJson(statePath(ctx, id), {}).state ?? null : null);
-// Done, so the train goes on: merged, or accepted with nothing merged. Code is in
-// the plan branch only for `merged`, which the readers of that ask for themselves.
+// Done, so the train goes on: merged, or accepted with nothing merged.
 const finished = (ctx, id) => isFinishedState(stateOf(ctx, id));
 
 function specsInOrder(ctx) {
@@ -4184,6 +4183,12 @@ function headAtBase(ctx, id) {
   return emptyBases(ctx, id).some((base) => tree("HEAD") === tree(base));
 }
 
+// HEAD is the base itself: no commit was made on it, empty or not.
+const headIsBase = (ctx, id) => {
+  const commit = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{commit}`]).stdout.trim();
+  return emptyBases(ctx, id).some((base) => commit("HEAD") === commit(base));
+};
+
 // Everything `snapshot-candidate.mjs` refuses as empty, against the base it is
 // handed: nothing uncommitted, and HEAD at the base.
 const nothingChanged = (ctx, id) => cleanTree(ctx) && headAtBase(ctx, id);
@@ -4328,12 +4333,18 @@ function acceptedProblems(ctx, maker, id) {
       said: entries.map((entry) => `the ledger entry ${entry.id} (${entry.severity}): ${flat(entry.title)}`)
     };
   }
+  // What an earlier unit accepted is not this one's to accept again: the unit's document leaves it out too.
+  const ledger = readLedger(ctx.shipDir);
+  const byOthers = (items, key) => new Set(items.filter((item) => item.spec !== id).map((item) => item[key]));
+  const acceptedCommands = byOthers(ledger.acceptedCommands, "command");
+  const acceptedChecks = byOthers(ledger.acceptedChecks, "name");
   const commands = maker.verify?.status === "failed"
-    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command)).map((command) => command.command)
+    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command) && !acceptedCommands.has(command.command)).map((command) => command.command)
     : [];
   const entries = entriesOf(id, maker.tip, unitFindings(ctx, maker), new Set()).map((entry) => ({ ...entry, reason: ACCEPTED_EMPTY }));
-  const redCheck = maker.ci?.status === "failed";
-  const checks = redCheck ? maker.ci.failed ?? [] : [];
+  const failedChecks = maker.ci?.failed ?? [];
+  const checks = failedChecks.filter((name) => !acceptedChecks.has(name));
+  const redCheck = maker.ci?.status === "failed" && (failedChecks.length === 0 || checks.length > 0);
   return {
     commands, entries, entryIds: [], checks,
     said: [
@@ -4384,8 +4395,8 @@ function acceptEmpty(ctx, id, say) {
     throw refuse(`the worktree has uncommitted changes, which is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
   }
   git(ctx.worktree, ["switch", branchOf(ctx, id)]);
-  if (!headAtBase(ctx, id)) {
-    throw refuse(`its branch has a commit that changes something, made after the question was asked, so there is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
+  if (!headIsBase(ctx, id)) {
+    throw refuse(`its branch has a commit made after the question was asked, so there is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
   }
   const file = acceptedEmptyPath(ctx, id);
   const problems = maker ? acceptedProblems(ctx, maker, id) : null;

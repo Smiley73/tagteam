@@ -95,7 +95,7 @@ export const ciFor = (record, tip) =>
  * name that failed is one a person accepted. The one answer the dialog, the red
  * check's routing and `merge.mjs` all read, so that they cannot disagree.
  */
-export const ciFailing = (ci, accepted = new Set()) =>
+export const ciFailing = (ci, accepted) =>
   ci?.status === "failed" && !((ci.failed ?? []).length > 0 && ci.failed.every((name) => accepted.has(name)));
 
 /** A resolve round still open — a merge of the base under way — or null. */

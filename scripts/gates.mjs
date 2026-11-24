@@ -165,13 +165,7 @@ const TRANSITIONS = {
   failed: ["pending"]
 };
 
-/**
- * Whether a spec or a whole-plan fix is done, so that the train goes on past
- * it: merged, or accepted by a person with nothing merged — the one exit from
- * `implementing` that is not toward a review, taken when the first implementer
- * changed nothing and the person said that is the answer. What is in the plan
- * branch is `merged` alone; this is for the readers that ask whether to go on.
- */
+/** Done, so the train goes on: merged, or accepted with nothing merged. Only `merged` puts code in the plan branch. */
 export const isFinishedState = (state) => state === "merged" || state === "accepted";
 
 export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) {
