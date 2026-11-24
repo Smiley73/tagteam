@@ -51,10 +51,15 @@ turns.
    Exit 3 means an older plugin wrote it — tell them to run `/tagteam:configure` and
    stop. No config at all: same. Show any `note:` or `warning:` line about lens
    briefs as the validator wrote it.
-5. `node "$P/scripts/codex-preflight.mjs" version --config "$R/.tagteam/config.json"`.
+5. `node "$P/scripts/codex-preflight.mjs" version --config "$R/.tagteam/config.json" && node "$P/scripts/subagent-model.mjs" stop plan`.
    It exits non-zero: stop and say what it printed — Codex is required, at
    0.153.0 or newer, only when the configuration uses it; a configuration that
-   does not makes it print that and exit 0.
+   does not makes it print that and exit 0. The second command stops with one
+   sentence when `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` holds a model name, because
+   every agent of the run would use it; relay it as given and create nothing.
+   **Never unset the variable in a command, rerun this line with it cleared, or stand
+   in for the run**: Claude Code's own process decides what the agents run on, so
+   that would pass the check and the run would still use the variable.
 6. `--resume <slug>` with `$D/work/goal-approved` present: the goal is past its
    gate, so launch a run as *4–6* says at
    `node "$P/scripts/plan.mjs" resume --plan "$D"`, once the `rm -f` below has

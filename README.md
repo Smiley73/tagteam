@@ -67,6 +67,12 @@ Always required: Claude Code 2.1.301 or newer with its Workflow tool (`/tagteam:
 and `/tagteam:plan` each run as a workflow and stop before creating anything when the
 session has none), Git, and an authenticated GitHub CLI.
 
+With Claude Code's Bash sandbox on, a ship also needs it to allow the ship's
+worktree, the commits in it and the start of its steps, which no narrower setting does; a ship needs the
+sandbox off (`{ "sandbox": { "enabled": false } }`). `/tagteam:ship` refuses before
+starting when the sandbox does not allow them, and `/tagteam:plan` needs nothing
+from the sandbox.
+
 Required only with Codex on: the [Codex CLI](https://github.com/openai/codex)
 0.153.0 or newer, refused before a plan or a ship starts when older: every call
 goes through `codex app-server`, and 0.153.0 is the first release that reports the

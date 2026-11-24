@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { stagePlugin, stagePlan } from "./stage.mjs";
 import { DOC_FILES } from "./docs-files.mjs";
 import { SESSION_VARIABLES } from "../scripts/usage.mjs";
+import { SANDBOX_STOP } from "../scripts/sandbox-trial.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -1102,6 +1103,111 @@ test("the Workflow guard fails on a plan command without the grant, without the 
   assert.match(stop, /so\s+nothing\s+was\s+started/, "the stop is not where the test cuts it");
   const late = plan.replace(stop, "").replace("Seven steps, and none of them loops.", `${stop}\nSeven steps, and none of them loops.`);
   assert.ok(planWorkflowProblems(late).some((problem) => /places the Workflow-required stop after/.test(problem)), planWorkflowProblems(late).join("\n"));
+});
+
+// CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL beats the model each agent of a run is given,
+// so `start` and the plan's item 5 refuse before anything is created while it
+// holds a model name. The check reads a copy of the environment, so the one thing
+// that would defeat it is the orchestrator clearing the variable in its own command;
+// the wording that forbids that is held here, beside the Workflow stop it follows.
+function subagentModelProblems(ship, plan, configure) {
+  const flat = (text) => text.replace(/\s+/g, " ");
+  const problems = [];
+  const variable = "`CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` holds a model name";
+  const shipRequired = flat(ship.slice(ship.indexOf("\n## The Workflow tool is required\n"), ship.indexOf("\n## A run\n")));
+  if (!/`start` also refuses, before anything is created, while `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` holds a model name/.test(shipRequired)) problems.push("ship.md has no subagent-model stop before anything is created, beside the Workflow stop");
+  if (!/relay it as written and end your turn/.test(shipRequired)) problems.push("ship.md does not relay the subagent-model stop and end");
+  if (!/Never unset the variable in a command, rerun `start` with it cleared, or stand in for the run/.test(shipRequired)) problems.push("ship.md does not forbid working around the subagent-model stop");
+  const planFlat = flat(plan);
+  const stop = planFlat.indexOf(variable);
+  if (stop === -1) problems.push("plan.md has no subagent-model stop");
+  if (!/\d\. `node "\$P\/scripts\/codex-preflight\.mjs" version [^`]* && node "\$P\/scripts\/subagent-model\.mjs" stop plan`/.test(planFlat)) problems.push("plan.md does not run the subagent-model check on item 5's line");
+  if (!/Never unset the variable in a command, rerun this line with it cleared, or stand in for the run/.test(planFlat)) problems.push("plan.md does not forbid working around the subagent-model stop");
+  for (const created of ["derive a slug", "create `$D/work/`"]) {
+    if (stop !== -1 && planFlat.indexOf(created) < stop) problems.push(`plan.md places the subagent-model stop after it says to ${created}`);
+  }
+  if (!/`node "\$P\/scripts\/subagent-model\.mjs" report`[^|]*\| no/.test(flat(configure))) problems.push("configure.md has no not-required Preflight row for the subagent model variable");
+  if (!/never stop for it/.test(flat(configure))) problems.push("configure.md does not say the subagent-model row never stops");
+  return problems;
+}
+
+test("the ship and plan commands stop for the subagent model variable before creating anything and forbid working around it, and configure only reports it", () => {
+  const problems = subagentModelProblems(read("commands", "ship.md"), read("commands", "plan.md"), read("commands", "configure.md"));
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the subagent model guard fails on a plan with the stop after the work directory is made, and on either command file without the stop or without the instruction not to work around it", () => {
+  const ship = read("commands", "ship.md");
+  const plan = read("commands", "plan.md");
+  const configure = read("commands", "configure.md");
+  const check = (changed) => subagentModelProblems(changed.ship ?? ship, changed.plan ?? plan, changed.configure ?? configure);
+  const cut = (text, pattern, replacement) => {
+    assert.ok(pattern.test(text), `${pattern} is not where the test cuts it`);
+    return text.replace(pattern, replacement);
+  };
+  const stop = plan.slice(plan.indexOf("The second command stops with one"), plan.indexOf("   **Never unset the variable in a command, rerun this line"));
+  assert.match(stop, /holds\s+a\s+model\s+name/, "the stop is not where the test cuts it");
+  const late = plan.replace(stop, "").replace("Seven steps, and none of them loops.", `${stop}\nSeven steps, and none of them loops.`);
+  assert.ok(check({ plan: late }).some((problem) => /places the subagent-model stop after/.test(problem)), check({ plan: late }).join("\n"));
+  assert.ok(check({ plan: cut(plan, /holds\s+a\s+model\s+name/, "holds a value") }).some((problem) => /plan\.md has no subagent-model stop/.test(problem)));
+  assert.ok(check({ plan: cut(plan, / && node "\$P\/scripts\/subagent-model\.mjs" stop plan/, "") }).some((problem) => /does not run the subagent-model check/.test(problem)));
+  assert.ok(check({ plan: cut(plan, /rerun\s+this\s+line\s+with\s+it\s+cleared/, "rerun it") }).some((problem) => /plan\.md does not forbid working around/.test(problem)));
+  assert.ok(check({ ship: cut(ship, /`start` also refuses/, "`start` also warns") }).some((problem) => /ship\.md has no subagent-model stop/.test(problem)));
+  assert.ok(check({ ship: cut(ship, /rerun\s+`start`\s+with\s+it\s+cleared/, "rerun `start`") }).some((problem) => /ship\.md does not forbid working around/.test(problem)));
+  assert.ok(check({ ship: cut(ship, /relay it as written and end your turn\. \*\*Never unset/, "relay it. **Never unset") }).some((problem) => /does not relay the subagent-model stop/.test(problem)));
+  assert.ok(check({ configure: configure.replace("subagent-model.mjs", "other.mjs") }).some((problem) => /no not-required Preflight row/.test(problem)));
+  assert.ok(check({ configure: cut(configure, /never\s+stop\s+for\s+it/, "stop for it") }).some((problem) => /never stops/.test(problem)));
+});
+
+// A ship needs the Bash sandbox to allow its worktree and the commits in it, and
+// `start` tries that before it creates anything. When the trial refuses, the one
+// thing that would defeat it is the orchestrator rerunning `start` outside the
+// sandbox: the trial passes there, and the ship then fails inside a step helper's
+// Bash, which cannot leave the sandbox. The wording that forbids it is held here.
+// The plan never runs the trial.
+function sandboxTrialProblems(ship, configure, plan, planScript, readmeText) {
+  const flat = (text) => text.replace(/\s+/g, " ");
+  const problems = [];
+  const start = flat(ship.slice(ship.indexOf("\n## Start\n"), ship.indexOf("\n## Dependency upgrades")));
+  if (!/tries that the Bash sandbox, when one is on, lets git make a worktree and commit in it/.test(start)) problems.push("ship.md's Start does not list the sandbox trial among what start checks");
+  if (!/stops, before anything is created, when Claude Code's Bash sandbox is on and does not let git make the ship's worktree or commit in it/.test(start)) problems.push("ship.md's Start has no sandbox stop before anything is created");
+  if (!/relay it as given and end your turn/.test(start)) problems.push("ship.md's Start does not relay the sandbox stop and end");
+  if (!/Never rerun `start`, or any other ship command, outside the sandbox/.test(start) || !/dangerouslyDisableSandbox/.test(start)) problems.push("ship.md's Start does not forbid rerunning start outside the sandbox");
+  const row = flat(configure);
+  if (!/`node "\$P\/scripts\/sandbox-trial\.mjs" "\$R"`[^|]*\| no/.test(row)) problems.push("configure.md has no not-required Preflight row for the sandbox trial");
+  if (!/never rerun it outside the sandbox/.test(row)) problems.push("configure.md does not forbid rerunning the sandbox row outside the sandbox");
+  if (!flat(readmeText).includes(SANDBOX_SETTING) || !SANDBOX_STOP.includes(SANDBOX_SETTING)) problems.push("the README and the stop sentence do not name the same setting");
+  for (const [name, text] of [["commands/plan.md", plan], ["scripts/plan.mjs", planScript]]) {
+    if (/sandbox-trial|sandboxTrial/.test(text)) problems.push(`${name} names the sandbox trial, which only a ship runs`);
+  }
+  return problems;
+}
+const SANDBOX_SETTING = '{ "sandbox": { "enabled": false } }';
+
+test("the ship command relays the sandbox stop and never reruns outside the sandbox, configure reports the trial, and the plan never runs it", () => {
+  const problems = sandboxTrialProblems(read("commands", "ship.md"), read("commands", "configure.md"), read("commands", "plan.md"), planDriver, readme);
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the sandbox guard fails on a ship command without the rerun ban, a configure without the row, and a plan that names the trial", () => {
+  const ship = read("commands", "ship.md");
+  const configure = read("commands", "configure.md");
+  const plan = read("commands", "plan.md");
+  const check = (changed) => sandboxTrialProblems(changed.ship ?? ship, changed.configure ?? configure, changed.plan ?? plan, changed.planScript ?? planDriver, changed.readme ?? readme);
+  // Each cut is a pattern that spans a line break, and must change the text.
+  const cut = (text, pattern, replacement) => {
+    assert.ok(pattern.test(text), `${pattern} is not where the test cuts it`);
+    return text.replace(pattern, replacement);
+  };
+  assert.ok(check({ ship: cut(ship, /Never rerun `start`,\s+or any other ship command,\s+outside the sandbox/, "Rerun `start` outside the sandbox") }).some((problem) => /forbid rerunning start/.test(problem)));
+  assert.ok(check({ ship: cut(ship, /`dangerouslyDisableSandbox`/, "a flag") }).some((problem) => /forbid rerunning start/.test(problem)));
+  assert.ok(check({ ship: cut(ship, /relay it as given and end\s+your turn/, "mention it") }).some((problem) => /relay the sandbox stop/.test(problem)));
+  assert.ok(check({ ship: cut(ship, /tries that the Bash sandbox, when one is on, lets git make a worktree\s+and commit in it, /, "") }).some((problem) => /does not list the sandbox trial/.test(problem)));
+  assert.ok(check({ configure: configure.replace("sandbox-trial.mjs", "sandbox.mjs") }).some((problem) => /no not-required Preflight row/.test(problem)));
+  assert.ok(check({ configure: cut(configure, /never\s+rerun\s+it\s+outside\s+the\s+sandbox/, "rerun it if it fails") }).some((problem) => /forbid rerunning the sandbox row/.test(problem)));
+  assert.ok(check({ plan: `${plan}\nRun \`node "$P/scripts/sandbox-trial.mjs" "$R"\` first.\n` }).some((problem) => /commands\/plan\.md names the sandbox trial/.test(problem)));
+  assert.ok(check({ planScript: `${planDriver}\nimport { sandboxTrial } from "./sandbox-trial.mjs";\n` }).some((problem) => /scripts\/plan\.mjs names the sandbox trial/.test(problem)));
+  assert.ok(check({ readme: readme.replace(SANDBOX_SETTING, "") }).some((problem) => /same setting/.test(problem)));
 });
 
 // The ship command no longer dispatches: one run of the ship-spec workflow does,

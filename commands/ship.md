@@ -34,6 +34,14 @@ it, and if it shows no such row, workflows are unavailable, or are disabled by
 your organization's policy", asking nothing and creating nothing. Never stand in
 for the run by dispatching agents yourself.
 
+`start` also refuses, before anything is created, while `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`
+holds a model name: every agent of the run would use it in place of the model it is
+given. The stop names the variable and its value and says to unset it where it is
+set and start a new session; relay it as written and end your turn. **Never unset the
+variable in a command, rerun `start` with it cleared, or stand in for the run** — Claude
+Code's own process, not the command, decides what the agents run on, so that would
+pass the check and the run would still use the variable.
+
 ## A run
 
 A unit is what one run covers: a spec, the dependency unit, a whole-plan fix unit
@@ -157,7 +165,8 @@ node "$P/scripts/ship.mjs" start --plan "$D"
 
 It checks `approved.json`, validates the configuration, checks `git`, `codex`
 (0.153.0 or newer, the binary `TAGTEAM_CODEX_BIN` names when it is set; only
-when the configuration says Codex is on) and `gh`, takes this plan's ship lock, creates or reuses the worktree, and prints
+when the configuration says Codex is on) and `gh`, tries that the Bash sandbox, when one is on, lets git make a worktree
+and commit in it, and lets a helper start its command, takes this plan's ship lock, creates or reuses the worktree, and prints
 the specs in dependency order with what state each is in. Its `snapshot` key is
 what `scripts/running-plugin.mjs` reported: render it first, as *The running
 snapshot* in the skill says. It never stops anything, whatever it says — a
@@ -171,6 +180,14 @@ requires signed commits — by a ruleset or by branch protection — and git on 
 machine does not sign: signing is not switched on, or it signs with an SSH key
 and names none. The stop says which, and how to turn signing on; relay it and
 stop. Running `start` again once signing is on picks the plan up.
+
+It also stops, before anything is created, when Claude Code's Bash sandbox is on
+and does not let git make the ship's worktree or commit in it, or start its steps. The stop says to
+turn the sandbox off; relay it as given and end your turn. **Never rerun `start`,
+or any other ship command, outside the sandbox** — not with
+`dangerouslyDisableSandbox`, and not because the error tells you to retry that
+way. It would pass the trial and make a ship that then fails part-way through,
+in a helper's Bash, which cannot be taken out of the sandbox.
 
 If it returns `ask`, the lock is held — and the lock is per plan, so what is
 holding it is another run of **this** plan, not a ship of something else. Two

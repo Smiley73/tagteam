@@ -89,6 +89,8 @@ import { codexSpend, codexUsageLine, recordCodexUsage } from "./codex-usage.mjs"
 import { arriveCommand, closeSet, readSet, readiness, recordSet, restart } from "./dispatch-set.mjs";
 import { effortCheckLines } from "./lib/effort-check.mjs";
 import { codexBinary, codexVersionProblem } from "./codex-preflight.mjs";
+import { sandboxTrial } from "./sandbox-trial.mjs";
+import { subagentModelProblem } from "./subagent-model.mjs";
 import { usesCodex } from "./lib/uses-codex.mjs";
 import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
@@ -3351,6 +3353,10 @@ async function routeLines(ctx, decided) {
 }
 
 async function start(options) {
+  // First, ahead of everything that reads the disk or the network: nothing the
+  // refusal could be waiting on is created, and it outranks the sandbox trial.
+  const modelProblem = subagentModelProblem("ship");
+  if (modelProblem) throw new Stop(modelProblem);
   const ctx = context(options, { requireTrain: false });
   const say = [];
   if (!exists(path.join(ctx.plan, "approved.json"))) throw new Stop(`The plan has not been approved, so there is nothing to ship; run /tagteam:plan first (${ctx.plan} has no approved.json).`);
@@ -3389,6 +3395,13 @@ async function start(options) {
     const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf8", shell: false });
     if (auth.status !== 0) throw Stop.raw((auth.stderr || auth.stdout).trim(), "the GitHub command line is not signed in");
   }
+
+  // Not behind the switch above: it needs only git and this repository, and a
+  // ship that reuses its worktree still commits in it. It runs before anything is
+  // created, because nothing here rolls the ship folder or the lock back.
+  const trial = sandboxTrial(ctx.repo);
+  if (trial.kind === "git") throw Stop.raw(trial.detail, "a git command failed");
+  if (trial.kind !== "passed") throw Stop.beneath(trial.say, trial.detail);
 
   const snapshot = lastJson(node("running-plugin.mjs", [ctx.repo], { allow: [1] }).stdout);
 
