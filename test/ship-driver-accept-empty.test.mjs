@@ -9,9 +9,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { git, ship, write, outputOf, arriveAll, trainOf, unitDirIn, unitStateOf, reviewWholePlan, stagePlan, stage, shipThrough, stageMerged,
   commitToMain, mergeBaseIn, pullsOf, bodyWriterOf, answerBodyWriter, factsFileOf, findings, resultOf, recordOf, resolvedReport, MAIN_ADD,
-  BOTH_ADD } from "./ship-stage.mjs";
+  BOTH_ADD, major } from "./ship-stage.mjs";
 import { stageVersioned, walkToDialog, approve, landingRecordOf } from "./ship-plan-version-shared.mjs";
-import { stageClean, toDialog, RED_CHECK } from "./ship-plan-landing-shared.mjs";
+import { stageClean, toDialog, PLAN_BODY, RED_CHECK } from "./ship-plan-landing-shared.mjs";
 import os from "node:os";
 import { ACCEPTED_EMPTY, enterAcceptance, enterMerge, entriesOf, planLines, readLedger } from "../scripts/lib/ledger.mjs";
 import { ciFailing } from "../scripts/lib/plan-landing.mjs";
@@ -64,6 +64,12 @@ test("an accepted spec ends finished with nothing merged: the train goes on to t
   assert.match(again.json.next, /begin --plan .* --spec 02-b$/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(shipDir, "01-a", "state.json"), "utf8")).state, "accepted");
 
+  // Answering the question twice says what is true, not that nothing was accepted.
+  const twice = accept(plan, "01-a", env);
+  assert.equal(twice.status, 0, twice.stderr);
+  assert.match(twice.json.say.join("\n"), /01-a was already accepted with nothing merged/);
+  assert.match(twice.json.next, /begin --plan .* --spec 02-b$/);
+
   // Status counts it as finished, and as accepted, not merged.
   const [shipped] = inventory(repo).ships;
   assert.deepEqual([shipped.started, shipped.merged, shipped.accepted], [1, 0, ["01-a"]]);
@@ -100,7 +106,7 @@ function acceptedUnit(staged, verify) {
   const collected = reviewWholePlan(staged, ship("plan-check", plan, ["--why", "last-spec"], failing), [], failing);
   assert.match(collected.json.next, /begin --plan .* --spec plan-fix-1$/, collected.stdout);
   const asked = questionFor(plan, "plan-fix-1", failing, "a failing command is not a defect in the code");
-  assert.match(asked.json.ask, /what plan-fix-1 was opened for is accepted as it stands for the rest of this plan/);
+  assert.match(asked.json.ask, /what plan-fix-1 was opened for is accepted as it stands for the rest of this plan — the verify command `node -e .*FAIL_A.*`, which fails, nothing is merged/);
   const accepted = accept(plan, "plan-fix-1", failing);
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.match(accepted.json.next, /plan-land --plan /);
@@ -197,7 +203,7 @@ test("accept is refused, changing nothing, unless the spec is still waiting at t
 
   const begun = ship("begin", plan, ["--spec", "01-a"]);
   const early = accept(plan, "01-a");
-  assert.match(early.stderr, /it is not waiting at the question .*\(it is implementing\)/, "an accept answered a question nobody asked");
+  assert.match(early.stderr, /it is not waiting at the question .*\(its implementer is still working\), so run .*begin --plan .* --spec 01-a to go on from where it is/, "an accept answered a question nobody asked");
   arrivesEmpty(begun, "first attempt: nothing", "first reason");
   const resent = ship("snapshot", plan, ["--spec", "01-a"]);
   arrivesEmpty(resent, "second attempt: nothing", "second reason");
@@ -213,7 +219,7 @@ test("accept is refused, changing nothing, unless the spec is still waiting at t
   git(worktree, "commit", "--allow-empty", "-m", "nothing, after the question");
   const emptied = accept(plan, "01-a");
   assert.equal(emptied.status, 1, "an empty commit with the base's tree was accepted as nothing changed");
-  assert.match(emptied.stderr, /^01-a was not accepted: its branch has a commit made after the question was asked/);
+  assert.match(emptied.stderr, /^01-a was not accepted: its branch has a commit made after the question was asked that changes nothing.*--send-back/);
   assert.equal(stateOf(), "implementing");
   fs.writeFileSync(path.join(worktree, "stray.js"), "export const stray = 1;\n");
   git(worktree, "add", "-A");
@@ -323,7 +329,16 @@ test("a red check accepted with a fix unit stops being a failure: Merge is offer
   assert.deepEqual(readLedger(shipDir).acceptedChecks, [{ spec: "plan-fix-1", name: "test" }]);
   assert.match(accepted.json.say.join("\n"), /the check test on the plan's pull request, which fails/);
 
+  // The plan's pull request exists, so a body written before the acceptance is asked for again and now names it.
+  const rewrite = ship("plan-land", plan, [], red);
+  assert.equal(rewrite.status, 0, rewrite.stderr);
+  const writer = bodyWriterOf(rewrite);
+  assert.ok(writer, `a body written before the acceptance was sent as it was: ${rewrite.stdout}`);
+  assert.match(rewrite.json.say.join("\n"), /plan-fix-1 was accepted with nothing merged/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(factsFileOf(writer), "utf8")).accepted.map((entry) => [entry.id, entry.fixUnit]), [["plan-fix-1", true]]);
+  answerBodyWriter(rewrite, PLAN_BODY, "Land the plan", red);
   const dialog = toDialog(staged, [], red);
+  assert.match(pullsOf(red).find((entry) => entry.branch === "plan/demo").body, /- The whole-plan fix plan-fix-1 was accepted with nothing merged: .*the check test on the plan's pull request, which fails/);
   assert.equal(dialog.json.planLanding.merge, true, dialog.json.planLanding.withheld.join("; "));
   assert.equal(dialog.json.planLanding.results.ci.status, "passed");
   assert.match(dialog.json.ask, /a check on pull request #\d+ failed at .* \(test\), which a person accepted for this plan/);
@@ -359,4 +374,93 @@ test("checks on the plan's pull request count as failing unless every name that 
   assert.equal(ciFailing(ci(["test", "lint"]), new Set(["test"])), true, "a name nobody accepted failed too");
   assert.equal(ciFailing(ci([]), new Set(["test"])), true, "a failure with no name cannot be accepted by name");
   assert.equal(ciFailing({ status: "passed", failed: [] }, new Set()), false);
+});
+
+test("a check that finds two failing commands records both, so accepting its unit accepts both knowingly and none is left unrun", () => {
+  const staged = stageMerged({ ciRepairs: 1, verify: [FAILS_A, FAILS_B] });
+  const { dir, plan, shipDir } = staged;
+  const both = { ...staged.env, FAIL_A: "1", FAIL_B: "1" };
+  const collected = reviewWholePlan(staged, ship("plan-check", plan, ["--why", "last-spec"], both), [], both);
+  assert.match(collected.json.next, /begin --plan .* --spec plan-fix-1$/, collected.stdout);
+  assert.deepEqual(checkRecordOf(shipDir, 1).verify.commands.map((command) => [command.command, command.status]), [[FAILS_A.command, "failed"], [FAILS_B.command, "failed"]],
+    "the first failing command hid the one after it");
+
+  const asked = questionFor(plan, "plan-fix-1", both, "nothing in the code to change");
+  assert.ok(asked.json.ask.includes(FAILS_A.command) && asked.json.ask.includes(FAILS_B.command), "the question does not name what accepting accepts");
+  const accepted = accept(plan, "plan-fix-1", both);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.deepEqual(readLedger(shipDir).acceptedCommands.map((item) => item.command), [FAILS_A.command, FAILS_B.command]);
+  assert.equal(checkRecordOf(shipDir, 1).verify.status, "failed-accepted");
+  const walked = walkToDialog({ ...staged, env: both }, { env: both });
+  assert.equal(walked.dialog.json.planLanding.merge, true, walked.dialog.json.planLanding.withheld.join("; "));
+  assert.ok(!fs.existsSync(unitDirIn(shipDir, "plan-fix-2")), "a second fix unit was opened");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A ledger entry still real in the code, from 01-a, and the follow-up limit that lets a clean check make a unit for it.
+const STILL_OPEN = { id: "1.correctness.1", severity: "major", scope: "code", file: "app.js", line: 1, title: "sub drops the sign", detail: "sub drops the sign, in detail", fix: null };
+
+// The whole-plan reviewer's answer to a check, ruling every entry in its ledger `still-real`, and the collect step.
+function judgeStillReal(staged, check, list = []) {
+  const [reviewer] = check.json.dispatch;
+  const tip = /^Candidate commit \(set candidate to exactly this\): (.*)$/m.exec(reviewer.prompt)[1];
+  const snapshot = /^Ledger to re-judge [^:]*: (.*)$/m.exec(reviewer.prompt)[1];
+  const verdicts = JSON.parse(fs.readFileSync(snapshot, "utf8")).entries.map((entry) => ({ id: entry.id, verdict: "still-real", evidence: "still real at the tip" }));
+  write(/^Write your ledger verdicts to: (.*)$/m.exec(reviewer.prompt)[1], { candidate: tip, verdicts });
+  return reviewWholePlan(staged, check, list);
+}
+
+function stageLedgerPlan() {
+  const staged = stageMerged({ ciRepairs: 2, prepare: (_, config) => Object.assign(config, { limits: { ...config.limits, followUps: 2 } }) });
+  enterMerge(staged.shipDir, "01-a", { entries: entriesOf("01-a", "a".repeat(40), [STILL_OPEN], new Set(), new Set([STILL_OPEN.id])), retries: [] });
+  return staged;
+}
+
+// The base moves and is merged in, and the plan is checked again with its reviewer ruling every ledger entry still real.
+function laterCheck(staged) {
+  commitToMain(staged.repo, { "other.js": "export const other = 1;\n" });
+  mergeBaseIn(staged);
+  return judgeStillReal(staged, ship("plan-check", staged.plan, ["--why", "merge-in"], staged.env));
+}
+
+test("accepting a follow-up accepts its ledger entries: a later check judges them accepted and opens no second follow-up", () => {
+  const staged = stageLedgerPlan();
+  const { dir, plan, shipDir, env } = staged;
+  const opened = judgeStillReal(staged, ship("plan-check", plan, ["--why", "last-spec"], env));
+  assert.match(opened.json.next, /begin --plan .* --spec plan-followup-1$/, opened.stdout);
+  const asked = questionFor(plan, "plan-followup-1", env, "the entry is not a defect");
+  assert.ok(asked.json.ask.includes("01-a:1.correctness.1"), "the question does not name the entry accepting accepts");
+  const accepted = accept(plan, "plan-followup-1", env);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.deepEqual(readLedger(shipDir).entries.map((entry) => [entry.id, entry.reason]), [["01-a:1.correctness.1", ACCEPTED_EMPTY]]);
+  assert.deepEqual([checkRecordOf(shipDir, 1).status, checkRecordOf(shipDir, 1).accepted ?? null], ["clean", null], "a follow-up rewrote the check that made it");
+
+  const later = laterCheck(staged);
+  assert.equal(later.status, 0, later.stderr);
+  const second = checkRecordOf(shipDir, 2);
+  assert.deepEqual([second.status, second.units, second.ledger.entries.map((entry) => entry.outcome)], ["clean", [], ["accepted"]]);
+  assert.ok(!fs.existsSync(unitDirIn(shipDir, "plan-followup-2")), "a second follow-up was made for an accepted entry");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("accepting a fix unit opened by the whole-plan reviewer's findings clears the check's review half, files the findings as accepted, and a later check opens no unit for them", () => {
+  const staged = stageLedgerPlan();
+  const { dir, plan, shipDir, env } = staged;
+  const opened = judgeStillReal(staged, ship("plan-check", plan, ["--why", "last-spec"], env), [major("b.js")]);
+  assert.match(opened.json.next, /begin --plan .* --spec plan-fix-1$/, opened.stdout);
+  questionFor(plan, "plan-fix-1", env, "the finding is not a defect");
+  const accepted = accept(plan, "plan-fix-1", env);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const maker = checkRecordOf(shipDir, 1);
+  assert.deepEqual([maker.status, maker.review.status, maker.accepted[0].review], ["clean", "clean", "open"]);
+  assert.deepEqual(readLedger(shipDir).entries.map((entry) => [entry.spec, entry.file ?? entry.files[0], entry.reason]),
+    [["01-a", "app.js", "carried"], ["plan-fix-1", "b.js", ACCEPTED_EMPTY]]);
+
+  const later = laterCheck(staged);
+  assert.equal(later.status, 0, later.stderr);
+  const second = checkRecordOf(shipDir, 2);
+  assert.deepEqual([second.status, second.units], ["clean", ["plan-followup-1"]], "only the entry nobody accepted is handed to a follow-up");
+  assert.deepEqual(second.followUps.map((unit) => unit.entries), [["01-a:1.correctness.1"]]);
+  assert.equal(second.ledger.entries.find((entry) => entry.id.startsWith("plan-fix-1:")).outcome, "accepted");
+  fs.rmSync(dir, { recursive: true, force: true });
 });

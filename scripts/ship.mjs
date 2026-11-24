@@ -232,7 +232,6 @@ const roundsRoot = (ctx, id) => path.join(specDir(ctx, id), "rounds");
 const roundDir = (ctx, id, round) => path.join(roundsRoot(ctx, id), String(round));
 const readState = (ctx, id) => readJson(statePath(ctx, id));
 const stateOf = (ctx, id) => (exists(statePath(ctx, id)) ? readJson(statePath(ctx, id), {}).state ?? null : null);
-// Done, so the train goes on: merged, or accepted with nothing merged.
 const finished = (ctx, id) => isFinishedState(stateOf(ctx, id));
 
 function specsInOrder(ctx) {
@@ -4177,21 +4176,15 @@ const emptyBases = (ctx, id) => [...new Set([ctx.baseOid, readJson(emptyImplemen
 
 const cleanTree = (ctx) => git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() === "";
 
-// HEAD is the base or has its tree.
-function headAtBase(ctx, id) {
-  const tree = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{tree}`]).stdout.trim();
-  return emptyBases(ctx, id).some((base) => tree("HEAD") === tree(base));
+// Whether HEAD has the tree, or is the commit, of a base an empty attempt is judged against.
+function headAt(ctx, id, kind) {
+  const of = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{${kind}}`]).stdout.trim();
+  return emptyBases(ctx, id).some((base) => of("HEAD") === of(base));
 }
 
-// HEAD is the base itself: no commit was made on it, empty or not.
-const headIsBase = (ctx, id) => {
-  const commit = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{commit}`]).stdout.trim();
-  return emptyBases(ctx, id).some((base) => commit("HEAD") === commit(base));
-};
-
 // Everything `snapshot-candidate.mjs` refuses as empty, against the base it is
-// handed: nothing uncommitted, and HEAD at the base.
-const nothingChanged = (ctx, id) => cleanTree(ctx) && headAtBase(ctx, id);
+// handed: nothing uncommitted, and HEAD is the base or has its tree.
+const nothingChanged = (ctx, id) => cleanTree(ctx) && headAt(ctx, id, "tree");
 
 // A round the base owns holds nothing a review could use, because the snapshot
 // always refuses candidate == base. One an older refusal left behind, with only
@@ -4244,8 +4237,11 @@ function emptyQuestion(ctx, id, say) {
   const accept = nextCommand(ctx, "begin", id, " --accept-empty");
   const end = nextCommand(ctx, "end", null);
   const planBody = isPlanRoute(routeOf(ctx)) ? "the plan's pull request names it under Risk with the implementer's reasons" : "its reasons are kept in the ship folder";
+  const maker = makerOf(ctx, id);
+  const problems = maker ? acceptedProblems(ctx, maker, id).said : [];
   const accepting = isFixUnitId(id)
-    ? `accept it (run ${accept}): what ${id} was opened for is accepted as it stands for the rest of this plan, nothing is merged, ${planBody}, and the ship goes on to the plan's pull request`
+    ? `accept it (run ${accept}): what ${id} was opened for is accepted as it stands for the rest of this plan${problems.length > 0 ? ` — ${listOf(problems)}` : ""}, `
+      + `nothing is merged, ${planBody}, and the ship goes on to the plan's pull request`
     : `accept it (run ${accept}): ${id} ships nothing and is finished with no pull request, ${planBody}, and the specs after it go on, those that depend on it included`;
   return {
     say,
@@ -4323,6 +4319,14 @@ const acceptedEmptyPath = (ctx, id) => path.join(specDir(ctx, id), "accepted-emp
 
 const flat = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
+// Where a spec or unit that is not waiting at the empty-result question is, in words.
+const whereItIs = (state) => ({
+  pending: "it has not begun", implementing: "its implementer is still working", merged: "it already merged", failed: "it failed"
+})[state] ?? "it is past its implementer, under review or on its way to merge";
+
+// The whole-plan check that made fix unit `id`, or null for a spec.
+const makerOf = (ctx, id) => (isFixUnitId(id) ? wholePlanChecks(ctx).find((entry) => (entry.units ?? []).includes(id)) ?? null : null);
+
 // What the fix unit `id` was opened for, which its acceptance accepts for the rest of the plan:
 // `maker` is the check that opened it. `said` is the same in words.
 function acceptedProblems(ctx, maker, id) {
@@ -4384,19 +4388,24 @@ function enterUnitAcceptance(ctx, maker, id, acceptance, problems) {
 // unit never reaches `evaluate`.
 function acceptEmpty(ctx, id, say) {
   const refuse = (why) => new Stop(`${id} was not accepted: ${why}. Nothing changed.`);
-  const maker = isFixUnitId(id) ? wholePlanChecks(ctx).find((entry) => (entry.units ?? []).includes(id)) : null;
+  const maker = makerOf(ctx, id);
   if (isFixUnitId(id) && !maker) throw refuse(`no whole-plan check of this plan made ${id}, so there is nothing it was opened for to accept`);
   const state = exists(statePath(ctx, id)) ? readState(ctx, id) : null;
+  if (state?.state === "accepted") return finishNext(ctx, id, [`${id} was already accepted with nothing merged; the train goes on.`]);
   const asked = readJson(emptyImplementerPath(ctx, id), {});
   if (state?.state !== "implementing" || asked.waiting !== true) {
-    throw refuse(`it is not waiting at the question about an implementer that changed nothing twice (${state ? `it is ${state.state}` : "it was never begun"})`);
+    throw refuse(`it is not waiting at the question about an implementer that changed nothing twice (${state ? whereItIs(state.state) : "it was never begun"}), `
+      + `so run ${nextCommand(ctx, "begin", id)} to go on from where it is`);
   }
   if (!cleanTree(ctx)) {
     throw refuse(`the worktree has uncommitted changes, which is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
   }
   git(ctx.worktree, ["switch", branchOf(ctx, id)]);
-  if (!headIsBase(ctx, id)) {
-    throw refuse(`its branch has a commit made after the question was asked, so there is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
+  if (!headAt(ctx, id, "commit")) {
+    throw refuse(headAt(ctx, id, "tree")
+      ? "its branch has a commit made after the question was asked that changes nothing, and accept needs the branch at the base itself: "
+        + `send it back (run ${nextCommand(ctx, "begin", id, " --send-back")}) or stop the ship (run ${nextCommand(ctx, "end", null)}) instead`
+      : `its branch has a commit made after the question was asked, so there is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
   }
   const file = acceptedEmptyPath(ctx, id);
   const problems = maker ? acceptedProblems(ctx, maker, id) : null;
@@ -6399,8 +6408,7 @@ async function resolveCommit(options) {
       "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
-      // Every command runs when a spec disclosed one as failing without its change, or a person accepted one, so that all that fail are known.
-      ...(keepsGoing(ctx) ? ["--keep-going", "true"] : [])
+      "--keep-going", "true"
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -6976,8 +6984,9 @@ async function planCheck(options) {
       "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
-      // Every command runs when a spec disclosed one as failing without its change, or a person accepted one, so that all that fail are known.
-      ...(keepsGoing(ctx) ? ["--keep-going", "true"] : [])
+      // Every command runs, so that a record always says what each did and accepting what it found
+      // never accepts a command that was not run.
+      "--keep-going", "true"
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
@@ -6993,11 +7002,11 @@ async function planCheck(options) {
     const bases = disclosed.length > 0
       ? await runOnBase(ctx, { oid: record.mergeBase, commands: disclosed.map((command) => command.command), dir: path.join(dir, "verify-base"), back: { oid: tip, branch: null } })
       : new Map();
-    const commands = (outcome.commands ?? []).map((command) => (bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command));
+    const commands = markAccepted(accepted, (outcome.commands ?? []).map((command) => (bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command)));
     record.verify = {
       tip, status: outcome.status === "failed" ? verifyStatus(commands, accepted) : outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
-      commands: commands.map(({ command, status, timedOut, logPath, base }) => ({
-        command, status, timedOut, logPath, ...(base ? { base } : {}), ...(status === "failed" && accepted.has(command) ? { accepted: true } : {})
+      commands: commands.map(({ command, status, timedOut, logPath, base, accepted: person }) => ({
+        command, status, timedOut, logPath, ...(base ? { base } : {}), ...(person ? { accepted: true } : {})
       }))
     };
     record.phase = "verified";
@@ -7608,7 +7617,7 @@ async function planLandingCheck(ctx, record, tip, check, say) {
       outcome = checkLanding({
         repo: ctx.repo, worktree: ctx.worktree, branch: null, config: ctx.config, configPath: ctx.configPath,
         baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
-        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: keepsGoing(ctx)
+        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: true
       });
     } catch (error) { throw Stop.raw(error.message, "the check of the landing failed"); }
     if (outcome.status === "failed") outcome = setAsideAccepted(ctx, outcome);
@@ -8857,11 +8866,6 @@ async function landingCheck(ctx, id, state, say) {
   return { stop: message, landing: record };
 }
 
-// Whether a whole-plan verify must run every command to the end: a spec disclosed one as
-// failing without its change, or a person accepted one, and a failing first command must
-// not hide the rest.
-const keepsGoing = (ctx) => failingInPlan(ctx.shipDir).size > 0 || acceptedCommandsIn(ctx.shipDir).size > 0;
-
 // A landing verify that failed only on commands that were disclosed as failing
 // without the change, each of which also fails on the base the change would land
 // on, is not the change's failure: it is `passed`, the only record `merge.mjs`
@@ -8878,12 +8882,14 @@ async function acceptDisclosed(ctx, outcome, { disclosed, back }) {
   return status === FAILS_WITHOUT_CHANGE || status === ACCEPTED_FAILING ? { ...outcome, status: "passed", verify: { ...outcome.verify, status, commands } } : outcome;
 }
 
+// The failed commands of a verify result that a person accepted, marked as such.
+const markAccepted = (accepted, commands) => commands.map((command) => (command.status === "failed" && accepted.has(command.command) ? { ...command, accepted: true } : command));
+
 // A whole-plan landing verify's failed commands that a person accepted are marked, as a
 // resolve attempt's are, and when nothing else failed the outcome passes with the status
 // that says so. What is left failing, marked ones apart, goes on to `acceptDisclosed`.
 function setAsideAccepted(ctx, outcome) {
-  const accepted = acceptedCommandsIn(ctx.shipDir);
-  const commands = (outcome.verify?.commands ?? []).map((command) => (command.status === "failed" && accepted.has(command.command) ? { ...command, accepted: true } : command));
+  const commands = markAccepted(acceptedCommandsIn(ctx.shipDir), outcome.verify?.commands ?? []);
   if (!commands.some((command) => command.accepted)) return outcome;
   const verify = { ...outcome.verify, commands };
   return commands.every((command) => command.status !== "failed" || command.accepted)
