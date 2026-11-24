@@ -20,9 +20,7 @@
 // Prompts go to agents untouched and are never inspected: the harness puts its own
 // frame ahead of them (d). A plugin agent type and the label are kept, and the
 // label becomes the agent's description (b), which is how an arrival and the cost
-// report find an agent. The effort printed is passed on every call; whether a
-// per-call effort applies inside a run was never shown (b), so the agent files
-// pin what they pin. No call sets stallMs: a single silent Bash call of eight
+// report find an agent. No call sets stallMs: a single silent Bash call of eight
 // minutes was seen to survive, and what the setting does was not observed.
 export const meta = {
   name: "plan-specs",
