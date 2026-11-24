@@ -74,7 +74,9 @@ given, after reading the code it names:
 An entry about the pull request's text or the commit history is already
 disclosed in the plan's pull request: judge it `resolved` only when the tip no
 longer has the problem, and otherwise as the problem stands, knowing nothing
-more is done with it.
+more is done with it. An entry whose `reason` is `accepted-empty` is one a person
+accepted as it stands: it is judged like any other, and is never filed as a
+finding.
 
 Give every entry exactly one verdict, its `id` copied unchanged from the
 ledger, with `evidence` saying what in the tip settles it. Write them to the

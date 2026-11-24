@@ -154,15 +154,19 @@ function spentBudgetMessage(who, { limitName, limit, spent }, { grantScope = nul
 // and is budgeted as one.
 const TRANSITIONS = {
   pending: ["implementing", "failed"],
-  implementing: ["verifying", "reviewing", "failed"],
+  implementing: ["verifying", "reviewing", "accepted", "failed"],
   reviewing: ["fixing", "verifying", "failed"],
   fixing: ["reviewing", "verifying", "failed"],
   verifying: ["reviewing", "publishing", "failed"],
   publishing: ["awaiting-approval", "reviewing", "merged", "failed"],
   "awaiting-approval": ["publishing", "reviewing", "verifying", "merged", "failed"],
   merged: [],
+  accepted: [],
   failed: ["pending"]
 };
+
+/** Done, so the train goes on: merged, or accepted with nothing merged. Only `merged` puts code in the plan branch. */
+export const isFinishedState = (state) => state === "merged" || state === "accepted";
 
 export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) {
   return {

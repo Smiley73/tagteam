@@ -170,8 +170,19 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
                  goal: the findings and its notes; no fixer follows it      ignored
     redesign-briefs/  round-<n>-<stamp>.md, the brief a redesign implementer
                  read, kept outside every round                             ignored
-    declined/    the reports of fixers and redesign implementers that changed
-                 nothing                                                    ignored
+    declined/    the reports of fixers, redesign implementers and first
+                 implementers that changed nothing, and the notes a person
+                 sent one back with                                         ignored
+    empty-implementer.json  a first implementer changed nothing: whether its
+                 one automatic resend is spent and whether the question
+                 after it is waiting; its resend is never repeated          ignored
+    send-back-note.md  a person's note for that question, written word for
+                 word before the send-back answer is run; moved to declined/
+                 once sent                                                  ignored
+    accepted-empty.json  a person accepted that question: the implementer's
+                 reasons as they were quoted, and for a whole-plan fix the
+                 problems accepted with it; the plan's pull request reads
+                 its lines under Risk from here                             ignored
     refused-reports/  a report that could not be recorded, kept outside every
                  round while a fresh agent is sent back for it              ignored
     report-resend.json  that agent was sent: the round, the commit and the

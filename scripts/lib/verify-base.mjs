@@ -18,6 +18,10 @@ import path from "node:path";
 
 export const FAILS_WITHOUT_CHANGE = "fails-without-change";
 
+// A whole-plan verify that failed only on commands a person accepted, or that
+// fail where the plan began too: the plan's own record of what it was handed on.
+export const ACCEPTED_FAILING = "failed-accepted";
+
 const fileOf = (shipDir) => path.join(shipDir, "known-failures.json");
 
 export function readKnown(shipDir) {
@@ -46,12 +50,16 @@ export const failsWithoutNames = (verify) => (verify?.commands ?? []).filter(fai
  * The gate status of a result whose commands are final: `passed` when none
  * failed, `fails-without-change` when every one that failed also fails on the
  * base, and `failed` otherwise — a command that passed on the base, or whose
- * base run could not be made, is the change's.
+ * base run could not be made, is the change's. Commands in `accepted` are set
+ * aside first, and when any of them failed and nothing else is the change's,
+ * the status is `failed-accepted`.
  */
-export function verifyStatus(commands) {
+export function verifyStatus(commands, accepted = new Set()) {
   const failed = commands.filter((command) => command.status === "failed");
   if (failed.length === 0) return "passed";
-  return failed.every(failsWithout) ? FAILS_WITHOUT_CHANGE : "failed";
+  const own = failed.filter((command) => !accepted.has(command.command));
+  if (!own.every(failsWithout)) return "failed";
+  return own.length < failed.length ? ACCEPTED_FAILING : FAILS_WITHOUT_CHANGE;
 }
 
 /** What `command` did on `base` when it was last run there, or null. */

@@ -272,11 +272,13 @@ export function inventory(repoRoot) {
       .filter(([, record]) => record !== null));
     const waiting = specs.filter((spec) => spec.state === "awaiting-approval");
     const merged = specs.filter((spec) => spec.state === "merged");
+    // Finished with nothing merged: a person accepted it when its implementer changed nothing twice.
+    const accepted = specs.filter((spec) => spec.state === "accepted");
     const failed = specs.filter((spec) => spec.state === "failed");
     // On a plan branch every spec merged is not the plan landed: it is complete
     // once its own pull request into the base has merged, and not before.
     const planLanding = planLandingOf(root);
-    const allMerged = specs.length > 0 && merged.length === specs.length;
+    const allMerged = specs.length > 0 && merged.length + accepted.length === specs.length;
     const landed = planLanding === null || planLanding.state === "merged";
     return {
       slug,
@@ -287,6 +289,7 @@ export function inventory(repoRoot) {
               : allMerged && planLanding.state === "open" ? "waiting for you"
                 : "in progress",
       merged: merged.length,
+      ...(accepted.length > 0 ? { accepted: accepted.map((spec) => spec.spec) } : {}),
       started: specs.length,
       waitingOn: waiting.map((spec) => ({ spec: spec.spec, pr: spec.pr?.number ?? null, branch: spec.branch })),
       stoppedOn: failed.map((spec) => ({ spec: spec.spec, branch: spec.branch })),
@@ -304,7 +307,7 @@ export function inventory(repoRoot) {
       // commit left no round behind, so reporting disk would promise a round the
       // next run declines to give.
       budgets: specs
-        .filter((spec) => spec.state !== "merged" && spec.state !== "failed")
+        .filter((spec) => !["merged", "accepted", "failed"].includes(spec.state))
         .map((spec) => {
           // The repair budget first: on a spec that is waiting or publishing it
           // is what decides the fix budget beside it, because the fix rounds a
