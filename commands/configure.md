@@ -19,6 +19,7 @@ command.
 | `git -C "$R" rev-parse --show-toplevel` | yes |
 | `git --version` is 2.38 or newer | yes |
 | `git -C "$R" status --porcelain` is empty | no — warn |
+| `node "$P/scripts/sandbox-trial.mjs" "$R"` — whether Claude Code's Bash sandbox, when on, lets a ship make its worktree, commit in it and start its steps | no — report it |
 | `node "$P/scripts/codex-preflight.mjs" version` — Codex 0.153.0 or newer | yes, only when Codex is used |
 | `gh auth status` and `gh repo view --json defaultBranchRef` | yes |
 | `node "$P/scripts/codex-preflight.mjs" probe` — one live Codex call in a temp directory | yes, only when Codex is used |
@@ -29,6 +30,13 @@ reviewed change, a ship tests that the same change still lands on the new base
 with `git merge-tree --write-tree`, which arrived in 2.38, and `ship.mjs start`
 stops without it. Checked here, a machine that cannot merge says so before
 anyone plans anything on it.
+
+Report the sandbox row's first result as given and never rerun it outside the
+sandbox: an escaped pass would tell the person a ship can run when it cannot. The
+trial exits 1 when the sandbox refused: say then that a ship needs the sandbox
+off and quote the setting the trial printed. It exits 2 for any other failure,
+such as a full disk or a git error; report what it printed as given, and never
+mention the sandbox.
 
 ### Whether Codex is used
 
