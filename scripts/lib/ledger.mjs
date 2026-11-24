@@ -14,8 +14,20 @@ const ledgerPath = (shipDir) => path.join(shipDir, "ledger.json");
 export function readLedger(shipDir) {
   const file = ledgerPath(shipDir);
   const ledger = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-  return { entries: ledger.entries ?? [], retries: ledger.retries ?? [], failing: ledger.failing ?? [] };
+  return {
+    entries: ledger.entries ?? [], retries: ledger.retries ?? [], failing: ledger.failing ?? [],
+    acceptedCommands: ledger.acceptedCommands ?? [], acceptedChecks: ledger.acceptedChecks ?? []
+  };
 }
+
+/** The reason of an entry a person accepted when the implementer sent to fix it changed nothing twice. */
+export const ACCEPTED_EMPTY = "accepted-empty";
+
+/** The verify commands a person accepted as failing, for the rest of this plan. */
+export const acceptedCommandsIn = (shipDir) => new Set(readLedger(shipDir).acceptedCommands.map((item) => item.command));
+
+/** The names of the plan pull request's checks a person accepted as failing, for the rest of this plan. */
+export const acceptedChecksIn = (shipDir) => new Set(readLedger(shipDir).acceptedChecks.map((item) => item.name));
 
 /** The verify commands that specs merged into this plan disclosed as failing without their change. */
 export const failingInPlan = (shipDir) => new Set(readLedger(shipDir).failing.map((item) => item.command));
@@ -52,7 +64,7 @@ export function enterMerge(shipDir, spec, { entries, retries, failing = [] }) {
   const added = entries.filter((entry) => !known.has(entry.id));
   const disclosed = retries.filter((line) => !said.has(`${spec}\n${line}`)).map((line) => ({ spec, line }));
   const stated = failing.filter((command) => !ledger.failing.some((item) => item.spec === spec && item.command === command)).map((command) => ({ spec, command }));
-  const next = { entries: [...ledger.entries, ...added], retries: [...ledger.retries, ...disclosed], failing: [...ledger.failing, ...stated] };
+  const next = { ...ledger, entries: [...ledger.entries, ...added], retries: [...ledger.retries, ...disclosed], failing: [...ledger.failing, ...stated] };
   const count = next.entries.filter((entry) => entry.spec === spec).length;
   if (added.length === 0 && disclosed.length === 0 && stated.length === 0) return count;
   const file = ledgerPath(shipDir);
@@ -62,8 +74,33 @@ export function enterMerge(shipDir, spec, { entries, retries, failing = [] }) {
   return count;
 }
 
+/**
+ * What a person accepted when the implementer of whole-plan fix `unit` changed
+ * nothing twice, written once: `entries` are new, each with the reason
+ * `accepted-empty`; `entryIds` are entries already in the ledger that become
+ * `accepted-empty`; `commands` and `checks` are the verify commands and check
+ * names that stop counting against the plan. Writing it twice adds nothing.
+ */
+export function enterAcceptance(shipDir, unit, { entries = [], entryIds = [], commands = [], checks = [] }) {
+  const ledger = readLedger(shipDir);
+  const known = new Set(ledger.entries.map((entry) => entry.id));
+  const marked = ledger.entries.map((entry) => (entryIds.includes(entry.id) ? { ...entry, reason: ACCEPTED_EMPTY } : entry));
+  const next = {
+    ...ledger,
+    entries: [...marked, ...entries.filter((entry) => !known.has(entry.id))],
+    acceptedCommands: [...ledger.acceptedCommands, ...commands.filter((command) => !ledger.acceptedCommands.some((item) => item.command === command)).map((command) => ({ spec: unit, command }))],
+    acceptedChecks: [...ledger.acceptedChecks, ...checks.filter((name) => !ledger.acceptedChecks.some((item) => item.name === name)).map((name) => ({ spec: unit, name }))]
+  };
+  if (JSON.stringify(next) === JSON.stringify(ledger)) return;
+  const file = ledgerPath(shipDir);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(`${file}.tmp`, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(`${file}.tmp`, file);
+}
+
 const REASONS = {
   accepted: "a person accepted it open",
+  [ACCEPTED_EMPTY]: "a person accepted it as it stands, after the implementer sent to fix it changed nothing twice",
   disclosed: "it is about the pull request's text or the commit history, which no fixer can change",
   carried: "the ship carried it open, as this repository's carrying setting allows",
   "merged-by-hand": "it was open when the pull request was merged by hand"
@@ -114,6 +151,8 @@ export function pendingLine(entry, { merges, recommendation }) {
  * disclosure, grouped by the spec they came from, in the order specs merged.
  */
 export function planLines({ entries, retries }) {
+  // What a person accepted is said once, with the reasons, by the acceptance's own lines.
+  entries = entries.filter((entry) => entry.reason !== ACCEPTED_EMPTY);
   const specs = [...new Set([...entries, ...retries].map((item) => item.spec))];
   return specs.flatMap((spec) => [
     `From ${spec}:`,

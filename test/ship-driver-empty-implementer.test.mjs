@@ -28,7 +28,7 @@ function arrivesEmpty(result, summary, reason) {
 function asked(result) {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.json.dispatch, undefined, `the question dispatched an agent: ${result.stdout}`);
-  assert.deepEqual(Object.keys(result.json.answers), ["send-back", "end"]);
+  assert.deepEqual(Object.keys(result.json.answers), ["send-back", "accept-empty", "end"]);
   assert.doesNotMatch(outcome(result), WRONG);
   return result.json.ask;
 }

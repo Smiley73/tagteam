@@ -27,7 +27,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { listResolveRounds, nextRoundNumber, readRecord, writeRecord } from "./resolve.mjs";
-import { FAILS_WITHOUT_CHANGE } from "./verify-base.mjs";
+import { ACCEPTED_FAILING, FAILS_WITHOUT_CHANGE } from "./verify-base.mjs";
+import { ACCEPTED_EMPTY } from "./ledger.mjs";
 
 export const WHOLE_PLAN_DIR = "whole-plan";
 export const UNITS_DIR = "units";
@@ -151,7 +152,9 @@ export function ledgerOutcomes({ entries, verdicts, status, made, limit }) {
   const said = new Map();
   for (const entry of verdicts) said.set(entry.id, said.has(entry.id) ? null : entry);
   const judged = (entry) => said.get(entry.id) ?? null;
-  const fixable = status === "clean" ? entries.filter((entry) => judged(entry)?.verdict === "still-real" && entry.scope === "code") : [];
+  const fixable = status === "clean"
+    ? entries.filter((entry) => judged(entry)?.verdict === "still-real" && entry.scope === "code" && entry.reason !== ACCEPTED_EMPTY)
+    : [];
   const units = [];
   const ids = [...made];
   for (const group of followUpGroups(fixable)) {
@@ -163,6 +166,8 @@ export function ledgerOutcomes({ entries, verdicts, status, made, limit }) {
   const handed = new Set(units.flatMap((unit) => unit.entries));
   const outcome = (entry) => {
     const verdict = judged(entry)?.verdict;
+    // A person accepted it: judged like any other, and never a follow-up.
+    if (entry.reason === ACCEPTED_EMPTY) return verdict === "resolved" ? "resolved" : "accepted";
     if (!verdict) return "not-re-judged";
     // Already disclosed in the plan's pull request: only `resolved` moves it.
     if (entry.scope !== "code" && verdict !== "resolved") return "pull-request";
@@ -180,7 +185,8 @@ export function ledgerOutcomes({ entries, verdicts, status, made, limit }) {
 
 // A command that fails on the tip and on the merge base too, and that a spec
 // disclosed, is not the plan's failure: the check ran it on the merge base itself.
-const verifyClean = (verify) => ["passed", "not-applicable", FAILS_WITHOUT_CHANGE].includes(verify?.status);
+// Nor is one a person accepted.
+export const verifyClean = (verify) => ["passed", "not-applicable", FAILS_WITHOUT_CHANGE, ACCEPTED_FAILING].includes(verify?.status);
 
 /**
  * A record's one overall status, from its two halves, once both are in.

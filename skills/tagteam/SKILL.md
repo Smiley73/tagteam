@@ -179,6 +179,10 @@ Throughout: `$P` is `${CLAUDE_PLUGIN_ROOT}` and `$R` is the repository root.
     send-back-note.md  a person's note for that question, written word for
                  word before the send-back answer is run; moved to declined/
                  once sent                                                  ignored
+    accepted-empty.json  a person accepted that question: the implementer's
+                 reasons as they were quoted, and for a whole-plan fix the
+                 problems accepted with it; the plan's pull request reads
+                 its lines under Risk from here                             ignored
     refused-reports/  a report that could not be recorded, kept outside every
                  round while a fresh agent is sent back for it              ignored
     report-resend.json  that agent was sent: the round, the commit and the

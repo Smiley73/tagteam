@@ -5,7 +5,9 @@ allowed-tools: Read, Bash
 
 Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/status.mjs" "$(git rev-parse --show-toplevel)"`
 and render it as a short table: each plan with its stage and spec count, each
-ship with how many specs have merged out of how many, and anything waiting.
+ship with how many specs have merged out of how many, and anything waiting. A ship
+with an `accepted` list has specs a person accepted when their implementer changed
+nothing twice: finished, with nothing merged. Say which, beside the merged count.
 
 **An out-of-date configuration comes first.** When `configuration.stale` is
 true, `.tagteam/config.json` was written for an older version of this plugin
@@ -47,7 +49,7 @@ under its ship:
 Naming the setting after the clause is useful — it is a value they set in their
 own config and may want to raise, so "…(`limits.fixRounds`)" earns its place —
 but the sentence has to make sense without it, and the number on its own is not a
-sentence. A spec that has merged or stopped has no entry and nothing to say:
+sentence. A spec that has merged, been accepted or stopped has no entry and nothing to say:
 **a missing key is no budget, not an unknown one.** Say nothing about a budget
 that is not there.
 

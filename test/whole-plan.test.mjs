@@ -117,3 +117,19 @@ test("a ledger entry about the pull request or the commit history is disclosed u
   ]);
   assert.deepEqual(result.units.map((unit) => unit.entries), [["01:c1"]], "only the code entry is handed to a follow-up");
 });
+
+test("a ledger entry a person accepted is judged like any other and never makes a follow-up unit, whatever it is judged", () => {
+  const entry = (id, reason) => ({ id, reason, scope: "code", severity: "major", files: ["a.js"] });
+  const entries = [entry("p:1", "accepted-empty"), entry("p:2", "accepted-empty"), entry("p:3", "accepted-empty"), entry("01:c1", "carried")];
+  const verdicts = [{ id: "p:1", verdict: "still-real" }, { id: "p:2", verdict: "resolved" }, { id: "01:c1", verdict: "still-real" }];
+  const result = ledgerOutcomes({ entries, verdicts, status: "clean", made: [], limit: 3 });
+  assert.deepEqual(result.entries.map((item) => [item.id, item.outcome]), [["p:1", "accepted"], ["p:2", "resolved"], ["p:3", "accepted"], ["01:c1", "follow-up"]]);
+  assert.deepEqual(result.units.map((unit) => unit.entries), [["01:c1"]], "an accepted entry was handed to a follow-up");
+});
+
+test("a verify that failed only on commands a person accepted is clean for its tip, and one that failed for another reason is not", () => {
+  const record = (status) => ({ tip: A, status: "clean", verify: { tip: A, status }, review: { tip: A, status: "clean" } });
+  assert.equal(isCleanFor(record("failed-accepted"), A), true);
+  assert.equal(isCleanFor(record("failed"), A), false);
+  assert.equal(verdict({ verify: { status: "failed-accepted" }, review: { status: "clean" } }), "clean");
+});

@@ -32,7 +32,8 @@ import { landingDecision } from "./lib/landing.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { withPrimaryGitLock } from "./lib/locks.mjs";
 import { decisionOf, increaseOf, isPlanRoute, versionFilesOf } from "./lib/plan-route.mjs";
-import { checkFor, ciFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
+import { acceptedChecksIn } from "./lib/ledger.mjs";
+import { checkFor, ciFailing, ciFor, openResolveRoundIn, readPlanLanding } from "./lib/plan-landing.mjs";
 import { isCleanFor } from "./lib/whole-plan.mjs";
 import { versionConditionAt, versionLines } from "./lib/version-lines.mjs";
 
@@ -235,7 +236,7 @@ export async function mergePlan(shipDir, { repo, dryRun = false } = {}) {
     // replaced at the same tip is not a wait on this one's checks.
     const ci = ciFor(record, tip);
     if (!ci) throw refuse(`the checks on pull request #${pr.number} were not waited for at ${short(tip)}`);
-    if (ci.status === "failed") throw refuse(`a check on pull request #${pr.number} failed at ${short(tip)}`);
+    if (ciFailing(ci, acceptedChecksIn(ship))) throw refuse(`a check on pull request #${pr.number} failed at ${short(tip)}`);
     // The version lines the route recorded when it was decided, never the
     // configuration as it is now: a list emptied mid-train would pass trivially.
     const entries = versionFilesOf(route);

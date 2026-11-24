@@ -83,7 +83,9 @@ whole output of the step that ended the run, which you read with Read).
 - **`merged`** — the unit is done, and `next` is where the train goes on. Start a
   new run at `next`, with the `spec` its `--spec` names, or null when it has none.
   When `next` is `end`, run it in the session instead, as *Teardown* says. Say in a
-  sentence what merged and what is next.
+  sentence what merged and what is next. A run started at `begin` with
+  `--accept-empty` ends `merged` with nothing merged: say that the spec or the fix
+  was accepted, that none of it is in the plan, and what is next.
 - **`stopped`** — `reason` is the stop's first line and `exit` its code. Relay the
   reason in plain words, as given, and stop; `stderr` is the file beneath it, the
   evidence — git's or GitHub's own error, the list of what a check refused — kept
@@ -112,8 +114,8 @@ Every command a run starts at or follows is `ship.mjs` for this plan. `start`,
 `dependencies` and `end` are the session's own and are never a run's. The commands
 that are a person's alone to order are each a run's first command — `finish
 --approve`, `redesign`, `accept`, `revisit`, `plan-adopt`, `plan-land` with
-`--approve`, `--squash` or `--stop`, and `begin` with `--run-gone`, `--run-live` or
-`--send-back` — and each below says whose word starts it. None of them is ever a `next`. The two
+`--approve`, `--squash` or `--stop`, and `begin` with `--run-gone`, `--run-live`,
+`--send-back` or `--accept-empty` — and each below says whose word starts it. None of them is ever a `next`. The two
 flagged `redesign` commands, with `--escalated` or `--normal`, are a person's answer
 to the question *After `collect` and `settle`* describes: never add either flag on
 your own judgement, and never to a `redesign` that `next` printed.
@@ -243,8 +245,8 @@ a fresh implementer at the same agent, model and effort, told that the last
 attempt changed nothing and handed its report, with `snapshot` next. If that one
 changes nothing too, the run ends as `ask`: it says in plain words that the
 implementer changed nothing twice and quotes the latest report's summary and each
-part left undone with its reason, or says that no report was written. Its two
-answers are `send-back` and `end`. `end` stops the ship. `send-back` is the
+part left undone with its reason, or says that no report was written. Its three
+answers are `send-back`, `accept-empty` and `end`. `end` stops the ship. `send-back` is the
 person's, with a note: write their words, exactly as they said them, to the file
 the question names — never into a command, where quotes, `$` and newlines break —
 and then start a run at that answer, which is `begin` with `--send-back`. It
@@ -254,6 +256,27 @@ for word and `snapshot` next; if it changes nothing too, the same question comes
 back. The ship never sends one back by itself a second time, whatever restarts in
 between. `begin` or `snapshot` run while the question waits put it again and
 dispatch nothing.
+
+`accept-empty` is the person's other answer, and the run starts at `begin` with
+`--accept-empty`: the implementer was right that nothing needed changing, and the
+ship goes on. For a spec it finishes with nothing merged: no pull request is opened
+for it, it is not in what lands, status shows it as accepted, the specs after it
+begin as if it had finished, those that depend on it included, and the plan's pull
+request names it under `## Risk` and quotes the implementer's reasons. For a
+whole-plan fix it accepts what the fix was opened for, for the rest of this plan:
+the failed verify commands, the blocking or major review findings, the failing
+checks on the plan's pull request or the ledger entries. The check that opened it
+is clean, no later check of this plan counts the accepted problem against it, so
+it never withholds Merge, never refuses the merge and never opens another fix
+or follow-up, and the ship goes on to the plan's pull request, which names the
+accepted problems under `## Risk`. A new problem beside an accepted one is
+handled as it always was; the whole-plan reviewer is told never to file an
+accepted ledger entry as a finding, and that is the one place the guarantee rests
+on it. It is refused in plain words, changing nothing and spending no fix round
+or `limits.ciRepairs`, unless the spec or fix is still waiting at the question
+with nothing committed and a clean tree. On a train that ships each spec straight
+to the base there is no plan pull request: the reasons are said in the answer and
+kept in the ship folder, and nothing else carries them.
 
 At a spec's first panel, the minor findings about the code that nobody could run
 are tried before the round is judged: correctness's and, when Codex is on,

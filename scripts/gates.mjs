@@ -154,15 +154,25 @@ function spentBudgetMessage(who, { limitName, limit, spent }, { grantScope = nul
 // and is budgeted as one.
 const TRANSITIONS = {
   pending: ["implementing", "failed"],
-  implementing: ["verifying", "reviewing", "failed"],
+  implementing: ["verifying", "reviewing", "accepted", "failed"],
   reviewing: ["fixing", "verifying", "failed"],
   fixing: ["reviewing", "verifying", "failed"],
   verifying: ["reviewing", "publishing", "failed"],
   publishing: ["awaiting-approval", "reviewing", "merged", "failed"],
   "awaiting-approval": ["publishing", "reviewing", "verifying", "merged", "failed"],
   merged: [],
+  accepted: [],
   failed: ["pending"]
 };
+
+/**
+ * Whether a spec or a whole-plan fix is done, so that the train goes on past
+ * it: merged, or accepted by a person with nothing merged — the one exit from
+ * `implementing` that is not toward a review, taken when the first implementer
+ * changed nothing and the person said that is the answer. What is in the plan
+ * branch is `merged` alone; this is for the readers that ask whether to go on.
+ */
+export const isFinishedState = (state) => state === "merged" || state === "accepted";
 
 export function initState({ spec, slug, branch, base, reviewers, briefs = {} }) {
   return {
