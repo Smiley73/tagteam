@@ -165,9 +165,21 @@ and it costs no fix round. It is sent back once, by itself, told that its last a
 changed nothing and given what it reported. If that attempt changes nothing too, the
 ship stops and asks, saying so in plain words and quoting what the implementer said
 it did and what it left undone, and why. You can send it back with a note of your own,
-which it is given exactly as you wrote it, or stop the ship. If it changes nothing
-again after your note, you are asked again; the ship never sends it back on its own a
-second time.
+which it is given exactly as you wrote it, accept that it changed nothing, or stop
+the ship. If it changes nothing again after your note, you are asked again; the ship
+never sends it back on its own a second time.
+
+Accepting says the implementer was right and the ship goes on. A spec you accept
+finishes with nothing merged: it opens no pull request, it is not in what lands, the
+specs after it begin as if it had finished, and the plan's pull request names it under
+Risk with the implementer's reasons. A whole-plan fix you accept accepts what it was
+opened for, whether a failing verify command, a blocking or major review finding, a
+failing check on the plan's pull request or an entry in the plan's ledger, for the rest
+of that plan: no later check counts it against the plan, it never withholds Merge and
+it never opens another fix, and the plan's pull request names it under Risk too. A new
+problem beside it is handled as it always was. Accepting is refused, and nothing
+changes, unless the spec or fix is still waiting at that question with nothing
+committed.
 
 Reviewers cannot run anything, so the minor findings they file about the code are
 suspicions. At a spec's first panel, the ones from correctness, from Codex when it is

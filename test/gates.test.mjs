@@ -501,6 +501,18 @@ test("states advance only along declared edges", () => {
   assert.throws(() => transition(state, "merged"), /invalid state transition/);
 });
 
+test("accepted is a terminal state reached only from implementing: nothing leaves it, and no other state enters it", () => {
+  const state = initState({ spec: "01-x", slug: "s", branch: "b", reviewers: [] });
+  const implementing = transition(state, "implementing");
+  const accepted = transition(implementing, "accepted");
+  assert.equal(accepted.state, "accepted");
+  for (const next of ["implementing", "verifying", "reviewing", "merged", "failed", "pending"]) {
+    assert.throws(() => transition(accepted, next), /invalid state transition/, `accepted -> ${next}`);
+  }
+  assert.throws(() => transition(state, "accepted"), /invalid state transition/);
+  assert.throws(() => transition({ ...implementing, state: "reviewing" }, "accepted"), /invalid state transition/);
+});
+
 test("binding refuses anything that is not a commit id", () => {
   const state = initState({ spec: "01-x", slug: "s", branch: "b", reviewers: [] });
   assert.throws(() => bindCandidate(state, "HEAD", BASE), /candidate OID is required/);

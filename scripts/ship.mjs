@@ -45,7 +45,7 @@ import { runSetupCommands } from "./worktree-setup.mjs";
 import { verify as verifyCommands } from "./verify-run.mjs";
 import { listRounds } from "./lib/rounds.mjs";
 import { REPO_LENS_DIR } from "./lib/lenses.mjs";
-import { reviewOpenLifts, adoptMerge, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
+import { reviewOpenLifts, adoptMerge, isFinishedState, readMergedPr, repairScope, resolveLensBriefs, resolveRoles } from "./gates.mjs";
 import { BASE_NOT_ACCEPTED, VERSION_NOT_ONE_INCREASE } from "./merge.mjs";
 import {
   GIT_MINIMUM, checkLanding, dryRunMerge, gitIsAtLeast, landingDecision, landingMessage, mergeWithLanding, parseGitVersion,
@@ -53,7 +53,9 @@ import {
 } from "./lib/landing.mjs";
 import { findingRound, isPullRequestFinding } from "./collect-findings.mjs";
 import { awaitedByUnmerged, carryEligible, carryRefusal, carrying, mergesWithOpenFindings, onPlanBranch, recommendation } from "./lib/carry.mjs";
-import { enterMerge, entriesOf, failingInPlan, pendingLine, planLines, readLedger } from "./lib/ledger.mjs";
+import {
+  ACCEPTED_EMPTY, acceptedChecksIn, acceptedCommandsIn, enterAcceptance, enterMerge, entriesOf, failingInPlan, pendingLine, planLines, readLedger
+} from "./lib/ledger.mjs";
 import { churnLines, churnSignal, looseLines, looseSignal } from "./lib/churn.mjs";
 import { REDESIGN_BRIEFS, fileHistory, redesignAsk, redesignFiles, renderBrief } from "./lib/redesign.mjs";
 import { ROUND_MARKER, ROUND_REDESIGN, ROUND_REPORT, ROUND_RETRIES, markRound, writeRoundFile } from "./lib/round-store.mjs";
@@ -67,10 +69,10 @@ import { parseFrontMatter, readSpecs, resolveReviewers } from "./specs.mjs";
 import {
   BRIEF as WHOLE_PLAN_BRIEF, LENS as WHOLE_PLAN_LENS, WHY, checkDir, checkRecordPath, checkRoundDir, cleanResultFor,
   fixUnitIds, followUpIds, isCleanFor, isFixUnitId, isFollowUpId, ledgerOutcomes, listChecks, nextCheckNumber, nextUnitId, saveCheck,
-  unitDir, unitDocument, unitDocumentPath, unitIds, verdict, ROUND as CHECK_ROUND
+  unitDir, unitDocument, unitDocumentPath, unitIds, verdict, verifyClean, ROUND as CHECK_ROUND
 } from "./lib/whole-plan.mjs";
 import {
-  checkFor, ciFor, landingBegun, landingRecordPath, landingRoot, mergeMethodOf, planBodyPath, readPlanLanding, resultsFor, savePlanLanding,
+  checkFor, ciFailing, ciFor, landingBegun, landingRecordPath, landingRoot, mergeMethodOf, planBodyPath, readPlanLanding, resultsFor, savePlanLanding,
   withholding
 } from "./lib/plan-landing.mjs";
 import {
@@ -91,7 +93,7 @@ import { refNameErrors } from "./lib/ref-name.mjs";
 import { hasPullRequestWorkflow } from "./lib/workflows.mjs";
 import { classifyChecks, isFailed, isRunning, judgedStatus, runOf } from "./lib/ci-state.mjs";
 import {
-  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, latestRuns, saveBaseRun,
+  ACCEPTED_FAILING, FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithout, failsWithoutLine, failsWithoutNames, latestRuns, saveBaseRun,
   verifyStatus
 } from "./lib/verify-base.mjs";
 import {
@@ -230,6 +232,7 @@ const roundsRoot = (ctx, id) => path.join(specDir(ctx, id), "rounds");
 const roundDir = (ctx, id, round) => path.join(roundsRoot(ctx, id), String(round));
 const readState = (ctx, id) => readJson(statePath(ctx, id));
 const stateOf = (ctx, id) => (exists(statePath(ctx, id)) ? readJson(statePath(ctx, id), {}).state ?? null : null);
+const finished = (ctx, id) => isFinishedState(stateOf(ctx, id));
 
 function specsInOrder(ctx) {
   return readSpecs(ctx.plan, ctx.config, path.join(PLUGIN, "schemas", "spec.schema.json"));
@@ -1739,7 +1742,7 @@ function carryFacts(ctx, id) {
   const specs = specsInOrder(ctx);
   return {
     spec: specById(ctx, id), state: readState(ctx, id), config: ctx.config, specs,
-    merged: new Set(specs.filter((spec) => stateOf(ctx, spec.id) === "merged").map((spec) => spec.id))
+    merged: new Set(specs.filter((spec) => finished(ctx, spec.id)).map((spec) => spec.id))
   };
 }
 
@@ -3533,6 +3536,7 @@ async function begin(options) {
   const spec = specById(ctx, id);
   const say = [];
   const branch = branchOf(ctx, id);
+  if (options.acceptEmpty) return acceptEmpty(ctx, id, say);
   if (!isDependencyId(id) && dependencyQuestions(ctx).length > 0) {
     throw new Stop(`${id} was not begun, because the dependency audit has questions nobody has answered and no spec branches before the upgrades it decides on have merged. `
       + `The person has to decide each package it names to upgrade or to leave as it is; run ${nextCommand(ctx, "start", null)} to put the questions to them again.`);
@@ -3605,6 +3609,7 @@ async function begin(options) {
   }
 
   if (state.state === "merged") return finishNext(ctx, id, [...reconciled.say, `${id} is already merged.`]);
+  if (state.state === "accepted") return finishNext(ctx, id, [...reconciled.say, `${id} was accepted with nothing merged; the train goes on.`]);
   if (state.state === "failed") {
     emit({ say, ask: `${id} is recorded as failed. Say what it set out to deliver and what stopped it, and ask before doing anything with it. To retry from scratch: \`gates.mjs state ... pending\` by hand, then rerun begin.`, state: state.state });
     return;
@@ -4010,7 +4015,7 @@ function followingCommand(ctx, id) {
 // the first spec not merged, then whatever follows the specs.
 function startingCommand(ctx) {
   if (dependencyPending(ctx)) return nextCommand(ctx, "begin", DEPENDENCY_ID);
-  const first = specsInOrder(ctx).find((spec) => stateOf(ctx, spec.id) !== "merged");
+  const first = specsInOrder(ctx).find((spec) => !finished(ctx, spec.id));
   return first ? nextCommand(ctx, "begin", first.id) : afterSpecs(ctx);
 }
 
@@ -4043,8 +4048,8 @@ function afterSpecs(ctx, from = null) {
   if (!isPlanRoute(route)) return end;
   // A plan whose pull request has merged is done, whatever is on disk beside it.
   if (readPlanLanding(ctx.shipDir).merged) return end;
-  if (specsInOrder(ctx).some((spec) => stateOf(ctx, spec.id) !== "merged")) return end;
-  const unit = fixUnitSpecs(ctx).find((entry) => stateOf(ctx, entry.id) !== "merged");
+  if (specsInOrder(ctx).some((spec) => !finished(ctx, spec.id))) return end;
+  const unit = fixUnitSpecs(ctx).find((entry) => !finished(ctx, entry.id));
   if (unit) return ["awaiting-approval", "failed"].includes(stateOf(ctx, unit.id)) ? end : nextCommand(ctx, "begin", unit.id);
   if (cleanResultFor(ctx.shipDir, route.tipOid)) return afterCleanCheck(ctx);
   // A check of this tip that stopped, once the landing has begun: the dialog
@@ -4169,13 +4174,17 @@ const sendBackNotePath = (ctx, id) => path.join(specDir(ctx, id), "send-back-not
 // branch has moved since.
 const emptyBases = (ctx, id) => [...new Set([ctx.baseOid, readJson(emptyImplementerPath(ctx, id), {}).base].filter(Boolean))];
 
+const cleanTree = (ctx) => git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() === "";
+
+// Whether HEAD has the tree, or is the commit, of a base an empty attempt is judged against.
+function headAt(ctx, id, kind) {
+  const of = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{${kind}}`]).stdout.trim();
+  return emptyBases(ctx, id).some((base) => of("HEAD") === of(base));
+}
+
 // Everything `snapshot-candidate.mjs` refuses as empty, against the base it is
 // handed: nothing uncommitted, and HEAD is the base or has its tree.
-function nothingChanged(ctx, id) {
-  if (git(ctx.worktree, ["status", "--porcelain"]).stdout.trim() !== "") return false;
-  const tree = (rev) => git(ctx.worktree, ["rev-parse", `${rev}^{tree}`]).stdout.trim();
-  return emptyBases(ctx, id).some((base) => tree("HEAD") === tree(base));
-}
+const nothingChanged = (ctx, id) => cleanTree(ctx) && headAt(ctx, id, "tree");
 
 // A round the base owns holds nothing a review could use, because the snapshot
 // always refuses candidate == base. One an older refusal left behind, with only
@@ -4225,15 +4234,23 @@ function emptyQuestion(ctx, id, say) {
   const record = readJson(emptyImplementerPath(ctx, id), {});
   const report = record.report ? readJson(record.report, null) : null;
   const sendBack = nextCommand(ctx, "begin", id, " --send-back");
+  const accept = nextCommand(ctx, "begin", id, " --accept-empty");
   const end = nextCommand(ctx, "end", null);
+  const planBody = isPlanRoute(routeOf(ctx)) ? "the plan's pull request names it under Risk with the implementer's reasons" : "its reasons are kept in the ship folder";
+  const maker = makerOf(ctx, id);
+  const problems = maker ? acceptedProblems(ctx, maker, id).said : [];
+  const accepting = isFixUnitId(id)
+    ? `accept it (run ${accept}): what ${id} was opened for is accepted as it stands for the rest of this plan${problems.length > 0 ? ` — ${listOf(problems)}` : ""}, `
+      + `nothing is merged, ${planBody}, and the ship goes on to the plan's pull request`
+    : `accept it (run ${accept}): ${id} ships nothing and is finished with no pull request, ${planBody}, and the specs after it go on, those that depend on it included`;
   return {
     say,
     ask: `The implementer for ${id} changed nothing twice: once when it was sent, and again when it was sent back, so there is no work to review, `
       + "and no fix round was spent.\n"
       + `${report ? `Its latest report (kept at ${record.report}):\n${quoteReport(report).join("\n")}` : "Its latest attempt wrote no report."}\n`
       + `You decide: send it back with your note — write your words, exactly as you want it to read them, to ${sendBackNotePath(ctx, id)}, and run ${sendBack}; `
-      + `or stop the ship (run ${end}).`,
-    answers: { "send-back": sendBack, end },
+      + `or ${accepting}; or stop the ship (run ${end}).`,
+    answers: { "send-back": sendBack, "accept-empty": accept, end },
     next: end
   };
 }
@@ -4290,6 +4307,153 @@ async function sendBack(ctx, id, spec, say) {
   fs.renameSync(notePath, kept);
   say.push(`${id} was sent back to a fresh implementer with the person's note (kept at ${kept}); no round is made or spent for it.`);
   return { say, dispatch: [dispatch], set, next: nextCommand(ctx, "snapshot", id) };
+}
+
+// --- accepting an implementer that changed nothing -----------------------------
+
+// What a person's accept of that question leaves, kept in the spec's or the
+// unit's own directory: the implementer's reasons as they were quoted, and for a
+// fix unit the problems accepted with it, said in words. Everything that later
+// says the spec or unit was accepted is read from here.
+const acceptedEmptyPath = (ctx, id) => path.join(specDir(ctx, id), "accepted-empty.json");
+
+const flat = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+
+// Where a spec or unit that is not waiting at the empty-result question is, in words.
+const whereItIs = (state) => ({
+  pending: "it has not begun", implementing: "its implementer is still working", merged: "it already merged", failed: "it failed"
+})[state] ?? "it is past its implementer, under review or on its way to merge";
+
+// The whole-plan check that made fix unit `id`, or null for a spec.
+const makerOf = (ctx, id) => (isFixUnitId(id) ? wholePlanChecks(ctx).find((entry) => (entry.units ?? []).includes(id)) ?? null : null);
+
+// What the fix unit `id` was opened for, which its acceptance accepts for the rest of the plan:
+// `maker` is the check that opened it. `said` is the same in words.
+function acceptedProblems(ctx, maker, id) {
+  if (isFollowUpId(id)) {
+    const entries = followUpEntries(ctx, maker, id);
+    return {
+      commands: [], entries: [], entryIds: entries.map((entry) => entry.id), checks: [],
+      said: entries.map((entry) => `the ledger entry ${entry.id} (${entry.severity}): ${flat(entry.title)}`)
+    };
+  }
+  // What an earlier unit accepted is not this one's to accept again: the unit's document leaves it out too.
+  const ledger = readLedger(ctx.shipDir);
+  const byOthers = (items, key) => new Set(items.filter((item) => item.spec !== id).map((item) => item[key]));
+  const acceptedCommands = byOthers(ledger.acceptedCommands, "command");
+  const acceptedChecks = byOthers(ledger.acceptedChecks, "name");
+  const commands = maker.verify?.status === "failed"
+    ? (maker.verify.commands ?? []).filter((command) => command.status === "failed" && !failsWithout(command) && !acceptedCommands.has(command.command)).map((command) => command.command)
+    : [];
+  const entries = entriesOf(id, maker.tip, unitFindings(ctx, maker), new Set()).map((entry) => ({ ...entry, reason: ACCEPTED_EMPTY }));
+  const failedChecks = maker.ci?.failed ?? [];
+  const checks = failedChecks.filter((name) => !acceptedChecks.has(name));
+  const redCheck = maker.ci?.status === "failed" && (failedChecks.length === 0 || checks.length > 0);
+  return {
+    commands, entries, entryIds: [], checks,
+    said: [
+      ...commands.map((command) => `the verify command \`${command}\`, which fails`),
+      ...entries.map((entry) => `the ${entry.severity} finding ${entry.finding}: ${flat(entry.title)}`),
+      ...checks.map((name) => `the check ${name} on the plan's pull request, which fails`),
+      ...(redCheck && checks.length === 0 ? ["a check on the plan's pull request, which fails"] : [])
+    ]
+  };
+}
+
+// The acceptance of fix unit `id` written plan-wide: in the ledger, which every later
+// check reads, and on the check that opened it, which is made clean for its tip with
+// what each half said kept beside it. Written twice it adds nothing.
+function enterUnitAcceptance(ctx, maker, id, acceptance, problems) {
+  enterAcceptance(ctx.shipDir, id, { entries: problems.entries, entryIds: problems.entryIds, commands: problems.commands, checks: problems.checks });
+  if (isFollowUpId(id) || (maker.accepted ?? []).some((entry) => entry.unit === id)) return;
+  maker.accepted = [...(maker.accepted ?? []), {
+    unit: id, at: acceptance.at, status: maker.status, reason: maker.reason,
+    verify: maker.verify?.status ?? null, review: maker.review?.status ?? null, summary: acceptance.summary, unfinished: acceptance.unfinished
+  }];
+  if (maker.verify?.status === "failed") {
+    maker.verify.status = ACCEPTED_FAILING;
+    maker.verify.commands = (maker.verify.commands ?? []).map((command) => (problems.commands.includes(command.command) ? { ...command, accepted: true } : command));
+  }
+  if (maker.review?.status === "open") maker.review.status = "clean";
+  maker.status = "clean";
+  maker.reason = null;
+  saveCheck(ctx.shipDir, maker);
+}
+
+// The accept answer, run through `begin`: the spec or the fix unit waiting at the
+// question is finished with nothing merged. It judges "empty" from git as it is now —
+// a clean tree and HEAD at the base — and never from anything an earlier step wrote,
+// so a commit made after the question turns it into a refusal, and the ordinary path
+// handles that commit. It writes nothing the report gate reads: an accepted spec or
+// unit never reaches `evaluate`.
+function acceptEmpty(ctx, id, say) {
+  const refuse = (why) => new Stop(`${id} was not accepted: ${why}. Nothing changed.`);
+  const maker = makerOf(ctx, id);
+  if (isFixUnitId(id) && !maker) throw refuse(`no whole-plan check of this plan made ${id}, so there is nothing it was opened for to accept`);
+  const state = exists(statePath(ctx, id)) ? readState(ctx, id) : null;
+  if (state?.state === "accepted") return finishNext(ctx, id, [`${id} was already accepted with nothing merged; the train goes on.`]);
+  const asked = readJson(emptyImplementerPath(ctx, id), {});
+  if (state?.state !== "implementing" || asked.waiting !== true) {
+    throw refuse(`it is not waiting at the question about an implementer that changed nothing twice (${state ? whereItIs(state.state) : "it was never begun"}), `
+      + `so run ${nextCommand(ctx, "begin", id)} to go on from where it is`);
+  }
+  if (!cleanTree(ctx)) {
+    throw refuse(`the worktree has uncommitted changes, which is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
+  }
+  git(ctx.worktree, ["switch", branchOf(ctx, id)]);
+  if (!headAt(ctx, id, "commit")) {
+    throw refuse(headAt(ctx, id, "tree")
+      ? "its branch has a commit made after the question was asked that changes nothing, and accept needs the branch at the base itself: "
+        + `send it back (run ${nextCommand(ctx, "begin", id, " --send-back")}) or stop the ship (run ${nextCommand(ctx, "end", null)}) instead`
+      : `its branch has a commit made after the question was asked, so there is work to take: run ${nextCommand(ctx, "snapshot", id)}`);
+  }
+  const file = acceptedEmptyPath(ctx, id);
+  const problems = maker ? acceptedProblems(ctx, maker, id) : null;
+  // A record an interrupted accept left is kept as it was written: what it accepted is in words only there.
+  let acceptance = readJson(file, null);
+  if (!acceptance) {
+    const report = asked.report ? readJson(asked.report, null) : null;
+    acceptance = {
+      id, kind: maker ? "fix-unit" : "spec", at: new Date().toISOString(), report: asked.report ?? null,
+      summary: typeof report?.summary === "string" && report.summary ? report.summary : null,
+      unfinished: (Array.isArray(report?.unfinished) ? report.unfinished : []).map((entry) => ({ part: String(entry?.part ?? ""), reason: String(entry?.reason ?? "") })),
+      problems: problems?.said ?? []
+    };
+    writeJson(file, acceptance);
+  }
+  if (maker) enterUnitAcceptance(ctx, maker, id, acceptance, problems);
+  transition(ctx, id, "accepted");
+  writeJson(emptyImplementerPath(ctx, id), { ...asked, waiting: false, at: new Date().toISOString() });
+  const planRoute = isPlanRoute(routeOf(ctx));
+  say.push(maker
+    ? `${id} was accepted with nothing merged, and what it was opened for is accepted for the rest of this plan${acceptance.problems.length > 0 ? `: ${listOf(acceptance.problems)}` : ""}. `
+      + "On its own it makes no later whole-plan check of this plan not clean, and no fix is made for it."
+    : `${id} was accepted with nothing merged: no pull request is opened for it, and it is not in what lands. The specs after it go on, those that depend on it included.`);
+  say.push(planRoute
+    ? `The plan's pull request names it under Risk and quotes the implementer's reasons: ${acceptedReasons(acceptance)}. They are kept at ${file}.`
+    : `The implementer's reasons: ${acceptedReasons(acceptance)}. Nothing else carries them: they are kept at ${file}.`);
+  return finishNext(ctx, id, say);
+}
+
+// The implementer's reasons for an acceptance, as they were quoted in the question.
+const acceptedReasons = (acceptance) => [
+  acceptance.summary ? `"${flat(acceptance.summary)}"` : "it gave no summary",
+  ...acceptance.unfinished.map((entry) => `left undone: ${flat(entry.part)} — ${flat(entry.reason)}`)
+].join("; ");
+
+// What the plan's pull request says under `## Risk` about each spec and each fix
+// unit that a person accepted with nothing merged, read from their acceptance records.
+function acceptedRecords(ctx) {
+  return unitsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) === "accepted")
+    .map((unit) => readJson(acceptedEmptyPath(ctx, unit.id), null)).filter(Boolean);
+}
+
+function acceptedLine(acceptance) {
+  const reasons = `The implementer's reasons — ${acceptedReasons(acceptance)}.`;
+  return acceptance.kind === "fix-unit"
+    ? `- The whole-plan fix ${acceptance.id} was accepted with nothing merged: its implementer changed nothing twice, so ${acceptance.problems.length > 0
+      ? `these stay as they are for the rest of this plan: ${listOf(acceptance.problems)}` : "what it was opened for stays as it is for the rest of this plan"}. ${reasons}`
+    : `- ${acceptance.id} was accepted with nothing merged: its implementer changed nothing twice, so none of it is in this plan. ${reasons}`;
 }
 
 async function snapshot(options) {
@@ -6244,8 +6408,7 @@ async function resolveCommit(options) {
       "--base", record.planTip, "--candidate-oid", merge, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
-      // Every command runs when a spec disclosed one as failing without its change, so that all that fail are known.
-      ...(failingInPlan(ctx.shipDir).size > 0 ? ["--keep-going", "true"] : [])
+      "--keep-going", "true"
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${at}`);
@@ -6254,24 +6417,28 @@ async function resolveCommit(options) {
     // is theirs, and is discarded, as the landing check discards it.
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", merge]);
     let outcome = readJson(path.join(dir, "verify.json"));
-    // A failure of a command the plan disclosed is the resolution's only if the command passes on the base being merged in.
+    // A command that failed and that a person accepted for this plan is set aside. A failure of one
+    // the plan disclosed is the resolution's only if the command passes on the base being merged in.
     if (outcome.status === "failed") {
-      const accepted = await acceptDisclosed(ctx, { status: "failed", baseOid: record.baseOid, dir, verify: outcome },
-        { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: merge, branch: null } });
-      if (accepted.status === "passed") outcome = accepted.verify;
+      let judged = setAsideAccepted(ctx, { status: "failed", baseOid: record.baseOid, dir, verify: outcome });
+      if (judged.status === "failed") {
+        judged = await acceptDisclosed(ctx, judged, { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: merge, branch: null } });
+      }
+      outcome = judged.verify;
     }
     attempt.verify = outcome.status;
     say.push(`Verification of the merge: ${outcome.status}.`);
     for (const command of outcome.commands ?? []) {
       say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`
+        + `${command.accepted ? " — a person accepted it as failing for this plan, so it does not fail the resolution" : ""}`
         + `${command.base ? ` — on ${record.base} at ${record.baseOid.slice(0, 12)}, where it is merged in from, it fails too` : ""}`);
     }
     if (outcome.status === "failed") {
-      const failed = (outcome.commands ?? []).find((command) => command.status === "failed");
+      const failed = (outcome.commands ?? []).find((command) => command.status === "failed" && !command.accepted);
       return emit(await failAttempt(ctx, record, attempt, { kind: "verify", log: failed?.logPath ?? path.join(dir, "verify.json") },
         `${failed ? `\`${failed.command}\`` : "a verify command"} failed on it`, say));
     }
-    if (outcome.status !== "passed" && outcome.status !== FAILS_WITHOUT_CHANGE) {
+    if (!["passed", FAILS_WITHOUT_CHANGE, ACCEPTED_FAILING].includes(outcome.status)) {
       return emit(stopRound(ctx, record, "not-applicable", `Resolve attempt ${attempt.k}: none of this repository's verify commands `
         + `selected the merge ${at}, which is not evidence that it works, and the ship does not push it with nobody watching.`, say));
     }
@@ -6513,6 +6680,7 @@ const OUTCOME_WORDS = {
   resolved: "resolved",
   "follow-up": "handed to a follow-up",
   "pull-request": "about the pull request's text or commit history, and disclosed",
+  accepted: "accepted by a person, so no follow-up is made for them",
   "needs-person": "needing a person or a re-plan",
   spent: "still real with every follow-up limits.followUps allows made",
   "after-fix": "still real, judged again once the whole-plan fix merges",
@@ -6577,9 +6745,9 @@ function ensureUnitDocument(ctx, record, id) {
     }))
     : unitFindings(ctx, record);
   const failedVerify = record.verify?.status === "failed"
-    ? (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command)) ?? { command: "a verify command", logPath: record.verify.result }
+    ? (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command) && !command.accepted) ?? { command: "a verify command", logPath: record.verify.result }
     : null;
-  const failedChecks = record.ci?.status === "failed" ? { pr: record.ci.pr, names: record.ci.failed ?? [], result: record.ci.result } : null;
+  const failedChecks = record.ci?.status === "failed" ? { pr: record.ci.pr, names: unacceptedChecks(ctx, record), result: record.ci.result } : null;
   const text = unitDocument({
     id, slug: ctx.slug, branch: record.branch, tip: record.tip, check: record.n, recordPath: checkRecordPath(ctx.shipDir, record.n),
     findings, failedVerify, failedChecks, goalPath: path.join(ctx.plan, "goal.md"), planPath: path.join(ctx.plan, "plan.md"),
@@ -6592,11 +6760,14 @@ function ensureUnitDocument(ctx, record, id) {
   return file;
 }
 
+// The names of the checks on the plan's pull request that failed at `record`, less those a person accepted.
+const unacceptedChecks = (ctx, record) => (record.ci?.failed ?? []).filter((name) => !acceptedChecksIn(ctx.shipDir).has(name));
+
 // What a check that is not clean found, in one sentence.
 function foundLine(ctx, record) {
   const parts = [];
   if (record.verify?.status === "failed") {
-    const failed = (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command));
+    const failed = (record.verify.commands ?? []).find((command) => command.status === "failed" && !failsWithout(command) && !command.accepted);
     parts.push(`${failed ? `\`${failed.command}\`` : "a verify command"} failed on the plan's tip${failed?.timedOut ? " (timed out)" : ""} — its log is ${failed?.logPath ?? record.verify.result}`);
   }
   if (record.review?.status === "open") {
@@ -6604,7 +6775,8 @@ function foundLine(ctx, record) {
     parts.push(`the reviewer found ${count} blocking or major finding(s) in how the plan's specs fit together — they are ${record.review.toFix}`);
   }
   if (record.ci?.status === "failed") {
-    parts.push(`a check on the plan's pull request #${record.ci.pr} failed${(record.ci.failed ?? []).length > 0 ? ` (${record.ci.failed.join(", ")})` : ""} — what was recorded is ${record.ci.result}`);
+    const names = unacceptedChecks(ctx, record);
+    parts.push(`a check on the plan's pull request #${record.ci.pr} failed${names.length > 0 ? ` (${names.join(", ")})` : ""} — what was recorded is ${record.ci.result}`);
   }
   return parts.join(", and ");
 }
@@ -6626,6 +6798,7 @@ function closeCheck(ctx, record, status, reason, say) {
 const VERIFY_SAID = {
   passed: "passed",
   [FAILS_WITHOUT_CHANGE]: "failed only on commands that fail where the plan began too, which were disclosed and are not held against the plan",
+  [ACCEPTED_FAILING]: "failed only on commands a person accepted for this plan, or that fail where the plan began too, which are not held against the plan",
   "not-applicable": "had nothing to run, which is recorded as that and not as a pass"
 };
 
@@ -6642,11 +6815,15 @@ function decidedPayload(ctx, record, say = [], { reused = false } = {}) {
   if (record.status === "clean") {
     const minor = Object.entries(record.review?.counts ?? {}).filter(([severity]) => severity === "minor" || severity === "nit")
       .reduce((sum, [, count]) => sum + count, 0);
-    say.push(`The whole-plan check of ${at} is clean: verify ${VERIFY_SAID[record.verify.status]}, `
+    const accepted = (record.accepted ?? []).map((entry) => entry.unit);
+    say.push(accepted.length > 0
+      ? `The whole-plan check of ${at} is clean because a person accepted ${listOf(accepted)}, whose implementer changed nothing: what the check found `
+        + `stays in its record, and no fix is made for it. Its record is ${where}.`
+      : `The whole-plan check of ${at} is clean: verify ${VERIFY_SAID[record.verify.status]}, `
       + `and the reviewer found nothing blocking or major${minor > 0 ? ` (${minor} minor or nit finding(s) recorded in ${record.review.findings}, and nothing fixed for them)` : ""}. `
       + `Its record is ${where}.`);
     if (ledger) say.push(ledger);
-    const pending = (record.followUps ?? []).filter((unit) => stateOf(ctx, unit.id) !== "merged");
+    const pending = (record.followUps ?? []).filter((unit) => !finished(ctx, unit.id));
     const made = followUpIds(ctx.shipDir);
     for (const unit of pending) {
       say.push(`${listOf(unit.entries)} ${unit.entries.length > 1 ? "are" : "is"} still real and about the code, so ${unit.id} fixes `
@@ -6748,7 +6925,7 @@ async function planCheck(options) {
     }
     return emit(decidedPayload(ctx, existing, say, { reused: true }));
   }
-  const unmerged = unitsInOrder(ctx).filter((entry) => stateOf(ctx, entry.id) !== "merged");
+  const unmerged = unitsInOrder(ctx).filter((entry) => !finished(ctx, entry.id));
   if (unmerged.length > 0) {
     throw new Stop(`${listOf(unmerged.map((entry) => entry.id))} ${unmerged.length > 1 ? "are" : "is"} not merged into ${route.branch} `
       + `yet, so the plan is not whole and the whole-plan check did not run; run ${nextCommand(ctx, "begin", unmerged[0].id)}`);
@@ -6807,25 +6984,30 @@ async function planCheck(options) {
       "--base", record.mergeBase, "--candidate-oid", tip, "--out-dir", path.join(dir, "verify"), "--out", path.join(dir, "verify.json"),
       // The verification stops, ending its command and writing nothing, if this driver dies under it.
       "--parent-pid", String(process.pid),
-      // Every command runs when a spec disclosed one as failing without its change, so that all that fail are known.
-      ...(failingInPlan(ctx.shipDir).size > 0 ? ["--keep-going", "true"] : [])
+      // Every command runs, so that a record always says what each did and accepting what it found
+      // never accepts a command that was not run.
+      "--keep-going", "true"
     ], { allow: [1] });
     if (!exists(path.join(dir, "verify.json"))) {
       throw Stop.raw((verified.stderr || verified.stdout || "").trim(), `verify could not run against ${short(tip)}`);
     }
     git(ctx.worktree, ["switch", "--discard-changes", "--detach", tip]);
     const outcome = readJson(path.join(dir, "verify.json"));
-    // A command that failed and that a spec disclosed is run on the merge base,
-    // where the plan began: it is the plan's own failure unless it fails there too.
+    // A command that failed and that a person accepted is set aside. One that a spec
+    // disclosed is run on the merge base, where the plan began: it is the plan's own
+    // failure unless it fails there too.
     const stated = failingInPlan(ctx.shipDir);
-    const disclosed = (outcome.commands ?? []).filter((command) => command.status === "failed" && stated.has(command.command));
+    const accepted = acceptedCommandsIn(ctx.shipDir);
+    const disclosed = (outcome.commands ?? []).filter((command) => command.status === "failed" && stated.has(command.command) && !accepted.has(command.command));
     const bases = disclosed.length > 0
       ? await runOnBase(ctx, { oid: record.mergeBase, commands: disclosed.map((command) => command.command), dir: path.join(dir, "verify-base"), back: { oid: tip, branch: null } })
       : new Map();
-    const commands = (outcome.commands ?? []).map((command) => (bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command));
+    const commands = markAccepted(accepted, (outcome.commands ?? []).map((command) => (bases.has(command.command) ? { ...command, base: bases.get(command.command) } : command)));
     record.verify = {
-      tip, status: outcome.status === "failed" ? verifyStatus(commands) : outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
-      commands: commands.map(({ command, status, timedOut, logPath, base }) => ({ command, status, timedOut, logPath, ...(base ? { base } : {}) }))
+      tip, status: outcome.status === "failed" ? verifyStatus(commands, accepted) : outcome.status, select: outcome.select ?? null, result: path.join(dir, "verify.json"),
+      commands: commands.map(({ command, status, timedOut, logPath, base, accepted: person }) => ({
+        command, status, timedOut, logPath, ...(base ? { base } : {}), ...(person ? { accepted: true } : {})
+      }))
     };
     record.phase = "verified";
     saveCheck(ctx.shipDir, record);
@@ -6833,17 +7015,21 @@ async function planCheck(options) {
   say.push(`Verification of the plan's tip, every command: ${record.verify.status}${record.verify.status === "not-applicable" ? " — none is configured, which is recorded as that and not as a pass" : ""}.`);
   for (const command of record.verify.commands ?? []) {
     say.push(`  ${command.status}: ${command.command}${command.timedOut ? " (timed out)" : ""}`
+      + `${command.accepted ? " — a person accepted it as failing, so it does not make the plan not clean" : ""}`
       + `${command.base ? ` — on ${short(record.mergeBase)}, where the plan began, it ${command.base.status === "failed" ? "fails too" : command.base.status === "passed" ? "passes" : "could not be run"}` : ""}`);
   }
   if (record.verify.status === FAILS_WITHOUT_CHANGE) {
     say.push("Every command that failed was disclosed by a spec as failing without its change, and fails where the plan began too, so it does not make the plan not clean.");
+  }
+  if (record.verify.status === ACCEPTED_FAILING) {
+    say.push("Every command that failed was accepted by a person for this plan, or was disclosed by a spec and fails where the plan began too, so none of them makes the plan not clean.");
   }
 
   // The ship's version commit and nothing else, over a tip whose check is clean:
   // that check's review speaks for this tip too, and names the tip it read. Only
   // verify ran again, here, on this tip; the landing check runs on it as well.
   // A verify that did not pass gets the reviewer like any other tip.
-  if (record.carry && record.verify?.tip === tip && ["passed", "not-applicable", FAILS_WITHOUT_CHANGE].includes(record.verify.status)) {
+  if (record.carry && record.verify?.tip === tip && verifyClean(record.verify)) {
     const clean = records.find((entry) => entry.n === record.carry.check);
     record.review = {
       lens: WHOLE_PLAN_LENS, tip: record.carry.from, status: "clean", set: null, resendSet: null,
@@ -7033,6 +7219,7 @@ function ledgerFacts(entries, records) {
     const endedUp = {
       resolved: `resolved at ${short(latest?.tip)}${unit ? `, after the follow-up ${unit}` : ""}`,
       "pull-request": "still unresolved: it is about the pull request's text or commit history, so no fix unit can answer it, and it is disclosed",
+      accepted: "still unresolved, and a person accepted it: no follow-up is made for it, and the ship says so under ## Risk itself",
       "needs-person": "still unresolved: only a person or a re-plan settles it",
       spent: "still unresolved: every follow-up limits.followUps allows was made",
       "after-fix": "still unresolved: the latest check was not clean, so it is judged again once the whole-plan fix merges",
@@ -7075,10 +7262,15 @@ function bodyFacts(ctx, file) {
   // otherwise name a number the plan no longer lands as.
   const landsAs = landsAsOf(ctx, routeOf(ctx).tipOid);
   const carried = planLines(ledger).length > 0;
+  const accepted = acceptedRecords(ctx);
   return {
     path: file, shape: ["## Summary", "## What you can now do", "## Risk"],
     goal: path.join(ctx.plan, "goal.md"), plan: path.join(ctx.plan, "plan.md"),
     lands: landsList(ctx), spent,
+    ...(accepted.length > 0 ? {
+      accepted: accepted.map((entry) => ({ id: entry.id, fixUnit: entry.kind === "fix-unit", problems: entry.problems, reasons: acceptedReasons(entry) })),
+      acceptedNote: "a person accepted each of these with nothing merged: none of it is in the plan, so never describe it as shipped; the ship says each under ## Risk itself"
+    } : {}),
     ...(landsAs ? { version: landsAs, versionLine: `the ship adds "${landsAsLine(landsAs)}" under ## Summary itself` } : {}),
     ...(carried ? {
       ledger: {
@@ -7095,6 +7287,7 @@ function bodyFacts(ctx, file) {
 // check that only confirms it again changes nothing the body says.
 const disclosedOf = (facts) => ({
   spent: facts.spent,
+  accepted: (facts.accepted ?? []).map((entry) => entry.id),
   entries: (facts.ledger?.entries ?? []).map((entry) => ({ id: entry.id, verdict: entry.verdict, outcome: entry.outcome }))
 });
 
@@ -7109,6 +7302,7 @@ function disclosureChanges(before, now) {
       ? [`ledger entry ${entry.id} went from ${old.verdict ?? "no verdict"} (${old.outcome}) to ${entry.verdict ?? "no verdict"} (${entry.outcome})`]
       : [];
   });
+  changes.push(...now.accepted.filter((id) => !(before.accepted ?? []).includes(id)).map((id) => `${id} was accepted with nothing merged`));
   changes.push(...now.spent.filter((line) => !before.spent.includes(line)).map((line) => `now ${line}`));
   changes.push(...before.spent.filter((line) => !now.spent.includes(line)).map((line) => `no longer ${line}`));
   return changes;
@@ -7123,7 +7317,7 @@ const landsAsLine = (landsAs) => `This plan lands as version ${landsAs}.`;
 // beside the orchestrator's file, which is left as it was written.
 function sentBody(ctx, text, tip) {
   const landsAs = landsAsOf(ctx, tip);
-  let composed = composeBody(text, planLines(readLedger(ctx.shipDir)));
+  let composed = composeBody(text, [...planLines(readLedger(ctx.shipDir)), ...acceptedRecords(ctx).map(acceptedLine)]);
   if (landsAs) {
     const line = landsAsLine(landsAs);
     const summary = /^## Summary[ \t]*\r?$/m.exec(composed);
@@ -7348,19 +7542,27 @@ function landingSnapshot(ctx, tip, mergeBase) {
   return path.join(dir, "candidate.json");
 }
 
+// The verify commands of a result that failed and that a person accepted, backticked and comma-joined.
+const acceptedNames = (verify) => (verify?.commands ?? []).filter((command) => command.accepted).map((command) => `\`${command.command}\``).join(", ");
+
 // What a landing result is, in a person's terms, naming the tip and the base.
 function landingLine(route, landing) {
   const at = `${route.branch} at ${short(landing.tip)}`;
   const base = `${route.base} at ${short(landing.baseOid)}`;
   if (landing.on === "whole-plan") {
     return `${base} has not moved past where ${at} last met it, so the landing check is the whole-plan check's own run of every `
-      + `verify command on this tip: ${{ passed: "passed", [FAILS_WITHOUT_CHANGE]: `${failsWithoutNames(landing.verify)} fails there and where the plan began, as disclosed, and nothing else fails` }[landing.verify?.status] ?? "nothing to run, which is not a failure"}.`;
+      + `verify command on this tip: ${{
+        passed: "passed", [FAILS_WITHOUT_CHANGE]: `${failsWithoutNames(landing.verify)} fails there and where the plan began, as disclosed, and nothing else fails`,
+        [ACCEPTED_FAILING]: `${acceptedNames(landing.verify)} fails there, which a person accepted for this plan, and nothing else fails that was not disclosed`
+      }[landing.verify?.status] ?? "nothing to run, which is not a failure"}.`;
   }
   const moved = `${route.base} moved to ${short(landing.baseOid)} since ${at} last met it at ${short(landing.mergeBase)}`;
   if (landing.status === "passed") {
     return `${moved}; the plan merges into it cleanly, lands as the same change, and ${landing.verify?.status === FAILS_WITHOUT_CHANGE
       ? `${failsWithoutNames(landing.verify)} fails on the merged result and on ${base} too, as a spec disclosed, and nothing else fails`
-      : "every verify command passes on the merged result"}.`;
+      : landing.verify?.status === ACCEPTED_FAILING
+        ? `${acceptedNames(landing.verify)} fails on the merged result, which a person accepted for this plan, and nothing else fails that was not disclosed`
+        : "every verify command passes on the merged result"}.`;
   }
   if (landing.status === "conflict") return `${moved}, and the plan no longer merges into it cleanly (${(landing.conflicts ?? []).join(", ")}).`;
   if (landing.status === "differs") {
@@ -7395,7 +7597,7 @@ async function planLandingCheck(ctx, record, tip, check, say) {
   if (mergeBase === baseOid) {
     landing = {
       tip, baseOid, mergeBase, status: "passed", on: "whole-plan", check: check.n,
-      verify: { status: check.verify.status, ...(check.verify.status === FAILS_WITHOUT_CHANGE ? { commands: check.verify.commands } : {}) },
+      verify: { status: check.verify.status, ...([FAILS_WITHOUT_CHANGE, ACCEPTED_FAILING].includes(check.verify.status) ? { commands: check.verify.commands } : {}) },
       resultPath: check.verify.result, conflicts: null, dir: null
     };
   } else {
@@ -7415,9 +7617,10 @@ async function planLandingCheck(ctx, record, tip, check, say) {
       outcome = checkLanding({
         repo: ctx.repo, worktree: ctx.worktree, branch: null, config: ctx.config, configPath: ctx.configPath,
         baseOid: mergeBase, newBaseOid: baseOid, candidateOid: tip, candidatePath,
-        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: failingInPlan(ctx.shipDir).size > 0
+        landingDir: path.join(landingRoot(ctx.shipDir), "checks", short(tip)), select: "all", keepGoing: true
       });
     } catch (error) { throw Stop.raw(error.message, "the check of the landing failed"); }
+    if (outcome.status === "failed") outcome = setAsideAccepted(ctx, outcome);
     if (outcome.status === "failed") {
       outcome = await acceptDisclosed(ctx, outcome, { disclosed: (command) => failingInPlan(ctx.shipDir).has(command), back: { oid: tip, branch: null } });
     }
@@ -7425,7 +7628,9 @@ async function planLandingCheck(ctx, record, tip, check, say) {
       tip, baseOid, mergeBase, status: outcome.status, conflicts: outcome.conflicts ?? null,
       verify: outcome.verify ? {
         status: outcome.verify.status,
-        commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath, base }) => ({ command, status, timedOut, logPath, ...(base ? { base } : {}) }))
+        commands: (outcome.verify.commands ?? []).map(({ command, status, timedOut, logPath, base, accepted }) => ({
+          command, status, timedOut, logPath, ...(base ? { base } : {}), ...(accepted ? { accepted } : {})
+        }))
       } : null,
       resultPath: outcome.resultPath ?? null, dir: outcome.dir ?? null, mergedCommit: outcome.mergedCommit ?? null
     };
@@ -7809,6 +8014,7 @@ function resultLines(route, record, results) {
   const pr = record.pr?.number ? `pull request #${record.pr.number}` : "the plan's pull request";
   lines.push(!ci.recorded
     ? `the checks on ${pr} were not waited for at ${at} — not run, which is not passed`
+    : ci.accepted ? `a check on ${pr} failed at ${at} (${ci.accepted.join(", ")}), which a person accepted for this plan, so it does not withhold Merge`
     : ci.status === "passed" ? `the checks on ${pr} passed at ${at}`
       : ci.status === "failed" ? `a check on ${pr} failed at ${at}`
         : ci.status === "not-started" ? notStartedLine(pr, at, ci)
@@ -8205,14 +8411,14 @@ async function landingStep(ctx, record, options, say) {
   // 1. Every spec and fix unit merged, the tip one the ship recorded, and a
   // clean whole-plan result for it.
   say.push(...(await reconcileMerged(ctx)).say);
-  const unmerged = specsInOrder(ctx).filter((unit) => stateOf(ctx, unit.id) !== "merged");
+  const unmerged = specsInOrder(ctx).filter((unit) => !finished(ctx, unit.id));
   if (unmerged.length > 0) {
     throw new Stop(`${listOf(unmerged.map((unit) => unit.id))} ${unmerged.length > 1 ? "are" : "is"} not merged into ${route.branch} yet, so `
       + `the plan does not land; run ${nextCommand(ctx, "begin", unmerged[0].id)}`);
   }
   // A whole-plan fix still to ship goes first, as it does after the check that
   // made it; one waiting for a person holds the plan, as a waiting spec does.
-  const fixing = fixUnitSpecs(ctx).find((unit) => stateOf(ctx, unit.id) !== "merged");
+  const fixing = fixUnitSpecs(ctx).find((unit) => !finished(ctx, unit.id));
   if (fixing) {
     say.push(`The whole-plan fix ${fixing.id} is not merged into ${route.branch} yet, so the plan does not land before it.`);
     return { say, next: afterSpecs(ctx) };
@@ -8243,7 +8449,7 @@ async function landingStep(ctx, record, options, say) {
   if (held) return held;
   // 4. Its checks.
   const ci = waitPlanChecks(ctx, record, tip, say);
-  if (ci.status === "failed") {
+  if (ciFailing(ci, acceptedChecksIn(ctx.shipDir))) {
     const fixing = routeRedChecks(ctx, record, tip, check, say);
     if (fixing) return fixing;
   }
@@ -8285,7 +8491,7 @@ async function planLand(options) {
 // Where the train goes once the plan branch's tip is settled: the first unit that
 // has not merged — `begin` resumes one that is under way — or the landing.
 function afterTip(ctx) {
-  const unit = unitsInOrder(ctx).find((entry) => stateOf(ctx, entry.id) !== "merged");
+  const unit = unitsInOrder(ctx).find((entry) => !finished(ctx, entry.id));
   return unit ? nextCommand(ctx, "begin", unit.id) : nextCommand(ctx, "plan-land", null);
 }
 
@@ -8668,12 +8874,27 @@ async function landingCheck(ctx, id, state, say) {
 // command that passes on the base, or one that was never disclosed, leaves the
 // outcome as it was.
 async function acceptDisclosed(ctx, outcome, { disclosed, back }) {
-  const failed = (outcome.verify?.commands ?? []).filter((command) => command.status === "failed");
+  const failed = (outcome.verify?.commands ?? []).filter((command) => command.status === "failed" && !command.accepted);
   if (failed.length === 0 || !failed.every((command) => disclosed(command.command))) return outcome;
   const bases = await runOnBase(ctx, { oid: outcome.baseOid, commands: failed.map((command) => command.command), dir: path.join(outcome.dir, "verify-base"), back });
-  const commands = outcome.verify.commands.map((command) => (command.status === "failed" ? { ...command, base: bases.get(command.command) } : command));
-  const status = verifyStatus(commands);
-  return status === FAILS_WITHOUT_CHANGE ? { ...outcome, status: "passed", verify: { ...outcome.verify, status, commands } } : outcome;
+  const commands = outcome.verify.commands.map((command) => (command.status === "failed" && !command.accepted ? { ...command, base: bases.get(command.command) } : command));
+  const status = verifyStatus(commands, new Set(commands.filter((command) => command.accepted).map((command) => command.command)));
+  return status === FAILS_WITHOUT_CHANGE || status === ACCEPTED_FAILING ? { ...outcome, status: "passed", verify: { ...outcome.verify, status, commands } } : outcome;
+}
+
+// The failed commands of a verify result that a person accepted, marked as such.
+const markAccepted = (accepted, commands) => commands.map((command) => (command.status === "failed" && accepted.has(command.command) ? { ...command, accepted: true } : command));
+
+// A whole-plan landing verify's failed commands that a person accepted are marked, as a
+// resolve attempt's are, and when nothing else failed the outcome passes with the status
+// that says so. What is left failing, marked ones apart, goes on to `acceptDisclosed`.
+function setAsideAccepted(ctx, outcome) {
+  const commands = markAccepted(acceptedCommandsIn(ctx.shipDir), outcome.verify?.commands ?? []);
+  if (!commands.some((command) => command.accepted)) return outcome;
+  const verify = { ...outcome.verify, commands };
+  return commands.every((command) => command.status !== "failed" || command.accepted)
+    ? { ...outcome, status: "passed", verify: { ...verify, status: ACCEPTED_FAILING } }
+    : { ...outcome, verify };
 }
 
 // The merge, with the check in front of it. `merge.mjs` refuses a base it was
@@ -8900,7 +9121,7 @@ function settledLines(ctx, id, state) {
 function nextSpecAfter(ctx, id) {
   const order = specsInOrder(ctx);
   return order.slice(order.findIndex((spec) => spec.id === id) + 1)
-    .find((spec) => !exists(statePath(ctx, spec.id)) || readJson(statePath(ctx, spec.id)).state !== "merged")?.id ?? null;
+    .find((spec) => !finished(ctx, spec.id))?.id ?? null;
 }
 
 // Best effort, never a stop: what this spec cost. The Claude line first, then
@@ -9100,12 +9321,15 @@ const USAGE = `usage: ship.mjs <subcommand> --plan <plan-dir> [--repo <repo>] [-
                                       a person's answer to the dependency audit's stop, never printed by next: approve or decline
                                       each package it would not upgrade unasked, by the keys the stop printed. A decline is kept
                                       for the repository, so no later ship asks about that package at that version again
-  begin   --spec <id> [--run-gone | --run-live | --send-back]
+  begin   --spec <id> [--run-gone | --run-live | --send-back | --accept-empty]
                                       branch and dispatch the implementer, or resume; the first two flags answer
                                       the question a resume asks about agents an earlier run sent out. --send-back is a
                                       person's answer to the question after an implementer changed nothing twice, never
                                       printed by next: it sends a fresh implementer the note written to the file the question
-                                      named, and refuses, changing nothing, when there is none
+                                      named, and refuses, changing nothing, when there is none. --accept-empty is their other
+                                      answer to it, never printed by next: the spec or whole-plan fix finishes with nothing
+                                      merged and the train goes on; refused, changing nothing, unless it is still waiting at
+                                      that question with a clean tree and its branch at the base
   snapshot --spec <id> [--message m]  commit, allocate the round, snapshot, bind, record the report
   verify  --spec <id>                 run the verify commands against the candidate
   panel   --spec <id>                 dispatch every lens plus Codex
@@ -9171,12 +9395,14 @@ function parseArgs(argv) {
     if (key === "--normal") { options.normal = true; continue; }
     if (key === "--squash") { options.squash = true; continue; }
     if (key === "--send-back") { options.sendBack = true; continue; }
+    if (key === "--accept-empty") { options.acceptEmpty = true; continue; }
     const value = rest[++index];
     if (value === undefined) throw Stop.beneath(`${key} requires a value`, USAGE, 2);
     options[key.slice(2)] = value;
   }
   if (options.runGone && options.runLive) throw new Stop("--run-gone and --run-live are the two answers to one question; give one", 2);
   if (options.escalated && options.normal) throw new Stop("--escalated and --normal are the two answers to one question; give one", 2);
+  if (options.sendBack && options.acceptEmpty) throw new Stop("--send-back and --accept-empty are two answers to one question; give one", 2);
   return { sub, options };
 }
 

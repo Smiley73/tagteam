@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithoutLine, saveBaseRun, verifyStatus
+  ACCEPTED_FAILING, FAILS_WITHOUT_CHANGE, baseRunOf, discloseFailing, disclosedFor, failsWithoutLine, saveBaseRun, verifyStatus
 } from "../scripts/lib/verify-base.mjs";
 
 const passed = { command: "a", status: "passed" };
@@ -20,6 +20,15 @@ test("a result is passed with no failure, and fails without the change only when
   assert.equal(verifyStatus([failedOn("failed"), { ...failedOn("passed"), command: "c" }]), "failed", "a command that passes on the base is the change's");
   assert.equal(verifyStatus([failedOn("failed"), { ...failedOn("could-not-run"), command: "c" }]), "failed", "a base run that could not be made proves nothing");
   assert.equal(verifyStatus([failedOn(null)]), "failed", "a failure with no base run is a failure");
+});
+
+test("commands a person accepted are set aside: when only they fail, or they and what fails on the base, the status says so", () => {
+  const accepted = new Set(["b"]);
+  assert.equal(verifyStatus([passed, failedOn(null)], accepted), ACCEPTED_FAILING);
+  assert.equal(verifyStatus([failedOn(null), { ...failedOn("failed"), command: "c" }], accepted), ACCEPTED_FAILING);
+  assert.equal(verifyStatus([failedOn(null), { ...failedOn(null), command: "c" }], accepted), "failed", "another command that fails is the plan's");
+  assert.equal(verifyStatus([passed], accepted), "passed", "nothing failed, so nothing was accepted");
+  assert.equal(verifyStatus([{ ...failedOn("failed"), command: "c" }], accepted), FAILS_WITHOUT_CHANGE, "no accepted command failed");
 });
 
 test("a base run is found by its commit and its command, and by nothing else", () => {

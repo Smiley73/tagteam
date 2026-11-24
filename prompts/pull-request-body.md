@@ -85,6 +85,12 @@ add under `## Risk` what it means for the person using the software — what sti
 goes wrong, and when — and why it was not fixed. The ship adds the version the
 plan lands as under `## Summary` itself, as `versionLine` says when there is one.
 
+When `accepted` is there, a person accepted each spec or whole-plan fix it names
+with nothing merged: none of it is in the plan, so never describe it under
+`## Summary` or `## What you can now do` as something the plan delivers. The ship
+says each under `## Risk` itself, with the implementer's reasons: do not write those
+lines a second time.
+
 The body that is sent is yours plus lines the driver writes under `## Risk`
 itself — on a plan branch each finding still open, which merging carries into
 the plan branch, and a failure that passed when it was run again on the same

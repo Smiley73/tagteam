@@ -36,6 +36,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isCleanFor, listChecks } from "./whole-plan.mjs";
+import { acceptedChecksIn } from "./ledger.mjs";
 import { RESOLVE_DIR, listResolveRounds } from "./resolve.mjs";
 
 export const PLAN_LANDING_DIR = "plan-landing";
@@ -89,6 +90,14 @@ export function checkFor(shipDir, tip) {
 export const ciFor = (record, tip) =>
   (record.ci && record.ci.tip === tip && record.pr?.number && record.ci.pr === record.pr.number ? record.ci : null);
 
+/**
+ * Whether checks recorded as `ci` count as failing: they failed, and not every
+ * name that failed is one a person accepted. The one answer the dialog, the red
+ * check's routing and `merge.mjs` all read, so that they cannot disagree.
+ */
+export const ciFailing = (ci, accepted) =>
+  ci?.status === "failed" && !((ci.failed ?? []).length > 0 && ci.failed.every((name) => accepted.has(name)));
+
 /** A resolve round still open — a merge of the base under way — or null. */
 export const openResolveRoundIn = (shipDir) =>
   listResolveRounds(path.join(shipDir, RESOLVE_DIR)).find((entry) => entry.record?.status === "open")?.record ?? null;
@@ -114,10 +123,11 @@ export function resultsFor(shipDir, record, { tip, baseOid, version = null }) {
       ? { status: "failed", tip, check: check.n, outcome: check.status, reason: check.reason ?? null }
       : { status: "not-run", tip: null, check: check?.n ?? null };
   const own = ciFor(record, tip);
+  const accepted = own?.status === "failed" && !ciFailing(own, acceptedChecksIn(shipDir));
   const ci = own
     ? own.status === "not-started"
       ? { status: "not-started", tip, recorded: true, reason: own.reason ?? null, startWaitSec: Number.isFinite(own.startWaitSec) ? own.startWaitSec : null }
-      : { status: own.status === "failed" ? "failed" : own.status === "passed" ? "passed" : "not-run", tip, recorded: true, reason: own.reason ?? null }
+      : { status: own.status === "failed" && !accepted ? "failed" : own.status === "passed" || accepted ? "passed" : "not-run", tip, recorded: true, reason: own.reason ?? null, ...(accepted ? { accepted: own.failed } : {}) }
     : {
       status: "not-run", tip: null, recorded: false,
       reason: !record.ci ? "not waited for yet"
